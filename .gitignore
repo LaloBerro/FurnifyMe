@@ -1,4 +1,5 @@
 build/
+build-headless/
 out/
 cmake-build-*/
 .vs/

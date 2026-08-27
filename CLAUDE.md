@@ -82,11 +82,19 @@ cmake --preset linux && cmake --build --preset linux
 
 ### Current state
 
-Scaffolded, **not yet compiled** — no build has ever run here. The toolchain is installed
-and OCCT/Qt were still building via vcpkg at the time this was written. What exists:
-`CMakeLists.txt`, `CMakePresets.json`, `src/ModelingOps.{h,cpp}` (the full geometry core),
-and `tests/headless_geometry.cpp`. **None of that C++ has been through a compiler yet** —
-treat the first `ctest` run as the real verification. The Qt files (`main`, `MainWindow`, `OcctViewWidget`,
+**Kernel integration is verified.** `ctest --preset windows-headless` passes all 15 checks
+on Windows (MSVC 19.38, OCCT 8.0.1): wire → face → 10mm prism (6 faces, volume 4000) → cut
+against an offset box → 1 solid, exactly 8 faces, volume 3000 → 494-entity `out.step`
+written. All 19 `TK*` toolkits in `CMakeLists.txt` resolve against OCCT 8.0.1 unchanged, and
+`find_package(Qt6 COMPONENTS Widgets)` succeeds under the `windows` preset.
+
+Per §9 of the brief, that means **every bug from here on is a UI bug** until proven
+otherwise. Not yet done: the Qt layer (`main`, `MainWindow`, `OcctViewWidget`,
+`DocumentModel`, `SketchController`) — `CMakeLists.txt` skips the `furnifyme` target while
+those files are absent. Nothing has been built or run on Linux yet.
+
+One benign warning to expect: OCCT 8.0 deprecates `TopTools_ListOfShape.hxx` in favour of
+NCollection types directly. It still works; worth cleaning up if the noise grows. The Qt files (`main`, `MainWindow`, `OcctViewWidget`,
 `DocumentModel`, `SketchController`) are deliberately **not written yet** — see the
 sequencing rule under Tests. `CMakeLists.txt` skips the `furnifyme` target while they are
 absent, so a fresh clone still configures and runs the test.
