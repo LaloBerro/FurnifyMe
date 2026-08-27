@@ -3,6 +3,7 @@
 #include <memory>
 #include <sstream>
 
+#include <BRep_Builder.hxx>
 #include <BRepAlgoAPI_BooleanOperation.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
@@ -19,6 +20,7 @@
 #include <STEPControl_Writer.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopoDS_Compound.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <gp_Vec.hxx>
 
@@ -105,6 +107,20 @@ BooleanResult applyBoolean(BooleanKind kind,
     out.ok = true;
     out.shape = unify.Shape();
     return out;
+}
+
+TopoDS_Shape makeCompound(const std::vector<TopoDS_Shape>& shapes)
+{
+    if (shapes.empty()) return TopoDS_Shape();
+    if (shapes.size() == 1) return shapes.front();
+
+    TopoDS_Compound compound;
+    BRep_Builder builder;
+    builder.MakeCompound(compound);
+    for (const TopoDS_Shape& s : shapes) {
+        if (!s.IsNull()) builder.Add(compound, s);
+    }
+    return compound;
 }
 
 void tessellate(const TopoDS_Shape& shape, double linearDeflection)

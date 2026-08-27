@@ -23,6 +23,8 @@ endif()
 # ---------------------------------------------------------------------------
 add_library(furnify_geometry STATIC
   src/ModelingOps.cpp
+  src/DocumentModel.cpp
+  src/SketchController.cpp
 )
 target_include_directories(furnify_geometry PUBLIC
   src ${OpenCASCADE_INCLUDE_DIR})
@@ -40,6 +42,10 @@ add_executable(headless_geometry tests/headless_geometry.cpp)
 target_link_libraries(headless_geometry PRIVATE furnify_geometry)
 add_test(NAME headless_geometry COMMAND headless_geometry)
 
+add_executable(headless_sketch_document tests/sketch_document.cpp)
+target_link_libraries(headless_sketch_document PRIVATE furnify_geometry)
+add_test(NAME headless_sketch_document COMMAND headless_sketch_document)
+
 # ---------------------------------------------------------------------------
 # Application (Qt + OCCT visualization)
 # ---------------------------------------------------------------------------
@@ -51,8 +57,6 @@ if(FURNIFYME_BUILD_APP)
     src/main.cpp
     src/MainWindow.cpp
     src/OcctViewWidget.cpp
-    src/DocumentModel.cpp
-    src/SketchController.cpp
   )
 
   # Sources land here as Milestone 1 progresses; skip the target until they exist
@@ -71,6 +75,35 @@ if(FURNIFYME_BUILD_APP)
       Qt6::Widgets
       TKService TKV3d TKOpenGl
     )
+
+    # Qt refuses to start without a platform plugin, and it is looked up in a
+    # `platforms/` directory next to the executable rather than alongside the
+    # Qt DLLs. vcpkg's applocal deployment copies DLLs but not plugins, and the
+    # `windeployqt` feature is deliberately not installed (see CLAUDE.md), so
+    # copy the ones we need ourselves. Skip this and the app dies at startup
+    # with "could not find the Qt platform plugin".
+    set(QT_RUNTIME_PLUGINS Qt6::QWindowsIntegrationPlugin)
+    if(TARGET Qt6::QModernWindowsStylePlugin)
+      list(APPEND QT_RUNTIME_PLUGINS Qt6::QModernWindowsStylePlugin)
+    endif()
+
+    foreach(plugin IN LISTS QT_RUNTIME_PLUGINS)
+      if(NOT TARGET ${plugin})
+        continue()
+      endif()
+      # Qt records each plugin's subdirectory (platforms, styles, ...) on the target.
+      get_target_property(plugin_type ${plugin} QT_PLUGIN_TYPE)
+      if(NOT plugin_type)
+        set(plugin_type platforms)
+      endif()
+      add_custom_command(TARGET furnifyme POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory
+                "$<TARGET_FILE_DIR:furnifyme>/${plugin_type}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:${plugin}>"
+                "$<TARGET_FILE_DIR:furnifyme>/${plugin_type}/"
+        COMMENT "Deploying Qt plugin ${plugin} -> ${plugin_type}/")
+    endforeach()
   else()
     message(STATUS "FurnifyMe: app sources not written yet - building geometry + tests only")
   endif()

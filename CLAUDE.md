@@ -82,22 +82,37 @@ cmake --preset linux && cmake --build --preset linux
 
 ### Current state
 
-**Kernel integration is verified.** `ctest --preset windows-headless` passes all 15 checks
-on Windows (MSVC 19.38, OCCT 8.0.1): wire → face → 10mm prism (6 faces, volume 4000) → cut
-against an offset box → 1 solid, exactly 8 faces, volume 3000 → 494-entity `out.step`
-written. All 19 `TK*` toolkits in `CMakeLists.txt` resolve against OCCT 8.0.1 unchanged, and
-`find_package(Qt6 COMPONENTS Widgets)` succeeds under the `windows` preset.
+**Kernel integration and the core UI loop are verified on Windows** (MSVC 19.38, OCCT
+8.0.1, Qt 6.11.1).
 
-Per §9 of the brief, that means **every bug from here on is a UI bug** until proven
-otherwise. Not yet done: the Qt layer (`main`, `MainWindow`, `OcctViewWidget`,
-`DocumentModel`, `SketchController`) — `CMakeLists.txt` skips the `furnifyme` target while
-those files are absent. Nothing has been built or run on Linux yet.
+Verified by the two headless tests (49 checks, all passing):
+wire -> face -> prism -> cut -> exact face counts and volumes -> 494-entity `out.step`;
+ray/plane unprojection including the parallel-ray case; sketch accumulation; document id
+lifecycle; compound building.
 
-One benign warning to expect: OCCT 8.0 deprecates `TopTools_ListOfShape.hxx` in favour of
-NCollection types directly. It still works; worth cleaning up if the noise grows. The Qt files (`main`, `MainWindow`, `OcctViewWidget`,
-`DocumentModel`, `SketchController`) are deliberately **not written yet** — see the
-sequencing rule under Tests. `CMakeLists.txt` skips the `furnifyme` target while they are
-absent, so a fresh clone still configures and runs the test.
+Verified by driving the running app and reading the screenshots:
+viewport renders with grid, triedron and lighting; sketch mode draws a live yellow polyline
+and reports clicked points at exactly `Z = 0.00`; closing produces a filled face; extrude
+produces a shaded solid with a plausible volume; clicking a solid selects it (status bar
+reports `1 solid(s) selected`).
+
+**Not yet verified, and worth doing before calling Milestone 1 done:**
+- A two-solid boolean *through the UI*. The geometry underneath is exhaustively tested and
+  single-solid selection works, so only the two-selection plumbing is unconfirmed. Automating
+  it defeated several attempts (see below); it takes about five seconds by hand.
+- Hover-highlight and face-selection mode, visually.
+- Opening an exported STEP file in FreeCAD.
+- Anything at all on Linux - it has never been configured, built or run.
+
+### A warning about automating this GUI
+
+Synthetic-input testing on this machine is unreliable and cost far more time than it was
+worth. `GetWindowRect` reported a 1500x2900 window on a 1920x1080 screen, so PowerShell's
+coordinates and the app's are separated by DPI virtualization, and clicks land somewhere
+other than intended. Two earlier "failures" were the harness, not the app: clicks falling
+outside an unmaximized window, and shift-clicking twice into the same solid (which XOR
+correctly *deselects*). Prefer manual verification, or fix the DPI awareness of the driving
+process first.
 
 ### Tests
 
@@ -142,6 +157,16 @@ those are on the `furnifyme` app target only.
 `applyBoolean()` returns a `BooleanResult{ok, shape, error}` rather than a bare shape,
 specifically so a failed boolean cannot be mistaken for a success. Surface `error` in the
 UI; never continue past `ok == false`.
+
+### Qt plugin deployment - do not remove
+
+Qt will not start without a platform plugin, and it looks for one in a `platforms/`
+directory next to the executable, not alongside the Qt DLLs. vcpkg's applocal deployment
+copies DLLs but **not** plugins, and the `windeployqt` feature is deliberately not installed
+(it would have dragged the full default feature set back in). `CMakeLists.txt` therefore
+copies `QWindowsIntegrationPlugin` and `QModernWindowsStylePlugin` itself in a POST_BUILD
+step. Delete that and the app dies at startup with
+`could not find the Qt platform plugin "windows"`.
 
 ### CMake note
 

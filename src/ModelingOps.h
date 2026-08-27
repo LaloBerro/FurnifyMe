@@ -51,6 +51,9 @@ BooleanResult applyBoolean(BooleanKind kind,
                            const TopoDS_Shape& b,
                            double fuzzyValue = 1.0e-5);
 
+// Single compound of several shapes, for exporting a whole document at once.
+TopoDS_Shape makeCompound(const std::vector<TopoDS_Shape>& shapes);
+
 // Must run before display or STL export, or curved faces render faceted / not at all.
 void tessellate(const TopoDS_Shape& shape, double linearDeflection = 0.1);
 

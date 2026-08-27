@@ -1,0 +1,87 @@
+#pragma once
+// OCCT headers first: Handle() is a macro and collides with some Windows headers
+// that Qt drags in.
+#include <AIS_InteractiveContext.hxx>
+#include <AIS_Shape.hxx>
+#include <TopoDS_Shape.hxx>
+#include <V3d_View.hxx>
+#include <V3d_Viewer.hxx>
+#include <gp_Pln.hxx>
+#include <gp_Pnt.hxx>
+
+#include <QPoint>
+#include <QWidget>
+
+#include <map>
+#include <vector>
+
+// The Qt <-> OCCT bridge. Hosts a V3d_View on this widget's native window and
+// forwards Qt input to the OCCT camera and selector.
+class OcctViewWidget : public QWidget {
+    Q_OBJECT
+
+public:
+    enum class SelectionMode { Solid, Face };
+
+    explicit OcctViewWidget(QWidget* parent = nullptr);
+    ~OcctViewWidget() override;
+
+    // Qt must not paint here or it fights OpenGL for the surface.
+    QPaintEngine* paintEngine() const override { return nullptr; }
+
+    void displaySolid(int id, const TopoDS_Shape& shape);
+    void removeSolid(int id);
+    void clearSolids();
+
+    // Temporary, non-selectable feedback shape (the in-progress sketch).
+    void setPreview(const TopoDS_Shape& shape, bool shaded = false);
+    void clearPreview();
+
+    void setSelectionMode(SelectionMode mode);
+    SelectionMode selectionMode() const { return mySelectionMode; }
+
+    // While sketching, a left click reports a point on `plane` instead of selecting.
+    void setSketchMode(bool enabled, const gp_Pln& plane);
+    bool sketchMode() const { return mySketchMode; }
+
+    // Document ids of the selected solids, deduplicated (face-mode selection can
+    // hit several faces of one solid).
+    std::vector<int> selectedSolidIds() const;
+    void clearSelection();
+
+    void fitAll();
+    void setViewAxonometric();
+
+signals:
+    void sketchPointPicked(const gp_Pnt& point);
+    void selectionChanged();
+
+protected:
+    void paintEvent(QPaintEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
+    void mouseReleaseEvent(QMouseEvent* event) override;
+    void mouseMoveEvent(QMouseEvent* event) override;
+    void wheelEvent(QWheelEvent* event) override;
+
+private:
+    void initializeViewer();
+    bool pointOnSketchPlane(int px, int py, gp_Pnt& out) const;
+    void applySelectionMode(const Handle(AIS_Shape)& shape);
+
+    Handle(V3d_Viewer) myViewer;
+    Handle(V3d_View) myView;
+    Handle(AIS_InteractiveContext) myContext;
+    Handle(AIS_Shape) myPreview;
+
+    std::map<int, Handle(AIS_Shape)> mySolids;
+
+    SelectionMode mySelectionMode = SelectionMode::Solid;
+    bool myInitialized = false;
+    bool mySketchMode = false;
+    gp_Pln mySketchPlane;
+
+    QPoint myLastPos;
+    bool myRotating = false;
+    bool myPanning = false;
+};
