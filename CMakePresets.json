@@ -1,0 +1,59 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "windows",
+      "displayName": "Windows (vcpkg, release-only deps)",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "C:/vcpkg/scripts/buildsystems/vcpkg.cmake",
+        "VCPKG_TARGET_TRIPLET": "x64-windows-release",
+        "VCPKG_HOST_TRIPLET": "x64-windows-release",
+        "CMAKE_CONFIGURATION_TYPES": "Release;RelWithDebInfo"
+      }
+    },
+    {
+      "name": "windows-headless",
+      "inherits": "windows",
+      "displayName": "Windows, geometry + headless test only (no Qt)",
+      "binaryDir": "${sourceDir}/build-headless",
+      "cacheVariables": { "FURNIFYME_BUILD_APP": "OFF" }
+    },
+    {
+      "name": "linux",
+      "displayName": "Linux (system OCCT + Qt6 from apt)",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": { "CMAKE_BUILD_TYPE": "RelWithDebInfo" }
+    },
+    {
+      "name": "linux-headless",
+      "inherits": "linux",
+      "displayName": "Linux, geometry + headless test only (no Qt)",
+      "binaryDir": "${sourceDir}/build-headless",
+      "cacheVariables": { "FURNIFYME_BUILD_APP": "OFF" }
+    }
+  ],
+  "buildPresets": [
+    { "name": "windows",          "configurePreset": "windows",          "configuration": "RelWithDebInfo" },
+    { "name": "windows-headless", "configurePreset": "windows-headless", "configuration": "RelWithDebInfo" },
+    { "name": "linux",            "configurePreset": "linux" },
+    { "name": "linux-headless",   "configurePreset": "linux-headless" }
+  ],
+  "testPresets": [
+    {
+      "name": "windows-headless",
+      "configurePreset": "windows-headless",
+      "configuration": "RelWithDebInfo",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "linux-headless",
+      "configurePreset": "linux-headless",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}

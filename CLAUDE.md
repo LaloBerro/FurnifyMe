@@ -25,18 +25,51 @@ out of scope until Milestone 1 runs clean on both platforms.
 
 ## Build & run
 
-### Windows (vcpkg — the reproducible path)
+### Windows
+
+Already provisioned on this machine: CMake 4.4.2 (winget `Kitware.CMake`), vcpkg at
+`C:cpkg`, MSVC 2022 Community + Windows SDK 10.0.22621. Dependencies were installed with:
 
 ```powershell
-git clone https://github.com/microsoft/vcpkg
-.\vcpkg\bootstrap-vcpkg.bat
-.\vcpkg\vcpkg install opencascade:x64-windows qtbase:x64-windows   # OCCT: 30-60+ min first time
-cmake -B build -S . -DCMAKE_TOOLCHAIN_FILE=<vcpkg>/scripts/buildsystems/vcpkg.cmake
-cmake --build build --config Release
+C:cpkgcpkg.exe install opencascade `
+  "qtbase[core,thread,gui,widgets,opengl,freetype,harfbuzz,png,jpeg,zstd,doubleconversion,pcre2]" `
+  --triplet x64-windows-release --host-triplet x64-windows-release --clean-after-build
 ```
 
-Alternative: official prebuilt OCCT installer from dev.opencascade.org + the Qt online
-installer, then point `OpenCASCADE_DIR` and `Qt6_DIR` at them manually.
+**Both triplet flags matter.** `x64-windows-release` skips every debug build (~half the
+work), and `--host-triplet` must match it — otherwise vcpkg treats the build as
+cross-compiling and builds a *second*, full-featured qtbase (ICU, OpenSSL, PostgreSQL) for
+the host just to get moc/rcc/uic. Always check the plan with `--dry-run` before a long
+install.
+
+The `qtbase[core,...]` list is deliberate: `core` is vcpkg's "no default features" marker,
+so it drops ICU, OpenSSL, the SQL drivers, dbus, brotli, dnslookup and testlib — none of
+which a Widgets + OCCT app needs.
+
+**Consequence of release-only deps:** no debug OCCT/Qt binaries exist, so the app cannot be
+built in the `Debug` configuration — MSVC's debug CRT against release dependencies is a
+runtime mismatch. Use `RelWithDebInfo`, which still gives full symbols for our own code. If
+stepping into OCCT internals ever becomes necessary, install `opencascade:x64-windows`
+alongside and configure a separate build dir against that triplet.
+
+Configure and build through the presets — they pin the toolchain file and both triplets:
+
+```powershell
+cmake --preset windows
+cmake --build --preset windows
+```
+
+Fallback if the vcpkg route is ever abandoned: the official prebuilt OCCT installer from
+dev.opencascade.org plus the Qt online installer, then point `OpenCASCADE_DIR` and
+`Qt6_DIR` at them manually.
+
+### Dependency versions actually installed
+
+vcpkg resolved **OCCT 8.0.1** and **Qt 6.11.1** — both well past the brief's 7.6+ baseline.
+OCCT 7.8 renamed the data-exchange toolkits (`CMakeLists.txt` branches on that), but 8.0 may
+have merged or renamed others. **If a `TK*` target fails to resolve on first configure,
+check the real names** in `C:/vcpkg/installed/x64-windows-release/lib/TK*.lib` rather than
+trusting the brief's list.
 
 ### Linux
 
@@ -44,15 +77,16 @@ installer, then point `OpenCASCADE_DIR` and `Qt6_DIR` at them manually.
 sudo apt install -y build-essential cmake \
   libocct-foundation-dev libocct-modeling-data-dev libocct-modeling-algorithms-dev \
   libocct-data-exchange-dev libocct-visualization-dev qt6-base-dev libgl1-mesa-dev
-cmake -B build -S . && cmake --build build -j
+cmake --preset linux && cmake --build --preset linux
 ```
 
 ### Current state
 
-Scaffolded, **not yet compiled** — no build has ever run here, because CMake, OCCT and Qt6
-are not installed on this machine (MSVC 2022 + Windows SDK are). What exists:
-`CMakeLists.txt`, `src/ModelingOps.{h,cpp}` (the full geometry core), and
-`tests/headless_geometry.cpp`. The Qt files (`main`, `MainWindow`, `OcctViewWidget`,
+Scaffolded, **not yet compiled** — no build has ever run here. The toolchain is installed
+and OCCT/Qt were still building via vcpkg at the time this was written. What exists:
+`CMakeLists.txt`, `CMakePresets.json`, `src/ModelingOps.{h,cpp}` (the full geometry core),
+and `tests/headless_geometry.cpp`. **None of that C++ has been through a compiler yet** —
+treat the first `ctest` run as the real verification. The Qt files (`main`, `MainWindow`, `OcctViewWidget`,
 `DocumentModel`, `SketchController`) are deliberately **not written yet** — see the
 sequencing rule under Tests. `CMakeLists.txt` skips the `furnifyme` target while they are
 absent, so a fresh clone still configures and runs the test.
@@ -63,13 +97,14 @@ absent, so a fresh clone still configures and runs the test.
 toolkits and runs on any box, including CI.
 
 ```bash
-cmake -B build -S . -DFURNIFYME_BUILD_APP=OFF   # geometry + test only, no Qt needed
-cmake --build build
-ctest --test-dir build --output-on-failure
+cmake --preset windows-headless      # or linux-headless
+cmake --build --preset windows-headless
+ctest --preset windows-headless
 ```
 
-`FURNIFYME_BUILD_APP=OFF` builds the geometry library and the test without requiring Qt at
-all — the fastest loop for kernel work, and what CI should run.
+The `*-headless` presets set `FURNIFYME_BUILD_APP=OFF`, building the geometry library and
+the test with no Qt involved at all — the fastest loop for kernel work, and what CI should
+run. They use a separate `build-headless/` dir so they never fight with the app build.
 
 **Pass this test before writing a single line of Qt code.** It asserts:
 square wire → face → 10mm prism → second offset box → cut → expected face/solid counts via
