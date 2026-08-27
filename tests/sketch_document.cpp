@@ -94,6 +94,71 @@ int main()
         check(sketch.pointCount() == 0, "reset clears the sketch");
     }
 
+    // --- grid snapping ------------------------------------------------------
+    {
+        // Snapping happens in the plane's own coordinates, so it stays correct
+        // when the sketch plane is not the XY plane.
+        gp_Pnt snapped = SketchController::snapToPlaneGrid(gp_Pnt(12.4, 27.6, 0.0), xy, 10.0);
+        checkPoint(snapped, 10.0, 30.0, 0.0, "snaps to the nearest 10mm grid intersection");
+
+        snapped = SketchController::snapToPlaneGrid(gp_Pnt(30.0, -20.0, 0.0), xy, 10.0);
+        checkPoint(snapped, 30.0, -20.0, 0.0, "a point already on the grid is unchanged");
+
+        // The real coordinate from a manual test run, which is what motivated this.
+        snapped = SketchController::snapToPlaneGrid(gp_Pnt(-4.35, -129.32, 0.0), xy, 10.0);
+        checkPoint(snapped, 0.0, -130.0, 0.0, "negative coordinates round to nearest, not toward zero");
+
+        snapped = SketchController::snapToPlaneGrid(gp_Pnt(15.0, 25.0, 0.0), xy, 10.0);
+        checkPoint(snapped, 20.0, 30.0, 0.0, "exact half-steps round up");
+
+        // A zero or negative step would divide by zero / invert the grid.
+        snapped = SketchController::snapToPlaneGrid(gp_Pnt(3.7, 4.2, 0.0), xy, 0.0);
+        checkPoint(snapped, 3.7, 4.2, 0.0, "a zero step leaves the point untouched");
+
+        // Snapping must not lift the point off its plane.
+        const gp_Pln raised(gp_Pnt(0.0, 0.0, 50.0), gp_Dir(0.0, 0.0, 1.0));
+        snapped = SketchController::snapToPlaneGrid(gp_Pnt(12.4, 27.6, 50.0), raised, 10.0);
+        checkPoint(snapped, 10.0, 30.0, 50.0, "snapped point stays on its own plane");
+    }
+
+    // --- closing the sketch by clicking the first point ----------------------
+    {
+        SketchController sketch;
+        check(!sketch.isNearFirstPoint(gp_Pnt(0.0, 0.0, 0.0), 5.0),
+              "an empty sketch has no first point to close on");
+
+        sketch.addPoint(gp_Pnt(0.0, 0.0, 0.0));
+        sketch.addPoint(gp_Pnt(50.0, 0.0, 0.0));
+        check(!sketch.isNearFirstPoint(gp_Pnt(0.0, 0.0, 0.0), 5.0),
+              "2 points cannot be closed by clicking the start");
+
+        sketch.addPoint(gp_Pnt(50.0, 50.0, 0.0));
+        check(sketch.isNearFirstPoint(gp_Pnt(2.0, 2.0, 0.0), 5.0),
+              "clicking within tolerance of the first point closes a 3-point sketch");
+        check(!sketch.isNearFirstPoint(gp_Pnt(20.0, 20.0, 0.0), 5.0),
+              "a click far from the first point does not close");
+        check(!sketch.isNearFirstPoint(gp_Pnt(48.0, 48.0, 0.0), 5.0),
+              "clicking near the LAST point does not close");
+    }
+
+    // --- rubber-band preview -------------------------------------------------
+    {
+        SketchController sketch;
+        check(sketch.previewShapeWithCursor(gp_Pnt(10.0, 10.0, 0.0)).IsNull(),
+              "no rubber band before the first point is placed");
+
+        sketch.addPoint(gp_Pnt(0.0, 0.0, 0.0));
+        check(!sketch.previewShapeWithCursor(gp_Pnt(10.0, 10.0, 0.0)).IsNull(),
+              "one placed point plus the cursor draws a segment");
+        check(sketch.previewShape().IsNull(),
+              "the committed preview is still empty with a single point");
+
+        sketch.addPoint(gp_Pnt(50.0, 0.0, 0.0));
+        const TopoDS_Shape band = sketch.previewShapeWithCursor(gp_Pnt(50.0, 50.0, 0.0));
+        check(!band.IsNull(), "rubber band follows the cursor past the second point");
+        check(sketch.pointCount() == 2, "asking for the rubber band does not commit the cursor");
+    }
+
     // --- document -----------------------------------------------------------
     {
         DocumentModel doc;

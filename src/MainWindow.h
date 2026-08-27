@@ -22,6 +22,8 @@ private slots:
     void onUndoSketchPoint();
     void onCancelSketch();
     void onSketchPointPicked(const gp_Pnt& point);
+    void onSketchCursorMoved(const gp_Pnt& point);
+    void onSnapToggled(bool enabled);
 
     void onExtrude();
     void onFuse();
@@ -36,6 +38,8 @@ private:
     void buildActions();
     void buildMenusAndToolbar();
     void updateActions();
+    // Persistent right-hand readout: what mode we are in and what is possible.
+    void updateStateLabel();
     void runBoolean(int kind);   // ModelingOps::BooleanKind as int, to keep it out of the header
 
     OcctViewWidget* myView = nullptr;
@@ -57,4 +61,7 @@ private:
     QAction* myExportStepAction = nullptr;
     QAction* mySolidSelectAction = nullptr;
     QAction* myFaceSelectAction = nullptr;
+    QAction* mySnapAction = nullptr;
+
+    class QLabel* myStateLabel = nullptr;
 };

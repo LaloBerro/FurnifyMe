@@ -11,6 +11,9 @@
 #include <Aspect_GridType.hxx>
 #include <Aspect_TypeOfTriedronPosition.hxx>
 #include <OpenGl_GraphicDriver.hxx>
+#include <Prs3d_Drawer.hxx>
+#include <Prs3d_LineAspect.hxx>
+#include <Prs3d_TypeOfHighlight.hxx>
 #include <Quantity_Color.hxx>
 #include <Quantity_NameOfColor.hxx>
 #include <V3d_TypeOfOrientation.hxx>
@@ -30,6 +33,7 @@
 #include <QWheelEvent>
 
 #include <algorithm>
+#include <cmath>
 
 namespace {
 // AIS_Shape selection modes are plain integers: 0 whole shape, 4 face.
@@ -85,6 +89,23 @@ void OcctViewWidget::initializeViewer()
     myViewer->SetRectangularGridValues(0.0, 0.0, 10.0, 10.0, 0.0);
     myViewer->SetRectangularGridGraphicValues(500.0, 500.0, 0.0);
 
+    // OCCT's default highlight barely reads against a shaded solid. Make hover
+    // and selection unmistakable - not being able to tell what is selected was
+    // the single most confusing thing about the app.
+    const Handle(Prs3d_Drawer) hover = myContext->HighlightStyle(Prs3d_TypeOfHighlight_Dynamic);
+    hover->SetColor(Quantity_NOC_CYAN1);
+    hover->SetDisplayMode(AIS_Shaded);
+    hover->SetTransparency(0.0f);
+
+    const Handle(Prs3d_Drawer) picked = myContext->HighlightStyle(Prs3d_TypeOfHighlight_Selected);
+    picked->SetColor(Quantity_NOC_ORANGE);
+    picked->SetDisplayMode(AIS_Shaded);
+    picked->SetTransparency(0.0f);
+
+    // Sub-shape (face-mode) highlighting uses its own styles.
+    myContext->HighlightStyle(Prs3d_TypeOfHighlight_LocalDynamic)->SetColor(Quantity_NOC_CYAN1);
+    myContext->HighlightStyle(Prs3d_TypeOfHighlight_LocalSelected)->SetColor(Quantity_NOC_ORANGE);
+
     setViewAxonometric();
     myView->MustBeResized();
 
@@ -117,6 +138,12 @@ void OcctViewWidget::displaySolid(int id, const TopoDS_Shape& shape)
     ModelingOps::tessellate(shape, 0.1);
 
     Handle(AIS_Shape) presentation = new AIS_Shape(shape);
+    // Neutral grey so the cyan hover and orange selection stand out, and face
+    // boundaries drawn so the shape's edges are readable when shaded.
+    presentation->SetColor(Quantity_Color(Quantity_NOC_GRAY70));
+    presentation->Attributes()->SetFaceBoundaryDraw(Standard_True);
+    presentation->Attributes()->SetFaceBoundaryAspect(
+        new Prs3d_LineAspect(Quantity_NOC_GRAY30, Aspect_TOL_SOLID, 1.0));
     myContext->Display(presentation, AIS_Shaded, kSelectionModeWholeShape, Standard_False);
     mySolids[id] = presentation;
     applySelectionMode(presentation);
@@ -192,6 +219,12 @@ void OcctViewWidget::setSelectionMode(SelectionMode mode)
     emit selectionChanged();
 }
 
+void OcctViewWidget::setSnap(bool enabled, double step)
+{
+    mySnapEnabled = enabled;
+    if (step > 0.0) mySnapStep = step;
+}
+
 void OcctViewWidget::setSketchMode(bool enabled, const gp_Pln& plane)
 {
     mySketchMode = enabled;
@@ -207,7 +240,12 @@ bool OcctViewWidget::pointOnSketchPlane(int px, int py, gp_Pnt& out) const
     myView->ConvertWithProj(px, py, x, y, z, vx, vy, vz);
 
     const gp_Lin ray(gp_Pnt(x, y, z), gp_Dir(vx, vy, vz));
-    return SketchController::intersectRayWithPlane(ray, mySketchPlane, out);
+    if (!SketchController::intersectRayWithPlane(ray, mySketchPlane, out)) return false;
+
+    if (mySnapEnabled) {
+        out = SketchController::snapToPlaneGrid(out, mySketchPlane, mySnapStep);
+    }
+    return true;
 }
 
 std::vector<int> OcctViewWidget::selectedSolidIds() const
@@ -301,7 +339,12 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
         myView->Rotation(pos.x(), pos.y());
     } else if (myPanning) {
         myView->Pan(pos.x() - myLastPos.x(), -(pos.y() - myLastPos.y()));
-    } else if (!myContext.IsNull() && !mySketchMode) {
+    } else if (mySketchMode) {
+        // Report where the next point would land, so the rubber band and the
+        // coordinate readout track the cursor before anything is committed.
+        gp_Pnt onPlane;
+        if (pointOnSketchPlane(pos.x(), pos.y(), onPlane)) emit sketchCursorMoved(onPlane);
+    } else if (!myContext.IsNull()) {
         // Hover highlight. Suppressed while sketching so the in-progress wire
         // does not fight the highlighter for attention.
         myContext->MoveTo(pos.x(), pos.y(), myView, Standard_True);
@@ -318,7 +361,11 @@ void OcctViewWidget::wheelEvent(QWheelEvent* event)
     if (delta == 0) return;
 
     const QPoint pos = event->position().toPoint();
-    const int step = delta > 0 ? 40 : -40;
+
+    // Proportional to the wheel delta rather than a fixed jump, so trackpads and
+    // high-resolution wheels behave. One notch is 120 units.
+    int step = static_cast<int>(std::lround(delta / 120.0 * 25.0));
+    if (step == 0) step = delta > 0 ? 1 : -1;
 
     myView->StartZoomAtPoint(pos.x(), pos.y());
     myView->ZoomAtPoint(pos.x(), pos.y(), pos.x() + step, pos.y());

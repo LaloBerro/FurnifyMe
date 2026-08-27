@@ -7,6 +7,7 @@
 #include <QActionGroup>
 #include <QFileDialog>
 #include <QInputDialog>
+#include <QLabel>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QStatusBar>
@@ -22,11 +23,18 @@ MainWindow::MainWindow(QWidget* parent)
     setCentralWidget(myView);
 
     connect(myView, &OcctViewWidget::sketchPointPicked, this, &MainWindow::onSketchPointPicked);
+    connect(myView, &OcctViewWidget::sketchCursorMoved, this, &MainWindow::onSketchCursorMoved);
     connect(myView, &OcctViewWidget::selectionChanged, this, &MainWindow::onSelectionChanged);
 
     buildActions();
     buildMenusAndToolbar();
     updateActions();
+
+    // Permanent widget so it survives transient showMessage() calls: the left
+    // side reports what just happened, the right side always says where you are.
+    myStateLabel = new QLabel(this);
+    statusBar()->addPermanentWidget(myStateLabel);
+    updateStateLabel();
 
     setWindowTitle(tr("FurnifyMe"));
     resize(1280, 800);
@@ -74,6 +82,19 @@ void MainWindow::buildActions()
     myFaceSelectAction = new QAction(tr("Select F&aces"), this);
     myFaceSelectAction->setCheckable(true);
 
+    mySnapAction = new QAction(tr("Snap to &Grid"), this);
+    mySnapAction->setCheckable(true);
+    mySnapAction->setChecked(true);
+    mySnapAction->setToolTip(tr("Round sketch points to the 10mm grid"));
+    connect(mySnapAction, &QAction::toggled, this, &MainWindow::onSnapToggled);
+
+    myStartSketchAction->setToolTip(tr("Draw a closed outline on the XY plane (Ctrl+K)"));
+    myFinishSketchAction->setToolTip(tr("Close the outline into a face - needs 3+ points (Enter)"));
+    myExtrudeAction->setToolTip(tr("Turn the closed face into a solid (E)"));
+    myFuseAction->setToolTip(tr("Union of two selected solids"));
+    myCutAction->setToolTip(tr("Subtract the later solid from the earlier one"));
+    myCommonAction->setToolTip(tr("Keep only the overlap of two selected solids"));
+
     auto* selectionGroup = new QActionGroup(this);
     selectionGroup->addAction(mySolidSelectAction);
     selectionGroup->addAction(myFaceSelectAction);
@@ -106,6 +127,8 @@ void MainWindow::buildMenusAndToolbar()
     viewMenu->addAction(tr("&Fit All"), QKeySequence(Qt::Key_F), myView, &OcctViewWidget::fitAll);
     viewMenu->addAction(tr("&Axonometric"), myView, &OcctViewWidget::setViewAxonometric);
     viewMenu->addSeparator();
+    viewMenu->addAction(mySnapAction);
+    viewMenu->addSeparator();
     viewMenu->addAction(mySolidSelectAction);
     viewMenu->addAction(myFaceSelectAction);
 
@@ -121,6 +144,8 @@ void MainWindow::buildMenusAndToolbar()
     bar->addSeparator();
     bar->addAction(mySolidSelectAction);
     bar->addAction(myFaceSelectAction);
+    bar->addSeparator();
+    bar->addAction(mySnapAction);
 }
 
 void MainWindow::updateActions()
@@ -140,6 +165,54 @@ void MainWindow::updateActions()
     myCommonAction->setEnabled(booleanReady);
 
     myExportStepAction->setEnabled(myDocument.count() > 0);
+
+    updateStateLabel();
+}
+
+void MainWindow::updateStateLabel()
+{
+    if (!myStateLabel) return;
+
+    QString state;
+    if (mySketching) {
+        state = mySketch.canClose()
+                    ? tr("Sketching - %1 points - Enter or click the start point to close")
+                          .arg(mySketch.pointCount())
+                    : tr("Sketching - %1 of 3 points needed").arg(mySketch.pointCount());
+    } else if (!myPendingFace.IsNull()) {
+        state = tr("Face ready - press E to extrude");
+    } else {
+        const std::size_t selected = myView->selectedSolidIds().size();
+        const std::size_t solids = myDocument.count();
+        if (selected == 2) {
+            state = tr("2 solids selected - Fuse / Cut / Intersect available");
+        } else if (selected == 1) {
+            state = tr("1 solid selected - shift-click a second one for a boolean");
+        } else if (solids == 0) {
+            state = tr("Empty - start a sketch (Ctrl+K)");
+        } else {
+            state = tr("%1 solid(s) - click one to select").arg(solids);
+        }
+    }
+    myStateLabel->setText(state);
+}
+
+void MainWindow::onSnapToggled(bool enabled)
+{
+    myView->setSnap(enabled, 10.0);
+    statusBar()->showMessage(enabled ? tr("Snapping to the 10mm grid.")
+                                     : tr("Snapping off - points land exactly where you click."));
+}
+
+void MainWindow::onSketchCursorMoved(const gp_Pnt& point)
+{
+    if (!mySketching) return;
+
+    myView->setPreview(mySketch.previewShapeWithCursor(point));
+    statusBar()->showMessage(tr("Cursor: (%1, %2, %3)")
+                                 .arg(point.X(), 0, 'f', 1)
+                                 .arg(point.Y(), 0, 'f', 1)
+                                 .arg(point.Z(), 0, 'f', 1));
 }
 
 void MainWindow::onStartSketch()
@@ -158,6 +231,14 @@ void MainWindow::onStartSketch()
 
 void MainWindow::onSketchPointPicked(const gp_Pnt& point)
 {
+    // Clicking the first point again closes the sketch, the way every CAD tool
+    // behaves. Half a grid step is a forgiving but unambiguous target.
+    const double closeTolerance = myView->snapEnabled() ? myView->snapStep() * 0.5 : 5.0;
+    if (mySketch.isNearFirstPoint(point, closeTolerance)) {
+        onFinishSketch();
+        return;
+    }
+
     mySketch.addPoint(point);
     myView->setPreview(mySketch.previewShape());
     updateActions();
@@ -221,10 +302,13 @@ void MainWindow::onExtrude()
         return;
     }
 
+    // Frame the very first solid; after that leave the camera where the user
+    // put it rather than yanking the view on every extrude.
+    const bool wasEmpty = myDocument.count() == 0;
     const int id = myDocument.addSolid(solid);
     myView->clearPreview();
     myView->displaySolid(id, solid);
-    myView->fitAll();
+    if (wasEmpty) myView->fitAll();
 
     myPendingFace.Nullify();
     mySketch.reset();

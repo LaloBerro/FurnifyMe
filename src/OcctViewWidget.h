@@ -44,6 +44,11 @@ public:
     void setSketchMode(bool enabled, const gp_Pln& plane);
     bool sketchMode() const { return mySketchMode; }
 
+    // Snapping applies to points reported while sketching, not to the camera.
+    void setSnap(bool enabled, double step);
+    bool snapEnabled() const { return mySnapEnabled; }
+    double snapStep() const { return mySnapStep; }
+
     // Document ids of the selected solids, deduplicated (face-mode selection can
     // hit several faces of one solid).
     std::vector<int> selectedSolidIds() const;
@@ -54,6 +59,9 @@ public:
 
 signals:
     void sketchPointPicked(const gp_Pnt& point);
+    // Live cursor position on the sketch plane, already snapped - drives the
+    // rubber band and the coordinate readout.
+    void sketchCursorMoved(const gp_Pnt& point);
     void selectionChanged();
 
 protected:
@@ -80,6 +88,8 @@ private:
     bool myInitialized = false;
     bool mySketchMode = false;
     gp_Pln mySketchPlane;
+    bool mySnapEnabled = true;
+    double mySnapStep = 10.0;      // matches the drawn grid
 
     QPoint myLastPos;
     bool myRotating = false;
