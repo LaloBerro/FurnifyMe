@@ -185,6 +185,12 @@ Source files under `src/`, plus `tests/`:
 | `OcctViewWidget.{h,cpp}` | the Qt↔OCCT bridge — the only genuinely tricky file |
 | `DocumentModel.{h,cpp}` | owns the list of solids |
 | `SketchController.{h,cpp}` | 2D input → wire on a plane |
+| `ui/Theme.{h,cpp}` | colour tokens + the app stylesheet; the only place hex lives |
+| `ui/IconSet.{h,cpp}` | glyphs painted with QPainter (no qtsvg installed) |
+| `ui/ToolChip.{h,cpp}` | a button built from a `QAction`, never storing its own state |
+| `ui/ToolCluster.{h,cpp}` | a vertical stack of chips |
+| `ui/ViewportOverlay.{h,cpp}` | anchors clusters to viewport edges; not a widget |
+| `ui/ItemsPanel.{h,cpp}` | solid list with visibility toggles |
 
 **Hard rule: `ModelingOps` must not include a single Qt header.** That invariant is what
 makes the headless test possible; breaking it collapses the whole testability story. It is
@@ -205,6 +211,17 @@ copies DLLs but **not** plugins, and the `windeployqt` feature is deliberately n
 copies `QWindowsIntegrationPlugin` and `QModernWindowsStylePlugin` itself in a POST_BUILD
 step. Delete that and the app dies at startup with
 `could not find the Qt platform plugin "windows"`.
+
+### The shell is action-driven
+
+Every tool chip is constructed from a `QAction` and mirrors it - enabled state,
+checked state, label, shortcut. Never give a chip its own state: menus, chips and
+shortcuts would drift, and `gui_smoke` finds actions by text, so the chips are covered
+for free. `updateActions()` remains the single place that decides what is available.
+
+Cluster widgets are **direct children of `OcctViewWidget`**. A probe confirmed Qt
+composites plain children over OCCT's OpenGL surface correctly on Windows; a translucent
+container was deliberately avoided as the least reliable variant of that.
 
 ### CMake note
 
