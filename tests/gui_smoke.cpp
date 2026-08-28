@@ -19,6 +19,8 @@
 #include "OcctViewWidget.h"
 #include "SketchController.h"
 #include "ToolChip.h"
+#include "ToolCluster.h"
+#include "ViewportOverlay.h"
 
 #include <QAction>
 #include <QApplication>
@@ -275,6 +277,31 @@ int main(int argc, char* argv[])
         const bool before = chip.isChecked();
         chip.click();
         check(chip.isChecked() == before, "a chip never toggles its own checked state");
+    }
+
+    // --- overlay anchoring ----------------------------------------------------
+    {
+        QAction probe(QStringLiteral("Probe"));
+        auto* cluster = new ToolCluster(view);
+        cluster->addChip(new ToolChip(&probe, IconSet::Glyph::Fit));
+
+        ViewportOverlay overlay(view);
+        overlay.addWidget(cluster, ViewportOverlay::Anchor::BottomLeft);
+        overlay.relayout();
+
+        const QRect bounds = view->rect();
+        check(bounds.contains(cluster->geometry()),
+              "an anchored cluster sits inside the viewport");
+        const int bottomGap = bounds.bottom() - cluster->geometry().bottom();
+        check(bottomGap >= 8 && bottomGap <= 32,
+              QStringLiteral("bottom-anchored cluster keeps its margin (%1px)").arg(bottomGap));
+
+        const int widthBefore = cluster->width();
+        view->resize(view->width() + 120, view->height());
+        settle(150);
+        check(bounds.left() <= cluster->geometry().left() && cluster->width() == widthBefore,
+              "cluster keeps its size and stays anchored after a resize");
+        delete cluster;
     }
 
     std::printf("\n%s (%d failure%s)  volumes: A=%.1f B=%.1f\n",
