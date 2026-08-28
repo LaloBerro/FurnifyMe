@@ -25,6 +25,7 @@
 #include <V3d_TypeOfVisualization.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Lin.hxx>
+#include <gp_Vec.hxx>
 
 #ifdef _WIN32
   #include <WNT_Window.hxx>
@@ -287,6 +288,11 @@ bool OcctViewWidget::pointOnSketchPlane(int px, int py, gp_Pnt& out) const
 
     const gp_Lin ray(gp_Pnt(x, y, z), gp_Dir(vx, vy, vz));
     if (!SketchController::intersectRayWithPlane(ray, mySketchPlane, out)) return false;
+    // A perspective camera has a horizon: an intersection with the sketch plane
+    // can lie BEHIND the eye when the cursor is above it. Such a hit is not a
+    // point the user can see - reject it.
+    const gp_Vec toHit(ray.Location(), out);
+    if (toHit.Dot(gp_Vec(ray.Direction())) <= 0.0) return false;
 
     if (mySnapEnabled) {
         out = SketchController::snapToPlaneGrid(out, mySketchPlane, mySnapStep);
@@ -314,7 +320,13 @@ bool OcctViewWidget::pickWorldPoint(int px, int py, gp_Pnt& out) const
     myView->ConvertWithProj(px, py, x, y, z, vx, vy, vz);
     const gp_Lin ray(gp_Pnt(x, y, z), gp_Dir(vx, vy, vz));
     const gp_Pln ground(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
-    return SketchController::intersectRayWithPlane(ray, ground, out);
+    if (!SketchController::intersectRayWithPlane(ray, ground, out)) return false;
+    // A perspective camera has a horizon: an intersection with the ground can
+    // lie BEHIND the eye when the cursor is above it. Such a hit is not a
+    // point the user can see - reject it.
+    const gp_Vec toHit(ray.Location(), out);
+    if (toHit.Dot(gp_Vec(ray.Direction())) <= 0.0) return false;
+    return true;
 }
 
 std::vector<int> OcctViewWidget::selectedSolidIds() const
@@ -388,9 +400,9 @@ void OcctViewWidget::syncCameraFromView()
     if (myView.IsNull()) return;
 
     // Decompose whatever the view's camera is (the view cube animates it
-    // behind our back) into turntable state. setPivot does exactly this
-    // derivation when the eye is fixed, so reuse it: set the eye-preserving
-    // state from the OCCT camera's center.
+    // behind our back) into turntable state: target from Center, then
+    // distance/elevation/azimuth derived from Eye-Center - the same
+    // derivation setPivot uses, re-done here against the OCCT camera.
     const Handle(Graphic3d_Camera) cam = myView->Camera();
     CameraState s = myCamera.state();
     s.target = cam->Center();

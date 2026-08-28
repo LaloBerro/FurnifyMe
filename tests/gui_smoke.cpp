@@ -198,6 +198,22 @@ int main(int argc, char* argv[])
               "camera restored to the startup pose for the rest of the suite");
     }
 
+    // --- above-horizon clicks are rejected, not mirrored behind the eye -------
+    {
+        trigger(window, QStringLiteral("Front"));
+        settle(400);   // elevation 0: half the viewport is above the horizon
+        trigger(window, QStringLiteral("Start Sketch"));
+        const int before = static_cast<int>(window.sketch().pointCount());
+        // Top strip of the viewport is sky in the Front view.
+        clickAt(view, QPointF(view->width() * 0.5, view->height() * 0.05));
+        check(static_cast<int>(window.sketch().pointCount()) == before,
+              "a click above the horizon adds no sketch point");
+        trigger(window, QStringLiteral("Cancel Sketch"));
+        settle(150);
+        trigger(window, QStringLiteral("Axonometric"));
+        settle(300);
+    }
+
     // --- bundled font ---------------------------------------------------------
     check(!Theme::fontFamily().isEmpty(),
           QStringLiteral("the bundled font loaded (family: '%1')").arg(Theme::fontFamily()));
@@ -526,7 +542,7 @@ int main(int argc, char* argv[])
         check(std::fabs(view->camera().state().azimuthDeg - goal.azimuthDeg) < 1e-3,
               "animateTo settles exactly on the goal");
         view->setAnimationsEnabled(false);
-        check(true, "animations re-disabled for the rest of the suite");
+        check(!view->animationsEnabled(), "animations re-disabled for the rest of the suite");
     }
 
     // --- grid subdivision policy ----------------------------------------------
