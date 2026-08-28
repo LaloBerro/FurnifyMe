@@ -327,8 +327,16 @@ int main(int argc, char* argv[])
         auto* cluster = new ToolCluster(view);
         cluster->addChip(new ToolChip(&probe, IconSet::Glyph::Fit));
 
+        // A second, independent cluster that outlives the first - the real
+        // post-condition for "relayout survives a destroyed cluster" is that
+        // this one is still laid out correctly afterwards.
+        QAction probe2(QStringLiteral("Probe2"));
+        auto* survivor = new ToolCluster(view);
+        survivor->addChip(new ToolChip(&probe2, IconSet::Glyph::Fit));
+
         ViewportOverlay overlay(view);
         overlay.addWidget(cluster, ViewportOverlay::Anchor::BottomLeft);
+        overlay.addWidget(survivor, ViewportOverlay::Anchor::TopRight);
         overlay.relayout();
 
         const QRect bounds = view->rect();
@@ -344,10 +352,12 @@ int main(int argc, char* argv[])
         check(bounds.left() <= cluster->geometry().left() && cluster->width() == widthBefore,
               "cluster keeps its size and stays anchored after a resize");
         // A destroyed widget must not take the overlay down with it on the next
-        // layout pass - QPointer entries go null and are skipped.
+        // layout pass - QPointer entries go null and are skipped, and the
+        // remaining, still-alive widget must still get laid out.
         delete cluster;
         overlay.relayout();
-        check(true, "relayout survives a destroyed cluster");
+        check(view->rect().contains(survivor->geometry()),
+              "the surviving cluster is still laid out after the destroyed one is skipped");
     }
 
     // --- view controls --------------------------------------------------------
@@ -356,11 +366,37 @@ int main(int argc, char* argv[])
         check(wireframe != nullptr, "a Wireframe display-mode action exists");
         if (wireframe) {
             check(wireframe->isCheckable(), "Wireframe is a toggle");
+
             wireframe->trigger();
             settle(200);
+            check(view->isWireframe(), "triggering Wireframe turns wireframe mode on");
+
             wireframe->trigger();
             settle(200);
-            check(true, "toggling the display mode does not crash the viewer");
+            check(!view->isWireframe(), "triggering it again turns wireframe mode off");
+
+            // Regression guard: displaySolid() used to hardcode AIS_Shaded, so
+            // resyncView() - which Undo and Redo both run - silently reverted
+            // every solid to shaded while the Wireframe action (and myWireframe
+            // itself) stayed checked/true. isWireframe() alone cannot catch that
+            // - it is untouched by resyncView() - so also check the solid's
+            // actual live display mode via isSolidWireframe().
+            wireframe->trigger();
+            settle(200);
+            check(view->isWireframe(), "wireframe is on going into undo/redo");
+            const int solidId = window.document().solids().front().id;
+            check(view->isSolidWireframe(solidId), "the solid itself renders wireframe before undo/redo");
+
+            trigger(window, QStringLiteral("Undo"));
+            trigger(window, QStringLiteral("Redo"));
+            check(view->isWireframe(), "wireframe survives undo/redo (resyncView)");
+            check(view->isSolidWireframe(solidId),
+                  "the resynced solid still renders wireframe, not just the flag");
+
+            // Leave the viewport shaded so later checks are unaffected.
+            wireframe->trigger();
+            settle(200);
+            check(!view->isWireframe(), "wireframe turned back off, viewport left shaded");
         }
     }
 

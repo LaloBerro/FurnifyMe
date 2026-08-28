@@ -17,7 +17,7 @@ public:
     ItemsPanel(const DocumentModel* document, OcctViewWidget* view, QWidget* parent = nullptr);
 
     void refresh();
-    int rowCount() const { return myRowCount; }
+    int rowCount() const { return static_cast<int>(myRowWidgets.size()); }
 
     // Highlights the rows for these solids. Called when the viewport selection
     // changes, so the two views of the document never disagree.
@@ -33,7 +33,6 @@ private:
     const DocumentModel* myDocument = nullptr;
     OcctViewWidget* myView = nullptr;
     QVBoxLayout* myRows = nullptr;
-    int myRowCount = 0;
     std::vector<QWidget*> myRowWidgets;   // parallel to the document's solids
     std::vector<int> myRowIds;
 };

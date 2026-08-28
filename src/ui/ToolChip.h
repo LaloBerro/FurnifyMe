@@ -29,7 +29,6 @@ private:
     void syncFromAction();
 
     QAction* myAction = nullptr;
-    IconSet::Glyph myGlyph;
     QString myShortcut;
     bool myHovered = false;
 };

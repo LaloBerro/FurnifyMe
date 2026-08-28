@@ -152,7 +152,8 @@ void OcctViewWidget::displaySolid(int id, const TopoDS_Shape& shape)
     presentation->Attributes()->SetFaceBoundaryDraw(Standard_True);
     presentation->Attributes()->SetFaceBoundaryAspect(
         new Prs3d_LineAspect(Quantity_NOC_GRAY30, Aspect_TOL_SOLID, 1.0));
-    myContext->Display(presentation, AIS_Shaded, kSelectionModeWholeShape, Standard_False);
+    myContext->Display(presentation, myWireframe ? AIS_WireFrame : AIS_Shaded,
+                       kSelectionModeWholeShape, Standard_False);
     mySolids[id] = presentation;
     applySelectionMode(presentation);
 
@@ -190,13 +191,16 @@ void OcctViewWidget::setSolidVisible(int id, bool visible)
         myContext->Display(it->second, myWireframe ? AIS_WireFrame : AIS_Shaded,
                            kSelectionModeWholeShape, Standard_False);
         applySelectionMode(it->second);
+        myContext->UpdateCurrentViewer();
     } else {
         // Erase also drops it from the selection, which is what we want: acting
-        // on something you cannot see would be a nasty surprise.
+        // on something you cannot see would be a nasty surprise. The selection
+        // can genuinely change here, unlike on the show path, so this is the
+        // only branch that should tell the status bar to re-check it.
         myContext->Erase(it->second, Standard_False);
+        myContext->UpdateCurrentViewer();
+        emit selectionChanged();
     }
-    myContext->UpdateCurrentViewer();
-    emit selectionChanged();
 }
 
 bool OcctViewWidget::isSolidVisible(int id) const
@@ -398,12 +402,21 @@ void OcctViewWidget::setViewCubeVisible(bool visible)
 
 void OcctViewWidget::setWireframe(bool wireframe)
 {
-    if (myContext.IsNull() || myWireframe == wireframe) return;
-
+    if (myWireframe == wireframe) return;
     myWireframe = wireframe;
+
+    if (myContext.IsNull()) return;   // state kept; re-applied once the viewer initialises
+
     const Standard_Integer mode = wireframe ? AIS_WireFrame : AIS_Shaded;
     for (auto& entry : mySolids) myContext->SetDisplayMode(entry.second, mode, Standard_False);
     myContext->UpdateCurrentViewer();
+}
+
+bool OcctViewWidget::isSolidWireframe(int id) const
+{
+    const auto it = mySolids.find(id);
+    if (it == mySolids.end() || myContext.IsNull()) return false;
+    return myContext->IsDisplayed(it->second, AIS_WireFrame);
 }
 
 void OcctViewWidget::mousePressEvent(QMouseEvent* event)

@@ -44,7 +44,7 @@ MainWindow::MainWindow(QWidget* parent)
     connect(myView, &OcctViewWidget::selectionChanged, this, &MainWindow::onSelectionChanged);
 
     buildActions();
-    buildMenusAndToolbar();
+    buildMenus();
     buildOverlay();
 
     connect(this, &MainWindow::documentChanged, myItemsPanel, &ItemsPanel::refresh);
@@ -145,12 +145,12 @@ void MainWindow::buildActions()
     connect(myDisplayModeAction, &QAction::toggled, this,
             [this](bool on) { myView->setWireframe(on); });
 
-    myFitAction = new QAction(tr("Fit All"), this);
+    myFitAction = new QAction(tr("&Fit All"), this);
     myFitAction->setShortcut(QKeySequence(Qt::Key_F));
     myFitAction->setToolTip(tr("Frame everything in the document (F)"));
     connect(myFitAction, &QAction::triggered, myView, &OcctViewWidget::fitAll);
 
-    myScreenshotAction = new QAction(tr("Screenshot"), this);
+    myScreenshotAction = new QAction(tr("Save S&creenshot..."), this);
     myScreenshotAction->setToolTip(tr("Save the viewport as a PNG"));
     connect(myScreenshotAction, &QAction::triggered, this, [this] {
         const QString path = QFileDialog::getSaveFileName(this, tr("Save Screenshot"),
@@ -175,7 +175,7 @@ void MainWindow::buildActions()
     connect(myFaceSelectAction, &QAction::triggered, this, &MainWindow::onSelectionModeChanged);
 }
 
-void MainWindow::buildMenusAndToolbar()
+void MainWindow::buildMenus()
 {
     QMenu* fileMenu = menuBar()->addMenu(tr("&File"));
     fileMenu->addAction(myExportStepAction);

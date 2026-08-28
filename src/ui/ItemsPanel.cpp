@@ -8,7 +8,6 @@
 #include <QEvent>
 #include <QHBoxLayout>
 #include <QLabel>
-#include <QMouseEvent>
 #include <QPushButton>
 #include <QVBoxLayout>
 
@@ -48,7 +47,6 @@ void ItemsPanel::refresh()
         if (QWidget* widget = item->widget()) widget->deleteLater();
         delete item;
     }
-    myRowCount = 0;
     myRowWidgets.clear();
     myRowIds.clear();
     if (!myDocument) return;
@@ -82,7 +80,6 @@ void ItemsPanel::refresh()
         myRows->addWidget(row);
         myRowWidgets.push_back(row);
         myRowIds.push_back(id);
-        ++myRowCount;
     }
 
     if (myView) showSelection(myView->selectedSolidIds());

@@ -79,8 +79,13 @@ public:
     void setViewRight();
 
     void setViewCubeVisible(bool visible);
-    bool hasViewCube() const { return !myViewCube.IsNull(); }
     void setWireframe(bool wireframe);
+    bool isWireframe() const { return myWireframe; }
+    // True if this solid's presentation is actually displayed in wireframe right
+    // now - queries the live AIS state rather than the requested mode above, so
+    // a solid silently reverting to shaded during a resync is observable even if
+    // myWireframe itself was never touched.
+    bool isSolidWireframe(int id) const;
 
 signals:
     void sketchPointPicked(const gp_Pnt& point);

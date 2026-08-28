@@ -18,7 +18,6 @@ constexpr int kRadius = 6;
 ToolChip::ToolChip(QAction* action, IconSet::Glyph glyph, QWidget* parent)
     : QAbstractButton(parent)
     , myAction(action)
-    , myGlyph(glyph)
 {
     setAttribute(Qt::WA_Hover, true);
     setCursor(Qt::PointingHandCursor);

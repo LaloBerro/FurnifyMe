@@ -58,7 +58,7 @@ private slots:
 
 private:
     void buildActions();
-    void buildMenusAndToolbar();
+    void buildMenus();
     void buildOverlay();
     void updateActions();
     // Persistent right-hand readout: what mode we are in and what is possible.

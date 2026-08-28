@@ -3,7 +3,6 @@
 #include "Theme.h"
 
 #include <QPainter>
-#include <QPainterPath>
 #include <QPixmap>
 
 namespace IconSet {
