@@ -4,6 +4,7 @@
 //
 #include "CameraController.h"
 
+#include <Bnd_Box.hxx>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -102,6 +103,92 @@ int main()
         cam.setState(s);
         checkNear(cam.state().elevationDeg, 88.0, 1e-9, "setState clamps elevation");
         checkNear(cam.state().distance, 1.0, 1e-9, "setState clamps distance to 1mm");
+    }
+
+    // --- setPivot preserves the eye ------------------------------------------
+    {
+        CameraController cam;
+        const gp_Pnt eyeBefore = cam.eyePosition();
+        cam.setPivot(gp_Pnt(200.0, -150.0, 40.0));
+        const gp_Pnt eyeAfter = cam.eyePosition();
+        checkNear(eyeBefore.Distance(eyeAfter), 0.0, 1e-6,
+                  "setPivot leaves the eye where it was");
+        checkNear(cam.state().target.Distance(gp_Pnt(200.0, -150.0, 40.0)), 0.0, 1e-6,
+                  "setPivot re-targets the pivot point");
+        // And orbiting afterwards keeps the pivot fixed by construction.
+        cam.orbit(30.0, -10.0);
+        checkNear(cam.state().target.Distance(gp_Pnt(200.0, -150.0, 40.0)), 0.0, 1e-6,
+                  "orbit after setPivot keeps the pivot as target");
+    }
+
+    // --- pan moves the target in the view plane -------------------------------
+    {
+        CameraController cam;
+        CameraState s;
+        s.azimuthDeg = 0.0; s.elevationDeg = 0.0; s.distance = 100.0;
+        cam.setState(s);
+        // Facing -Y with up +Z, right = view x up = -X: standing at +Y looking
+        // south, your right hand points west. Up for this pose is +Z exactly.
+        cam.pan(10.0, 5.0);
+        checkNear(cam.state().target.X(), -10.0, 1e-6, "pan right moves target -X here");
+        checkNear(cam.state().target.Z(), 5.0, 1e-6, "pan up moves target +Z here");
+        checkNear(cam.state().target.Y(), 0.0, 1e-6, "pan does not move along the view axis");
+    }
+
+    // --- zoomToward keeps the pivot on its eye ray ----------------------------
+    {
+        CameraController cam;
+        const gp_Pnt pivot(120.0, 80.0, 0.0);
+        const gp_Pnt eye0 = cam.eyePosition();
+        // Direction from eye to pivot before zooming.
+        gp_Dir before(pivot.X() - eye0.X(), pivot.Y() - eye0.Y(), pivot.Z() - eye0.Z());
+        cam.zoomToward(pivot, 0.5);
+        const gp_Pnt eye1 = cam.eyePosition();
+        gp_Dir after(pivot.X() - eye1.X(), pivot.Y() - eye1.Y(), pivot.Z() - eye1.Z());
+        checkNear(before.Angle(after), 0.0, 1e-6,
+                  "zoomToward keeps the pivot on the same eye ray");
+        checkNear(cam.state().distance, 350.0, 1e-6, "zoomToward halves the distance");
+        check(cam.eyePosition().Distance(pivot) < eye0.Distance(pivot),
+              "zooming in moves the eye toward the pivot");
+    }
+
+    // --- zoom clamps ----------------------------------------------------------
+    {
+        CameraController cam;
+        cam.zoom(1e-9);
+        checkNear(cam.state().distance, 1.0, 1e-9, "zoom clamps at 1mm");
+        cam.zoom(1e12);
+        checkNear(cam.state().distance, 100000.0, 1e-9, "zoom clamps at 100m");
+    }
+
+    // --- frame fits a box -----------------------------------------------------
+    {
+        CameraController cam;
+        Bnd_Box box;
+        box.Update(-50.0, -50.0, 0.0, 50.0, 50.0, 100.0);
+        cam.frame(box, 45.0);
+        checkNear(cam.state().target.X(), 0.0, 1e-6, "frame centres X");
+        checkNear(cam.state().target.Z(), 50.0, 1e-6, "frame centres Z");
+        // Radius of that box is sqrt(50^2+50^2+50^2) ~ 86.6; distance must at
+        // least cover radius/sin(fov/2) with the ~10% margin, and not be silly.
+        const double radius = 86.6025;
+        const double minimum = radius / std::sin(22.5 * 3.14159265358979323846 / 180.0);
+        check(cam.state().distance >= minimum * 1.05 && cam.state().distance <= minimum * 1.3,
+              "frame distance covers the bounding sphere with margin");
+        // Angles are preserved - framing changes where you look, not from where.
+        checkNear(cam.state().azimuthDeg, -45.0, 1e-9, "frame keeps azimuth");
+    }
+
+    // --- shortest arc ---------------------------------------------------------
+    {
+        checkNear(CameraController::shortestArcDelta(350.0, 10.0), 20.0, 1e-9,
+                  "350 -> 10 goes +20, not -340");
+        checkNear(CameraController::shortestArcDelta(10.0, 350.0), -20.0, 1e-9,
+                  "10 -> 350 goes -20");
+        checkNear(CameraController::shortestArcDelta(0.0, 180.0), 180.0, 1e-9,
+                  "opposite angles resolve to +180");
+        checkNear(CameraController::shortestArcDelta(-45.0, -45.0), 0.0, 1e-9,
+                  "no movement is zero");
     }
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL",

@@ -4,6 +4,7 @@
 // from +Z so the horizon can never roll. Pure maths, no Qt, no visualization
 // toolkits - lives in furnify_geometry so the headless tests cover it.
 //
+#include <Bnd_Box.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
 
@@ -29,6 +30,16 @@ public:
     gp_Pnt eyePosition() const;
     gp_Dir viewDirection() const;   // eye -> target
     gp_Dir upVector() const;
+    gp_Dir rightVector() const;
+
+    void setPivot(const gp_Pnt& pivot);
+    void pan(double rightUnits, double upUnits);
+    void zoom(double factor);
+    void zoomToward(const gp_Pnt& p, double factor);
+    void frame(const Bnd_Box& box, double fovyDeg);
+
+    // Signed shortest rotation from one angle to another, in (-180, 180].
+    static double shortestArcDelta(double fromDeg, double toDeg);
 
 private:
     CameraState myState;

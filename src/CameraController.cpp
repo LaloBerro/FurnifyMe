@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <Bnd_Box.hxx>
 
 namespace {
 constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
@@ -48,4 +49,82 @@ gp_Dir CameraController::upVector() const
     const gp_Dir view = viewDirection();
     const double dot = view.Z();   // view . (0,0,1)
     return gp_Dir(-dot * view.X(), -dot * view.Y(), 1.0 - dot * view.Z());
+}
+
+void CameraController::setPivot(const gp_Pnt& pivot)
+{
+    // Keep the eye fixed and re-derive the spherical state around the new
+    // target, so switching pivots never visibly moves the camera.
+    const gp_Pnt eye = eyePosition();
+    const double dx = eye.X() - pivot.X();
+    const double dy = eye.Y() - pivot.Y();
+    const double dz = eye.Z() - pivot.Z();
+    const double dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+    if (dist < kMinDistance) return;   // pivot at the eye: nothing sensible to do
+
+    const double horizontal = std::sqrt(dx * dx + dy * dy);
+    myState.target = pivot;
+    myState.distance = std::clamp(dist, kMinDistance, kMaxDistance);
+    myState.elevationDeg = std::clamp(std::atan2(dz, horizontal) / kDegToRad,
+                                      kMinElevation, kMaxElevation);
+    if (horizontal > 1e-9) {
+        myState.azimuthDeg = std::atan2(-dx, dy) / kDegToRad;
+    }
+    // horizontal ~ 0 cannot happen through the UI (elevation is clamped), and
+    // keeping the old azimuth is the right behaviour if it ever does.
+}
+
+gp_Dir CameraController::rightVector() const
+{
+    // right = view x up; both are unit and perpendicular, so this is unit too.
+    return viewDirection().Crossed(upVector());
+}
+
+void CameraController::pan(double rightUnits, double upUnits)
+{
+    const gp_Dir right = rightVector();
+    const gp_Dir up = upVector();
+    myState.target = gp_Pnt(
+        myState.target.X() + right.X() * rightUnits + up.X() * upUnits,
+        myState.target.Y() + right.Y() * rightUnits + up.Y() * upUnits,
+        myState.target.Z() + right.Z() * rightUnits + up.Z() * upUnits);
+}
+
+void CameraController::zoom(double factor)
+{
+    myState.distance = std::clamp(myState.distance * factor, kMinDistance, kMaxDistance);
+}
+
+void CameraController::zoomToward(const gp_Pnt& p, double factor)
+{
+    // Shrink the whole eye/target frame toward p by the zoom factor: the pivot
+    // stays on the same eye ray, which is what keeps it fixed on screen.
+    const double clamped =
+        std::clamp(myState.distance * factor, kMinDistance, kMaxDistance) / myState.distance;
+    myState.target = gp_Pnt(p.X() + (myState.target.X() - p.X()) * clamped,
+                            p.Y() + (myState.target.Y() - p.Y()) * clamped,
+                            p.Z() + (myState.target.Z() - p.Z()) * clamped);
+    myState.distance *= clamped;
+}
+
+void CameraController::frame(const Bnd_Box& box, double fovyDeg)
+{
+    if (box.IsVoid()) return;
+
+    Standard_Real xmin, ymin, zmin, xmax, ymax, zmax;
+    box.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+    myState.target = gp_Pnt((xmin + xmax) / 2.0, (ymin + ymax) / 2.0, (zmin + zmax) / 2.0);
+
+    const double dx = xmax - xmin, dy = ymax - ymin, dz = zmax - zmin;
+    const double radius = 0.5 * std::sqrt(dx * dx + dy * dy + dz * dz);
+    const double fit = radius / std::sin(0.5 * fovyDeg * kDegToRad);
+    myState.distance = std::clamp(fit * 1.1, kMinDistance, kMaxDistance);
+}
+
+double CameraController::shortestArcDelta(double fromDeg, double toDeg)
+{
+    double delta = std::fmod(toDeg - fromDeg, 360.0);
+    if (delta > 180.0) delta -= 360.0;
+    if (delta <= -180.0) delta += 360.0;
+    return delta;
 }
