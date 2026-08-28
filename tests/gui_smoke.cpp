@@ -612,6 +612,32 @@ int main(int argc, char* argv[])
               "an already-aligned band edge is its own first line");
     }
 
+    // --- vocabulary is enforced, not merely documented ------------------------
+    {
+        // A documented vocabulary drifts the moment someone is in a hurry. An
+        // asserted one cannot.
+        const QStringList banned = {QStringLiteral("Fuse"), QStringLiteral("Solid"),
+                                    QStringLiteral("OCCT"), QStringLiteral("mm3")};
+        QStringList offenders;
+        for (QAction* candidate : window.findChildren<QAction*>()) {
+            const QString text = candidate->text().remove(QLatin1Char('&'));
+            const QString tip = candidate->toolTip();
+            for (const QString& word : banned) {
+                if (text.contains(word) || tip.contains(word)) {
+                    offenders << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
+                }
+            }
+        }
+        check(offenders.isEmpty(),
+              QStringLiteral("no action uses a banned word (%1)")
+                  .arg(offenders.isEmpty() ? QStringLiteral("none")
+                                           : offenders.join(QStringLiteral(", "))));
+
+        check(action(window, QStringLiteral("Union")) != nullptr, "the Union action exists");
+        check(action(window, QStringLiteral("Subtract")) != nullptr, "the Subtract action exists");
+        check(action(window, QStringLiteral("Intersect")) != nullptr, "the Intersect action exists");
+    }
+
     std::printf("\n%s (%d failure%s)  volumes: A=%.1f B=%.1f\n",
                 g_failures == 0 ? "PASS" : "FAIL", g_failures,
                 g_failures == 1 ? "" : "s", volumeA, volumeB);

@@ -94,20 +94,20 @@ void MainWindow::buildActions()
     myExtrudeAction->setShortcut(QKeySequence(Qt::Key_E));
     connect(myExtrudeAction, &QAction::triggered, this, &MainWindow::onExtrude);
 
-    myFuseAction = new QAction(tr("&Fuse"), this);
-    connect(myFuseAction, &QAction::triggered, this, &MainWindow::onFuse);
+    myUnionAction = new QAction(tr("&Union"), this);
+    connect(myUnionAction, &QAction::triggered, this, &MainWindow::onUnion);
 
-    myCutAction = new QAction(tr("&Cut"), this);
-    connect(myCutAction, &QAction::triggered, this, &MainWindow::onCut);
+    mySubtractAction = new QAction(tr("&Subtract"), this);
+    connect(mySubtractAction, &QAction::triggered, this, &MainWindow::onSubtract);
 
-    myCommonAction = new QAction(tr("&Intersect"), this);
-    connect(myCommonAction, &QAction::triggered, this, &MainWindow::onCommon);
+    myIntersectAction = new QAction(tr("&Intersect"), this);
+    connect(myIntersectAction, &QAction::triggered, this, &MainWindow::onIntersect);
 
     myExportStepAction = new QAction(tr("Export &STEP..."), this);
     myExportStepAction->setShortcut(QKeySequence::Save);
     connect(myExportStepAction, &QAction::triggered, this, &MainWindow::onExportStep);
 
-    mySolidSelectAction = new QAction(tr("Select &Solids"), this);
+    mySolidSelectAction = new QAction(tr("Select &Bodies"), this);
     mySolidSelectAction->setCheckable(true);
     mySolidSelectAction->setChecked(true);
     myFaceSelectAction = new QAction(tr("Select F&aces"), this);
@@ -164,9 +164,13 @@ void MainWindow::buildActions()
     myStartSketchAction->setToolTip(tr("Draw a closed outline on the XY plane (Ctrl+K)"));
     myFinishSketchAction->setToolTip(tr("Close the outline into a face - needs 3+ points (Enter)"));
     myExtrudeAction->setToolTip(tr("Turn the closed face into a solid (E)"));
-    myFuseAction->setToolTip(tr("Union of two selected solids"));
-    myCutAction->setToolTip(tr("Subtract the later solid from the earlier one"));
-    myCommonAction->setToolTip(tr("Keep only the overlap of two selected solids"));
+    myUnionAction->setToolTip(tr("Merge two bodies into one\n"
+                                 "Overlapping material is kept once, not twice."));
+    mySubtractAction->setToolTip(tr("Cut the second body out of the first\n"
+                                    "Like a chisel removing waste. The body you made "
+                                    "first is the one that keeps its shape."));
+    myIntersectAction->setToolTip(tr("Keep only where two bodies overlap\n"
+                                     "Everything outside the shared volume is discarded."));
 
     auto* selectionGroup = new QActionGroup(this);
     selectionGroup->addAction(mySolidSelectAction);
@@ -199,9 +203,9 @@ void MainWindow::buildMenus()
     QMenu* modelMenu = menuBar()->addMenu(tr("&Model"));
     modelMenu->addAction(myExtrudeAction);
     modelMenu->addSeparator();
-    modelMenu->addAction(myFuseAction);
-    modelMenu->addAction(myCutAction);
-    modelMenu->addAction(myCommonAction);
+    modelMenu->addAction(myUnionAction);
+    modelMenu->addAction(mySubtractAction);
+    modelMenu->addAction(myIntersectAction);
 
     QMenu* viewMenu = menuBar()->addMenu(tr("&View"));
     viewMenu->addAction(myFitAction);
@@ -235,9 +239,9 @@ void MainWindow::buildOverlay()
     cluster(ViewportOverlay::Anchor::LeftCenter, {
         {myStartSketchAction, IconSet::Glyph::Sketch},
         {myExtrudeAction,     IconSet::Glyph::Extrude},
-        {myFuseAction,        IconSet::Glyph::Fuse},
-        {myCutAction,         IconSet::Glyph::Cut},
-        {myCommonAction,      IconSet::Glyph::Intersect},
+        {myUnionAction,       IconSet::Glyph::Fuse},
+        {mySubtractAction,    IconSet::Glyph::Cut},
+        {myIntersectAction,   IconSet::Glyph::Intersect},
         {myDeleteAction,      IconSet::Glyph::Delete},
     });
 
@@ -287,9 +291,9 @@ void MainWindow::updateActions()
 
     myExtrudeAction->setEnabled(!mySketching && !myPendingFace.IsNull());
 
-    myFuseAction->setEnabled(booleanReady);
-    myCutAction->setEnabled(booleanReady);
-    myCommonAction->setEnabled(booleanReady);
+    myUnionAction->setEnabled(booleanReady);
+    mySubtractAction->setEnabled(booleanReady);
+    myIntersectAction->setEnabled(booleanReady);
 
     myExportStepAction->setEnabled(myDocument.count() > 0);
     myDeleteAction->setEnabled(!mySketching && selectedCount > 0);
@@ -505,9 +509,9 @@ bool MainWindow::extrudePendingFace(double height)
     return true;
 }
 
-void MainWindow::onFuse()   { runBoolean(static_cast<int>(ModelingOps::BooleanKind::Fuse)); }
-void MainWindow::onCut()    { runBoolean(static_cast<int>(ModelingOps::BooleanKind::Cut)); }
-void MainWindow::onCommon() { runBoolean(static_cast<int>(ModelingOps::BooleanKind::Common)); }
+void MainWindow::onUnion()     { runBoolean(static_cast<int>(ModelingOps::BooleanKind::Fuse)); }
+void MainWindow::onSubtract()  { runBoolean(static_cast<int>(ModelingOps::BooleanKind::Cut)); }
+void MainWindow::onIntersect() { runBoolean(static_cast<int>(ModelingOps::BooleanKind::Common)); }
 
 void MainWindow::runBoolean(int kind)
 {
