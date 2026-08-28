@@ -98,7 +98,6 @@ private:
     Handle(AIS_Shape) myPreview;
 
     std::map<int, Handle(AIS_Shape)> mySolids;
-    std::set<int> mySolidsWereSelected;  // Track solids that were selected before hiding
 
     SelectionMode mySelectionMode = SelectionMode::Solid;
     bool myInitialized = false;

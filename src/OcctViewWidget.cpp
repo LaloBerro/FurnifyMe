@@ -181,18 +181,7 @@ void OcctViewWidget::setSolidVisible(int id, bool visible)
     if (visible) {
         myContext->Display(it->second, Standard_False);
         applySelectionMode(it->second);
-
-        // Restore selection if it was selected before hiding.
-        if (mySolidsWereSelected.count(id) > 0) {
-            myContext->AddOrRemoveSelected(it->second, Standard_False);
-            mySolidsWereSelected.erase(id);
-        }
     } else {
-        // Track if it was selected before hiding.
-        if (myContext->IsSelected(it->second)) {
-            mySolidsWereSelected.insert(id);
-        }
-
         // Erase also drops it from the selection, which is what we want: acting
         // on something you cannot see would be a nasty surprise.
         myContext->Erase(it->second, Standard_False);
