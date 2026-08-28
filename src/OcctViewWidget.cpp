@@ -7,7 +7,6 @@
 // OCCT before Qt, for the Handle() macro clash.
 #include <AIS_DisplayMode.hxx>
 #include <AIS_SelectionScheme.hxx>
-#include <AIS_ViewCube.hxx>
 #include <Aspect_DisplayConnection.hxx>
 #include <Aspect_TypeOfTriedronPosition.hxx>
 #include <Bnd_Box.hxx>
@@ -124,7 +123,6 @@ void OcctViewWidget::initializeViewer()
 
     myInitialized = true;
 
-    setViewCubeVisible(true);
 }
 
 void OcctViewWidget::paintEvent(QPaintEvent* /*event*/)
@@ -393,35 +391,7 @@ void OcctViewWidget::applyCameraState()
     cam->SetUp(up);
     myGridRenderer.update(myCamera.state().distance, myCamera.state().target);
     myView->Redraw();
-}
-
-void OcctViewWidget::syncCameraFromView()
-{
-    if (myView.IsNull()) return;
-
-    // Decompose whatever the view's camera is (the view cube animates it
-    // behind our back) into turntable state: target from Center, then
-    // distance/elevation/azimuth derived from Eye-Center - the same
-    // derivation setPivot uses, re-done here against the OCCT camera.
-    const Handle(Graphic3d_Camera) cam = myView->Camera();
-    CameraState s = myCamera.state();
-    s.target = cam->Center();
-    myCamera.setState(s);
-    // Recompute angles/distance from the real eye by pivoting about the center.
-    CameraState derived = myCamera.state();
-    const gp_Pnt eye = cam->Eye();
-    const double dx = eye.X() - derived.target.X();
-    const double dy = eye.Y() - derived.target.Y();
-    const double dz = eye.Z() - derived.target.Z();
-    const double horizontal = std::sqrt(dx * dx + dy * dy);
-    derived.distance = std::sqrt(dx * dx + dy * dy + dz * dz);
-    derived.elevationDeg = std::atan2(dz, horizontal) * 180.0 / 3.14159265358979323846;
-    if (horizontal > 1e-9) {
-        derived.azimuthDeg = std::atan2(-dx, dy) * 180.0 / 3.14159265358979323846;
-    }
-    myCamera.setState(derived);
-    // Re-assert our up vector: cube-driven views may leave a rolled camera.
-    applyCameraState();
+    emit cameraChanged();
 }
 
 void OcctViewWidget::fitAll()
@@ -519,30 +489,6 @@ void OcctViewWidget::setViewRight()
     animateTo(s);
 }
 
-void OcctViewWidget::setViewCubeVisible(bool visible)
-{
-    initializeViewer();
-    if (myContext.IsNull()) return;
-
-    if (!visible) {
-        if (!myViewCube.IsNull()) myContext->Remove(myViewCube, Standard_True);
-        myViewCube.Nullify();
-        return;
-    }
-    if (!myViewCube.IsNull()) return;
-
-    Handle(AIS_ViewCube) cube = new AIS_ViewCube();
-    cube->SetSize(60.0);
-    cube->SetDuration(0.25);   // matches animateTo, so cube clicks feel the same
-    cube->SetBoxColor(Quantity_Color(Theme::chip().redF(), Theme::chip().greenF(),
-                                     Theme::chip().blueF(), Quantity_TOC_sRGB));
-    cube->SetTransformPersistence(new Graphic3d_TransformPers(
-        Graphic3d_TMF_TriedronPers, Aspect_TOTP_RIGHT_UPPER, Graphic3d_Vec2i(100, 100)));
-    myContext->Display(cube, Standard_False);
-    myViewCube = cube;
-    myContext->UpdateCurrentViewer();
-}
-
 void OcctViewWidget::setWireframe(bool wireframe)
 {
     if (myWireframe == wireframe) return;
@@ -597,9 +543,6 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
     myContext->MoveTo(pos.x(), pos.y(), myView, Standard_False);
     myContext->SelectDetected(additive ? AIS_SelectionScheme_XOR
                                        : AIS_SelectionScheme_Replace);
-    // A click on the view cube animates the OCCT camera directly; fold whatever
-    // it did back into the controller so the next orbit starts from reality.
-    syncCameraFromView();
     myView->Redraw();
     emit selectionChanged();
 }

@@ -87,6 +87,7 @@ if(FURNIFYME_BUILD_APP)
       src/MainWindow.cpp
       src/OcctViewWidget.cpp
       src/GridRenderer.cpp
+      src/ui/AxisGizmo.cpp
       src/ui/Theme.cpp
       src/ui/IconSet.cpp
       src/ui/ToolChip.cpp

@@ -88,7 +88,6 @@ public:
 
     CameraController& camera() { return myCamera; }
 
-    void setViewCubeVisible(bool visible);
     void setWireframe(bool wireframe);
     bool isWireframe() const { return myWireframe; }
     // True if this solid's presentation is actually displayed in wireframe right
@@ -99,6 +98,8 @@ public:
 
 signals:
     void sketchPointPicked(const gp_Pnt& point);
+    // Fired on every camera change so overlays (the axis gizmo) can repaint.
+    void cameraChanged();
     // Live cursor position on the sketch plane, already snapped - drives the
     // rubber band and the coordinate readout.
     void sketchCursorMoved(const gp_Pnt& point);
@@ -119,7 +120,6 @@ private:
     bool pickWorldPoint(int px, int py, gp_Pnt& out) const;
     void applySelectionMode(const Handle(AIS_Shape)& shape);
     void applyCameraState();
-    void syncCameraFromView();
     void stopCameraAnimation();
 
     Handle(V3d_Viewer) myViewer;
@@ -132,7 +132,6 @@ private:
 
     std::map<int, Handle(AIS_Shape)> mySolids;
 
-    Handle(AIS_InteractiveObject) myViewCube;
     bool myWireframe = false;
 
     SelectionMode mySelectionMode = SelectionMode::Solid;
