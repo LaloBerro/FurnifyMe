@@ -134,7 +134,9 @@ that a two-solid Cut works end to end.
 
 Screenshots come from `V3d_View::Dump` via `OcctViewWidget::saveSnapshot()`, which renders
 the viewport to a file. It captures only the 3D view, regardless of what is on top of the
-window.
+window. **View shortcuts:** keys `0`–`3` trigger Axonometric, Top, Front, Right views with
+smooth animation; `gui_smoke` disables animations at startup for deterministic camera state
+in the test suite.
 
 ```powershell
 cmake --build --preset windows
@@ -180,6 +182,8 @@ Source files under `src/`, plus `tests/`:
 | File | Role |
 |---|---|
 | `ModelingOps.{h,cpp}` | pure geometry, **zero Qt includes** — the only file that exists so far |
+| `CameraController.{h,cpp}` | turntable camera maths, Qt-free, headless-tested |
+| `GridRenderer.{h,cpp}` | adaptive fading ground grid (app layer) |
 | `main.cpp` | `QApplication` + `MainWindow` |
 | `MainWindow.{h,cpp}` | menus, toolbar, mode switching |
 | `OcctViewWidget.{h,cpp}` | the Qt↔OCCT bridge — the only genuinely tricky file |
@@ -242,9 +246,7 @@ Required `QWidget` setup — omitting any of these gives flicker or a black view
 `setAutoFillBackground(false)`, `setMouseTracking(true)` (needed for hover highlight), and
 `paintEngine()` overridden to return `nullptr`.
 
-Event wiring: `paintEvent`→`Redraw()`, `resizeEvent`→`MustBeResized()`, RMB drag→
-`StartRotation`/`Rotation`, MMB drag→`Pan(dx,-dy)`, wheel→`StartZoomAtPoint`/`ZoomAtPoint`,
-mouse move→`MoveTo(x,y,view,true)`, LMB click→`SelectDetected()`.
+Event wiring: `paintEvent`→`Redraw()`, `resizeEvent`→`MustBeResized()`, MMB drag→turntable orbit around the picked point, Shift+MMB→pan, wheel→zoomToward cursor; RMB unbound (reserved for a context menu); camera state lives in CameraController and is pushed via SetEye/SetCenter/SetUp; the projection is perspective (FOVy 45°).
 
 ### Selection
 

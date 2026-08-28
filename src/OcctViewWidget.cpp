@@ -521,6 +521,7 @@ void OcctViewWidget::setViewCubeVisible(bool visible)
 
     Handle(AIS_ViewCube) cube = new AIS_ViewCube();
     cube->SetSize(60.0);
+    cube->SetDuration(0.25);   // matches animateTo, so cube clicks feel the same
     cube->SetBoxColor(Quantity_Color(Theme::chip().redF(), Theme::chip().greenF(),
                                      Theme::chip().blueF(), Quantity_TOC_sRGB));
     cube->SetTransformPersistence(new Graphic3d_TransformPers(
