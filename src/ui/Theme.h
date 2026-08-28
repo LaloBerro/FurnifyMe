@@ -19,6 +19,10 @@ QColor textMuted();     // shortcut badges
 QColor textDisabled();
 QColor border();
 QColor viewport();      // OCCT background
+QColor gridMinor();     // ground grid, minor lines
+QColor gridMajor();     // ground grid, major lines
+QColor axisX();         // ground grid, X axis tint (muted red)
+QColor axisY();         // ground grid, Y axis tint (muted green)
 
 // Installs the palette, the bundled font and the stylesheet. Call once, before
 // any window is built.

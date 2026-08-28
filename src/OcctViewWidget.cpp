@@ -9,9 +9,10 @@
 #include <AIS_SelectionScheme.hxx>
 #include <AIS_ViewCube.hxx>
 #include <Aspect_DisplayConnection.hxx>
-#include <Aspect_GridDrawMode.hxx>
-#include <Aspect_GridType.hxx>
 #include <Aspect_TypeOfTriedronPosition.hxx>
+#include <Bnd_Box.hxx>
+#include <BRepBndLib.hxx>
+#include <Graphic3d_Camera.hxx>
 #include <Graphic3d_TransformPers.hxx>
 #include <Graphic3d_Vec2.hxx>
 #include <OpenGl_GraphicDriver.hxx>
@@ -20,10 +21,11 @@
 #include <Prs3d_TypeOfHighlight.hxx>
 #include <Quantity_Color.hxx>
 #include <Quantity_NameOfColor.hxx>
-#include <V3d_TypeOfOrientation.hxx>
+#include <StdSelect_ViewerSelector3d.hxx>
 #include <V3d_TypeOfVisualization.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Lin.hxx>
+#include <gp_Vec.hxx>
 
 #ifdef _WIN32
   #include <WNT_Window.hxx>
@@ -31,9 +33,11 @@
   #include <Xw_Window.hxx>
 #endif
 
+#include <QEasingCurve>
 #include <QMouseEvent>
 #include <QPaintEvent>
 #include <QResizeEvent>
+#include <QVariantAnimation>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -90,11 +94,6 @@ void OcctViewWidget::initializeViewer()
     myView->TriedronDisplay(Aspect_TOTP_LEFT_LOWER, Quantity_Color(Quantity_NOC_WHITE),
                             0.08, V3d_ZBUFFER);
 
-    // Visible grid on the XY plane (Milestone 1 acceptance criterion).
-    myViewer->ActivateGrid(Aspect_GT_Rectangular, Aspect_GDM_Lines);
-    myViewer->SetRectangularGridValues(0.0, 0.0, 10.0, 10.0, 0.0);
-    myViewer->SetRectangularGridGraphicValues(500.0, 500.0, 0.0);
-
     // OCCT's default highlight barely reads against a shaded solid. Make hover
     // and selection unmistakable - not being able to tell what is selected was
     // the single most confusing thing about the app.
@@ -112,7 +111,15 @@ void OcctViewWidget::initializeViewer()
     myContext->HighlightStyle(Prs3d_TypeOfHighlight_LocalDynamic)->SetColor(Quantity_NOC_CYAN1);
     myContext->HighlightStyle(Prs3d_TypeOfHighlight_LocalSelected)->SetColor(Quantity_NOC_ORANGE);
 
-    setViewAxonometric();
+    myGridRenderer.attach(myContext);
+    myGridRenderer.update(myCamera.state().distance, myCamera.state().target);
+
+    // Perspective projection: the turntable model is distance-based, and OCCT's
+    // default orthographic camera zooms by scale, which would make
+    // zoom-toward-cursor meaningless.
+    myView->Camera()->SetProjectionType(Graphic3d_Camera::Projection_Perspective);
+    myView->Camera()->SetFOVy(kFovyDeg);
+    applyCameraState();
     myView->MustBeResized();
 
     myInitialized = true;
@@ -281,10 +288,44 @@ bool OcctViewWidget::pointOnSketchPlane(int px, int py, gp_Pnt& out) const
 
     const gp_Lin ray(gp_Pnt(x, y, z), gp_Dir(vx, vy, vz));
     if (!SketchController::intersectRayWithPlane(ray, mySketchPlane, out)) return false;
+    // A perspective camera has a horizon: an intersection with the sketch plane
+    // can lie BEHIND the eye when the cursor is above it. Such a hit is not a
+    // point the user can see - reject it.
+    const gp_Vec toHit(ray.Location(), out);
+    if (toHit.Dot(gp_Vec(ray.Direction())) <= 0.0) return false;
 
     if (mySnapEnabled) {
         out = SketchController::snapToPlaneGrid(out, mySketchPlane, mySnapStep);
     }
+    return true;
+}
+
+bool OcctViewWidget::pickWorldPoint(int px, int py, gp_Pnt& out) const
+{
+    // Prefer a real hit on the model: MoveTo + detection gives the picked point
+    // on the surface under the cursor.
+    if (!myContext.IsNull() && !myView.IsNull()) {
+        myContext->MoveTo(px, py, myView, Standard_False);
+        if (myContext->HasDetected()) {
+            const Handle(StdSelect_ViewerSelector3d) selector = myContext->MainSelector();
+            if (selector->NbPicked() > 0) {
+                out = selector->PickedPoint(1);
+                return true;
+            }
+        }
+    }
+    // Otherwise the ground plane, reusing the sketch unprojection.
+    if (myView.IsNull()) return false;
+    Standard_Real x, y, z, vx, vy, vz;
+    myView->ConvertWithProj(px, py, x, y, z, vx, vy, vz);
+    const gp_Lin ray(gp_Pnt(x, y, z), gp_Dir(vx, vy, vz));
+    const gp_Pln ground(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
+    if (!SketchController::intersectRayWithPlane(ray, ground, out)) return false;
+    // A perspective camera has a horizon: an intersection with the ground can
+    // lie BEHIND the eye when the cursor is above it. Such a hit is not a
+    // point the user can see - reject it.
+    const gp_Vec toHit(ray.Location(), out);
+    if (toHit.Dot(gp_Vec(ray.Direction())) <= 0.0) return false;
     return true;
 }
 
@@ -339,42 +380,143 @@ bool OcctViewWidget::saveSnapshot(const QString& path)
     return myView->Dump(path.toUtf8().constData()) == Standard_True;
 }
 
+void OcctViewWidget::applyCameraState()
+{
+    if (myView.IsNull()) return;
+
+    const Handle(Graphic3d_Camera) cam = myView->Camera();
+    const gp_Pnt eye = myCamera.eyePosition();
+    const gp_Pnt& at = myCamera.state().target;
+    const gp_Dir up = myCamera.upVector();
+    cam->SetEye(eye);
+    cam->SetCenter(at);
+    cam->SetUp(up);
+    myGridRenderer.update(myCamera.state().distance, myCamera.state().target);
+    myView->Redraw();
+}
+
+void OcctViewWidget::syncCameraFromView()
+{
+    if (myView.IsNull()) return;
+
+    // Decompose whatever the view's camera is (the view cube animates it
+    // behind our back) into turntable state: target from Center, then
+    // distance/elevation/azimuth derived from Eye-Center - the same
+    // derivation setPivot uses, re-done here against the OCCT camera.
+    const Handle(Graphic3d_Camera) cam = myView->Camera();
+    CameraState s = myCamera.state();
+    s.target = cam->Center();
+    myCamera.setState(s);
+    // Recompute angles/distance from the real eye by pivoting about the center.
+    CameraState derived = myCamera.state();
+    const gp_Pnt eye = cam->Eye();
+    const double dx = eye.X() - derived.target.X();
+    const double dy = eye.Y() - derived.target.Y();
+    const double dz = eye.Z() - derived.target.Z();
+    const double horizontal = std::sqrt(dx * dx + dy * dy);
+    derived.distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+    derived.elevationDeg = std::atan2(dz, horizontal) * 180.0 / 3.14159265358979323846;
+    if (horizontal > 1e-9) {
+        derived.azimuthDeg = std::atan2(-dx, dy) * 180.0 / 3.14159265358979323846;
+    }
+    myCamera.setState(derived);
+    // Re-assert our up vector: cube-driven views may leave a rolled camera.
+    applyCameraState();
+}
+
 void OcctViewWidget::fitAll()
 {
     if (myView.IsNull()) return;
 
-    myView->FitAll();
-    myView->ZFitAll();
-    myView->Redraw();
+    // Frame everything we display ourselves (the grid and view cube are
+    // presentation furniture, not content).
+    Bnd_Box box;
+    for (const auto& entry : mySolids) {
+        Bnd_Box b;
+        BRepBndLib::Add(entry.second->Shape(), b);
+        box.Add(b);
+    }
+    if (box.IsVoid()) box.Update(-250.0, -250.0, 0.0, 250.0, 250.0, 10.0);
+    CameraController scratch = myCamera;
+    scratch.frame(box, kFovyDeg);
+    animateTo(scratch.state());
+}
+
+void OcctViewWidget::stopCameraAnimation()
+{
+    if (myCameraAnimation) {
+        myCameraAnimation->stop();   // leaves the camera wherever it got to
+        myCameraAnimation->deleteLater();
+        myCameraAnimation = nullptr;
+    }
+}
+
+void OcctViewWidget::animateTo(const CameraState& goal)
+{
+    stopCameraAnimation();
+    if (!myAnimationsEnabled) {
+        myCamera.setState(goal);
+        applyCameraState();
+        return;
+    }
+
+    const CameraState from = myCamera.state();
+    // Interpolate azimuth along the shortest arc so 350 -> 10 turns 20 degrees.
+    const double azDelta = CameraController::shortestArcDelta(from.azimuthDeg, goal.azimuthDeg);
+
+    auto* animation = new QVariantAnimation(this);
+    animation->setDuration(250);
+    animation->setEasingCurve(QEasingCurve::OutCubic);
+    animation->setStartValue(0.0);
+    animation->setEndValue(1.0);
+    connect(animation, &QVariantAnimation::valueChanged, this,
+            [this, from, goal, azDelta](const QVariant& value) {
+                const double t = value.toDouble();
+                CameraState s;
+                s.azimuthDeg = from.azimuthDeg + azDelta * t;
+                s.elevationDeg = from.elevationDeg + (goal.elevationDeg - from.elevationDeg) * t;
+                s.distance = from.distance + (goal.distance - from.distance) * t;
+                s.target = gp_Pnt(from.target.X() + (goal.target.X() - from.target.X()) * t,
+                                  from.target.Y() + (goal.target.Y() - from.target.Y()) * t,
+                                  from.target.Z() + (goal.target.Z() - from.target.Z()) * t);
+                myCamera.setState(s);
+                applyCameraState();
+            });
+    connect(animation, &QVariantAnimation::finished, this, [this, goal] {
+        myCamera.setState(goal);
+        applyCameraState();
+        myCameraAnimation = nullptr;
+    });
+    myCameraAnimation = animation;
+    animation->start(QAbstractAnimation::DeleteWhenStopped);
 }
 
 void OcctViewWidget::setViewAxonometric()
 {
-    if (myView.IsNull()) return;
-
-    myView->SetProj(V3d_XposYnegZpos);
-    myView->Redraw();
+    CameraState s = myCamera.state();
+    s.azimuthDeg = -45.0; s.elevationDeg = 30.0;
+    animateTo(s);
 }
 
 void OcctViewWidget::setViewTop()
 {
-    if (myView.IsNull()) return;
-    myView->SetProj(V3d_Zpos);
-    myView->Redraw();
+    CameraState s = myCamera.state();
+    s.elevationDeg = 89.0;   // inside the clamp: a true 90 makes azimuth degenerate
+    animateTo(s);
 }
 
 void OcctViewWidget::setViewFront()
 {
-    if (myView.IsNull()) return;
-    myView->SetProj(V3d_Yneg);
-    myView->Redraw();
+    CameraState s = myCamera.state();
+    s.azimuthDeg = 0.0; s.elevationDeg = 0.0;
+    animateTo(s);
 }
 
 void OcctViewWidget::setViewRight()
 {
-    if (myView.IsNull()) return;
-    myView->SetProj(V3d_Xpos);
-    myView->Redraw();
+    CameraState s = myCamera.state();
+    s.azimuthDeg = -90.0; s.elevationDeg = 0.0;
+    animateTo(s);
 }
 
 void OcctViewWidget::setViewCubeVisible(bool visible)
@@ -391,6 +533,7 @@ void OcctViewWidget::setViewCubeVisible(bool visible)
 
     Handle(AIS_ViewCube) cube = new AIS_ViewCube();
     cube->SetSize(60.0);
+    cube->SetDuration(0.25);   // matches animateTo, so cube clicks feel the same
     cube->SetBoxColor(Quantity_Color(Theme::chip().redF(), Theme::chip().greenF(),
                                      Theme::chip().blueF(), Quantity_TOC_sRGB));
     cube->SetTransformPersistence(new Graphic3d_TransformPers(
@@ -421,21 +564,30 @@ bool OcctViewWidget::isSolidWireframe(int id) const
 
 void OcctViewWidget::mousePressEvent(QMouseEvent* event)
 {
+    stopCameraAnimation();
     initializeViewer();
     myLastPos = event->position().toPoint();
 
-    if (event->button() == Qt::RightButton) {
-        myRotating = true;
-        if (!myView.IsNull()) myView->StartRotation(myLastPos.x(), myLastPos.y());
-    } else if (event->button() == Qt::MiddleButton) {
-        myPanning = true;
+    if (event->button() == Qt::MiddleButton) {
+        if (event->modifiers() & Qt::ShiftModifier) {
+            myPanningDrag = true;
+        } else {
+            myOrbiting = true;
+            // Orbit around what is under the cursor; fall back to the current
+            // target when the pick finds nothing (looking at empty sky).
+            gp_Pnt pivot;
+            if (pickWorldPoint(myLastPos.x(), myLastPos.y(), pivot)) {
+                myCamera.setPivot(pivot);
+                applyCameraState();
+            }
+        }
     }
+    // Right button: deliberately unbound - reserved for a context menu.
 }
 
 void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
 {
-    if (event->button() == Qt::RightButton)       myRotating = false;
-    else if (event->button() == Qt::MiddleButton) myPanning = false;
+    if (event->button() == Qt::MiddleButton) { myOrbiting = false; myPanningDrag = false; }
 
     if (event->button() != Qt::LeftButton || myContext.IsNull()) return;
 
@@ -451,6 +603,9 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
     myContext->MoveTo(pos.x(), pos.y(), myView, Standard_False);
     myContext->SelectDetected(additive ? AIS_SelectionScheme_XOR
                                        : AIS_SelectionScheme_Replace);
+    // A click on the view cube animates the OCCT camera directly; fold whatever
+    // it did back into the controller so the next orbit starts from reality.
+    syncCameraFromView();
     myView->Redraw();
     emit selectionChanged();
 }
@@ -461,10 +616,21 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
 
     const QPoint pos = event->position().toPoint();
 
-    if (myRotating) {
-        myView->Rotation(pos.x(), pos.y());
-    } else if (myPanning) {
-        myView->Pan(pos.x() - myLastPos.x(), -(pos.y() - myLastPos.y()));
+    if (myOrbiting) {
+        const QPoint delta = pos - myLastPos;
+        // Dragging right swings the scene right: azimuth decreases; dragging up
+        // raises the eye. 0.4 deg/px and 0.3 deg/px feel close to Fusion.
+        myCamera.orbit(-delta.x() * 0.4, delta.y() * 0.3);
+        applyCameraState();
+    } else if (myPanningDrag) {
+        const QPoint delta = pos - myLastPos;
+        // World units per pixel at target depth, for a perspective camera.
+        const double worldPerPixel =
+            2.0 * myCamera.state().distance *
+            std::tan(0.5 * kFovyDeg * 3.14159265358979323846 / 180.0) /
+            std::max(1, height());
+        myCamera.pan(-delta.x() * worldPerPixel, delta.y() * worldPerPixel);
+        applyCameraState();
     } else if (mySketchMode) {
         // Report where the next point would land, so the rubber band and the
         // coordinate readout track the cursor before anything is committed.
@@ -487,13 +653,33 @@ void OcctViewWidget::wheelEvent(QWheelEvent* event)
     if (delta == 0) return;
 
     const QPoint pos = event->position().toPoint();
+    gp_Pnt pivot;
+    const bool havePivot = pickWorldPoint(pos.x(), pos.y(), pivot);
 
-    // Proportional to the wheel delta rather than a fixed jump, so trackpads and
-    // high-resolution wheels behave. One notch is 120 units.
-    int step = static_cast<int>(std::lround(delta / 120.0 * 25.0));
-    if (step == 0) step = delta > 0 ? 1 : -1;
+    // One wheel notch (delta 120) zooms ~12%; exponential so every notch feels
+    // the same at any scale.
+    const double factor = std::exp(-double(delta) / 120.0 * 0.12);
+    if (havePivot) myCamera.zoomToward(pivot, factor);
+    else           myCamera.zoom(factor);
+    applyCameraState();
+}
 
-    myView->StartZoomAtPoint(pos.x(), pos.y());
-    myView->ZoomAtPoint(pos.x(), pos.y(), pos.x() + step, pos.y());
-    myView->Redraw();
+void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
+{
+    if (event->button() != Qt::LeftButton || mySketchMode || myContext.IsNull()) return;
+
+    const QPoint pos = event->position().toPoint();
+    myContext->MoveTo(pos.x(), pos.y(), myView, Standard_False);
+    if (!myContext->HasDetected()) return;
+
+    const Handle(AIS_InteractiveObject) hit = myContext->DetectedInteractive();
+    for (const auto& entry : mySolids) {
+        if (entry.second.get() != hit.get()) continue;
+        Bnd_Box box;
+        BRepBndLib::Add(entry.second->Shape(), box);
+        CameraController scratch = myCamera;
+        scratch.frame(box, kFovyDeg);
+        animateTo(scratch.state());
+        return;
+    }
 }

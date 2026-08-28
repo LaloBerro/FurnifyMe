@@ -30,6 +30,10 @@ QColor textMuted()    { return QColor("#9a9aa2"); }
 QColor textDisabled() { return QColor("#5c5c64"); }
 QColor border()       { return QColor("#3a3a40"); }
 QColor viewport()     { return QColor("#45454b"); }
+QColor gridMinor()    { return QColor("#3a3a40"); }
+QColor gridMajor()    { return QColor("#4a4a52"); }
+QColor axisX()        { return QColor("#7a4a4a"); }   // muted red
+QColor axisY()        { return QColor("#4a7a4a"); }   // muted green
 
 namespace {
 QString g_fontFamily;

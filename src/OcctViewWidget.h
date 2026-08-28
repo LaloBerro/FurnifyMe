@@ -9,6 +9,9 @@
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
 
+#include "CameraController.h"
+#include "GridRenderer.h"
+
 #include <QPoint>
 #include <QString>
 #include <QWidget>
@@ -71,12 +74,19 @@ public:
     bool saveSnapshot(const QString& path);
 
     void fitAll();
+    void animateTo(const CameraState& goal);
+    void setAnimationsEnabled(bool enabled) { myAnimationsEnabled = enabled; }
+    bool animationsEnabled() const { return myAnimationsEnabled; }
     void setViewAxonometric();
     // Sketching happens on the XY plane, so a true top view makes clicking
     // accurate in a way the angled default cannot.
     void setViewTop();
     void setViewFront();
     void setViewRight();
+
+    static constexpr double kFovyDeg = 45.0;
+
+    CameraController& camera() { return myCamera; }
 
     void setViewCubeVisible(bool visible);
     void setWireframe(bool wireframe);
@@ -101,16 +111,24 @@ protected:
     void mouseReleaseEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
+    void mouseDoubleClickEvent(QMouseEvent* event) override;
 
 private:
     void initializeViewer();
     bool pointOnSketchPlane(int px, int py, gp_Pnt& out) const;
+    bool pickWorldPoint(int px, int py, gp_Pnt& out) const;
     void applySelectionMode(const Handle(AIS_Shape)& shape);
+    void applyCameraState();
+    void syncCameraFromView();
+    void stopCameraAnimation();
 
     Handle(V3d_Viewer) myViewer;
     Handle(V3d_View) myView;
     Handle(AIS_InteractiveContext) myContext;
     Handle(AIS_Shape) myPreview;
+
+    CameraController myCamera;
+    GridRenderer myGridRenderer;
 
     std::map<int, Handle(AIS_Shape)> mySolids;
 
@@ -125,6 +143,9 @@ private:
     double mySnapStep = 10.0;      // matches the drawn grid
 
     QPoint myLastPos;
-    bool myRotating = false;
-    bool myPanning = false;
+    bool myOrbiting = false;
+    bool myPanningDrag = false;
+
+    class QVariantAnimation* myCameraAnimation = nullptr;
+    bool myAnimationsEnabled = true;
 };

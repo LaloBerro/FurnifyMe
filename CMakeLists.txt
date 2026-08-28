@@ -25,6 +25,7 @@ add_library(furnify_geometry STATIC
   src/ModelingOps.cpp
   src/DocumentModel.cpp
   src/SketchController.cpp
+  src/CameraController.cpp
 )
 target_include_directories(furnify_geometry PUBLIC
   src ${OpenCASCADE_INCLUDE_DIR})
@@ -45,6 +46,10 @@ add_test(NAME headless_geometry COMMAND headless_geometry)
 add_executable(headless_sketch_document tests/sketch_document.cpp)
 target_link_libraries(headless_sketch_document PRIVATE furnify_geometry)
 add_test(NAME headless_sketch_document COMMAND headless_sketch_document)
+
+add_executable(headless_camera tests/camera_controller.cpp)
+target_link_libraries(headless_camera PRIVATE furnify_geometry)
+add_test(NAME headless_camera COMMAND headless_camera)
 
 # ---------------------------------------------------------------------------
 # Application (Qt + OCCT visualization)
@@ -81,6 +86,7 @@ if(FURNIFYME_BUILD_APP)
       resources.qrc
       src/MainWindow.cpp
       src/OcctViewWidget.cpp
+      src/GridRenderer.cpp
       src/ui/Theme.cpp
       src/ui/IconSet.cpp
       src/ui/ToolChip.cpp

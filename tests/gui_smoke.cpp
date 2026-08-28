@@ -12,7 +12,9 @@
 // sketch points, that picking returns the right solids, that the document and
 // the viewport stay in agreement.
 //
+#include "CameraController.h"
 #include "DocumentModel.h"
+#include "GridRenderer.h"
 #include "IconSet.h"
 #include "ItemsPanel.h"
 #include "MainWindow.h"
@@ -69,6 +71,26 @@ void clickAt(QWidget* target, const QPointF& pos,
     QCoreApplication::sendEvent(target, &release);
 
     settle(80);
+}
+
+// Middle-button drag delivered as press/move/release, for camera tests.
+void dragMMB(QWidget* target, const QPointF& from, const QPointF& to,
+             Qt::KeyboardModifiers mods = Qt::NoModifier)
+{
+    QMouseEvent press(QEvent::MouseButtonPress, from, target->mapToGlobal(from),
+                      Qt::MiddleButton, Qt::MiddleButton, mods);
+    QCoreApplication::sendEvent(target, &press);
+    const int steps = 8;
+    for (int i = 1; i <= steps; ++i) {
+        const QPointF p = from + (to - from) * (double(i) / steps);
+        QMouseEvent move(QEvent::MouseMove, p, target->mapToGlobal(p),
+                         Qt::NoButton, Qt::MiddleButton, mods);
+        QCoreApplication::sendEvent(target, &move);
+    }
+    QMouseEvent release(QEvent::MouseButtonRelease, to, target->mapToGlobal(to),
+                        Qt::MiddleButton, Qt::NoButton, mods);
+    QCoreApplication::sendEvent(target, &release);
+    settle(120);
 }
 
 // Actions are looked up by their visible text, minus the mnemonic marker.
@@ -129,9 +151,68 @@ int main(int argc, char* argv[])
     window.move(40, 40);
     window.show();
     settle(900);
+    window.view()->setAnimationsEnabled(false);   // deterministic camera for the suite
 
     OcctViewWidget* view = window.view();
     check(view != nullptr && view->width() > 100, "viewport has a usable size");
+
+    // --- camera startup state -------------------------------------------------
+    {
+        const CameraState& cam = view->camera().state();
+        check(std::fabs(cam.azimuthDeg - (-45.0)) < 1e-6, "startup azimuth is -45");
+        check(std::fabs(cam.elevationDeg - 30.0) < 1e-6, "startup elevation is +30");
+        check(std::fabs(cam.distance - 700.0) < 1e-6, "startup distance is 700mm");
+    }
+
+    // --- turntable input ------------------------------------------------------
+    {
+        const double az0 = view->camera().state().azimuthDeg;
+        const gp_Dir up0 = view->camera().upVector();
+        dragMMB(view, QPointF(view->width() * 0.5, view->height() * 0.5),
+                      QPointF(view->width() * 0.5 + 100.0, view->height() * 0.5));
+        check(std::fabs(view->camera().state().azimuthDeg - az0) > 5.0,
+              "a horizontal MMB drag orbits azimuth");
+        check(view->camera().upVector().Z() > 0.0 && up0.Z() > 0.0,
+              "orbiting never rolls: up keeps its +Z component");
+
+        const gp_Pnt target0 = view->camera().state().target;
+        dragMMB(view, QPointF(view->width() * 0.5, view->height() * 0.5),
+                      QPointF(view->width() * 0.5 + 80.0, view->height() * 0.5 + 40.0),
+                Qt::ShiftModifier);
+        check(view->camera().state().target.Distance(target0) > 1.0,
+              "Shift+MMB pans the target");
+
+        // Elevation clamp holds through input: a huge vertical drag stops at 88.
+        dragMMB(view, QPointF(view->width() * 0.5, view->height() * 0.5),
+                      QPointF(view->width() * 0.5, view->height() * 0.5 + 2000.0));
+        check(view->camera().state().elevationDeg >= -88.0 - 1e-6 &&
+              view->camera().state().elevationDeg <= 88.0 + 1e-6,
+              "elevation stays inside the clamp under wild input");
+
+        // Restore the exact startup pose: every later check clicks at fractions
+        // tuned for it, and this block has dragged the camera all over the sky.
+        view->camera().setState(CameraState{});
+        trigger(window, QStringLiteral("Axonometric"));
+        settle(200);
+        check(std::fabs(view->camera().state().azimuthDeg - (-45.0)) < 1e-3,
+              "camera restored to the startup pose for the rest of the suite");
+    }
+
+    // --- above-horizon clicks are rejected, not mirrored behind the eye -------
+    {
+        trigger(window, QStringLiteral("Front"));
+        settle(400);   // elevation 0: half the viewport is above the horizon
+        trigger(window, QStringLiteral("Start Sketch"));
+        const int before = static_cast<int>(window.sketch().pointCount());
+        // Top strip of the viewport is sky in the Front view.
+        clickAt(view, QPointF(view->width() * 0.5, view->height() * 0.05));
+        check(static_cast<int>(window.sketch().pointCount()) == before,
+              "a click above the horizon adds no sketch point");
+        trigger(window, QStringLiteral("Cancel Sketch"));
+        settle(150);
+        trigger(window, QStringLiteral("Axonometric"));
+        settle(300);
+    }
 
     // --- bundled font ---------------------------------------------------------
     check(!Theme::fontFamily().isEmpty(),
@@ -253,11 +334,13 @@ int main(int argc, char* argv[])
     view->saveSnapshot(outDir + "/g2-two-solids.png");
 
     // --- select two and cut ---------------------------------------------------
-    // Fractions re-tuned for the narrower viewport once the items panel claims
-    // its share of the window (previously 0.30/0.70, which grazed the first
-    // solid's bottom edge once fitAll framed it against the panel-reduced width).
+    // Fractions re-tuned again for the perspective projection this task turns
+    // on: switching from orthographic to perspective moves where the two
+    // solids land on screen, and the previous 0.35/0.50 point sat right on the
+    // first solid's edge (it worked under orthographic framing, not under
+    // perspective). 0.45/0.55 lands solidly inside the first solid's silhouette.
     view->clearSelection();
-    clickAt(view, QPointF(view->width() * 0.35, view->height() * 0.50));
+    clickAt(view, QPointF(view->width() * 0.45, view->height() * 0.55));
     check(view->selectedSolidIds().size() == 1, "first solid picked");
 
     clickAt(view, QPointF(view->width() * 0.68, view->height() * 0.40), Qt::ShiftModifier);
@@ -410,6 +493,84 @@ int main(int argc, char* argv[])
             settle(200);
             check(!view->isWireframe(), "wireframe turned back off, viewport left shaded");
         }
+    }
+
+    // --- standard views set turntable state -----------------------------------
+    {
+        trigger(window, QStringLiteral("Front"));
+        settle(400);
+        check(std::fabs(view->camera().state().azimuthDeg) < 1e-3 &&
+              std::fabs(view->camera().state().elevationDeg) < 1e-3,
+              "Front is azimuth 0, elevation 0");
+
+        trigger(window, QStringLiteral("Top"));
+        settle(400);
+        // setViewTop() requests 89 degrees, but CameraController's clamp caps
+        // elevation at kMaxElevation = 88 (see CameraController.h and the
+        // "setState clamps elevation" headless check) - 88 is what actually
+        // lands, and it is still comfortably non-degenerate.
+        check(std::fabs(view->camera().state().elevationDeg - 88.0) < 1e-3,
+              "Top is elevation +88, clamped from the requested +89");
+
+        trigger(window, QStringLiteral("Right"));
+        settle(400);
+        check(std::fabs(view->camera().state().azimuthDeg - (-90.0)) < 1e-3,
+              "Right is azimuth -90");
+
+        trigger(window, QStringLiteral("Axonometric"));
+        settle(400);
+        check(std::fabs(view->camera().state().azimuthDeg - (-45.0)) < 1e-3 &&
+              std::fabs(view->camera().state().elevationDeg - 30.0) < 1e-3,
+              "Axonometric returns to the startup angles");
+    }
+
+    // --- animated transitions -------------------------------------------------
+    {
+        view->setAnimationsEnabled(true);
+        CameraState goal = view->camera().state();
+        goal.azimuthDeg += 90.0;
+        const double azBefore = view->camera().state().azimuthDeg;
+        view->animateTo(goal);
+        // Mid-flight (a few event-loop turns in), the camera is between the
+        // endpoints - that is what distinguishes animation from teleporting.
+        settle(80);
+        const double azMid = view->camera().state().azimuthDeg;
+        check(std::fabs(azMid - azBefore) > 1.0 &&
+              std::fabs(azMid - goal.azimuthDeg) > 1.0,
+              "animateTo passes through intermediate states");
+        settle(500);
+        check(std::fabs(view->camera().state().azimuthDeg - goal.azimuthDeg) < 1e-3,
+              "animateTo settles exactly on the goal");
+        view->setAnimationsEnabled(false);
+        check(!view->animationsEnabled(), "animations re-disabled for the rest of the suite");
+    }
+
+    // --- grid subdivision policy ----------------------------------------------
+    {
+        check(GridRenderer::minorStepFor(700.0) == 10.0,
+              "default working distance uses the 10mm grid");
+        check(GridRenderer::minorStepFor(50.0) == 1.0,
+              "zoomed close in, the 1mm grid appears");
+        check(GridRenderer::minorStepFor(8000.0) == 100.0,
+              "zoomed far out, the 100mm grid takes over");
+        check(GridRenderer::minorStepFor(0.0) >= 1.0 &&
+              GridRenderer::minorStepFor(1e9) <= 100.0,
+              "extreme distances stay inside the defined levels");
+        check(GridRenderer::minorStepFor(119.9) == 1.0 &&
+              GridRenderer::minorStepFor(120.0) == 10.0,
+              "the 120mm threshold flips exactly once");
+        check(GridRenderer::minorStepFor(2499.9) == 10.0 &&
+              GridRenderer::minorStepFor(2500.0) == 100.0,
+              "the 2500mm threshold flips exactly once");
+
+        // Line positions must sit on the absolute grid regardless of band
+        // extent parity - a band edge is not in general a line position.
+        const double f1 = GridRenderer::firstLineAtOrBelow(2150.0, 100.0);
+        check(std::fmod(f1, 100.0) == 0.0 && f1 <= -2150.0 && f1 > -2350.0,
+              "band start snaps outward onto the absolute grid (odd parity)");
+        const double f2 = GridRenderer::firstLineAtOrBelow(2100.0, 100.0);
+        check(f2 == -2100.0,
+              "an already-aligned band edge is its own first line");
     }
 
     std::printf("\n%s (%d failure%s)  volumes: A=%.1f B=%.1f\n",
