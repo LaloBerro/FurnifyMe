@@ -53,8 +53,12 @@ gp_Dir CameraController::upVector() const
 
 void CameraController::setPivot(const gp_Pnt& pivot)
 {
-    // Keep the eye fixed and re-derive the spherical state around the new
-    // target, so switching pivots never visibly moves the camera.
+    // Re-derive the spherical state around the new target, keeping the eye
+    // position fixed whenever the derived elevation lies within ±88 degrees.
+    // When the pivot is nearly overhead or underfoot, the derived elevation
+    // exceeds the clamp and is silently clamped; the eye then moves by at most
+    // distance*sin(2 deg) (~3.5% of distance) — the unavoidable price of
+    // maintaining the no-roll invariant.
     const gp_Pnt eye = eyePosition();
     const double dx = eye.X() - pivot.X();
     const double dy = eye.Y() - pivot.Y();
@@ -70,8 +74,8 @@ void CameraController::setPivot(const gp_Pnt& pivot)
     if (horizontal > 1e-9) {
         myState.azimuthDeg = std::atan2(-dx, dy) / kDegToRad;
     }
-    // horizontal ~ 0 cannot happen through the UI (elevation is clamped), and
-    // keeping the old azimuth is the right behaviour if it ever does.
+    // An exactly-vertical pivot leaves azimuth undefined; keeping the previous
+    // azimuth is the only sensible choice.
 }
 
 gp_Dir CameraController::rightVector() const

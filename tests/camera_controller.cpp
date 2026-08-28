@@ -121,6 +121,28 @@ int main()
                   "orbit after setPivot keeps the pivot as target");
     }
 
+    // --- setPivot at the clamp edge -------------------------------------------
+    {
+        // A pivot nearly underfoot: derived elevation would exceed +88, so it
+        // clamps, and the eye is allowed to move - but only by the small amount
+        // the 2-degree clamp margin implies.
+        CameraController cam;
+        CameraState s;
+        s.azimuthDeg = 0.0; s.elevationDeg = 80.0; s.distance = 100.0;
+        cam.setState(s);
+        const gp_Pnt eyeBefore = cam.eyePosition();
+        // A point on the ground almost directly below the eye.
+        const gp_Pnt pivot(eyeBefore.X() + 0.5, eyeBefore.Y(), 0.0);
+        cam.setPivot(pivot);
+        check(cam.state().elevationDeg <= 88.0 + 1e-9,
+              "clamp holds even for an overhead pivot");
+        const double drift = cam.eyePosition().Distance(eyeBefore);
+        const double bound = cam.state().distance * std::sin(2.5 * 3.14159265358979323846 / 180.0)
+                             + 1e-6;
+        check(drift <= bound,
+              "eye drift at the clamp edge stays within the documented bound");
+    }
+
     // --- pan moves the target in the view plane -------------------------------
     {
         CameraController cam;
@@ -189,6 +211,14 @@ int main()
                   "opposite angles resolve to +180");
         checkNear(CameraController::shortestArcDelta(-45.0, -45.0), 0.0, 1e-9,
                   "no movement is zero");
+    }
+
+    // --- shortestArcDelta boundaries ------------------------------------------
+    {
+        checkNear(CameraController::shortestArcDelta(0.0, -180.0), 180.0, 1e-9,
+                  "0 -> -180 resolves to +180, the half-open boundary");
+        checkNear(CameraController::shortestArcDelta(0.0, 725.0), 5.0, 1e-9,
+                  "deltas beyond a full turn reduce correctly");
     }
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL",
