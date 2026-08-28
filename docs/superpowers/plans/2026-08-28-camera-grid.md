@@ -352,10 +352,10 @@ Append to `tests/camera_controller.cpp` before the final `printf` (add `#include
         CameraState s;
         s.azimuthDeg = 0.0; s.elevationDeg = 0.0; s.distance = 100.0;
         cam.setState(s);
-        // Looking along -Y: right is +X... verify against rightVector, and up
-        // for this pose is +Z exactly.
+        // Facing -Y with up +Z, right = view x up = -X: standing at +Y looking
+        // south, your right hand points west. Up for this pose is +Z exactly.
         cam.pan(10.0, 5.0);
-        checkNear(cam.state().target.X(), 10.0, 1e-6, "pan right moves target +X here");
+        checkNear(cam.state().target.X(), -10.0, 1e-6, "pan right moves target -X here");
         checkNear(cam.state().target.Z(), 5.0, 1e-6, "pan up moves target +Z here");
         checkNear(cam.state().target.Y(), 0.0, 1e-6, "pan does not move along the view axis");
     }
@@ -821,6 +821,14 @@ Insert immediately after the camera-startup-state block from Task 3:
         check(view->camera().state().elevationDeg >= -88.0 - 1e-6 &&
               view->camera().state().elevationDeg <= 88.0 + 1e-6,
               "elevation stays inside the clamp under wild input");
+
+        // Restore the exact startup pose: every later check clicks at fractions
+        // tuned for it, and this block has dragged the camera all over the sky.
+        view->camera().setState(CameraState{});
+        trigger(window, QStringLiteral("Axonometric"));
+        settle(200);
+        check(std::fabs(view->camera().state().azimuthDeg - (-45.0)) < 1e-3,
+              "camera restored to the startup pose for the rest of the suite");
     }
 ```
 
