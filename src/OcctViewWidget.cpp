@@ -7,10 +7,13 @@
 // OCCT before Qt, for the Handle() macro clash.
 #include <AIS_DisplayMode.hxx>
 #include <AIS_SelectionScheme.hxx>
+#include <AIS_ViewCube.hxx>
 #include <Aspect_DisplayConnection.hxx>
 #include <Aspect_GridDrawMode.hxx>
 #include <Aspect_GridType.hxx>
 #include <Aspect_TypeOfTriedronPosition.hxx>
+#include <Graphic3d_TransformPers.hxx>
+#include <Graphic3d_Vec2.hxx>
 #include <OpenGl_GraphicDriver.hxx>
 #include <Prs3d_Drawer.hxx>
 #include <Prs3d_LineAspect.hxx>
@@ -113,6 +116,8 @@ void OcctViewWidget::initializeViewer()
     myView->MustBeResized();
 
     myInitialized = true;
+
+    setViewCubeVisible(true);
 }
 
 void OcctViewWidget::paintEvent(QPaintEvent* /*event*/)
@@ -179,7 +184,11 @@ void OcctViewWidget::setSolidVisible(int id, bool visible)
     if (it == mySolids.end() || myContext.IsNull()) return;
 
     if (visible) {
-        myContext->Display(it->second, Standard_False);
+        // Display(obj, false) would use the object's default mode - wireframe -
+        // silently changing a solid's appearance when it is hidden and shown
+        // again. Pass the mode the viewport is actually in.
+        myContext->Display(it->second, myWireframe ? AIS_WireFrame : AIS_Shaded,
+                           kSelectionModeWholeShape, Standard_False);
         applySelectionMode(it->second);
     } else {
         // Erase also drops it from the selection, which is what we want: acting
@@ -362,6 +371,39 @@ void OcctViewWidget::setViewRight()
     if (myView.IsNull()) return;
     myView->SetProj(V3d_Xpos);
     myView->Redraw();
+}
+
+void OcctViewWidget::setViewCubeVisible(bool visible)
+{
+    initializeViewer();
+    if (myContext.IsNull()) return;
+
+    if (!visible) {
+        if (!myViewCube.IsNull()) myContext->Remove(myViewCube, Standard_True);
+        myViewCube.Nullify();
+        return;
+    }
+    if (!myViewCube.IsNull()) return;
+
+    Handle(AIS_ViewCube) cube = new AIS_ViewCube();
+    cube->SetSize(60.0);
+    cube->SetBoxColor(Quantity_Color(Theme::chip().redF(), Theme::chip().greenF(),
+                                     Theme::chip().blueF(), Quantity_TOC_sRGB));
+    cube->SetTransformPersistence(new Graphic3d_TransformPers(
+        Graphic3d_TMF_TriedronPers, Aspect_TOTP_RIGHT_UPPER, Graphic3d_Vec2i(100, 100)));
+    myContext->Display(cube, Standard_False);
+    myViewCube = cube;
+    myContext->UpdateCurrentViewer();
+}
+
+void OcctViewWidget::setWireframe(bool wireframe)
+{
+    if (myContext.IsNull() || myWireframe == wireframe) return;
+
+    myWireframe = wireframe;
+    const Standard_Integer mode = wireframe ? AIS_WireFrame : AIS_Shaded;
+    for (auto& entry : mySolids) myContext->SetDisplayMode(entry.second, mode, Standard_False);
+    myContext->UpdateCurrentViewer();
 }
 
 void OcctViewWidget::mousePressEvent(QMouseEvent* event)

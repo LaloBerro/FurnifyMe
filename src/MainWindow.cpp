@@ -139,6 +139,27 @@ void MainWindow::buildActions()
     myItemsPanelAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Alt+S")));
     myItemsPanelAction->setToolTip(tr("Show or hide the items panel (Ctrl+Alt+S)"));
 
+    myDisplayModeAction = new QAction(tr("Wireframe"), this);
+    myDisplayModeAction->setCheckable(true);
+    myDisplayModeAction->setToolTip(tr("Show solids as wireframe instead of shaded"));
+    connect(myDisplayModeAction, &QAction::toggled, this,
+            [this](bool on) { myView->setWireframe(on); });
+
+    myFitAction = new QAction(tr("Fit All"), this);
+    myFitAction->setShortcut(QKeySequence(Qt::Key_F));
+    myFitAction->setToolTip(tr("Frame everything in the document (F)"));
+    connect(myFitAction, &QAction::triggered, myView, &OcctViewWidget::fitAll);
+
+    myScreenshotAction = new QAction(tr("Screenshot"), this);
+    myScreenshotAction->setToolTip(tr("Save the viewport as a PNG"));
+    connect(myScreenshotAction, &QAction::triggered, this, [this] {
+        const QString path = QFileDialog::getSaveFileName(this, tr("Save Screenshot"),
+                                                          QString(), tr("PNG image (*.png)"));
+        if (!path.isEmpty() && !myView->saveSnapshot(path)) {
+            QMessageBox::warning(this, tr("Screenshot"), tr("Could not write %1").arg(path));
+        }
+    });
+
     myStartSketchAction->setToolTip(tr("Draw a closed outline on the XY plane (Ctrl+K)"));
     myFinishSketchAction->setToolTip(tr("Close the outline into a face - needs 3+ points (Enter)"));
     myExtrudeAction->setToolTip(tr("Turn the closed face into a solid (E)"));
@@ -158,13 +179,7 @@ void MainWindow::buildMenusAndToolbar()
 {
     QMenu* fileMenu = menuBar()->addMenu(tr("&File"));
     fileMenu->addAction(myExportStepAction);
-    fileMenu->addAction(tr("Save S&creenshot..."), this, [this] {
-        const QString path = QFileDialog::getSaveFileName(this, tr("Save Screenshot"),
-                                                          QString(), tr("PNG image (*.png)"));
-        if (!path.isEmpty() && !myView->saveSnapshot(path)) {
-            QMessageBox::warning(this, tr("Screenshot"), tr("Could not write %1").arg(path));
-        }
-    });
+    fileMenu->addAction(myScreenshotAction);
     fileMenu->addSeparator();
     fileMenu->addAction(tr("E&xit"), this, &QWidget::close);
 
@@ -188,7 +203,7 @@ void MainWindow::buildMenusAndToolbar()
     modelMenu->addAction(myCommonAction);
 
     QMenu* viewMenu = menuBar()->addMenu(tr("&View"));
-    viewMenu->addAction(tr("&Fit All"), QKeySequence(Qt::Key_F), myView, &OcctViewWidget::fitAll);
+    viewMenu->addAction(myFitAction);
     viewMenu->addSeparator();
     viewMenu->addAction(tr("&Axonometric"), QKeySequence(Qt::Key_0),
                         myView, &OcctViewWidget::setViewAxonometric);
@@ -236,6 +251,24 @@ void MainWindow::buildOverlay()
         {myUndoAction,       IconSet::Glyph::Undo},
         {myRedoAction,       IconSet::Glyph::Redo},
     });
+
+    cluster(ViewportOverlay::Anchor::RightCenter, {
+        {myDisplayModeAction, IconSet::Glyph::DisplayMode},
+        {myScreenshotAction,  IconSet::Glyph::Screenshot},
+        {myFitAction,         IconSet::Glyph::Fit},
+    });
+
+    // Static unit readout under the view cube. We have no unit system; this
+    // states the one the whole app assumes rather than pretending to offer a
+    // choice.
+    auto* units = new QLabel(tr("mm"), myView);
+    units->setAlignment(Qt::AlignCenter);
+    units->setStyleSheet(QStringLiteral(
+                             "background-color: %1; color: %2;"
+                             "border-radius: 6px; padding: 6px 10px;")
+                             .arg(Theme::chip().name(), Theme::textMuted().name()));
+    units->adjustSize();
+    myOverlay->addWidget(units, ViewportOverlay::Anchor::TopRight);
 }
 
 void MainWindow::updateActions()

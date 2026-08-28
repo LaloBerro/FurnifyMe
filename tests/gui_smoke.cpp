@@ -181,6 +181,19 @@ int main(int argc, char* argv[])
         check(view->selectedSolidIds().size() == 1, "the shown solid can be picked again");
     }
 
+    {
+        const int id = window.document().solids().front().id;
+        view->setWireframe(false);
+        view->setSolidVisible(id, false);
+        view->setSolidVisible(id, true);
+        settle(150);
+        check(view->isSolidVisible(id), "a hidden-then-shown solid comes back visible");
+
+        // Showing does not restore the selection (same rule as above); the
+        // delete/undo checks below need one, so re-establish it with a click.
+        clickAt(view, QPointF(view->width() * 0.5, view->height() * 0.5));
+    }
+
     // --- delete / undo / redo through the real actions -----------------------
     trigger(window, QStringLiteral("Delete Selected"));
     check(window.document().count() == 0, "Delete removes the solid");
@@ -335,6 +348,20 @@ int main(int argc, char* argv[])
         delete cluster;
         overlay.relayout();
         check(true, "relayout survives a destroyed cluster");
+    }
+
+    // --- view controls --------------------------------------------------------
+    {
+        QAction* wireframe = action(window, QStringLiteral("Wireframe"));
+        check(wireframe != nullptr, "a Wireframe display-mode action exists");
+        if (wireframe) {
+            check(wireframe->isCheckable(), "Wireframe is a toggle");
+            wireframe->trigger();
+            settle(200);
+            wireframe->trigger();
+            settle(200);
+            check(true, "toggling the display mode does not crash the viewer");
+        }
     }
 
     std::printf("\n%s (%d failure%s)  volumes: A=%.1f B=%.1f\n",

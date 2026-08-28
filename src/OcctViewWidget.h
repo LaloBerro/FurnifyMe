@@ -16,6 +16,8 @@
 #include <map>
 #include <vector>
 
+class AIS_InteractiveObject;
+
 // The Qt <-> OCCT bridge. Hosts a V3d_View on this widget's native window and
 // forwards Qt input to the OCCT camera and selector.
 class OcctViewWidget : public QWidget {
@@ -76,6 +78,10 @@ public:
     void setViewFront();
     void setViewRight();
 
+    void setViewCubeVisible(bool visible);
+    bool hasViewCube() const { return !myViewCube.IsNull(); }
+    void setWireframe(bool wireframe);
+
 signals:
     void sketchPointPicked(const gp_Pnt& point);
     // Live cursor position on the sketch plane, already snapped - drives the
@@ -102,6 +108,9 @@ private:
     Handle(AIS_Shape) myPreview;
 
     std::map<int, Handle(AIS_Shape)> mySolids;
+
+    Handle(AIS_InteractiveObject) myViewCube;
+    bool myWireframe = false;
 
     SelectionMode mySelectionMode = SelectionMode::Solid;
     bool myInitialized = false;

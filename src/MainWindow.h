@@ -92,6 +92,9 @@ private:
     QAction* myUndoAction = nullptr;
     QAction* myRedoAction = nullptr;
     QAction* myItemsPanelAction = nullptr;
+    QAction* myDisplayModeAction = nullptr;
+    QAction* myFitAction = nullptr;
+    QAction* myScreenshotAction = nullptr;
 
     class ViewportOverlay* myOverlay = nullptr;
     class QLabel* myStateLabel = nullptr;
