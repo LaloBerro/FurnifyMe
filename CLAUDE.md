@@ -96,23 +96,30 @@ and reports clicked points at exactly `Z = 0.00`; closing produces a filled face
 produces a shaded solid with a plausible volume; clicking a solid selects it (status bar
 reports `1 solid(s) selected`).
 
-**Not yet verified, and worth doing before calling Milestone 1 done:**
-- A two-solid boolean *through the UI*. The geometry underneath is exhaustively tested and
-  single-solid selection works, so only the two-selection plumbing is unconfirmed. Automating
-  it defeated several attempts (see below); it takes about five seconds by hand.
-- Hover-highlight and face-selection mode, visually.
-- Opening an exported STEP file in FreeCAD.
+Also verified through the UI: hover highlight (cyan), selection (orange), and a **two-solid
+Cut**, checked by arithmetic rather than by eye - a 1,113,000 mm3 slab minus a 748,000 mm3
+block left 926,000 mm3, and the 187,000 mm3 removed is exactly the tool's 18,700 mm2
+footprint times the slab's 10mm thickness. Both operands were replaced by the single result.
+
+**Not yet verified:**
+- Face-selection mode (`Select Faces`) visually - solid-mode picking is confirmed, face mode
+  is not.
+- Opening an exported STEP file in FreeCAD. FreeCAD is not installed on this machine
+  (`winget install FreeCAD.FreeCAD` if it is wanted).
 - Anything at all on Linux - it has never been configured, built or run.
 
 ### A warning about automating this GUI
 
-Synthetic-input testing on this machine is unreliable and cost far more time than it was
-worth. `GetWindowRect` reported a 1500x2900 window on a 1920x1080 screen, so PowerShell's
+Synthetic-input testing on this machine is workable but fragile, and cost far more time than
+it was worth before the UI reported its own state. `GetWindowRect` reported a 1500x2900 window on a 1920x1080 screen, so PowerShell's
 coordinates and the app's are separated by DPI virtualization, and clicks land somewhere
 other than intended. Two earlier "failures" were the harness, not the app: clicks falling
 outside an unmaximized window, and shift-clicking twice into the same solid (which XOR
-correctly *deselects*). Prefer manual verification, or fix the DPI awareness of the driving
-process first.
+correctly *deselects*). Two things make it tractable: maximize the window with
+`ShowWindow(h, 3)` and **assert the resulting size** (1936x1048 here) rather than trusting
+`MoveWindow`, and read the status bar's state label out of the screenshot instead of guessing
+whether an action landed. Give the two solids different heights so each has a screen region
+where only it is pickable - coplanar slabs make shift-click ambiguous.
 
 ### Tests
 
