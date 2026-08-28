@@ -163,6 +163,13 @@ int main(int argc, char* argv[])
         view->setSolidVisible(id, true);
         check(view->isSolidVisible(id), "showing reports visible again");
         check(!view->isSolidVisible(9999), "an unknown id is not visible");
+
+        // Showing does not restore the selection - production code must never
+        // silently re-select something on the user's behalf. The delete/undo
+        // checks below need a selection, so re-establish it the way a user
+        // would, with a click.
+        clickAt(view, QPointF(view->width() * 0.5, view->height() * 0.5));
+        check(view->selectedSolidIds().size() == 1, "the shown solid can be picked again");
     }
 
     // --- delete / undo / redo through the real actions -----------------------
