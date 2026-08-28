@@ -73,22 +73,22 @@ void clickAt(QWidget* target, const QPointF& pos,
     settle(80);
 }
 
-// Middle-button drag delivered as press/move/release, for camera tests.
-void dragMMB(QWidget* target, const QPointF& from, const QPointF& to,
-             Qt::KeyboardModifiers mods = Qt::NoModifier)
+// Button drag delivered as press/move/release, for camera tests.
+void dragButton(QWidget* target, const QPointF& from, const QPointF& to,
+                Qt::MouseButton button, Qt::KeyboardModifiers mods = Qt::NoModifier)
 {
     QMouseEvent press(QEvent::MouseButtonPress, from, target->mapToGlobal(from),
-                      Qt::MiddleButton, Qt::MiddleButton, mods);
+                      button, button, mods);
     QCoreApplication::sendEvent(target, &press);
     const int steps = 8;
     for (int i = 1; i <= steps; ++i) {
         const QPointF p = from + (to - from) * (double(i) / steps);
         QMouseEvent move(QEvent::MouseMove, p, target->mapToGlobal(p),
-                         Qt::NoButton, Qt::MiddleButton, mods);
+                         Qt::NoButton, button, mods);
         QCoreApplication::sendEvent(target, &move);
     }
     QMouseEvent release(QEvent::MouseButtonRelease, to, target->mapToGlobal(to),
-                        Qt::MiddleButton, Qt::NoButton, mods);
+                        button, Qt::NoButton, mods);
     QCoreApplication::sendEvent(target, &release);
     settle(120);
 }
@@ -168,23 +168,30 @@ int main(int argc, char* argv[])
     {
         const double az0 = view->camera().state().azimuthDeg;
         const gp_Dir up0 = view->camera().upVector();
-        dragMMB(view, QPointF(view->width() * 0.5, view->height() * 0.5),
-                      QPointF(view->width() * 0.5 + 100.0, view->height() * 0.5));
+        const gp_Pnt orbitTarget0 = view->camera().state().target;
+        dragButton(view, QPointF(view->width() * 0.5, view->height() * 0.5),
+                         QPointF(view->width() * 0.5 + 100.0, view->height() * 0.5),
+                   Qt::RightButton);
         check(std::fabs(view->camera().state().azimuthDeg - az0) > 5.0,
-              "a horizontal MMB drag orbits azimuth");
+              "a horizontal RMB drag orbits azimuth");
         check(view->camera().upVector().Z() > 0.0 && up0.Z() > 0.0,
               "orbiting never rolls: up keeps its +Z component");
+        // Unity-style: orbiting spins around the current view target, so the
+        // target itself must not move - no cursor-anchored re-pivoting.
+        check(view->camera().state().target.Distance(orbitTarget0) < 1e-6,
+              "orbiting leaves the view target where it was");
 
         const gp_Pnt target0 = view->camera().state().target;
-        dragMMB(view, QPointF(view->width() * 0.5, view->height() * 0.5),
-                      QPointF(view->width() * 0.5 + 80.0, view->height() * 0.5 + 40.0),
-                Qt::ShiftModifier);
+        dragButton(view, QPointF(view->width() * 0.5, view->height() * 0.5),
+                         QPointF(view->width() * 0.5 + 80.0, view->height() * 0.5 + 40.0),
+                   Qt::MiddleButton);
         check(view->camera().state().target.Distance(target0) > 1.0,
-              "Shift+MMB pans the target");
+              "an MMB drag pans the target");
 
         // Elevation clamp holds through input: a huge vertical drag stops at 88.
-        dragMMB(view, QPointF(view->width() * 0.5, view->height() * 0.5),
-                      QPointF(view->width() * 0.5, view->height() * 0.5 + 2000.0));
+        dragButton(view, QPointF(view->width() * 0.5, view->height() * 0.5),
+                         QPointF(view->width() * 0.5, view->height() * 0.5 + 2000.0),
+                   Qt::RightButton);
         check(view->camera().state().elevationDeg >= -88.0 - 1e-6 &&
               view->camera().state().elevationDeg <= 88.0 + 1e-6,
               "elevation stays inside the clamp under wild input");

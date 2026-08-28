@@ -246,7 +246,7 @@ Required `QWidget` setup — omitting any of these gives flicker or a black view
 `setAutoFillBackground(false)`, `setMouseTracking(true)` (needed for hover highlight), and
 `paintEngine()` overridden to return `nullptr`.
 
-Event wiring: `paintEvent`→`Redraw()`, `resizeEvent`→`MustBeResized()`, MMB drag→turntable orbit around the picked point, Shift+MMB→pan, wheel→zoomToward cursor; RMB unbound (reserved for a context menu); camera state lives in CameraController and is pushed via SetEye/SetCenter/SetUp; the projection is perspective (FOVy 45°).
+Event wiring: `paintEvent`→`Redraw()`, `resizeEvent`→`MustBeResized()`, RMB drag→turntable orbit around the current view target (Unity-style, the user's explicit preference — no cursor-anchored pivoting), MMB drag→pan, wheel→zoomToward cursor; camera state lives in CameraController and is pushed via SetEye/SetCenter/SetUp; the projection is perspective (FOVy 45°).
 
 ### Selection
 

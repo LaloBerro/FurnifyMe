@@ -568,26 +568,20 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
     initializeViewer();
     myLastPos = event->position().toPoint();
 
-    if (event->button() == Qt::MiddleButton) {
-        if (event->modifiers() & Qt::ShiftModifier) {
-            myPanningDrag = true;
-        } else {
-            myOrbiting = true;
-            // Orbit around what is under the cursor; fall back to the current
-            // target when the pick finds nothing (looking at empty sky).
-            gp_Pnt pivot;
-            if (pickWorldPoint(myLastPos.x(), myLastPos.y(), pivot)) {
-                myCamera.setPivot(pivot);
-                applyCameraState();
-            }
-        }
+    // Unity-style mapping, per the user's preference: RMB orbits around the
+    // current view target (which moves only when you pan or frame something -
+    // no cursor-anchored re-pivoting), MMB pans.
+    if (event->button() == Qt::RightButton) {
+        myOrbiting = true;
+    } else if (event->button() == Qt::MiddleButton) {
+        myPanningDrag = true;
     }
-    // Right button: deliberately unbound - reserved for a context menu.
 }
 
 void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
 {
-    if (event->button() == Qt::MiddleButton) { myOrbiting = false; myPanningDrag = false; }
+    if (event->button() == Qt::RightButton)  myOrbiting = false;
+    if (event->button() == Qt::MiddleButton) myPanningDrag = false;
 
     if (event->button() != Qt::LeftButton || myContext.IsNull()) return;
 

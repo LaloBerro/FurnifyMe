@@ -68,7 +68,7 @@ MainWindow::MainWindow(QWidget* parent)
 
     setWindowTitle(tr("FurnifyMe"));
     resize(1280, 800);
-    statusBar()->showMessage(tr("MMB drag orbits, Shift+MMB pans, wheel zooms."));
+    statusBar()->showMessage(tr("RMB drag orbits, MMB drag pans, wheel zooms."));
 }
 
 void MainWindow::buildActions()
