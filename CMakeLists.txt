@@ -76,7 +76,9 @@ if(FURNIFYME_BUILD_APP)
     add_library(furnify_app STATIC
       src/MainWindow.cpp
       src/OcctViewWidget.cpp
+      src/ui/Theme.cpp
     )
+    target_include_directories(furnify_app PUBLIC src/ui)
     target_link_libraries(furnify_app PUBLIC
       furnify_geometry
       Qt6::Widgets

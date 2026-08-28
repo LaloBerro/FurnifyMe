@@ -2,6 +2,7 @@
 
 #include "ModelingOps.h"
 #include "SketchController.h"
+#include "Theme.h"
 
 // OCCT before Qt, for the Handle() macro clash.
 #include <AIS_DisplayMode.hxx>
@@ -80,7 +81,9 @@ void OcctViewWidget::initializeViewer()
     myView->SetWindow(window);
     if (!window->IsMapped()) window->Map();
 
-    myView->SetBackgroundColor(Quantity_Color(Quantity_NOC_GRAY30));
+    const QColor bg = Theme::viewport();
+    myView->SetBackgroundColor(Quantity_Color(bg.redF(), bg.greenF(), bg.blueF(),
+                                              Quantity_TOC_sRGB));
     myView->TriedronDisplay(Aspect_TOTP_LEFT_LOWER, Quantity_Color(Quantity_NOC_WHITE),
                             0.08, V3d_ZBUFFER);
 
