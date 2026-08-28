@@ -9,6 +9,7 @@
 // tree, so nothing persists them - see the topological naming note in CLAUDE.md
 // before giving them any longer life.
 //
+#include <string>
 #include <vector>
 
 #include <TopoDS_Shape.hxx>
@@ -17,6 +18,7 @@ class DocumentModel {
 public:
     struct Solid {
         int id = 0;
+        std::string name;
         TopoDS_Shape shape;
     };
 
@@ -30,6 +32,10 @@ public:
     // Null shape if the id is unknown.
     TopoDS_Shape shapeOf(int id) const;
     bool contains(int id) const;
+
+    // Empty string if the id is unknown.
+    std::string nameOf(int id) const;
+    bool renameSolid(int id, const std::string& name);
 
     const std::vector<Solid>& solids() const { return mySolids; }
     std::size_t count() const { return mySolids.size(); }
@@ -50,6 +56,9 @@ public:
 private:
     std::vector<Solid> mySolids;
     int myNextId = 1;
+    // Like ids, never rolled back by undo: a name reappearing on a different
+    // solid would be confusing in the Items panel.
+    int myNextName = 1;
 
     // Ids are never rolled back with the state: reusing an id would let a stale
     // reference resolve to a different solid.
