@@ -101,12 +101,21 @@ Cut**, checked by arithmetic rather than by eye - a 1,113,000 mm3 slab minus a 7
 block left 926,000 mm3, and the 187,000 mm3 removed is exactly the tool's 18,700 mm2
 footprint times the slab's 10mm thickness. Both operands were replaced by the single result.
 
+Face-selection mode is confirmed too: hovering outlines a single face, and the outline
+follows the hole through the cut solid, so it is the real `TopoDS_Face` and not the whole
+shape.
+
+STEP export via the UI produces a well-formed file - AP214 (`AUTOMOTIVE_DESIGN`), 658
+entities, one `MANIFOLD_SOLID_BREP`, and exactly 10 `ADVANCED_FACE` entries, which is what a
+slab with a rectangular through-hole should have (top, bottom, 4 outer sides, 4 hole sides).
+The exported topology therefore matches what is on screen.
+
 **Not yet verified:**
-- Face-selection mode (`Select Faces`) visually - solid-mode picking is confirmed, face mode
-  is not.
-- Opening an exported STEP file in FreeCAD. FreeCAD is not installed on this machine
-  (`winget install FreeCAD.FreeCAD` if it is wanted).
-- Anything at all on Linux - it has never been configured, built or run.
+- **Opening a STEP file in FreeCAD.** The file is structurally correct, but "opens correctly
+  in FreeCAD" is the actual acceptance criterion and FreeCAD is not installed here
+  (`winget install FreeCAD.FreeCAD`).
+- **Anything at all on Linux** - never configured, built or run. This is the largest
+  remaining gap in Milestone 1, since both platforms are first-class.
 
 ### A warning about automating this GUI
 
