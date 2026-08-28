@@ -18,6 +18,7 @@
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
 #include "SketchController.h"
+#include "ToolChip.h"
 
 #include <QAction>
 #include <QApplication>
@@ -246,6 +247,27 @@ int main(int argc, char* argv[])
             if (!anyInk) { allDrawn = false; break; }
         }
         check(allDrawn, "every glyph paints something at 16x16");
+    }
+
+    // --- chips mirror their action -------------------------------------------
+    {
+        QAction probe(QStringLiteral("Probe"));
+        probe.setShortcut(QKeySequence(QStringLiteral("Ctrl+P")));
+        ToolChip chip(&probe, IconSet::Glyph::Sketch);
+
+        probe.setEnabled(false);
+        check(!chip.isEnabled(), "chip disables with its action");
+        probe.setEnabled(true);
+        check(chip.isEnabled(), "chip re-enables with its action");
+
+        int fired = 0;
+        QObject::connect(&probe, &QAction::triggered, [&fired] { ++fired; });
+        chip.click();
+        check(fired == 1, "clicking the chip triggers the action exactly once");
+
+        probe.setCheckable(true);
+        probe.setChecked(true);
+        check(chip.isChecked(), "chip mirrors the checked state");
     }
 
     std::printf("\n%s (%d failure%s)  volumes: A=%.1f B=%.1f\n",
