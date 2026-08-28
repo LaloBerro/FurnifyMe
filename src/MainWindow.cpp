@@ -3,6 +3,12 @@
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
 
+#include "IconSet.h"
+#include "Theme.h"
+#include "ToolChip.h"
+#include "ToolCluster.h"
+#include "ViewportOverlay.h"
+
 #include <QAction>
 #include <QActionGroup>
 #include <QFileDialog>
@@ -11,9 +17,10 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QStatusBar>
-#include <QToolBar>
 
 #include <algorithm>
+#include <initializer_list>
+#include <utility>
 #include <vector>
 
 MainWindow::MainWindow(QWidget* parent)
@@ -28,6 +35,7 @@ MainWindow::MainWindow(QWidget* parent)
 
     buildActions();
     buildMenusAndToolbar();
+    buildOverlay();
     updateActions();
 
     // Permanent widget so it survives transient showMessage() calls: the left
@@ -103,6 +111,12 @@ void MainWindow::buildActions()
     mySnapAction->setToolTip(tr("Round sketch points to the 10mm grid"));
     connect(mySnapAction, &QAction::toggled, this, &MainWindow::onSnapToggled);
 
+    myItemsPanelAction = new QAction(tr("Items"), this);
+    myItemsPanelAction->setCheckable(true);
+    myItemsPanelAction->setChecked(true);
+    myItemsPanelAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Alt+S")));
+    myItemsPanelAction->setToolTip(tr("Show or hide the items panel (Ctrl+Alt+S)"));
+
     myStartSketchAction->setToolTip(tr("Draw a closed outline on the XY plane (Ctrl+K)"));
     myFinishSketchAction->setToolTip(tr("Close the outline into a face - needs 3+ points (Enter)"));
     myExtrudeAction->setToolTip(tr("Turn the closed face into a solid (E)"));
@@ -164,26 +178,42 @@ void MainWindow::buildMenusAndToolbar()
     viewMenu->addSeparator();
     viewMenu->addAction(mySolidSelectAction);
     viewMenu->addAction(myFaceSelectAction);
+    viewMenu->addAction(myItemsPanelAction);
+}
 
-    QToolBar* bar = addToolBar(tr("Main"));
-    bar->addAction(myUndoAction);
-    bar->addAction(myRedoAction);
-    bar->addSeparator();
-    bar->addAction(myStartSketchAction);
-    bar->addAction(myFinishSketchAction);
-    bar->addSeparator();
-    bar->addAction(myExtrudeAction);
-    bar->addSeparator();
-    bar->addAction(myFuseAction);
-    bar->addAction(myCutAction);
-    bar->addAction(myCommonAction);
-    bar->addSeparator();
-    bar->addAction(myDeleteAction);
-    bar->addSeparator();
-    bar->addAction(mySolidSelectAction);
-    bar->addAction(myFaceSelectAction);
-    bar->addSeparator();
-    bar->addAction(mySnapAction);
+void MainWindow::buildOverlay()
+{
+    myOverlay = new ViewportOverlay(myView);
+
+    auto cluster = [this](ViewportOverlay::Anchor anchor,
+                          std::initializer_list<std::pair<QAction*, IconSet::Glyph>> chips) {
+        auto* group = new ToolCluster(myView);
+        for (const auto& entry : chips) {
+            group->addChip(new ToolChip(entry.first, entry.second));
+        }
+        myOverlay->addWidget(group, anchor);
+    };
+
+    cluster(ViewportOverlay::Anchor::LeftCenter, {
+        {myStartSketchAction, IconSet::Glyph::Sketch},
+        {myExtrudeAction,     IconSet::Glyph::Extrude},
+        {myFuseAction,        IconSet::Glyph::Fuse},
+        {myCutAction,         IconSet::Glyph::Cut},
+        {myCommonAction,      IconSet::Glyph::Intersect},
+        {myDeleteAction,      IconSet::Glyph::Delete},
+    });
+
+    cluster(ViewportOverlay::Anchor::BottomLeft, {
+        {mySnapAction,         IconSet::Glyph::Snap},
+        {mySolidSelectAction,  IconSet::Glyph::SelectSolid},
+        {myFaceSelectAction,   IconSet::Glyph::SelectFace},
+    });
+
+    cluster(ViewportOverlay::Anchor::TopLeft, {
+        {myItemsPanelAction, IconSet::Glyph::Items},
+        {myUndoAction,       IconSet::Glyph::Undo},
+        {myRedoAction,       IconSet::Glyph::Redo},
+    });
 }
 
 void MainWindow::updateActions()

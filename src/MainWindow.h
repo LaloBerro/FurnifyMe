@@ -54,6 +54,7 @@ private slots:
 private:
     void buildActions();
     void buildMenusAndToolbar();
+    void buildOverlay();
     void updateActions();
     // Persistent right-hand readout: what mode we are in and what is possible.
     void updateStateLabel();
@@ -85,6 +86,8 @@ private:
     QAction* myDeleteAction = nullptr;
     QAction* myUndoAction = nullptr;
     QAction* myRedoAction = nullptr;
+    QAction* myItemsPanelAction = nullptr;
 
+    class ViewportOverlay* myOverlay = nullptr;
     class QLabel* myStateLabel = nullptr;
 };
