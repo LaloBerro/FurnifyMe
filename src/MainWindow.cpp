@@ -82,6 +82,21 @@ void MainWindow::buildActions()
     myFaceSelectAction = new QAction(tr("Select F&aces"), this);
     myFaceSelectAction->setCheckable(true);
 
+    myDeleteAction = new QAction(tr("&Delete Selected"), this);
+    myDeleteAction->setShortcut(QKeySequence::Delete);
+    myDeleteAction->setToolTip(tr("Remove the selected solids (Del)"));
+    connect(myDeleteAction, &QAction::triggered, this, &MainWindow::onDeleteSelected);
+
+    myUndoAction = new QAction(tr("&Undo"), this);
+    myUndoAction->setShortcut(QKeySequence::Undo);
+    myUndoAction->setToolTip(tr("Undo the last solid change (Ctrl+Z)"));
+    connect(myUndoAction, &QAction::triggered, this, &MainWindow::onUndo);
+
+    myRedoAction = new QAction(tr("&Redo"), this);
+    myRedoAction->setShortcut(QKeySequence::Redo);
+    myRedoAction->setToolTip(tr("Redo the last undone change (Ctrl+Y)"));
+    connect(myRedoAction, &QAction::triggered, this, &MainWindow::onRedo);
+
     mySnapAction = new QAction(tr("Snap to &Grid"), this);
     mySnapAction->setCheckable(true);
     mySnapAction->setChecked(true);
@@ -116,6 +131,12 @@ void MainWindow::buildMenusAndToolbar()
     sketchMenu->addAction(myUndoPointAction);
     sketchMenu->addAction(myCancelSketchAction);
 
+    QMenu* editMenu = menuBar()->addMenu(tr("&Edit"));
+    editMenu->addAction(myUndoAction);
+    editMenu->addAction(myRedoAction);
+    editMenu->addSeparator();
+    editMenu->addAction(myDeleteAction);
+
     QMenu* modelMenu = menuBar()->addMenu(tr("&Model"));
     modelMenu->addAction(myExtrudeAction);
     modelMenu->addSeparator();
@@ -125,7 +146,12 @@ void MainWindow::buildMenusAndToolbar()
 
     QMenu* viewMenu = menuBar()->addMenu(tr("&View"));
     viewMenu->addAction(tr("&Fit All"), QKeySequence(Qt::Key_F), myView, &OcctViewWidget::fitAll);
-    viewMenu->addAction(tr("&Axonometric"), myView, &OcctViewWidget::setViewAxonometric);
+    viewMenu->addSeparator();
+    viewMenu->addAction(tr("&Axonometric"), QKeySequence(Qt::Key_0),
+                        myView, &OcctViewWidget::setViewAxonometric);
+    viewMenu->addAction(tr("&Top"), QKeySequence(Qt::Key_1), myView, &OcctViewWidget::setViewTop);
+    viewMenu->addAction(tr("F&ront"), QKeySequence(Qt::Key_2), myView, &OcctViewWidget::setViewFront);
+    viewMenu->addAction(tr("&Right"), QKeySequence(Qt::Key_3), myView, &OcctViewWidget::setViewRight);
     viewMenu->addSeparator();
     viewMenu->addAction(mySnapAction);
     viewMenu->addSeparator();
@@ -133,6 +159,9 @@ void MainWindow::buildMenusAndToolbar()
     viewMenu->addAction(myFaceSelectAction);
 
     QToolBar* bar = addToolBar(tr("Main"));
+    bar->addAction(myUndoAction);
+    bar->addAction(myRedoAction);
+    bar->addSeparator();
     bar->addAction(myStartSketchAction);
     bar->addAction(myFinishSketchAction);
     bar->addSeparator();
@@ -141,6 +170,8 @@ void MainWindow::buildMenusAndToolbar()
     bar->addAction(myFuseAction);
     bar->addAction(myCutAction);
     bar->addAction(myCommonAction);
+    bar->addSeparator();
+    bar->addAction(myDeleteAction);
     bar->addSeparator();
     bar->addAction(mySolidSelectAction);
     bar->addAction(myFaceSelectAction);
@@ -165,6 +196,9 @@ void MainWindow::updateActions()
     myCommonAction->setEnabled(booleanReady);
 
     myExportStepAction->setEnabled(myDocument.count() > 0);
+    myDeleteAction->setEnabled(!mySketching && selectedCount > 0);
+    myUndoAction->setEnabled(!mySketching && myDocument.canUndo());
+    myRedoAction->setEnabled(!mySketching && myDocument.canRedo());
 
     updateStateLabel();
 }
@@ -195,6 +229,50 @@ void MainWindow::updateStateLabel()
         }
     }
     myStateLabel->setText(state);
+}
+
+void MainWindow::resyncView()
+{
+    myView->clearSolids();
+    for (const DocumentModel::Solid& solid : myDocument.solids()) {
+        myView->displaySolid(solid.id, solid.shape);
+    }
+}
+
+void MainWindow::onDeleteSelected()
+{
+    const std::vector<int> ids = myView->selectedSolidIds();
+    if (ids.empty()) return;
+
+    myDocument.checkpoint();
+    myView->clearSelection();
+    for (int id : ids) {
+        myDocument.removeSolid(id);
+        myView->removeSolid(id);
+    }
+
+    updateActions();
+    statusBar()->showMessage(tr("Deleted %1 solid(s).").arg(ids.size()));
+}
+
+void MainWindow::onUndo()
+{
+    if (!myDocument.undo()) return;
+
+    myView->clearSelection();
+    resyncView();
+    updateActions();
+    statusBar()->showMessage(tr("Undone. %1 solid(s) in the document.").arg(myDocument.count()));
+}
+
+void MainWindow::onRedo()
+{
+    if (!myDocument.redo()) return;
+
+    myView->clearSelection();
+    resyncView();
+    updateActions();
+    statusBar()->showMessage(tr("Redone. %1 solid(s) in the document.").arg(myDocument.count()));
 }
 
 void MainWindow::onSnapToggled(bool enabled)
@@ -305,6 +383,7 @@ void MainWindow::onExtrude()
     // Frame the very first solid; after that leave the camera where the user
     // put it rather than yanking the view on every extrude.
     const bool wasEmpty = myDocument.count() == 0;
+    myDocument.checkpoint();
     const int id = myDocument.addSolid(solid);
     myView->clearPreview();
     myView->displaySolid(id, solid);
@@ -352,6 +431,7 @@ void MainWindow::runBoolean(int kind)
         return;
     }
 
+    myDocument.checkpoint();
     myView->clearSelection();
     for (int id : ids) {
         myDocument.removeSolid(id);

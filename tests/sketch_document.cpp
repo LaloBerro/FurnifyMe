@@ -190,6 +190,66 @@ int main()
         check(doc.addSolid(boxA) != idC, "ids still advance after clear");
     }
 
+    // --- undo / redo of document state --------------------------------------
+    {
+        DocumentModel doc;
+        const TopoDS_Shape box = ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 10.0, 10.0, 10.0);
+
+        check(!doc.canUndo(), "a fresh document has nothing to undo");
+        check(!doc.canRedo(), "a fresh document has nothing to redo");
+        check(!doc.undo(), "undo on an empty history reports failure");
+
+        doc.checkpoint();
+        doc.addSolid(box);
+        check(doc.count() == 1, "solid added after the checkpoint");
+        check(doc.canUndo(), "the checkpoint is undoable");
+
+        check(doc.undo(), "undo succeeds");
+        check(doc.count() == 0, "undo removes the solid added after the checkpoint");
+        check(doc.canRedo(), "undo makes a redo available");
+
+        check(doc.redo(), "redo succeeds");
+        check(doc.count() == 1, "redo puts the solid back");
+        check(!doc.canRedo(), "nothing left to redo after redoing");
+
+        // A new action after an undo must discard the redo branch, or redo would
+        // resurrect a state that never followed from the current one.
+        doc.undo();
+        check(doc.canRedo(), "redo is available again after another undo");
+        doc.checkpoint();
+        doc.addSolid(box);
+        check(!doc.canRedo(), "a new action discards the redo branch");
+
+        // Ids must not be recycled across an undo either: a stale id resolving to
+        // a different solid is the bug this guards against.
+        DocumentModel fresh;
+        fresh.checkpoint();
+        const int firstId = fresh.addSolid(box);
+        fresh.undo();
+        fresh.checkpoint();
+        const int secondId = fresh.addSolid(box);
+        check(firstId != secondId, "ids are not reused after an undo");
+    }
+
+    // --- undo history is bounded ---------------------------------------------
+    {
+        DocumentModel doc;
+        const TopoDS_Shape box = ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 1.0, 1.0, 1.0);
+
+        const std::size_t overflow = DocumentModel::kMaxHistory + 5;
+        for (std::size_t i = 0; i < overflow; ++i) {
+            doc.checkpoint();
+            doc.addSolid(box);
+        }
+        check(doc.count() == overflow, "every solid was added");
+
+        std::size_t undone = 0;
+        while (doc.undo()) ++undone;
+        check(undone == DocumentModel::kMaxHistory,
+              "history is capped, so only the most recent steps can be undone");
+        check(doc.count() == 5, "the states beyond the cap are gone for good");
+    }
+
     // --- compound for STEP export -------------------------------------------
     {
         const TopoDS_Shape one = ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 1.0, 1.0, 1.0);

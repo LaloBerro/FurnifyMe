@@ -30,6 +30,10 @@ private slots:
     void onCut();
     void onCommon();
 
+    void onDeleteSelected();
+    void onUndo();
+    void onRedo();
+
     void onExportStep();
     void onSelectionModeChanged();
     void onSelectionChanged();
@@ -40,6 +44,9 @@ private:
     void updateActions();
     // Persistent right-hand readout: what mode we are in and what is possible.
     void updateStateLabel();
+    // Rebuilds the viewport from the document. Cheaper than tracking individual
+    // differences, and the only way to be sure the two agree after undo/redo.
+    void resyncView();
     void runBoolean(int kind);   // ModelingOps::BooleanKind as int, to keep it out of the header
 
     OcctViewWidget* myView = nullptr;
@@ -62,6 +69,9 @@ private:
     QAction* mySolidSelectAction = nullptr;
     QAction* myFaceSelectAction = nullptr;
     QAction* mySnapAction = nullptr;
+    QAction* myDeleteAction = nullptr;
+    QAction* myUndoAction = nullptr;
+    QAction* myRedoAction = nullptr;
 
     class QLabel* myStateLabel = nullptr;
 };

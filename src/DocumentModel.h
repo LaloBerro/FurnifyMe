@@ -34,7 +34,25 @@ public:
     const std::vector<Solid>& solids() const { return mySolids; }
     std::size_t count() const { return mySolids.size(); }
 
+    // --- undo / redo -------------------------------------------------------
+    // A "simple shape stack", which is what the brief leaves in scope. Call
+    // checkpoint() *before* mutating; it records the current solids and discards
+    // the redo branch. Snapshots are cheap: TopoDS_Shape is a refcounted handle,
+    // so copying the vector shares the geometry rather than duplicating it.
+    static constexpr std::size_t kMaxHistory = 20;
+
+    void checkpoint();
+    bool canUndo() const { return !myUndo.empty(); }
+    bool canRedo() const { return !myRedo.empty(); }
+    bool undo();
+    bool redo();
+
 private:
     std::vector<Solid> mySolids;
     int myNextId = 1;
+
+    // Ids are never rolled back with the state: reusing an id would let a stale
+    // reference resolve to a different solid.
+    std::vector<std::vector<Solid>> myUndo;
+    std::vector<std::vector<Solid>> myRedo;
 };

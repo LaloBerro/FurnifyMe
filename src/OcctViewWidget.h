@@ -56,6 +56,11 @@ public:
 
     void fitAll();
     void setViewAxonometric();
+    // Sketching happens on the XY plane, so a true top view makes clicking
+    // accurate in a way the angled default cannot.
+    void setViewTop();
+    void setViewFront();
+    void setViewRight();
 
 signals:
     void sketchPointPicked(const gp_Pnt& point);

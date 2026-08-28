@@ -293,6 +293,27 @@ void OcctViewWidget::setViewAxonometric()
     myView->Redraw();
 }
 
+void OcctViewWidget::setViewTop()
+{
+    if (myView.IsNull()) return;
+    myView->SetProj(V3d_Zpos);
+    myView->Redraw();
+}
+
+void OcctViewWidget::setViewFront()
+{
+    if (myView.IsNull()) return;
+    myView->SetProj(V3d_Yneg);
+    myView->Redraw();
+}
+
+void OcctViewWidget::setViewRight()
+{
+    if (myView.IsNull()) return;
+    myView->SetProj(V3d_Xpos);
+    myView->Redraw();
+}
+
 void OcctViewWidget::mousePressEvent(QMouseEvent* event)
 {
     initializeViewer();

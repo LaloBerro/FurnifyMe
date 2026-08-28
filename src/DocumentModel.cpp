@@ -53,3 +53,32 @@ bool DocumentModel::contains(int id) const
     return std::any_of(mySolids.begin(), mySolids.end(),
                        [id](const Solid& s) { return s.id == id; });
 }
+
+void DocumentModel::checkpoint()
+{
+    myUndo.push_back(mySolids);
+    if (myUndo.size() > kMaxHistory) myUndo.erase(myUndo.begin());
+
+    // Anything redoable described a future that no longer follows from here.
+    myRedo.clear();
+}
+
+bool DocumentModel::undo()
+{
+    if (myUndo.empty()) return false;
+
+    myRedo.push_back(mySolids);
+    mySolids = myUndo.back();
+    myUndo.pop_back();
+    return true;
+}
+
+bool DocumentModel::redo()
+{
+    if (myRedo.empty()) return false;
+
+    myUndo.push_back(mySolids);
+    mySolids = myRedo.back();
+    myRedo.pop_back();
+    return true;
+}

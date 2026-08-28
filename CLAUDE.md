@@ -135,6 +135,12 @@ correctly *deselects*). Two things make it tractable: maximize the window with
 whether an action landed. Give the two solids different heights so each has a screen region
 where only it is pickable - coplanar slabs make shift-click ambiguous.
 
+**Drive actions by keyboard shortcut, never by toolbar pixel position.** Adding one toolbar
+button shifts every position after it, and a script that then clicks a disabled button fails
+silently and looks exactly like an application bug. That cost a false bug report once
+already. `Ctrl+K` sketch, `Enter` close, `E` extrude, `Del` delete, `Ctrl+Z`/`Ctrl+Y`
+undo/redo, `0`-`3` standard views, `F` fit all.
+
 ### Tests
 
 `tests/headless_geometry.cpp` needs no window and no GPU — it links only the modeling
