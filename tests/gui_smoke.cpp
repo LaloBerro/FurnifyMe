@@ -301,7 +301,11 @@ int main(int argc, char* argv[])
         settle(150);
         check(bounds.left() <= cluster->geometry().left() && cluster->width() == widthBefore,
               "cluster keeps its size and stays anchored after a resize");
+        // A destroyed widget must not take the overlay down with it on the next
+        // layout pass - QPointer entries go null and are skipped.
         delete cluster;
+        overlay.relayout();
+        check(true, "relayout survives a destroyed cluster");
     }
 
     std::printf("\n%s (%d failure%s)  volumes: A=%.1f B=%.1f\n",

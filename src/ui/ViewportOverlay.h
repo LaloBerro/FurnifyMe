@@ -3,6 +3,7 @@
 // itself: the clusters are direct children of the viewport, which is the
 // arrangement verified to composite correctly over OCCT's OpenGL surface.
 #include <QObject>
+#include <QPointer>
 
 #include <vector>
 
@@ -24,7 +25,7 @@ protected:
 
 private:
     struct Entry {
-        QWidget* widget;
+        QPointer<QWidget> widget;
         Anchor anchor;
     };
 

@@ -43,6 +43,10 @@ void ViewportOverlay::relayout()
     int rightCenterY = 0;
 
     for (const Entry& entry : myEntries) {
+        if (!entry.widget) continue;
+        // Size every widget before measuring: the centring sums below are wrong
+        // if a widget is still at its default size on first layout.
+        entry.widget->adjustSize();
         if (entry.anchor == Anchor::LeftCenter)  leftCenterY += entry.widget->height() + kGap;
         if (entry.anchor == Anchor::RightCenter) rightCenterY += entry.widget->height() + kGap;
     }
@@ -50,34 +54,35 @@ void ViewportOverlay::relayout()
     int rightCursor = (h - (rightCenterY - kGap)) / 2;
 
     for (const Entry& entry : myEntries) {
-        QWidget* cluster = entry.widget;
-        cluster->adjustSize();
-        const int cw = cluster->width();
-        const int ch = cluster->height();
+        if (!entry.widget) continue;   // the widget was destroyed; nothing to place
+        QWidget* placed = entry.widget;
+        placed->adjustSize();
+        const int cw = placed->width();
+        const int ch = placed->height();
 
         switch (entry.anchor) {
             case Anchor::TopLeft:
-                cluster->move(kMargin, topLeftY);
+                placed->move(kMargin, topLeftY);
                 topLeftY += ch + kGap;
                 break;
             case Anchor::LeftCenter:
-                cluster->move(kMargin, leftCursor);
+                placed->move(kMargin, leftCursor);
                 leftCursor += ch + kGap;
                 break;
             case Anchor::BottomLeft:
                 bottomLeftY -= ch;
-                cluster->move(kMargin, bottomLeftY);
+                placed->move(kMargin, bottomLeftY);
                 bottomLeftY -= kGap;
                 break;
             case Anchor::TopRight:
-                cluster->move(w - cw - kMargin, topRightY);
+                placed->move(w - cw - kMargin, topRightY);
                 topRightY += ch + kGap;
                 break;
             case Anchor::RightCenter:
-                cluster->move(w - cw - kMargin, rightCursor);
+                placed->move(w - cw - kMargin, rightCursor);
                 rightCursor += ch + kGap;
                 break;
         }
-        cluster->raise();
+        placed->raise();
     }
 }
