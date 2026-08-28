@@ -21,6 +21,7 @@
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
 #include "SketchController.h"
+#include "AxisGizmo.h"
 #include "Theme.h"
 #include "ToolChip.h"
 #include "ToolCluster.h"
@@ -203,6 +204,37 @@ int main(int argc, char* argv[])
         settle(200);
         check(std::fabs(view->camera().state().azimuthDeg - (-45.0)) < 1e-3,
               "camera restored to the startup pose for the rest of the suite");
+    }
+
+    // --- axis gizmo -----------------------------------------------------------
+    {
+        AxisGizmo* gizmo = window.findChild<AxisGizmo*>();
+        check(gizmo != nullptr, "the viewport has an axis gizmo");
+        if (gizmo) {
+            // Clicking the +Z cone looks down from above.
+            clickAt(gizmo, gizmo->tipCenter(2, true));
+            settle(150);
+            check(std::fabs(view->camera().state().elevationDeg - 88.0) < 1e-3,
+                  "clicking the +Z cone goes to Top");
+            check(gizmo->labelText().contains(QStringLiteral("Top")),
+                  "the label reads Top when aligned");
+
+            // Clicking the -Y ball views from behind.
+            clickAt(gizmo, gizmo->tipCenter(1, false));
+            settle(150);
+            check(std::fabs(std::fabs(view->camera().state().azimuthDeg) - 180.0) < 1e-3 &&
+                  std::fabs(view->camera().state().elevationDeg) < 1e-3,
+                  "clicking the -Y ball goes to Back");
+
+            // Clicking the label chip returns home to the axonometric view.
+            clickAt(gizmo, gizmo->labelCenter());
+            settle(150);
+            check(std::fabs(view->camera().state().azimuthDeg - (-45.0)) < 1e-3 &&
+                  std::fabs(view->camera().state().elevationDeg - 30.0) < 1e-3,
+                  "clicking the label returns to the axonometric view");
+            check(gizmo->labelText().contains(QStringLiteral("Persp")),
+                  "the label reads Persp when not axis-aligned");
+        }
     }
 
     // --- above-horizon clicks are rejected, not mirrored behind the eye -------

@@ -3,6 +3,7 @@
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
 
+#include "AxisGizmo.h"
 #include "IconSet.h"
 #include "ItemsPanel.h"
 #include "Theme.h"
@@ -258,7 +259,10 @@ void MainWindow::buildOverlay()
         {myFitAction,         IconSet::Glyph::Fit},
     });
 
-    // Static unit readout under the view cube. We have no unit system; this
+    // The orientation gizmo, then the unit readout beneath it.
+    myOverlay->addWidget(new AxisGizmo(myView, myView), ViewportOverlay::Anchor::TopRight);
+
+    // Static unit readout under the axis gizmo. We have no unit system; this
     // states the one the whole app assumes rather than pretending to offer a
     // choice.
     auto* units = new QLabel(tr("mm"), myView);
