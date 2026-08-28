@@ -303,6 +303,21 @@ void OcctViewWidget::clearSelection()
     emit selectionChanged();
 }
 
+void OcctViewWidget::setSelectedSolids(const std::vector<int>& ids)
+{
+    if (myContext.IsNull()) return;
+
+    myContext->ClearSelected(Standard_False);
+    for (int id : ids) {
+        const auto it = mySolids.find(id);
+        if (it == mySolids.end()) continue;
+        if (!myContext->IsDisplayed(it->second)) continue;   // never select the hidden
+        myContext->AddOrRemoveSelected(it->second, Standard_False);
+    }
+    myContext->UpdateCurrentViewer();
+    emit selectionChanged();
+}
+
 bool OcctViewWidget::saveSnapshot(const QString& path)
 {
     if (myView.IsNull()) return false;

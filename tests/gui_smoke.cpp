@@ -14,6 +14,7 @@
 //
 #include "DocumentModel.h"
 #include "IconSet.h"
+#include "ItemsPanel.h"
 #include "MainWindow.h"
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
@@ -143,6 +144,10 @@ int main(int argc, char* argv[])
 
     check(window.extrudePendingFace(10.0), "extrude reports success");
     check(window.document().count() == 1, "one solid in the document");
+
+    // --- items panel ----------------------------------------------------------
+    check(window.itemsPanel() != nullptr, "the window has an items panel");
+    check(window.itemsPanel()->rowCount() == 1, "panel shows one row for one solid");
     settle(300);
 
     const double volumeA = ModelingOps::volume(window.document().solids().front().shape);
@@ -179,6 +184,7 @@ int main(int argc, char* argv[])
     // --- delete / undo / redo through the real actions -----------------------
     trigger(window, QStringLiteral("Delete Selected"));
     check(window.document().count() == 0, "Delete removes the solid");
+    check(window.itemsPanel()->rowCount() == 0, "panel empties when the solid is deleted");
 
     trigger(window, QStringLiteral("Undo"));
     check(window.document().count() == 1, "Undo brings it back");
@@ -196,14 +202,37 @@ int main(int argc, char* argv[])
     trigger(window, QStringLiteral("Finish Sketch"));
     check(window.extrudePendingFace(40.0), "second extrude reports success");
     check(window.document().count() == 2, "two solids in the document");
+    check(window.itemsPanel()->rowCount() == 2, "panel tracks the second solid");
+
+    {
+        const int firstId = window.document().solids().front().id;
+        view->setSelectedSolids({firstId});
+        settle(150);
+        check(view->selectedSolidIds().size() == 1,
+              "setSelectedSolids selects exactly the requested solid");
+        check(view->selectedSolidIds().front() == firstId,
+              "and it is the one that was asked for");
+
+        // A hidden solid must never become selected behind the user's back.
+        view->clearSelection();
+        view->setSolidVisible(firstId, false);
+        view->setSelectedSolids({firstId});
+        settle(150);
+        check(view->selectedSolidIds().empty(), "a hidden solid cannot be selected");
+        view->setSolidVisible(firstId, true);
+    }
+
     settle(300);
 
     const double volumeB = ModelingOps::volume(window.document().solids().back().shape);
     view->saveSnapshot(outDir + "/g2-two-solids.png");
 
     // --- select two and cut ---------------------------------------------------
+    // Fractions re-tuned for the narrower viewport once the items panel claims
+    // its share of the window (previously 0.30/0.70, which grazed the first
+    // solid's bottom edge once fitAll framed it against the panel-reduced width).
     view->clearSelection();
-    clickAt(view, QPointF(view->width() * 0.30, view->height() * 0.70));
+    clickAt(view, QPointF(view->width() * 0.35, view->height() * 0.50));
     check(view->selectedSolidIds().size() == 1, "first solid picked");
 
     clickAt(view, QPointF(view->width() * 0.68, view->height() * 0.40), Qt::ShiftModifier);

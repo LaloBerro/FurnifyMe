@@ -59,6 +59,10 @@ public:
     // hit several faces of one solid).
     std::vector<int> selectedSolidIds() const;
     void clearSelection();
+    // Replaces the selection with exactly these solids. Refuses to select a
+    // hidden solid - showing it again later must never silently resurrect a
+    // selection the user did not make.
+    void setSelectedSolids(const std::vector<int>& ids);
 
     // Renders the viewport straight to an image file. Independent of what is on
     // screen or on top of the window, unlike a screen grab.

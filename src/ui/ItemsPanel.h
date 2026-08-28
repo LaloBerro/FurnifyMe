@@ -1,0 +1,39 @@
+#pragma once
+// Lists the document's solids with a visibility toggle each. Reads the document
+// rather than owning it, and is rebuilt when MainWindow announces a change -
+// DocumentModel stays free of Qt and cannot emit signals of its own.
+#include <QWidget>
+
+#include <vector>
+
+class DocumentModel;
+class OcctViewWidget;
+class QVBoxLayout;
+
+class ItemsPanel : public QWidget {
+    Q_OBJECT
+
+public:
+    ItemsPanel(const DocumentModel* document, OcctViewWidget* view, QWidget* parent = nullptr);
+
+    void refresh();
+    int rowCount() const { return myRowCount; }
+
+    // Highlights the rows for these solids. Called when the viewport selection
+    // changes, so the two views of the document never disagree.
+    void showSelection(const std::vector<int>& ids);
+
+signals:
+    void solidActivated(int id);
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override;
+
+private:
+    const DocumentModel* myDocument = nullptr;
+    OcctViewWidget* myView = nullptr;
+    QVBoxLayout* myRows = nullptr;
+    int myRowCount = 0;
+    std::vector<QWidget*> myRowWidgets;   // parallel to the document's solids
+    std::vector<int> myRowIds;
+};

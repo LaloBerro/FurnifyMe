@@ -4,6 +4,7 @@
 #include "OcctViewWidget.h"
 
 #include "IconSet.h"
+#include "ItemsPanel.h"
 #include "Theme.h"
 #include "ToolChip.h"
 #include "ToolCluster.h"
@@ -16,6 +17,7 @@
 #include <QLabel>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QSplitter>
 #include <QStatusBar>
 
 #include <algorithm>
@@ -27,7 +29,15 @@ MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
 {
     myView = new OcctViewWidget(this);
-    setCentralWidget(myView);
+
+    myItemsPanel = new ItemsPanel(&myDocument, myView, this);
+
+    auto* splitter = new QSplitter(Qt::Horizontal, this);
+    splitter->addWidget(myItemsPanel);
+    splitter->addWidget(myView);
+    splitter->setStretchFactor(1, 1);
+    splitter->setSizes({240, 1000});
+    setCentralWidget(splitter);
 
     connect(myView, &OcctViewWidget::sketchPointPicked, this, &MainWindow::onSketchPointPicked);
     connect(myView, &OcctViewWidget::sketchCursorMoved, this, &MainWindow::onSketchCursorMoved);
@@ -36,6 +46,18 @@ MainWindow::MainWindow(QWidget* parent)
     buildActions();
     buildMenusAndToolbar();
     buildOverlay();
+
+    connect(this, &MainWindow::documentChanged, myItemsPanel, &ItemsPanel::refresh);
+
+    // Selection syncs both ways.
+    connect(myItemsPanel, &ItemsPanel::solidActivated, this,
+            [this](int id) { myView->setSelectedSolids({id}); });
+    connect(myView, &OcctViewWidget::selectionChanged, this,
+            [this] { myItemsPanel->showSelection(myView->selectedSolidIds()); });
+
+    // The Items chip and menu entry collapse the panel.
+    connect(myItemsPanelAction, &QAction::toggled, myItemsPanel, &QWidget::setVisible);
+
     updateActions();
 
     // Permanent widget so it survives transient showMessage() calls: the left
@@ -289,6 +311,7 @@ void MainWindow::onDeleteSelected()
     }
 
     updateActions();
+    emit documentChanged();
     statusBar()->showMessage(tr("Deleted %1 solid(s).").arg(ids.size()));
 }
 
@@ -299,6 +322,7 @@ void MainWindow::onUndo()
     myView->clearSelection();
     resyncView();
     updateActions();
+    emit documentChanged();
     statusBar()->showMessage(tr("Undone. %1 solid(s) in the document.").arg(myDocument.count()));
 }
 
@@ -309,6 +333,7 @@ void MainWindow::onRedo()
     myView->clearSelection();
     resyncView();
     updateActions();
+    emit documentChanged();
     statusBar()->showMessage(tr("Redone. %1 solid(s) in the document.").arg(myDocument.count()));
 }
 
@@ -436,6 +461,7 @@ bool MainWindow::extrudePendingFace(double height)
     myPendingFace.Nullify();
     mySketch.reset();
     updateActions();
+    emit documentChanged();
     statusBar()->showMessage(tr("Solid #%1 created (volume %2 mm3).")
                                  .arg(id)
                                  .arg(ModelingOps::volume(solid), 0, 'f', 2));
@@ -492,6 +518,7 @@ bool MainWindow::applyBooleanToSelection(int kind)
     myView->displaySolid(id, result.shape);
 
     updateActions();
+    emit documentChanged();
     statusBar()->showMessage(tr("Solid #%1 created from #%2 and #%3 (volume %4 mm3).")
                                  .arg(id).arg(ids[0]).arg(ids[1])
                                  .arg(ModelingOps::volume(result.shape), 0, 'f', 2));
