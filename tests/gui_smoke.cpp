@@ -268,6 +268,13 @@ int main(int argc, char* argv[])
         probe.setCheckable(true);
         probe.setChecked(true);
         check(chip.isChecked(), "chip mirrors the checked state");
+
+        // The action is the only thing that may change the checked state: a
+        // click that does not reach the action must leave the chip alone.
+        QObject::disconnect(&probe, nullptr, nullptr, nullptr);
+        const bool before = chip.isChecked();
+        chip.click();
+        check(chip.isChecked() == before, "a chip never toggles its own checked state");
     }
 
     std::printf("\n%s (%d failure%s)  volumes: A=%.1f B=%.1f\n",

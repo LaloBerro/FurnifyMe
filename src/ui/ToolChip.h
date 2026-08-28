@@ -21,6 +21,9 @@ protected:
     void paintEvent(QPaintEvent* event) override;
     void enterEvent(QEnterEvent* event) override;
     void leaveEvent(QEvent* event) override;
+    // Qt would otherwise flip our checked state locally, before the action has
+    // been triggered - the chip must never be the source of truth for it.
+    void nextCheckState() override {}
 
 private:
     void syncFromAction();
