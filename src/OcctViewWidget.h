@@ -73,6 +73,9 @@ public:
     bool saveSnapshot(const QString& path);
 
     void fitAll();
+    void animateTo(const CameraState& goal);
+    void setAnimationsEnabled(bool enabled) { myAnimationsEnabled = enabled; }
+    bool animationsEnabled() const { return myAnimationsEnabled; }
     void setViewAxonometric();
     // Sketching happens on the XY plane, so a true top view makes clicking
     // accurate in a way the angled default cannot.
@@ -107,6 +110,7 @@ protected:
     void mouseReleaseEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
+    void mouseDoubleClickEvent(QMouseEvent* event) override;
 
 private:
     void initializeViewer();
@@ -115,6 +119,7 @@ private:
     void applySelectionMode(const Handle(AIS_Shape)& shape);
     void applyCameraState();
     void syncCameraFromView();
+    void stopCameraAnimation();
 
     Handle(V3d_Viewer) myViewer;
     Handle(V3d_View) myView;
@@ -138,4 +143,7 @@ private:
     QPoint myLastPos;
     bool myOrbiting = false;
     bool myPanningDrag = false;
+
+    class QVariantAnimation* myCameraAnimation = nullptr;
+    bool myAnimationsEnabled = true;
 };

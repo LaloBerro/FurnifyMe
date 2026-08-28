@@ -34,9 +34,11 @@
   #include <Xw_Window.hxx>
 #endif
 
+#include <QEasingCurve>
 #include <QMouseEvent>
 #include <QPaintEvent>
 #include <QResizeEvent>
+#include <QVariantAnimation>
 #include <QWheelEvent>
 
 #include <algorithm>
@@ -426,40 +428,86 @@ void OcctViewWidget::fitAll()
         box.Add(b);
     }
     if (box.IsVoid()) box.Update(-250.0, -250.0, 0.0, 250.0, 250.0, 10.0);
-    myCamera.frame(box, kFovyDeg);
-    applyCameraState();
+    CameraController scratch = myCamera;
+    scratch.frame(box, kFovyDeg);
+    animateTo(scratch.state());
+}
+
+void OcctViewWidget::stopCameraAnimation()
+{
+    if (myCameraAnimation) {
+        myCameraAnimation->stop();   // leaves the camera wherever it got to
+        myCameraAnimation->deleteLater();
+        myCameraAnimation = nullptr;
+    }
+}
+
+void OcctViewWidget::animateTo(const CameraState& goal)
+{
+    stopCameraAnimation();
+    if (!myAnimationsEnabled) {
+        myCamera.setState(goal);
+        applyCameraState();
+        return;
+    }
+
+    const CameraState from = myCamera.state();
+    // Interpolate azimuth along the shortest arc so 350 -> 10 turns 20 degrees.
+    const double azDelta = CameraController::shortestArcDelta(from.azimuthDeg, goal.azimuthDeg);
+
+    auto* animation = new QVariantAnimation(this);
+    animation->setDuration(250);
+    animation->setEasingCurve(QEasingCurve::OutCubic);
+    animation->setStartValue(0.0);
+    animation->setEndValue(1.0);
+    connect(animation, &QVariantAnimation::valueChanged, this,
+            [this, from, goal, azDelta](const QVariant& value) {
+                const double t = value.toDouble();
+                CameraState s;
+                s.azimuthDeg = from.azimuthDeg + azDelta * t;
+                s.elevationDeg = from.elevationDeg + (goal.elevationDeg - from.elevationDeg) * t;
+                s.distance = from.distance + (goal.distance - from.distance) * t;
+                s.target = gp_Pnt(from.target.X() + (goal.target.X() - from.target.X()) * t,
+                                  from.target.Y() + (goal.target.Y() - from.target.Y()) * t,
+                                  from.target.Z() + (goal.target.Z() - from.target.Z()) * t);
+                myCamera.setState(s);
+                applyCameraState();
+            });
+    connect(animation, &QVariantAnimation::finished, this, [this, goal] {
+        myCamera.setState(goal);
+        applyCameraState();
+        myCameraAnimation = nullptr;
+    });
+    myCameraAnimation = animation;
+    animation->start(QAbstractAnimation::DeleteWhenStopped);
 }
 
 void OcctViewWidget::setViewAxonometric()
 {
     CameraState s = myCamera.state();
     s.azimuthDeg = -45.0; s.elevationDeg = 30.0;
-    myCamera.setState(s);
-    applyCameraState();
+    animateTo(s);
 }
 
 void OcctViewWidget::setViewTop()
 {
     CameraState s = myCamera.state();
     s.elevationDeg = 89.0;   // inside the clamp: a true 90 makes azimuth degenerate
-    myCamera.setState(s);
-    applyCameraState();
+    animateTo(s);
 }
 
 void OcctViewWidget::setViewFront()
 {
     CameraState s = myCamera.state();
     s.azimuthDeg = 0.0; s.elevationDeg = 0.0;
-    myCamera.setState(s);
-    applyCameraState();
+    animateTo(s);
 }
 
 void OcctViewWidget::setViewRight()
 {
     CameraState s = myCamera.state();
     s.azimuthDeg = -90.0; s.elevationDeg = 0.0;
-    myCamera.setState(s);
-    applyCameraState();
+    animateTo(s);
 }
 
 void OcctViewWidget::setViewCubeVisible(bool visible)
@@ -506,6 +554,7 @@ bool OcctViewWidget::isSolidWireframe(int id) const
 
 void OcctViewWidget::mousePressEvent(QMouseEvent* event)
 {
+    stopCameraAnimation();
     initializeViewer();
     myLastPos = event->position().toPoint();
 
@@ -603,4 +652,24 @@ void OcctViewWidget::wheelEvent(QWheelEvent* event)
     if (havePivot) myCamera.zoomToward(pivot, factor);
     else           myCamera.zoom(factor);
     applyCameraState();
+}
+
+void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
+{
+    if (event->button() != Qt::LeftButton || mySketchMode || myContext.IsNull()) return;
+
+    const QPoint pos = event->position().toPoint();
+    myContext->MoveTo(pos.x(), pos.y(), myView, Standard_False);
+    if (!myContext->HasDetected()) return;
+
+    const Handle(AIS_InteractiveObject) hit = myContext->DetectedInteractive();
+    for (const auto& entry : mySolids) {
+        if (entry.second.get() != hit.get()) continue;
+        Bnd_Box box;
+        BRepBndLib::Add(entry.second->Shape(), box);
+        CameraController scratch = myCamera;
+        scratch.frame(box, kFovyDeg);
+        animateTo(scratch.state());
+        return;
+    }
 }

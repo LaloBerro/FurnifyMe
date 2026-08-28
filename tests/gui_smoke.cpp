@@ -150,6 +150,7 @@ int main(int argc, char* argv[])
     window.move(40, 40);
     window.show();
     settle(900);
+    window.view()->setAnimationsEnabled(false);   // deterministic camera for the suite
 
     OcctViewWidget* view = window.view();
     check(view != nullptr && view->width() > 100, "viewport has a usable size");
@@ -504,6 +505,27 @@ int main(int argc, char* argv[])
         check(std::fabs(view->camera().state().azimuthDeg - (-45.0)) < 1e-3 &&
               std::fabs(view->camera().state().elevationDeg - 30.0) < 1e-3,
               "Axonometric returns to the startup angles");
+    }
+
+    // --- animated transitions -------------------------------------------------
+    {
+        view->setAnimationsEnabled(true);
+        CameraState goal = view->camera().state();
+        goal.azimuthDeg += 90.0;
+        const double azBefore = view->camera().state().azimuthDeg;
+        view->animateTo(goal);
+        // Mid-flight (a few event-loop turns in), the camera is between the
+        // endpoints - that is what distinguishes animation from teleporting.
+        settle(80);
+        const double azMid = view->camera().state().azimuthDeg;
+        check(std::fabs(azMid - azBefore) > 1.0 &&
+              std::fabs(azMid - goal.azimuthDeg) > 1.0,
+              "animateTo passes through intermediate states");
+        settle(500);
+        check(std::fabs(view->camera().state().azimuthDeg - goal.azimuthDeg) < 1e-3,
+              "animateTo settles exactly on the goal");
+        view->setAnimationsEnabled(false);
+        check(true, "animations re-disabled for the rest of the suite");
     }
 
     std::printf("\n%s (%d failure%s)  volumes: A=%.1f B=%.1f\n",
