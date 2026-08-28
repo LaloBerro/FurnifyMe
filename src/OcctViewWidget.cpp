@@ -23,6 +23,7 @@
 #include <Prs3d_TypeOfHighlight.hxx>
 #include <Quantity_Color.hxx>
 #include <Quantity_NameOfColor.hxx>
+#include <StdSelect_ViewerSelector3d.hxx>
 #include <V3d_TypeOfVisualization.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Lin.hxx>
@@ -295,6 +296,29 @@ bool OcctViewWidget::pointOnSketchPlane(int px, int py, gp_Pnt& out) const
     return true;
 }
 
+bool OcctViewWidget::pickWorldPoint(int px, int py, gp_Pnt& out) const
+{
+    // Prefer a real hit on the model: MoveTo + detection gives the picked point
+    // on the surface under the cursor.
+    if (!myContext.IsNull() && !myView.IsNull()) {
+        myContext->MoveTo(px, py, myView, Standard_False);
+        if (myContext->HasDetected()) {
+            const Handle(StdSelect_ViewerSelector3d) selector = myContext->MainSelector();
+            if (selector->NbPicked() > 0) {
+                out = selector->PickedPoint(1);
+                return true;
+            }
+        }
+    }
+    // Otherwise the ground plane, reusing the sketch unprojection.
+    if (myView.IsNull()) return false;
+    Standard_Real x, y, z, vx, vy, vz;
+    myView->ConvertWithProj(px, py, x, y, z, vx, vy, vz);
+    const gp_Lin ray(gp_Pnt(x, y, z), gp_Dir(vx, vy, vz));
+    const gp_Pln ground(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
+    return SketchController::intersectRayWithPlane(ray, ground, out);
+}
+
 std::vector<int> OcctViewWidget::selectedSolidIds() const
 {
     std::vector<int> ids;
@@ -485,18 +509,26 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
     initializeViewer();
     myLastPos = event->position().toPoint();
 
-    if (event->button() == Qt::RightButton) {
-        myRotating = true;
-        if (!myView.IsNull()) myView->StartRotation(myLastPos.x(), myLastPos.y());
-    } else if (event->button() == Qt::MiddleButton) {
-        myPanning = true;
+    if (event->button() == Qt::MiddleButton) {
+        if (event->modifiers() & Qt::ShiftModifier) {
+            myPanningDrag = true;
+        } else {
+            myOrbiting = true;
+            // Orbit around what is under the cursor; fall back to the current
+            // target when the pick finds nothing (looking at empty sky).
+            gp_Pnt pivot;
+            if (pickWorldPoint(myLastPos.x(), myLastPos.y(), pivot)) {
+                myCamera.setPivot(pivot);
+                applyCameraState();
+            }
+        }
     }
+    // Right button: deliberately unbound - reserved for a context menu.
 }
 
 void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
 {
-    if (event->button() == Qt::RightButton)       myRotating = false;
-    else if (event->button() == Qt::MiddleButton) myPanning = false;
+    if (event->button() == Qt::MiddleButton) { myOrbiting = false; myPanningDrag = false; }
 
     if (event->button() != Qt::LeftButton || myContext.IsNull()) return;
 
@@ -525,10 +557,21 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
 
     const QPoint pos = event->position().toPoint();
 
-    if (myRotating) {
-        myView->Rotation(pos.x(), pos.y());
-    } else if (myPanning) {
-        myView->Pan(pos.x() - myLastPos.x(), -(pos.y() - myLastPos.y()));
+    if (myOrbiting) {
+        const QPoint delta = pos - myLastPos;
+        // Dragging right swings the scene right: azimuth decreases; dragging up
+        // raises the eye. 0.4 deg/px and 0.3 deg/px feel close to Fusion.
+        myCamera.orbit(-delta.x() * 0.4, delta.y() * 0.3);
+        applyCameraState();
+    } else if (myPanningDrag) {
+        const QPoint delta = pos - myLastPos;
+        // World units per pixel at target depth, for a perspective camera.
+        const double worldPerPixel =
+            2.0 * myCamera.state().distance *
+            std::tan(0.5 * kFovyDeg * 3.14159265358979323846 / 180.0) /
+            std::max(1, height());
+        myCamera.pan(-delta.x() * worldPerPixel, delta.y() * worldPerPixel);
+        applyCameraState();
     } else if (mySketchMode) {
         // Report where the next point would land, so the rubber band and the
         // coordinate readout track the cursor before anything is committed.
@@ -551,13 +594,13 @@ void OcctViewWidget::wheelEvent(QWheelEvent* event)
     if (delta == 0) return;
 
     const QPoint pos = event->position().toPoint();
+    gp_Pnt pivot;
+    const bool havePivot = pickWorldPoint(pos.x(), pos.y(), pivot);
 
-    // Proportional to the wheel delta rather than a fixed jump, so trackpads and
-    // high-resolution wheels behave. One notch is 120 units.
-    int step = static_cast<int>(std::lround(delta / 120.0 * 25.0));
-    if (step == 0) step = delta > 0 ? 1 : -1;
-
-    myView->StartZoomAtPoint(pos.x(), pos.y());
-    myView->ZoomAtPoint(pos.x(), pos.y(), pos.x() + step, pos.y());
-    myView->Redraw();
+    // One wheel notch (delta 120) zooms ~12%; exponential so every notch feels
+    // the same at any scale.
+    const double factor = std::exp(-double(delta) / 120.0 * 0.12);
+    if (havePivot) myCamera.zoomToward(pivot, factor);
+    else           myCamera.zoom(factor);
+    applyCameraState();
 }

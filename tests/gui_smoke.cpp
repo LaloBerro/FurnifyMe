@@ -72,6 +72,26 @@ void clickAt(QWidget* target, const QPointF& pos,
     settle(80);
 }
 
+// Middle-button drag delivered as press/move/release, for camera tests.
+void dragMMB(QWidget* target, const QPointF& from, const QPointF& to,
+             Qt::KeyboardModifiers mods = Qt::NoModifier)
+{
+    QMouseEvent press(QEvent::MouseButtonPress, from, target->mapToGlobal(from),
+                      Qt::MiddleButton, Qt::MiddleButton, mods);
+    QCoreApplication::sendEvent(target, &press);
+    const int steps = 8;
+    for (int i = 1; i <= steps; ++i) {
+        const QPointF p = from + (to - from) * (double(i) / steps);
+        QMouseEvent move(QEvent::MouseMove, p, target->mapToGlobal(p),
+                         Qt::NoButton, Qt::MiddleButton, mods);
+        QCoreApplication::sendEvent(target, &move);
+    }
+    QMouseEvent release(QEvent::MouseButtonRelease, to, target->mapToGlobal(to),
+                        Qt::MiddleButton, Qt::NoButton, mods);
+    QCoreApplication::sendEvent(target, &release);
+    settle(120);
+}
+
 // Actions are looked up by their visible text, minus the mnemonic marker.
 QAction* action(MainWindow& window, const QString& label)
 {
@@ -140,6 +160,40 @@ int main(int argc, char* argv[])
         check(std::fabs(cam.azimuthDeg - (-45.0)) < 1e-6, "startup azimuth is -45");
         check(std::fabs(cam.elevationDeg - 30.0) < 1e-6, "startup elevation is +30");
         check(std::fabs(cam.distance - 700.0) < 1e-6, "startup distance is 700mm");
+    }
+
+    // --- turntable input ------------------------------------------------------
+    {
+        const double az0 = view->camera().state().azimuthDeg;
+        const gp_Dir up0 = view->camera().upVector();
+        dragMMB(view, QPointF(view->width() * 0.5, view->height() * 0.5),
+                      QPointF(view->width() * 0.5 + 100.0, view->height() * 0.5));
+        check(std::fabs(view->camera().state().azimuthDeg - az0) > 5.0,
+              "a horizontal MMB drag orbits azimuth");
+        check(view->camera().upVector().Z() > 0.0 && up0.Z() > 0.0,
+              "orbiting never rolls: up keeps its +Z component");
+
+        const gp_Pnt target0 = view->camera().state().target;
+        dragMMB(view, QPointF(view->width() * 0.5, view->height() * 0.5),
+                      QPointF(view->width() * 0.5 + 80.0, view->height() * 0.5 + 40.0),
+                Qt::ShiftModifier);
+        check(view->camera().state().target.Distance(target0) > 1.0,
+              "Shift+MMB pans the target");
+
+        // Elevation clamp holds through input: a huge vertical drag stops at 88.
+        dragMMB(view, QPointF(view->width() * 0.5, view->height() * 0.5),
+                      QPointF(view->width() * 0.5, view->height() * 0.5 + 2000.0));
+        check(view->camera().state().elevationDeg >= -88.0 - 1e-6 &&
+              view->camera().state().elevationDeg <= 88.0 + 1e-6,
+              "elevation stays inside the clamp under wild input");
+
+        // Restore the exact startup pose: every later check clicks at fractions
+        // tuned for it, and this block has dragged the camera all over the sky.
+        view->camera().setState(CameraState{});
+        trigger(window, QStringLiteral("Axonometric"));
+        settle(200);
+        check(std::fabs(view->camera().state().azimuthDeg - (-45.0)) < 1e-3,
+              "camera restored to the startup pose for the rest of the suite");
     }
 
     // --- bundled font ---------------------------------------------------------

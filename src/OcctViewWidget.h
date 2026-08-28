@@ -111,6 +111,7 @@ protected:
 private:
     void initializeViewer();
     bool pointOnSketchPlane(int px, int py, gp_Pnt& out) const;
+    bool pickWorldPoint(int px, int py, gp_Pnt& out) const;
     void applySelectionMode(const Handle(AIS_Shape)& shape);
     void applyCameraState();
     void syncCameraFromView();
@@ -135,6 +136,6 @@ private:
     double mySnapStep = 10.0;      // matches the drawn grid
 
     QPoint myLastPos;
-    bool myRotating = false;
-    bool myPanning = false;
+    bool myOrbiting = false;
+    bool myPanningDrag = false;
 };
