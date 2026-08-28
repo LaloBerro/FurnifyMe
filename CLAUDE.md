@@ -117,6 +117,11 @@ The exported topology therefore matches what is on screen.
 - **Anything at all on Linux** - never configured, built or run. This is the largest
   remaining gap in Milestone 1, since both platforms are first-class.
 
+**Both are parked by the user's decision (2026-08-28): Windows-only focus for now.** Neither
+FreeCAD nor WSL is installed and neither should be installed without being asked for. Do not
+re-raise these as blockers; keep them listed as unverified, and treat "Milestone 1 complete"
+as a claim that cannot honestly be made until they are done.
+
 ### A warning about automating this GUI
 
 Synthetic-input testing on this machine is workable but fragile, and cost far more time than
