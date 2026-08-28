@@ -173,6 +173,41 @@ void OcctViewWidget::clearSolids()
     myContext->UpdateCurrentViewer();
 }
 
+void OcctViewWidget::setSolidVisible(int id, bool visible)
+{
+    const auto it = mySolids.find(id);
+    if (it == mySolids.end() || myContext.IsNull()) return;
+
+    if (visible) {
+        myContext->Display(it->second, Standard_False);
+        applySelectionMode(it->second);
+
+        // Restore selection if it was selected before hiding.
+        if (mySolidsWereSelected.count(id) > 0) {
+            myContext->AddOrRemoveSelected(it->second, Standard_False);
+            mySolidsWereSelected.erase(id);
+        }
+    } else {
+        // Track if it was selected before hiding.
+        if (myContext->IsSelected(it->second)) {
+            mySolidsWereSelected.insert(id);
+        }
+
+        // Erase also drops it from the selection, which is what we want: acting
+        // on something you cannot see would be a nasty surprise.
+        myContext->Erase(it->second, Standard_False);
+    }
+    myContext->UpdateCurrentViewer();
+    emit selectionChanged();
+}
+
+bool OcctViewWidget::isSolidVisible(int id) const
+{
+    const auto it = mySolids.find(id);
+    if (it == mySolids.end() || myContext.IsNull()) return false;
+    return myContext->IsDisplayed(it->second);
+}
+
 void OcctViewWidget::setPreview(const TopoDS_Shape& shape, bool shaded)
 {
     initializeViewer();

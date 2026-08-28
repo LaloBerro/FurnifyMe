@@ -34,6 +34,11 @@ public:
     void removeSolid(int id);
     void clearSolids();
 
+    // Presentation state, not document state: it is deliberately not captured by
+    // undo, because hiding something is not an edit.
+    void setSolidVisible(int id, bool visible);
+    bool isSolidVisible(int id) const;
+
     // Temporary, non-selectable feedback shape (the in-progress sketch).
     void setPreview(const TopoDS_Shape& shape, bool shaded = false);
     void clearPreview();
@@ -93,6 +98,7 @@ private:
     Handle(AIS_Shape) myPreview;
 
     std::map<int, Handle(AIS_Shape)> mySolids;
+    std::set<int> mySolidsWereSelected;  // Track solids that were selected before hiding
 
     SelectionMode mySelectionMode = SelectionMode::Solid;
     bool myInitialized = false;

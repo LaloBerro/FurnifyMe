@@ -151,6 +151,20 @@ int main(int argc, char* argv[])
     clickAt(view, QPointF(view->width() * 0.5, view->height() * 0.5));
     check(view->selectedSolidIds().size() == 1, "clicking the solid selects exactly one");
 
+    // --- per-solid visibility -------------------------------------------------
+    {
+        const int id = window.document().solids().front().id;
+        check(view->isSolidVisible(id), "a new solid starts visible");
+
+        view->setSolidVisible(id, false);
+        check(!view->isSolidVisible(id), "hiding reports hidden");
+        check(view->selectedSolidIds().empty(), "hiding a solid drops it from the selection");
+
+        view->setSolidVisible(id, true);
+        check(view->isSolidVisible(id), "showing reports visible again");
+        check(!view->isSolidVisible(9999), "an unknown id is not visible");
+    }
+
     // --- delete / undo / redo through the real actions -----------------------
     trigger(window, QStringLiteral("Delete Selected"));
     check(window.document().count() == 0, "Delete removes the solid");
