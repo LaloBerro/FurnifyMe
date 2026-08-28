@@ -14,6 +14,9 @@ public:
 
     static double minorStepFor(double cameraDistance);
 
+    // First line position at or below -limit on the absolute grid of `step`.
+    static double firstLineAtOrBelow(double limit, double step);
+
 private:
     Handle(AIS_InteractiveContext) myContext;
     Handle(AIS_InteractiveObject) myGrid;

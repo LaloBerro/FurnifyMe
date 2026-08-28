@@ -540,6 +540,21 @@ int main(int argc, char* argv[])
         check(GridRenderer::minorStepFor(0.0) >= 1.0 &&
               GridRenderer::minorStepFor(1e9) <= 100.0,
               "extreme distances stay inside the defined levels");
+        check(GridRenderer::minorStepFor(119.9) == 1.0 &&
+              GridRenderer::minorStepFor(120.0) == 10.0,
+              "the 120mm threshold flips exactly once");
+        check(GridRenderer::minorStepFor(2499.9) == 10.0 &&
+              GridRenderer::minorStepFor(2500.0) == 100.0,
+              "the 2500mm threshold flips exactly once");
+
+        // Line positions must sit on the absolute grid regardless of band
+        // extent parity - a band edge is not in general a line position.
+        const double f1 = GridRenderer::firstLineAtOrBelow(2150.0, 100.0);
+        check(std::fmod(f1, 100.0) == 0.0 && f1 <= -2150.0 && f1 > -2350.0,
+              "band start snaps outward onto the absolute grid (odd parity)");
+        const double f2 = GridRenderer::firstLineAtOrBelow(2100.0, 100.0);
+        check(f2 == -2100.0,
+              "an already-aligned band edge is its own first line");
     }
 
     std::printf("\n%s (%d failure%s)  volumes: A=%.1f B=%.1f\n",

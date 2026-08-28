@@ -9,8 +9,6 @@
 #include <AIS_SelectionScheme.hxx>
 #include <AIS_ViewCube.hxx>
 #include <Aspect_DisplayConnection.hxx>
-#include <Aspect_GridDrawMode.hxx>
-#include <Aspect_GridType.hxx>
 #include <Aspect_TypeOfTriedronPosition.hxx>
 #include <Bnd_Box.hxx>
 #include <BRepBndLib.hxx>

@@ -70,6 +70,11 @@ double GridRenderer::minorStepFor(double cameraDistance)
     return 100.0;
 }
 
+double GridRenderer::firstLineAtOrBelow(double limit, double step)
+{
+    return std::floor(-limit / step) * step;
+}
+
 void GridRenderer::attach(const Handle(AIS_InteractiveContext)& context)
 {
     myContext = context;
@@ -122,7 +127,11 @@ void GridRenderer::rebuild(double minorStep, const gp_Pnt& center, double extent
         // Collect segments for lines whose |coordinate| lies in the band ring.
         std::vector<gp_Pnt> points;
         const double lo = extent * spec.inner, hi = extent * spec.outer;
-        for (double v = -hi; v <= hi + step * 0.5; v += step) {
+        // Positions are absolute multiples of the step, snapped outward from
+        // the band's clip range - never anchored at the band edge, which is
+        // not in general a multiple of the step.
+        const double first = firstLineAtOrBelow(hi, step);
+        for (double v = first; v <= hi + step * 0.5; v += step) {
             if (!isMajor && std::fmod(std::fabs(v) + step * 0.25, major) < step * 0.5)
                 continue;   // skip positions covered by a major line
             const double a = std::fabs(v);
