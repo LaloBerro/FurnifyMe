@@ -3,6 +3,13 @@
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
 
+#include "IconSet.h"
+#include "ItemsPanel.h"
+#include "Theme.h"
+#include "ToolChip.h"
+#include "ToolCluster.h"
+#include "ViewportOverlay.h"
+
 #include <QAction>
 #include <QActionGroup>
 #include <QFileDialog>
@@ -10,24 +17,47 @@
 #include <QLabel>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QSplitter>
 #include <QStatusBar>
-#include <QToolBar>
 
 #include <algorithm>
+#include <initializer_list>
+#include <utility>
 #include <vector>
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent)
 {
     myView = new OcctViewWidget(this);
-    setCentralWidget(myView);
+
+    myItemsPanel = new ItemsPanel(&myDocument, myView, this);
+
+    auto* splitter = new QSplitter(Qt::Horizontal, this);
+    splitter->addWidget(myItemsPanel);
+    splitter->addWidget(myView);
+    splitter->setStretchFactor(1, 1);
+    splitter->setSizes({240, 1000});
+    setCentralWidget(splitter);
 
     connect(myView, &OcctViewWidget::sketchPointPicked, this, &MainWindow::onSketchPointPicked);
     connect(myView, &OcctViewWidget::sketchCursorMoved, this, &MainWindow::onSketchCursorMoved);
     connect(myView, &OcctViewWidget::selectionChanged, this, &MainWindow::onSelectionChanged);
 
     buildActions();
-    buildMenusAndToolbar();
+    buildMenus();
+    buildOverlay();
+
+    connect(this, &MainWindow::documentChanged, myItemsPanel, &ItemsPanel::refresh);
+
+    // Selection syncs both ways.
+    connect(myItemsPanel, &ItemsPanel::solidActivated, this,
+            [this](int id) { myView->setSelectedSolids({id}); });
+    connect(myView, &OcctViewWidget::selectionChanged, this,
+            [this] { myItemsPanel->showSelection(myView->selectedSolidIds()); });
+
+    // The Items chip and menu entry collapse the panel.
+    connect(myItemsPanelAction, &QAction::toggled, myItemsPanel, &QWidget::setVisible);
+
     updateActions();
 
     // Permanent widget so it survives transient showMessage() calls: the left
@@ -103,6 +133,33 @@ void MainWindow::buildActions()
     mySnapAction->setToolTip(tr("Round sketch points to the 10mm grid"));
     connect(mySnapAction, &QAction::toggled, this, &MainWindow::onSnapToggled);
 
+    myItemsPanelAction = new QAction(tr("Items"), this);
+    myItemsPanelAction->setCheckable(true);
+    myItemsPanelAction->setChecked(true);
+    myItemsPanelAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Alt+S")));
+    myItemsPanelAction->setToolTip(tr("Show or hide the items panel (Ctrl+Alt+S)"));
+
+    myDisplayModeAction = new QAction(tr("Wireframe"), this);
+    myDisplayModeAction->setCheckable(true);
+    myDisplayModeAction->setToolTip(tr("Show solids as wireframe instead of shaded"));
+    connect(myDisplayModeAction, &QAction::toggled, this,
+            [this](bool on) { myView->setWireframe(on); });
+
+    myFitAction = new QAction(tr("&Fit All"), this);
+    myFitAction->setShortcut(QKeySequence(Qt::Key_F));
+    myFitAction->setToolTip(tr("Frame everything in the document (F)"));
+    connect(myFitAction, &QAction::triggered, myView, &OcctViewWidget::fitAll);
+
+    myScreenshotAction = new QAction(tr("Save S&creenshot..."), this);
+    myScreenshotAction->setToolTip(tr("Save the viewport as a PNG"));
+    connect(myScreenshotAction, &QAction::triggered, this, [this] {
+        const QString path = QFileDialog::getSaveFileName(this, tr("Save Screenshot"),
+                                                          QString(), tr("PNG image (*.png)"));
+        if (!path.isEmpty() && !myView->saveSnapshot(path)) {
+            QMessageBox::warning(this, tr("Screenshot"), tr("Could not write %1").arg(path));
+        }
+    });
+
     myStartSketchAction->setToolTip(tr("Draw a closed outline on the XY plane (Ctrl+K)"));
     myFinishSketchAction->setToolTip(tr("Close the outline into a face - needs 3+ points (Enter)"));
     myExtrudeAction->setToolTip(tr("Turn the closed face into a solid (E)"));
@@ -118,17 +175,11 @@ void MainWindow::buildActions()
     connect(myFaceSelectAction, &QAction::triggered, this, &MainWindow::onSelectionModeChanged);
 }
 
-void MainWindow::buildMenusAndToolbar()
+void MainWindow::buildMenus()
 {
     QMenu* fileMenu = menuBar()->addMenu(tr("&File"));
     fileMenu->addAction(myExportStepAction);
-    fileMenu->addAction(tr("Save S&creenshot..."), this, [this] {
-        const QString path = QFileDialog::getSaveFileName(this, tr("Save Screenshot"),
-                                                          QString(), tr("PNG image (*.png)"));
-        if (!path.isEmpty() && !myView->saveSnapshot(path)) {
-            QMessageBox::warning(this, tr("Screenshot"), tr("Could not write %1").arg(path));
-        }
-    });
+    fileMenu->addAction(myScreenshotAction);
     fileMenu->addSeparator();
     fileMenu->addAction(tr("E&xit"), this, &QWidget::close);
 
@@ -152,7 +203,7 @@ void MainWindow::buildMenusAndToolbar()
     modelMenu->addAction(myCommonAction);
 
     QMenu* viewMenu = menuBar()->addMenu(tr("&View"));
-    viewMenu->addAction(tr("&Fit All"), QKeySequence(Qt::Key_F), myView, &OcctViewWidget::fitAll);
+    viewMenu->addAction(myFitAction);
     viewMenu->addSeparator();
     viewMenu->addAction(tr("&Axonometric"), QKeySequence(Qt::Key_0),
                         myView, &OcctViewWidget::setViewAxonometric);
@@ -164,26 +215,60 @@ void MainWindow::buildMenusAndToolbar()
     viewMenu->addSeparator();
     viewMenu->addAction(mySolidSelectAction);
     viewMenu->addAction(myFaceSelectAction);
+    viewMenu->addAction(myItemsPanelAction);
+}
 
-    QToolBar* bar = addToolBar(tr("Main"));
-    bar->addAction(myUndoAction);
-    bar->addAction(myRedoAction);
-    bar->addSeparator();
-    bar->addAction(myStartSketchAction);
-    bar->addAction(myFinishSketchAction);
-    bar->addSeparator();
-    bar->addAction(myExtrudeAction);
-    bar->addSeparator();
-    bar->addAction(myFuseAction);
-    bar->addAction(myCutAction);
-    bar->addAction(myCommonAction);
-    bar->addSeparator();
-    bar->addAction(myDeleteAction);
-    bar->addSeparator();
-    bar->addAction(mySolidSelectAction);
-    bar->addAction(myFaceSelectAction);
-    bar->addSeparator();
-    bar->addAction(mySnapAction);
+void MainWindow::buildOverlay()
+{
+    myOverlay = new ViewportOverlay(myView);
+
+    auto cluster = [this](ViewportOverlay::Anchor anchor,
+                          std::initializer_list<std::pair<QAction*, IconSet::Glyph>> chips) {
+        auto* group = new ToolCluster(myView);
+        for (const auto& entry : chips) {
+            group->addChip(new ToolChip(entry.first, entry.second));
+        }
+        myOverlay->addWidget(group, anchor);
+    };
+
+    cluster(ViewportOverlay::Anchor::LeftCenter, {
+        {myStartSketchAction, IconSet::Glyph::Sketch},
+        {myExtrudeAction,     IconSet::Glyph::Extrude},
+        {myFuseAction,        IconSet::Glyph::Fuse},
+        {myCutAction,         IconSet::Glyph::Cut},
+        {myCommonAction,      IconSet::Glyph::Intersect},
+        {myDeleteAction,      IconSet::Glyph::Delete},
+    });
+
+    cluster(ViewportOverlay::Anchor::BottomLeft, {
+        {mySnapAction,         IconSet::Glyph::Snap},
+        {mySolidSelectAction,  IconSet::Glyph::SelectSolid},
+        {myFaceSelectAction,   IconSet::Glyph::SelectFace},
+    });
+
+    cluster(ViewportOverlay::Anchor::TopLeft, {
+        {myItemsPanelAction, IconSet::Glyph::Items},
+        {myUndoAction,       IconSet::Glyph::Undo},
+        {myRedoAction,       IconSet::Glyph::Redo},
+    });
+
+    cluster(ViewportOverlay::Anchor::RightCenter, {
+        {myDisplayModeAction, IconSet::Glyph::DisplayMode},
+        {myScreenshotAction,  IconSet::Glyph::Screenshot},
+        {myFitAction,         IconSet::Glyph::Fit},
+    });
+
+    // Static unit readout under the view cube. We have no unit system; this
+    // states the one the whole app assumes rather than pretending to offer a
+    // choice.
+    auto* units = new QLabel(tr("mm"), myView);
+    units->setAlignment(Qt::AlignCenter);
+    units->setStyleSheet(QStringLiteral(
+                             "background-color: %1; color: %2;"
+                             "border-radius: 6px; padding: 6px 10px;")
+                             .arg(Theme::chip().name(), Theme::textMuted().name()));
+    units->adjustSize();
+    myOverlay->addWidget(units, ViewportOverlay::Anchor::TopRight);
 }
 
 void MainWindow::updateActions()
@@ -259,6 +344,7 @@ void MainWindow::onDeleteSelected()
     }
 
     updateActions();
+    emit documentChanged();
     statusBar()->showMessage(tr("Deleted %1 solid(s).").arg(ids.size()));
 }
 
@@ -269,6 +355,7 @@ void MainWindow::onUndo()
     myView->clearSelection();
     resyncView();
     updateActions();
+    emit documentChanged();
     statusBar()->showMessage(tr("Undone. %1 solid(s) in the document.").arg(myDocument.count()));
 }
 
@@ -279,6 +366,7 @@ void MainWindow::onRedo()
     myView->clearSelection();
     resyncView();
     updateActions();
+    emit documentChanged();
     statusBar()->showMessage(tr("Redone. %1 solid(s) in the document.").arg(myDocument.count()));
 }
 
@@ -406,6 +494,7 @@ bool MainWindow::extrudePendingFace(double height)
     myPendingFace.Nullify();
     mySketch.reset();
     updateActions();
+    emit documentChanged();
     statusBar()->showMessage(tr("Solid #%1 created (volume %2 mm3).")
                                  .arg(id)
                                  .arg(ModelingOps::volume(solid), 0, 'f', 2));
@@ -462,6 +551,7 @@ bool MainWindow::applyBooleanToSelection(int kind)
     myView->displaySolid(id, result.shape);
 
     updateActions();
+    emit documentChanged();
     statusBar()->showMessage(tr("Solid #%1 created from #%2 and #%3 (volume %4 mm3).")
                                  .arg(id).arg(ids[0]).arg(ids[1])
                                  .arg(ModelingOps::volume(result.shape), 0, 'f', 2));

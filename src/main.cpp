@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "Theme.h"
 
 #include <QApplication>
 
@@ -15,6 +16,8 @@ int main(int argc, char* argv[])
 
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("FurnifyMe"));
+
+    Theme::apply(app);
 
     MainWindow window;
     window.show();

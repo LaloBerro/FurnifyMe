@@ -13,10 +13,15 @@
 // the viewport stay in agreement.
 //
 #include "DocumentModel.h"
+#include "IconSet.h"
+#include "ItemsPanel.h"
 #include "MainWindow.h"
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
 #include "SketchController.h"
+#include "ToolChip.h"
+#include "ToolCluster.h"
+#include "ViewportOverlay.h"
 
 #include <QAction>
 #include <QApplication>
@@ -139,6 +144,10 @@ int main(int argc, char* argv[])
 
     check(window.extrudePendingFace(10.0), "extrude reports success");
     check(window.document().count() == 1, "one solid in the document");
+
+    // --- items panel ----------------------------------------------------------
+    check(window.itemsPanel() != nullptr, "the window has an items panel");
+    check(window.itemsPanel()->rowCount() == 1, "panel shows one row for one solid");
     settle(300);
 
     const double volumeA = ModelingOps::volume(window.document().solids().front().shape);
@@ -151,9 +160,44 @@ int main(int argc, char* argv[])
     clickAt(view, QPointF(view->width() * 0.5, view->height() * 0.5));
     check(view->selectedSolidIds().size() == 1, "clicking the solid selects exactly one");
 
+    // --- per-solid visibility -------------------------------------------------
+    {
+        const int id = window.document().solids().front().id;
+        check(view->isSolidVisible(id), "a new solid starts visible");
+
+        view->setSolidVisible(id, false);
+        check(!view->isSolidVisible(id), "hiding reports hidden");
+        check(view->selectedSolidIds().empty(), "hiding a solid drops it from the selection");
+
+        view->setSolidVisible(id, true);
+        check(view->isSolidVisible(id), "showing reports visible again");
+        check(!view->isSolidVisible(9999), "an unknown id is not visible");
+
+        // Showing does not restore the selection - production code must never
+        // silently re-select something on the user's behalf. The delete/undo
+        // checks below need a selection, so re-establish it the way a user
+        // would, with a click.
+        clickAt(view, QPointF(view->width() * 0.5, view->height() * 0.5));
+        check(view->selectedSolidIds().size() == 1, "the shown solid can be picked again");
+    }
+
+    {
+        const int id = window.document().solids().front().id;
+        view->setWireframe(false);
+        view->setSolidVisible(id, false);
+        view->setSolidVisible(id, true);
+        settle(150);
+        check(view->isSolidVisible(id), "a hidden-then-shown solid comes back visible");
+
+        // Showing does not restore the selection (same rule as above); the
+        // delete/undo checks below need one, so re-establish it with a click.
+        clickAt(view, QPointF(view->width() * 0.5, view->height() * 0.5));
+    }
+
     // --- delete / undo / redo through the real actions -----------------------
     trigger(window, QStringLiteral("Delete Selected"));
     check(window.document().count() == 0, "Delete removes the solid");
+    check(window.itemsPanel()->rowCount() == 0, "panel empties when the solid is deleted");
 
     trigger(window, QStringLiteral("Undo"));
     check(window.document().count() == 1, "Undo brings it back");
@@ -171,14 +215,37 @@ int main(int argc, char* argv[])
     trigger(window, QStringLiteral("Finish Sketch"));
     check(window.extrudePendingFace(40.0), "second extrude reports success");
     check(window.document().count() == 2, "two solids in the document");
+    check(window.itemsPanel()->rowCount() == 2, "panel tracks the second solid");
+
+    {
+        const int firstId = window.document().solids().front().id;
+        view->setSelectedSolids({firstId});
+        settle(150);
+        check(view->selectedSolidIds().size() == 1,
+              "setSelectedSolids selects exactly the requested solid");
+        check(view->selectedSolidIds().front() == firstId,
+              "and it is the one that was asked for");
+
+        // A hidden solid must never become selected behind the user's back.
+        view->clearSelection();
+        view->setSolidVisible(firstId, false);
+        view->setSelectedSolids({firstId});
+        settle(150);
+        check(view->selectedSolidIds().empty(), "a hidden solid cannot be selected");
+        view->setSolidVisible(firstId, true);
+    }
+
     settle(300);
 
     const double volumeB = ModelingOps::volume(window.document().solids().back().shape);
     view->saveSnapshot(outDir + "/g2-two-solids.png");
 
     // --- select two and cut ---------------------------------------------------
+    // Fractions re-tuned for the narrower viewport once the items panel claims
+    // its share of the window (previously 0.30/0.70, which grazed the first
+    // solid's bottom edge once fitAll framed it against the panel-reduced width).
     view->clearSelection();
-    clickAt(view, QPointF(view->width() * 0.30, view->height() * 0.70));
+    clickAt(view, QPointF(view->width() * 0.35, view->height() * 0.50));
     check(view->selectedSolidIds().size() == 1, "first solid picked");
 
     clickAt(view, QPointF(view->width() * 0.68, view->height() * 0.40), Qt::ShiftModifier);
@@ -195,6 +262,142 @@ int main(int argc, char* argv[])
                   .arg(volumeA, 0, 'f', 1).arg(cutVolume, 0, 'f', 1));
         settle(300);
         view->saveSnapshot(outDir + "/g3-after-cut.png");
+    }
+
+    // --- icons ----------------------------------------------------------------
+    {
+        const IconSet::Glyph all[] = {
+            IconSet::Glyph::Sketch,      IconSet::Glyph::Extrude,
+            IconSet::Glyph::Fuse,        IconSet::Glyph::Cut,
+            IconSet::Glyph::Intersect,   IconSet::Glyph::Delete,
+            IconSet::Glyph::Undo,        IconSet::Glyph::Redo,
+            IconSet::Glyph::Items,       IconSet::Glyph::Snap,
+            IconSet::Glyph::SelectSolid, IconSet::Glyph::SelectFace,
+            IconSet::Glyph::DisplayMode, IconSet::Glyph::Screenshot,
+            IconSet::Glyph::Fit,
+        };
+        bool allDrawn = true;
+        for (IconSet::Glyph glyph : all) {
+            const QPixmap pixmap = IconSet::icon(glyph).pixmap(16, 16);
+            // A glyph that painted nothing yields a fully transparent pixmap.
+            if (pixmap.isNull() || pixmap.toImage().isNull()) { allDrawn = false; break; }
+            bool anyInk = false;
+            const QImage image = pixmap.toImage();
+            for (int y = 0; y < image.height() && !anyInk; ++y) {
+                for (int x = 0; x < image.width(); ++x) {
+                    if (qAlpha(image.pixel(x, y)) > 0) { anyInk = true; break; }
+                }
+            }
+            if (!anyInk) { allDrawn = false; break; }
+        }
+        check(allDrawn, "every glyph paints something at 16x16");
+    }
+
+    // --- chips mirror their action -------------------------------------------
+    {
+        QAction probe(QStringLiteral("Probe"));
+        probe.setShortcut(QKeySequence(QStringLiteral("Ctrl+P")));
+        ToolChip chip(&probe, IconSet::Glyph::Sketch);
+
+        probe.setEnabled(false);
+        check(!chip.isEnabled(), "chip disables with its action");
+        probe.setEnabled(true);
+        check(chip.isEnabled(), "chip re-enables with its action");
+
+        int fired = 0;
+        QObject::connect(&probe, &QAction::triggered, [&fired] { ++fired; });
+        chip.click();
+        check(fired == 1, "clicking the chip triggers the action exactly once");
+
+        probe.setCheckable(true);
+        probe.setChecked(true);
+        check(chip.isChecked(), "chip mirrors the checked state");
+
+        // The action is the only thing that may change the checked state: a
+        // click that does not reach the action must leave the chip alone.
+        QObject::disconnect(&probe, nullptr, nullptr, nullptr);
+        const bool before = chip.isChecked();
+        chip.click();
+        check(chip.isChecked() == before, "a chip never toggles its own checked state");
+    }
+
+    // --- overlay anchoring ----------------------------------------------------
+    {
+        QAction probe(QStringLiteral("Probe"));
+        auto* cluster = new ToolCluster(view);
+        cluster->addChip(new ToolChip(&probe, IconSet::Glyph::Fit));
+
+        // A second, independent cluster that outlives the first - the real
+        // post-condition for "relayout survives a destroyed cluster" is that
+        // this one is still laid out correctly afterwards.
+        QAction probe2(QStringLiteral("Probe2"));
+        auto* survivor = new ToolCluster(view);
+        survivor->addChip(new ToolChip(&probe2, IconSet::Glyph::Fit));
+
+        ViewportOverlay overlay(view);
+        overlay.addWidget(cluster, ViewportOverlay::Anchor::BottomLeft);
+        overlay.addWidget(survivor, ViewportOverlay::Anchor::TopRight);
+        overlay.relayout();
+
+        const QRect bounds = view->rect();
+        check(bounds.contains(cluster->geometry()),
+              "an anchored cluster sits inside the viewport");
+        const int bottomGap = bounds.bottom() - cluster->geometry().bottom();
+        check(bottomGap >= 8 && bottomGap <= 32,
+              QStringLiteral("bottom-anchored cluster keeps its margin (%1px)").arg(bottomGap));
+
+        const int widthBefore = cluster->width();
+        view->resize(view->width() + 120, view->height());
+        settle(150);
+        check(bounds.left() <= cluster->geometry().left() && cluster->width() == widthBefore,
+              "cluster keeps its size and stays anchored after a resize");
+        // A destroyed widget must not take the overlay down with it on the next
+        // layout pass - QPointer entries go null and are skipped, and the
+        // remaining, still-alive widget must still get laid out.
+        delete cluster;
+        overlay.relayout();
+        check(view->rect().contains(survivor->geometry()),
+              "the surviving cluster is still laid out after the destroyed one is skipped");
+    }
+
+    // --- view controls --------------------------------------------------------
+    {
+        QAction* wireframe = action(window, QStringLiteral("Wireframe"));
+        check(wireframe != nullptr, "a Wireframe display-mode action exists");
+        if (wireframe) {
+            check(wireframe->isCheckable(), "Wireframe is a toggle");
+
+            wireframe->trigger();
+            settle(200);
+            check(view->isWireframe(), "triggering Wireframe turns wireframe mode on");
+
+            wireframe->trigger();
+            settle(200);
+            check(!view->isWireframe(), "triggering it again turns wireframe mode off");
+
+            // Regression guard: displaySolid() used to hardcode AIS_Shaded, so
+            // resyncView() - which Undo and Redo both run - silently reverted
+            // every solid to shaded while the Wireframe action (and myWireframe
+            // itself) stayed checked/true. isWireframe() alone cannot catch that
+            // - it is untouched by resyncView() - so also check the solid's
+            // actual live display mode via isSolidWireframe().
+            wireframe->trigger();
+            settle(200);
+            check(view->isWireframe(), "wireframe is on going into undo/redo");
+            const int solidId = window.document().solids().front().id;
+            check(view->isSolidWireframe(solidId), "the solid itself renders wireframe before undo/redo");
+
+            trigger(window, QStringLiteral("Undo"));
+            trigger(window, QStringLiteral("Redo"));
+            check(view->isWireframe(), "wireframe survives undo/redo (resyncView)");
+            check(view->isSolidWireframe(solidId),
+                  "the resynced solid still renders wireframe, not just the flag");
+
+            // Leave the viewport shaded so later checks are unaffected.
+            wireframe->trigger();
+            settle(200);
+            check(!view->isWireframe(), "wireframe turned back off, viewport left shaded");
+        }
     }
 
     std::printf("\n%s (%d failure%s)  volumes: A=%.1f B=%.1f\n",

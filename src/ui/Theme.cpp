@@ -1,0 +1,66 @@
+#include "Theme.h"
+
+#include <QApplication>
+#include <QPalette>
+
+namespace Theme {
+
+QColor chrome()       { return QColor("#1b1b1d"); }
+QColor panel()        { return QColor("#232326"); }
+QColor chip()         { return QColor("#2b2b2e"); }
+QColor chipHover()    { return QColor("#34343a"); }
+QColor chipActive()   { return QColor("#3d3d45"); }
+QColor accent()       { return QColor("#3d7eff"); }
+QColor text()         { return QColor("#f0f0f0"); }
+QColor textMuted()    { return QColor("#9a9aa2"); }
+QColor textDisabled() { return QColor("#5c5c64"); }
+QColor border()       { return QColor("#3a3a40"); }
+QColor viewport()     { return QColor("#45454b"); }
+
+void apply(QApplication& app)
+{
+    QPalette palette;
+    palette.setColor(QPalette::Window, chrome());
+    palette.setColor(QPalette::WindowText, text());
+    palette.setColor(QPalette::Base, panel());
+    palette.setColor(QPalette::AlternateBase, chip());
+    palette.setColor(QPalette::Text, text());
+    palette.setColor(QPalette::Button, chip());
+    palette.setColor(QPalette::ButtonText, text());
+    palette.setColor(QPalette::Highlight, accent());
+    palette.setColor(QPalette::HighlightedText, QColor("#ffffff"));
+    palette.setColor(QPalette::Disabled, QPalette::WindowText, textDisabled());
+    palette.setColor(QPalette::Disabled, QPalette::ButtonText, textDisabled());
+    palette.setColor(QPalette::Disabled, QPalette::Text, textDisabled());
+    app.setPalette(palette);
+
+    // Compiled in as a raw string rather than a .qrc file: it avoids adding
+    // AUTORCC and a resource tree for one asset, and is just as much "in the
+    // binary" as a resource would be.
+    app.setStyleSheet(QStringLiteral(R"(
+QMainWindow, QWidget       { background-color: #1b1b1d; color: #f0f0f0; }
+QMenuBar                   { background-color: #1b1b1d; color: #f0f0f0;
+                             border-bottom: 1px solid #3a3a40; padding: 2px; }
+QMenuBar::item             { background: transparent; padding: 6px 12px;
+                             border-radius: 4px; }
+QMenuBar::item:selected    { background-color: #34343a; }
+QMenu                      { background-color: #232326; color: #f0f0f0;
+                             border: 1px solid #3a3a40; padding: 4px; }
+QMenu::item                { padding: 6px 24px 6px 12px; border-radius: 4px; }
+QMenu::item:selected       { background-color: #34343a; }
+QMenu::item:disabled       { color: #5c5c64; }
+QMenu::separator           { height: 1px; background: #3a3a40; margin: 4px 8px; }
+QStatusBar                 { background-color: #1b1b1d; color: #9a9aa2;
+                             border-top: 1px solid #3a3a40; }
+QStatusBar QLabel          { color: #9a9aa2; }
+QSplitter::handle          { background-color: #3a3a40; width: 1px; }
+QToolTip                   { background-color: #232326; color: #f0f0f0;
+                             border: 1px solid #3a3a40; padding: 4px; }
+QScrollBar:vertical        { background: #232326; width: 10px; margin: 0; }
+QScrollBar::handle:vertical{ background: #3a3a40; border-radius: 5px;
+                             min-height: 24px; }
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+)"));
+}
+
+}  // namespace Theme

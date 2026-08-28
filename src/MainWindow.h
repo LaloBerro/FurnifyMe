@@ -28,6 +28,11 @@ public:
     bool hasPendingFace() const { return !myPendingFace.IsNull(); }
     bool isSketching() const { return mySketching; }
     OcctViewWidget* view() const { return myView; }
+    class ItemsPanel* itemsPanel() const { return myItemsPanel; }
+
+signals:
+    // DocumentModel is Qt-free by design, so the window announces its changes.
+    void documentChanged();
 
 private slots:
     void onStartSketch();
@@ -53,7 +58,8 @@ private slots:
 
 private:
     void buildActions();
-    void buildMenusAndToolbar();
+    void buildMenus();
+    void buildOverlay();
     void updateActions();
     // Persistent right-hand readout: what mode we are in and what is possible.
     void updateStateLabel();
@@ -85,6 +91,12 @@ private:
     QAction* myDeleteAction = nullptr;
     QAction* myUndoAction = nullptr;
     QAction* myRedoAction = nullptr;
+    QAction* myItemsPanelAction = nullptr;
+    QAction* myDisplayModeAction = nullptr;
+    QAction* myFitAction = nullptr;
+    QAction* myScreenshotAction = nullptr;
 
+    class ViewportOverlay* myOverlay = nullptr;
     class QLabel* myStateLabel = nullptr;
+    class ItemsPanel* myItemsPanel = nullptr;
 };

@@ -6,4 +6,6 @@ cmake-build-*/
 .vscode/
 *.user
 out.step
+build.log
+g*-*.png
 vcpkg_installed/

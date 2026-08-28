@@ -2,14 +2,18 @@
 
 #include "ModelingOps.h"
 #include "SketchController.h"
+#include "Theme.h"
 
 // OCCT before Qt, for the Handle() macro clash.
 #include <AIS_DisplayMode.hxx>
 #include <AIS_SelectionScheme.hxx>
+#include <AIS_ViewCube.hxx>
 #include <Aspect_DisplayConnection.hxx>
 #include <Aspect_GridDrawMode.hxx>
 #include <Aspect_GridType.hxx>
 #include <Aspect_TypeOfTriedronPosition.hxx>
+#include <Graphic3d_TransformPers.hxx>
+#include <Graphic3d_Vec2.hxx>
 #include <OpenGl_GraphicDriver.hxx>
 #include <Prs3d_Drawer.hxx>
 #include <Prs3d_LineAspect.hxx>
@@ -80,7 +84,9 @@ void OcctViewWidget::initializeViewer()
     myView->SetWindow(window);
     if (!window->IsMapped()) window->Map();
 
-    myView->SetBackgroundColor(Quantity_Color(Quantity_NOC_GRAY30));
+    const QColor bg = Theme::viewport();
+    myView->SetBackgroundColor(Quantity_Color(bg.redF(), bg.greenF(), bg.blueF(),
+                                              Quantity_TOC_sRGB));
     myView->TriedronDisplay(Aspect_TOTP_LEFT_LOWER, Quantity_Color(Quantity_NOC_WHITE),
                             0.08, V3d_ZBUFFER);
 
@@ -110,6 +116,8 @@ void OcctViewWidget::initializeViewer()
     myView->MustBeResized();
 
     myInitialized = true;
+
+    setViewCubeVisible(true);
 }
 
 void OcctViewWidget::paintEvent(QPaintEvent* /*event*/)
@@ -144,7 +152,8 @@ void OcctViewWidget::displaySolid(int id, const TopoDS_Shape& shape)
     presentation->Attributes()->SetFaceBoundaryDraw(Standard_True);
     presentation->Attributes()->SetFaceBoundaryAspect(
         new Prs3d_LineAspect(Quantity_NOC_GRAY30, Aspect_TOL_SOLID, 1.0));
-    myContext->Display(presentation, AIS_Shaded, kSelectionModeWholeShape, Standard_False);
+    myContext->Display(presentation, myWireframe ? AIS_WireFrame : AIS_Shaded,
+                       kSelectionModeWholeShape, Standard_False);
     mySolids[id] = presentation;
     applySelectionMode(presentation);
 
@@ -168,6 +177,37 @@ void OcctViewWidget::clearSolids()
     for (auto& entry : mySolids) myContext->Remove(entry.second, Standard_False);
     mySolids.clear();
     myContext->UpdateCurrentViewer();
+}
+
+void OcctViewWidget::setSolidVisible(int id, bool visible)
+{
+    const auto it = mySolids.find(id);
+    if (it == mySolids.end() || myContext.IsNull()) return;
+
+    if (visible) {
+        // Display(obj, false) would use the object's default mode - wireframe -
+        // silently changing a solid's appearance when it is hidden and shown
+        // again. Pass the mode the viewport is actually in.
+        myContext->Display(it->second, myWireframe ? AIS_WireFrame : AIS_Shaded,
+                           kSelectionModeWholeShape, Standard_False);
+        applySelectionMode(it->second);
+        myContext->UpdateCurrentViewer();
+    } else {
+        // Erase also drops it from the selection, which is what we want: acting
+        // on something you cannot see would be a nasty surprise. The selection
+        // can genuinely change here, unlike on the show path, so this is the
+        // only branch that should tell the status bar to re-check it.
+        myContext->Erase(it->second, Standard_False);
+        myContext->UpdateCurrentViewer();
+        emit selectionChanged();
+    }
+}
+
+bool OcctViewWidget::isSolidVisible(int id) const
+{
+    const auto it = mySolids.find(id);
+    if (it == mySolids.end() || myContext.IsNull()) return false;
+    return myContext->IsDisplayed(it->second);
 }
 
 void OcctViewWidget::setPreview(const TopoDS_Shape& shape, bool shaded)
@@ -276,6 +316,21 @@ void OcctViewWidget::clearSelection()
     emit selectionChanged();
 }
 
+void OcctViewWidget::setSelectedSolids(const std::vector<int>& ids)
+{
+    if (myContext.IsNull()) return;
+
+    myContext->ClearSelected(Standard_False);
+    for (int id : ids) {
+        const auto it = mySolids.find(id);
+        if (it == mySolids.end()) continue;
+        if (!myContext->IsDisplayed(it->second)) continue;   // never select the hidden
+        myContext->AddOrRemoveSelected(it->second, Standard_False);
+    }
+    myContext->UpdateCurrentViewer();
+    emit selectionChanged();
+}
+
 bool OcctViewWidget::saveSnapshot(const QString& path)
 {
     if (myView.IsNull()) return false;
@@ -320,6 +375,48 @@ void OcctViewWidget::setViewRight()
     if (myView.IsNull()) return;
     myView->SetProj(V3d_Xpos);
     myView->Redraw();
+}
+
+void OcctViewWidget::setViewCubeVisible(bool visible)
+{
+    initializeViewer();
+    if (myContext.IsNull()) return;
+
+    if (!visible) {
+        if (!myViewCube.IsNull()) myContext->Remove(myViewCube, Standard_True);
+        myViewCube.Nullify();
+        return;
+    }
+    if (!myViewCube.IsNull()) return;
+
+    Handle(AIS_ViewCube) cube = new AIS_ViewCube();
+    cube->SetSize(60.0);
+    cube->SetBoxColor(Quantity_Color(Theme::chip().redF(), Theme::chip().greenF(),
+                                     Theme::chip().blueF(), Quantity_TOC_sRGB));
+    cube->SetTransformPersistence(new Graphic3d_TransformPers(
+        Graphic3d_TMF_TriedronPers, Aspect_TOTP_RIGHT_UPPER, Graphic3d_Vec2i(100, 100)));
+    myContext->Display(cube, Standard_False);
+    myViewCube = cube;
+    myContext->UpdateCurrentViewer();
+}
+
+void OcctViewWidget::setWireframe(bool wireframe)
+{
+    if (myWireframe == wireframe) return;
+    myWireframe = wireframe;
+
+    if (myContext.IsNull()) return;   // state kept; re-applied once the viewer initialises
+
+    const Standard_Integer mode = wireframe ? AIS_WireFrame : AIS_Shaded;
+    for (auto& entry : mySolids) myContext->SetDisplayMode(entry.second, mode, Standard_False);
+    myContext->UpdateCurrentViewer();
+}
+
+bool OcctViewWidget::isSolidWireframe(int id) const
+{
+    const auto it = mySolids.find(id);
+    if (it == mySolids.end() || myContext.IsNull()) return false;
+    return myContext->IsDisplayed(it->second, AIS_WireFrame);
 }
 
 void OcctViewWidget::mousePressEvent(QMouseEvent* event)

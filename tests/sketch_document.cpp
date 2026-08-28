@@ -190,6 +190,38 @@ int main()
         check(doc.addSolid(boxA) != idC, "ids still advance after clear");
     }
 
+    // --- solid names ---------------------------------------------------------
+    {
+        DocumentModel doc;
+        const TopoDS_Shape box = ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 5.0, 5.0, 5.0);
+
+        const int first = doc.addSolid(box);
+        const int second = doc.addSolid(box);
+        check(doc.nameOf(first) == "Body 01", "first solid is named Body 01");
+        check(doc.nameOf(second) == "Body 02", "second solid is named Body 02");
+        check(doc.nameOf(9999).empty(), "an unknown id has no name");
+
+        check(doc.renameSolid(first, "Table Top"), "rename succeeds for a known id");
+        check(doc.nameOf(first) == "Table Top", "the new name sticks");
+        check(!doc.renameSolid(9999, "Nope"), "rename fails for an unknown id");
+
+        // Names must not be recycled, for the same reason ids are not: a name
+        // reappearing on a different solid is confusing in the Items panel.
+        doc.removeSolid(second);
+        const int third = doc.addSolid(box);
+        check(doc.nameOf(third) == "Body 03", "names keep advancing after a removal");
+
+        // Undo restores the solids it captured, names included.
+        DocumentModel undoDoc;
+        undoDoc.addSolid(box);
+        undoDoc.renameSolid(1, "Renamed");
+        undoDoc.checkpoint();
+        undoDoc.addSolid(box);
+        undoDoc.undo();
+        check(undoDoc.count() == 1, "undo left one solid");
+        check(undoDoc.nameOf(1) == "Renamed", "undo restores the name with the solid");
+    }
+
     // --- undo / redo of document state --------------------------------------
     {
         DocumentModel doc;

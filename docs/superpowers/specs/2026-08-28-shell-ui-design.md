@@ -1,7 +1,7 @@
 # Shell UI redesign — design
 
 Date: 2026-08-28
-Status: approved in chat, awaiting spec review
+Status: implemented 2026-08-28
 
 ## Goal
 

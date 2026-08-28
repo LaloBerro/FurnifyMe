@@ -16,6 +16,8 @@
 #include <map>
 #include <vector>
 
+class AIS_InteractiveObject;
+
 // The Qt <-> OCCT bridge. Hosts a V3d_View on this widget's native window and
 // forwards Qt input to the OCCT camera and selector.
 class OcctViewWidget : public QWidget {
@@ -33,6 +35,11 @@ public:
     void displaySolid(int id, const TopoDS_Shape& shape);
     void removeSolid(int id);
     void clearSolids();
+
+    // Presentation state, not document state: it is deliberately not captured by
+    // undo, because hiding something is not an edit.
+    void setSolidVisible(int id, bool visible);
+    bool isSolidVisible(int id) const;
 
     // Temporary, non-selectable feedback shape (the in-progress sketch).
     void setPreview(const TopoDS_Shape& shape, bool shaded = false);
@@ -54,6 +61,10 @@ public:
     // hit several faces of one solid).
     std::vector<int> selectedSolidIds() const;
     void clearSelection();
+    // Replaces the selection with exactly these solids. Refuses to select a
+    // hidden solid - showing it again later must never silently resurrect a
+    // selection the user did not make.
+    void setSelectedSolids(const std::vector<int>& ids);
 
     // Renders the viewport straight to an image file. Independent of what is on
     // screen or on top of the window, unlike a screen grab.
@@ -66,6 +77,15 @@ public:
     void setViewTop();
     void setViewFront();
     void setViewRight();
+
+    void setViewCubeVisible(bool visible);
+    void setWireframe(bool wireframe);
+    bool isWireframe() const { return myWireframe; }
+    // True if this solid's presentation is actually displayed in wireframe right
+    // now - queries the live AIS state rather than the requested mode above, so
+    // a solid silently reverting to shaded during a resync is observable even if
+    // myWireframe itself was never touched.
+    bool isSolidWireframe(int id) const;
 
 signals:
     void sketchPointPicked(const gp_Pnt& point);
@@ -93,6 +113,9 @@ private:
     Handle(AIS_Shape) myPreview;
 
     std::map<int, Handle(AIS_Shape)> mySolids;
+
+    Handle(AIS_InteractiveObject) myViewCube;
+    bool myWireframe = false;
 
     SelectionMode mySelectionMode = SelectionMode::Solid;
     bool myInitialized = false;
