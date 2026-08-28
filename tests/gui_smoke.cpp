@@ -12,6 +12,7 @@
 // sketch points, that picking returns the right solids, that the document and
 // the viewport stay in agreement.
 //
+#include "CameraController.h"
 #include "DocumentModel.h"
 #include "IconSet.h"
 #include "ItemsPanel.h"
@@ -133,6 +134,14 @@ int main(int argc, char* argv[])
     OcctViewWidget* view = window.view();
     check(view != nullptr && view->width() > 100, "viewport has a usable size");
 
+    // --- camera startup state -------------------------------------------------
+    {
+        const CameraState& cam = view->camera().state();
+        check(std::fabs(cam.azimuthDeg - (-45.0)) < 1e-6, "startup azimuth is -45");
+        check(std::fabs(cam.elevationDeg - 30.0) < 1e-6, "startup elevation is +30");
+        check(std::fabs(cam.distance - 700.0) < 1e-6, "startup distance is 700mm");
+    }
+
     // --- bundled font ---------------------------------------------------------
     check(!Theme::fontFamily().isEmpty(),
           QStringLiteral("the bundled font loaded (family: '%1')").arg(Theme::fontFamily()));
@@ -253,11 +262,13 @@ int main(int argc, char* argv[])
     view->saveSnapshot(outDir + "/g2-two-solids.png");
 
     // --- select two and cut ---------------------------------------------------
-    // Fractions re-tuned for the narrower viewport once the items panel claims
-    // its share of the window (previously 0.30/0.70, which grazed the first
-    // solid's bottom edge once fitAll framed it against the panel-reduced width).
+    // Fractions re-tuned again for the perspective projection this task turns
+    // on: switching from orthographic to perspective moves where the two
+    // solids land on screen, and the previous 0.35/0.50 point sat right on the
+    // first solid's edge (it worked under orthographic framing, not under
+    // perspective). 0.45/0.55 lands solidly inside the first solid's silhouette.
     view->clearSelection();
-    clickAt(view, QPointF(view->width() * 0.35, view->height() * 0.50));
+    clickAt(view, QPointF(view->width() * 0.45, view->height() * 0.55));
     check(view->selectedSolidIds().size() == 1, "first solid picked");
 
     clickAt(view, QPointF(view->width() * 0.68, view->height() * 0.40), Qt::ShiftModifier);
@@ -410,6 +421,35 @@ int main(int argc, char* argv[])
             settle(200);
             check(!view->isWireframe(), "wireframe turned back off, viewport left shaded");
         }
+    }
+
+    // --- standard views set turntable state -----------------------------------
+    {
+        trigger(window, QStringLiteral("Front"));
+        settle(400);
+        check(std::fabs(view->camera().state().azimuthDeg) < 1e-3 &&
+              std::fabs(view->camera().state().elevationDeg) < 1e-3,
+              "Front is azimuth 0, elevation 0");
+
+        trigger(window, QStringLiteral("Top"));
+        settle(400);
+        // setViewTop() requests 89 degrees, but CameraController's clamp caps
+        // elevation at kMaxElevation = 88 (see CameraController.h and the
+        // "setState clamps elevation" headless check) - 88 is what actually
+        // lands, and it is still comfortably non-degenerate.
+        check(std::fabs(view->camera().state().elevationDeg - 88.0) < 1e-3,
+              "Top is elevation +88, clamped from the requested +89");
+
+        trigger(window, QStringLiteral("Right"));
+        settle(400);
+        check(std::fabs(view->camera().state().azimuthDeg - (-90.0)) < 1e-3,
+              "Right is azimuth -90");
+
+        trigger(window, QStringLiteral("Axonometric"));
+        settle(400);
+        check(std::fabs(view->camera().state().azimuthDeg - (-45.0)) < 1e-3 &&
+              std::fabs(view->camera().state().elevationDeg - 30.0) < 1e-3,
+              "Axonometric returns to the startup angles");
     }
 
     std::printf("\n%s (%d failure%s)  volumes: A=%.1f B=%.1f\n",

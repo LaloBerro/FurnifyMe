@@ -9,6 +9,8 @@
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
 
+#include "CameraController.h"
+
 #include <QPoint>
 #include <QString>
 #include <QWidget>
@@ -78,6 +80,10 @@ public:
     void setViewFront();
     void setViewRight();
 
+    static constexpr double kFovyDeg = 45.0;
+
+    CameraController& camera() { return myCamera; }
+
     void setViewCubeVisible(bool visible);
     void setWireframe(bool wireframe);
     bool isWireframe() const { return myWireframe; }
@@ -106,11 +112,15 @@ private:
     void initializeViewer();
     bool pointOnSketchPlane(int px, int py, gp_Pnt& out) const;
     void applySelectionMode(const Handle(AIS_Shape)& shape);
+    void applyCameraState();
+    void syncCameraFromView();
 
     Handle(V3d_Viewer) myViewer;
     Handle(V3d_View) myView;
     Handle(AIS_InteractiveContext) myContext;
     Handle(AIS_Shape) myPreview;
+
+    CameraController myCamera;
 
     std::map<int, Handle(AIS_Shape)> mySolids;
 

@@ -12,6 +12,9 @@
 #include <Aspect_GridDrawMode.hxx>
 #include <Aspect_GridType.hxx>
 #include <Aspect_TypeOfTriedronPosition.hxx>
+#include <Bnd_Box.hxx>
+#include <BRepBndLib.hxx>
+#include <Graphic3d_Camera.hxx>
 #include <Graphic3d_TransformPers.hxx>
 #include <Graphic3d_Vec2.hxx>
 #include <OpenGl_GraphicDriver.hxx>
@@ -20,7 +23,6 @@
 #include <Prs3d_TypeOfHighlight.hxx>
 #include <Quantity_Color.hxx>
 #include <Quantity_NameOfColor.hxx>
-#include <V3d_TypeOfOrientation.hxx>
 #include <V3d_TypeOfVisualization.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Lin.hxx>
@@ -112,7 +114,12 @@ void OcctViewWidget::initializeViewer()
     myContext->HighlightStyle(Prs3d_TypeOfHighlight_LocalDynamic)->SetColor(Quantity_NOC_CYAN1);
     myContext->HighlightStyle(Prs3d_TypeOfHighlight_LocalSelected)->SetColor(Quantity_NOC_ORANGE);
 
-    setViewAxonometric();
+    // Perspective projection: the turntable model is distance-based, and OCCT's
+    // default orthographic camera zooms by scale, which would make
+    // zoom-toward-cursor meaningless.
+    myView->Camera()->SetProjectionType(Graphic3d_Camera::Projection_Perspective);
+    myView->Camera()->SetFOVy(kFovyDeg);
+    applyCameraState();
     myView->MustBeResized();
 
     myInitialized = true;
@@ -339,42 +346,96 @@ bool OcctViewWidget::saveSnapshot(const QString& path)
     return myView->Dump(path.toUtf8().constData()) == Standard_True;
 }
 
+void OcctViewWidget::applyCameraState()
+{
+    if (myView.IsNull()) return;
+
+    const Handle(Graphic3d_Camera) cam = myView->Camera();
+    const gp_Pnt eye = myCamera.eyePosition();
+    const gp_Pnt& at = myCamera.state().target;
+    const gp_Dir up = myCamera.upVector();
+    cam->SetEye(eye);
+    cam->SetCenter(at);
+    cam->SetUp(up);
+    myView->Redraw();
+}
+
+void OcctViewWidget::syncCameraFromView()
+{
+    if (myView.IsNull()) return;
+
+    // Decompose whatever the view's camera is (the view cube animates it
+    // behind our back) into turntable state. setPivot does exactly this
+    // derivation when the eye is fixed, so reuse it: set the eye-preserving
+    // state from the OCCT camera's center.
+    const Handle(Graphic3d_Camera) cam = myView->Camera();
+    CameraState s = myCamera.state();
+    s.target = cam->Center();
+    myCamera.setState(s);
+    // Recompute angles/distance from the real eye by pivoting about the center.
+    CameraState derived = myCamera.state();
+    const gp_Pnt eye = cam->Eye();
+    const double dx = eye.X() - derived.target.X();
+    const double dy = eye.Y() - derived.target.Y();
+    const double dz = eye.Z() - derived.target.Z();
+    const double horizontal = std::sqrt(dx * dx + dy * dy);
+    derived.distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+    derived.elevationDeg = std::atan2(dz, horizontal) * 180.0 / 3.14159265358979323846;
+    if (horizontal > 1e-9) {
+        derived.azimuthDeg = std::atan2(-dx, dy) * 180.0 / 3.14159265358979323846;
+    }
+    myCamera.setState(derived);
+    // Re-assert our up vector: cube-driven views may leave a rolled camera.
+    applyCameraState();
+}
+
 void OcctViewWidget::fitAll()
 {
     if (myView.IsNull()) return;
 
-    myView->FitAll();
-    myView->ZFitAll();
-    myView->Redraw();
+    // Frame everything we display ourselves (the grid and view cube are
+    // presentation furniture, not content).
+    Bnd_Box box;
+    for (const auto& entry : mySolids) {
+        Bnd_Box b;
+        BRepBndLib::Add(entry.second->Shape(), b);
+        box.Add(b);
+    }
+    if (box.IsVoid()) box.Update(-250.0, -250.0, 0.0, 250.0, 250.0, 10.0);
+    myCamera.frame(box, kFovyDeg);
+    applyCameraState();
 }
 
 void OcctViewWidget::setViewAxonometric()
 {
-    if (myView.IsNull()) return;
-
-    myView->SetProj(V3d_XposYnegZpos);
-    myView->Redraw();
+    CameraState s = myCamera.state();
+    s.azimuthDeg = -45.0; s.elevationDeg = 30.0;
+    myCamera.setState(s);
+    applyCameraState();
 }
 
 void OcctViewWidget::setViewTop()
 {
-    if (myView.IsNull()) return;
-    myView->SetProj(V3d_Zpos);
-    myView->Redraw();
+    CameraState s = myCamera.state();
+    s.elevationDeg = 89.0;   // inside the clamp: a true 90 makes azimuth degenerate
+    myCamera.setState(s);
+    applyCameraState();
 }
 
 void OcctViewWidget::setViewFront()
 {
-    if (myView.IsNull()) return;
-    myView->SetProj(V3d_Yneg);
-    myView->Redraw();
+    CameraState s = myCamera.state();
+    s.azimuthDeg = 0.0; s.elevationDeg = 0.0;
+    myCamera.setState(s);
+    applyCameraState();
 }
 
 void OcctViewWidget::setViewRight()
 {
-    if (myView.IsNull()) return;
-    myView->SetProj(V3d_Xpos);
-    myView->Redraw();
+    CameraState s = myCamera.state();
+    s.azimuthDeg = -90.0; s.elevationDeg = 0.0;
+    myCamera.setState(s);
+    applyCameraState();
 }
 
 void OcctViewWidget::setViewCubeVisible(bool visible)
@@ -451,6 +512,9 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
     myContext->MoveTo(pos.x(), pos.y(), myView, Standard_False);
     myContext->SelectDetected(additive ? AIS_SelectionScheme_XOR
                                        : AIS_SelectionScheme_Replace);
+    // A click on the view cube animates the OCCT camera directly; fold whatever
+    // it did back into the controller so the next orbit starts from reality.
+    syncCameraFromView();
     myView->Redraw();
     emit selectionChanged();
 }
