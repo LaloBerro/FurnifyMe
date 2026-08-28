@@ -10,6 +10,7 @@
 #include <gp_Pnt.hxx>
 
 #include "CameraController.h"
+#include "GridRenderer.h"
 
 #include <QPoint>
 #include <QString>
@@ -127,6 +128,7 @@ private:
     Handle(AIS_Shape) myPreview;
 
     CameraController myCamera;
+    GridRenderer myGridRenderer;
 
     std::map<int, Handle(AIS_Shape)> mySolids;
 

@@ -95,11 +95,6 @@ void OcctViewWidget::initializeViewer()
     myView->TriedronDisplay(Aspect_TOTP_LEFT_LOWER, Quantity_Color(Quantity_NOC_WHITE),
                             0.08, V3d_ZBUFFER);
 
-    // Visible grid on the XY plane (Milestone 1 acceptance criterion).
-    myViewer->ActivateGrid(Aspect_GT_Rectangular, Aspect_GDM_Lines);
-    myViewer->SetRectangularGridValues(0.0, 0.0, 10.0, 10.0, 0.0);
-    myViewer->SetRectangularGridGraphicValues(500.0, 500.0, 0.0);
-
     // OCCT's default highlight barely reads against a shaded solid. Make hover
     // and selection unmistakable - not being able to tell what is selected was
     // the single most confusing thing about the app.
@@ -116,6 +111,9 @@ void OcctViewWidget::initializeViewer()
     // Sub-shape (face-mode) highlighting uses its own styles.
     myContext->HighlightStyle(Prs3d_TypeOfHighlight_LocalDynamic)->SetColor(Quantity_NOC_CYAN1);
     myContext->HighlightStyle(Prs3d_TypeOfHighlight_LocalSelected)->SetColor(Quantity_NOC_ORANGE);
+
+    myGridRenderer.attach(myContext);
+    myGridRenderer.update(myCamera.state().distance, myCamera.state().target);
 
     // Perspective projection: the turntable model is distance-based, and OCCT's
     // default orthographic camera zooms by scale, which would make
@@ -383,6 +381,7 @@ void OcctViewWidget::applyCameraState()
     cam->SetEye(eye);
     cam->SetCenter(at);
     cam->SetUp(up);
+    myGridRenderer.update(myCamera.state().distance, myCamera.state().target);
     myView->Redraw();
 }
 

@@ -14,6 +14,7 @@
 //
 #include "CameraController.h"
 #include "DocumentModel.h"
+#include "GridRenderer.h"
 #include "IconSet.h"
 #include "ItemsPanel.h"
 #include "MainWindow.h"
@@ -526,6 +527,19 @@ int main(int argc, char* argv[])
               "animateTo settles exactly on the goal");
         view->setAnimationsEnabled(false);
         check(true, "animations re-disabled for the rest of the suite");
+    }
+
+    // --- grid subdivision policy ----------------------------------------------
+    {
+        check(GridRenderer::minorStepFor(700.0) == 10.0,
+              "default working distance uses the 10mm grid");
+        check(GridRenderer::minorStepFor(50.0) == 1.0,
+              "zoomed close in, the 1mm grid appears");
+        check(GridRenderer::minorStepFor(8000.0) == 100.0,
+              "zoomed far out, the 100mm grid takes over");
+        check(GridRenderer::minorStepFor(0.0) >= 1.0 &&
+              GridRenderer::minorStepFor(1e9) <= 100.0,
+              "extreme distances stay inside the defined levels");
     }
 
     std::printf("\n%s (%d failure%s)  volumes: A=%.1f B=%.1f\n",
