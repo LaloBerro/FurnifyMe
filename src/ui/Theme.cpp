@@ -1,7 +1,21 @@
 #include "Theme.h"
 
 #include <QApplication>
+#include <QFont>
+#include <QFontDatabase>
 #include <QPalette>
+
+// Deliberately at global scope. Q_INIT_RESOURCE declares the initialiser as an
+// extern at block scope, which binds to the innermost enclosing namespace - so
+// calling it from inside `namespace Theme` would look for
+// Theme::qInitResources_resources and fail to link.
+static void furnifyInitResources()
+{
+    // A Qt resource compiled into a STATIC library is discarded by the linker
+    // unless something references its initialiser. Nothing else does, so the
+    // font silently would not exist at runtime.
+    Q_INIT_RESOURCE(resources);
+}
 
 namespace Theme {
 
@@ -17,8 +31,30 @@ QColor textDisabled() { return QColor("#5c5c64"); }
 QColor border()       { return QColor("#3a3a40"); }
 QColor viewport()     { return QColor("#45454b"); }
 
+namespace {
+QString g_fontFamily;
+}
+
+QString fontFamily() { return g_fontFamily; }
+
 void apply(QApplication& app)
 {
+    // DM Sans, compiled in as a Qt resource. If it cannot be loaded we keep the
+    // platform default rather than falling back to something arbitrary - a
+    // missing font should not change the layout in a way nobody chose.
+    furnifyInitResources();
+
+    const int fontId = QFontDatabase::addApplicationFont(QStringLiteral(":/fonts/DMSans.ttf"));
+    if (fontId >= 0) {
+        const QStringList families = QFontDatabase::applicationFontFamilies(fontId);
+        if (!families.isEmpty()) {
+            g_fontFamily = families.first();
+            QFont uiFont = app.font();
+            uiFont.setFamily(g_fontFamily);   // keep the platform's point size
+            app.setFont(uiFont);
+        }
+    }
+
     QPalette palette;
     palette.setColor(QPalette::Window, chrome());
     palette.setColor(QPalette::WindowText, text());
