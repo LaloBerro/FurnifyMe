@@ -1,0 +1,8 @@
+<!DOCTYPE RCC>
+<RCC version="1.0">
+  <qresource prefix="/fonts">
+    <!-- Aliased: the real filename contains a comma (the variable font's axis
+         list), which is awkward to reference in code. -->
+    <file alias="DMSans.ttf">assets/fonts/DMSans-VariableFont_opsz,wght.ttf</file>
+  </qresource>
+</RCC>

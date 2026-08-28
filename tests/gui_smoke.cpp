@@ -19,6 +19,7 @@
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
 #include "SketchController.h"
+#include "Theme.h"
 #include "ToolChip.h"
 #include "ToolCluster.h"
 #include "ViewportOverlay.h"
@@ -114,6 +115,9 @@ int main(int argc, char* argv[])
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) qputenv("QT_QPA_PLATFORM", "xcb");
 #endif
     QApplication app(argc, argv);
+    // Exercise what actually ships: main.cpp themes the app before building the
+    // window, so the test must too, or it checks an app nobody runs.
+    Theme::apply(app);
 
     const QString outDir = argc > 1 ? QString::fromLocal8Bit(argv[1]) : QDir::currentPath();
 
@@ -128,6 +132,14 @@ int main(int argc, char* argv[])
 
     OcctViewWidget* view = window.view();
     check(view != nullptr && view->width() > 100, "viewport has a usable size");
+
+    // --- bundled font ---------------------------------------------------------
+    check(!Theme::fontFamily().isEmpty(),
+          QStringLiteral("the bundled font loaded (family: '%1')").arg(Theme::fontFamily()));
+    check(QApplication::font().family() == Theme::fontFamily(),
+          "the application font is the bundled family");
+    check(Theme::fontFamily().contains(QStringLiteral("DM Sans")),
+          QStringLiteral("the bundled family is DM Sans, not a fallback"));
     check(window.document().count() == 0, "document starts empty");
     check(!window.isSketching(), "not sketching at startup");
 

@@ -73,7 +73,12 @@ if(FURNIFYME_BUILD_APP)
     # The UI lives in a library so the GUI smoke test can drive the real
     # MainWindow instead of a reimplementation of it. `furnifyme` is then just
     # main.cpp on top.
+    # The bundled font is compiled into the binary rather than loaded from a
+    # path, so the app stays self-contained wherever it is copied.
+    set(CMAKE_AUTORCC ON)
+
     add_library(furnify_app STATIC
+      resources.qrc
       src/MainWindow.cpp
       src/OcctViewWidget.cpp
       src/ui/Theme.cpp
