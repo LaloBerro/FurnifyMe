@@ -77,6 +77,7 @@ if(FURNIFYME_BUILD_APP)
       src/MainWindow.cpp
       src/OcctViewWidget.cpp
       src/ui/Theme.cpp
+      src/ui/IconSet.cpp
     )
     target_include_directories(furnify_app PUBLIC src/ui)
     target_link_libraries(furnify_app PUBLIC

@@ -13,6 +13,7 @@
 // the viewport stay in agreement.
 //
 #include "DocumentModel.h"
+#include "IconSet.h"
 #include "MainWindow.h"
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
@@ -216,6 +217,35 @@ int main(int argc, char* argv[])
                   .arg(volumeA, 0, 'f', 1).arg(cutVolume, 0, 'f', 1));
         settle(300);
         view->saveSnapshot(outDir + "/g3-after-cut.png");
+    }
+
+    // --- icons ----------------------------------------------------------------
+    {
+        const IconSet::Glyph all[] = {
+            IconSet::Glyph::Sketch,      IconSet::Glyph::Extrude,
+            IconSet::Glyph::Fuse,        IconSet::Glyph::Cut,
+            IconSet::Glyph::Intersect,   IconSet::Glyph::Delete,
+            IconSet::Glyph::Undo,        IconSet::Glyph::Redo,
+            IconSet::Glyph::Items,       IconSet::Glyph::Snap,
+            IconSet::Glyph::SelectSolid, IconSet::Glyph::SelectFace,
+            IconSet::Glyph::DisplayMode, IconSet::Glyph::Screenshot,
+            IconSet::Glyph::Fit,
+        };
+        bool allDrawn = true;
+        for (IconSet::Glyph glyph : all) {
+            const QPixmap pixmap = IconSet::icon(glyph).pixmap(16, 16);
+            // A glyph that painted nothing yields a fully transparent pixmap.
+            if (pixmap.isNull() || pixmap.toImage().isNull()) { allDrawn = false; break; }
+            bool anyInk = false;
+            const QImage image = pixmap.toImage();
+            for (int y = 0; y < image.height() && !anyInk; ++y) {
+                for (int x = 0; x < image.width(); ++x) {
+                    if (qAlpha(image.pixel(x, y)) > 0) { anyInk = true; break; }
+                }
+            }
+            if (!anyInk) { allDrawn = false; break; }
+        }
+        check(allDrawn, "every glyph paints something at 16x16");
     }
 
     std::printf("\n%s (%d failure%s)  volumes: A=%.1f B=%.1f\n",
