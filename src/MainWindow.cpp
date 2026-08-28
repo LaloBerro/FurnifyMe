@@ -122,6 +122,13 @@ void MainWindow::buildMenusAndToolbar()
 {
     QMenu* fileMenu = menuBar()->addMenu(tr("&File"));
     fileMenu->addAction(myExportStepAction);
+    fileMenu->addAction(tr("Save S&creenshot..."), this, [this] {
+        const QString path = QFileDialog::getSaveFileName(this, tr("Save Screenshot"),
+                                                          QString(), tr("PNG image (*.png)"));
+        if (!path.isEmpty() && !myView->saveSnapshot(path)) {
+            QMessageBox::warning(this, tr("Screenshot"), tr("Could not write %1").arg(path));
+        }
+    });
     fileMenu->addSeparator();
     fileMenu->addAction(tr("E&xit"), this, &QWidget::close);
 
@@ -371,13 +378,20 @@ void MainWindow::onExtrude()
     bool accepted = false;
     const double height = QInputDialog::getDouble(this, tr("Extrude"), tr("Height (mm):"),
                                                   10.0, -10000.0, 10000.0, 3, &accepted);
-    if (!accepted || height == 0.0) return;
+    if (!accepted) return;
+
+    extrudePendingFace(height);
+}
+
+bool MainWindow::extrudePendingFace(double height)
+{
+    if (myPendingFace.IsNull() || height == 0.0) return false;
 
     const TopoDS_Shape solid =
         ModelingOps::extrude(myPendingFace, mySketch.plane().Axis().Direction(), height);
     if (solid.IsNull()) {
         QMessageBox::warning(this, tr("Extrude"), tr("The extrusion failed."));
-        return;
+        return false;
     }
 
     // Frame the very first solid; after that leave the camera where the user
@@ -395,6 +409,7 @@ void MainWindow::onExtrude()
     statusBar()->showMessage(tr("Solid #%1 created (volume %2 mm3).")
                                  .arg(id)
                                  .arg(ModelingOps::volume(solid), 0, 'f', 2));
+    return true;
 }
 
 void MainWindow::onFuse()   { runBoolean(static_cast<int>(ModelingOps::BooleanKind::Fuse)); }
@@ -403,11 +418,16 @@ void MainWindow::onCommon() { runBoolean(static_cast<int>(ModelingOps::BooleanKi
 
 void MainWindow::runBoolean(int kind)
 {
+    applyBooleanToSelection(kind);
+}
+
+bool MainWindow::applyBooleanToSelection(int kind)
+{
     std::vector<int> ids = myView->selectedSolidIds();
     if (ids.size() != 2) {
         QMessageBox::information(this, tr("Boolean"),
                                  tr("Select exactly two solids (Shift-click to add)."));
-        return;
+        return false;
     }
 
     // Cut is not commutative. The lower document id is the base, so the result is
@@ -415,7 +435,7 @@ void MainWindow::runBoolean(int kind)
     std::sort(ids.begin(), ids.end());
     const TopoDS_Shape a = myDocument.shapeOf(ids[0]);
     const TopoDS_Shape b = myDocument.shapeOf(ids[1]);
-    if (a.IsNull() || b.IsNull()) return;
+    if (a.IsNull() || b.IsNull()) return false;
 
     const ModelingOps::BooleanResult result =
         ModelingOps::applyBoolean(static_cast<ModelingOps::BooleanKind>(kind), a, b);
@@ -428,7 +448,7 @@ void MainWindow::runBoolean(int kind)
                                  "fuzzy value sometimes helps.")
                                   .arg(QString::fromStdString(result.error)));
         statusBar()->showMessage(tr("Boolean failed - model unchanged."));
-        return;
+        return false;
     }
 
     myDocument.checkpoint();
@@ -445,6 +465,7 @@ void MainWindow::runBoolean(int kind)
     statusBar()->showMessage(tr("Solid #%1 created from #%2 and #%3 (volume %4 mm3).")
                                  .arg(id).arg(ids[0]).arg(ids[1])
                                  .arg(ModelingOps::volume(result.shape), 0, 'f', 2));
+    return true;
 }
 
 void MainWindow::onExportStep()

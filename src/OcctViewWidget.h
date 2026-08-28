@@ -10,6 +10,7 @@
 #include <gp_Pnt.hxx>
 
 #include <QPoint>
+#include <QString>
 #include <QWidget>
 
 #include <map>
@@ -53,6 +54,10 @@ public:
     // hit several faces of one solid).
     std::vector<int> selectedSolidIds() const;
     void clearSelection();
+
+    // Renders the viewport straight to an image file. Independent of what is on
+    // screen or on top of the window, unlike a screen grab.
+    bool saveSnapshot(const QString& path);
 
     void fitAll();
     void setViewAxonometric();

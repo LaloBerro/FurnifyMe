@@ -59,6 +59,7 @@ if(FURNIFYME_BUILD_APP)
     src/OcctViewWidget.cpp
   )
 
+
   # Sources land here as Milestone 1 progresses; skip the target until they exist
   # so a fresh clone still configures and runs the headless test.
   set(APP_SOURCES_PRESENT TRUE)
@@ -69,12 +70,28 @@ if(FURNIFYME_BUILD_APP)
   endforeach()
 
   if(APP_SOURCES_PRESENT)
-    add_executable(furnifyme ${APP_SOURCES})
-    target_link_libraries(furnifyme PRIVATE
+    # The UI lives in a library so the GUI smoke test can drive the real
+    # MainWindow instead of a reimplementation of it. `furnifyme` is then just
+    # main.cpp on top.
+    add_library(furnify_app STATIC
+      src/MainWindow.cpp
+      src/OcctViewWidget.cpp
+    )
+    target_link_libraries(furnify_app PUBLIC
       furnify_geometry
       Qt6::Widgets
       TKService TKV3d TKOpenGl
     )
+
+    add_executable(furnifyme src/main.cpp)
+    target_link_libraries(furnifyme PRIVATE furnify_app)
+
+    # Drives the real widgets with synthetic Qt events delivered straight to
+    # them, so it never touches the OS cursor or steals focus - the machine
+    # stays usable while it runs. Not registered with ctest: it needs a GPU and
+    # a window server, unlike the headless tests.
+    add_executable(gui_smoke tests/gui_smoke.cpp)
+    target_link_libraries(gui_smoke PRIVATE furnify_app)
 
     # Qt refuses to start without a platform plugin, and it is looked up in a
     # `platforms/` directory next to the executable rather than alongside the

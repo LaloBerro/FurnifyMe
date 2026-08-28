@@ -16,6 +16,19 @@ class MainWindow : public QMainWindow {
 public:
     explicit MainWindow(QWidget* parent = nullptr);
 
+    // Operations, split from the dialogs that ask for their parameters. The GUI
+    // smoke test drives these directly; a modal QInputDialog cannot be answered
+    // from inside the same event loop that raised it.
+    bool extrudePendingFace(double height);
+    bool applyBooleanToSelection(int kind);   // ModelingOps::BooleanKind
+
+    // Read-only state, for assertions.
+    const DocumentModel& document() const { return myDocument; }
+    const SketchController& sketch() const { return mySketch; }
+    bool hasPendingFace() const { return !myPendingFace.IsNull(); }
+    bool isSketching() const { return mySketching; }
+    OcctViewWidget* view() const { return myView; }
+
 private slots:
     void onStartSketch();
     void onFinishSketch();

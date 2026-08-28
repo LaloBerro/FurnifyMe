@@ -122,24 +122,35 @@ FreeCAD nor WSL is installed and neither should be installed without being asked
 re-raise these as blockers; keep them listed as unverified, and treat "Milestone 1 complete"
 as a claim that cannot honestly be made until they are done.
 
-### A warning about automating this GUI
+### Driving the GUI: use `gui_smoke`, not synthetic OS input
 
-Synthetic-input testing on this machine is workable but fragile, and cost far more time than
-it was worth before the UI reported its own state. `GetWindowRect` reported a 1500x2900 window on a 1920x1080 screen, so PowerShell's
-coordinates and the app's are separated by DPI virtualization, and clicks land somewhere
-other than intended. Two earlier "failures" were the harness, not the app: clicks falling
-outside an unmaximized window, and shift-clicking twice into the same solid (which XOR
-correctly *deselects*). Two things make it tractable: maximize the window with
-`ShowWindow(h, 3)` and **assert the resulting size** (1936x1048 here) rather than trusting
-`MoveWindow`, and read the status bar's state label out of the screenshot instead of guessing
-whether an action landed. Give the two solids different heights so each has a screen region
-where only it is pickable - coplanar slabs make shift-click ambiguous.
+`tests/gui_smoke.cpp` drives the real `MainWindow` by delivering Qt events
+**straight to the widgets** with `QCoreApplication::sendEvent`, and by calling
+`QAction::trigger()`. Nothing goes through the OS input queue, so it never moves the cursor
+or steals focus - the machine stays usable while it runs. It finishes in seconds and covers
+what the headless tests cannot: that clicks become sketch points, that picking returns the
+right solids, that the document and viewport stay in agreement across delete/undo/redo, and
+that a two-solid Cut works end to end.
 
-**Drive actions by keyboard shortcut, never by toolbar pixel position.** Adding one toolbar
-button shifts every position after it, and a script that then clicks a disabled button fails
-silently and looks exactly like an application bug. That cost a false bug report once
-already. `Ctrl+K` sketch, `Enter` close, `E` extrude, `Del` delete, `Ctrl+Z`/`Ctrl+Y`
-undo/redo, `0`-`3` standard views, `F` fit all.
+Screenshots come from `V3d_View::Dump` via `OcctViewWidget::saveSnapshot()`, which renders
+the viewport to a file. It captures only the 3D view, regardless of what is on top of the
+window.
+
+```powershell
+cmake --build --preset windows
+.\build\RelWithDebInfo\gui_smoke.exe <output-dir-for-snapshots>
+```
+
+A window still appears - OCCT's `V3d_View` needs a real native window and a GL surface, so
+`-platform offscreen` cannot work - but it is shown with `WA_ShowWithoutActivating` and
+never takes focus. `gui_smoke` is deliberately **not** registered with ctest: it needs a GPU
+and a window server, while the headless tests must stay runnable anywhere, including CI.
+
+**Do not go back to `SetCursorPos`/`mouse_event` PowerShell scripts.** That approach cost far
+more time than it was worth: `GetWindowRect` reported a 1500x2900 window on a 1920x1080
+screen (DPI virtualization between the driving process and the app), clicks landed outside
+unmaximized windows, and toolbar pixel positions silently went stale the moment a button was
+added - which produced a false bug report. It also holds the machine hostage while it runs.
 
 ### Tests
 

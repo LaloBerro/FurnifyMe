@@ -276,6 +276,14 @@ void OcctViewWidget::clearSelection()
     emit selectionChanged();
 }
 
+bool OcctViewWidget::saveSnapshot(const QString& path)
+{
+    if (myView.IsNull()) return false;
+
+    myView->Redraw();
+    return myView->Dump(path.toUtf8().constData()) == Standard_True;
+}
+
 void OcctViewWidget::fitAll()
 {
     if (myView.IsNull()) return;
