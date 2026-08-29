@@ -119,8 +119,7 @@ void OcctViewWidget::initializeViewer()
     myContext->HighlightStyle(Prs3d_TypeOfHighlight_LocalSelected)->SetColor(Quantity_NOC_ORANGE);
 
     myGridRenderer.attach(myContext);
-    myGridRenderer.update(myCamera.state().distance, myCamera.state().target,
-                          mySketchPlane);
+    myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane());
     myDimension.attach(myContext);
 
     // Perspective projection: the turntable model is distance-based, and OCCT's
@@ -300,7 +299,7 @@ void OcctViewWidget::setWorkPlane(const gp_Pln& plane)
     // than on the next camera move: locking a face and seeing the grid still
     // lying on the ground is the whole failure this call exists to prevent.
     if (myView.IsNull()) return;
-    myGridRenderer.update(myCamera.state().distance, myCamera.state().target, mySketchPlane);
+    myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane());
     myView->Redraw();
 }
 
@@ -339,6 +338,35 @@ void OcctViewWidget::setSketchMode(bool enabled, const gp_Pln& plane)
     // edge-hover annotation cannot bleed into the sketch that follows it.
     myDimension.clear();
     myHasLastHoverPoint = false;
+}
+
+gp_Pln OcctViewWidget::gridPlane() const
+{
+    // Since a face can be locked, the grid is drawn exactly coplanar with a
+    // shaded face, and two coplanar surfaces are a depth-buffer tie: the grid
+    // stipples through the face and flickers as the camera moves. So the grid
+    // is displaced a hair toward whichever side of the plane the eye is on.
+    //
+    // Not Graphic3d_ZLayerId_Topmost: that layer draws with the depth buffer
+    // cleared, so the GROUND grid would then paint over every body standing
+    // on it. And not a depth-offset ZLayer either - OCCT's
+    // Graphic3d_ZLayerSettings depth offset drives glPolygonOffset in
+    // Aspect_POM_Fill mode, which does nothing at all to the line primitives
+    // this grid is made of.
+    //
+    // The displacement is tied to the grid's own minor step rather than to
+    // the raw camera distance, because it has to be QUANTIZED: GridRenderer
+    // caches on the plane it last built, so a nudge that changed with every
+    // wheel notch would rebuild the whole grid every frame. minorStepFor()
+    // already changes at only two thresholds, and 0.2% of a grid square is
+    // far below a pixel at any distance where that square is visible.
+    const double nudge = GridRenderer::minorStepFor(myCamera.state().distance) * 0.002;
+    const gp_Dir normal = mySketchPlane.Axis().Direction();
+    const gp_Vec toEye(mySketchPlane.Location(), myCamera.eyePosition());
+
+    gp_Pln plane = mySketchPlane;
+    plane.Translate(gp_Vec(normal) * (toEye.Dot(gp_Vec(normal)) >= 0.0 ? nudge : -nudge));
+    return plane;
 }
 
 bool OcctViewWidget::pointOnSketchPlane(int px, int py, gp_Pnt& out) const
@@ -504,8 +532,7 @@ void OcctViewWidget::applyCameraState()
     cam->SetEye(eye);
     cam->SetCenter(at);
     cam->SetUp(up);
-    myGridRenderer.update(myCamera.state().distance, myCamera.state().target,
-                          mySketchPlane);
+    myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane());
     myView->Redraw();
     emit cameraChanged();
 }

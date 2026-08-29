@@ -53,7 +53,10 @@
 
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepGProp.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
+#include <ElSLib.hxx>
+#include <TopAbs_Orientation.hxx>
 #include <GProp_GProps.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopExp_Explorer.hxx>
@@ -1003,6 +1006,22 @@ int main(int argc, char* argv[])
         // face is accepted. A check that passed because a click happened to
         // land somewhere is a check that fails on an unrelated change three
         // tasks from now.
+        // BRepAdaptor_Surface carries geometry and location only - it never
+        // applies TopAbs_Orientation - so on a TopAbs_REVERSED face the
+        // surface normal points INTO the body. Everything below reasons about
+        // the OUTWARD normal, which is what the app stores and extrudes along.
+        //
+        // This lambda is also why the orientation bug did not show up here
+        // first: the "is it facing the camera" test used the raw surface
+        // normal, and on a REVERSED face that normal points away from the eye,
+        // so every REVERSED face was silently filtered out of the candidate
+        // list. The picker could only ever land on a face whose surface normal
+        // already happened to be the outward one.
+        auto outwardNormal = [](const TopoDS_Face& face) {
+            gp_Dir normal = BRepAdaptor_Surface(face).Plane().Axis().Direction();
+            if (face.Orientation() == TopAbs_REVERSED) normal.Reverse();
+            return normal;
+        };
         auto isVerticalPlane = [](const TopoDS_Face& face) {
             if (face.IsNull()) return false;
             const BRepAdaptor_Surface surface(face);
@@ -1011,30 +1030,50 @@ int main(int argc, char* argv[])
         };
 
         TopoDS_Face picked;
+        TopoDS_Shape pickedBody;
         QPoint screen;
-        for (const DocumentModel::Solid& solid : window.document().solids()) {
-            for (TopExp_Explorer it(solid.shape, TopAbs_FACE); it.More(); it.Next()) {
-                const TopoDS_Face candidate = TopoDS::Face(it.Current());
-                if (!isVerticalPlane(candidate)) continue;
-                const gp_Dir normal = BRepAdaptor_Surface(candidate).Plane().Axis().Direction();
-                // Only a face pointing back at the camera can be picked at all.
-                if (gp_Vec(normal).Dot(gp_Vec(view->camera().viewDirection())) >= 0.0) continue;
+        // Projecting a centre of mass says where a face WOULD be if nothing
+        // stood in front of it; several bodies exist by now and any of them
+        // can occlude any other. So each candidate is clicked and the result
+        // read back, and only a click that actually selected a vertical flat
+        // face is accepted. A check that passed because a click happened to
+        // land somewhere is a check that fails on an unrelated change three
+        // tasks from now.
+        //
+        // REVERSED faces are tried first, so that when the model offers one
+        // the end-to-end path runs over the case the orientation fix exists
+        // for rather than over the easy one. The deterministic coverage of
+        // that fix is the box probe further down; this is belt and braces.
+        for (int pass = 0; pass < 2 && picked.IsNull(); ++pass) {
+            const bool wantReversed = (pass == 0);
+            for (const DocumentModel::Solid& solid : window.document().solids()) {
+                for (TopExp_Explorer it(solid.shape, TopAbs_FACE); it.More(); it.Next()) {
+                    const TopoDS_Face candidate = TopoDS::Face(it.Current());
+                    if (!isVerticalPlane(candidate)) continue;
+                    if ((candidate.Orientation() == TopAbs_REVERSED) != wantReversed) continue;
+                    // Only a face whose OUTWARD normal points back at the
+                    // camera can be picked at all.
+                    if (gp_Vec(outwardNormal(candidate))
+                            .Dot(gp_Vec(view->camera().viewDirection())) >= 0.0)
+                        continue;
 
-                GProp_GProps props;
-                BRepGProp::SurfaceProperties(candidate, props);
-                QPoint at;
-                if (!view->projectToScreen(props.CentreOfMass(), at)) continue;
-                if (!view->rect().adjusted(20, 20, -20, -20).contains(at)) continue;
+                    GProp_GProps props;
+                    BRepGProp::SurfaceProperties(candidate, props);
+                    QPoint at;
+                    if (!view->projectToScreen(props.CentreOfMass(), at)) continue;
+                    if (!view->rect().adjusted(20, 20, -20, -20).contains(at)) continue;
 
-                clickAt(view, QPointF(at));
-                settle(120);
-                const TopoDS_Face got = view->selectedFace();
-                if (!isVerticalPlane(got)) continue;   // occluded, or the pick missed
-                picked = got;
-                screen = at;
-                break;
+                    clickAt(view, QPointF(at));
+                    settle(120);
+                    const TopoDS_Face got = view->selectedFace();
+                    if (!isVerticalPlane(got)) continue;   // occluded, or the pick missed
+                    picked = got;
+                    pickedBody = solid.shape;
+                    screen = at;
+                    break;
+                }
+                if (!picked.IsNull()) break;
             }
-            if (!picked.IsNull()) break;
         }
         check(!picked.IsNull(),
               "clicking a projected face centre selects a vertical flat face");
@@ -1053,13 +1092,27 @@ int main(int argc, char* argv[])
 
                 // The sketch plane must BE the face's plane, not merely something.
                 const gp_Pln sketchPlane = window.sketch().plane();
-                check(sketchPlane.Axis().Direction().IsParallel(
-                          facePlane.Axis().Direction(), 1.0e-7),
-                      "the sketch plane is oriented like the face");
                 check(std::fabs(facePlane.Distance(sketchPlane.Location())) < 1.0e-6,
-                      "and sits on it");
+                      "the sketch plane sits on the face");
                 check(std::fabs(sketchPlane.Axis().Direction().Z()) < 0.1,
                       "and the locked plane really is a vertical one, not the ground");
+
+                // SIGNED, not IsParallel. IsParallel is true for antiparallel
+                // directions too, so a plane whose normal points INTO the body
+                // sails through it - and that is exactly the bug: extrude
+                // sweeps along this normal, so an inward one puts the shelf
+                // inside the cabinet. The centroid of the body the face came
+                // from is the reference that cannot be argued with.
+                GProp_GProps hostProps;
+                BRepGProp::VolumeProperties(pickedBody, hostProps);
+                const gp_Pnt hostCentre = hostProps.CentreOfMass();
+                const double outwardness =
+                    gp_Vec(hostCentre, sketchPlane.Location())
+                        .Dot(gp_Vec(sketchPlane.Axis().Direction()));
+                check(outwardness > 0.0,
+                      QStringLiteral("the locked plane's normal points out of the body, "
+                                     "not into it (%1)")
+                          .arg(outwardness));
 
                 // The grid is drawn in the 3D view, so the viewport dump is
                 // the only place it can be seen at all.
@@ -1085,6 +1138,80 @@ int main(int argc, char* argv[])
                 trigger(window, QStringLiteral("Cancel Sketch"));
                 settle(120);
 
+                // And now the whole point of the feature: draw an outline on
+                // the locked face and extrude it. Volume alone would NOT have
+                // caught the inward-sweep bug - a prism swept into the body is
+                // still a valid prism of the right volume, just in the wrong
+                // place - so the check that bites is where the new body's
+                // centre of mass ends up relative to the face it grew from.
+                trigger(window, QStringLiteral("Start Sketch"));
+                settle(120);
+                clickAt(view, QPointF(screen + QPoint(-60, -40)));
+                clickAt(view, QPointF(screen + QPoint(60, -40)));
+                clickAt(view, QPointF(screen + QPoint(60, 40)));
+                clickAt(view, QPointF(screen + QPoint(-60, 40)));
+                settle(120);
+                check(window.sketch().pointCount() == 4,
+                      "four points land on the locked face");
+
+                // The outline's area, in the plane's own coordinates, computed
+                // here so the expected volume is not read back out of the
+                // thing under test.
+                double area = 0.0;
+                const std::vector<gp_Pnt> outline = window.sketch().points();
+                for (std::size_t k = 0; k < outline.size(); ++k) {
+                    Standard_Real u0 = 0.0, v0 = 0.0, u1 = 0.0, v1 = 0.0;
+                    ElSLib::Parameters(sketchPlane, outline[k], u0, v0);
+                    ElSLib::Parameters(sketchPlane, outline[(k + 1) % outline.size()], u1, v1);
+                    area += u0 * v1 - u1 * v0;
+                }
+                area = std::fabs(area) * 0.5;
+                check(area > 1.0, QStringLiteral("the outline encloses real area (%1)").arg(area));
+
+                trigger(window, QStringLiteral("Finish Sketch"));
+                settle(150);
+                check(window.hasPendingFace(), "the outline on the locked face closes");
+
+                const std::size_t bodiesBefore = window.document().count();
+                const double shelfHeight = 30.0;
+                check(window.extrudePendingFace(shelfHeight),
+                      "and extrudes into a body");
+                settle(150);
+                if (window.document().count() == bodiesBefore + 1) {
+                    const TopoDS_Shape shelf = window.document().solids().back().shape;
+                    check(std::fabs(ModelingOps::volume(shelf) - area * shelfHeight) <
+                              area * shelfHeight * 1.0e-6,
+                          QStringLiteral("whose volume is the outline times the height "
+                                         "(%1 against %2)")
+                              .arg(ModelingOps::volume(shelf))
+                              .arg(area * shelfHeight));
+
+                    GProp_GProps shelfProps;
+                    BRepGProp::VolumeProperties(shelf, shelfProps);
+                    const double standsProud =
+                        gp_Vec(sketchPlane.Location(), shelfProps.CentreOfMass())
+                            .Dot(gp_Vec(sketchPlane.Axis().Direction()));
+                    check(standsProud > 0.0,
+                          QStringLiteral("and stands proud of the locked face rather than "
+                                         "sinking into the body behind it (%1)")
+                              .arg(standsProud));
+                }
+
+                // Extruding calls SketchController::reset(), which clears the
+                // points and must NOT clear the plane - a lock that silently
+                // expired on the first extrude would make the feature useless
+                // for the second shelf.
+                check(window.isFaceLocked() &&
+                          std::fabs(facePlane.Distance(window.sketch().plane().Location())) <
+                              1.0e-6,
+                      "the face stays locked after extruding on it");
+
+                // Put the document back where the rest of the suite expects it.
+                trigger(window, QStringLiteral("Undo"));
+                settle(150);
+                check(window.document().count() == bodiesBefore,
+                      "the shelf is undone, leaving the document as it was");
+
                 // A curved face has no single plane to draw on, and the
                 // refusal has to say so rather than silently doing nothing.
                 // Built here rather than modelled: nothing in this document
@@ -1109,9 +1236,12 @@ int main(int argc, char* argv[])
                           QStringLiteral("and the refusal names the cause and the fix "
                                          "(\"%1\")")
                               .arg(toasts->currentText()));
+                    // IsEqual, not IsParallel: "unchanged" has to include the
+                    // sense of the normal, or a refusal that quietly flipped
+                    // the plane the user is drawing on would read as a pass.
                     check(window.isFaceLocked() &&
-                              window.sketch().plane().Axis().Direction().IsParallel(
-                                  facePlane.Axis().Direction(), 1.0e-7) &&
+                              window.sketch().plane().Axis().Direction().IsEqual(
+                                  sketchPlane.Axis().Direction(), 1.0e-9) &&
                               std::fabs(facePlane.Distance(
                                   window.sketch().plane().Location())) < 1.0e-6,
                           "a refused lock leaves the plane that was already locked alone");
@@ -1134,6 +1264,45 @@ int main(int argc, char* argv[])
                 // it has to be recorded like every other one.
                 check(window.progress().count("faceLock.used") >= 1,
                       "locking a face is recorded as something the user has done");
+
+                // Deterministic coverage of the orientation flip, independent
+                // of which face the picker above happened to reach. A plain
+                // BRepPrimAPI_MakeBox has three TopAbs_REVERSED faces whose
+                // surface normals point into the box; every one of the six
+                // must lock to a plane whose normal points OUT.
+                {
+                    const TopoDS_Shape probe =
+                        BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 100.0, 60.0, 40.0).Shape();
+                    GProp_GProps probeProps;
+                    BRepGProp::VolumeProperties(probe, probeProps);
+                    const gp_Pnt probeCentre = probeProps.CentreOfMass();
+
+                    int reversedSeen = 0, outward = 0, faces = 0;
+                    for (TopExp_Explorer it(probe, TopAbs_FACE); it.More(); it.Next()) {
+                        const TopoDS_Face f = TopoDS::Face(it.Current());
+                        if (f.Orientation() == TopAbs_REVERSED) ++reversedSeen;
+                        if (!window.lockToFace(f)) continue;
+                        ++faces;
+                        const gp_Pln locked = window.sketch().plane();
+                        if (gp_Vec(probeCentre, locked.Location())
+                                .Dot(gp_Vec(locked.Axis().Direction())) > 0.0)
+                            ++outward;
+                    }
+                    check(faces == 6, "every face of the probe box locks");
+                    check(reversedSeen > 0,
+                          QStringLiteral("the probe box really does carry reversed faces "
+                                         "(%1 of 6), so this check exercises the flip")
+                              .arg(reversedSeen));
+                    check(outward == faces,
+                          QStringLiteral("every locked face stores its OUTWARD normal "
+                                         "(%1 of %2)").arg(outward).arg(faces));
+
+                    // The probe leaves the window locked to a box that is not
+                    // in the document; hand the rest of the suite the ground
+                    // plane it was written against.
+                    window.unlockFace();
+                    check(!window.isFaceLocked(), "the probe leaves nothing locked");
+                }
             }
         }
 

@@ -19,6 +19,8 @@
 
 #include <BRepAdaptor_Surface.hxx>
 #include <GeomAbs_SurfaceType.hxx>
+#include <TopAbs_Orientation.hxx>
+#include <gp_Ax3.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Vec.hxx>
@@ -1022,7 +1024,29 @@ bool MainWindow::lockToFace(const TopoDS_Face& face)
     // By value, and the face is dropped here - see lockToFace()'s comment in
     // the header for why holding on to it would be a bug waiting for the
     // user's next boolean.
-    const gp_Pln plane = surface.Plane();
+    //
+    // DIRECTION CONVENTION: the stored plane's normal is the face's OUTWARD
+    // normal, because extrude sweeps along it (see extrudePendingFace and
+    // ExtrudePreview) and a shelf has to come out of the cabinet rather than
+    // into it.
+    //
+    // BRepAdaptor_Surface carries the underlying geometry and its location
+    // and nothing else - it never applies TopAbs_Orientation. On a plain
+    // BRepPrimAPI_MakeBox three of the six faces are TopAbs_REVERSED, and
+    // for those the surface normal points INTO the body. Locking one of them
+    // without this flip sweeps the prism straight through the body it is
+    // standing on. Reverse it here, once, so no consumer of the sketch plane
+    // has to know any of this.
+    gp_Pln plane = surface.Plane();
+    if (face.Orientation() == TopAbs_REVERSED) {
+        // Origin and in-plane X direction preserved, normal flipped: gp_Ax3's
+        // (P, N, Vx) constructor keeps Vx as the X direction when it is
+        // already perpendicular to N, which it is, so only the normal (and
+        // with it the derived Y direction) changes. The grid is symmetric
+        // about both, so nothing visible moves.
+        plane = gp_Pln(gp_Ax3(plane.Location(), plane.Axis().Direction().Reversed(),
+                              plane.Position().XDirection()));
+    }
     mySketch.setPlane(plane);
     myFaceLocked = true;
     // One call sets both where clicks land and where the grid is drawn; they

@@ -174,6 +174,11 @@ protected:
 
 private:
     void initializeViewer();
+    // The work plane, nudged a hair toward the eye. Locking a face makes the
+    // grid exactly coplanar with a shaded face, and two coplanar surfaces are
+    // a depth-buffer tie - stipple, and flicker under camera motion. See the
+    // definition for why this is a geometric nudge rather than a ZLayer.
+    gp_Pln gridPlane() const;
     bool pointOnSketchPlane(int px, int py, gp_Pnt& out) const;
     bool pickWorldPoint(int px, int py, gp_Pnt& out) const;
     void applySelectionMode(const Handle(AIS_Shape)& shape);
