@@ -242,6 +242,11 @@ void OcctViewWidget::clearPreview()
     myContext->UpdateCurrentViewer();
 }
 
+bool OcctViewWidget::hasPreview() const
+{
+    return !myPreview.IsNull();
+}
+
 void OcctViewWidget::applySelectionMode(const Handle(AIS_Shape)& shape)
 {
     if (myContext.IsNull() || shape.IsNull()) return;

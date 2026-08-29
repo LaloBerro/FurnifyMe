@@ -72,11 +72,15 @@ protected:
 private:
     QRect fieldRect() const;
     void syncFieldGeometry();
-    // Centred along the top edge, at ViewportOverlay's own edge margin -
-    // clear of the bottom strip where the toast, the walkthrough guide and
-    // the hint balloon all live, and of the chip clusters docked in the top
-    // corners. See ExtrudePreview.cpp for why that placement was chosen over
-    // tracking the other three at runtime.
+    // Centred along the top edge, at ViewportOverlay's own edge margin. Clear
+    // of the bottom strip where the toast, the walkthrough guide and the
+    // hint balloon all live at every width this app runs at - but NOT
+    // collision-free against the top corners: it overlaps the axis gizmo
+    // (top-right) below ~472px of viewport width, and the top-left chip
+    // cluster (Items/Undo/Redo) somewhere in the 530-580px range depending on
+    // that cluster's own label widths. Neither is tracked at runtime the way
+    // HintBalloon/ToastHost step around the guide - see ExtrudePreview.cpp
+    // for the reasoning and the exact thresholds.
     void reposition();
     // Rebuilds the preview from the field's current text through
     // ModelingOps::extrude(). Leaves the last good preview alone - and marks
@@ -84,6 +88,15 @@ private:
     void updatePreview();
     void commit();
     void markInvalid(bool invalid);
+    // Connected to MainWindow::appStateChanged(), which fires at the end of
+    // every updateActions() call - including onStartSketch()'s and
+    // onCancelSketch()'s, both of which null the pending face out from under
+    // an open preview without telling this widget directly. Closes the
+    // preview itself whenever it is open but the pending face it was built
+    // from is gone, rather than trusting every present and future route that
+    // can clear the pending face to individually remember to call cancel().
+    // See ExtrudePreview.cpp for why a ghost body was reachable before this.
+    void onAppStateChanged();
 
     MainWindow* myWindow = nullptr;
     OcctViewWidget* myView = nullptr;

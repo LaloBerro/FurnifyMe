@@ -47,6 +47,11 @@ public:
     // Temporary, non-selectable feedback shape (the in-progress sketch).
     void setPreview(const TopoDS_Shape& shape, bool shaded = false);
     void clearPreview();
+    // True while a preview shape is actually displayed. Exposed so a caller
+    // like ExtrudePreview's own hasPreview() can be checked against the real
+    // AIS state rather than trusted as a bare, uncrossed-checked flag - see
+    // gui_smoke.cpp's extrude preview block.
+    bool hasPreview() const;
 
     void setSelectionMode(SelectionMode mode);
     SelectionMode selectionMode() const { return mySelectionMode; }

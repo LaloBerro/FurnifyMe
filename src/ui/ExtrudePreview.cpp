@@ -55,6 +55,13 @@ ExtrudePreview::ExtrudePreview(MainWindow* window, OcctViewWidget* view)
     // Repositions on a viewport resize, the same reason Toast and HintBalloon
     // each install this on their own parent.
     if (myView) myView->installEventFilter(this);
+
+    // Ties this widget's own life to the pending face it was built from -
+    // see onAppStateChanged() and the header for why a route this class does
+    // not know about (onStartSketch(), onCancelSketch(), and any future one)
+    // must not be trusted to remember to call cancel() individually.
+    if (myWindow) connect(myWindow, &MainWindow::appStateChanged, this,
+                          &ExtrudePreview::onAppStateChanged);
 }
 
 ExtrudePreview::~ExtrudePreview()
@@ -102,6 +109,26 @@ void ExtrudePreview::cancel()
     // the user can press Extrude again and try another height.
 }
 
+void ExtrudePreview::onAppStateChanged()
+{
+    // Fix round 1, Important 1: onStartSketch() nulls the pending face and
+    // resets the view's single preview slot to empty, but neither of those
+    // told this widget anything - it kept myHasPreview true and stayed open,
+    // so the next keystroke's updatePreview() called myView->setPreview()
+    // again and redisplayed a body-shaped shape over the new outline, and
+    // Enter reached commit(), where extrudePendingFace() returns false on
+    // the now-null pending face - hide() never ran, and a shape that exists
+    // in no document sat on screen. Deriving this from the one signal every
+    // route that can clear the pending face already emits (appStateChanged,
+    // fired at the end of every updateActions() call) closes the whole
+    // class rather than patching onStartSketch()/onCancelSketch()
+    // individually - the same reasoning HintBalloon's conditionHolds() uses
+    // for its own triggers. Reads state and calls cancel(), which touches
+    // neither DocumentModel nor updateActions() - safe per CLAUDE.md's rule
+    // that a slot on this signal must never call back into updateActions().
+    if (isVisible() && myWindow && !myWindow->hasPendingFace()) cancel();
+}
+
 double ExtrudePreview::height() const
 {
     return myHeight;
@@ -117,10 +144,25 @@ void ExtrudePreview::reposition()
     if (!myView) return;
     // Top-center, clear of the bottom strip where Toast, WalkthroughPanel and
     // HintBalloon all live (see their own reposition()/HintBalloon::stepAside
-    // logic) and of the chip clusters anchored in the top-left and top-right
-    // corners (see ViewportOverlay::relayout()). Unlike those three, this
-    // panel does not need to track anything else at runtime to stay clear -
-    // it simply lives somewhere none of them ever reach.
+    // logic) at every width this app runs at - unlike those three, this
+    // panel does not need to track the guide/toast/balloon at runtime to
+    // stay clear of them.
+    //
+    // It is NOT collision-free against the top corners, though - fix round
+    // 1 flagged an earlier version of this comment for overclaiming that.
+    // This panel is kWidth (200) wide, centred, so its edges sit at
+    // (viewportWidth +/- 200) / 2. The axis gizmo is 120px wide, top-right
+    // at the same kMargin: the two overlap once viewportWidth drops below
+    // 472px. The top-left chip cluster (Items/Undo/Redo) is roughly
+    // 150-175px wide depending on its own action labels; the two overlap
+    // somewhere in the 530-580px range depending on that width. Neither is
+    // tracked or stepped around here - this simply has not come up at any
+    // width the app has actually been run or tested at (1200, 900 and
+    // 1100px in gui_smoke), and handling it would mean giving this panel
+    // the same obstacle-tracking HintBalloon/ToastHost use for the guide,
+    // which felt like more machinery than a narrow-window edge case
+    // justified. Revisit if this app ever needs to run meaningfully
+    // narrower than ~600px.
     const int x = (myView->width() - QWidget::width()) / 2;
     move(x, kMargin);
 }
@@ -168,6 +210,16 @@ void ExtrudePreview::updatePreview()
 
     markInvalid(false);
     myHeight = h;
+    // Deliberate deviation from the brief, which specced a transparent
+    // preview: setPreview() is OcctViewWidget's single existing preview
+    // channel, already used for the in-progress sketch outline, and it
+    // displays opaque yellow (see OcctViewWidget::setPreview) rather than
+    // transparent. Reusing it as-is - instead of adding a second,
+    // extrude-specific display path with its own transparency - keeps "the
+    // preview is built by the same call the commit uses" honest without
+    // introducing a second AIS channel to keep in sync with this one, and
+    // an opaque preview is still clearly not a committed body (it is
+    // wireframe-yellow, not the shaded grey every real body renders in).
     myView->setPreview(solid, /*shaded=*/true);
     myHasPreview = true;
 }
@@ -247,6 +299,26 @@ void ExtrudePreview::resizeEvent(QResizeEvent* event)
 
 bool ExtrudePreview::eventFilter(QObject* watched, QEvent* event)
 {
+    // Fix round 1, Minor 2: QShortcutMap resolves an enabled window-context
+    // shortcut BEFORE a key press ever reaches the focused widget - myField
+    // only saw Escape as an ordinary KeyPress below because Cancel Sketch's
+    // own Escape binding happens to be disabled whenever this panel can be
+    // open (mySketching is false). That was an accident of the two actions'
+    // current enabled-state, not a real guarantee, and would silently break
+    // the moment anything else claims Escape while extruding. ShortcutOverride
+    // is the mechanism Qt gives a widget to claim a key back from the map -
+    // ShortcutSheet::event() does this directly since it IS the focused
+    // widget; myField is a plain QLineEdit this class does not subclass, so
+    // the same claim has to happen through this eventFilter instead, on the
+    // ShortcutOverride event Qt sends to the focus widget first.
+    if (watched == myField && event->type() == QEvent::ShortcutOverride) {
+        auto* keyEvent = static_cast<QKeyEvent*>(event);
+        if (isVisible() && keyEvent->key() == Qt::Key_Escape &&
+            keyEvent->modifiers() == Qt::NoModifier) {
+            event->accept();
+            return true;
+        }
+    }
     if (watched == myField && event->type() == QEvent::KeyPress) {
         auto* keyEvent = static_cast<QKeyEvent*>(event);
         if (keyEvent->key() == Qt::Key_Escape) {
@@ -254,7 +326,9 @@ bool ExtrudePreview::eventFilter(QObject* watched, QEvent* event)
             // Swallowed here, not left to bubble: MainWindow's own Cancel
             // Sketch action is also bound to Escape and would otherwise null
             // the pending face too, contradicting "Escape cancels [this] and
-            // leaves the pending face intact".
+            // leaves the pending face intact". The ShortcutOverride branch
+            // above is what actually guarantees this KeyPress arrives at
+            // all, regardless of what else is bound to Escape.
             return true;
         }
     }

@@ -839,6 +839,11 @@ int main(int argc, char* argv[])
               "extrude never constructs a dialog");
         check(preview != nullptr && preview->hasPreview(),
               "a preview shape is shown before the user commits anything");
+        // Cross-checked against the viewport's own state, not just the
+        // panel's bare flag - fix round 1, Minor 4: hasPreview() alone would
+        // pass for a panel that sets the flag and displays nothing.
+        check(view->hasPreview(),
+              "the viewport itself actually holds the preview shape");
         check(static_cast<int>(window.document().solids().size()) == before,
               "previewing creates no body");
 
@@ -846,12 +851,15 @@ int main(int argc, char* argv[])
             preview->field()->setText(QStringLiteral("25"));
             settle(150);
             check(preview->hasPreview(), "editing the height keeps a live preview");
+            check(view->hasPreview(), "the viewport reflects the edited height too");
 
             // Garbage must not clear the preview or flicker the viewport.
             preview->field()->setText(QStringLiteral("abc"));
             settle(150);
             check(preview->hasPreview(),
                   "an unparseable height leaves the last good preview alone");
+            check(view->hasPreview(),
+                  "the viewport still holds the last good preview, not nothing");
             check(static_cast<int>(window.document().solids().size()) == before,
                   "an unparseable height creates no body");
 
@@ -868,12 +876,95 @@ int main(int argc, char* argv[])
         check(after == nullptr || !after->isVisible(),
               "committing closes the preview");
         if (!window.document().solids().empty()) {
-            const std::string dims =
-                Measure::formatDimensions(window.document().solids().back().shape);
-            check(dims.find("25") != std::string::npos,
-                  QStringLiteral("the body is the height that was typed (\"%1\")")
-                      .arg(QString::fromStdString(dims)));
+            const QString dims = QString::fromStdString(
+                Measure::formatDimensions(window.document().solids().back().shape));
+            // Fix round 1, Minor 4: dims.find("25") would also match a 250mm
+            // width or depth component - "x <times> y <times> z mm" (see
+            // Measure::formatDimensions), so check the height specifically,
+            // the last of the three numbers, rather than anywhere in the
+            // string.
+            const QStringList parts = dims.split(QString::fromUtf8("\xC3\x97"));
+            check(!parts.isEmpty() && parts.last().trimmed() == QStringLiteral("25 mm"),
+                  QStringLiteral("the body's height specifically is 25 mm, not just "
+                                 "some dimension that contains \"25\" (\"%1\")")
+                      .arg(dims));
         }
+    }
+
+    // --- starting a new sketch closes an open extrude preview -----------------
+    // Fix round 1, Important 1: onStartSketch() nulls the pending face and
+    // resets the view's preview slot to empty, but that alone used to leave
+    // the panel itself open and still believing it had a good preview - the
+    // next keystroke redisplayed a body-shaped shape over the new outline,
+    // and Enter reached commit(), where extrudePendingFace() silently failed
+    // on the now-null pending face, so hide() never ran and the shape stayed
+    // on screen: a body visible in the viewport that exists in no document.
+    {
+        trigger(window, QStringLiteral("Start Sketch"));
+        clickAt(view, QPointF(300, 300)); clickAt(view, QPointF(420, 300));
+        clickAt(view, QPointF(420, 380)); clickAt(view, QPointF(300, 380));
+        trigger(window, QStringLiteral("Finish Sketch"));
+        settle(150);
+        trigger(window, QStringLiteral("Extrude..."));
+        settle(150);
+
+        ExtrudePreview* preview = window.findChild<ExtrudePreview*>();
+        check(preview != nullptr && preview->isVisible() && preview->hasPreview() &&
+                  view->hasPreview(),
+              "a preview is open, with a shape in the viewport, before starting a new sketch");
+
+        trigger(window, QStringLiteral("Start Sketch"));
+        settle(150);
+        ExtrudePreview* stillOpen = window.findChild<ExtrudePreview*>();
+        check(stillOpen == nullptr || !stillOpen->isVisible(),
+              "starting a new sketch closes the open extrude preview");
+        check(!view->hasPreview(),
+              "and leaves no ghost preview shape behind in the viewport");
+
+        trigger(window, QStringLiteral("Cancel Sketch"));
+        settle(150);
+    }
+
+    // --- Escape cancels the extrude preview without touching the pending face -
+    {
+        trigger(window, QStringLiteral("Start Sketch"));
+        clickAt(view, QPointF(300, 300)); clickAt(view, QPointF(420, 300));
+        clickAt(view, QPointF(420, 380)); clickAt(view, QPointF(300, 380));
+        trigger(window, QStringLiteral("Finish Sketch"));
+        settle(150);
+        trigger(window, QStringLiteral("Extrude..."));
+        settle(150);
+
+        ExtrudePreview* preview = window.findChild<ExtrudePreview*>();
+        check(preview != nullptr && preview->isVisible() && preview->hasPreview(),
+              "a preview is open before pressing Escape");
+        check(window.hasPendingFace(), "a face is pending before pressing Escape");
+
+        if (preview && preview->field()) {
+            QKeyEvent escape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+            QCoreApplication::sendEvent(preview->field(), &escape);
+            settle(150);
+        }
+
+        ExtrudePreview* afterEscape = window.findChild<ExtrudePreview*>();
+        check(afterEscape == nullptr || !afterEscape->isVisible(),
+              "Escape closes the preview");
+        check(!view->hasPreview(), "Escape removes the preview shape from the viewport");
+        check(window.hasPendingFace(),
+              "Escape leaves the pending face intact, so the user can retry");
+
+        // Retry: the same face, extruded again, still works after a cancel.
+        const int before = static_cast<int>(window.document().solids().size());
+        trigger(window, QStringLiteral("Extrude..."));
+        settle(150);
+        ExtrudePreview* retry = window.findChild<ExtrudePreview*>();
+        if (retry && retry->field()) {
+            QKeyEvent commit(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+            QCoreApplication::sendEvent(retry->field(), &commit);
+            settle(250);
+        }
+        check(static_cast<int>(window.document().solids().size()) == before + 1,
+              "the pending face left behind by Escape can still be extruded");
     }
 
     // --- icons ----------------------------------------------------------------
