@@ -19,6 +19,7 @@
 #include <QLabel>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QSettings>
 #include <QSplitter>
 #include <QStatusBar>
 #include <QtGlobal>
@@ -28,9 +29,16 @@
 #include <utility>
 #include <vector>
 
-MainWindow::MainWindow(QWidget* parent)
+MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     : QMainWindow(parent)
+    , myPersistProgress(persistProgress)
 {
+    if (myPersistProgress) {
+        const QSettings settings;
+        myProgress.deserialize(
+            settings.value(QStringLiteral("progress")).toString().toStdString());
+    }
+
     myView = new OcctViewWidget(this);
 
     myItemsPanel = new ItemsPanel(&myDocument, myView, this);
@@ -220,17 +228,45 @@ void MainWindow::buildMenus()
     QMenu* viewMenu = menuBar()->addMenu(tr("&View"));
     viewMenu->addAction(myFitAction);
     viewMenu->addSeparator();
-    viewMenu->addAction(tr("&Axonometric"), QKeySequence(Qt::Key_0),
-                        myView, &OcctViewWidget::setViewAxonometric);
-    viewMenu->addAction(tr("&Top"), QKeySequence(Qt::Key_1), myView, &OcctViewWidget::setViewTop);
-    viewMenu->addAction(tr("F&ront"), QKeySequence(Qt::Key_2), myView, &OcctViewWidget::setViewFront);
-    viewMenu->addAction(tr("&Right"), QKeySequence(Qt::Key_3), myView, &OcctViewWidget::setViewRight);
+    viewMenu->addAction(tr("&Axonometric"), QKeySequence(Qt::Key_0), this, [this] {
+        myView->setViewAxonometric();
+        recordProgress("view.changed");
+    });
+    viewMenu->addAction(tr("&Top"), QKeySequence(Qt::Key_1), this, [this] {
+        myView->setViewTop();
+        recordProgress("view.changed");
+    });
+    viewMenu->addAction(tr("F&ront"), QKeySequence(Qt::Key_2), this, [this] {
+        myView->setViewFront();
+        recordProgress("view.changed");
+    });
+    viewMenu->addAction(tr("&Right"), QKeySequence(Qt::Key_3), this, [this] {
+        myView->setViewRight();
+        recordProgress("view.changed");
+    });
     viewMenu->addSeparator();
     viewMenu->addAction(mySnapAction);
     viewMenu->addSeparator();
     viewMenu->addAction(mySolidSelectAction);
     viewMenu->addAction(myFaceSelectAction);
     viewMenu->addAction(myItemsPanelAction);
+
+    QMenu* helpMenu = menuBar()->addMenu(tr("&Help"));
+
+    myShortcutsAction = new QAction(tr("Keyboard Shortcuts"), this);
+    myShortcutsAction->setShortcut(QKeySequence(Qt::Key_Question));
+    myShortcutsAction->setToolTip(tr("List every keyboard shortcut (?)"));
+    helpMenu->addAction(myShortcutsAction);
+
+    helpMenu->addAction(tr("Show tips again"), this, [this] {
+        myProgress.reset();
+        if (myPersistProgress) {
+            QSettings settings;
+            settings.setValue(QStringLiteral("progress"), QString());
+        }
+        statusBar()->showMessage(tr("Tips reset — the guide and hints will appear again"));
+        emit appStateChanged();
+    });
 }
 
 void MainWindow::buildOverlay()
@@ -311,6 +347,17 @@ void MainWindow::updateActions()
     myRedoAction->setEnabled(!mySketching && myDocument.canRedo());
 
     updateStateLabel();
+    emit appStateChanged();
+}
+
+void MainWindow::recordProgress(const std::string& event)
+{
+    myProgress.record(event);
+    if (!myPersistProgress) return;
+
+    QSettings settings;
+    settings.setValue(QStringLiteral("progress"),
+                      QString::fromStdString(myProgress.serialize()));
 }
 
 void MainWindow::updateStateLabel()
@@ -372,6 +419,7 @@ void MainWindow::onDeleteSelected()
         myDocument.removeSolid(id);
         myView->removeSolid(id);
     }
+    recordProgress("delete.used");
 
     updateActions();
     emit documentChanged();
@@ -383,6 +431,7 @@ void MainWindow::onDeleteSelected()
 void MainWindow::onUndo()
 {
     if (!myDocument.undo()) return;
+    recordProgress("undo.used");
 
     myView->clearSelection();
     resyncView();
@@ -396,6 +445,7 @@ void MainWindow::onUndo()
 void MainWindow::onRedo()
 {
     if (!myDocument.redo()) return;
+    recordProgress("undo.used");
 
     myView->clearSelection();
     resyncView();
@@ -488,6 +538,7 @@ void MainWindow::onFinishSketch()
     }
 
     myPendingFace = face;
+    recordProgress("sketch.completed");
     mySketching = false;
     myView->setSketchMode(false, mySketch.plane());
     myView->setPreview(face, /*shaded=*/true);
@@ -526,6 +577,7 @@ bool MainWindow::extrudePendingFace(double height)
     const bool wasEmpty = myDocument.count() == 0;
     myDocument.checkpoint();
     const int id = myDocument.addSolid(solid);
+    recordProgress("extrude.completed");
     myView->clearPreview();
     myView->displaySolid(id, solid);
     if (wasEmpty) myView->fitAll();
@@ -598,6 +650,7 @@ bool MainWindow::applyBooleanToSelection(int kind)
     }
 
     const int id = myDocument.addSolid(result.shape);
+    recordProgress("boolean.completed");
     myView->displaySolid(id, result.shape);
 
     updateActions();
@@ -645,6 +698,7 @@ void MainWindow::onSelectionModeChanged()
 {
     myView->setSelectionMode(myFaceSelectAction->isChecked() ? OcctViewWidget::SelectionMode::Face
                                                              : OcctViewWidget::SelectionMode::Solid);
+    if (myFaceSelectAction->isChecked()) recordProgress("faceMode.used");
     statusBar()->showMessage(myFaceSelectAction->isChecked()
                                  ? tr("Face selection — hovering highlights one face at a time")
                                  : tr("Body selection — click whole bodies to combine them"));

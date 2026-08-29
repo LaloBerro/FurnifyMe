@@ -146,7 +146,9 @@ int main(int argc, char* argv[])
 
     const QString outDir = argc > 1 ? QString::fromLocal8Bit(argv[1]) : QDir::currentPath();
 
-    MainWindow window;
+    // Never persist: a suite whose behaviour depends on how often the developer
+    // ran the real app is not a suite.
+    MainWindow window(nullptr, /*persistProgress=*/false);
     // Show without taking focus: the point of this harness is that the user can
     // keep working while it runs.
     window.setAttribute(Qt::WA_ShowWithoutActivating);
@@ -678,6 +680,41 @@ int main(int argc, char* argv[])
         check(action(window, QStringLiteral("Union")) != nullptr, "the Union action exists");
         check(action(window, QStringLiteral("Subtract")) != nullptr, "the Subtract action exists");
         check(action(window, QStringLiteral("Intersect")) != nullptr, "the Intersect action exists");
+    }
+
+    // --- progress is recorded from real actions -------------------------------
+    {
+        // The suite has by now completed sketches, extrudes and a boolean, so
+        // those events must have been counted.
+        check(window.progress().count("extrude.completed") >= 2,
+              QStringLiteral("extrudes were recorded (%1)")
+                  .arg(window.progress().count("extrude.completed")));
+        check(window.progress().count("boolean.completed") >= 1,
+              "the boolean was recorded");
+        check(window.progress().count("sketch.completed") >= 2,
+              "closing an outline was recorded");
+
+        const int before = window.progress().count("undo.used");
+        trigger(window, QStringLiteral("Undo"));
+        settle(150);
+        check(window.progress().count("undo.used") == before + 1,
+              "undo records exactly once");
+        trigger(window, QStringLiteral("Redo"));
+        settle(150);
+    }
+
+    // --- the Help menu ---------------------------------------------------------
+    {
+        check(action(window, QStringLiteral("Keyboard Shortcuts")) != nullptr,
+              "a Keyboard Shortcuts action exists");
+        QAction* reset = action(window, QStringLiteral("Show tips again"));
+        check(reset != nullptr, "a Show tips again action exists");
+        if (reset) {
+            reset->trigger();
+            settle(100);
+            check(window.progress().count("extrude.completed") == 0,
+                  "Show tips again clears the progress store");
+        }
     }
 
     std::printf("\n%s (%d failure%s)  volumes: A=%.1f B=%.1f\n",

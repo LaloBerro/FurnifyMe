@@ -6,6 +6,7 @@
 
 #include "DocumentModel.h"
 #include "SketchController.h"
+#include "UserProgress.h"
 
 class OcctViewWidget;
 class QAction;
@@ -14,7 +15,7 @@ class MainWindow : public QMainWindow {
     Q_OBJECT
 
 public:
-    explicit MainWindow(QWidget* parent = nullptr);
+    explicit MainWindow(QWidget* parent = nullptr, bool persistProgress = true);
 
     // Operations, split from the dialogs that ask for their parameters. The GUI
     // smoke test drives these directly; a modal QInputDialog cannot be answered
@@ -30,9 +31,21 @@ public:
     OcctViewWidget* view() const { return myView; }
     class ItemsPanel* itemsPanel() const { return myItemsPanel; }
 
+    UserProgress& progress() { return myProgress; }
+    const UserProgress& progress() const { return myProgress; }
+
+    // Records an event and writes the store through immediately, so a crash
+    // never costs the user their learning history.
+    void recordProgress(const std::string& event);
+
 signals:
     // DocumentModel is Qt-free by design, so the window announces its changes.
     void documentChanged();
+
+    // Emitted after every change that affects what the user can do next.
+    // Slots must only read state and update themselves - calling back into
+    // updateActions() from here would recurse.
+    void appStateChanged();
 
 private slots:
     void onStartSketch();
@@ -76,6 +89,9 @@ private:
     TopoDS_Face myPendingFace;
     bool mySketching = false;
 
+    UserProgress myProgress;
+    bool myPersistProgress = true;
+
     QAction* myStartSketchAction = nullptr;
     QAction* myFinishSketchAction = nullptr;
     QAction* myUndoPointAction = nullptr;
@@ -95,6 +111,7 @@ private:
     QAction* myDisplayModeAction = nullptr;
     QAction* myFitAction = nullptr;
     QAction* myScreenshotAction = nullptr;
+    QAction* myShortcutsAction = nullptr;
 
     class ViewportOverlay* myOverlay = nullptr;
     class QLabel* myStateLabel = nullptr;

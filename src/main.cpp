@@ -16,6 +16,7 @@ int main(int argc, char* argv[])
 
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("FurnifyMe"));
+    QApplication::setOrganizationName(QStringLiteral("FurnifyMe"));
 
     Theme::apply(app);
 
