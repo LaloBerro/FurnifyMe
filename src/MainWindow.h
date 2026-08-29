@@ -6,6 +6,7 @@
 
 #include "DocumentModel.h"
 #include "SketchController.h"
+#include "UserProgress.h"
 
 class OcctViewWidget;
 class QAction;
@@ -14,7 +15,7 @@ class MainWindow : public QMainWindow {
     Q_OBJECT
 
 public:
-    explicit MainWindow(QWidget* parent = nullptr);
+    explicit MainWindow(QWidget* parent = nullptr, bool persistProgress = true);
 
     // Operations, split from the dialogs that ask for their parameters. The GUI
     // smoke test drives these directly; a modal QInputDialog cannot be answered
@@ -30,9 +31,30 @@ public:
     OcctViewWidget* view() const { return myView; }
     class ItemsPanel* itemsPanel() const { return myItemsPanel; }
 
+    UserProgress& progress() { return myProgress; }
+    const UserProgress& progress() const { return myProgress; }
+
+    // Records an event and writes the store through immediately, so a crash
+    // never costs the user their learning history.
+    void recordProgress(const std::string& event);
+
 signals:
     // DocumentModel is Qt-free by design, so the window announces its changes.
     void documentChanged();
+
+    // Emitted after every change that affects what the user can do next.
+    // Slots must only read state and update themselves - calling back into
+    // updateActions() from here would recurse.
+    void appStateChanged();
+
+    // Emitted by Help -> Show tips again, immediately before the
+    // appStateChanged() that follows it. Clearing the store is not enough on
+    // its own to bring every teaching surface back: a surface that also
+    // remembers what it has already shown *this session* would stay quiet
+    // until a restart, which is precisely what Show tips again exists to
+    // avoid. This lets each surface drop that session memory itself, without
+    // MainWindow having to know any of them has one.
+    void progressReset();
 
 private slots:
     void onStartSketch();
@@ -67,6 +89,12 @@ private:
     // differences, and the only way to be sure the two agree after undo/redo.
     void resyncView();
     void runBoolean(int kind);   // ModelingOps::BooleanKind as int, to keep it out of the header
+    // The one place "the camera was moved to a named direction" is recorded.
+    // Every route to that - the four View menu entries and a click on the
+    // axis gizmo - goes through here, so no route can record the event
+    // without also emitting appStateChanged, which is what actually retires
+    // the hint that teaches it.
+    void recordViewChanged();
 
     OcctViewWidget* myView = nullptr;
     DocumentModel myDocument;
@@ -75,6 +103,9 @@ private:
     // Face produced by the last committed sketch, waiting to be extruded.
     TopoDS_Face myPendingFace;
     bool mySketching = false;
+
+    UserProgress myProgress;
+    bool myPersistProgress = true;
 
     QAction* myStartSketchAction = nullptr;
     QAction* myFinishSketchAction = nullptr;
@@ -95,8 +126,10 @@ private:
     QAction* myDisplayModeAction = nullptr;
     QAction* myFitAction = nullptr;
     QAction* myScreenshotAction = nullptr;
+    QAction* myShortcutsAction = nullptr;
 
     class ViewportOverlay* myOverlay = nullptr;
     class QLabel* myStateLabel = nullptr;
     class ItemsPanel* myItemsPanel = nullptr;
+    class ShortcutSheet* myShortcutSheet = nullptr;
 };

@@ -24,6 +24,13 @@ public:
     // "Top", "Front", ... when the camera is axis-aligned; "Persp" otherwise.
     QString labelText() const;
 
+signals:
+    // A tip was clicked and the camera is on its way to that axis. The gizmo
+    // deliberately does not know what anyone makes of that: MainWindow
+    // connects this to its own "a named view was used" bookkeeping, and this
+    // widget keeps knowing nothing but its OcctViewWidget.
+    void viewSnapped();
+
 protected:
     void paintEvent(QPaintEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;

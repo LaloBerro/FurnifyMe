@@ -13,7 +13,7 @@ class ViewportOverlay : public QObject {
     Q_OBJECT
 
 public:
-    enum class Anchor { TopLeft, LeftCenter, BottomLeft, TopRight, RightCenter };
+    enum class Anchor { TopLeft, LeftCenter, BottomLeft, TopRight, RightCenter, BottomRight };
 
     explicit ViewportOverlay(QWidget* viewport);
 

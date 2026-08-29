@@ -5,12 +5,15 @@
 #include "OcctViewWidget.h"
 
 #include "AxisGizmo.h"
+#include "HintBalloon.h"
 #include "IconSet.h"
 #include "ItemsPanel.h"
+#include "ShortcutSheet.h"
 #include "Theme.h"
 #include "ToolChip.h"
 #include "ToolCluster.h"
 #include "ViewportOverlay.h"
+#include "WalkthroughPanel.h"
 
 #include <QAction>
 #include <QActionGroup>
@@ -19,6 +22,7 @@
 #include <QLabel>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QSettings>
 #include <QSplitter>
 #include <QStatusBar>
 #include <QtGlobal>
@@ -28,9 +32,16 @@
 #include <utility>
 #include <vector>
 
-MainWindow::MainWindow(QWidget* parent)
+MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     : QMainWindow(parent)
+    , myPersistProgress(persistProgress)
 {
+    if (myPersistProgress) {
+        const QSettings settings;
+        myProgress.deserialize(
+            settings.value(QStringLiteral("progress")).toString().toStdString());
+    }
+
     myView = new OcctViewWidget(this);
 
     myItemsPanel = new ItemsPanel(&myDocument, myView, this);
@@ -49,6 +60,9 @@ MainWindow::MainWindow(QWidget* parent)
     buildActions();
     buildMenus();
     buildOverlay();
+
+    myShortcutSheet = new ShortcutSheet(this);
+    connect(myShortcutsAction, &QAction::triggered, myShortcutSheet, &ShortcutSheet::showSheet);
 
     connect(this, &MainWindow::documentChanged, myItemsPanel, &ItemsPanel::refresh);
 
@@ -220,17 +234,54 @@ void MainWindow::buildMenus()
     QMenu* viewMenu = menuBar()->addMenu(tr("&View"));
     viewMenu->addAction(myFitAction);
     viewMenu->addSeparator();
-    viewMenu->addAction(tr("&Axonometric"), QKeySequence(Qt::Key_0),
-                        myView, &OcctViewWidget::setViewAxonometric);
-    viewMenu->addAction(tr("&Top"), QKeySequence(Qt::Key_1), myView, &OcctViewWidget::setViewTop);
-    viewMenu->addAction(tr("F&ront"), QKeySequence(Qt::Key_2), myView, &OcctViewWidget::setViewFront);
-    viewMenu->addAction(tr("&Right"), QKeySequence(Qt::Key_3), myView, &OcctViewWidget::setViewRight);
+    viewMenu->addAction(tr("&Axonometric"), QKeySequence(Qt::Key_0), this, [this] {
+        myView->setViewAxonometric();
+        recordViewChanged();
+    });
+    viewMenu->addAction(tr("&Top"), QKeySequence(Qt::Key_1), this, [this] {
+        myView->setViewTop();
+        recordViewChanged();
+    });
+    viewMenu->addAction(tr("F&ront"), QKeySequence(Qt::Key_2), this, [this] {
+        myView->setViewFront();
+        recordViewChanged();
+    });
+    viewMenu->addAction(tr("&Right"), QKeySequence(Qt::Key_3), this, [this] {
+        myView->setViewRight();
+        recordViewChanged();
+    });
     viewMenu->addSeparator();
     viewMenu->addAction(mySnapAction);
     viewMenu->addSeparator();
     viewMenu->addAction(mySolidSelectAction);
     viewMenu->addAction(myFaceSelectAction);
     viewMenu->addAction(myItemsPanelAction);
+
+    QMenu* helpMenu = menuBar()->addMenu(tr("&Help"));
+
+    myShortcutsAction = new QAction(tr("Keyboard Shortcuts"), this);
+    // Both bindings the design calls for. F1 is what people reach for without
+    // being told; ? is what the sheet itself is worth advertising.
+    myShortcutsAction->setShortcuts(
+        {QKeySequence(Qt::Key_Question), QKeySequence(Qt::Key_F1)});
+    myShortcutsAction->setToolTip(tr("List every keyboard shortcut (? or F1)"));
+    helpMenu->addAction(myShortcutsAction);
+
+    helpMenu->addAction(tr("Show tips again"), this, [this] {
+        myProgress.reset();
+        if (myPersistProgress) {
+            QSettings settings;
+            settings.setValue(QStringLiteral("progress"), QString());
+        }
+        statusBar()->showMessage(tr("Tips reset — the guide and hints will appear again"));
+        // Before appStateChanged, not after: a surface that remembers what it
+        // already showed this session has to forget that first, or the
+        // reconsider() this emission drives would find every hint still
+        // marked as spent and put none of them back. Emptying the store is
+        // only half of what "show tips again" means.
+        emit progressReset();
+        emit appStateChanged();
+    });
 }
 
 void MainWindow::buildOverlay()
@@ -274,7 +325,16 @@ void MainWindow::buildOverlay()
     });
 
     // The orientation gizmo, then the unit readout beneath it.
-    myOverlay->addWidget(new AxisGizmo(myView, myView), ViewportOverlay::Anchor::TopRight);
+    auto* gizmo = new AxisGizmo(myView, myView);
+    // Clicking an arm of the gizmo is the other way to look from a named
+    // direction, and the hint that teaches the gizmo is retired by
+    // view.changed - so a user who only ever used the gizmo used to dismiss
+    // that hint every session and never cross the threshold. The gizmo
+    // announces the snap and this window decides what it means; giving the
+    // gizmo a MainWindow just to record an event would hand a painted
+    // overlay a dependency on the whole application.
+    connect(gizmo, &AxisGizmo::viewSnapped, this, &MainWindow::recordViewChanged);
+    myOverlay->addWidget(gizmo, ViewportOverlay::Anchor::TopRight);
 
     // Static unit readout under the axis gizmo. We have no unit system; this
     // states the one the whole app assumes rather than pretending to offer a
@@ -287,6 +347,22 @@ void MainWindow::buildOverlay()
                              .arg(Theme::chip().name(), Theme::textMuted().name()));
     units->adjustSize();
     myOverlay->addWidget(units, ViewportOverlay::Anchor::TopRight);
+
+    // Always built, even for a user who has already learned this - it
+    // decides its own visibility in its constructor (see WalkthroughPanel's
+    // refresh()) and hides itself immediately in that case. Gating
+    // construction on hasLearned() here instead would mean a returning
+    // user's window has no panel to bring back when Show tips again resets
+    // their progress, and the guide would stay gone until the app is
+    // restarted - exactly the case Show tips again exists for.
+    myOverlay->addWidget(new WalkthroughPanel(this, myView),
+                         ViewportOverlay::Anchor::BottomRight);
+
+    // Built last, after the walkthrough, so the guide is never competing with
+    // a hint on first run. It parents itself to the viewport and positions
+    // itself, centred near the bottom rather than pinned to an edge, so it
+    // needs no overlay anchor of its own.
+    new HintBalloon(this, myView);
 }
 
 void MainWindow::updateActions()
@@ -311,6 +387,28 @@ void MainWindow::updateActions()
     myRedoAction->setEnabled(!mySketching && myDocument.canRedo());
 
     updateStateLabel();
+    emit appStateChanged();
+}
+
+void MainWindow::recordViewChanged()
+{
+    recordProgress("view.changed");
+    // Recording alone teaches nothing: the hint that points at the gizmo is
+    // retired by reconsider(), which only ever runs off appStateChanged.
+    // Without this the third press of 0 left a hint on screen for an action
+    // the user had already learned. updateActions() touches nothing this
+    // path depends on, so it cannot recurse back in here.
+    updateActions();
+}
+
+void MainWindow::recordProgress(const std::string& event)
+{
+    myProgress.record(event);
+    if (!myPersistProgress) return;
+
+    QSettings settings;
+    settings.setValue(QStringLiteral("progress"),
+                      QString::fromStdString(myProgress.serialize()));
 }
 
 void MainWindow::updateStateLabel()
@@ -372,6 +470,7 @@ void MainWindow::onDeleteSelected()
         myDocument.removeSolid(id);
         myView->removeSolid(id);
     }
+    recordProgress("delete.used");
 
     updateActions();
     emit documentChanged();
@@ -383,6 +482,7 @@ void MainWindow::onDeleteSelected()
 void MainWindow::onUndo()
 {
     if (!myDocument.undo()) return;
+    recordProgress("undo.used");
 
     myView->clearSelection();
     resyncView();
@@ -396,6 +496,7 @@ void MainWindow::onUndo()
 void MainWindow::onRedo()
 {
     if (!myDocument.redo()) return;
+    recordProgress("undo.used");
 
     myView->clearSelection();
     resyncView();
@@ -488,6 +589,7 @@ void MainWindow::onFinishSketch()
     }
 
     myPendingFace = face;
+    recordProgress("sketch.completed");
     mySketching = false;
     myView->setSketchMode(false, mySketch.plane());
     myView->setPreview(face, /*shaded=*/true);
@@ -526,6 +628,7 @@ bool MainWindow::extrudePendingFace(double height)
     const bool wasEmpty = myDocument.count() == 0;
     myDocument.checkpoint();
     const int id = myDocument.addSolid(solid);
+    recordProgress("extrude.completed");
     myView->clearPreview();
     myView->displaySolid(id, solid);
     if (wasEmpty) myView->fitAll();
@@ -598,6 +701,7 @@ bool MainWindow::applyBooleanToSelection(int kind)
     }
 
     const int id = myDocument.addSolid(result.shape);
+    recordProgress("boolean.completed");
     myView->displaySolid(id, result.shape);
 
     updateActions();
@@ -645,9 +749,17 @@ void MainWindow::onSelectionModeChanged()
 {
     myView->setSelectionMode(myFaceSelectAction->isChecked() ? OcctViewWidget::SelectionMode::Face
                                                              : OcctViewWidget::SelectionMode::Solid);
+    if (myFaceSelectAction->isChecked()) recordProgress("faceMode.used");
     statusBar()->showMessage(myFaceSelectAction->isChecked()
                                  ? tr("Face selection — hovering highlights one face at a time")
                                  : tr("Body selection — click whole bodies to combine them"));
+    // Neither mySolidSelectAction nor myFaceSelectAction is touched by
+    // updateActions() itself (their checked state is handled entirely by the
+    // QActionGroup they belong to), so this cannot recurse back in here -
+    // but without this call, HintBalloon::reconsider() only ever finds out
+    // face selection was used the next time something unrelated happens to
+    // fire appStateChanged, which left its hint lingering.
+    updateActions();
 }
 
 void MainWindow::onSelectionChanged()

@@ -27,6 +27,7 @@ add_library(furnify_geometry STATIC
   src/SketchController.cpp
   src/CameraController.cpp
   src/Measure.cpp
+  src/UserProgress.cpp
 )
 target_include_directories(furnify_geometry PUBLIC
   src ${OpenCASCADE_INCLUDE_DIR})
@@ -55,6 +56,10 @@ add_test(NAME headless_camera COMMAND headless_camera)
 add_executable(headless_measure tests/measure.cpp)
 target_link_libraries(headless_measure PRIVATE furnify_geometry)
 add_test(NAME headless_measure COMMAND headless_measure)
+
+add_executable(headless_progress tests/user_progress.cpp)
+target_link_libraries(headless_progress PRIVATE furnify_geometry)
+add_test(NAME headless_progress COMMAND headless_progress)
 
 # ---------------------------------------------------------------------------
 # Application (Qt + OCCT visualization)
@@ -99,6 +104,9 @@ if(FURNIFYME_BUILD_APP)
       src/ui/ToolCluster.cpp
       src/ui/ViewportOverlay.cpp
       src/ui/ItemsPanel.cpp
+      src/ui/ShortcutSheet.cpp
+      src/ui/WalkthroughPanel.cpp
+      src/ui/HintBalloon.cpp
     )
     target_include_directories(furnify_app PUBLIC src/ui)
     target_link_libraries(furnify_app PUBLIC
