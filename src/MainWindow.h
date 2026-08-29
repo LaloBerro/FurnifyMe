@@ -10,6 +10,7 @@
 
 class OcctViewWidget;
 class QAction;
+class ToastHost;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -132,4 +133,5 @@ private:
     class QLabel* myStateLabel = nullptr;
     class ItemsPanel* myItemsPanel = nullptr;
     class ShortcutSheet* myShortcutSheet = nullptr;
+    ToastHost* myToasts = nullptr;
 };

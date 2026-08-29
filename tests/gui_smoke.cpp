@@ -25,6 +25,7 @@
 #include "AxisGizmo.h"
 #include "ShortcutSheet.h"
 #include "Theme.h"
+#include "Toast.h"
 #include "ToolChip.h"
 #include "ToolCluster.h"
 #include "UserProgress.h"
@@ -33,6 +34,7 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QDialog>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QKeyEvent>
@@ -449,6 +451,61 @@ int main(int argc, char* argv[])
     trigger(window, QStringLiteral("Undo"));
     check(window.document().count() == 1, "Undo again, back to one solid");
     settle(200);
+
+    // --- outcomes are reported without stopping the user ----------------------
+    {
+        ToastHost* toasts = window.findChild<ToastHost*>();
+        check(toasts != nullptr, "the window has a toast host");
+
+        // A modal would hang this suite rather than fail it, so assert the
+        // absence of one directly: nothing in the app may create a dialog.
+        check(window.findChildren<QDialog*>().isEmpty(),
+              "no dialog is ever constructed for an outcome");
+
+        if (toasts) {
+            const int before = static_cast<int>(window.document().solids().size());
+            check(before > 0, "there is a body to delete");
+            view->setSelectedSolids({window.document().solids().front().id});
+            settle(100);
+            trigger(window, QStringLiteral("Delete Selected"));
+            settle(150);
+
+            check(toasts->isShowing(), "deleting a body raises a toast");
+            check(toasts->toast() != nullptr && toasts->toast()->isVisible(),
+                  "the toast is actually visible");
+            check(!toasts->currentText().isEmpty(),
+                  QStringLiteral("the toast says what happened (\"%1\")")
+                      .arg(toasts->currentText()));
+
+            // The Undo control must be reachable by a real click, not merely
+            // present: a transparent overlay hides its whole subtree from
+            // hit-testing, which is how Phase 2 shipped an unclickable control.
+            QWidget* undo = toasts->undoControl();
+            check(undo != nullptr && undo->isVisible(), "the toast offers Undo");
+            if (undo) {
+                const QPoint centre =
+                    undo->mapTo(view, QPoint(undo->width() / 2, undo->height() / 2));
+                check(view->childAt(centre) == undo,
+                      "the Undo control is reachable by a real click");
+                clickAt(undo, QPointF(undo->width() / 2.0, undo->height() / 2.0));
+                settle(200);
+                check(static_cast<int>(window.document().solids().size()) == before,
+                      "using the toast's Undo restores the body");
+                check(!toasts->isShowing(), "using Undo dismisses the toast");
+            }
+
+            // A second message replaces the first; a stack of toasts is a
+            // dialog with extra steps.
+            toasts->show(QStringLiteral("First"), Toast::Kind::Note, false);
+            settle(50);
+            toasts->show(QStringLiteral("Second"), Toast::Kind::Note, false);
+            settle(50);
+            check(window.findChildren<Toast*>().size() == 1,
+                  "a second message replaces the first rather than stacking");
+            check(toasts->currentText() == QStringLiteral("Second"),
+                  "the newest message is the one showing");
+        }
+    }
 
     // --- a second, taller solid ---------------------------------------------
     trigger(window, QStringLiteral("Start Sketch"));
@@ -1026,6 +1083,23 @@ int main(int argc, char* argv[])
                   .arg(hintOffenders.isEmpty()
                            ? QStringLiteral("none")
                            : hintOffenders.join(QStringLiteral(", "))));
+
+        // Same story for the toast: its copy is painted, not put on an action
+        // or a tooltip, so it needs its own explicit sweep too.
+        QStringList toastOffenders;
+        for (Toast* toastWidget : window.findChildren<Toast*>()) {
+            for (const QString& text : toastWidget->paintedTexts()) {
+                for (const QString& word : banned) {
+                    if (text.contains(word, Qt::CaseInsensitive))
+                        toastOffenders << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
+                }
+            }
+        }
+        check(toastOffenders.isEmpty(),
+              QStringLiteral("no toast text uses a banned word (%1)")
+                  .arg(toastOffenders.isEmpty()
+                           ? QStringLiteral("none")
+                           : toastOffenders.join(QStringLiteral(", "))));
 
         // The state label is the app's most-updated string; it must obey the
         // vocabulary too. It is a permanent widget on the status bar.

@@ -4,6 +4,7 @@
 #include "MainWindow.h"
 #include "OcctViewWidget.h"
 #include "Theme.h"
+#include "Toast.h"
 #include "UserProgress.h"
 #include "WalkthroughPanel.h"
 
@@ -191,22 +192,28 @@ void HintBalloon::reposition()
     // while a hint is up. Overlap would be worse than it looks, because
     // ViewportOverlay::relayout() raises the guide back above the balloon
     // while the balloon is still the click target underneath it. So step
-    // aside - to the left of the guide when that fits, above it when it does
-    // not.
-    const WalkthroughPanel* guide = parentWidget()->findChild<WalkthroughPanel*>();
-    if (guide && guide->isVisible()) {
-        const QRect panel = guide->geometry();
-        if (QRect(x, y, width(), height()).intersects(panel)) {
-            const int beside = panel.left() - kClearance - width();
-            if (beside >= kClearance) {
-                x = beside;
-            } else {
-                // Never above the top edge: on a viewport too short for both,
-                // a balloon nudged off-screen teaches nobody anything.
-                y = std::max(0, panel.top() - kClearance - height());
-            }
+    // aside - to the left of an obstacle when that fits, above it when it
+    // does not. A toast lands in the same bottom strip whenever an outcome
+    // is reported while a hint is already up, so it steps aside by the same
+    // rule rather than a second mechanism invented just for it.
+    auto stepAside = [&](const QRect& obstacle) {
+        if (!QRect(x, y, width(), height()).intersects(obstacle)) return;
+        const int beside = obstacle.left() - kClearance - width();
+        if (beside >= kClearance) {
+            x = beside;
+        } else {
+            // Never above the top edge: on a viewport too short for both,
+            // a balloon nudged off-screen teaches nobody anything.
+            y = std::max(0, obstacle.top() - kClearance - height());
         }
-    }
+    };
+
+    const WalkthroughPanel* guide = parentWidget()->findChild<WalkthroughPanel*>();
+    if (guide && guide->isVisible()) stepAside(guide->geometry());
+
+    const Toast* toast = parentWidget()->findChild<Toast*>();
+    if (toast && toast->isVisible()) stepAside(toast->geometry());
+
     move(x, y);
 }
 
