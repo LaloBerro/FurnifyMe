@@ -129,14 +129,18 @@ void ShortcutSheet::showSheet()
     rebuild();
 
     // Measured with the same fonts paintEvent() actually draws with below -
-    // group titles and row labels at bodyFont(), the key badges at
-    // badgeFont() - so the sizing this computes can never drift from what
-    // ends up on screen.
+    // group titles at bold bodyFont() (bold is wider than regular, so
+    // measuring with the plain font here would clip a long title), row
+    // labels at plain bodyFont(), the key badges at badgeFont() - so the
+    // sizing this computes can never drift from what ends up on screen.
+    QFont groupFont = Theme::bodyFont();
+    groupFont.setBold(true);
+    const QFontMetrics groupMetrics(groupFont);
     const QFontMetrics bodyMetrics(Theme::bodyFont());
     const QFontMetrics badgeMetrics(Theme::badgeFont());
     int widest = 0;
     for (const Group& group : myGroups) {
-        widest = std::max(widest, bodyMetrics.horizontalAdvance(group.title));
+        widest = std::max(widest, groupMetrics.horizontalAdvance(group.title));
         for (const Row& row : group.rows) {
             widest = std::max(widest, bodyMetrics.horizontalAdvance(row.label) +
                                           badgeMetrics.horizontalAdvance(row.keys));

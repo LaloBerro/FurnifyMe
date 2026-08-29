@@ -15,6 +15,7 @@
 #include <QResizeEvent>
 #include <QShowEvent>
 #include <QTimer>
+#include <QVariantAnimation>
 
 #include <algorithm>
 #include <functional>
@@ -157,12 +158,23 @@ void Toast::resizeEvent(QResizeEvent* event)
     syncUndoGeometry();
 }
 
+void Toast::setOpacity(double opacity)
+{
+    myOpacity = opacity;
+    update();
+}
+
 void Toast::paintEvent(QPaintEvent* /*event*/)
 {
     if (myText.isEmpty()) return;
 
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
+    // The fade - see the header comment on setOpacity() for why this is a
+    // plain QPainter opacity rather than a QGraphicsEffect. Applies to
+    // everything drawn below with this same QPainter: the panel, the
+    // message, and the Undo pill alike.
+    painter.setOpacity(myOpacity);
 
     QPainterPath panel;
     panel.addRoundedRect(rect().adjusted(0, 0, -1, -1), 8.0, 8.0);
@@ -207,6 +219,10 @@ ToastHost::ToastHost(OcctViewWidget* viewport, QWidget* parent)
     , myViewport(viewport)
 {
     myToast = new Toast(viewport);
+    // Starts fully transparent: myToast is also hidden at this point, so
+    // this matters only as the starting value the first show()'s fade-in
+    // runs from.
+    myToast->setOpacity(0.0);
 
     connect(myToast, &Toast::undoClicked, this, [this] {
         emit undoRequested();
@@ -225,11 +241,28 @@ ToastHost::ToastHost(OcctViewWidget* viewport, QWidget* parent)
 
 void ToastHost::show(const QString& text, Toast::Kind kind, bool undo)
 {
+    const bool wasVisible = myToast->isVisible();
     myToast->setMessage(text, kind, undo);
     reposition();
     myToast->show();
     myToast->raise();
     if (myToast->undoControl()) myToast->undoControl()->raise();
+
+    if (wasVisible) {
+        // A second message replacing the first - not the moment to fade in
+        // again, and this call may have landed mid a dismiss() fade-out, so
+        // make sure that one does not keep running and pull opacity back
+        // toward 0 out from under the message that just replaced it.
+        if (myFade) { myFade->stop(); myFade->deleteLater(); myFade = nullptr; }
+        myToast->setOpacity(1.0);
+    } else {
+        fadeTo(1.0, nullptr);
+    }
+
+    // Armed here, unconditionally and synchronously - never inside fadeTo()
+    // or its callback. A fade must not change when the dismiss countdown
+    // starts, since remainingMs() and the Note/Failure duration contract
+    // both read this timer directly.
     myTimer->start(kind == Toast::Kind::Failure ? kFailureMs : kNoteMs);
 }
 
@@ -256,7 +289,58 @@ int ToastHost::remainingMs() const
 void ToastHost::dismiss()
 {
     myTimer->stop();
-    if (myToast) myToast->hide();
+    if (!myToast) return;
+    // hide() only once the fade-out actually finishes - synchronously, when
+    // animations are disabled (see fadeTo()), so isShowing() still flips the
+    // instant dismiss() returns in that case, exactly as it did before the
+    // fade existed. gui_smoke disables animations on the real viewport, so
+    // every lifetime check in the suite still reads a synchronous dismiss().
+    QPointer<Toast> toast = myToast;
+    fadeTo(0.0, [toast] {
+        if (toast) toast->hide();
+    });
+}
+
+void ToastHost::fadeTo(double opacity, std::function<void()> onFinished)
+{
+    if (myFade) {
+        myFade->stop();
+        myFade->deleteLater();
+        myFade = nullptr;
+    }
+
+    if (!myToast) return;
+
+    if (!myViewport || !myViewport->animationsEnabled()) {
+        // Mirrors OcctViewWidget::animateTo()'s own handling of a disabled
+        // camera animation: skip it entirely and apply the end state
+        // directly, synchronously, rather than starting a zero-duration
+        // animation and waiting on the event loop to notice it finished.
+        // gui_smoke relies on exactly this - it disables animations on the
+        // real viewport specifically so a fade cannot turn a lifetime check
+        // into something that has to wait.
+        myToast->setOpacity(opacity);
+        if (onFinished) onFinished();
+        return;
+    }
+
+    // A plain QVariantAnimation over a double feeding Toast::setOpacity(),
+    // not a QPropertyAnimation on a QGraphicsEffect - see the comment on
+    // Toast::setOpacity() for why a graphics effect crashes here (this
+    // widget sits over OcctViewWidget's own on-screen OpenGL surface).
+    myFade = new QVariantAnimation(this);
+    myFade->setDuration(Theme::motionMs());
+    myFade->setEasingCurve(Theme::motionCurve());
+    myFade->setStartValue(myToast->opacity());
+    myFade->setEndValue(opacity);
+    QPointer<Toast> toast = myToast;
+    connect(myFade, &QVariantAnimation::valueChanged, this, [toast](const QVariant& value) {
+        if (toast) toast->setOpacity(value.toDouble());
+    });
+    if (onFinished) {
+        connect(myFade, &QVariantAnimation::finished, this, onFinished);
+    }
+    myFade->start(QAbstractAnimation::DeleteWhenStopped);
 }
 
 void ToastHost::reposition()

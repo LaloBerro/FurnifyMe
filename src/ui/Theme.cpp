@@ -38,6 +38,8 @@ QColor danger()       { return QColor("#e0564a"); }   // invalid input, failures
 QColor focusRing()    { return QColor("#ffca4a"); }   // amber - distinct from
                                                        // accent(), which already
                                                        // marks the checked state
+QColor focusRingMuted() { return QColor("#9f7e2e"); } // same hue, dimmed for
+                                                       // an inactive window
 
 namespace {
 QString g_fontFamily;

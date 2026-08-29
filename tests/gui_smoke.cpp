@@ -1775,6 +1775,20 @@ int main(int argc, char* argv[])
             settle(80);
             const QImage focused = chip->grab().toImage();
             check(focused != unfocused, "keyboard focus is visible on a chip");
+
+            // The check above renders whatever this harness's own window can
+            // actually produce: WA_ShowWithoutActivating means window is
+            // never the OS-active one (gui_smoke must never steal focus from
+            // whatever else the user is doing), so window()->isActiveWindow()
+            // is false throughout the whole suite and the ring painted above
+            // is always the muted branch - see the comment at
+            // ToolChip::paintEvent(). The active branch cannot be exercised
+            // by rendering without genuinely activating a window, which this
+            // suite must not do; checked at the token level instead, since
+            // that is what determines whether the two branches would ever
+            // look different on a window a real user is actually working in.
+            check(Theme::focusRing() != Theme::focusRingMuted(),
+                  "the active and muted focus-ring colours are visually distinct");
         }
     }
 
@@ -1829,9 +1843,16 @@ int main(int argc, char* argv[])
         check(returningGuide != nullptr && returningGuide->skipControl() != nullptr &&
                   !returningGuide->skipControl()->isVisible(),
               "the skip control is hidden too, not just the panel it belongs to");
-        // QRect(width() - kPad - 34, 8, 34, 18) with pos() still (0, 0):
-        // (212, 8, 34, 18) for a 260-wide panel, so (229, 17) is its centre.
-        const QPoint stale(229, 17);
+        // The stale rect is wherever the constructor's own initial
+        // syncSkipGeometry() call left the (hidden) skip control - it never
+        // moved for a returning user, since the panel itself never showed.
+        // Read from the control's own geometry rather than a hard-coded
+        // point: sizeHint() now measures the panel's actual step strings
+        // (see WalkthroughPanel::sizeHint()), so a fixed x/y here would go
+        // stale the moment the wording or the type scale changed width.
+        const QPoint stale = returningGuide && returningGuide->skipControl()
+                                  ? returningGuide->skipControl()->geometry().center()
+                                  : QPoint();
         QWidget* hitStale = returningView->childAt(stale);
         check(hitStale == nullptr,
               QStringLiteral("nothing lurks at the skip control's stale "

@@ -55,7 +55,11 @@ protected:
     void hideEvent(QHideEvent* event) override;
     void moveEvent(QMoveEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
-    QSize sizeHint() const override { return QSize(260, 168); }
+    // Out of line, not inline here: it measures the actual step strings with
+    // Theme::titleFont()/bodyFont() (see WalkthroughPanel.cpp) rather than
+    // carrying a hard-coded size that silently stops matching once the type
+    // scale or the wording changes.
+    QSize sizeHint() const override;
 
 private:
     void refresh();

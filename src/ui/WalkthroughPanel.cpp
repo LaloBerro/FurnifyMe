@@ -6,6 +6,7 @@
 #include "Theme.h"
 #include "UserProgress.h"
 
+#include <QFontMetrics>
 #include <QHideEvent>
 #include <QMouseEvent>
 #include <QMoveEvent>
@@ -14,6 +15,7 @@
 #include <QResizeEvent>
 #include <QShowEvent>
 
+#include <algorithm>
 #include <functional>
 #include <utility>
 
@@ -276,6 +278,29 @@ QStringList WalkthroughPanel::paintedTexts() const
 QStringList WalkthroughPanel::stepTexts() const
 {
     return paintedTexts().mid(2);
+}
+
+QSize WalkthroughPanel::sizeHint() const
+{
+    // Measured with the same fonts paintEvent() actually draws with below -
+    // the title at titleFont(), everything else (skip and the four steps) at
+    // bodyFont() - so a wording or type-scale change can only ever make this
+    // wider, never clip. Each step is measured with the "✓  " prefix rather
+    // than "•  ": both are painted (see paintEvent()) but the check mark is
+    // what a completed step actually shows, and neither prefix is narrower
+    // than the other in this font, so measuring one covers both.
+    const QStringList texts = paintedTexts();
+    const QFontMetrics titleMetrics(Theme::titleFont());
+    const QFontMetrics bodyMetrics(Theme::bodyFont());
+
+    int widest = titleMetrics.horizontalAdvance(texts[0]);
+    const QStringList steps = stepTexts();
+    for (const QString& step : steps) {
+        widest = std::max(widest,
+                          bodyMetrics.horizontalAdvance(QStringLiteral("✓  ") + step));
+    }
+
+    return QSize(widest + kPad * 2, kTitle + kStep * static_cast<int>(steps.size()));
 }
 
 void WalkthroughPanel::paintEvent(QPaintEvent* /*event*/)

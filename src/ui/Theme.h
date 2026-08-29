@@ -31,6 +31,11 @@ QColor danger();        // invalid input, failure accents - NOT the same
                         // happens to be red; this is the semantic "something
                         // is wrong" colour
 QColor focusRing();     // visible keyboard focus outline
+QColor focusRingMuted(); // same outline, dimmed - a focused widget in a
+                        // window that is not the OS-active one (the user has
+                        // moved on to another application) still shows a
+                        // ring, just not one that keeps shouting for
+                        // attention
 
 // The whole app's type scale: four sizes, and every widget that paints text
 // reads one of them - a fifth size anywhere is a smell, not a design choice.

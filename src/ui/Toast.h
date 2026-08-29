@@ -17,7 +17,10 @@
 #include <QPointer>
 #include <QString>
 #include <QStringList>
+#include <QVariantAnimation>
 #include <QWidget>
+
+#include <functional>
 
 class OcctViewWidget;
 class QHideEvent;
@@ -48,6 +51,20 @@ public:
     // should still treat it as optional the way WalkthroughPanel::skipControl()
     // does.
     QWidget* undoControl() const { return myUndo; }
+
+    // Drives the fade ToastHost animates. QPainter::setOpacity(), not a
+    // QGraphicsEffect: this widget is a plain composited child of
+    // OcctViewWidget, the way every overlay in this app is (see the class
+    // comment on ToolCluster) - OcctViewWidget itself paints on screen via
+    // OpenGL with Qt's own paint engine disabled (paintEngine() returns
+    // nullptr, per CLAUDE.md), and QGraphicsEffect requires rendering its
+    // source widget through Qt's normal offscreen raster path first, which
+    // does not exist here. A prior version of this fade used
+    // QGraphicsOpacityEffect and crashed - reliably, a few hundred
+    // milliseconds into any later repaint-heavy stretch of gui_smoke - for
+    // exactly that reason.
+    void setOpacity(double opacity);
+    double opacity() const { return myOpacity; }
 
     // Every string this widget can ever paint, so gui_smoke's banned-word
     // sweep has no blind spot here the way it has none for WalkthroughPanel
@@ -87,6 +104,7 @@ private:
     Kind myKind = Kind::Note;
     bool myHasUndo = false;
     QPointer<QWidget> myUndo;   // sibling, not a child - see class comment
+    double myOpacity = 1.0;     // read by paintEvent() via painter.setOpacity()
 };
 
 // Owns the single Toast, decides how long each kind stays up before it
@@ -124,6 +142,16 @@ private:
     bool eventFilter(QObject* watched, QEvent* event) override;
     void reposition();
     void dismiss();
+    // Animates myToast's opacity from its current value to `opacity` over
+    // Theme::motionMs()/motionCurve(), then calls onFinished (which may be
+    // empty) - or, when myViewport->animationsEnabled() is false, the way
+    // OcctViewWidget::animateTo() already treats its own camera animation:
+    // skips the animation entirely, sets the value directly, and calls
+    // onFinished synchronously within this call. gui_smoke disables
+    // animations on the real viewport for exactly this reason - a fade must
+    // never turn a lifetime check (isShowing(), remainingMs()) into
+    // something that has to wait on a timer it does not itself own.
+    void fadeTo(double opacity, std::function<void()> onFinished);
 
     OcctViewWidget* myViewport = nullptr;
     // A QPointer, not a raw pointer: myToast is owned by the viewport (it is
@@ -132,4 +160,13 @@ private:
     // same reasoning as Toast::myUndo.
     QPointer<Toast> myToast;
     QTimer* myTimer = nullptr;
+    // A plain QVariantAnimation over a double, feeding Toast::setOpacity() -
+    // not a QPropertyAnimation on a QGraphicsEffect; see the comment on
+    // Toast::setOpacity() for why that does not work here. A QPointer, not a
+    // raw pointer: it starts with QAbstractAnimation::DeleteWhenStopped, so
+    // it self-deletes the instant it finishes on its own (a fade that simply
+    // ran to completion, nobody having called stop() on it) - a raw pointer
+    // would go dangling right there, silently, until the next fadeTo() call
+    // dereferenced it.
+    QPointer<QVariantAnimation> myFade;
 };

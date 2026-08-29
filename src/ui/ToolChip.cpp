@@ -113,12 +113,24 @@ void ToolChip::paintEvent(QPaintEvent* /*event*/)
     // MainWindows shown with WA_ShowWithoutActivating specifically so it
     // never steals OS focus while it runs). setFocus() still updates this
     // top-level's own remembered focus child immediately, regardless of
-    // activation, and that is what a chip's ring should reflect - it also
-    // means a returning-active window shows the same ring with no extra work.
+    // activation, and that is what a chip's ring should reflect.
+    //
+    // Presence does not depend on window()->isActiveWindow() - only colour
+    // and weight do. An earlier version added "&& isActiveWindow()" to the
+    // condition above, which fixes the wrong problem: it makes the ring
+    // disappear entirely (still correct for a user who moved to another
+    // application) but also disappears while gui_smoke's own window, which
+    // is never OS-activated by design, is the one under test - breaking the
+    // very check this exists to satisfy. Painting a dimmer ring instead
+    // solves both: it stops shouting focus at someone who has moved on
+    // without ever going fully invisible.
     if (this == window()->focusWidget()) {
+        const bool active = window()->isActiveWindow();
+        const QColor ringColor = active ? Theme::focusRing() : Theme::focusRingMuted();
+        const double ringWidth = active ? kFocusRingWidth : kFocusRingWidth - 0.5;
         QPainterPath ring;
         ring.addRoundedRect(rect().adjusted(2, 2, -2, -2), kRadius - 2, kRadius - 2);
-        painter.setPen(QPen(Theme::focusRing(), kFocusRingWidth));
+        painter.setPen(QPen(ringColor, ringWidth));
         painter.setBrush(Qt::NoBrush);
         painter.drawPath(ring);
     }
