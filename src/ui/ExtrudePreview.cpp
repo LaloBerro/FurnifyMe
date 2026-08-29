@@ -1,0 +1,265 @@
+#include "ExtrudePreview.h"
+
+#include "MainWindow.h"
+#include "ModelingOps.h"
+#include "OcctViewWidget.h"
+#include "SketchController.h"
+#include "Theme.h"
+
+#include <QEvent>
+#include <QHideEvent>
+#include <QKeyEvent>
+#include <QLineEdit>
+#include <QMoveEvent>
+#include <QPainter>
+#include <QPainterPath>
+#include <QResizeEvent>
+#include <QShowEvent>
+
+namespace {
+constexpr int kPad = 12;
+constexpr int kWidth = 200;
+constexpr int kLabelHeight = 20;
+constexpr int kFieldHeight = 26;
+constexpr int kMargin = 16;   // matches ViewportOverlay's own edge margin
+}  // namespace
+
+ExtrudePreview::ExtrudePreview(MainWindow* window, OcctViewWidget* view)
+    : QWidget(view)
+    , myWindow(window)
+    , myView(view)
+{
+    // The panel paints its own background and label and must never eat a
+    // click meant for the model behind it - only the sibling field below is
+    // ever interactive. See the class comment in the header for why that
+    // means the field cannot be a child of this widget.
+    setAttribute(Qt::WA_NoSystemBackground);
+    setAttribute(Qt::WA_TransparentForMouseEvents);
+    setFixedSize(kWidth, kPad * 2 + kLabelHeight + kFieldHeight);
+
+    myField = new QLineEdit(view);
+    // Closes the same class of bug documented on HintBalloon's balloon and
+    // Toast's UndoControl: an unhandled release would otherwise propagate to
+    // the viewport behind this field and trigger a real pick underneath the
+    // panel.
+    myField->setAttribute(Qt::WA_NoMousePropagation);
+    myField->installEventFilter(this);   // catches Escape - see eventFilter()
+    connect(myField, &QLineEdit::textChanged, this,
+            [this](const QString&) { updatePreview(); });
+    connect(myField, &QLineEdit::returnPressed, this, &ExtrudePreview::commit);
+    markInvalid(false);   // paints the field's normal (valid) border once
+
+    syncFieldGeometry();
+    hide();
+
+    // Repositions on a viewport resize, the same reason Toast and HintBalloon
+    // each install this on their own parent.
+    if (myView) myView->installEventFilter(this);
+}
+
+ExtrudePreview::~ExtrudePreview()
+{
+    // Sibling, not a child - same reasoning as Toast::~Toast() and
+    // WalkthroughPanel::~WalkthroughPanel(): Qt's parent-child cascade does
+    // not clean this up when this panel alone is destroyed. QPointer makes
+    // the delete a safe no-op if the two are instead torn down together, in
+    // either order, by their shared parent (the viewport).
+    delete myField;
+}
+
+void ExtrudePreview::begin(const TopoDS_Face& face)
+{
+    myFace = face;
+
+    reposition();
+    show();
+    raise();
+    if (myField) myField->raise();
+
+    if (myField) {
+        // Force the same default every time, even if a previous use already
+        // left "10" (or anything else) in the field: setText() would not
+        // emit textChanged for a value that has not actually changed, and
+        // the contract is "preview at 10 mm", unconditionally.
+        myField->blockSignals(true);
+        myField->setText(QStringLiteral("10"));
+        myField->blockSignals(false);
+        myField->setFocus(Qt::OtherFocusReason);
+        myField->selectAll();
+    }
+    updatePreview();
+}
+
+void ExtrudePreview::cancel()
+{
+    if (myHasPreview && myView) {
+        myView->clearPreview();
+        myHasPreview = false;
+    }
+    markInvalid(false);
+    hide();
+    // myFace, and MainWindow's own pending face, are deliberately untouched -
+    // the user can press Extrude again and try another height.
+}
+
+double ExtrudePreview::height() const
+{
+    return myHeight;
+}
+
+QLineEdit* ExtrudePreview::field() const
+{
+    return myField;
+}
+
+void ExtrudePreview::reposition()
+{
+    if (!myView) return;
+    // Top-center, clear of the bottom strip where Toast, WalkthroughPanel and
+    // HintBalloon all live (see their own reposition()/HintBalloon::stepAside
+    // logic) and of the chip clusters anchored in the top-left and top-right
+    // corners (see ViewportOverlay::relayout()). Unlike those three, this
+    // panel does not need to track anything else at runtime to stay clear -
+    // it simply lives somewhere none of them ever reach.
+    const int x = (myView->width() - QWidget::width()) / 2;
+    move(x, kMargin);
+}
+
+QRect ExtrudePreview::fieldRect() const
+{
+    return QRect(kPad, kPad + kLabelHeight, QWidget::width() - kPad * 2, kFieldHeight);
+}
+
+void ExtrudePreview::syncFieldGeometry()
+{
+    if (!myField) return;
+    // Shares this widget's parent, so fieldRect() - defined in this widget's
+    // own local coordinates - needs translating by pos() to land in that
+    // shared coordinate space. Same idiom as
+    // WalkthroughPanel::syncSkipGeometry() and Toast::syncUndoGeometry().
+    myField->setGeometry(fieldRect().translated(pos()));
+    // Visibility is DERIVED here, not left to a hide event that may never
+    // arrive - see WalkthroughPanel::syncSkipGeometry() for why that matters.
+    myField->setVisible(isVisible());
+    myField->raise();
+}
+
+void ExtrudePreview::updatePreview()
+{
+    if (!myField || !myView || !myWindow || myFace.IsNull()) return;
+
+    bool ok = false;
+    const double h = myField->text().toDouble(&ok);
+    if (!ok || h == 0.0) {
+        // Invalid input never previews: the last good shape, if any, stays
+        // exactly as it was - only the field's own border marks the problem.
+        markInvalid(true);
+        return;
+    }
+
+    // The SAME ModelingOps::extrude() call the commit uses - a preview built
+    // by a different path than the commit would be a lie.
+    const TopoDS_Shape solid =
+        ModelingOps::extrude(myFace, myWindow->sketch().plane().Axis().Direction(), h);
+    if (solid.IsNull()) {
+        markInvalid(true);
+        return;
+    }
+
+    markInvalid(false);
+    myHeight = h;
+    myView->setPreview(solid, /*shaded=*/true);
+    myHasPreview = true;
+}
+
+void ExtrudePreview::commit()
+{
+    if (!myField || !myHasPreview || myInvalid) return;
+
+    bool ok = false;
+    const double h = myField->text().toDouble(&ok);
+    if (!ok || h == 0.0) return;
+
+    // extrudePendingFace() re-runs the same extrude, clears whatever preview
+    // is on screen, adds the real body, records progress, and reports the
+    // result - this widget never touches DocumentModel itself.
+    if (myWindow->extrudePendingFace(h)) {
+        myHasPreview = false;
+        hide();
+    }
+}
+
+void ExtrudePreview::markInvalid(bool invalid)
+{
+    myInvalid = invalid;
+    if (!myField) return;
+    const QColor border = invalid ? Theme::axisX() : Theme::accent();
+    myField->setStyleSheet(QStringLiteral(
+                               "QLineEdit { background-color: %1; color: %2; "
+                               "border: 1px solid %3; border-radius: 4px; padding: 2px 6px; }")
+                               .arg(Theme::chip().name(), Theme::text().name(), border.name()));
+}
+
+QStringList ExtrudePreview::paintedTexts() const
+{
+    return {tr("Extrude height (mm)")};
+}
+
+void ExtrudePreview::paintEvent(QPaintEvent* /*event*/)
+{
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+
+    QPainterPath panel;
+    panel.addRoundedRect(rect().adjusted(0, 0, -1, -1), 8.0, 8.0);
+    painter.fillPath(panel, Theme::panel());
+    painter.setPen(QPen(Theme::accent(), 1.0));
+    painter.drawPath(panel);
+
+    painter.setPen(Theme::text());
+    painter.drawText(QRect(kPad, kPad, QWidget::width() - kPad * 2, kLabelHeight),
+                     Qt::AlignVCenter | Qt::AlignLeft, paintedTexts().front());
+}
+
+void ExtrudePreview::showEvent(QShowEvent* event)
+{
+    QWidget::showEvent(event);
+    syncFieldGeometry();
+}
+
+void ExtrudePreview::hideEvent(QHideEvent* event)
+{
+    QWidget::hideEvent(event);
+    if (myField) myField->hide();
+}
+
+void ExtrudePreview::moveEvent(QMoveEvent* event)
+{
+    QWidget::moveEvent(event);
+    syncFieldGeometry();
+}
+
+void ExtrudePreview::resizeEvent(QResizeEvent* event)
+{
+    QWidget::resizeEvent(event);
+    syncFieldGeometry();
+}
+
+bool ExtrudePreview::eventFilter(QObject* watched, QEvent* event)
+{
+    if (watched == myField && event->type() == QEvent::KeyPress) {
+        auto* keyEvent = static_cast<QKeyEvent*>(event);
+        if (keyEvent->key() == Qt::Key_Escape) {
+            cancel();
+            // Swallowed here, not left to bubble: MainWindow's own Cancel
+            // Sketch action is also bound to Escape and would otherwise null
+            // the pending face too, contradicting "Escape cancels [this] and
+            // leaves the pending face intact".
+            return true;
+        }
+    }
+    if (watched == myView && event->type() == QEvent::Resize) {
+        reposition();
+    }
+    return QWidget::eventFilter(watched, event);
+}

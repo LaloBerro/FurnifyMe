@@ -14,11 +14,13 @@
 //
 #include "CameraController.h"
 #include "DocumentModel.h"
+#include "ExtrudePreview.h"
 #include "GridRenderer.h"
 #include "HintBalloon.h"
 #include "IconSet.h"
 #include "ItemsPanel.h"
 #include "MainWindow.h"
+#include "Measure.h"
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
 #include "SketchController.h"
@@ -39,6 +41,7 @@
 #include <QElapsedTimer>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMouseEvent>
 #include <QPointF>
 #include <QSettings>
@@ -816,6 +819,63 @@ int main(int argc, char* argv[])
         view->saveSnapshot(outDir + "/g3-after-cut.png");
     }
 
+    // --- extrude asks for a height without stopping the user ------------------
+    {
+        // Draw an outline and close it, so a face is pending.
+        trigger(window, QStringLiteral("Start Sketch"));
+        clickAt(view, QPointF(300, 300)); clickAt(view, QPointF(420, 300));
+        clickAt(view, QPointF(420, 380)); clickAt(view, QPointF(300, 380));
+        trigger(window, QStringLiteral("Finish Sketch"));
+        settle(150);
+
+        const int before = static_cast<int>(window.document().solids().size());
+        trigger(window, QStringLiteral("Extrude..."));
+        settle(150);
+
+        ExtrudePreview* preview = window.findChild<ExtrudePreview*>();
+        check(preview != nullptr, "extrude opens a preview rather than a dialog");
+        check(preview != nullptr && preview->isVisible(), "the preview is visible");
+        check(window.findChildren<QDialog*>().isEmpty(),
+              "extrude never constructs a dialog");
+        check(preview != nullptr && preview->hasPreview(),
+              "a preview shape is shown before the user commits anything");
+        check(static_cast<int>(window.document().solids().size()) == before,
+              "previewing creates no body");
+
+        if (preview && preview->field()) {
+            preview->field()->setText(QStringLiteral("25"));
+            settle(150);
+            check(preview->hasPreview(), "editing the height keeps a live preview");
+
+            // Garbage must not clear the preview or flicker the viewport.
+            preview->field()->setText(QStringLiteral("abc"));
+            settle(150);
+            check(preview->hasPreview(),
+                  "an unparseable height leaves the last good preview alone");
+            check(static_cast<int>(window.document().solids().size()) == before,
+                  "an unparseable height creates no body");
+
+            preview->field()->setText(QStringLiteral("25"));
+            settle(100);
+            QKeyEvent commit(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+            QCoreApplication::sendEvent(preview->field(), &commit);
+            settle(250);
+        }
+
+        check(static_cast<int>(window.document().solids().size()) == before + 1,
+              "Enter commits the extrude");
+        ExtrudePreview* after = window.findChild<ExtrudePreview*>();
+        check(after == nullptr || !after->isVisible(),
+              "committing closes the preview");
+        if (!window.document().solids().empty()) {
+            const std::string dims =
+                Measure::formatDimensions(window.document().solids().back().shape);
+            check(dims.find("25") != std::string::npos,
+                  QStringLiteral("the body is the height that was typed (\"%1\")")
+                      .arg(QString::fromStdString(dims)));
+        }
+    }
+
     // --- icons ----------------------------------------------------------------
     {
         const IconSet::Glyph all[] = {
@@ -1117,6 +1177,24 @@ int main(int argc, char* argv[])
                   .arg(toastOffenders.isEmpty()
                            ? QStringLiteral("none")
                            : toastOffenders.join(QStringLiteral(", "))));
+
+        // Same story for the extrude preview: its label is painted, not put
+        // on an action or a tooltip, so it needs its own explicit sweep too.
+        QStringList extrudePreviewOffenders;
+        for (ExtrudePreview* preview : window.findChildren<ExtrudePreview*>()) {
+            for (const QString& text : preview->paintedTexts()) {
+                for (const QString& word : banned) {
+                    if (text.contains(word, Qt::CaseInsensitive))
+                        extrudePreviewOffenders
+                            << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
+                }
+            }
+        }
+        check(extrudePreviewOffenders.isEmpty(),
+              QStringLiteral("no extrude preview text uses a banned word (%1)")
+                  .arg(extrudePreviewOffenders.isEmpty()
+                           ? QStringLiteral("none")
+                           : extrudePreviewOffenders.join(QStringLiteral(", "))));
 
         // The state label is the app's most-updated string; it must obey the
         // vocabulary too. It is a permanent widget on the status bar.

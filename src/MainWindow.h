@@ -8,6 +8,7 @@
 #include "SketchController.h"
 #include "UserProgress.h"
 
+class ExtrudePreview;
 class OcctViewWidget;
 class QAction;
 class ToastHost;
@@ -134,4 +135,5 @@ private:
     class ItemsPanel* myItemsPanel = nullptr;
     class ShortcutSheet* myShortcutSheet = nullptr;
     ToastHost* myToasts = nullptr;
+    ExtrudePreview* myExtrudePreview = nullptr;
 };

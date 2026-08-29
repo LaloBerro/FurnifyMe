@@ -5,6 +5,7 @@
 #include "OcctViewWidget.h"
 
 #include "AxisGizmo.h"
+#include "ExtrudePreview.h"
 #include "HintBalloon.h"
 #include "IconSet.h"
 #include "ItemsPanel.h"
@@ -19,7 +20,6 @@
 #include <QAction>
 #include <QActionGroup>
 #include <QFileDialog>
-#include <QInputDialog>
 #include <QLabel>
 #include <QMenuBar>
 #include <QSettings>
@@ -357,6 +357,12 @@ void MainWindow::buildOverlay()
     myToasts = new ToastHost(myView, this);
     connect(myToasts, &ToastHost::undoRequested, this, &MainWindow::onUndo);
 
+    // Replaces the old QInputDialog::getDouble() for extrude height. Parents
+    // itself to the viewport and positions itself (top-center, clear of the
+    // toast/guide/balloon bottom strip - see ExtrudePreview::reposition()),
+    // so it needs no overlay anchor of its own either.
+    myExtrudePreview = new ExtrudePreview(this, myView);
+
     // Always built, even for a user who has already learned this - it
     // decides its own visibility in its constructor (see WalkthroughPanel's
     // refresh()) and hides itself immediately in that case. Gating
@@ -611,12 +617,11 @@ void MainWindow::onExtrude()
 {
     if (myPendingFace.IsNull()) return;
 
-    bool accepted = false;
-    const double height = QInputDialog::getDouble(this, tr("Extrude"), tr("Height (mm):"),
-                                                  10.0, -10000.0, 10000.0, 3, &accepted);
-    if (!accepted) return;
-
-    extrudePendingFace(height);
+    // Opens a live preview over the viewport instead of a modal dialog - see
+    // ExtrudePreview. It calls extrudePendingFace() itself once the user
+    // commits (Enter) or leaves the pending face alone if they back out
+    // (Escape).
+    myExtrudePreview->begin(myPendingFace);
 }
 
 bool MainWindow::extrudePendingFace(double height)

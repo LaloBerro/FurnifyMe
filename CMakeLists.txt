@@ -108,6 +108,7 @@ if(FURNIFYME_BUILD_APP)
       src/ui/WalkthroughPanel.cpp
       src/ui/HintBalloon.cpp
       src/ui/Toast.cpp
+      src/ui/ExtrudePreview.cpp
     )
     target_include_directories(furnify_app PUBLIC src/ui)
     target_link_libraries(furnify_app PUBLIC
