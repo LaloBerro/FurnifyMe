@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 
+#include "Measure.h"
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
 
@@ -20,6 +21,7 @@
 #include <QMessageBox>
 #include <QSplitter>
 #include <QStatusBar>
+#include <QtGlobal>
 
 #include <algorithm>
 #include <initializer_list>
@@ -69,7 +71,7 @@ MainWindow::MainWindow(QWidget* parent)
 
     setWindowTitle(tr("FurnifyMe"));
     resize(1280, 800);
-    statusBar()->showMessage(tr("RMB drag orbits, MMB drag pans, wheel zooms."));
+    statusBar()->showMessage(tr("Right-drag to orbit, middle-drag to pan, wheel to zoom"));
 }
 
 void MainWindow::buildActions()
@@ -94,20 +96,20 @@ void MainWindow::buildActions()
     myExtrudeAction->setShortcut(QKeySequence(Qt::Key_E));
     connect(myExtrudeAction, &QAction::triggered, this, &MainWindow::onExtrude);
 
-    myFuseAction = new QAction(tr("&Fuse"), this);
-    connect(myFuseAction, &QAction::triggered, this, &MainWindow::onFuse);
+    myUnionAction = new QAction(tr("&Union"), this);
+    connect(myUnionAction, &QAction::triggered, this, &MainWindow::onUnion);
 
-    myCutAction = new QAction(tr("&Cut"), this);
-    connect(myCutAction, &QAction::triggered, this, &MainWindow::onCut);
+    mySubtractAction = new QAction(tr("&Subtract"), this);
+    connect(mySubtractAction, &QAction::triggered, this, &MainWindow::onSubtract);
 
-    myCommonAction = new QAction(tr("&Intersect"), this);
-    connect(myCommonAction, &QAction::triggered, this, &MainWindow::onCommon);
+    myIntersectAction = new QAction(tr("&Intersect"), this);
+    connect(myIntersectAction, &QAction::triggered, this, &MainWindow::onIntersect);
 
     myExportStepAction = new QAction(tr("Export &STEP..."), this);
     myExportStepAction->setShortcut(QKeySequence::Save);
     connect(myExportStepAction, &QAction::triggered, this, &MainWindow::onExportStep);
 
-    mySolidSelectAction = new QAction(tr("Select &Solids"), this);
+    mySolidSelectAction = new QAction(tr("Select &Bodies"), this);
     mySolidSelectAction->setCheckable(true);
     mySolidSelectAction->setChecked(true);
     myFaceSelectAction = new QAction(tr("Select F&aces"), this);
@@ -115,58 +117,70 @@ void MainWindow::buildActions()
 
     myDeleteAction = new QAction(tr("&Delete Selected"), this);
     myDeleteAction->setShortcut(QKeySequence::Delete);
-    myDeleteAction->setToolTip(tr("Remove the selected solids (Del)"));
+    myDeleteAction->setToolTip(tr("Delete the selected bodies (Del)"));
     connect(myDeleteAction, &QAction::triggered, this, &MainWindow::onDeleteSelected);
 
     myUndoAction = new QAction(tr("&Undo"), this);
     myUndoAction->setShortcut(QKeySequence::Undo);
-    myUndoAction->setToolTip(tr("Undo the last solid change (Ctrl+Z)"));
+    myUndoAction->setToolTip(tr("Undo the last change to your bodies (Ctrl+Z)"));
     connect(myUndoAction, &QAction::triggered, this, &MainWindow::onUndo);
 
     myRedoAction = new QAction(tr("&Redo"), this);
     myRedoAction->setShortcut(QKeySequence::Redo);
-    myRedoAction->setToolTip(tr("Redo the last undone change (Ctrl+Y)"));
+    myRedoAction->setToolTip(tr("Redo the change you just undid (Ctrl+Y)"));
     connect(myRedoAction, &QAction::triggered, this, &MainWindow::onRedo);
 
     mySnapAction = new QAction(tr("Snap to &Grid"), this);
     mySnapAction->setCheckable(true);
     mySnapAction->setChecked(true);
-    mySnapAction->setToolTip(tr("Round sketch points to the 10mm grid"));
+    mySnapAction->setToolTip(tr("Snap outline points to the 10 mm grid\n"
+                                "Turn this off for freehand placement."));
     connect(mySnapAction, &QAction::toggled, this, &MainWindow::onSnapToggled);
 
     myItemsPanelAction = new QAction(tr("Items"), this);
     myItemsPanelAction->setCheckable(true);
     myItemsPanelAction->setChecked(true);
     myItemsPanelAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Alt+S")));
-    myItemsPanelAction->setToolTip(tr("Show or hide the items panel (Ctrl+Alt+S)"));
+    myItemsPanelAction->setToolTip(tr("Show or hide the list of bodies (Ctrl+Alt+S)"));
 
     myDisplayModeAction = new QAction(tr("Wireframe"), this);
     myDisplayModeAction->setCheckable(true);
-    myDisplayModeAction->setToolTip(tr("Show solids as wireframe instead of shaded"));
+    myDisplayModeAction->setToolTip(tr("Draw bodies as edges only\n"
+                                       "Useful for seeing through to what is behind."));
     connect(myDisplayModeAction, &QAction::toggled, this,
             [this](bool on) { myView->setWireframe(on); });
 
     myFitAction = new QAction(tr("&Fit All"), this);
     myFitAction->setShortcut(QKeySequence(Qt::Key_F));
-    myFitAction->setToolTip(tr("Frame everything in the document (F)"));
+    myFitAction->setToolTip(tr("Frame every body in the viewport (F)"));
     connect(myFitAction, &QAction::triggered, myView, &OcctViewWidget::fitAll);
 
     myScreenshotAction = new QAction(tr("Save S&creenshot..."), this);
-    myScreenshotAction->setToolTip(tr("Save the viewport as a PNG"));
+    myScreenshotAction->setToolTip(tr("Save the viewport as a PNG image"));
     connect(myScreenshotAction, &QAction::triggered, this, [this] {
         const QString path = QFileDialog::getSaveFileName(this, tr("Save Screenshot"),
                                                           QString(), tr("PNG image (*.png)"));
         if (!path.isEmpty() && !myView->saveSnapshot(path)) {
-            QMessageBox::warning(this, tr("Screenshot"), tr("Could not write %1").arg(path));
+            QMessageBox::warning(this, tr("Screenshot failed"),
+                                 tr("Couldn't save the image to %1.\n\n"
+                                    "Check that the folder exists and isn't read-only.")
+                                     .arg(path));
         }
     });
 
-    myStartSketchAction->setToolTip(tr("Draw a closed outline on the XY plane (Ctrl+K)"));
-    myFinishSketchAction->setToolTip(tr("Close the outline into a face - needs 3+ points (Enter)"));
-    myExtrudeAction->setToolTip(tr("Turn the closed face into a solid (E)"));
-    myFuseAction->setToolTip(tr("Union of two selected solids"));
-    myCutAction->setToolTip(tr("Subtract the later solid from the earlier one"));
-    myCommonAction->setToolTip(tr("Keep only the overlap of two selected solids"));
+    myStartSketchAction->setToolTip(tr("Draw an outline on the ground (Ctrl+K)\n"
+                                       "Click to place points; close it to make a face."));
+    myFinishSketchAction->setToolTip(tr("Close the outline into a face (Enter)\n"
+                                        "Needs at least three points."));
+    myExtrudeAction->setToolTip(tr("Pull the face up into a body (E)\n"
+                                   "The outline's shape becomes the body's footprint."));
+    myUnionAction->setToolTip(tr("Combine two bodies into one\n"
+                                 "Overlapping material is kept once, not twice."));
+    mySubtractAction->setToolTip(tr("Cut the second body out of the first\n"
+                                    "Like a chisel removing waste. The body you made "
+                                    "first is the one that keeps its shape."));
+    myIntersectAction->setToolTip(tr("Keep only where two bodies overlap\n"
+                                     "Everything outside the shared volume is discarded."));
 
     auto* selectionGroup = new QActionGroup(this);
     selectionGroup->addAction(mySolidSelectAction);
@@ -199,9 +213,9 @@ void MainWindow::buildMenus()
     QMenu* modelMenu = menuBar()->addMenu(tr("&Model"));
     modelMenu->addAction(myExtrudeAction);
     modelMenu->addSeparator();
-    modelMenu->addAction(myFuseAction);
-    modelMenu->addAction(myCutAction);
-    modelMenu->addAction(myCommonAction);
+    modelMenu->addAction(myUnionAction);
+    modelMenu->addAction(mySubtractAction);
+    modelMenu->addAction(myIntersectAction);
 
     QMenu* viewMenu = menuBar()->addMenu(tr("&View"));
     viewMenu->addAction(myFitAction);
@@ -235,9 +249,9 @@ void MainWindow::buildOverlay()
     cluster(ViewportOverlay::Anchor::LeftCenter, {
         {myStartSketchAction, IconSet::Glyph::Sketch},
         {myExtrudeAction,     IconSet::Glyph::Extrude},
-        {myFuseAction,        IconSet::Glyph::Fuse},
-        {myCutAction,         IconSet::Glyph::Cut},
-        {myCommonAction,      IconSet::Glyph::Intersect},
+        {myUnionAction,       IconSet::Glyph::Fuse},
+        {mySubtractAction,    IconSet::Glyph::Cut},
+        {myIntersectAction,   IconSet::Glyph::Intersect},
         {myDeleteAction,      IconSet::Glyph::Delete},
     });
 
@@ -287,9 +301,9 @@ void MainWindow::updateActions()
 
     myExtrudeAction->setEnabled(!mySketching && !myPendingFace.IsNull());
 
-    myFuseAction->setEnabled(booleanReady);
-    myCutAction->setEnabled(booleanReady);
-    myCommonAction->setEnabled(booleanReady);
+    myUnionAction->setEnabled(booleanReady);
+    mySubtractAction->setEnabled(booleanReady);
+    myIntersectAction->setEnabled(booleanReady);
 
     myExportStepAction->setEnabled(myDocument.count() > 0);
     myDeleteAction->setEnabled(!mySketching && selectedCount > 0);
@@ -305,23 +319,32 @@ void MainWindow::updateStateLabel()
 
     QString state;
     if (mySketching) {
-        state = mySketch.canClose()
-                    ? tr("Sketching - %1 points - Enter or click the start point to close")
-                          .arg(mySketch.pointCount())
-                    : tr("Sketching - %1 of 3 points needed").arg(mySketch.pointCount());
+        const int placed = static_cast<int>(mySketch.pointCount());
+        if (mySketch.canClose()) {
+            state = tr("Sketching — %1 points — Enter or click the first point to close")
+                        .arg(placed);
+        } else if (placed == 0) {
+            state = tr("Sketching — click to place your first point");
+        } else if (placed == 1) {
+            state = tr("Sketching — 1 point, 2 more to close");
+        } else {
+            state = tr("Sketching — 2 points, 1 more to close");
+        }
     } else if (!myPendingFace.IsNull()) {
-        state = tr("Face ready - press E to extrude");
+        state = tr("Face ready — press E to extrude");
     } else {
         const std::size_t selected = myView->selectedSolidIds().size();
-        const std::size_t solids = myDocument.count();
+        const std::size_t bodies = myDocument.count();
         if (selected == 2) {
-            state = tr("2 solids selected - Fuse / Cut / Intersect available");
+            state = tr("2 bodies selected — Union, Subtract and Intersect available");
         } else if (selected == 1) {
-            state = tr("1 solid selected - shift-click a second one for a boolean");
-        } else if (solids == 0) {
-            state = tr("Empty - start a sketch (Ctrl+K)");
+            state = tr("1 body selected — Shift-click another to combine them");
+        } else if (bodies == 0) {
+            state = tr("Nothing yet — press Ctrl+K to draw an outline");
+        } else if (bodies == 1) {
+            state = tr("1 body — click it to select");
         } else {
-            state = tr("%1 solid(s) - click one to select").arg(solids);
+            state = tr("%1 bodies — click one to select").arg(bodies);
         }
     }
     myStateLabel->setText(state);
@@ -340,6 +363,9 @@ void MainWindow::onDeleteSelected()
     const std::vector<int> ids = myView->selectedSolidIds();
     if (ids.empty()) return;
 
+    const std::string deletedName = ids.size() == 1 ? myDocument.nameOf(ids.front())
+                                                    : std::string();
+
     myDocument.checkpoint();
     myView->clearSelection();
     for (int id : ids) {
@@ -349,7 +375,9 @@ void MainWindow::onDeleteSelected()
 
     updateActions();
     emit documentChanged();
-    statusBar()->showMessage(tr("Deleted %1 solid(s).").arg(ids.size()));
+    statusBar()->showMessage(
+        ids.size() == 1 ? tr("Deleted %1").arg(QString::fromStdString(deletedName))
+                        : tr("Deleted %1 bodies").arg(ids.size()));
 }
 
 void MainWindow::onUndo()
@@ -360,7 +388,9 @@ void MainWindow::onUndo()
     resyncView();
     updateActions();
     emit documentChanged();
-    statusBar()->showMessage(tr("Undone. %1 solid(s) in the document.").arg(myDocument.count()));
+    statusBar()->showMessage(myDocument.count() == 1
+                                 ? tr("Undone — 1 body in the document")
+                                 : tr("Undone — %1 bodies in the document").arg(myDocument.count()));
 }
 
 void MainWindow::onRedo()
@@ -371,14 +401,17 @@ void MainWindow::onRedo()
     resyncView();
     updateActions();
     emit documentChanged();
-    statusBar()->showMessage(tr("Redone. %1 solid(s) in the document.").arg(myDocument.count()));
+    statusBar()->showMessage(myDocument.count() == 1
+                                 ? tr("Redone — 1 body in the document")
+                                 : tr("Redone — %1 bodies in the document").arg(myDocument.count()));
 }
 
 void MainWindow::onSnapToggled(bool enabled)
 {
     myView->setSnap(enabled, 10.0);
-    statusBar()->showMessage(enabled ? tr("Snapping to the 10mm grid.")
-                                     : tr("Snapping off - points land exactly where you click."));
+    statusBar()->showMessage(enabled
+                                 ? tr("Snapping to the 10 mm grid")
+                                 : tr("Snapping off — points land exactly where you click"));
 }
 
 void MainWindow::onSketchCursorMoved(const gp_Pnt& point)
@@ -386,10 +419,9 @@ void MainWindow::onSketchCursorMoved(const gp_Pnt& point)
     if (!mySketching) return;
 
     myView->setPreview(mySketch.previewShapeWithCursor(point));
-    statusBar()->showMessage(tr("Cursor: (%1, %2, %3)")
-                                 .arg(point.X(), 0, 'f', 1)
-                                 .arg(point.Y(), 0, 'f', 1)
-                                 .arg(point.Z(), 0, 'f', 1));
+    statusBar()->showMessage(tr("Cursor at %1, %2")
+                                 .arg(QString::fromStdString(Measure::formatLength(point.X())),
+                                      QString::fromStdString(Measure::formatLength(point.Y()))));
 }
 
 void MainWindow::onStartSketch()
@@ -402,8 +434,8 @@ void MainWindow::onStartSketch()
     myView->setSketchMode(true, mySketch.plane());
     myView->setPreview(TopoDS_Shape());
     updateActions();
-    statusBar()->showMessage(tr("Sketch mode: click points on the XY plane. "
-                                "Enter closes the wire, Backspace undoes, Esc cancels."));
+    statusBar()->showMessage(tr("Click points on the ground to draw an outline — "
+                                "Enter closes it, Backspace undoes a point, Esc cancels"));
 }
 
 void MainWindow::onSketchPointPicked(const gp_Pnt& point)
@@ -419,11 +451,10 @@ void MainWindow::onSketchPointPicked(const gp_Pnt& point)
     mySketch.addPoint(point);
     myView->setPreview(mySketch.previewShape());
     updateActions();
-    statusBar()->showMessage(tr("%1 point(s). Last: (%2, %3, %4)")
-                                 .arg(mySketch.pointCount())
-                                 .arg(point.X(), 0, 'f', 2)
-                                 .arg(point.Y(), 0, 'f', 2)
-                                 .arg(point.Z(), 0, 'f', 2));
+    statusBar()->showMessage(
+        mySketch.pointCount() == 1
+            ? tr("1 point placed")
+            : tr("%1 points placed").arg(mySketch.pointCount()));
 }
 
 void MainWindow::onUndoSketchPoint()
@@ -441,17 +472,18 @@ void MainWindow::onCancelSketch()
     myView->setSketchMode(false, mySketch.plane());
     myView->clearPreview();
     updateActions();
-    statusBar()->showMessage(tr("Sketch cancelled."));
+    statusBar()->showMessage(tr("Sketch cancelled"));
 }
 
 void MainWindow::onFinishSketch()
 {
     const TopoDS_Face face = mySketch.closedFace();
     if (face.IsNull()) {
-        QMessageBox::warning(this, tr("Sketch"),
-                             tr("Could not build a planar face from these points. "
-                                "A closed, non-self-intersecting outline of at least "
-                                "3 points is required."));
+        QMessageBox::warning(this, tr("Can't close this outline"),
+                             tr("This outline can't close into a flat face. It probably "
+                                "crosses itself.\n\n"
+                                "Press Backspace to undo the last point and redraw it, or "
+                                "Esc to start over."));
         return;
     }
 
@@ -460,7 +492,7 @@ void MainWindow::onFinishSketch()
     myView->setSketchMode(false, mySketch.plane());
     myView->setPreview(face, /*shaded=*/true);
     updateActions();
-    statusBar()->showMessage(tr("Face closed. Extrude (E) to make it a solid."));
+    statusBar()->showMessage(tr("Outline closed — press E to extrude it into a body"));
 }
 
 void MainWindow::onExtrude()
@@ -482,7 +514,10 @@ bool MainWindow::extrudePendingFace(double height)
     const TopoDS_Shape solid =
         ModelingOps::extrude(myPendingFace, mySketch.plane().Axis().Direction(), height);
     if (solid.IsNull()) {
-        QMessageBox::warning(this, tr("Extrude"), tr("The extrusion failed."));
+        QMessageBox::warning(this, tr("Extrude failed"),
+                             tr("This face couldn't be extruded into a body.\n\n"
+                                "The outline may cross itself or be too small to have an "
+                                "inside. Try redrawing it with Ctrl+K."));
         return false;
     }
 
@@ -499,15 +534,15 @@ bool MainWindow::extrudePendingFace(double height)
     mySketch.reset();
     updateActions();
     emit documentChanged();
-    statusBar()->showMessage(tr("Solid #%1 created (volume %2 mm3).")
-                                 .arg(id)
-                                 .arg(ModelingOps::volume(solid), 0, 'f', 2));
+    statusBar()->showMessage(tr("%1 created — %2")
+                                 .arg(QString::fromStdString(myDocument.nameOf(id)),
+                                      QString::fromStdString(Measure::formatDimensions(solid))));
     return true;
 }
 
-void MainWindow::onFuse()   { runBoolean(static_cast<int>(ModelingOps::BooleanKind::Fuse)); }
-void MainWindow::onCut()    { runBoolean(static_cast<int>(ModelingOps::BooleanKind::Cut)); }
-void MainWindow::onCommon() { runBoolean(static_cast<int>(ModelingOps::BooleanKind::Common)); }
+void MainWindow::onUnion()     { runBoolean(static_cast<int>(ModelingOps::BooleanKind::Fuse)); }
+void MainWindow::onSubtract()  { runBoolean(static_cast<int>(ModelingOps::BooleanKind::Cut)); }
+void MainWindow::onIntersect() { runBoolean(static_cast<int>(ModelingOps::BooleanKind::Common)); }
 
 void MainWindow::runBoolean(int kind)
 {
@@ -516,16 +551,25 @@ void MainWindow::runBoolean(int kind)
 
 bool MainWindow::applyBooleanToSelection(int kind)
 {
+    const QString operationName =
+        kind == static_cast<int>(ModelingOps::BooleanKind::Fuse)   ? tr("Union")
+        : kind == static_cast<int>(ModelingOps::BooleanKind::Cut)  ? tr("Subtract")
+                                                                   : tr("Intersect");
+
     std::vector<int> ids = myView->selectedSolidIds();
     if (ids.size() != 2) {
-        QMessageBox::information(this, tr("Boolean"),
-                                 tr("Select exactly two solids (Shift-click to add)."));
+        QMessageBox::information(this, operationName,
+                                 tr("%1 needs exactly two bodies.\n\n"
+                                    "Click one body, then Shift-click another.")
+                                     .arg(operationName));
         return false;
     }
 
     // Cut is not commutative. The lower document id is the base, so the result is
     // predictable rather than dependent on pick order, which AIS does not preserve.
     std::sort(ids.begin(), ids.end());
+    const std::string nameA = myDocument.nameOf(ids[0]);
+    const std::string nameB = myDocument.nameOf(ids[1]);
     const TopoDS_Shape a = myDocument.shapeOf(ids[0]);
     const TopoDS_Shape b = myDocument.shapeOf(ids[1]);
     if (a.IsNull() || b.IsNull()) return false;
@@ -534,13 +578,15 @@ bool MainWindow::applyBooleanToSelection(int kind)
         ModelingOps::applyBoolean(static_cast<ModelingOps::BooleanKind>(kind), a, b);
 
     if (!result.ok) {
-        // Never present a failed boolean as a success.
-        QMessageBox::critical(this, tr("Boolean failed"),
-                              tr("OCCT could not complete the operation:\n\n%1\n\n"
-                                 "Near-tangent geometry is the usual cause; adjusting the "
-                                 "fuzzy value sometimes helps.")
-                                  .arg(QString::fromStdString(result.error)));
-        statusBar()->showMessage(tr("Boolean failed - model unchanged."));
+        // Never present a failed boolean as a success. The engine's error text is
+        // genuinely useful for debugging, so keep it in the log, not the dialog.
+        qWarning("%s failed: %s", qPrintable(operationName), result.error.c_str());
+        QMessageBox::critical(this, tr("%1 failed").arg(operationName),
+                              tr("The two bodies couldn't be combined.\n\n"
+                                 "This usually means they only touch at a single edge or "
+                                 "corner, which the geometry engine can't resolve. Move one "
+                                 "body so they overlap properly, then try again."));
+        statusBar()->showMessage(tr("%1 failed — nothing was changed").arg(operationName));
         return false;
     }
 
@@ -556,9 +602,13 @@ bool MainWindow::applyBooleanToSelection(int kind)
 
     updateActions();
     emit documentChanged();
-    statusBar()->showMessage(tr("Solid #%1 created from #%2 and #%3 (volume %4 mm3).")
-                                 .arg(id).arg(ids[0]).arg(ids[1])
-                                 .arg(ModelingOps::volume(result.shape), 0, 'f', 2));
+    statusBar()->showMessage(tr("%1 — %2 and %3 → %4 — %5")
+                                 .arg(operationName,
+                                      QString::fromStdString(nameA),
+                                      QString::fromStdString(nameB),
+                                      QString::fromStdString(myDocument.nameOf(id)),
+                                      QString::fromStdString(
+                                          Measure::formatDimensions(result.shape))));
     return true;
 }
 
@@ -578,12 +628,17 @@ void MainWindow::onExportStep()
         ModelingOps::exportStep(ModelingOps::makeCompound(shapes), path.toStdString());
 
     if (!result.ok) {
+        qWarning("STEP export failed: %s", result.error.c_str());
         QMessageBox::critical(this, tr("Export failed"),
-                              QString::fromStdString(result.error));
+                              tr("Couldn't write the STEP file.\n\n"
+                                 "Check that the folder exists and isn't read-only, then "
+                                 "try a different location."));
         return;
     }
-    statusBar()->showMessage(tr("Exported %1 solid(s) to %2")
-                                 .arg(myDocument.count()).arg(path));
+    statusBar()->showMessage(myDocument.count() == 1
+                                 ? tr("Exported 1 body to %1").arg(path)
+                                 : tr("Exported %1 bodies to %2")
+                                       .arg(myDocument.count()).arg(path));
 }
 
 void MainWindow::onSelectionModeChanged()
@@ -591,8 +646,8 @@ void MainWindow::onSelectionModeChanged()
     myView->setSelectionMode(myFaceSelectAction->isChecked() ? OcctViewWidget::SelectionMode::Face
                                                              : OcctViewWidget::SelectionMode::Solid);
     statusBar()->showMessage(myFaceSelectAction->isChecked()
-                                 ? tr("Face selection: hover highlights faces.")
-                                 : tr("Solid selection: pick whole solids for booleans."));
+                                 ? tr("Face selection — hovering highlights one face at a time")
+                                 : tr("Body selection — click whole bodies to combine them"));
 }
 
 void MainWindow::onSelectionChanged()
@@ -600,7 +655,7 @@ void MainWindow::onSelectionChanged()
     updateActions();
 
     const std::size_t count = myView->selectedSolidIds().size();
-    statusBar()->showMessage(count == 0
-                                 ? tr("Nothing selected.")
-                                 : tr("%1 solid(s) selected.").arg(count));
+    statusBar()->showMessage(count == 0   ? tr("Nothing selected")
+                             : count == 1 ? tr("1 body selected")
+                                          : tr("%1 bodies selected").arg(count));
 }

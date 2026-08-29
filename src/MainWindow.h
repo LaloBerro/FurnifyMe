@@ -44,9 +44,9 @@ private slots:
     void onSnapToggled(bool enabled);
 
     void onExtrude();
-    void onFuse();
-    void onCut();
-    void onCommon();
+    void onUnion();
+    void onSubtract();
+    void onIntersect();
 
     void onDeleteSelected();
     void onUndo();
@@ -81,9 +81,9 @@ private:
     QAction* myUndoPointAction = nullptr;
     QAction* myCancelSketchAction = nullptr;
     QAction* myExtrudeAction = nullptr;
-    QAction* myFuseAction = nullptr;
-    QAction* myCutAction = nullptr;
-    QAction* myCommonAction = nullptr;
+    QAction* myUnionAction = nullptr;
+    QAction* mySubtractAction = nullptr;
+    QAction* myIntersectAction = nullptr;
     QAction* myExportStepAction = nullptr;
     QAction* mySolidSelectAction = nullptr;
     QAction* myFaceSelectAction = nullptr;

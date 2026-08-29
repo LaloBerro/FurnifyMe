@@ -31,8 +31,10 @@
 #include <QApplication>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QLabel>
 #include <QMouseEvent>
 #include <QPointF>
+#include <QStatusBar>
 #include <QString>
 
 #include <cmath>
@@ -276,6 +278,18 @@ int main(int argc, char* argv[])
 
     check(window.extrudePendingFace(10.0), "extrude reports success");
     check(window.document().count() == 1, "one solid in the document");
+
+    // --- the app reports dimensions, not volume -------------------------------
+    {
+        const QString status = window.statusBar()->currentMessage();
+        check(status.contains(QStringLiteral("Body 0")),
+              QStringLiteral("the status line names the body (\"%1\")").arg(status));
+        check(status.contains(QString::fromUtf8("\xC3\x97")),
+              "the status line reports dimensions with a multiplication sign");
+        check(!status.contains(QStringLiteral("volume")) &&
+              !status.contains(QStringLiteral("mm3")),
+              "the status line no longer mentions volume");
+    }
 
     // --- items panel ----------------------------------------------------------
     check(window.itemsPanel() != nullptr, "the window has an items panel");
@@ -610,6 +624,60 @@ int main(int argc, char* argv[])
         const double f2 = GridRenderer::firstLineAtOrBelow(2100.0, 100.0);
         check(f2 == -2100.0,
               "an already-aligned band edge is its own first line");
+    }
+
+    // --- vocabulary is enforced, not merely documented ------------------------
+    {
+        // A documented vocabulary drifts the moment someone is in a hurry. An
+        // asserted one cannot.
+        const QStringList banned = {QStringLiteral("Fuse"),  QStringLiteral("Solid"),
+                                    QStringLiteral("OCCT"),  QStringLiteral("mm3"),
+                                    QStringLiteral("(s)"),   QStringLiteral("Merge"),
+                                    QStringLiteral("Join")};
+        QStringList offenders;
+        for (QAction* candidate : window.findChildren<QAction*>()) {
+            const QString text = candidate->text().remove(QLatin1Char('&'));
+            const QString tip = candidate->toolTip();
+            for (const QString& word : banned) {
+                if (text.contains(word, Qt::CaseInsensitive) ||
+                    tip.contains(word, Qt::CaseInsensitive)) {
+                    offenders << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
+                }
+            }
+        }
+        check(offenders.isEmpty(),
+              QStringLiteral("no action uses a banned word (%1)")
+                  .arg(offenders.isEmpty() ? QStringLiteral("none")
+                                           : offenders.join(QStringLiteral(", "))));
+
+        QStringList tipOffenders;
+        for (QWidget* widget : window.findChildren<QWidget*>()) {
+            const QString tip = widget->toolTip();
+            if (tip.isEmpty()) continue;
+            for (const QString& word : banned) {
+                if (tip.contains(word, Qt::CaseInsensitive))
+                    tipOffenders << (tip.left(30) + QStringLiteral("…"));
+            }
+        }
+        check(tipOffenders.isEmpty(),
+              QStringLiteral("no widget tooltip uses a banned word (%1)")
+                  .arg(tipOffenders.isEmpty() ? QStringLiteral("none")
+                                              : tipOffenders.join(QStringLiteral(", "))));
+
+        // The state label is the app's most-updated string; it must obey the
+        // vocabulary too. It is a permanent widget on the status bar.
+        QString stateText;
+        for (QLabel* label : window.statusBar()->findChildren<QLabel*>()) {
+            if (!label->text().isEmpty()) stateText = label->text();
+        }
+        check(!stateText.contains(QStringLiteral("solid"), Qt::CaseInsensitive),
+              QStringLiteral("the state label says body, not solid (\"%1\")").arg(stateText));
+        check(!stateText.contains(QStringLiteral("(s)")),
+              "the state label writes plurals out rather than using (s)");
+
+        check(action(window, QStringLiteral("Union")) != nullptr, "the Union action exists");
+        check(action(window, QStringLiteral("Subtract")) != nullptr, "the Subtract action exists");
+        check(action(window, QStringLiteral("Intersect")) != nullptr, "the Intersect action exists");
     }
 
     std::printf("\n%s (%d failure%s)  volumes: A=%.1f B=%.1f\n",
