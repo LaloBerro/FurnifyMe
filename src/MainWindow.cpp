@@ -174,7 +174,7 @@ void MainWindow::buildActions()
                                         "Needs at least three points."));
     myExtrudeAction->setToolTip(tr("Pull the face up into a body (E)\n"
                                    "The outline's shape becomes the body's footprint."));
-    myUnionAction->setToolTip(tr("Merge two bodies into one\n"
+    myUnionAction->setToolTip(tr("Combine two bodies into one\n"
                                  "Overlapping material is kept once, not twice."));
     mySubtractAction->setToolTip(tr("Cut the second body out of the first\n"
                                     "Like a chisel removing waste. The body you made "
@@ -338,7 +338,7 @@ void MainWindow::updateStateLabel()
         if (selected == 2) {
             state = tr("2 bodies selected — Union, Subtract and Intersect available");
         } else if (selected == 1) {
-            state = tr("1 body selected — shift-click another for a boolean");
+            state = tr("1 body selected — Shift-click another to combine them");
         } else if (bodies == 0) {
             state = tr("Nothing yet — press Ctrl+K to draw an outline");
         } else if (bodies == 1) {
@@ -602,13 +602,8 @@ bool MainWindow::applyBooleanToSelection(int kind)
 
     updateActions();
     emit documentChanged();
-    const QString verb = kind == static_cast<int>(ModelingOps::BooleanKind::Fuse)
-                             ? tr("Merged")
-                             : kind == static_cast<int>(ModelingOps::BooleanKind::Cut)
-                                   ? tr("Subtracted")
-                                   : tr("Intersected");
-    statusBar()->showMessage(tr("%1 %2 and %3 → %4 — %5")
-                                 .arg(verb,
+    statusBar()->showMessage(tr("%1 — %2 and %3 → %4 — %5")
+                                 .arg(operationName,
                                       QString::fromStdString(nameA),
                                       QString::fromStdString(nameB),
                                       QString::fromStdString(myDocument.nameOf(id)),
@@ -652,7 +647,7 @@ void MainWindow::onSelectionModeChanged()
                                                              : OcctViewWidget::SelectionMode::Solid);
     statusBar()->showMessage(myFaceSelectAction->isChecked()
                                  ? tr("Face selection — hovering highlights one face at a time")
-                                 : tr("Body selection — click whole bodies for booleans"));
+                                 : tr("Body selection — click whole bodies to combine them"));
 }
 
 void MainWindow::onSelectionChanged()

@@ -215,8 +215,8 @@ tooltip contains a banned word, so this table is executable, not aspirational.
 `ModelingOps::BooleanKind::Fuse` and `::Cut` keep their kernel-facing names — the
 user never sees them, and renaming them would churn the geometry library and its
 tests for no visible gain. The enforced bans match the bare word (case-insensitive):
-`OCCT`, `Fuse`, `Solid`, `mm3`, and `(s)` are forbidden everywhere in action text
-and widget tooltips, regardless of capitalization.
+`OCCT`, `Fuse`, `Solid`, `mm3`, `(s)`, `Merge`, and `Join` are forbidden everywhere
+in action text and widget tooltips, regardless of capitalization.
 
 Numbers are formatted by `Measure` (`src/Measure.h`), never by hand at a call
 site: lengths as `340 mm` / `1,200 mm` / `18.5 mm`, sizes as `340 × 220 × 18 mm`.

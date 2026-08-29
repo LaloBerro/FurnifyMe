@@ -630,8 +630,10 @@ int main(int argc, char* argv[])
     {
         // A documented vocabulary drifts the moment someone is in a hurry. An
         // asserted one cannot.
-        const QStringList banned = {QStringLiteral("Fuse"), QStringLiteral("Solid"),
-                                    QStringLiteral("OCCT"), QStringLiteral("mm3")};
+        const QStringList banned = {QStringLiteral("Fuse"),  QStringLiteral("Solid"),
+                                    QStringLiteral("OCCT"),  QStringLiteral("mm3"),
+                                    QStringLiteral("(s)"),   QStringLiteral("Merge"),
+                                    QStringLiteral("Join")};
         QStringList offenders;
         for (QAction* candidate : window.findChildren<QAction*>()) {
             const QString text = candidate->text().remove(QLatin1Char('&'));
