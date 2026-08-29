@@ -15,6 +15,7 @@
 #include "CameraController.h"
 #include "DocumentModel.h"
 #include "GridRenderer.h"
+#include "HintBalloon.h"
 #include "IconSet.h"
 #include "ItemsPanel.h"
 #include "MainWindow.h"
@@ -461,6 +462,46 @@ int main(int argc, char* argv[])
     clickAt(view, QPointF(view->width() * 0.68, view->height() * 0.40), Qt::ShiftModifier);
     check(view->selectedSolidIds().size() == 2, "shift-click adds the second solid");
 
+    // --- a hint appears the first time two bodies are selected ----------------
+    {
+        HintBalloon* hint = window.findChild<HintBalloon*>();
+        check(hint != nullptr, "the window has a hint balloon");
+        check(hint != nullptr && !hint->currentHint().isEmpty(),
+              QStringLiteral("selecting two bodies raises a hint (\"%1\")")
+                  .arg(hint ? hint->currentHint() : QString()));
+        check(hint != nullptr && hint->currentHint().contains(QStringLiteral("Union")),
+              "the hint names the operations now available");
+    }
+
+    // --- a learned hint never appears again ------------------------------------
+    {
+        // The live window already has two bodies and has shown the boolean hint.
+        // Teach it, dismiss what is up, then reproduce the exact condition that
+        // raised it and assert nothing comes back.
+        HintBalloon* hint = window.findChild<HintBalloon*>();
+        check(hint != nullptr, "the hint balloon is still around");
+        if (hint) {
+            for (int i = 0; i < UserProgress::kLearnedThreshold; ++i) {
+                window.progress().record("boolean.completed");
+                window.progress().record("faceMode.used");
+                window.progress().record("view.changed");
+            }
+            // Force a fresh look at the state with everything learned.
+            view->clearSelection();
+            settle(150);
+            const std::vector<int> two = {window.document().solids().front().id,
+                                          window.document().solids().back().id};
+            if (two.size() == 2 && two[0] != two[1]) {
+                view->setSelectedSolids(two);
+                settle(200);
+                check(hint->currentHint().isEmpty(),
+                      "a user who has run three booleans is not told about them again");
+            } else {
+                check(false, "expected two distinct bodies to re-trigger the hint");
+            }
+        }
+    }
+
     if (view->selectedSolidIds().size() == 2) {
         check(window.applyBooleanToSelection(static_cast<int>(ModelingOps::BooleanKind::Cut)),
               "Cut reports success");
@@ -744,6 +785,23 @@ int main(int argc, char* argv[])
                   .arg(walkthroughOffenders.isEmpty()
                            ? QStringLiteral("none")
                            : walkthroughOffenders.join(QStringLiteral(", "))));
+
+        // Same story for the hint balloon: its copy is painted, not put on an
+        // action or a tooltip, so it needs its own explicit sweep too.
+        QStringList hintOffenders;
+        for (HintBalloon* hint : window.findChildren<HintBalloon*>()) {
+            for (const QString& text : hint->paintedTexts()) {
+                for (const QString& word : banned) {
+                    if (text.contains(word, Qt::CaseInsensitive))
+                        hintOffenders << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
+                }
+            }
+        }
+        check(hintOffenders.isEmpty(),
+              QStringLiteral("no hint balloon text uses a banned word (%1)")
+                  .arg(hintOffenders.isEmpty()
+                           ? QStringLiteral("none")
+                           : hintOffenders.join(QStringLiteral(", "))));
 
         // The state label is the app's most-updated string; it must obey the
         // vocabulary too. It is a permanent widget on the status bar.

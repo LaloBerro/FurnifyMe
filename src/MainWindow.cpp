@@ -5,6 +5,7 @@
 #include "OcctViewWidget.h"
 
 #include "AxisGizmo.h"
+#include "HintBalloon.h"
 #include "IconSet.h"
 #include "ItemsPanel.h"
 #include "ShortcutSheet.h"
@@ -338,6 +339,12 @@ void MainWindow::buildOverlay()
     // restarted - exactly the case Show tips again exists for.
     myOverlay->addWidget(new WalkthroughPanel(this, myView),
                          ViewportOverlay::Anchor::BottomRight);
+
+    // Built last, after the walkthrough, so the guide is never competing with
+    // a hint on first run. It parents itself to the viewport and positions
+    // itself, centred near the bottom rather than pinned to an edge, so it
+    // needs no overlay anchor of its own.
+    new HintBalloon(this, myView);
 }
 
 void MainWindow::updateActions()
