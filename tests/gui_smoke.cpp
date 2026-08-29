@@ -741,6 +741,25 @@ int main(int argc, char* argv[])
                       .arg(sheet ? sheet->rowCount() : -1));
             check(expected > 5, "there are enough bound actions for this to mean something");
 
+            // Cancel Sketch is also bound to plain Escape with the default
+            // WindowShortcut context, so in real dispatch QShortcutMap would
+            // resolve it before a key press ever reaches the focused sheet.
+            // ShortcutOverride is the mechanism Qt gives a widget to claim
+            // the key back; sending it directly with sendEvent bypasses
+            // QShortcutMap entirely, so this only proves the sheet uses that
+            // mechanism correctly for Escape (and leaves everything else
+            // alone) - it is not an end-to-end proof that the real keystroke
+            // reaches the sheet instead of cancelling the sketch.
+            QKeyEvent escapeOverride(QEvent::ShortcutOverride, Qt::Key_Escape, Qt::NoModifier);
+            QCoreApplication::sendEvent(sheet, &escapeOverride);
+            check(sheet != nullptr && escapeOverride.isAccepted(),
+                  "the sheet claims Escape back from the shortcut map");
+
+            QKeyEvent otherOverride(QEvent::ShortcutOverride, Qt::Key_E, Qt::NoModifier);
+            QCoreApplication::sendEvent(sheet, &otherOverride);
+            check(sheet != nullptr && !otherOverride.isAccepted(),
+                  "an unrelated key is left for the shortcut map, not grabbed");
+
             QKeyEvent escape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
             QCoreApplication::sendEvent(sheet, &escape);
             settle(150);

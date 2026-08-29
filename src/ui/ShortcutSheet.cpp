@@ -3,6 +3,7 @@
 #include "Theme.h"
 
 #include <QAction>
+#include <QEvent>
 #include <QFont>
 #include <QFontMetrics>
 #include <QKeyEvent>
@@ -65,6 +66,26 @@ void ShortcutSheet::showSheet()
     show();
     raise();
     setFocus();
+}
+
+bool ShortcutSheet::event(QEvent* event)
+{
+    // QShortcutMap resolves an enabled window-context shortcut (Cancel Sketch
+    // is bound to Escape too) before a key press ever reaches the focused
+    // widget. ShortcutOverride is the mechanism Qt gives a widget to claim a
+    // key back from the map: accepting it here routes Escape to
+    // keyPressEvent below instead of letting the sketch get cancelled out
+    // from under the sheet. Every other key falls through untouched, so this
+    // is not a blanket grab.
+    if (event->type() == QEvent::ShortcutOverride) {
+        auto* keyEvent = static_cast<QKeyEvent*>(event);
+        if (isVisible() && keyEvent->key() == Qt::Key_Escape &&
+            keyEvent->modifiers() == Qt::NoModifier) {
+            event->accept();
+            return true;
+        }
+    }
+    return QWidget::event(event);
 }
 
 void ShortcutSheet::paintEvent(QPaintEvent* /*event*/)
