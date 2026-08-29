@@ -14,6 +14,19 @@
 // derived from the toast's own move/show/hide rather than trusted to an
 // event that might never arrive.
 //
+// "Derived" turned out to include one more piece of state than it first
+// looked like: myDismissing. A fade-out leaves this widget isVisible() ==
+// true for the whole fade (it is not actually hidden until the fade
+// finishes), so a control whose visibility was only ever `isVisible() &&
+// myHasUndo` stayed reachable through the fade too - and a one-shot hide()
+// called once at the top of dismiss() is not enough on its own, because
+// ToastHost::reposition() re-derives this control's geometry (and, through
+// syncUndoGeometry(), its visibility) on every viewport resize for as long
+// as the toast is still isVisible(). A resize landing mid-fade re-showed a
+// control the one-shot hide() had already closed. myDismissing folds into
+// the same predicate syncUndoGeometry() already reads, so no later sync -
+// from a resize or anything else - can undo it.
+//
 #include <QPointer>
 #include <QString>
 #include <QStringList>
@@ -40,8 +53,17 @@ public:
 
     // Replaces whatever is currently shown. Does not itself start or stop a
     // dismiss timer - ToastHost owns that, since the duration depends on
-    // kind and this widget has no notion of one.
+    // kind and this widget has no notion of one. Also clears myDismissing:
+    // a new message supersedes whatever dismissal, if any, was in progress.
     void setMessage(const QString& text, Kind kind, bool undo);
+
+    // ToastHost calls this at the top of dismiss(), before the fade starts.
+    // Folded into the same predicate syncUndoGeometry() already derives the
+    // control's visibility from, rather than a one-shot hide() - see the
+    // class comment for why a one-shot action here is exactly the bug this
+    // exists to close. Undoing it is symmetric with setMessage() above: a
+    // fresh show() clears it, a dismiss() sets it.
+    void setDismissing(bool dismissing);
 
     QString text() const { return myText; }
     bool hasUndo() const { return myHasUndo; }
@@ -105,6 +127,14 @@ private:
     bool myHasUndo = false;
     QPointer<QWidget> myUndo;   // sibling, not a child - see class comment
     double myOpacity = 1.0;     // read by paintEvent() via painter.setOpacity()
+    // Part of the same derived state syncUndoGeometry() reads myHasUndo and
+    // isVisible() from - true for as long as a dismiss() is in flight
+    // (through the whole fade, not just once it finishes), so a later sync
+    // triggered by something else entirely (ToastHost::reposition() on a
+    // viewport resize, which moves/resizes this widget and so re-runs
+    // syncUndoGeometry() via moveEvent()/resizeEvent()) cannot re-show a
+    // control dismiss() already closed the door on.
+    bool myDismissing = false;
 };
 
 // Owns the single Toast, decides how long each kind stays up before it

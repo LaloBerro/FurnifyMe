@@ -99,8 +99,17 @@ void Toast::setMessage(const QString& text, Kind kind, bool undo)
     myText = text;
     myKind = kind;
     myHasUndo = undo;
+    // A fresh message supersedes whatever dismissal, if any, was still in
+    // flight - see setDismissing() and the class comment on myDismissing.
+    myDismissing = false;
     syncUndoGeometry();
     update();
+}
+
+void Toast::setDismissing(bool dismissing)
+{
+    myDismissing = dismissing;
+    syncUndoGeometry();
 }
 
 QSize Toast::sizeHint() const
@@ -130,7 +139,13 @@ void Toast::syncUndoGeometry()
     // Visibility is DERIVED here, not left to a hide event that may never
     // arrive - see WalkthroughPanel::syncSkipGeometry() for why that matters:
     // hide() on a widget that was never shown delivers no QHideEvent at all.
-    myUndo->setVisible(isVisible() && myHasUndo);
+    // myDismissing is part of the same predicate for the same reason: this
+    // widget stays isVisible() == true for the whole fade a dismiss() kicks
+    // off, and this function reruns on every viewport resize for as long as
+    // that is true (see ToastHost::reposition()), so a one-shot hide() at
+    // the top of dismiss() alone is not enough - the next resize would
+    // re-derive visibility from isVisible() && myHasUndo and re-show it.
+    myUndo->setVisible(isVisible() && myHasUndo && !myDismissing);
     myUndo->raise();
 }
 
@@ -304,14 +319,16 @@ void ToastHost::dismiss()
     myTimer->stop();
     if (!myToast) return;
 
-    // Hidden immediately, before the fade even starts - not left to
-    // Toast::hideEvent(), which only runs once the fade actually finishes
-    // and the toast body itself is hidden. A visible, still-clickable Undo
-    // pill for the whole fade is exactly how an ordinary impatient
-    // double-click on Undo undid two operations: the second click landed on
-    // a toast that looked like it was on its way out but was still fully
-    // live underneath, right up until the fade completed.
-    if (QWidget* undo = myToast->undoControl()) undo->hide();
+    // Folded into the DERIVED visibility syncUndoGeometry() computes, not a
+    // one-shot hide() - a visible, still-clickable Undo pill for the whole
+    // fade is exactly how an ordinary impatient double-click on Undo undid
+    // two operations, and a one-shot hide() alone is not enough to prevent
+    // it: this widget stays isVisible() == true until the fade actually
+    // finishes, and ToastHost::reposition() re-derives the control's
+    // visibility on every viewport resize for as long as that holds, which
+    // would silently re-show a control a one-shot hide() had already closed.
+    // See the class comment on Toast::myDismissing.
+    myToast->setDismissing(true);
 
     // hide() only once the fade-out actually finishes - synchronously, when
     // animations are disabled (see fadeTo()), so isShowing() still flips the

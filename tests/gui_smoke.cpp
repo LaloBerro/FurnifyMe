@@ -1210,6 +1210,45 @@ int main(int argc, char* argv[])
                   "a second click during the fade did not undo a second time");
         }
 
+        // A resize mid-fade is the OTHER trigger for the same race:
+        // ToastHost's own event filter re-derives the Undo control's
+        // geometry - and, through Toast::syncUndoGeometry(), its visibility
+        // - on every viewport resize for as long as the toast itself is
+        // still isVisible(), which it is for the whole fade, not just until
+        // dismiss() returns. A one-shot hide() at the top of dismiss() does
+        // not survive that; folding "is this toast dismissing?" into the
+        // same predicate syncUndoGeometry() already computes does.
+        check(!window.document().solids().empty(),
+              "there is a body to delete for the resize-mid-fade check");
+        const int beforeResizeCheck = static_cast<int>(window.document().solids().size());
+        view->setSelectedSolids({window.document().solids().front().id});
+        settle(100);
+        trigger(window, QStringLiteral("Delete Selected"));
+        settle(150);
+
+        QWidget* undo2 = toasts ? toasts->undoControl() : nullptr;
+        check(undo2 != nullptr && undo2->isVisible(),
+              "the toast offers Undo again for the resize-mid-fade check");
+        if (undo2) {
+            clickAt(undo2, QPointF(undo2->width() / 2.0, undo2->height() / 2.0));
+            // Deliberately not settled for the fade duration - the resize
+            // below has to land while it is still running.
+            check(static_cast<int>(window.document().solids().size()) == beforeResizeCheck,
+                  "Undo restored the body before the resize");
+
+            const QSize original = view->size();
+            view->resize(original.width() + 40, original.height());
+            settle(30);   // well inside the 160 ms fade
+
+            const QPoint centreAfterResize =
+                undo2->mapTo(view, QPoint(undo2->width() / 2, undo2->height() / 2));
+            check(view->childAt(centreAfterResize) != undo2,
+                  "a viewport resize mid-fade does not re-show the Undo control");
+
+            view->resize(original);
+            settle(250);   // outlasts the fade, and lets the resize settle back
+        }
+
         view->setAnimationsEnabled(false);
         check(!view->animationsEnabled(), "animations re-disabled again after the double-click check");
     }
