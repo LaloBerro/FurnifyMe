@@ -37,6 +37,16 @@ public:
     void clear();
     bool isShowing() const { return !myObjects.empty(); }
 
+    // Redraws the span that is already up, from the arguments it was last
+    // shown with. Nothing to do when nothing is showing. This exists because
+    // the label reads through Measure and Measure's unit can change while the
+    // annotation is on screen: without it a label kept saying "40 mm" over a
+    // viewport that had switched to centimetres, until the next mouse move
+    // happened to rebuild it. Not a QObject - this class draws, it does not
+    // listen - so MainWindow drives it from appStateChanged, the same signal
+    // every other unit-following surface refreshes on.
+    void refresh();
+
     // The label's text, for the suite and the banned-word sweep. Empty when
     // nothing is shown.
     std::string labelText() const { return myLabelText; }
@@ -45,4 +55,11 @@ private:
     Handle(AIS_InteractiveContext) myContext;
     std::vector<Handle(AIS_InteractiveObject)> myObjects;
     std::string myLabelText;
+
+    // The last span shown, kept only so refresh() can rebuild it. Meaningful
+    // only while something is showing.
+    gp_Pnt myFrom;
+    gp_Pnt myTo;
+    gp_Dir myNormal;
+    double myWorldPerPixel = 1.0;
 };

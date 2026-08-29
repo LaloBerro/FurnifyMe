@@ -28,8 +28,11 @@ public:
 
     // Makes `face`'s own plane the sketch plane, so the next outline is drawn
     // on the face and extrudes perpendicular to it. False - with a toast
-    // naming the cause and the fix - when the face is not flat, which is the
-    // only way this can be refused.
+    // naming the cause and the fix - when the face is not flat, or when a
+    // closed outline is still waiting to be extruded on the plane this would
+    // replace (see canChangeSketchPlane). Both refusals are checked here as
+    // well as in the actions' enabled state, because the double-click route
+    // never consults that.
     //
     // The plane is captured BY VALUE here and the face itself is not kept.
     // CLAUDE.md's topological-naming warning is the reason: face indices are
@@ -38,7 +41,9 @@ public:
     // under the user without a single visible event.
     bool lockToFace(const TopoDS_Face& face);
     // Back to the ground plane. The ground plane is the default and is never
-    // itself "locked", so this is not a toggle of the same state.
+    // itself "locked", so this is not a toggle of the same state. Refused,
+    // with the same toast, while an outline is pending - unlocking re-aims a
+    // pending extrude exactly as locking does, only the other way.
     void unlockFace();
     bool isFaceLocked() const { return myFaceLocked; }
 
@@ -116,6 +121,15 @@ private:
     // stale after a unit switch - refreshed from updateActions(), same as
     // updateStateLabel().
     QString snapTooltipText() const;
+    // The two plane actions' ordinary tooltips, in one place, because
+    // updateActions() swaps them for a reason-it-is-unavailable message while
+    // an outline is pending and has to be able to put them back.
+    QString lockTooltipText() const;
+    QString unlockTooltipText() const;
+    // False - with a toast naming the cause and the fix - while a closed
+    // outline is waiting to be extruded. Both plane changes ask this, because
+    // both would silently re-aim that outline's extrude. See its definition.
+    bool canChangeSketchPlane();
     // Rebuilds the viewport from the document. Cheaper than tracking individual
     // differences, and the only way to be sure the two agree after undo/redo.
     void resyncView();

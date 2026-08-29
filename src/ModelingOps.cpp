@@ -3,7 +3,10 @@
 #include <memory>
 #include <sstream>
 
+#include <cmath>
+
 #include <BRep_Builder.hxx>
+#include <BRep_Tool.hxx>
 #include <BRepAlgoAPI_BooleanOperation.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
@@ -15,6 +18,8 @@
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <GProp_GProps.hxx>
+#include <Geom_Plane.hxx>
+#include <Geom_Surface.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <Interface_Static.hxx>
 #include <STEPControl_Writer.hxx>
@@ -22,6 +27,7 @@
 #include <TopExp_Explorer.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopTools_ListOfShape.hxx>
+#include <gp_Pln.hxx>
 #include <gp_Vec.hxx>
 
 namespace ModelingOps {
@@ -46,9 +52,41 @@ TopoDS_Face makeFaceFromWire(const TopoDS_Wire& wire)
     return mkFace.Face();
 }
 
+namespace {
+
+// True when `direction` actually carries the profile off its own plane, which
+// is the only way a prism can enclose a volume. A non-planar profile (nothing
+// in this app builds one, but the signature allows it) is left to the kernel:
+// there is no single plane to compare against.
+bool sweepLeavesThePlane(const TopoDS_Face& profile, const gp_Dir& direction)
+{
+    const Handle(Geom_Plane) plane = Handle(Geom_Plane)::DownCast(BRep_Tool::Surface(profile));
+    if (plane.IsNull()) return true;
+
+    const gp_Dir normal = plane->Pln().Axis().Direction();
+    return std::fabs(gp_Vec(direction).Dot(gp_Vec(normal))) > 1.0e-7;
+}
+
+}  // namespace
+
 TopoDS_Shape extrude(const TopoDS_Face& profile, const gp_Dir& direction, double height)
 {
     if (profile.IsNull() || height == 0.0) return TopoDS_Shape();
+
+    // A sweep direction that lies IN the profile's own plane sweeps the face
+    // across itself: the result has no volume at all. BRepPrimAPI_MakePrism
+    // still reports IsDone() for it, so a caller checking only IsDone() would
+    // put a flat, empty body into the document, name it, and export it - the
+    // exact shape of "a failed operation surfaced as a success" that CLAUDE.md
+    // forbids. Refuse it here, in the geometry, rather than trusting every UI
+    // path to have thought of it: the app reaches this by locking a different
+    // plane while a closed outline is still pending, and the UI blocks that
+    // too, but a rule enforced only where somebody remembered it is not a rule.
+    //
+    // The threshold is on the sine of the angle between the sweep and the
+    // plane's normal, so it is exactly "in the plane" that is refused and a
+    // legitimately shallow sweep still builds.
+    if (!sweepLeavesThePlane(profile, direction)) return TopoDS_Shape();
 
     const gp_Vec sweep = gp_Vec(direction) * height;
     BRepPrimAPI_MakePrism prism(profile, sweep);

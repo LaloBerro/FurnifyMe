@@ -522,6 +522,29 @@ that chooses one and the grid that shows it.
   over every body standing on it — and a depth-offset ZLayer does nothing to line primitives.
 - A locked plane is a mode, and a mode with no persistent cue is a trap: `updateStateLabel`
   leads with `On a locked face — …` so the label says where the next outline will land.
+- **A closed outline pins the plane it was drawn on.** Both the commit
+  (`extrudePendingFace`) and the preview (`ExtrudePreview`) sweep the pending face along
+  the sketch plane's normal *as it is at that moment*, so locking or unlocking in between
+  silently re-aims the extrude — a ground-plane outline swept along a direction lying in
+  its own plane, which `BRepPrimAPI_MakePrism` reports as `IsDone()`. Both plane changes
+  therefore ask `canChangeSketchPlane()`, which refuses while `hasPendingFace()` and says
+  why; `updateActions()` disables both actions and swaps their tooltips for the reason,
+  because a disabled control that will not say why reads as broken. The refusal lives in
+  `lockToFace`/`unlockFace` too, not only in the enabled state, because the
+  `faceDoubleClicked` route never consults an action. And `ModelingOps::extrude` refuses an
+  in-plane sweep direction outright — a rule enforced only where a UI path remembered it is
+  not a rule, and it is `furnify_geometry`, so it is headless-tested.
+- **The cursor readout is the plane's own (u, v)**, through `ElSLib::Parameters` — the same
+  call `snapToPlaneGrid` uses, so the two agree by construction. World X/Y froze one number
+  and made the other meaningless the moment the plane stopped being the ground.
+- **The dimension follows selection as well as hover, and follows the unit.**
+  `updateEdgeDimension()` prefers the detected edge and falls back to the single selected
+  one, so leaving a selected edge does not drop its label; every route that can change
+  either input calls it, including `clearSolids`/`removeSolid`, because an annotation must
+  not outlive the body it measures. `DimensionRenderer` is not a `QObject`, so it keeps the
+  span it last drew and `MainWindow` drives `refresh()` from `appStateChanged` — the same
+  signal the items panel and the extrude preview already follow, rather than
+  `setDisplayUnit()` growing a private list of everything that shows a length.
 
 ### Qt plugin deployment - do not remove
 

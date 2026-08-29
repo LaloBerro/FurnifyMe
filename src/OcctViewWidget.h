@@ -3,6 +3,7 @@
 // that Qt drags in.
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_Shape.hxx>
+#include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 #include <V3d_View.hxx>
@@ -83,6 +84,16 @@ public:
     // Face is enabled off this, and locking one of several highlighted faces
     // would be a coin toss the user cannot see.
     TopoDS_Face selectedFace() const;
+
+    // The single selected edge, or a null edge otherwise - the same rule as
+    // selectedFace(), for the same reason. This is what the dimension falls
+    // back to when the cursor leaves an edge the user has selected.
+    TopoDS_Edge selectedEdge() const;
+
+    // Redraws whatever dimension is on screen without changing which span it
+    // measures - for a display-unit switch, which changes the label's text
+    // under an annotation nothing else would touch until the next mouse move.
+    void refreshDimension() { myDimension.refresh(); }
 
     // Screen position of a world point, in this widget's coordinates. False
     // when there is no view yet. Exposed for gui_smoke: a test that hardcodes
@@ -184,9 +195,13 @@ private:
     void applySelectionMode(const Handle(AIS_Shape)& shape);
     void applyCameraState();
     void stopCameraAnimation();
-    // Shows or clears the edge-hover dimension from whatever the last MoveTo
-    // detected. A no-op outside edge-selection mode.
-    void updateHoverDimension();
+    // Shows or clears the edge dimension: the edge the last MoveTo detected
+    // if there is one, otherwise the single selected edge. Clears outside
+    // edge-selection mode. Every route that can change either of those two
+    // inputs - a hover, a click that selects, a cleared selection, a body
+    // that went away - calls this, because an annotation that only some of
+    // them refresh is an annotation that is sometimes a lie.
+    void updateEdgeDimension();
 
     Handle(V3d_Viewer) myViewer;
     Handle(V3d_View) myView;

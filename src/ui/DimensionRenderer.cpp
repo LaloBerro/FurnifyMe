@@ -117,6 +117,15 @@ void DimensionRenderer::clear()
     myLabelText.clear();
 }
 
+void DimensionRenderer::refresh()
+{
+    // Only ever redraws what is already on screen: a renderer that could
+    // resurrect a cleared annotation would put one back every time the app
+    // state changed.
+    if (myObjects.empty()) return;
+    show(myFrom, myTo, myNormal, myWorldPerPixel);
+}
+
 void DimensionRenderer::show(const gp_Pnt& from, const gp_Pnt& to, const gp_Dir& normalIn,
                              double worldPerPixel)
 {
@@ -129,6 +138,14 @@ void DimensionRenderer::show(const gp_Pnt& from, const gp_Pnt& to, const gp_Dir&
     }
 
     clear();   // drop whatever was drawn before, same as GridRenderer's rebuild
+
+    // Remembered for refresh(), which redraws this same span when the display
+    // unit changes under it. The degenerate case above has already returned,
+    // so what is stored here is always a span that really is on screen.
+    myFrom = from;
+    myTo = to;
+    myNormal = normalIn;
+    myWorldPerPixel = worldPerPixel;
 
     const gp_Dir dir(gp_Vec(from, to));
 

@@ -181,6 +181,13 @@ void OcctViewWidget::removeSolid(int id)
 
     myContext->Remove(it->second, Standard_False);
     mySolids.erase(it);
+    // An annotation must never outlive the thing it measures: Delete and Undo
+    // both come through here, and a dimension left behind hangs in empty space
+    // labelling a body that is gone. Unconditional, because the only other
+    // thing the renderer ever holds is the live sketch segment, and no route
+    // removes a body while a sketch is in progress (Undo and Redo are disabled
+    // while sketching, and the booleans need a selection sketch mode clears).
+    myDimension.clear();
     myContext->UpdateCurrentViewer();
 }
 
@@ -190,6 +197,7 @@ void OcctViewWidget::clearSolids()
 
     for (auto& entry : mySolids) myContext->Remove(entry.second, Standard_False);
     mySolids.clear();
+    myDimension.clear();   // same rule as removeSolid(): nothing left to measure
     myContext->UpdateCurrentViewer();
 }
 
@@ -446,16 +454,50 @@ double OcctViewWidget::worldPerPixel() const
            std::max(1, height());
 }
 
-void OcctViewWidget::updateHoverDimension()
+TopoDS_Edge OcctViewWidget::selectedEdge() const
 {
-    if (mySelectionMode != SelectionMode::Edge || myContext.IsNull() ||
-        !myContext->HasDetectedShape() ||
-        myContext->DetectedShape().ShapeType() != TopAbs_EDGE) {
+    if (myContext.IsNull()) return TopoDS_Edge();
+
+    TopoDS_Edge found;
+    int edges = 0;
+    for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
+        if (!myContext->HasSelectedShape()) continue;
+        const TopoDS_Shape shape = myContext->SelectedShape();
+        if (shape.IsNull() || shape.ShapeType() != TopAbs_EDGE) continue;
+        // Same rule as selectedFace(): "the one selected edge", never "the
+        // first of several", so a dimension can never be a coin toss between
+        // two highlighted edges.
+        if (++edges > 1) return TopoDS_Edge();
+        found = TopoDS::Edge(shape);
+    }
+    return found;
+}
+
+void OcctViewWidget::updateEdgeDimension()
+{
+    if (mySelectionMode != SelectionMode::Edge || myContext.IsNull() || myView.IsNull()) {
         myDimension.clear();
         return;
     }
 
-    const TopoDS_Edge edge = TopoDS::Edge(myContext->DetectedShape());
+    // Hover first, selection second. Acceptance criterion 1 asks for both, and
+    // this is the single place that decides between them: the hovered edge is
+    // what the cursor is asking about right now, and a selected edge is what
+    // the user asked about and has not let go of - so moving the cursor off a
+    // selected edge falls back to it rather than dropping the annotation, which
+    // is what used to happen.
+    TopoDS_Edge edge;
+    if (myContext->HasDetectedShape() &&
+        myContext->DetectedShape().ShapeType() == TopAbs_EDGE) {
+        edge = TopoDS::Edge(myContext->DetectedShape());
+    } else {
+        edge = selectedEdge();
+    }
+    if (edge.IsNull()) {
+        myDimension.clear();
+        return;
+    }
+
     TopoDS_Vertex v1, v2;
     TopExp::Vertices(edge, v1, v2);
     if (v1.IsNull() || v2.IsNull()) {
@@ -506,6 +548,7 @@ void OcctViewWidget::clearSelection()
     if (myContext.IsNull()) return;
 
     myContext->ClearSelected(Standard_True);
+    updateEdgeDimension();   // nothing selected, so nothing left for it to fall back to
     emit selectionChanged();
 }
 
@@ -520,6 +563,7 @@ void OcctViewWidget::setSelectedSolids(const std::vector<int>& ids)
         if (!myContext->IsDisplayed(it->second)) continue;   // never select the hidden
         myContext->AddOrRemoveSelected(it->second, Standard_False);
     }
+    updateEdgeDimension();
     myContext->UpdateCurrentViewer();
     emit selectionChanged();
 }
@@ -701,6 +745,10 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
     myContext->MoveTo(pos.x(), pos.y(), myView, Standard_False);
     myContext->SelectDetected(additive ? AIS_SelectionScheme_XOR
                                        : AIS_SelectionScheme_Replace);
+    // The selection just changed, and in edge mode the dimension follows it as
+    // well as the hover - selecting a second edge has to stop the annotation
+    // claiming to measure the one before it.
+    updateEdgeDimension();
     myView->Redraw();
     emit selectionChanged();
 }
@@ -735,7 +783,7 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
         // Hover highlight. Suppressed while sketching so the in-progress wire
         // does not fight the highlighter for attention.
         myContext->MoveTo(pos.x(), pos.y(), myView, Standard_True);
-        updateHoverDimension();
+        updateEdgeDimension();
     }
 
     myLastPos = pos;

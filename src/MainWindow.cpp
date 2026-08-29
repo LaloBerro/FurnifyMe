@@ -18,6 +18,7 @@
 #include "WalkthroughPanel.h"
 
 #include <BRepAdaptor_Surface.hxx>
+#include <ElSLib.hxx>
 #include <GeomAbs_SurfaceType.hxx>
 #include <TopAbs_Orientation.hxx>
 #include <gp_Ax3.hxx>
@@ -94,6 +95,17 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     // shows (see setDisplayUnit()).
     connect(this, &MainWindow::appStateChanged, myItemsPanel, &ItemsPanel::refresh);
 
+    // A dimension label reads through Measure too, so it has to follow a unit
+    // switch the way the items panel and the status bar do. DimensionRenderer
+    // is not a QObject - it draws, it does not listen - so the window drives
+    // it from the one signal every unit-following surface already refreshes
+    // on, rather than setDisplayUnit() growing a private list of everything
+    // that shows a length. refreshDimension() redraws only what is already on
+    // screen and is a no-op otherwise, so this cannot make an annotation
+    // appear; and it only reads and repaints, so it cannot recurse back into
+    // updateActions().
+    connect(this, &MainWindow::appStateChanged, myView, &OcctViewWidget::refreshDimension);
+
     // Selection syncs both ways.
     connect(myItemsPanel, &ItemsPanel::solidActivated, this,
             [this](int id) { myView->setSelectedSolids({id}); });
@@ -156,14 +168,12 @@ void MainWindow::buildActions()
 
     myLockFaceAction = new QAction(tr("&Lock to Face"), this);
     myLockFaceAction->setShortcut(QKeySequence(Qt::Key_L));
-    myLockFaceAction->setToolTip(tr("Draw on the selected face instead of the ground (L)\n"
-                                    "Double-clicking a face does the same. Outlines drawn "
-                                    "there extrude square to it."));
+    myLockFaceAction->setToolTip(lockTooltipText());
     connect(myLockFaceAction, &QAction::triggered, this, &MainWindow::onLockToFace);
 
     myUnlockFaceAction = new QAction(tr("U&nlock Face"), this);
     myUnlockFaceAction->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_L));
-    myUnlockFaceAction->setToolTip(tr("Go back to drawing on the ground (Shift+L)"));
+    myUnlockFaceAction->setToolTip(unlockTooltipText());
     connect(myUnlockFaceAction, &QAction::triggered, this, &MainWindow::unlockFace);
 
     myExportStepAction = new QAction(tr("Export &STEP..."), this);
@@ -535,15 +545,25 @@ void MainWindow::updateActions()
     // checked again inside lockToFace(), because the double-click route can
     // reach a curved face this enabled state never sees.
     const TopoDS_Face selectedFace = myView->selectedFace();
+    // Not while sketching: the points already placed live on the plane that is
+    // about to be swapped, and an outline with points on two planes is not an
+    // outline. Not while a closed outline is waiting either - see
+    // canChangeSketchPlane() for what moving the plane out from under it does.
+    const bool planeCanMove = !mySketching && myPendingFace.IsNull();
     const bool flatFaceSelected =
-        !mySketching && !selectedFace.IsNull() &&
+        planeCanMove && !selectedFace.IsNull() &&
         BRepAdaptor_Surface(selectedFace).GetType() == GeomAbs_Plane;
     myLockFaceAction->setEnabled(flatFaceSelected);
-    // Not while sketching either: the points already placed live on the plane
-    // that is about to be swapped, and an outline with points on two planes
-    // is not an outline. Locking is already excluded above for the same
-    // reason; the double-click route cannot fire in sketch mode at all.
-    myUnlockFaceAction->setEnabled(myFaceLocked && !mySketching);
+    myUnlockFaceAction->setEnabled(myFaceLocked && planeCanMove);
+    // A disabled control that does not say why is a control the user reads as
+    // broken. Same idea as snapTooltipText(): recomputed here rather than
+    // frozen at buildActions() time, so the reason is current.
+    const QString pendingReason =
+        tr("Unavailable while an outline is waiting — press E to extrude it, "
+           "or Ctrl+K to start a new one");
+    myLockFaceAction->setToolTip(myPendingFace.IsNull() ? lockTooltipText() : pendingReason);
+    myUnlockFaceAction->setToolTip(myPendingFace.IsNull() ? unlockTooltipText()
+                                                          : pendingReason);
 
     myUnionAction->setEnabled(booleanReady);
     mySubtractAction->setEnabled(booleanReady);
@@ -604,6 +624,18 @@ void MainWindow::recordProgress(const std::string& event)
     QSettings settings;
     settings.setValue(QStringLiteral("progress"),
                       QString::fromStdString(myProgress.serialize()));
+}
+
+QString MainWindow::lockTooltipText() const
+{
+    return tr("Draw on the selected face instead of the ground (L)\n"
+              "Double-clicking a face does the same. Outlines drawn "
+              "there extrude square to it.");
+}
+
+QString MainWindow::unlockTooltipText() const
+{
+    return tr("Go back to drawing on the ground (Shift+L)");
 }
 
 QString MainWindow::snapTooltipText() const
@@ -732,9 +764,18 @@ void MainWindow::onSketchCursorMoved(const gp_Pnt& point)
     if (!mySketching) return;
 
     myView->setPreview(mySketch.previewShapeWithCursor(point));
+    // The plane's OWN coordinates, not the world's. On a face locked at
+    // y = 220 the world Y never changes as the cursor runs up the face, so a
+    // world X/Y readout froze one number and made the other meaningless in
+    // the plane the user is actually drawing in. ElSLib::Parameters is the
+    // same conversion SketchController::snapToPlaneGrid uses, so the readout
+    // and the snap grid agree by construction rather than by coincidence -
+    // and on the ground plane (u, v) is (X, Y), so nothing changes there.
+    Standard_Real u = 0.0, v = 0.0;
+    ElSLib::Parameters(mySketch.plane(), point, u, v);
     statusBar()->showMessage(tr("Cursor at %1, %2")
-                                 .arg(QString::fromStdString(Measure::formatLength(point.X())),
-                                      QString::fromStdString(Measure::formatLength(point.Y()))));
+                                 .arg(QString::fromStdString(Measure::formatLength(u)),
+                                      QString::fromStdString(Measure::formatLength(v))));
 
     // The live length of the segment being dragged out - the last placed
     // point to the cursor. Only one call site touches this in
@@ -1009,6 +1050,30 @@ void MainWindow::onSelectionModeChanged()
     updateActions();
 }
 
+bool MainWindow::canChangeSketchPlane()
+{
+    // A closed outline that has not been extruded yet still belongs to the
+    // plane it was drawn on, and both the commit (extrudePendingFace) and the
+    // live preview sweep it along whatever the sketch plane's normal happens
+    // to be AT THAT MOMENT. Move the plane in between and the outline is swept
+    // in a direction lying in its own plane: a body with no volume at all,
+    // which BRepPrimAPI_MakePrism reports as done. ModelingOps::extrude now
+    // refuses that sweep outright, so nothing degenerate can reach the
+    // document either way - but a refusal the user meets only after pressing E
+    // is not an explanation, so the plane simply does not move while an
+    // outline is waiting.
+    //
+    // Discarding the pending outline instead was the alternative, and it is
+    // worse: it throws away work the user did without being asked.
+    if (myPendingFace.IsNull()) return true;
+
+    myToasts->show(tr("There's an outline waiting to be extruded, and it belongs to the "
+                      "plane it was drawn on. Press E to turn it into a body, or Ctrl+K "
+                      "to start a new outline, before you change the face you draw on."),
+                  Toast::Kind::Note, false);
+    return false;
+}
+
 void MainWindow::onLockToFace()
 {
     const TopoDS_Face face = myView->selectedFace();
@@ -1019,6 +1084,7 @@ void MainWindow::onLockToFace()
 bool MainWindow::lockToFace(const TopoDS_Face& face)
 {
     if (face.IsNull()) return false;
+    if (!canChangeSketchPlane()) return false;
 
     const BRepAdaptor_Surface surface(face);
     if (surface.GetType() != GeomAbs_Plane) {
@@ -1070,6 +1136,7 @@ bool MainWindow::lockToFace(const TopoDS_Face& face)
 void MainWindow::unlockFace()
 {
     if (!myFaceLocked) return;
+    if (!canChangeSketchPlane()) return;
 
     const gp_Pln ground(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
     mySketch.setPlane(ground);
