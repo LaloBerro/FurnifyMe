@@ -79,6 +79,50 @@ int main()
         check(e.x == 0.0 && e.y == 0.0 && e.z == 0.0, "a null shape has zero extents");
     }
 
+    // --- the display unit ---------------------------------------------------
+    check(Measure::displayUnit() == Measure::Unit::Millimetres,
+          "millimetres is the default, so an untouched caller is unaffected");
+    check(Measure::formatLength(340.0) == "340 mm", "millimetres unchanged");
+
+    Measure::setDisplayUnit(Measure::Unit::Centimetres);
+    check(Measure::displayUnit() == Measure::Unit::Centimetres, "the unit round-trips");
+    check(Measure::formatLength(0.0) == "0 cm", "zero has no decimal");
+    check(Measure::formatLength(4.0) == "0.4 cm", "4 mm is 0.4 cm");
+    check(Measure::formatLength(18.0) == "1.8 cm", "18 mm is 1.8 cm");
+    check(Measure::formatLength(340.0) == "34 cm", "a whole value drops the .0");
+    check(Measure::formatLength(1000.0) == "100 cm", "1,000 mm is 100 cm");
+    check(Measure::formatLength(123456.0) == "12,345.6 cm",
+          "thousands are separated in the displayed value");
+    check(Measure::unitSuffix() == "cm", "the suffix follows the unit");
+
+    // formatDimensions on the box built above, but now read in centimetres.
+    {
+        const TopoDS_Shape box =
+            ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 340.0, 220.0, 18.0);
+        checkEq(Measure::formatDimensions(box), "34 \xC3\x97 22 \xC3\x97 1.8 cm",
+                "formatDimensions reads in the current display unit too");
+    }
+
+    // Input is read in the displayed unit, or a field that shows cm and reads
+    // mm is a trap.
+    double mm = 0.0;
+    check(Measure::parseLength("4", mm) && mm == 40.0, "4 cm parses to 40 mm");
+    check(Measure::parseLength(" 1.8 ", mm) && mm == 18.0, "spaces are tolerated");
+    check(Measure::parseLength("-2", mm) && mm == -20.0, "a negative parses");
+
+    double untouched = 99.0;
+    check(!Measure::parseLength("", untouched) && untouched == 99.0,
+          "empty is refused and leaves the value alone");
+    check(!Measure::parseLength("abc", untouched) && untouched == 99.0, "letters refused");
+    check(!Measure::parseLength("1.2.3", untouched) && untouched == 99.0,
+          "two decimal points refused");
+    check(!Measure::parseLength(".", untouched) && untouched == 99.0, "a bare point refused");
+    check(!Measure::parseLength("1,2", untouched) && untouched == 99.0, "a comma refused");
+
+    Measure::setDisplayUnit(Measure::Unit::Millimetres);
+    check(Measure::parseLength("4", mm) && mm == 4.0, "4 mm parses to 4 mm");
+    check(Measure::formatLength(340.0) == "340 mm", "switching back restores exactly");
+
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL",
                 g_failures, g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;

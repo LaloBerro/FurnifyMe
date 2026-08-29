@@ -3,8 +3,11 @@
 #include <BRepBndLib.hxx>
 #include <Bnd_Box.hxx>
 
+#include <cctype>
+#include <cerrno>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 
 namespace Measure {
 namespace {
@@ -12,6 +15,8 @@ namespace {
 // U+00D7 MULTIPLICATION SIGN, written as UTF-8 bytes so the file's own encoding
 // cannot change what ships.
 const char* kTimes = "\xC3\x97";
+
+Unit g_unit = Unit::Millimetres;
 
 // Groups the integer part in threes: 1234567 -> "1,234,567".
 std::string groupThousands(const std::string& digits)
@@ -22,6 +27,36 @@ std::string groupThousands(const std::string& digits)
         if (i > 0 && i >= lead && (i - lead) % 3 == 0) out.push_back(',');
         out.push_back(digits[i]);
     }
+    return out;
+}
+
+// Renders a value already in the display unit, with the given suffix. The
+// rounding rule - one decimal place, trailing ".0" dropped - is the single
+// path every length in the app goes through, in whichever unit is current.
+std::string formatValue(double value, const char* suffix)
+{
+    // Round to a tenth first, so every later decision sees the same number the
+    // user will read.
+    double rounded = std::round(value * 10.0) / 10.0;
+    if (rounded == 0.0) rounded = 0.0;   // collapses -0.0, which would print "-0"
+
+    const bool negative = rounded < 0.0;
+    const double magnitude = std::fabs(rounded);
+    const long long whole = static_cast<long long>(magnitude);
+    const int tenth = static_cast<int>(std::llround((magnitude - whole) * 10.0));
+
+    char digits[32];
+    std::snprintf(digits, sizeof(digits), "%lld", whole);
+
+    std::string out;
+    if (negative) out.push_back('-');
+    out += groupThousands(digits);
+    if (tenth != 0) {
+        out.push_back('.');
+        out.push_back(static_cast<char>('0' + tenth));
+    }
+    out.push_back(' ');
+    out += suffix;
     return out;
 }
 
@@ -40,30 +75,57 @@ Extents extentsOf(const TopoDS_Shape& shape)
     return Extents{xmax - xmin, ymax - ymin, zmax - zmin};
 }
 
+void setDisplayUnit(Unit unit)
+{
+    g_unit = unit;
+}
+
+Unit displayUnit()
+{
+    return g_unit;
+}
+
+std::string unitSuffix()
+{
+    return g_unit == Unit::Centimetres ? "cm" : "mm";
+}
+
 std::string formatLength(double millimetres)
 {
-    // Round to a tenth first, so every later decision sees the same number the
-    // user will read.
-    double value = std::round(millimetres * 10.0) / 10.0;
-    if (value == 0.0) value = 0.0;   // collapses -0.0, which would print "-0"
+    const double value = g_unit == Unit::Centimetres ? millimetres / 10.0 : millimetres;
+    return formatValue(value, g_unit == Unit::Centimetres ? "cm" : "mm");
+}
 
-    const bool negative = value < 0.0;
-    const double magnitude = std::fabs(value);
-    const long long whole = static_cast<long long>(magnitude);
-    const int tenth = static_cast<int>(std::llround((magnitude - whole) * 10.0));
+bool parseLength(const std::string& text, double& out)
+{
+    // Trim surrounding whitespace by hand - std::strtod does not skip trailing
+    // whitespace, and leading whitespace it does skip would otherwise hide a
+    // string that is nothing but spaces.
+    std::size_t begin = 0;
+    while (begin < text.size() &&
+           std::isspace(static_cast<unsigned char>(text[begin])))
+        ++begin;
+    std::size_t end = text.size();
+    while (end > begin && std::isspace(static_cast<unsigned char>(text[end - 1])))
+        --end;
 
-    char digits[32];
-    std::snprintf(digits, sizeof(digits), "%lld", whole);
+    const std::string trimmed = text.substr(begin, end - begin);
+    if (trimmed.empty()) return false;
 
-    std::string out;
-    if (negative) out.push_back('-');
-    out += groupThousands(digits);
-    if (tenth != 0) {
-        out.push_back('.');
-        out.push_back(static_cast<char>('0' + tenth));
-    }
-    out += " mm";
-    return out;
+    // std::strtod (never atof, which reports no error and returns 0 for
+    // garbage) reports exactly how much of the string it consumed via
+    // endPtr. Anything left over - a second decimal point, a stray letter, a
+    // trailing comma - means the text was not a single clean number.
+    const char* start = trimmed.c_str();
+    char* endPtr = nullptr;
+    errno = 0;
+    const double parsed = std::strtod(start, &endPtr);
+    if (endPtr == start) return false;              // no digits consumed at all
+    if (*endPtr != '\0') return false;               // leftover characters
+    if (!std::isfinite(parsed)) return false;         // rejects "inf"/"nan"
+
+    out = g_unit == Unit::Centimetres ? parsed * 10.0 : parsed;
+    return true;
 }
 
 std::string formatDimensions(const TopoDS_Shape& shape)
