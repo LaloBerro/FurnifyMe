@@ -7,6 +7,8 @@
 #include "UserProgress.h"
 #include "WalkthroughPanel.h"
 
+#include <algorithm>
+
 #include <QEvent>
 #include <QFontMetrics>
 #include <QMouseEvent>
@@ -199,7 +201,9 @@ void HintBalloon::reposition()
             if (beside >= kClearance) {
                 x = beside;
             } else {
-                y = panel.top() - kClearance - height();
+                // Never above the top edge: on a viewport too short for both,
+                // a balloon nudged off-screen teaches nobody anything.
+                y = std::max(0, panel.top() - kClearance - height());
             }
         }
     }

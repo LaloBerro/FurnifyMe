@@ -188,6 +188,16 @@ bool ShortcutSheet::eventFilter(QObject* watched, QEvent* event)
         // to go too, or OcctViewWidget::mouseReleaseEvent performs a real
         // pick on the way out - the sheet would look modal and still act as
         // a hole punched through to the model behind it.
+        // A release that never lands in this window - the drag left it, or
+        // another window took the gesture - would otherwise leave the filter
+        // armed and eat some later, innocent release. The next press proves
+        // the gesture is over, so stand down and let it through untouched.
+        if (event->type() == QEvent::MouseButtonPress && mySwallowRelease &&
+            !isVisible()) {
+            mySwallowRelease = false;
+            QCoreApplication::instance()->removeEventFilter(this);
+            return QWidget::eventFilter(watched, event);
+        }
         if (event->type() == QEvent::MouseButtonRelease && mySwallowRelease) {
             mySwallowRelease = false;
             // The sheet is already hidden by now, so hideEvent() deliberately

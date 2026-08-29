@@ -153,6 +153,10 @@ void AxisGizmo::mousePressEvent(QMouseEvent* event)
         goal.azimuthDeg = -45.0;
         goal.elevationDeg = 30.0;
         myView->animateTo(goal);
+        // The same pose the Axonometric entry applies, so it is the same
+        // event - a route that changes the view without recording it is how
+        // the gizmo's own hint came back forever.
+        emit viewSnapped();
         return;
     }
 
