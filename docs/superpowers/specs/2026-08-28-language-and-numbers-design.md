@@ -1,7 +1,7 @@
 # Phase 1: Language and numbers — design
 
 Date: 2026-08-28
-Status: approved in chat, awaiting spec review
+Status: implemented 2026-08-28
 
 Phase 1 of three. Phase 2 is help and learnability; Phase 3 is feedback and polish.
 This phase changes what the app *says* through the surfaces that already exist. It adds

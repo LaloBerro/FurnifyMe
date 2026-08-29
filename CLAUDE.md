@@ -196,6 +196,37 @@ Source files under `src/`, plus `tests/`:
 | `ui/ViewportOverlay.{h,cpp}` | anchors clusters to viewport edges; not a widget |
 | `ui/ItemsPanel.{h,cpp}` | solid list with visibility toggles |
 
+### The vocabulary — enforced by test
+
+One word per concept, everywhere. `gui_smoke` fails if any action text or widget
+tooltip contains a banned word, so this table is executable, not aspirational.
+
+| Concept | Word | Never |
+|---|---|---|
+| The 2D shape being drawn | outline | wire, polygon, polyline, sketch line |
+| A closed outline, not yet 3D | face | profile, region |
+| A 3D object in the document | body, `Body 03` | solid, `Solid #3`, shape, part |
+| Combining two bodies | Union | fuse, merge, join, add |
+| Removing one body from another | Subtract | cut, difference, boolean cut |
+| Keeping the shared volume | Intersect | common, overlap, boolean common |
+| Turning a face into a body | Extrude | pull, push, prism |
+| The 3D area | viewport | scene, canvas, view |
+
+`ModelingOps::BooleanKind::Fuse` and `::Cut` keep their kernel-facing names — the
+user never sees them, and renaming them would churn the geometry library and its
+tests for no visible gain. The enforced bans match the bare word (case-insensitive):
+`OCCT`, `Fuse`, `Solid`, `mm3`, and `(s)` are forbidden everywhere in action text
+and widget tooltips, regardless of capitalization.
+
+Numbers are formatted by `Measure` (`src/Measure.h`), never by hand at a call
+site: lengths as `340 mm` / `1,200 mm` / `18.5 mm`, sizes as `340 × 220 × 18 mm`.
+Volume is not shown anywhere — furniture is specified by dimension.
+
+Punctuation: status-bar text takes no trailing period; dialog bodies are full
+sentences; tooltips lead with a fragment and may add one teaching sentence.
+Clauses are separated by an em dash. Singular and plural are written out — no
+`(s)` anywhere.
+
 **Hard rule: `ModelingOps` must not include a single Qt header.** That invariant is what
 makes the headless test possible; breaking it collapses the whole testability story. It is
 enforced structurally: `ModelingOps` lives in the `furnify_geometry` target, which does not
