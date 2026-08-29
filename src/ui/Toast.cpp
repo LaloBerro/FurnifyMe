@@ -105,7 +105,8 @@ void Toast::setMessage(const QString& text, Kind kind, bool undo)
 QSize Toast::sizeHint() const
 {
     const int textWidth = kWidth - kPad * 2 - (myHasUndo ? kUndoWidth + kPad : 0);
-    const QFontMetrics metrics(font());
+    // Measured with the same font paintEvent() draws the message in.
+    const QFontMetrics metrics(Theme::bodyFont());
     const QRect bounds = metrics.boundingRect(QRect(0, 0, std::max(textWidth, 1), 1000),
                                               Qt::TextWordWrap, myText);
     const int minHeight = myHasUndo ? kUndoHeight + kPad * 2 : 0;
@@ -170,6 +171,7 @@ void Toast::paintEvent(QPaintEvent* /*event*/)
     painter.drawPath(panel);
 
     const int textWidth = width() - kPad * 2 - (myHasUndo ? kUndoWidth + kPad : 0);
+    painter.setFont(Theme::bodyFont());
     painter.setPen(Theme::text());
     painter.drawText(QRect(kPad, 0, textWidth, height()),
                      Qt::TextWordWrap | Qt::AlignVCenter | Qt::AlignLeft, myText);
@@ -182,6 +184,7 @@ void Toast::paintEvent(QPaintEvent* /*event*/)
         QPainterPath pill;
         pill.addRoundedRect(r, 5.0, 5.0);
         painter.fillPath(pill, Theme::chipHover());
+        painter.setFont(Theme::labelFont());
         painter.setPen(Theme::accent());
         painter.drawText(r, Qt::AlignCenter, undoLabel());
     }

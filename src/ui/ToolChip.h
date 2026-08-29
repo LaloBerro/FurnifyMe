@@ -7,6 +7,7 @@
 #include <QAbstractButton>
 
 class QAction;
+class QFocusEvent;
 
 class ToolChip : public QAbstractButton {
     Q_OBJECT
@@ -21,6 +22,12 @@ protected:
     void paintEvent(QPaintEvent* event) override;
     void enterEvent(QEnterEvent* event) override;
     void leaveEvent(QEvent* event) override;
+    // Keyboard focus is otherwise invisible on a custom-painted widget - Qt
+    // does not repaint one on its own just because focus moved, the way it
+    // does for built-in styled controls. Both just call update(); the ring
+    // itself is painted in paintEvent() from hasFocus().
+    void focusInEvent(QFocusEvent* event) override;
+    void focusOutEvent(QFocusEvent* event) override;
     // Qt would otherwise flip our checked state locally, before the action has
     // been triggered - the chip must never be the source of truth for it.
     void nextCheckState() override {}

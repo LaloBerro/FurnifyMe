@@ -77,6 +77,13 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
 
     updateActions();
 
+    // Theme.cpp's stylesheet reaches the status bar's own internal message
+    // label through the QStatusBar/QStatusBar QLabel selectors (it is
+    // created privately by showMessage() and this code never gets a pointer
+    // to it) - this sets the same size directly, so a plain QStatusBar with
+    // no matching stylesheet rule would still be correct.
+    statusBar()->setFont(Theme::labelFont());
+
     // Permanent widget so it survives transient showMessage() calls: the left
     // side reports what just happened, the right side always says where you are.
     myStateLabel = new QLabel(this);
@@ -341,10 +348,13 @@ void MainWindow::buildOverlay()
     // choice.
     auto* units = new QLabel(tr("mm"), myView);
     units->setAlignment(Qt::AlignCenter);
+    // A small chip-styled readout - Theme::labelFont(), the same size as a
+    // chip label.
     units->setStyleSheet(QStringLiteral(
                              "background-color: %1; color: %2;"
-                             "border-radius: 6px; padding: 6px 10px;")
-                             .arg(Theme::chip().name(), Theme::textMuted().name()));
+                             "border-radius: 6px; padding: 6px 10px; font-size: %3pt;")
+                             .arg(Theme::chip().name(), Theme::textMuted().name())
+                             .arg(Theme::labelFont().pointSizeF()));
     units->adjustSize();
     myOverlay->addWidget(units, ViewportOverlay::Anchor::TopRight);
 

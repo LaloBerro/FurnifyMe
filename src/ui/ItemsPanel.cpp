@@ -27,8 +27,12 @@ ItemsPanel::ItemsPanel(const DocumentModel* document, OcctViewWidget* view, QWid
     outer->setSpacing(8);
 
     auto* title = new QLabel(tr("Items"), this);
-    title->setStyleSheet(QStringLiteral("color: %1; font-weight: 600;")
-                             .arg(Theme::textMuted().name()));
+    // A per-widget stylesheet wins over the app-wide one regardless of
+    // selector specificity, so the size sticks reliably here - this is a
+    // panel title, Theme::titleFont().
+    title->setStyleSheet(QStringLiteral("color: %1; font-weight: 600; font-size: %2pt;")
+                             .arg(Theme::textMuted().name())
+                             .arg(Theme::titleFont().pointSizeF()));
     outer->addWidget(title);
 
     myRows = new QVBoxLayout();
@@ -64,8 +68,10 @@ void ItemsPanel::refresh()
 
         auto* size = new QLabel(
             QString::fromStdString(Measure::formatDimensions(solid.shape)), row);
-        size->setStyleSheet(QStringLiteral("color: %1; font-size: 11px;")
-                                .arg(Theme::textMuted().name()));
+        // A secondary readout beside the name, sized like a chip label.
+        size->setStyleSheet(QStringLiteral("color: %1; font-size: %2pt;")
+                                .arg(Theme::textMuted().name())
+                                .arg(Theme::labelFont().pointSizeF()));
         layout->addWidget(size);
 
         auto* eye = new QPushButton(row);
@@ -95,8 +101,9 @@ void ItemsPanel::refresh()
                                  this);
         empty->setWordWrap(true);
         empty->setAlignment(Qt::AlignTop);
-        empty->setStyleSheet(QStringLiteral("color: %1; font-size: 11px;")
-                                 .arg(Theme::textMuted().name()));
+        empty->setStyleSheet(QStringLiteral("color: %1; font-size: %2pt;")
+                                 .arg(Theme::textMuted().name())
+                                 .arg(Theme::bodyFont().pointSizeF()));
         myRows->addWidget(empty);
     }
 

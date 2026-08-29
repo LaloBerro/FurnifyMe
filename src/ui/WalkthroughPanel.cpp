@@ -6,7 +6,6 @@
 #include "Theme.h"
 #include "UserProgress.h"
 
-#include <QFont>
 #include <QHideEvent>
 #include <QMouseEvent>
 #include <QMoveEvent>
@@ -292,14 +291,12 @@ void WalkthroughPanel::paintEvent(QPaintEvent* /*event*/)
 
     const QStringList texts = paintedTexts();
 
-    QFont titleFont = font();
-    titleFont.setBold(true);
-    painter.setFont(titleFont);
+    painter.setFont(Theme::titleFont());
     painter.setPen(Theme::text());
     painter.drawText(QRect(kPad, 0, width() - kPad * 2, kTitle),
                      Qt::AlignVCenter | Qt::AlignLeft, texts[0]);
 
-    painter.setFont(font());
+    painter.setFont(Theme::bodyFont());
     painter.setPen(Theme::textMuted());
     painter.drawText(skipRect(), Qt::AlignCenter, texts[1]);
 

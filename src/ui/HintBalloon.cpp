@@ -177,7 +177,8 @@ void HintBalloon::reposition()
 {
     if (myText.isEmpty() || !parentWidget()) return;
 
-    const QFontMetrics metrics(font());
+    // Measured with the same font paintEvent() draws the message in.
+    const QFontMetrics metrics(Theme::bodyFont());
     const QRect bounds = metrics.boundingRect(QRect(0, 0, kWidth - kPad * 2, 1000),
                                               Qt::TextWordWrap, myText);
     resize(kWidth, bounds.height() + kPad * 2 + 22);
@@ -265,10 +266,12 @@ void HintBalloon::paintEvent(QPaintEvent* /*event*/)
     painter.setPen(QPen(Theme::accent(), 1.0));
     painter.drawPath(panel);
 
+    painter.setFont(Theme::bodyFont());
     painter.setPen(Theme::text());
     painter.drawText(QRect(kPad, kPad, width() - kPad * 2, height() - kPad * 2 - 20),
                      Qt::TextWordWrap | Qt::AlignTop | Qt::AlignLeft, myText);
 
+    painter.setFont(Theme::labelFont());
     painter.setPen(Theme::accent());
     painter.drawText(QRect(kPad, height() - 26, width() - kPad * 2, 20),
                      Qt::AlignRight | Qt::AlignVCenter, tr("got it"));

@@ -43,6 +43,10 @@ ExtrudePreview::ExtrudePreview(MainWindow* window, OcctViewWidget* view)
     // the viewport behind this field and trigger a real pick underneath the
     // panel.
     myField->setAttribute(Qt::WA_NoMousePropagation);
+    // The height the user types is body text, same as everything else they
+    // read - set explicitly rather than left to inherit, since it is the one
+    // widget on this panel the user actually types into.
+    myField->setFont(Theme::bodyFont());
     myField->installEventFilter(this);   // catches Escape - see eventFilter()
     connect(myField, &QLineEdit::textChanged, this,
             [this](const QString&) { updatePreview(); });
@@ -245,7 +249,7 @@ void ExtrudePreview::markInvalid(bool invalid)
 {
     myInvalid = invalid;
     if (!myField) return;
-    const QColor border = invalid ? Theme::axisX() : Theme::accent();
+    const QColor border = invalid ? Theme::danger() : Theme::accent();
     myField->setStyleSheet(QStringLiteral(
                                "QLineEdit { background-color: %1; color: %2; "
                                "border: 1px solid %3; border-radius: 4px; padding: 2px 6px; }")
@@ -268,6 +272,7 @@ void ExtrudePreview::paintEvent(QPaintEvent* /*event*/)
     painter.setPen(QPen(Theme::accent(), 1.0));
     painter.drawPath(panel);
 
+    painter.setFont(Theme::labelFont());
     painter.setPen(Theme::text());
     painter.drawText(QRect(kPad, kPad, QWidget::width() - kPad * 2, kLabelHeight),
                      Qt::AlignVCenter | Qt::AlignLeft, paintedTexts().front());

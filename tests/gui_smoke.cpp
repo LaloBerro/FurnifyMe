@@ -39,11 +39,13 @@
 #include <QDialog>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QImage>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMouseEvent>
 #include <QPointF>
+#include <QSet>
 #include <QSettings>
 #include <QStatusBar>
 #include <QString>
@@ -1742,6 +1744,38 @@ int main(int argc, char* argv[])
         // "Show tips again restores the walkthrough for a returning user
         // too" block below instead.
         second.close();
+    }
+
+    // --- one type scale, and focus you can see --------------------------------
+    {
+        QSet<double> scale;
+        for (const QFont& f : {Theme::titleFont(), Theme::bodyFont(),
+                               Theme::labelFont(), Theme::badgeFont()}) {
+            scale.insert(f.pointSizeF());
+        }
+        check(scale.size() == 4, "the type scale has four distinct sizes");
+
+        QStringList offenders;
+        for (QWidget* w : window.findChildren<QWidget*>()) {
+            if (!w->isVisible()) continue;
+            if (!scale.contains(w->font().pointSizeF()))
+                offenders << (w->metaObject()->className() +
+                              QStringLiteral(" @ %1").arg(w->font().pointSizeF()));
+        }
+        check(offenders.isEmpty(),
+              QStringLiteral("every visible widget uses the type scale (%1)")
+                  .arg(offenders.isEmpty() ? QStringLiteral("all do")
+                                           : offenders.join(QStringLiteral(", "))));
+
+        ToolChip* chip = window.findChild<ToolChip*>();
+        check(chip != nullptr, "there is a chip to focus");
+        if (chip) {
+            const QImage unfocused = chip->grab().toImage();
+            chip->setFocus(Qt::TabFocusReason);
+            settle(80);
+            const QImage focused = chip->grab().toImage();
+            check(focused != unfocused, "keyboard focus is visible on a chip");
+        }
     }
 
     // --- Show tips again restores the walkthrough for a returning user too ---

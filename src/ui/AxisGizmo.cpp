@@ -40,6 +40,11 @@ AxisGizmo::AxisGizmo(OcctViewWidget* view, QWidget* parent)
     setMouseTracking(true);
     setCursor(Qt::PointingHandCursor);
     setFixedSize(sizeHint());
+    // Baseline for this widget's own font() (what the sweep in gui_smoke
+    // checks): the view-name chip painted below is a chip label. A per-widget
+    // stylesheet wins over the app-wide one regardless of selector
+    // specificity, so this sticks reliably rather than fighting the cascade.
+    setStyleSheet(QStringLiteral("font-size: %1pt;").arg(Theme::labelFont().pointSizeF()));
 
     // Repaint whenever the camera moves, so the gizmo rotates with the scene.
     connect(myView, &OcctViewWidget::cameraChanged, this,
@@ -261,10 +266,10 @@ void AxisGizmo::paintEvent(QPaintEvent* /*event*/)
                 painter.setBrush(colour);
                 painter.drawPath(cone);
 
-                // Axis letter just past the cone.
+                // Axis letter just past the cone - a small badge, like the
+                // shortcut badges Theme::badgeFont() is sized for.
                 painter.setPen(colour.lighter(115));
-                QFont letterFont = font();
-                letterFont.setPointSizeF(8.0);
+                QFont letterFont = Theme::badgeFont();
                 letterFont.setBold(true);
                 painter.setFont(letterFont);
                 const QPointF letterPos = tip->screen + unit * 9.0;
@@ -293,9 +298,7 @@ void AxisGizmo::paintEvent(QPaintEvent* /*event*/)
     painter.setBrush(myHoverLabel ? Theme::chipHover() : Theme::chip());
     painter.drawPath(chipPath);
     painter.setPen(Theme::text());
-    QFont labelFont = font();
-    labelFont.setPointSizeF(9.0);
-    painter.setFont(labelFont);
+    painter.setFont(Theme::labelFont());
     painter.drawText(chip, Qt::AlignCenter,
                      QStringLiteral("≡ ") + labelText());
 }
