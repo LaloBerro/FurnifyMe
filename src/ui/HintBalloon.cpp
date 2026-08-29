@@ -4,12 +4,12 @@
 #include "MainWindow.h"
 #include "OcctViewWidget.h"
 #include "Theme.h"
+#include "Toast.h"
 #include "UserProgress.h"
 #include "WalkthroughPanel.h"
 
 #include <algorithm>
 
-#include <QEvent>
 #include <QFontMetrics>
 #include <QMouseEvent>
 #include <QPainter>
@@ -49,10 +49,14 @@ HintBalloon::HintBalloon(MainWindow* window, QWidget* parent)
     // camera, so there is nothing an orbit frame could change. See the
     // header for why the view hint retires on its event instead.
     connect(myWindow, &MainWindow::progressReset, this, &HintBalloon::onProgressReset);
-    // Repositioning only happened inside showHint(), so a window resize while
-    // a hint was up left it stranded wherever the viewport used to end - see
-    // eventFilter() below.
-    if (parent) parent->installEventFilter(this);
+    // No filter on the viewport's resize any more. It ran BEFORE
+    // ViewportOverlay had moved the walkthrough guide this balloon steps
+    // around - Qt runs event filters last-installed-first and the overlay
+    // installs its own first - so a shrink placed the balloon against the
+    // guide's pre-resize rectangle and the guide then landed on top of it.
+    // MainWindow drives reposition() from ViewportOverlay::laidOut()
+    // instead, which is by construction after every anchored widget is at
+    // its final rectangle. See that signal's comment.
 }
 
 bool HintBalloon::conditionHolds(const QString& event) const
@@ -176,7 +180,8 @@ void HintBalloon::reposition()
 {
     if (myText.isEmpty() || !parentWidget()) return;
 
-    const QFontMetrics metrics(font());
+    // Measured with the same font paintEvent() draws the message in.
+    const QFontMetrics metrics(Theme::bodyFont());
     const QRect bounds = metrics.boundingRect(QRect(0, 0, kWidth - kPad * 2, 1000),
                                               Qt::TextWordWrap, myText);
     resize(kWidth, bounds.height() + kPad * 2 + 22);
@@ -191,23 +196,33 @@ void HintBalloon::reposition()
     // while a hint is up. Overlap would be worse than it looks, because
     // ViewportOverlay::relayout() raises the guide back above the balloon
     // while the balloon is still the click target underneath it. So step
-    // aside - to the left of the guide when that fits, above it when it does
-    // not.
-    const WalkthroughPanel* guide = parentWidget()->findChild<WalkthroughPanel*>();
-    if (guide && guide->isVisible()) {
-        const QRect panel = guide->geometry();
-        if (QRect(x, y, width(), height()).intersects(panel)) {
-            const int beside = panel.left() - kClearance - width();
-            if (beside >= kClearance) {
-                x = beside;
-            } else {
-                // Never above the top edge: on a viewport too short for both,
-                // a balloon nudged off-screen teaches nobody anything.
-                y = std::max(0, panel.top() - kClearance - height());
-            }
+    // aside - to the left of an obstacle when that fits, above it when it
+    // does not. A toast lands in the same bottom strip whenever an outcome
+    // is reported while a hint is already up, so it steps aside by the same
+    // rule rather than a second mechanism invented just for it.
+    auto stepAside = [&](const QRect& obstacle) {
+        if (!QRect(x, y, width(), height()).intersects(obstacle)) return;
+        const int beside = obstacle.left() - kClearance - width();
+        if (beside >= kClearance) {
+            x = beside;
+        } else {
+            // Never above the top edge: on a viewport too short for both,
+            // a balloon nudged off-screen teaches nobody anything.
+            y = std::max(0, obstacle.top() - kClearance - height());
         }
-    }
+    };
+
+    const WalkthroughPanel* guide = parentWidget()->findChild<WalkthroughPanel*>();
+    if (guide && guide->isVisible()) stepAside(guide->geometry());
+
+    const Toast* toast = parentWidget()->findChild<Toast*>();
+    if (toast && toast->isVisible()) stepAside(toast->geometry());
+
     move(x, y);
+    // Re-raised here as well as re-placed: this runs from
+    // ViewportOverlay::laidOut(), immediately after the overlay has raise()d
+    // every anchored widget - including the guide - back above this one.
+    if (isVisible()) raise();
 }
 
 void HintBalloon::showHint(const QString& event)
@@ -237,14 +252,6 @@ void HintBalloon::mousePressEvent(QMouseEvent* /*event*/)
     dismiss();
 }
 
-bool HintBalloon::eventFilter(QObject* watched, QEvent* event)
-{
-    if (watched == parentWidget() && event->type() == QEvent::Resize) {
-        reposition();
-    }
-    return QWidget::eventFilter(watched, event);
-}
-
 void HintBalloon::paintEvent(QPaintEvent* /*event*/)
 {
     if (myText.isEmpty()) return;
@@ -258,10 +265,12 @@ void HintBalloon::paintEvent(QPaintEvent* /*event*/)
     painter.setPen(QPen(Theme::accent(), 1.0));
     painter.drawPath(panel);
 
+    painter.setFont(Theme::bodyFont());
     painter.setPen(Theme::text());
     painter.drawText(QRect(kPad, kPad, width() - kPad * 2, height() - kPad * 2 - 20),
                      Qt::TextWordWrap | Qt::AlignTop | Qt::AlignLeft, myText);
 
+    painter.setFont(Theme::labelFont());
     painter.setPen(Theme::accent());
     painter.drawText(QRect(kPad, height() - 26, width() - kPad * 2, 20),
                      Qt::AlignRight | Qt::AlignVCenter, tr("got it"));

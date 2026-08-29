@@ -54,10 +54,19 @@ public:
     // never a second one that only the sweep sees.
     QStringList paintedTexts() const;
 
+    // Re-places (and re-raises) whatever hint is currently up, without
+    // changing which one it is. Public so ToastHost can nudge a balloon that
+    // is already visible when a toast appears (or moves) underneath it -
+    // reconsider() is what normally drives this, but it only runs on
+    // appStateChanged, which a toast showing does not by itself emit - and
+    // so MainWindow can drive it from ViewportOverlay::laidOut(), which is
+    // the only moment the guide this balloon steps around is guaranteed to
+    // be at its final rectangle. A no-op when nothing is up.
+    void reposition();
+
 protected:
     void paintEvent(QPaintEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
-    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     void reconsider();
@@ -70,7 +79,6 @@ private:
     void onProgressReset();
     void showHint(const QString& event);
     void dismiss();
-    void reposition();
 
     // The live predicate behind an event's hint: is the teaching moment
     // still relevant right now? Read twice per reconsider() call - once

@@ -1,7 +1,10 @@
 #pragma once
-// Colour tokens and the application-wide stylesheet. Single source of truth for
-// the shell's appearance - widgets ask Theme rather than hard-coding hex.
+// Colour tokens, the type scale, motion tokens and the application-wide
+// stylesheet. Single source of truth for the shell's appearance - widgets ask
+// Theme rather than hard-coding hex, a point size or an animation constant.
 #include <QColor>
+#include <QEasingCurve>
+#include <QFont>
 #include <QString>
 
 class QApplication;
@@ -23,6 +26,30 @@ QColor gridMinor();     // ground grid, minor lines
 QColor gridMajor();     // ground grid, major lines
 QColor axisX();         // ground grid, X axis tint (muted red)
 QColor axisY();         // ground grid, Y axis tint (muted green)
+QColor danger();        // invalid input, failure accents - NOT the same
+                        // concept as axisX(), which is a grid-axis tint that
+                        // happens to be red; this is the semantic "something
+                        // is wrong" colour
+QColor focusRing();     // visible keyboard focus outline
+QColor focusRingMuted(); // same outline, dimmed - a focused widget in a
+                        // window that is not the OS-active one (the user has
+                        // moved on to another application) still shows a
+                        // ring, just not one that keeps shouting for
+                        // attention
+
+// The whole app's type scale: four sizes, and every widget that paints text
+// reads one of them - a fifth size anywhere is a smell, not a design choice.
+QFont titleFont();      // panel and sheet titles
+QFont bodyFont();       // everything the user reads
+QFont labelFont();      // chip labels, status bar
+QFont badgeFont();      // shortcut badges
+
+// Motion tokens for ordinary UI transitions - hover, focus, a panel
+// appearing. NOT for the viewport camera: OcctViewWidget::animateTo() keeps
+// its own 250 ms, deliberately not this value (see the comment at that
+// constant).
+int motionMs();               // 160
+QEasingCurve motionCurve();   // OutCubic
 
 // Installs the palette, the bundled font and the stylesheet. Call once, before
 // any window is built.

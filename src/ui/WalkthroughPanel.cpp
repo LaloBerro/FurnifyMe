@@ -6,7 +6,7 @@
 #include "Theme.h"
 #include "UserProgress.h"
 
-#include <QFont>
+#include <QFontMetrics>
 #include <QHideEvent>
 #include <QMouseEvent>
 #include <QMoveEvent>
@@ -15,6 +15,7 @@
 #include <QResizeEvent>
 #include <QShowEvent>
 
+#include <algorithm>
 #include <functional>
 #include <utility>
 
@@ -22,6 +23,10 @@ namespace {
 constexpr int kPad = 14;
 constexpr int kTitle = 30;
 constexpr int kStep = 26;
+constexpr int kBottomPad = 14;   // breathing room below the last step
+// skipRect()'s own width - shared with sizeHint() below so the title row's
+// reserved space for the pill can never disagree with the pill itself.
+constexpr int kSkipWidth = 34;
 
 // The one interactive spot on an otherwise click-through overlay.
 //
@@ -62,6 +67,17 @@ public:
     {
         setAttribute(Qt::WA_NoSystemBackground);
         setAttribute(Qt::WA_TranslucentBackground);
+        // Toast's UndoControl and ExtrudePreview's field both carry this and
+        // this one did not, which is the whole of the bug: accepting the
+        // press makes this widget the grab holder for the gesture, so the
+        // RELEASE comes here too - and QWidget's default release handler
+        // ignores it, which propagates it to the parent. That parent is the
+        // viewport, whose mouseReleaseEvent() performs a real pick and
+        // unconditionally emits selectionChanged(), so clicking "skip" on
+        // first run also selected whatever body happened to sit behind the
+        // guide. WA_NoMousePropagation closes the whole event class rather
+        // than overriding release, wheel and the rest one bug at a time.
+        setAttribute(Qt::WA_NoMousePropagation);
     }
 
 protected:
@@ -199,7 +215,7 @@ void WalkthroughPanel::finish()
 
 QRect WalkthroughPanel::skipRect() const
 {
-    return QRect(width() - kPad - 34, 8, 34, 18);
+    return QRect(width() - kPad - kSkipWidth, 8, kSkipWidth, 18);
 }
 
 void WalkthroughPanel::syncSkipGeometry()
@@ -279,6 +295,40 @@ QStringList WalkthroughPanel::stepTexts() const
     return paintedTexts().mid(2);
 }
 
+QSize WalkthroughPanel::sizeHint() const
+{
+    // Measured with the same fonts paintEvent() actually draws with below -
+    // the title at titleFont(), the skip label and the four steps at
+    // bodyFont() - so a wording or type-scale change can only ever make this
+    // wider, never clip. Each step is measured with the "✓  " prefix rather
+    // than "•  ": both are painted (see paintEvent()) but the check mark is
+    // what a completed step actually shows, and neither prefix is narrower
+    // than the other in this font, so measuring one covers both.
+    const QStringList texts = paintedTexts();
+    const QFontMetrics titleMetrics(Theme::titleFont());
+    const QFontMetrics bodyMetrics(Theme::bodyFont());
+
+    // The title shares its row with the skip pill (skipRect()) rather than
+    // getting the full width the way the steps below it do - kPad on the
+    // left, and on the right the pill's own kSkipWidth plus a further kPad
+    // of clearance, not just kPad again. Measured separately so a title
+    // that ever grew past the steps' width would still reserve real room for
+    // the pill instead of running under it.
+    const int titleWidth =
+        titleMetrics.horizontalAdvance(texts[0]) + kPad + (kPad + kSkipWidth);
+
+    int widest = bodyMetrics.horizontalAdvance(texts[1]);   // "skip"
+    const QStringList steps = stepTexts();
+    for (const QString& step : steps) {
+        widest = std::max(widest,
+                          bodyMetrics.horizontalAdvance(QStringLiteral("✓  ") + step));
+    }
+    widest += kPad * 2;
+
+    return QSize(std::max(widest, titleWidth),
+                kTitle + kStep * static_cast<int>(steps.size()) + kBottomPad);
+}
+
 void WalkthroughPanel::paintEvent(QPaintEvent* /*event*/)
 {
     QPainter painter(this);
@@ -292,14 +342,12 @@ void WalkthroughPanel::paintEvent(QPaintEvent* /*event*/)
 
     const QStringList texts = paintedTexts();
 
-    QFont titleFont = font();
-    titleFont.setBold(true);
-    painter.setFont(titleFont);
+    painter.setFont(Theme::titleFont());
     painter.setPen(Theme::text());
     painter.drawText(QRect(kPad, 0, width() - kPad * 2, kTitle),
                      Qt::AlignVCenter | Qt::AlignLeft, texts[0]);
 
-    painter.setFont(font());
+    painter.setFont(Theme::bodyFont());
     painter.setPen(Theme::textMuted());
     painter.drawText(skipRect(), Qt::AlignCenter, texts[1]);
 

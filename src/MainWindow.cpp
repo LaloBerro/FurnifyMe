@@ -5,11 +5,13 @@
 #include "OcctViewWidget.h"
 
 #include "AxisGizmo.h"
+#include "ExtrudePreview.h"
 #include "HintBalloon.h"
 #include "IconSet.h"
 #include "ItemsPanel.h"
 #include "ShortcutSheet.h"
 #include "Theme.h"
+#include "Toast.h"
 #include "ToolChip.h"
 #include "ToolCluster.h"
 #include "ViewportOverlay.h"
@@ -18,10 +20,8 @@
 #include <QAction>
 #include <QActionGroup>
 #include <QFileDialog>
-#include <QInputDialog>
 #include <QLabel>
 #include <QMenuBar>
-#include <QMessageBox>
 #include <QSettings>
 #include <QSplitter>
 #include <QStatusBar>
@@ -76,6 +76,13 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     connect(myItemsPanelAction, &QAction::toggled, myItemsPanel, &QWidget::setVisible);
 
     updateActions();
+
+    // Theme.cpp's stylesheet reaches the status bar's own internal message
+    // label through the QStatusBar/QStatusBar QLabel selectors (it is
+    // created privately by showMessage() and this code never gets a pointer
+    // to it) - this sets the same size directly, so a plain QStatusBar with
+    // no matching stylesheet rule would still be correct.
+    statusBar()->setFont(Theme::labelFont());
 
     // Permanent widget so it survives transient showMessage() calls: the left
     // side reports what just happened, the right side always says where you are.
@@ -175,10 +182,10 @@ void MainWindow::buildActions()
         const QString path = QFileDialog::getSaveFileName(this, tr("Save Screenshot"),
                                                           QString(), tr("PNG image (*.png)"));
         if (!path.isEmpty() && !myView->saveSnapshot(path)) {
-            QMessageBox::warning(this, tr("Screenshot failed"),
-                                 tr("Couldn't save the image to %1.\n\n"
-                                    "Check that the folder exists and isn't read-only.")
-                                     .arg(path));
+            myToasts->show(tr("Screenshot failed — Couldn't save the image to %1 — "
+                              "Check that the folder exists and isn't read-only")
+                              .arg(path),
+                          Toast::Kind::Failure, false);
         }
     });
 
@@ -281,6 +288,17 @@ void MainWindow::buildMenus()
         // only half of what "show tips again" means.
         emit progressReset();
         emit appStateChanged();
+        // The guide has just reappeared, somewhere in the middle of that
+        // emission. Anything that places itself against it - the toast, the
+        // hint balloon - has to be told, and which slot ran first on
+        // appStateChanged is not something to rely on. relayout() re-places
+        // every anchored widget and then emits laidOut(), which is the one
+        // ordering guarantee in this file: the dependents re-place after the
+        // guide is at its final rectangle, not before. HintBalloon already
+        // handled this case for itself inside reconsider(); ToastHost did
+        // not, so a Show tips again under a live toast left the restored
+        // guide sitting on top of it.
+        if (myOverlay) myOverlay->relayout();
     });
 }
 
@@ -341,12 +359,52 @@ void MainWindow::buildOverlay()
     // choice.
     auto* units = new QLabel(tr("mm"), myView);
     units->setAlignment(Qt::AlignCenter);
+    // A small chip-styled readout - Theme::labelFont(), the same size as a
+    // chip label.
     units->setStyleSheet(QStringLiteral(
                              "background-color: %1; color: %2;"
-                             "border-radius: 6px; padding: 6px 10px;")
-                             .arg(Theme::chip().name(), Theme::textMuted().name()));
+                             "border-radius: 6px; padding: 6px 10px; font-size: %3pt;")
+                             .arg(Theme::chip().name(), Theme::textMuted().name())
+                             .arg(Theme::labelFont().pointSizeF()));
     units->adjustSize();
     myOverlay->addWidget(units, ViewportOverlay::Anchor::TopRight);
+
+    // Every outcome the app reports - success or failure - goes through this
+    // one host rather than a modal dialog. It parents itself (and its Toast)
+    // to the viewport and positions itself, so it needs no overlay anchor of
+    // its own; raise()ing on every show() keeps it above whatever cluster
+    // happens to be on top. Undo, when a message offers it, replays through
+    // the same onUndo() the Undo action itself uses.
+    myToasts = new ToastHost(myView, this);
+    // Through the ACTION, never straight to onUndo(). The menu entry, the
+    // chip and the Ctrl+Z binding all obey myUndoAction's enabled state -
+    // "!mySketching && canUndo()", set in updateActions(), which CLAUDE.md
+    // makes the single place that decides what is available - and a toast
+    // that called the slot directly was a fourth entry point that obeyed
+    // none of it: delete a body, start a sketch inside the four-second
+    // window, click Undo, and the document was resynced and the selection
+    // cleared while the user was still placing points. updateActions() also
+    // pushes that same enabled state onto the toast (see setUndoEnabled), so
+    // the pill is dimmed and out of hit-testing rather than merely inert.
+    connect(myToasts, &ToastHost::undoRequested, this, [this] {
+        if (myUndoAction->isEnabled()) myUndoAction->trigger();
+    });
+    // A toast that offers to undo one operation must not survive that
+    // operation - see ToastHost::documentMovedTo().
+    connect(this, &MainWindow::documentChanged, this,
+            [this] { myToasts->documentMovedTo(myDocument.revision()); });
+    // A guide can appear UNDERNEATH a toast that is already up (Show tips
+    // again does exactly that), and nothing told the toast to step aside
+    // when it did - HintBalloon::reconsider() already handled that case for
+    // itself. appStateChanged is when it happens; replace() only reads
+    // geometry, so it cannot recurse back into updateActions().
+    connect(this, &MainWindow::appStateChanged, myToasts, &ToastHost::replace);
+
+    // Replaces the old QInputDialog::getDouble() for extrude height. Parents
+    // itself to the viewport and positions itself (top-center, clear of the
+    // toast/guide/balloon bottom strip - see ExtrudePreview::reposition()),
+    // so it needs no overlay anchor of its own either.
+    myExtrudePreview = new ExtrudePreview(this, myView);
 
     // Always built, even for a user who has already learned this - it
     // decides its own visibility in its constructor (see WalkthroughPanel's
@@ -362,7 +420,22 @@ void MainWindow::buildOverlay()
     // a hint on first run. It parents itself to the viewport and positions
     // itself, centred near the bottom rather than pinned to an edge, so it
     // needs no overlay anchor of its own.
-    new HintBalloon(this, myView);
+    auto* hints = new HintBalloon(this, myView);
+
+    // The three surfaces that place themselves against widgets the overlay
+    // owns re-place themselves HERE, from the overlay's own "I have finished
+    // laying out" signal - not from their own filters on the viewport's
+    // resize event. Qt runs event filters last-installed-first, and the
+    // overlay installs its own first, so those filters all ran BEFORE the
+    // guide and the chip clusters had moved: on a shrink the toast and the
+    // balloon stepped aside from where the guide used to be and the guide
+    // then landed on top of them, and the extrude panel was raised before
+    // relayout() raised the top-left cluster back over it. Ordering off the
+    // signal makes "after the anchored widgets have moved" a property of the
+    // code rather than an accident of construction order.
+    connect(myOverlay, &ViewportOverlay::laidOut, myToasts, &ToastHost::replace);
+    connect(myOverlay, &ViewportOverlay::laidOut, hints, &HintBalloon::reposition);
+    connect(myOverlay, &ViewportOverlay::laidOut, myExtrudePreview, &ExtrudePreview::replace);
 }
 
 void MainWindow::updateActions()
@@ -384,6 +457,10 @@ void MainWindow::updateActions()
     myExportStepAction->setEnabled(myDocument.count() > 0);
     myDeleteAction->setEnabled(!mySketching && selectedCount > 0);
     myUndoAction->setEnabled(!mySketching && myDocument.canUndo());
+    // The toast's Undo pill is the same route as the action, so it obeys the
+    // same enabled state - decided here, in the one place that decides what
+    // is available, and pushed out rather than re-derived at the toast.
+    if (myToasts) myToasts->setUndoEnabled(myUndoAction->isEnabled());
     myRedoAction->setEnabled(!mySketching && myDocument.canRedo());
 
     updateStateLabel();
@@ -474,9 +551,11 @@ void MainWindow::onDeleteSelected()
 
     updateActions();
     emit documentChanged();
-    statusBar()->showMessage(
+    const QString message =
         ids.size() == 1 ? tr("Deleted %1").arg(QString::fromStdString(deletedName))
-                        : tr("Deleted %1 bodies").arg(ids.size()));
+                        : tr("Deleted %1 bodies").arg(ids.size());
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
 }
 
 void MainWindow::onUndo()
@@ -580,11 +659,10 @@ void MainWindow::onFinishSketch()
 {
     const TopoDS_Face face = mySketch.closedFace();
     if (face.IsNull()) {
-        QMessageBox::warning(this, tr("Can't close this outline"),
-                             tr("This outline can't close into a flat face. It probably "
-                                "crosses itself.\n\n"
-                                "Press Backspace to undo the last point and redraw it, or "
-                                "Esc to start over."));
+        myToasts->show(tr("This outline can't close into a flat face. It probably "
+                          "crosses itself — Press Backspace to undo the last point and "
+                          "redraw it, or Esc to start over"),
+                      Toast::Kind::Failure, false);
         return;
     }
 
@@ -601,12 +679,11 @@ void MainWindow::onExtrude()
 {
     if (myPendingFace.IsNull()) return;
 
-    bool accepted = false;
-    const double height = QInputDialog::getDouble(this, tr("Extrude"), tr("Height (mm):"),
-                                                  10.0, -10000.0, 10000.0, 3, &accepted);
-    if (!accepted) return;
-
-    extrudePendingFace(height);
+    // Opens a live preview over the viewport instead of a modal dialog - see
+    // ExtrudePreview. It calls extrudePendingFace() itself once the user
+    // commits (Enter) or leaves the pending face alone if they back out
+    // (Escape).
+    myExtrudePreview->begin(myPendingFace);
 }
 
 bool MainWindow::extrudePendingFace(double height)
@@ -616,10 +693,10 @@ bool MainWindow::extrudePendingFace(double height)
     const TopoDS_Shape solid =
         ModelingOps::extrude(myPendingFace, mySketch.plane().Axis().Direction(), height);
     if (solid.IsNull()) {
-        QMessageBox::warning(this, tr("Extrude failed"),
-                             tr("This face couldn't be extruded into a body.\n\n"
-                                "The outline may cross itself or be too small to have an "
-                                "inside. Try redrawing it with Ctrl+K."));
+        myToasts->show(tr("This face couldn't be extruded into a body — "
+                          "The outline may cross itself or be too small to have an "
+                          "inside. Try redrawing it with Ctrl+K"),
+                      Toast::Kind::Failure, false);
         return false;
     }
 
@@ -637,9 +714,11 @@ bool MainWindow::extrudePendingFace(double height)
     mySketch.reset();
     updateActions();
     emit documentChanged();
-    statusBar()->showMessage(tr("%1 created — %2")
-                                 .arg(QString::fromStdString(myDocument.nameOf(id)),
-                                      QString::fromStdString(Measure::formatDimensions(solid))));
+    const QString message = tr("%1 created — %2")
+                                .arg(QString::fromStdString(myDocument.nameOf(id)),
+                                     QString::fromStdString(Measure::formatDimensions(solid)));
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
     return true;
 }
 
@@ -661,10 +740,10 @@ bool MainWindow::applyBooleanToSelection(int kind)
 
     std::vector<int> ids = myView->selectedSolidIds();
     if (ids.size() != 2) {
-        QMessageBox::information(this, operationName,
-                                 tr("%1 needs exactly two bodies.\n\n"
-                                    "Click one body, then Shift-click another.")
-                                     .arg(operationName));
+        myToasts->show(tr("%1 needs exactly two bodies — "
+                          "Click one body, then Shift-click another")
+                          .arg(operationName),
+                      Toast::Kind::Note, false);
         return false;
     }
 
@@ -682,13 +761,14 @@ bool MainWindow::applyBooleanToSelection(int kind)
 
     if (!result.ok) {
         // Never present a failed boolean as a success. The engine's error text is
-        // genuinely useful for debugging, so keep it in the log, not the dialog.
+        // genuinely useful for debugging, so keep it in the log, not the toast.
         qWarning("%s failed: %s", qPrintable(operationName), result.error.c_str());
-        QMessageBox::critical(this, tr("%1 failed").arg(operationName),
-                              tr("The two bodies couldn't be combined.\n\n"
-                                 "This usually means they only touch at a single edge or "
-                                 "corner, which the geometry engine can't resolve. Move one "
-                                 "body so they overlap properly, then try again."));
+        myToasts->show(tr("%1 failed — The two bodies couldn't be combined — "
+                          "This usually means they only touch at a single edge or "
+                          "corner, which the geometry engine can't resolve. Move one "
+                          "body so they overlap properly, then try again")
+                          .arg(operationName),
+                      Toast::Kind::Failure, false);
         statusBar()->showMessage(tr("%1 failed — nothing was changed").arg(operationName));
         return false;
     }
@@ -706,13 +786,15 @@ bool MainWindow::applyBooleanToSelection(int kind)
 
     updateActions();
     emit documentChanged();
-    statusBar()->showMessage(tr("%1 — %2 and %3 → %4 — %5")
-                                 .arg(operationName,
-                                      QString::fromStdString(nameA),
-                                      QString::fromStdString(nameB),
-                                      QString::fromStdString(myDocument.nameOf(id)),
-                                      QString::fromStdString(
-                                          Measure::formatDimensions(result.shape))));
+    const QString message = tr("%1 — %2 and %3 → %4 — %5")
+                                .arg(operationName,
+                                     QString::fromStdString(nameA),
+                                     QString::fromStdString(nameB),
+                                     QString::fromStdString(myDocument.nameOf(id)),
+                                     QString::fromStdString(
+                                         Measure::formatDimensions(result.shape)));
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
     return true;
 }
 
@@ -733,10 +815,10 @@ void MainWindow::onExportStep()
 
     if (!result.ok) {
         qWarning("STEP export failed: %s", result.error.c_str());
-        QMessageBox::critical(this, tr("Export failed"),
-                              tr("Couldn't write the STEP file.\n\n"
-                                 "Check that the folder exists and isn't read-only, then "
-                                 "try a different location."));
+        myToasts->show(tr("Export failed — Couldn't write the STEP file — "
+                          "Check that the folder exists and isn't read-only, then "
+                          "try a different location"),
+                      Toast::Kind::Failure, false);
         return;
     }
     statusBar()->showMessage(myDocument.count() == 1

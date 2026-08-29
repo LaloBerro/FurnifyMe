@@ -242,6 +242,16 @@ void OcctViewWidget::clearPreview()
     myContext->UpdateCurrentViewer();
 }
 
+bool OcctViewWidget::hasPreview() const
+{
+    return !myPreview.IsNull();
+}
+
+TopoDS_Shape OcctViewWidget::previewShape() const
+{
+    return myPreview.IsNull() ? TopoDS_Shape() : myPreview->Shape();
+}
+
 void OcctViewWidget::applySelectionMode(const Handle(AIS_Shape)& shape)
 {
     if (myContext.IsNull() || shape.IsNull()) return;
@@ -435,6 +445,10 @@ void OcctViewWidget::animateTo(const CameraState& goal)
     const double azDelta = CameraController::shortestArcDelta(from.azimuthDeg, goal.azimuthDeg);
 
     auto* animation = new QVariantAnimation(this);
+    // Deliberately its own constant, not Theme::motionMs(): a camera move is
+    // not a UI transition, and reading well at the same speed as a chip
+    // hover would be a coincidence, not a rule. Keep this at 250 ms even if
+    // Theme::motionMs() (160 ms) ever changes.
     animation->setDuration(250);
     animation->setEasingCurve(QEasingCurve::OutCubic);
     animation->setStartValue(0.0);

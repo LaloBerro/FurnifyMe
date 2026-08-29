@@ -41,6 +41,16 @@ QString keysFor(const QAction* action)
     }
     return keys.join(QStringLiteral(", "));
 }
+
+// The one place a group header's font is built - showSheet() measures with
+// it, paintEvent() paints with it, and there is exactly one bold-bodyFont()
+// call for both to agree with instead of two copies that happen to match.
+QFont groupFont()
+{
+    QFont f = Theme::bodyFont();
+    f.setBold(true);
+    return f;
+}
 }  // namespace
 
 ShortcutSheet::ShortcutSheet(QWidget* parent)
@@ -128,13 +138,20 @@ void ShortcutSheet::showSheet()
 {
     rebuild();
 
-    const QFontMetrics metrics(font());
+    // Measured with the same fonts paintEvent() actually draws with below -
+    // group titles at bold bodyFont() (bold is wider than regular, so
+    // measuring with the plain font here would clip a long title), row
+    // labels at plain bodyFont(), the key badges at badgeFont() - so the
+    // sizing this computes can never drift from what ends up on screen.
+    const QFontMetrics groupMetrics(groupFont());
+    const QFontMetrics bodyMetrics(Theme::bodyFont());
+    const QFontMetrics badgeMetrics(Theme::badgeFont());
     int widest = 0;
     for (const Group& group : myGroups) {
-        widest = std::max(widest, metrics.horizontalAdvance(group.title));
+        widest = std::max(widest, groupMetrics.horizontalAdvance(group.title));
         for (const Row& row : group.rows) {
-            widest = std::max(widest, metrics.horizontalAdvance(row.label) +
-                                          metrics.horizontalAdvance(row.keys));
+            widest = std::max(widest, bodyMetrics.horizontalAdvance(row.label) +
+                                          badgeMetrics.horizontalAdvance(row.keys));
         }
     }
     const int width = widest + kColumnGap + kPadding * 2;
@@ -231,30 +248,26 @@ void ShortcutSheet::paintEvent(QPaintEvent* /*event*/)
     painter.setPen(QPen(Theme::border(), 1.0));
     painter.drawPath(panel);
 
-    QFont titleFont = font();
-    titleFont.setPointSizeF(titleFont.pointSizeF() + 2.0);
-    titleFont.setBold(true);
-    painter.setFont(titleFont);
+    painter.setFont(Theme::titleFont());
     painter.setPen(Theme::text());
     painter.drawText(QRect(kPadding, 0, width() - kPadding * 2, kTitleHeight),
                      Qt::AlignVCenter | Qt::AlignLeft, tr("Keyboard shortcuts"));
 
-    QFont groupFont = font();
-    groupFont.setBold(true);
-
     int y = kTitleHeight;
     for (const Group& group : myGroups) {
-        painter.setFont(groupFont);
+        painter.setFont(groupFont());
         painter.setPen(Theme::accent());
         painter.drawText(QRect(kPadding, y, width() - kPadding * 2, kGroupHeight),
                          Qt::AlignBottom | Qt::AlignLeft, group.title);
         y += kGroupHeight;
 
-        painter.setFont(font());
         for (const Row& row : group.rows) {
             const QRect line(kPadding, y, width() - kPadding * 2, kRowHeight);
+            painter.setFont(Theme::bodyFont());
             painter.setPen(Theme::text());
             painter.drawText(line, Qt::AlignVCenter | Qt::AlignLeft, row.label);
+            // The key combination is a badge, not body text - Theme::badgeFont().
+            painter.setFont(Theme::badgeFont());
             painter.setPen(Theme::textMuted());
             painter.drawText(line, Qt::AlignVCenter | Qt::AlignRight, row.keys);
             y += kRowHeight;

@@ -20,6 +20,7 @@ int DocumentModel::addSolid(const TopoDS_Shape& shape)
 
     const int id = myNextId++;
     mySolids.push_back(Solid{id, defaultName(myNextName++), shape});
+    ++myRevision;
     return id;
 }
 
@@ -30,6 +31,7 @@ bool DocumentModel::replaceSolid(int id, const TopoDS_Shape& shape)
     for (Solid& s : mySolids) {
         if (s.id == id) {
             s.shape = shape;
+            ++myRevision;
             return true;
         }
     }
@@ -43,12 +45,14 @@ bool DocumentModel::removeSolid(int id)
     if (it == mySolids.end()) return false;
 
     mySolids.erase(it);
+    ++myRevision;
     return true;
 }
 
 void DocumentModel::clear()
 {
     mySolids.clear();
+    ++myRevision;
     // Ids are not reused: a stale id must never silently resolve to a new solid.
 }
 
@@ -82,6 +86,7 @@ bool DocumentModel::undo()
     myRedo.push_back(mySolids);
     mySolids = myUndo.back();
     myUndo.pop_back();
+    ++myRevision;
     return true;
 }
 
@@ -92,6 +97,7 @@ bool DocumentModel::redo()
     myUndo.push_back(mySolids);
     mySolids = myRedo.back();
     myRedo.pop_back();
+    ++myRevision;
     return true;
 }
 

@@ -14,17 +14,20 @@
 //
 #include "CameraController.h"
 #include "DocumentModel.h"
+#include "ExtrudePreview.h"
 #include "GridRenderer.h"
 #include "HintBalloon.h"
 #include "IconSet.h"
 #include "ItemsPanel.h"
 #include "MainWindow.h"
+#include "Measure.h"
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
 #include "SketchController.h"
 #include "AxisGizmo.h"
 #include "ShortcutSheet.h"
 #include "Theme.h"
+#include "Toast.h"
 #include "ToolChip.h"
 #include "ToolCluster.h"
 #include "UserProgress.h"
@@ -33,15 +36,22 @@
 
 #include <QAction>
 #include <QApplication>
+#include <QDialog>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QImage>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMouseEvent>
 #include <QPointF>
+#include <QSet>
 #include <QSettings>
 #include <QStatusBar>
 #include <QString>
+
+#include <TopAbs_ShapeEnum.hxx>
+#include <TopExp_Explorer.hxx>
 
 #include <cmath>
 #include <cstdio>
@@ -126,6 +136,24 @@ void clickAt(QWidget* target, const QPointF& pos,
     QCoreApplication::sendEvent(target, &release);
 
     settle(80);
+}
+
+// A key press delivered the way a real one arrives: to whatever currently
+// holds focus inside `scope`, not to the widget the test hopes will handle
+// it. Aiming a key at a specific widget is precisely the blind spot that let
+// the extrude preview ship with Enter and Escape reachable only while its own
+// field kept focus - which the first click anywhere in the viewport took
+// away. QWidget::focusWidget() rather than QApplication::focusWidget():
+// every window in this suite carries WA_ShowWithoutActivating and so is never
+// the OS-active one, which leaves the application-wide focus widget null.
+void sendKeyTo(QWidget* scope, int key, Qt::KeyboardModifiers mods = Qt::NoModifier)
+{
+    if (!scope) return;
+    QWidget* target = scope->focusWidget();
+    if (!target) target = scope;
+    QKeyEvent press(QEvent::KeyPress, key, mods);
+    QCoreApplication::sendEvent(target, &press);
+    settle(120);
 }
 
 // Button drag delivered as press/move/release, for camera tests.
@@ -450,6 +478,144 @@ int main(int argc, char* argv[])
     check(window.document().count() == 1, "Undo again, back to one solid");
     settle(200);
 
+    // --- outcomes are reported without stopping the user ----------------------
+    {
+        ToastHost* toasts = window.findChild<ToastHost*>();
+        check(toasts != nullptr, "the window has a toast host");
+
+        // A modal would hang this suite rather than fail it, so assert the
+        // absence of one directly: nothing in the app may create a dialog.
+        check(window.findChildren<QDialog*>().isEmpty(),
+              "no dialog is ever constructed for an outcome");
+
+        if (toasts) {
+            const int before = static_cast<int>(window.document().solids().size());
+            check(before > 0, "there is a body to delete");
+            view->setSelectedSolids({window.document().solids().front().id});
+            settle(100);
+            trigger(window, QStringLiteral("Delete Selected"));
+            settle(150);
+
+            check(toasts->isShowing(), "deleting a body raises a toast");
+            check(toasts->toast() != nullptr && toasts->toast()->isVisible(),
+                  "the toast is actually visible");
+            check(!toasts->currentText().isEmpty(),
+                  QStringLiteral("the toast says what happened (\"%1\")")
+                      .arg(toasts->currentText()));
+
+            // The Undo control must be reachable by a real click, not merely
+            // present: a transparent overlay hides its whole subtree from
+            // hit-testing, which is how Phase 2 shipped an unclickable control.
+            QWidget* undo = toasts->undoControl();
+            check(undo != nullptr && undo->isVisible(), "the toast offers Undo");
+            if (undo) {
+                const QPoint centre =
+                    undo->mapTo(view, QPoint(undo->width() / 2, undo->height() / 2));
+                check(view->childAt(centre) == undo,
+                      "the Undo control is reachable by a real click");
+                clickAt(undo, QPointF(undo->width() / 2.0, undo->height() / 2.0));
+                settle(200);
+                check(static_cast<int>(window.document().solids().size()) == before,
+                      "using the toast's Undo restores the body");
+                check(!toasts->isShowing(), "using Undo dismisses the toast");
+            }
+
+            // A second message replaces the first; a stack of toasts is a
+            // dialog with extra steps.
+            toasts->show(QStringLiteral("First"), Toast::Kind::Note, false);
+            settle(50);
+            toasts->show(QStringLiteral("Second"), Toast::Kind::Note, false);
+            settle(50);
+            check(window.findChildren<Toast*>().size() == 1,
+                  "a second message replaces the first rather than stacking");
+            check(toasts->currentText() == QStringLiteral("Second"),
+                  "the newest message is the one showing");
+
+            // The 4000/8000 ms split is the contract - a Failure carries a
+            // sentence the user must read and act on, which is the whole
+            // reason it outlives a Note. Asserted against the armed timer
+            // rather than by actually waiting 4-8 real seconds for each one
+            // to elapse, which would meaningfully slow this suite for a
+            // property that a single read of the timer proves just as well.
+            toasts->show(QStringLiteral("Note lifetime check"), Toast::Kind::Note, false);
+            const int noteMs = toasts->remainingMs();
+            check(noteMs > 3500 && noteMs <= 4000,
+                  QStringLiteral("a Note toast is timed for 4000 ms (got %1)").arg(noteMs));
+
+            toasts->show(QStringLiteral("Failure lifetime check"), Toast::Kind::Failure, false);
+            const int failureMs = toasts->remainingMs();
+            check(failureMs > 7500 && failureMs <= 8000,
+                  QStringLiteral("a Failure outlives a Note - timed for 8000 ms (got %1)")
+                      .arg(failureMs));
+
+            // The toast's Undo used to be wired straight to onUndo(), so it
+            // was a fourth entry point obeying none of the guard the menu
+            // entry, the chip and Ctrl+Z all share - delete a body, start a
+            // sketch inside the four-second window, click Undo, and the
+            // document resynced and the selection cleared while the user was
+            // still placing points.
+            if (!window.document().solids().empty()) {
+                const int bodies = static_cast<int>(window.document().solids().size());
+                view->setSelectedSolids({window.document().solids().front().id});
+                settle(100);
+                trigger(window, QStringLiteral("Delete Selected"));
+                settle(150);
+                check(toasts->isShowing() && toasts->undoControl() &&
+                          toasts->undoControl()->isVisible(),
+                      "a delete raises a toast whose Undo is offered");
+
+                trigger(window, QStringLiteral("Start Sketch"));
+                settle(150);
+                QAction* undoAction = action(window, QStringLiteral("Undo"));
+                check(undoAction != nullptr && !undoAction->isEnabled(),
+                      "the Undo action is disabled mid-sketch");
+                QWidget* pill = toasts->undoControl();
+                check(pill != nullptr && !pill->isVisible(),
+                      "and the toast's Undo control is unusable while it is");
+                const int afterGuard = static_cast<int>(window.document().solids().size());
+                if (pill) {
+                    // Straight at the control, the most generous thing a user
+                    // could manage: even reached, it must do nothing.
+                    clickAt(pill, QPointF(pill->width() / 2.0, pill->height() / 2.0));
+                    settle(150);
+                }
+                check(static_cast<int>(window.document().solids().size()) == afterGuard,
+                      "clicking the toast's Undo mid-sketch undoes nothing");
+                check(window.isSketching(),
+                      "and leaves the sketch the user was placing points in alone");
+                trigger(window, QStringLiteral("Cancel Sketch"));
+                settle(120);
+                trigger(window, QStringLiteral("Undo"));
+                settle(150);
+                check(static_cast<int>(window.document().solids().size()) == bodies,
+                      "Undo by hand restores the body the guarded pill would not");
+
+                // A toast that names one operation must not outlive it. Delete
+                // a body - the toast says so and offers Undo - then press
+                // Ctrl+Z by hand. The toast used to stay up, still armed, and
+                // its pill then popped the checkpoint BEFORE the one it named:
+                // the label described one change and the control performed
+                // another. A fresh delete here, deliberately, so the toast
+                // under test is one nothing has already dismissed.
+                view->setSelectedSolids({window.document().solids().front().id});
+                settle(100);
+                trigger(window, QStringLiteral("Delete Selected"));
+                settle(150);
+                check(toasts->isShowing() && toasts->undoControl() &&
+                          toasts->undoControl()->isVisible(),
+                      "the fresh delete raises an armed toast");
+                trigger(window, QStringLiteral("Undo"));
+                settle(200);
+                check(static_cast<int>(window.document().solids().size()) == bodies,
+                      "the hand Undo restored that body too");
+                check(!toasts->isShowing(),
+                      "and the toast that offered to undo that same delete is gone, "
+                      "rather than left describing one change while armed to "
+                      "perform another");
+            }
+        }
+    }
+
     // --- a second, taller solid ---------------------------------------------
     trigger(window, QStringLiteral("Start Sketch"));
     sketchQuad(window, 0.55, 0.30, 0.82, 0.50);
@@ -742,6 +908,256 @@ int main(int argc, char* argv[])
         view->saveSnapshot(outDir + "/g3-after-cut.png");
     }
 
+    // --- extrude asks for a height without stopping the user ------------------
+    {
+        // Draw an outline and close it, so a face is pending.
+        trigger(window, QStringLiteral("Start Sketch"));
+        clickAt(view, QPointF(300, 300)); clickAt(view, QPointF(420, 300));
+        clickAt(view, QPointF(420, 380)); clickAt(view, QPointF(300, 380));
+        trigger(window, QStringLiteral("Finish Sketch"));
+        settle(150);
+
+        const int before = static_cast<int>(window.document().solids().size());
+        trigger(window, QStringLiteral("Extrude..."));
+        settle(150);
+
+        ExtrudePreview* preview = window.findChild<ExtrudePreview*>();
+        check(preview != nullptr, "extrude opens a preview rather than a dialog");
+        check(preview != nullptr && preview->isVisible(), "the preview is visible");
+        check(window.findChildren<QDialog*>().isEmpty(),
+              "extrude never constructs a dialog");
+        check(preview != nullptr && preview->hasPreview(),
+              "a preview shape is shown before the user commits anything");
+        // Cross-checked against the viewport's own state, not just the
+        // panel's bare flag - fix round 1, Minor 4: hasPreview() alone would
+        // pass for a panel that sets the flag and displays nothing.
+        check(view->hasPreview(),
+              "the viewport itself actually holds the preview shape");
+        check(static_cast<int>(window.document().solids().size()) == before,
+              "previewing creates no body");
+
+        if (preview && preview->field()) {
+            preview->field()->setText(QStringLiteral("25"));
+            settle(150);
+            check(preview->hasPreview(), "editing the height keeps a live preview");
+            check(view->hasPreview(), "the viewport reflects the edited height too");
+
+            // Garbage must not clear the preview or flicker the viewport.
+            preview->field()->setText(QStringLiteral("abc"));
+            settle(150);
+            check(preview->hasPreview(),
+                  "an unparseable height leaves the last good preview alone");
+            check(view->hasPreview(),
+                  "the viewport still holds the last good preview, not nothing");
+            check(static_cast<int>(window.document().solids().size()) == before,
+                  "an unparseable height creates no body");
+
+            preview->field()->setText(QStringLiteral("25"));
+            settle(100);
+            QKeyEvent commit(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+            QCoreApplication::sendEvent(preview->field(), &commit);
+            settle(250);
+        }
+
+        check(static_cast<int>(window.document().solids().size()) == before + 1,
+              "Enter commits the extrude");
+        ExtrudePreview* after = window.findChild<ExtrudePreview*>();
+        check(after == nullptr || !after->isVisible(),
+              "committing closes the preview");
+        if (!window.document().solids().empty()) {
+            const QString dims = QString::fromStdString(
+                Measure::formatDimensions(window.document().solids().back().shape));
+            // Fix round 1, Minor 4: dims.find("25") would also match a 250mm
+            // width or depth component - "x <times> y <times> z mm" (see
+            // Measure::formatDimensions), so check the height specifically,
+            // the last of the three numbers, rather than anywhere in the
+            // string.
+            const QStringList parts = dims.split(QString::fromUtf8("\xC3\x97"));
+            check(!parts.isEmpty() && parts.last().trimmed() == QStringLiteral("25 mm"),
+                  QStringLiteral("the body's height specifically is 25 mm, not just "
+                                 "some dimension that contains \"25\" (\"%1\")")
+                      .arg(dims));
+        }
+    }
+
+    // --- the preview owns Enter and Escape whatever holds focus ---------------
+    // The whole point of a LIVE preview is that the user orbits to look at the
+    // shape before committing to a height. That orbit is a press in the
+    // viewport, which is Qt::StrongFocus - and every ToolChip became focusable
+    // too - so focus left the panel's field, and Enter and Escape had been
+    // wired only to a filter on that field. Nothing else consumed Escape
+    // either (Cancel Sketch's binding is disabled while a preview can be
+    // open), and the panel has no buttons: the user was stranded with a
+    // preview shape and no route to commit or cancel it.
+    {
+        trigger(window, QStringLiteral("Start Sketch"));
+        clickAt(view, QPointF(300, 300)); clickAt(view, QPointF(420, 300));
+        clickAt(view, QPointF(420, 380)); clickAt(view, QPointF(300, 380));
+        trigger(window, QStringLiteral("Finish Sketch"));
+        settle(150);
+        trigger(window, QStringLiteral("Extrude..."));
+        settle(150);
+
+        ExtrudePreview* preview = window.findChild<ExtrudePreview*>();
+        check(preview != nullptr && preview->isVisible(),
+              "a preview is open before the orbit");
+        // The panel has to SAY what the two keys are - a modeless panel with
+        // invisible verbs is how this went unnoticed for a whole branch.
+        bool saysKeys = false;
+        if (preview) {
+            for (const QString& text : preview->paintedTexts()) {
+                if (text.contains(QStringLiteral("Enter")) &&
+                    text.contains(QStringLiteral("Esc")))
+                    saysKeys = true;
+            }
+        }
+        check(saysKeys, "the panel tells the user which keys commit and cancel");
+
+        const int before = static_cast<int>(window.document().solids().size());
+
+        // The orbit. clickAt()/dragButton() send events straight to a widget
+        // and so never move focus the way a real press does (Qt does that in
+        // QWidgetWindow, which synthetic delivery bypasses), so the focus
+        // change is made explicitly - otherwise this probe would pass against
+        // exactly the broken code it exists to catch.
+        view->setFocus(Qt::MouseFocusReason);
+        dragButton(view, QPointF(600, 400), QPointF(660, 430), Qt::RightButton);
+        check(preview != nullptr && preview->field() != nullptr &&
+                  window.focusWidget() != preview->field(),
+              "orbiting takes focus off the height field, as a real press does");
+        check(preview != nullptr && preview->isVisible(),
+              "the preview survives the orbit");
+
+        // Enter, delivered to the focus widget - the viewport, not the field.
+        sendKeyTo(&window, Qt::Key_Return);
+        settle(200);
+        check(static_cast<int>(window.document().solids().size()) == before + 1,
+              "Enter still commits after an orbit moved focus off the field");
+        ExtrudePreview* afterCommit = window.findChild<ExtrudePreview*>();
+        check(afterCommit == nullptr || !afterCommit->isVisible(),
+              "and the panel closes on that commit");
+
+        // Same again for Escape.
+        trigger(window, QStringLiteral("Start Sketch"));
+        clickAt(view, QPointF(300, 300)); clickAt(view, QPointF(420, 300));
+        clickAt(view, QPointF(420, 380)); clickAt(view, QPointF(300, 380));
+        trigger(window, QStringLiteral("Finish Sketch"));
+        settle(150);
+        trigger(window, QStringLiteral("Extrude..."));
+        settle(150);
+
+        const int beforeEscape = static_cast<int>(window.document().solids().size());
+        view->setFocus(Qt::MouseFocusReason);
+        dragButton(view, QPointF(600, 400), QPointF(650, 420), Qt::RightButton);
+        sendKeyTo(&window, Qt::Key_Escape);
+        settle(200);
+
+        ExtrudePreview* afterEscape = window.findChild<ExtrudePreview*>();
+        check(afterEscape == nullptr || !afterEscape->isVisible(),
+              "Escape still cancels after an orbit moved focus off the field");
+        check(static_cast<int>(window.document().solids().size()) == beforeEscape,
+              "and that cancel created no body");
+        check(window.hasPendingFace(),
+              "the pending face survives a cancel from the viewport too");
+        trigger(window, QStringLiteral("Start Sketch"));
+        trigger(window, QStringLiteral("Cancel Sketch"));
+        settle(120);
+    }
+
+    // --- starting a new sketch closes an open extrude preview -----------------
+    // Fix round 1, Important 1: onStartSketch() nulls the pending face and
+    // resets the view's preview slot to empty, but that alone used to leave
+    // the panel itself open and still believing it had a good preview - the
+    // next keystroke redisplayed a body-shaped shape over the new outline,
+    // and Enter reached commit(), where extrudePendingFace() silently failed
+    // on the now-null pending face, so hide() never ran and the shape stayed
+    // on screen: a body visible in the viewport that exists in no document.
+    {
+        trigger(window, QStringLiteral("Start Sketch"));
+        clickAt(view, QPointF(300, 300)); clickAt(view, QPointF(420, 300));
+        clickAt(view, QPointF(420, 380)); clickAt(view, QPointF(300, 380));
+        trigger(window, QStringLiteral("Finish Sketch"));
+        settle(150);
+        trigger(window, QStringLiteral("Extrude..."));
+        settle(150);
+
+        ExtrudePreview* preview = window.findChild<ExtrudePreview*>();
+        check(preview != nullptr && preview->isVisible() && preview->hasPreview() &&
+                  view->hasPreview(),
+              "a preview is open, with a shape in the viewport, before starting a new sketch");
+
+        trigger(window, QStringLiteral("Start Sketch"));
+        settle(150);
+        ExtrudePreview* stillOpen = window.findChild<ExtrudePreview*>();
+        check(stillOpen == nullptr || !stillOpen->isVisible(),
+              "starting a new sketch closes the open extrude preview");
+        check(!view->hasPreview(),
+              "and leaves no ghost preview shape behind in the viewport");
+
+        trigger(window, QStringLiteral("Cancel Sketch"));
+        settle(150);
+    }
+
+    // --- Escape cancels the extrude preview without touching the pending face -
+    {
+        trigger(window, QStringLiteral("Start Sketch"));
+        clickAt(view, QPointF(300, 300)); clickAt(view, QPointF(420, 300));
+        clickAt(view, QPointF(420, 380)); clickAt(view, QPointF(300, 380));
+        trigger(window, QStringLiteral("Finish Sketch"));
+        settle(150);
+        trigger(window, QStringLiteral("Extrude..."));
+        settle(150);
+
+        ExtrudePreview* preview = window.findChild<ExtrudePreview*>();
+        check(preview != nullptr && preview->isVisible() && preview->hasPreview(),
+              "a preview is open before pressing Escape");
+        check(window.hasPendingFace(), "a face is pending before pressing Escape");
+
+        if (preview && preview->field()) {
+            QKeyEvent escape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+            QCoreApplication::sendEvent(preview->field(), &escape);
+            settle(150);
+        }
+
+        ExtrudePreview* afterEscape = window.findChild<ExtrudePreview*>();
+        check(afterEscape == nullptr || !afterEscape->isVisible(),
+              "Escape closes the preview");
+        // This check used to assert the OPPOSITE - that the viewport was left
+        // empty - which enshrined the bug rather than catching it.
+        // MainWindow::onFinishSketch() shows the closed face through the
+        // viewport's single preview slot; ExtrudePreview overwrites that same
+        // slot with the body it would build. Clearing it on cancel therefore
+        // erased the face, leaving an intact pending face, an enabled Extrude
+        // action and a status bar still saying "Outline closed" above an
+        // empty viewport - against Milestone 1's own criterion that closing an
+        // outline produces a VISIBLE filled face.
+        check(view->hasPreview(),
+              "Escape puts the closed face back on screen rather than clearing it");
+        // And it is the FACE, not the body the cancelled preview was showing:
+        // hasPreview() alone cannot tell the two apart, which is how one
+        // feature silently overwriting another's slot went unnoticed.
+        const TopoDS_Shape restored = view->previewShape();
+        check(!restored.IsNull() &&
+                  !TopExp_Explorer(restored, TopAbs_SOLID).More() &&
+                  TopExp_Explorer(restored, TopAbs_FACE).More(),
+              "and what is on screen is the face, not the body it would have built");
+        check(window.hasPendingFace(),
+              "Escape leaves the pending face intact, so the user can retry");
+
+        // Retry: the same face, extruded again, still works after a cancel.
+        const int before = static_cast<int>(window.document().solids().size());
+        trigger(window, QStringLiteral("Extrude..."));
+        settle(150);
+        ExtrudePreview* retry = window.findChild<ExtrudePreview*>();
+        if (retry && retry->field()) {
+            QKeyEvent commit(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+            QCoreApplication::sendEvent(retry->field(), &commit);
+            settle(250);
+        }
+        check(static_cast<int>(window.document().solids().size()) == before + 1,
+              "the pending face left behind by Escape can still be extruded");
+    }
+
     // --- icons ----------------------------------------------------------------
     {
         const IconSet::Glyph all[] = {
@@ -928,6 +1344,104 @@ int main(int argc, char* argv[])
         check(!view->animationsEnabled(), "animations re-disabled for the rest of the suite");
     }
 
+    // --- a fade cannot be double-clicked into a second undo -------------------
+    // The suite otherwise runs with animations off, so ToastHost::dismiss()
+    // is synchronous there and this exact bug is invisible to it - the toast
+    // and its Undo pill vanish together in the same call that pops the undo
+    // stack, leaving nothing for a second click to land on. With animations
+    // on (the shipping default), a fade used to leave the pill visible and
+    // clickable for the whole 160 ms, so an ordinary impatient double-click
+    // undid two operations - one of them silently.
+    {
+        view->setAnimationsEnabled(true);
+
+        check(!window.document().solids().empty(),
+              "there is a body to delete for the double-click check");
+        const int before = static_cast<int>(window.document().solids().size());
+        view->setSelectedSolids({window.document().solids().front().id});
+        settle(100);
+        trigger(window, QStringLiteral("Delete Selected"));
+        settle(150);
+
+        ToastHost* toasts = window.findChild<ToastHost*>();
+        check(toasts != nullptr && toasts->isShowing(),
+              "deleting a body raises a toast with animations enabled");
+        QWidget* undo = toasts ? toasts->undoControl() : nullptr;
+        check(undo != nullptr && undo->isVisible(), "the toast offers Undo");
+
+        if (toasts && undo) {
+            const QPoint centre = undo->mapTo(view, QPoint(undo->width() / 2, undo->height() / 2));
+            check(view->childAt(centre) == undo,
+                  "the Undo control is reachable before the first click");
+
+            clickAt(undo, QPointF(undo->width() / 2.0, undo->height() / 2.0));
+            // Deliberately not settled for the full fade duration - this is
+            // the impatient double-click, landing mid fade-out.
+            const int afterFirstClick = static_cast<int>(window.document().solids().size());
+            check(afterFirstClick == before, "the first click's Undo restored the body");
+
+            // dismiss() hides the Undo control at its own top, before the
+            // fade even starts - so real hit-testing must already find
+            // something other than the control here, exactly as it would
+            // for a genuine second click a user fires off before the toast
+            // has visibly finished fading.
+            QWidget* hitDuringFade = view->childAt(centre);
+            check(hitDuringFade != undo,
+                  "the Undo control is not reachable by a real click during the fade");
+
+            // The second click a real user's double-click would produce -
+            // sent to whatever hit-testing actually finds there (nothing
+            // claims this point once the control is hidden, so it falls
+            // through to the viewport, same as clicking empty space).
+            clickAt(view, QPointF(centre));
+            settle(250);   // outlasts the 160 ms fade either way
+            check(static_cast<int>(window.document().solids().size()) == afterFirstClick,
+                  "a second click during the fade did not undo a second time");
+        }
+
+        // A resize mid-fade is the OTHER trigger for the same race:
+        // ToastHost's own event filter re-derives the Undo control's
+        // geometry - and, through Toast::syncUndoGeometry(), its visibility
+        // - on every viewport resize for as long as the toast itself is
+        // still isVisible(), which it is for the whole fade, not just until
+        // dismiss() returns. A one-shot hide() at the top of dismiss() does
+        // not survive that; folding "is this toast dismissing?" into the
+        // same predicate syncUndoGeometry() already computes does.
+        check(!window.document().solids().empty(),
+              "there is a body to delete for the resize-mid-fade check");
+        const int beforeResizeCheck = static_cast<int>(window.document().solids().size());
+        view->setSelectedSolids({window.document().solids().front().id});
+        settle(100);
+        trigger(window, QStringLiteral("Delete Selected"));
+        settle(150);
+
+        QWidget* undo2 = toasts ? toasts->undoControl() : nullptr;
+        check(undo2 != nullptr && undo2->isVisible(),
+              "the toast offers Undo again for the resize-mid-fade check");
+        if (undo2) {
+            clickAt(undo2, QPointF(undo2->width() / 2.0, undo2->height() / 2.0));
+            // Deliberately not settled for the fade duration - the resize
+            // below has to land while it is still running.
+            check(static_cast<int>(window.document().solids().size()) == beforeResizeCheck,
+                  "Undo restored the body before the resize");
+
+            const QSize original = view->size();
+            view->resize(original.width() + 40, original.height());
+            settle(30);   // well inside the 160 ms fade
+
+            const QPoint centreAfterResize =
+                undo2->mapTo(view, QPoint(undo2->width() / 2, undo2->height() / 2));
+            check(view->childAt(centreAfterResize) != undo2,
+                  "a viewport resize mid-fade does not re-show the Undo control");
+
+            view->resize(original);
+            settle(250);   // outlasts the fade, and lets the resize settle back
+        }
+
+        view->setAnimationsEnabled(false);
+        check(!view->animationsEnabled(), "animations re-disabled again after the double-click check");
+    }
+
     // --- grid subdivision policy ----------------------------------------------
     {
         check(GridRenderer::minorStepFor(700.0) == 10.0,
@@ -1026,6 +1540,52 @@ int main(int argc, char* argv[])
                   .arg(hintOffenders.isEmpty()
                            ? QStringLiteral("none")
                            : hintOffenders.join(QStringLiteral(", "))));
+
+        // Same story for the toast: its copy is painted, not put on an action
+        // or a tooltip, so it needs its own explicit sweep too. Unlike the
+        // other three widgets it has no fixed set of strings to enumerate, so
+        // it records every message it has been given this run and the sweep
+        // covers all of them - it used to see only whichever one happened to
+        // be live, which made the sweep a coin toss. HONEST LIMIT, stated on
+        // Toast::paintedTexts() too: a message never actually triggered
+        // during a run is not covered by this.
+        Toast* sweptToast = window.findChild<Toast*>();
+        check(sweptToast != nullptr && sweptToast->paintedTexts().size() > 2,
+              QStringLiteral("the toast sweep covers every message shown this run, "
+                             "not just the live one (%1 strings)")
+                  .arg(sweptToast ? sweptToast->paintedTexts().size() : 0));
+        QStringList toastOffenders;
+        for (Toast* toastWidget : window.findChildren<Toast*>()) {
+            for (const QString& text : toastWidget->paintedTexts()) {
+                for (const QString& word : banned) {
+                    if (text.contains(word, Qt::CaseInsensitive))
+                        toastOffenders << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
+                }
+            }
+        }
+        check(toastOffenders.isEmpty(),
+              QStringLiteral("no toast text uses a banned word (%1)")
+                  .arg(toastOffenders.isEmpty()
+                           ? QStringLiteral("none")
+                           : toastOffenders.join(QStringLiteral(", "))));
+
+        // Same story for the extrude preview: its label is painted, not put
+        // on an action or a tooltip, so it needs its own explicit sweep too.
+        QStringList extrudePreviewOffenders;
+        for (ExtrudePreview* preview : window.findChildren<ExtrudePreview*>()) {
+            for (const QString& text : preview->paintedTexts()) {
+                for (const QString& word : banned) {
+                    if (text.contains(word, Qt::CaseInsensitive))
+                        extrudePreviewOffenders
+                            << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
+                }
+            }
+        }
+        check(extrudePreviewOffenders.isEmpty(),
+              QStringLiteral("no extrude preview text uses a banned word (%1)")
+                  .arg(extrudePreviewOffenders.isEmpty()
+                           ? QStringLiteral("none")
+                           : extrudePreviewOffenders.join(QStringLiteral(", "))));
 
         // The state label is the app's most-updated string; it must obey the
         // vocabulary too. It is a permanent widget on the status bar.
@@ -1461,14 +2021,38 @@ int main(int argc, char* argv[])
                   "finds neither the panel nor the skip control");
 
             if (hitSkip && hitSkip == secondGuide->skipControl()) {
+                // Toast's UndoControl and the extrude field both carry
+                // Qt::WA_NoMousePropagation and this control did not. It
+                // accepts the press, which makes it the grab holder, so the
+                // RELEASE lands here too - and QWidget's default release
+                // handler ignores it, which propagates it to the parent. That
+                // parent is the viewport, which performs a real pick on
+                // release and unconditionally emits selectionChanged(), so
+                // clicking "skip" on first run also selected whatever body sat
+                // behind the guide. Counting that signal is the precise test:
+                // an emission at all is the leak, whether or not this probe
+                // has a body for the pick to land on.
+                int picks = 0;
+                QObject::connect(secondView, &OcctViewWidget::selectionChanged,
+                                 secondView, [&picks] { ++picks; });
+
                 const QPointF centre(hitSkip->width() / 2.0, hitSkip->height() / 2.0);
                 QMouseEvent press(QEvent::MouseButtonPress, centre, centre,
                                   Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
                 QCoreApplication::sendEvent(hitSkip, &press);
+                QMouseEvent release(QEvent::MouseButtonRelease, centre, centre,
+                                    Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+                QCoreApplication::sendEvent(hitSkip, &release);
+                settle(120);
+
                 check(secondGuide->isFinished(),
                       "activating the skip control childAt() found finishes the guide");
                 check(second.progress().hasLearned("walkthrough.done"),
                       "skipping records walkthrough.done, same as finishing for real");
+                check(picks == 0,
+                      QStringLiteral("clicking skip does not fall through to a pick in "
+                                     "the viewport behind it (%1 selection changes)")
+                          .arg(picks));
             }
         }
 
@@ -1482,6 +2066,240 @@ int main(int argc, char* argv[])
         // "Show tips again restores the walkthrough for a returning user
         // too" block below instead.
         second.close();
+    }
+
+    // --- nothing in the bottom strip lands on top of anything else ------------
+    // Three surfaces share the viewport's bottom edge - the guide bottom
+    // right, the Snap/Select chip cluster bottom left, and the toast centred
+    // between them - and all of them are z-ABOVE the toast after the next
+    // relayout(). Two separate defects met here. The toast and the balloon
+    // each repositioned from their own filter on the viewport's resize event,
+    // which runs BEFORE ViewportOverlay has moved the guide (filters run
+    // last-installed-first and the overlay installs its own first), so a
+    // shrink placed them against the guide's pre-resize rectangle and the
+    // guide then landed on top of them. And the toast only ever stepped
+    // around the guide, never the chip cluster, so at 800x500 with the guide
+    // up it was pushed left to x~86 and put a third of its message under
+    // Snap/Select - reachable on a first run the moment a self-crossing
+    // outline raises a failure message.
+    {
+        MainWindow narrow(nullptr, /*persistProgress=*/false);
+        narrow.setAttribute(Qt::WA_ShowWithoutActivating);
+        narrow.resize(900, 620);
+        narrow.show();
+        settle(300);
+        narrow.view()->setAnimationsEnabled(false);
+
+        OcctViewWidget* nv = narrow.view();
+        // The defect is stated in VIEWPORT pixels, and the items panel eats a
+        // couple of hundred of the window's own width, so drive the window
+        // until the viewport itself is the size under test. Iterated because
+        // the splitter re-proportions the panel as the window shrinks, so one
+        // pass does not land it.
+        auto resizeViewport = [&](int w, int h) {
+            for (int i = 0; i < 5; ++i) {
+                const int dw = w - nv->width();
+                const int dh = h - nv->height();
+                if (dw == 0 && dh == 0) break;
+                narrow.resize(narrow.width() + dw, narrow.height() + dh);
+                settle(250);
+            }
+        };
+        WalkthroughPanel* guide = narrow.findChild<WalkthroughPanel*>();
+        ToastHost* toasts = narrow.findChild<ToastHost*>();
+        check(guide != nullptr && guide->isVisible() && toasts != nullptr,
+              "the narrow probe starts with a guide up and a toast host");
+
+        if (guide && toasts) {
+            toasts->show(QStringLiteral("This outline can't close into a flat face"),
+                         Toast::Kind::Failure, false);
+            settle(150);
+            Toast* toast = narrow.findChild<Toast*>();
+            check(toast != nullptr && toast->isVisible(),
+                  "a failure message is up alongside the guide");
+
+            // The shrink, to the exact 800x500 viewport the defect names.
+            resizeViewport(800, 500);
+            check(nv->width() == 800 && nv->height() == 500,
+                  QStringLiteral("the probe really is at the 800x500 viewport under "
+                                 "test (got %1x%2)").arg(nv->width()).arg(nv->height()));
+
+            if (toast) {
+                check(!toast->geometry().intersects(guide->geometry()),
+                      QStringLiteral("after a shrink the toast is clear of the guide "
+                                     "(viewport %1 wide - toast %2,%3 %4x%5 - guide "
+                                     "%6,%7 %8x%9)")
+                          .arg(nv->width())
+                          .arg(toast->x()).arg(toast->y())
+                          .arg(toast->width()).arg(toast->height())
+                          .arg(guide->x()).arg(guide->y())
+                          .arg(guide->width()).arg(guide->height()));
+
+                QStringList collisions;
+                for (ToolCluster* cluster : nv->findChildren<ToolCluster*>()) {
+                    if (cluster->isVisible() &&
+                        cluster->geometry().intersects(toast->geometry()))
+                        collisions << QStringLiteral("%1,%2 %3x%4")
+                                          .arg(cluster->x()).arg(cluster->y())
+                                          .arg(cluster->width()).arg(cluster->height());
+                }
+                check(collisions.isEmpty(),
+                      QStringLiteral("and clear of every anchored widget too "
+                                     "(viewport %1x%2, toast %3,%4 %5x%6; hits: %7)")
+                          .arg(nv->width()).arg(nv->height())
+                          .arg(toast->x()).arg(toast->y())
+                          .arg(toast->width()).arg(toast->height())
+                          .arg(collisions.isEmpty() ? QStringLiteral("none")
+                                                    : collisions.join(QStringLiteral("; "))));
+                check(nv->rect().contains(toast->geometry()),
+                      "and still entirely inside the viewport");
+            }
+
+            // The other half: a guide that appears UNDERNEATH a toast already
+            // up. HintBalloon::reconsider() handled that case for itself and
+            // ToastHost did not, so Show tips again under a live toast left
+            // the restored guide sitting on top of it.
+            check(buildBody(narrow, 0.32, 0.32, 0.52, 0.52, 10.0),
+                  "a body for the narrow probe, which completes its guide");
+            settle(200);
+            check(!guide->isVisible(), "the completed guide is out of the way");
+
+            toasts->show(QStringLiteral("This outline can't close into a flat face"),
+                         Toast::Kind::Failure, false);
+            settle(150);
+            Toast* liveToast = narrow.findChild<Toast*>();
+            check(liveToast != nullptr && liveToast->isVisible(),
+                  "a message is up with no guide beneath it");
+
+            QAction* again = action(narrow, QStringLiteral("Show tips again"));
+            check(again != nullptr, "the narrow probe has the reset action");
+            if (again && liveToast) {
+                again->trigger();
+                settle(250);
+                check(guide->isVisible(), "the guide comes back under the live toast");
+                check(!liveToast->geometry().intersects(guide->geometry()),
+                      QStringLiteral("and the toast steps aside for it rather than "
+                                     "being buried (toast %1,%2 %3x%4 - guide "
+                                     "%5,%6 %7x%8)")
+                          .arg(liveToast->x()).arg(liveToast->y())
+                          .arg(liveToast->width()).arg(liveToast->height())
+                          .arg(guide->x()).arg(guide->y())
+                          .arg(guide->width()).arg(guide->height()));
+            }
+
+            // ExtrudePreview has the mirror problem at the top edge: it is
+            // raised once, at begin(), and relayout() then raises the
+            // top-left Items/Undo/Redo cluster back over it, so its field
+            // stopped being clickable on a narrow viewport. Overlap is not
+            // itself the bug - being underneath it is.
+            trigger(narrow, QStringLiteral("Start Sketch"));
+            sketchQuad(narrow, 0.30, 0.30, 0.50, 0.50);
+            trigger(narrow, QStringLiteral("Finish Sketch"));
+            settle(150);
+            trigger(narrow, QStringLiteral("Extrude..."));
+            settle(200);
+            // A resize AFTER the panel opened is what used to bury it.
+            resizeViewport(500, 500);
+
+            ExtrudePreview* panel = narrow.findChild<ExtrudePreview*>();
+            check(panel != nullptr && panel->isVisible() && panel->field() != nullptr,
+                  "the extrude panel is open on the narrow viewport");
+            if (panel && panel->field()) {
+                QWidget* field = panel->field();
+                bool overlapped = false;
+                for (ToolCluster* cluster : nv->findChildren<ToolCluster*>()) {
+                    if (cluster->isVisible() &&
+                        cluster->geometry().intersects(panel->geometry()))
+                        overlapped = true;
+                }
+                check(overlapped,
+                      QStringLiteral("the panel really does collide with a chip cluster "
+                                     "at this width, so this check is exercising "
+                                     "something (viewport %1 wide)").arg(nv->width()));
+                const QPoint centre =
+                    field->mapTo(nv, QPoint(field->width() / 2, field->height() / 2));
+                QWidget* hit = nv->childAt(centre);
+                check(hit == field,
+                      QStringLiteral("and a real click still finds its height field, "
+                                     "not a cluster raised over it (found %1)")
+                          .arg(hit ? QString::fromLatin1(hit->metaObject()->className())
+                                   : QStringLiteral("nothing")));
+            }
+            sendKeyTo(&narrow, Qt::Key_Escape);
+            settle(150);
+        }
+        narrow.close();
+    }
+
+    // --- one type scale, and focus you can see --------------------------------
+    {
+        QSet<double> scale;
+        for (const QFont& f : {Theme::titleFont(), Theme::bodyFont(),
+                               Theme::labelFont(), Theme::badgeFont()}) {
+            scale.insert(f.pointSizeF());
+        }
+        check(scale.size() == 4, "the type scale has four distinct sizes");
+
+        QStringList offenders;
+        for (QWidget* w : window.findChildren<QWidget*>()) {
+            if (!w->isVisible()) continue;
+            if (!scale.contains(w->font().pointSizeF()))
+                offenders << (w->metaObject()->className() +
+                              QStringLiteral(" @ %1").arg(w->font().pointSizeF()));
+        }
+        check(offenders.isEmpty(),
+              QStringLiteral("every visible widget uses the type scale (%1)")
+                  .arg(offenders.isEmpty() ? QStringLiteral("all do")
+                                           : offenders.join(QStringLiteral(", "))));
+
+        // The sweep above skips anything not visible, and the toast, its Undo
+        // control, the extrude panel and that panel's field are all hidden
+        // whenever it runs - so they are structurally exempt from it however
+        // their fonts drift. They inherit bodyFont() today; assert that
+        // rather than leave it to chance.
+        QStringList exempt;
+        auto assertScale = [&](QWidget* w, const QString& name) {
+            if (!w) { exempt << name + QStringLiteral(" (missing)"); return; }
+            if (!scale.contains(w->font().pointSizeF()))
+                exempt << name + QStringLiteral(" @ %1").arg(w->font().pointSizeF());
+        };
+        Toast* hiddenToast = window.findChild<Toast*>();
+        ExtrudePreview* hiddenPreview = window.findChild<ExtrudePreview*>();
+        assertScale(hiddenToast, QStringLiteral("Toast"));
+        assertScale(hiddenToast ? hiddenToast->undoControl() : nullptr,
+                    QStringLiteral("UndoControl"));
+        assertScale(hiddenPreview, QStringLiteral("ExtrudePreview"));
+        assertScale(hiddenPreview ? hiddenPreview->field() : nullptr,
+                    QStringLiteral("ExtrudePreview field"));
+        check(exempt.isEmpty(),
+              QStringLiteral("the widgets hidden when that sweep runs use the type "
+                             "scale too (%1)")
+                  .arg(exempt.isEmpty() ? QStringLiteral("all do")
+                                        : exempt.join(QStringLiteral(", "))));
+
+        ToolChip* chip = window.findChild<ToolChip*>();
+        check(chip != nullptr, "there is a chip to focus");
+        if (chip) {
+            const QImage unfocused = chip->grab().toImage();
+            chip->setFocus(Qt::TabFocusReason);
+            settle(80);
+            const QImage focused = chip->grab().toImage();
+            check(focused != unfocused, "keyboard focus is visible on a chip");
+
+            // The check above renders whatever this harness's own window can
+            // actually produce: WA_ShowWithoutActivating means window is
+            // never the OS-active one (gui_smoke must never steal focus from
+            // whatever else the user is doing), so window()->isActiveWindow()
+            // is false throughout the whole suite and the ring painted above
+            // is always the muted branch - see the comment at
+            // ToolChip::paintEvent(). The active branch cannot be exercised
+            // by rendering without genuinely activating a window, which this
+            // suite must not do; checked at the token level instead, since
+            // that is what determines whether the two branches would ever
+            // look different on a window a real user is actually working in.
+            check(Theme::focusRing() != Theme::focusRingMuted(),
+                  "the active and muted focus-ring colours are visually distinct");
+        }
     }
 
     // --- Show tips again restores the walkthrough for a returning user too ---
@@ -1535,9 +2353,16 @@ int main(int argc, char* argv[])
         check(returningGuide != nullptr && returningGuide->skipControl() != nullptr &&
                   !returningGuide->skipControl()->isVisible(),
               "the skip control is hidden too, not just the panel it belongs to");
-        // QRect(width() - kPad - 34, 8, 34, 18) with pos() still (0, 0):
-        // (212, 8, 34, 18) for a 260-wide panel, so (229, 17) is its centre.
-        const QPoint stale(229, 17);
+        // The stale rect is wherever the constructor's own initial
+        // syncSkipGeometry() call left the (hidden) skip control - it never
+        // moved for a returning user, since the panel itself never showed.
+        // Read from the control's own geometry rather than a hard-coded
+        // point: sizeHint() now measures the panel's actual step strings
+        // (see WalkthroughPanel::sizeHint()), so a fixed x/y here would go
+        // stale the moment the wording or the type scale changed width.
+        const QPoint stale = returningGuide && returningGuide->skipControl()
+                                  ? returningGuide->skipControl()->geometry().center()
+                                  : QPoint();
         QWidget* hitStale = returningView->childAt(stale);
         check(hitStale == nullptr,
               QStringLiteral("nothing lurks at the skip control's stale "

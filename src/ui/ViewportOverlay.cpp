@@ -34,6 +34,15 @@ void ViewportOverlay::addWidget(QWidget* widget, Anchor anchor)
     relayout();
 }
 
+std::vector<QRect> ViewportOverlay::occupiedRects() const
+{
+    std::vector<QRect> rects;
+    for (const Entry& entry : myEntries) {
+        if (entry.widget && entry.widget->isVisible()) rects.push_back(entry.widget->geometry());
+    }
+    return rects;
+}
+
 bool ViewportOverlay::eventFilter(QObject* watched, QEvent* event)
 {
     if (watched == myViewport && event->type() == QEvent::Resize) relayout();
@@ -101,4 +110,10 @@ void ViewportOverlay::relayout()
         }
         placed->raise();
     }
+
+    // Dependents that place themselves against one of the entries above -
+    // ToastHost, HintBalloon and ExtrudePreview - re-place (and re-raise)
+    // themselves here, now that every anchored widget is at its final
+    // rectangle. See the comment on this signal in the header.
+    emit laidOut();
 }
