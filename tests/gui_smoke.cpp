@@ -55,6 +55,52 @@ void check(bool condition, const QString& what)
     if (!condition) ++g_failures;
 }
 
+// RAII for the one probe below that needs to seed QSettings before
+// constructing a persistProgress=true MainWindow: saves the real
+// organization/application name and QSettings::defaultFormat(), then
+// switches to a dedicated, file-backed identity that cannot collide with
+// whatever the developer's own use of the real app has recorded - and
+// restores everything in the destructor, so the restore happens even if
+// something between construction and the end of the scope were ever changed
+// to throw or return early, rather than relying on sequential code reaching
+// a restore line at the bottom.
+//
+// IniFormat plus a temp-directory path keeps the whole probe out of the
+// registry entirely, rather than merely under a distinctly named key inside
+// it - the file is left on disk afterward (temp directories are routinely
+// cleared by the OS; a registry key is not), but it never touches the real
+// app's actual settings location either way.
+class ScopedTestSettings {
+public:
+    ScopedTestSettings()
+        : myOrg(QCoreApplication::organizationName())
+        , myApp(QCoreApplication::applicationName())
+        , myFormat(QSettings::defaultFormat())
+    {
+        const QString path = QDir::tempPath() + QStringLiteral("/furnifyme-gui_smoke-settings");
+        QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, path);
+        QSettings::setDefaultFormat(QSettings::IniFormat);
+        QCoreApplication::setOrganizationName(QStringLiteral("FurnifyMe-gui_smoke"));
+        QCoreApplication::setApplicationName(QStringLiteral("returning-user-probe"));
+    }
+
+    ~ScopedTestSettings()
+    {
+        QSettings().clear();   // this probe's own entries, wherever they landed
+        QSettings::setDefaultFormat(myFormat);
+        QCoreApplication::setOrganizationName(myOrg);
+        QCoreApplication::setApplicationName(myApp);
+    }
+
+    ScopedTestSettings(const ScopedTestSettings&) = delete;
+    ScopedTestSettings& operator=(const ScopedTestSettings&) = delete;
+
+private:
+    QString myOrg;
+    QString myApp;
+    QSettings::Format myFormat;
+};
+
 // Lets the event loop breathe so Qt delivers exposure/resize and OCCT redraws.
 void settle(int ms = 250)
 {
@@ -880,9 +926,14 @@ int main(int argc, char* argv[])
             const QPoint skipCentre =
                 secondGuide->pos() + QPoint(secondGuide->width() - 31, 17);
             QWidget* hitSkip = secondView->childAt(skipCentre);
-            check(hitSkip != nullptr && hitSkip != secondGuide,
-                  "childAt() at the skip control's centre finds a real widget, "
-                  "not the transparent panel");
+            // "not the panel" alone is the check that let an AxisGizmo
+            // mis-hit through once already (see the fix-round report) - it
+            // asserts what the bug happened not to violate, not what this
+            // is actually supposed to prove. skipControl() gives the real
+            // identity to compare against.
+            check(hitSkip != nullptr && hitSkip == secondGuide->skipControl(),
+                  "childAt() at the skip control's centre finds the skip "
+                  "control itself, not some other widget");
 
             const QPoint insidePanelOutsideSkip =
                 secondGuide->pos() + QPoint(20, secondGuide->height() - 20);
@@ -891,29 +942,27 @@ int main(int argc, char* argv[])
                   "childAt() at a point inside the panel but well outside skip "
                   "finds neither the panel nor the skip control");
 
-            if (hitSkip && hitSkip != secondGuide) {
+            if (hitSkip && hitSkip == secondGuide->skipControl()) {
                 const QPointF centre(hitSkip->width() / 2.0, hitSkip->height() / 2.0);
                 QMouseEvent press(QEvent::MouseButtonPress, centre, centre,
                                   Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
                 QCoreApplication::sendEvent(hitSkip, &press);
                 check(secondGuide->isFinished(),
-                      "activating the widget childAt() found at the skip control "
-                      "finishes the guide");
+                      "activating the skip control childAt() found finishes the guide");
                 check(second.progress().hasLearned("walkthrough.done"),
                       "skipping records walkthrough.done, same as finishing for real");
             }
         }
 
-        // Redundant with the skip click above by this point (hasLearned() is
-        // already true), kept anyway as the same direct simulation of an
-        // already-learned user that this block always used.
-        second.progress().record("walkthrough.done");
-        second.progress().record("walkthrough.done");
-        second.progress().record("walkthrough.done");
-        settle(150);
-        WalkthroughPanel* repeat = second.findChild<WalkthroughPanel*>();
-        check(repeat == nullptr || !repeat->isVisible(),
-              "a returning user never sees the guide again");
+        // A check used to sit here re-recording walkthrough.done and
+        // asserting the panel stayed hidden - but by this point the skip
+        // click above has already finished and hidden it, so that assertion
+        // passed regardless of whether the returning-user gate actually
+        // works. The genuine test of that gate - a window whose progress
+        // already says learned BEFORE its panel is ever built, which is the
+        // state persistProgress=false can never produce here - lives in the
+        // "Show tips again restores the walkthrough for a returning user
+        // too" block below instead.
         second.close();
     }
 
@@ -925,13 +974,10 @@ int main(int argc, char* argv[])
         // MainWindow's constructor deserializes progress from QSettings
         // BEFORE buildOverlay() ever runs. That is the path Show tips again
         // exists for: someone who quit, came back, and wants the guide
-        // again. Uses its own QSettings organization/application name so it
-        // can never read or write whatever the developer's own use of the
-        // real app has recorded, and restores the real names afterward.
-        const QString realOrg = QCoreApplication::organizationName();
-        const QString realApp = QCoreApplication::applicationName();
-        QCoreApplication::setOrganizationName(QStringLiteral("FurnifyMe-gui_smoke"));
-        QCoreApplication::setApplicationName(QStringLiteral("returning-user-probe"));
+        // again. ScopedTestSettings switches to a dedicated, file-backed
+        // QSettings identity for this block and guarantees the restore on
+        // the way out, however the scope ends.
+        ScopedTestSettings scopedSettings;
 
         UserProgress seed;
         for (int i = 0; i < UserProgress::kLearnedThreshold; ++i) seed.record("walkthrough.done");
@@ -968,10 +1014,8 @@ int main(int argc, char* argv[])
                   "the restored panel starts fresh rather than staying finished");
         }
         returning.close();
-
-        QSettings().clear();   // drops the test-only registry key entirely, not just the one value
-        QCoreApplication::setOrganizationName(realOrg);
-        QCoreApplication::setApplicationName(realApp);
+        // scopedSettings restores the real QSettings identity as it goes
+        // out of scope here.
     }
 
     std::printf("\n%s (%d failure%s)  volumes: A=%.1f B=%.1f\n",

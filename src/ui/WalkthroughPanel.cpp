@@ -41,11 +41,19 @@ constexpr int kStep = 26;
 // not achieve real click-through either.)
 //
 // So this is a SIBLING: parented to the same viewport as WalkthroughPanel,
-// positioned over skipRect() by the panel itself (see syncSkipGeometry()),
-// and raised above it. A sibling is hit-tested on its own, independent of
-// whatever attributes its neighbour carries. It paints nothing of its own,
-// so the parent's own paintEvent - which draws the "skip" label at that same
-// rect - remains what the user actually sees.
+// positioned over skipRect() by the panel itself (see syncSkipGeometry()). A
+// sibling is hit-tested on its own, independent of whatever attributes its
+// neighbour carries - z-order between the two does not affect that, since
+// hit-testing only picks among widgets that are not excluded from it in the
+// first place, and the panel excludes itself. syncSkipGeometry() does still
+// raise() this above the panel on every move, but ViewportOverlay::relayout()
+// raises the panel right back above it immediately afterward, since the
+// panel is itself one of the overlay's anchored entries - so in practice the
+// panel ends up on top after every relayout. That is harmless only because
+// of the same transparency (paint order does not matter either: this widget
+// paints nothing of its own, so the parent's own paintEvent - which draws
+// the "skip" label at that same rect - is what the user sees regardless of
+// which one is stacked above the other).
 class SkipControl : public QWidget {
 public:
     SkipControl(std::function<void()> onClick, QWidget* parent)
@@ -97,6 +105,23 @@ WalkthroughPanel::WalkthroughPanel(MainWindow* window, QWidget* parent)
 
     connect(myWindow, &MainWindow::appStateChanged, this, &WalkthroughPanel::refresh);
     refresh();
+}
+
+WalkthroughPanel::~WalkthroughPanel()
+{
+    // mySkip is a sibling, not a child, so Qt's parent-child cascade does not
+    // clean it up when this panel alone is destroyed - and it holds a raw
+    // `this` pointer via its click callback, so leaving it alive after this
+    // panel is gone would be a dangling-pointer crash waiting to happen the
+    // next time someone clicked it. Nothing destroys the panel alone today,
+    // which is exactly why this needs to hold regardless: the alternative is
+    // a latent bug waiting for the first caller that does.
+    //
+    // Safe if the two are instead destroyed together, in either order, by
+    // their shared parent tearing down: mySkip is a QPointer, so if it goes
+    // first this becomes a harmless delete of a null pointer rather than a
+    // double free.
+    delete mySkip;
 }
 
 void WalkthroughPanel::refresh()
@@ -180,6 +205,10 @@ void WalkthroughPanel::syncSkipGeometry()
     // widget's own local coordinates - needs translating by pos() to land in
     // that shared coordinate space.
     mySkip->setGeometry(skipRect().translated(pos()));
+    // Belt and suspenders, not a guarantee: ViewportOverlay::relayout() will
+    // usually raise() this panel again right after moving it, putting the
+    // panel back above mySkip - see the class comment on SkipControl for why
+    // that stacking does not actually matter.
     mySkip->raise();
 }
 

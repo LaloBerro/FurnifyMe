@@ -5,6 +5,7 @@
 // appStateChanged, never stored as a cursor - a stored cursor is a second
 // source of truth that drifts from the first.
 //
+#include <QPointer>
 #include <QStringList>
 #include <QWidget>
 
@@ -19,9 +20,16 @@ class WalkthroughPanel : public QWidget {
 
 public:
     WalkthroughPanel(MainWindow* window, QWidget* parent);
+    ~WalkthroughPanel() override;
 
     int completedSteps() const { return myCompleted; }
     bool isFinished() const { return myFinished; }
+
+    // Exposed so gui_smoke can assert that childAt() actually finds THIS
+    // specific widget at the skip location, by pointer identity, rather
+    // than merely "found something that is not the panel" - the weaker
+    // check that let an AxisGizmo mis-hit through once already.
+    QWidget* skipControl() const { return mySkip; }
 
     // The four step strings, exposed so gui_smoke's banned-word sweep can
     // reach them.
@@ -66,9 +74,17 @@ private:
     // this machine's Qt build - QWidgetPrivate::childAtRecursiveHelper skips
     // straight past a transparent widget's children), so a child here would
     // have been just as unreachable by a real click as the transparent parent
-    // itself. See WalkthroughPanel.cpp. Owned by Qt's parent-child mechanism,
-    // not by this pointer.
-    QWidget* mySkip = nullptr;
+    // itself. See WalkthroughPanel.cpp.
+    //
+    // Being a sibling means Qt's own parent-child cascade does NOT destroy it
+    // when this panel alone is destroyed, yet it holds a raw `this` pointer
+    // (via its callback) that would dangle if it outlived this panel - so
+    // ~WalkthroughPanel() destroys it explicitly. QPointer, not a bare
+    // pointer, because the two can also be destroyed together (their shared
+    // parent tearing down) in either order: if mySkip goes first, this
+    // safely observes that and ~WalkthroughPanel()'s delete becomes a no-op
+    // instead of a double free.
+    QPointer<QWidget> mySkip;
 
     // Latches: a step stays ticked once reached, because the state that proves
     // it (a sketch in progress, a pending face) is transient by nature.
