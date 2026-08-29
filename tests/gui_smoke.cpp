@@ -13,6 +13,7 @@
 // the viewport stay in agreement.
 //
 #include "CameraController.h"
+#include "DimensionRenderer.h"
 #include "DocumentModel.h"
 #include "ExtrudePreview.h"
 #include "GridRenderer.h"
@@ -134,6 +135,18 @@ void clickAt(QWidget* target, const QPointF& pos,
     QMouseEvent release(QEvent::MouseButtonRelease, pos, global,
                         Qt::LeftButton, Qt::NoButton, mods);
     QCoreApplication::sendEvent(target, &release);
+
+    settle(80);
+}
+
+// A hover move with no button down - the live dimension and the hover
+// highlight both key off this, not a click.
+void moveTo(QWidget* target, const QPointF& pos, Qt::KeyboardModifiers mods = Qt::NoModifier)
+{
+    const QPointF global = target->mapToGlobal(pos);
+
+    QMouseEvent move(QEvent::MouseMove, pos, global, Qt::NoButton, Qt::NoButton, mods);
+    QCoreApplication::sendEvent(target, &move);
 
     settle(80);
 }
@@ -906,6 +919,50 @@ int main(int argc, char* argv[])
                   .arg(volumeA, 0, 'f', 1).arg(cutVolume, 0, 'f', 1));
         settle(300);
         view->saveSnapshot(outDir + "/g3-after-cut.png");
+    }
+
+    // --- a length you can see while you make it -------------------------------
+    {
+        trigger(window, QStringLiteral("Start Sketch"));
+        settle(100);
+        clickAt(view, QPointF(300, 300));
+        moveTo(view, QPointF(420, 300));
+        settle(120);
+
+        check(view->dimension().isShowing(),
+              "dragging out a segment shows its length");
+        view->saveSnapshot(outDir + "/g-dimension-live.png");
+
+        // Computed independently: the renderer must not be its own oracle.
+        const gp_Pnt a = window.sketch().points().front();
+        gp_Pnt b;
+        check(view->lastHoverPoint(b), "the cursor's ground point is known");
+        const std::string expected = Measure::formatLength(a.Distance(b));
+        check(view->dimension().labelText() == expected,
+              QStringLiteral("the label reads the true distance (\"%1\" vs \"%2\")")
+                  .arg(QString::fromStdString(view->dimension().labelText()))
+                  .arg(QString::fromStdString(expected)));
+
+        // The one copy of the banned list (bannedWords(), below) reaches this
+        // painted-not-tooltipped string too, the same way it already reaches
+        // the walkthrough panel, the hint balloon and the toast.
+        const QString labelText = QString::fromStdString(view->dimension().labelText());
+        QStringList labelOffenders;
+        for (const QString& word : bannedWords()) {
+            if (labelText.contains(word, Qt::CaseInsensitive)) labelOffenders << word;
+        }
+        check(labelOffenders.isEmpty(),
+              QStringLiteral("the dimension label uses no banned word (\"%1\"%2)")
+                  .arg(labelText,
+                       labelOffenders.isEmpty()
+                           ? QString()
+                           : QStringLiteral(" [") + labelOffenders.join(QStringLiteral(", ")) +
+                                 QStringLiteral("]")));
+
+        trigger(window, QStringLiteral("Cancel Sketch"));
+        settle(120);
+        check(!view->dimension().isShowing(),
+              "cancelling the outline clears the dimension");
     }
 
     // --- extrude asks for a height without stopping the user ------------------

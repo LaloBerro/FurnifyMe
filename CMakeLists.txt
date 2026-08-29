@@ -98,6 +98,7 @@ if(FURNIFYME_BUILD_APP)
       src/OcctViewWidget.cpp
       src/GridRenderer.cpp
       src/ui/AxisGizmo.cpp
+      src/ui/DimensionRenderer.cpp
       src/ui/Theme.cpp
       src/ui/IconSet.cpp
       src/ui/ToolChip.cpp

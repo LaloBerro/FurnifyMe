@@ -21,6 +21,12 @@
 #include <Quantity_Color.hxx>
 #include <Quantity_NameOfColor.hxx>
 #include <StdSelect_ViewerSelector3d.hxx>
+#include <TopAbs_ShapeEnum.hxx>
+#include <TopExp.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Edge.hxx>
+#include <TopoDS_Vertex.hxx>
+#include <BRep_Tool.hxx>
 #include <V3d_TypeOfVisualization.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Lin.hxx>
@@ -43,8 +49,9 @@
 #include <cmath>
 
 namespace {
-// AIS_Shape selection modes are plain integers: 0 whole shape, 4 face.
+// AIS_Shape selection modes are plain integers: 0 whole shape, 2 edge, 4 face.
 constexpr int kSelectionModeWholeShape = 0;
+constexpr int kSelectionModeEdge       = 2;
 constexpr int kSelectionModeFace       = 4;
 }  // namespace
 
@@ -112,6 +119,7 @@ void OcctViewWidget::initializeViewer()
 
     myGridRenderer.attach(myContext);
     myGridRenderer.update(myCamera.state().distance, myCamera.state().target);
+    myDimension.attach(myContext);
 
     // Perspective projection: the turntable model is distance-based, and OCCT's
     // default orthographic camera zooms by scale, which would make
@@ -256,9 +264,11 @@ void OcctViewWidget::applySelectionMode(const Handle(AIS_Shape)& shape)
 {
     if (myContext.IsNull() || shape.IsNull()) return;
 
+    const int mode = mySelectionMode == SelectionMode::Face  ? kSelectionModeFace
+                    : mySelectionMode == SelectionMode::Edge ? kSelectionModeEdge
+                                                              : kSelectionModeWholeShape;
     myContext->Deactivate(shape);
-    myContext->Activate(shape, mySelectionMode == SelectionMode::Face ? kSelectionModeFace
-                                                                     : kSelectionModeWholeShape);
+    myContext->Activate(shape, mode);
 }
 
 void OcctViewWidget::setSelectionMode(SelectionMode mode)
@@ -266,6 +276,7 @@ void OcctViewWidget::setSelectionMode(SelectionMode mode)
     if (mode == mySelectionMode) return;
 
     mySelectionMode = mode;
+    myDimension.clear();   // a hover annotation from the old mode means nothing in the new one
     if (myContext.IsNull()) return;
 
     myContext->ClearSelected(Standard_False);
@@ -285,6 +296,11 @@ void OcctViewWidget::setSketchMode(bool enabled, const gp_Pln& plane)
     mySketchMode = enabled;
     mySketchPlane = plane;
     if (enabled) clearSelection();
+    // The live segment dimension belongs to one sketch: cleared whether this
+    // one just committed or was cancelled, and again on entry so a stale
+    // edge-hover annotation cannot bleed into the sketch that follows it.
+    myDimension.clear();
+    myHasLastHoverPoint = false;
 }
 
 bool OcctViewWidget::pointOnSketchPlane(int px, int py, gp_Pnt& out) const
@@ -335,6 +351,48 @@ bool OcctViewWidget::pickWorldPoint(int px, int py, gp_Pnt& out) const
     const gp_Vec toHit(ray.Location(), out);
     if (toHit.Dot(gp_Vec(ray.Direction())) <= 0.0) return false;
     return true;
+}
+
+bool OcctViewWidget::lastHoverPoint(gp_Pnt& out) const
+{
+    if (!myHasLastHoverPoint) return false;
+    out = myLastHoverPoint;
+    return true;
+}
+
+void OcctViewWidget::updateHoverDimension()
+{
+    if (mySelectionMode != SelectionMode::Edge || myContext.IsNull() ||
+        !myContext->HasDetectedShape() ||
+        myContext->DetectedShape().ShapeType() != TopAbs_EDGE) {
+        myDimension.clear();
+        return;
+    }
+
+    const TopoDS_Edge edge = TopoDS::Edge(myContext->DetectedShape());
+    TopoDS_Vertex v1, v2;
+    TopExp::Vertices(edge, v1, v2);
+    if (v1.IsNull() || v2.IsNull()) {
+        myDimension.clear();
+        return;
+    }
+
+    const gp_Pnt from = BRep_Tool::Pnt(v1);
+    const gp_Pnt to = BRep_Tool::Pnt(v2);
+    const gp_Vec along(from, to);
+    if (along.Magnitude() < 1.0e-7) {
+        myDimension.clear();
+        return;
+    }
+
+    // Extension lines run sideways in the screen plane - perpendicular to
+    // both the edge and the direction we are looking - so they read the same
+    // whichever way the camera happens to be turned.
+    gp_Vec sideways = along.Crossed(gp_Vec(myView->Camera()->Direction()));
+    if (sideways.Magnitude() < 1.0e-7) sideways = gp_Vec(0.0, 0.0, 1.0).Crossed(along);
+    if (sideways.Magnitude() < 1.0e-7) sideways = gp_Vec(1.0, 0.0, 0.0);
+
+    myDimension.show(from, to, gp_Dir(sideways));
 }
 
 std::vector<int> OcctViewWidget::selectedSolidIds() const
@@ -586,11 +644,16 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
         // Report where the next point would land, so the rubber band and the
         // coordinate readout track the cursor before anything is committed.
         gp_Pnt onPlane;
-        if (pointOnSketchPlane(pos.x(), pos.y(), onPlane)) emit sketchCursorMoved(onPlane);
+        if (pointOnSketchPlane(pos.x(), pos.y(), onPlane)) {
+            myLastHoverPoint = onPlane;
+            myHasLastHoverPoint = true;
+            emit sketchCursorMoved(onPlane);
+        }
     } else if (!myContext.IsNull()) {
         // Hover highlight. Suppressed while sketching so the in-progress wire
         // does not fight the highlighter for attention.
         myContext->MoveTo(pos.x(), pos.y(), myView, Standard_True);
+        updateHoverDimension();
     }
 
     myLastPos = pos;

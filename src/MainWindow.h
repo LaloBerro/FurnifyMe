@@ -132,6 +132,7 @@ private:
     QAction* myExportStepAction = nullptr;
     QAction* mySolidSelectAction = nullptr;
     QAction* myFaceSelectAction = nullptr;
+    QAction* myEdgeSelectAction = nullptr;
     QAction* mySnapAction = nullptr;
     QAction* myDeleteAction = nullptr;
     QAction* myUndoAction = nullptr;

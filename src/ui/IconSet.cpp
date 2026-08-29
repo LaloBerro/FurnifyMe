@@ -81,6 +81,14 @@ void paintGlyph(QPainter& p, Glyph glyph)
             p.drawLine(6, 12, 18, 12);
             p.fillRect(QRect(7, 7, 10, 4), QBrush(p.pen().color()));
             break;
+        case Glyph::SelectEdge: {                 // cube with one edge thickened
+            p.drawRect(6, 6, 12, 12);
+            QPen thick = p.pen();
+            thick.setWidthF(3.4);
+            p.setPen(thick);
+            p.drawLine(6, 6, 18, 6);
+            break;
+        }
         case Glyph::DisplayMode:                  // half-shaded circle
             p.drawEllipse(QPoint(12, 12), 8, 8);
             p.drawLine(12, 4, 12, 20);

@@ -17,6 +17,9 @@
 #include "ViewportOverlay.h"
 #include "WalkthroughPanel.h"
 
+#include <gp_Dir.hxx>
+#include <gp_Vec.hxx>
+
 #include <QAction>
 #include <QActionGroup>
 #include <QFileDialog>
@@ -150,6 +153,10 @@ void MainWindow::buildActions()
     mySolidSelectAction->setChecked(true);
     myFaceSelectAction = new QAction(tr("Select F&aces"), this);
     myFaceSelectAction->setCheckable(true);
+    myEdgeSelectAction = new QAction(tr("Select &Edges"), this);
+    myEdgeSelectAction->setCheckable(true);
+    myEdgeSelectAction->setToolTip(tr("Pick one edge at a time\n"
+                                      "Hovering shows its length."));
 
     myDeleteAction = new QAction(tr("&Delete Selected"), this);
     myDeleteAction->setShortcut(QKeySequence::Delete);
@@ -220,9 +227,11 @@ void MainWindow::buildActions()
     auto* selectionGroup = new QActionGroup(this);
     selectionGroup->addAction(mySolidSelectAction);
     selectionGroup->addAction(myFaceSelectAction);
+    selectionGroup->addAction(myEdgeSelectAction);
     selectionGroup->setExclusive(true);
     connect(mySolidSelectAction, &QAction::triggered, this, &MainWindow::onSelectionModeChanged);
     connect(myFaceSelectAction, &QAction::triggered, this, &MainWindow::onSelectionModeChanged);
+    connect(myEdgeSelectAction, &QAction::triggered, this, &MainWindow::onSelectionModeChanged);
 
     myUnitsMillimetresAction = new QAction(tr("Millimetres"), this);
     myUnitsMillimetresAction->setCheckable(true);
@@ -298,6 +307,7 @@ void MainWindow::buildMenus()
     viewMenu->addSeparator();
     viewMenu->addAction(mySolidSelectAction);
     viewMenu->addAction(myFaceSelectAction);
+    viewMenu->addAction(myEdgeSelectAction);
     viewMenu->addAction(myItemsPanelAction);
     viewMenu->addSeparator();
     QMenu* unitsMenu = viewMenu->addMenu(tr("Units"));
@@ -368,6 +378,7 @@ void MainWindow::buildOverlay()
         {mySnapAction,         IconSet::Glyph::Snap},
         {mySolidSelectAction,  IconSet::Glyph::SelectSolid},
         {myFaceSelectAction,   IconSet::Glyph::SelectFace},
+        {myEdgeSelectAction,   IconSet::Glyph::SelectEdge},
     });
 
     cluster(ViewportOverlay::Anchor::TopLeft, {
@@ -677,6 +688,27 @@ void MainWindow::onSketchCursorMoved(const gp_Pnt& point)
     statusBar()->showMessage(tr("Cursor at %1, %2")
                                  .arg(QString::fromStdString(Measure::formatLength(point.X())),
                                       QString::fromStdString(Measure::formatLength(point.Y()))));
+
+    // The live length of the segment being dragged out - the last placed
+    // point to the cursor. Only one call site touches this in
+    // OcctViewWidget's own hover branch too (a selected edge); this is the
+    // other of the two, per DimensionRenderer's contract.
+    if (mySketch.points().empty()) {
+        myView->dimension().clear();
+        return;
+    }
+    const gp_Pnt& last = mySketch.points().back();
+    const gp_Vec segment(last, point);
+    if (segment.Magnitude() < 1.0e-4) {
+        myView->dimension().clear();
+        return;
+    }
+    // Sideways within the sketch plane - perpendicular to both the segment
+    // and the plane's own normal - so the extension lines lie flat on the
+    // plane the user is actually drawing on.
+    gp_Vec sideways = gp_Vec(mySketch.plane().Axis().Direction()).Crossed(segment);
+    if (sideways.Magnitude() < 1.0e-7) sideways = gp_Vec(1.0, 0.0, 0.0);
+    myView->dimension().show(last, point, gp_Dir(sideways));
 }
 
 void MainWindow::onStartSketch()
@@ -904,12 +936,18 @@ void MainWindow::onExportStep()
 
 void MainWindow::onSelectionModeChanged()
 {
-    myView->setSelectionMode(myFaceSelectAction->isChecked() ? OcctViewWidget::SelectionMode::Face
-                                                             : OcctViewWidget::SelectionMode::Solid);
+    const OcctViewWidget::SelectionMode mode =
+        myFaceSelectAction->isChecked() ? OcctViewWidget::SelectionMode::Face
+        : myEdgeSelectAction->isChecked() ? OcctViewWidget::SelectionMode::Edge
+                                          : OcctViewWidget::SelectionMode::Solid;
+    myView->setSelectionMode(mode);
     if (myFaceSelectAction->isChecked()) recordProgress("faceMode.used");
-    statusBar()->showMessage(myFaceSelectAction->isChecked()
-                                 ? tr("Face selection — hovering highlights one face at a time")
-                                 : tr("Body selection — click whole bodies to combine them"));
+    statusBar()->showMessage(
+        myFaceSelectAction->isChecked()
+            ? tr("Face selection — hovering highlights one face at a time")
+        : myEdgeSelectAction->isChecked()
+            ? tr("Edge selection — hovering shows one edge's length at a time")
+            : tr("Body selection — click whole bodies to combine them"));
     // Neither mySolidSelectAction nor myFaceSelectAction is touched by
     // updateActions() itself (their checked state is handled entirely by the
     // QActionGroup they belong to), so this cannot recurse back in here -

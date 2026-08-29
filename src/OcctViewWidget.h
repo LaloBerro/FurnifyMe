@@ -10,6 +10,7 @@
 #include <gp_Pnt.hxx>
 
 #include "CameraController.h"
+#include "DimensionRenderer.h"
 #include "GridRenderer.h"
 
 #include <QPoint>
@@ -27,7 +28,7 @@ class OcctViewWidget : public QWidget {
     Q_OBJECT
 
 public:
-    enum class SelectionMode { Solid, Face };
+    enum class SelectionMode { Solid, Face, Edge };
 
     explicit OcctViewWidget(QWidget* parent = nullptr);
     ~OcctViewWidget() override;
@@ -71,6 +72,17 @@ public:
     void setSnap(bool enabled, double step);
     bool snapEnabled() const { return mySnapEnabled; }
     double snapStep() const { return mySnapStep; }
+
+    // The live length annotation - the last placed sketch point out to the
+    // cursor while sketching, or a hovered edge in edge-selection mode. One
+    // instance serves both call sites; see DimensionRenderer.
+    DimensionRenderer& dimension() { return myDimension; }
+
+    // The most recent point reported through sketchCursorMoved, so a test can
+    // compute the true distance independently rather than trusting the
+    // renderer as its own oracle. False before any cursor move on the sketch
+    // plane has happened.
+    bool lastHoverPoint(gp_Pnt& out) const;
 
     // Document ids of the selected solids, deduplicated (face-mode selection can
     // hit several faces of one solid).
@@ -133,6 +145,9 @@ private:
     void applySelectionMode(const Handle(AIS_Shape)& shape);
     void applyCameraState();
     void stopCameraAnimation();
+    // Shows or clears the edge-hover dimension from whatever the last MoveTo
+    // detected. A no-op outside edge-selection mode.
+    void updateHoverDimension();
 
     Handle(V3d_Viewer) myViewer;
     Handle(V3d_View) myView;
@@ -141,6 +156,7 @@ private:
 
     CameraController myCamera;
     GridRenderer myGridRenderer;
+    DimensionRenderer myDimension;
 
     std::map<int, Handle(AIS_Shape)> mySolids;
 
@@ -152,6 +168,9 @@ private:
     gp_Pln mySketchPlane;
     bool mySnapEnabled = true;
     double mySnapStep = 10.0;      // matches the drawn grid
+
+    gp_Pnt myLastHoverPoint{0.0, 0.0, 0.0};
+    bool myHasLastHoverPoint = false;
 
     QPoint myLastPos;
     bool myOrbiting = false;
