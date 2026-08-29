@@ -134,12 +134,26 @@ QSize Toast::sizeHint() const
     const QRect bounds = metrics.boundingRect(QRect(0, 0, std::max(textWidth, 1), 1000),
                                               Qt::TextWordWrap, myText);
     const int minHeight = myHasUndo ? kUndoHeight + kPad * 2 : 0;
-    return QSize(kWidth, std::max(bounds.height() + kPad * 2, minHeight));
+    // Grown by Theme::surfaceShadowMargin() per side beyond the content size
+    // computed above - see paintEvent() and undoRect() for where that margin
+    // goes on the inside. ToastHost::reposition() resizes this widget
+    // straight from this return value, the same way WalkthroughPanel's
+    // constructor uses its own sizeHint() directly.
+    const int margin = Theme::surfaceShadowMargin();
+    return QSize(kWidth + margin * 2, std::max(bounds.height() + kPad * 2, minHeight) + margin * 2);
 }
 
 QRect Toast::undoRect() const
 {
-    return QRect(width() - kPad - kUndoWidth, (height() - kUndoHeight) / 2,
+    // Local coordinates within this (now grown) widget - kPad from the
+    // visible card's right edge and vertically centred within the card, not
+    // flush against this widget's own outer bounds. syncUndoGeometry() below
+    // still just translates this by pos(), unchanged - the margin lives
+    // entirely in this one formula, the same pattern as
+    // WalkthroughPanel::skipRect().
+    const int margin = Theme::surfaceShadowMargin();
+    return QRect(width() - margin - kPad - kUndoWidth,
+                margin + (height() - margin * 2 - kUndoHeight) / 2,
                 kUndoWidth, kUndoHeight);
 }
 
@@ -205,16 +219,22 @@ void Toast::paintEvent(QPaintEvent* /*event*/)
     // message, and the Undo pill alike.
     painter.setOpacity(myOpacity);
 
-    QPainterPath panel;
-    panel.addRoundedRect(rect().adjusted(0, 0, -1, -1), 8.0, 8.0);
-    painter.fillPath(panel, Theme::panel());
-    painter.setPen(QPen(myKind == Kind::Failure ? Theme::textMuted() : Theme::accent(), 1.0));
-    painter.drawPath(panel);
+    // `body` is the visible card, inset from this widget's own bounds by
+    // Theme::surfaceShadowMargin() - see sizeHint() for the growth and
+    // undoRect() for the sibling pill that also has to agree on where it
+    // landed. Replaces the old kind-tinted border (accent() for a Note,
+    // textMuted() for a Failure) with the one shared surface every floating
+    // card now uses - nothing in this suite asserted that distinction, and
+    // the Note/Failure difference that matters (how long each stays up) is
+    // untouched.
+    const int margin = Theme::surfaceShadowMargin();
+    const QRect body = rect().adjusted(margin, margin, -margin, -margin);
+    Theme::paintSurface(painter, body, 8);
 
-    const int textWidth = width() - kPad * 2 - (myHasUndo ? kUndoWidth + kPad : 0);
+    const int textWidth = body.width() - kPad * 2 - (myHasUndo ? kUndoWidth + kPad : 0);
     painter.setFont(Theme::bodyFont());
     painter.setPen(Theme::text());
-    painter.drawText(QRect(kPad, 0, textWidth, height()),
+    painter.drawText(QRect(body.left() + kPad, body.top(), textWidth, body.height()),
                      Qt::TextWordWrap | Qt::AlignVCenter | Qt::AlignLeft, myText);
 
     // Painted here rather than by the sibling UndoControl - see that class's

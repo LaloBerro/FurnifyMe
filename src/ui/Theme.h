@@ -5,9 +5,11 @@
 #include <QColor>
 #include <QEasingCurve>
 #include <QFont>
+#include <QRect>
 #include <QString>
 
 class QApplication;
+class QPainter;
 
 namespace Theme {
 
@@ -56,6 +58,24 @@ QFont badgeFont();      // shortcut badges
 // constant).
 int motionMs();               // 160
 QEasingCurve motionCurve();   // OutCubic
+
+// The one implementation of the floating-surface family: fills `rect` with
+// panel(), strokes a 1px border(), rounds the corners to `radius`, and paints
+// a soft shadow ring in the margin around `rect` - never outside it, since a
+// widget composited over OcctViewWidget's own GL surface cannot paint past
+// its own bounds. Every floating card in the shell (WalkthroughPanel,
+// HintBalloon, Toast, ShortcutSheet) calls this for its background instead
+// of hand-rolling its own; a chip's body counts too, painted over before its
+// state colour and content. `rect` is the surface itself - callers reserve
+// surfaceShadowMargin() px around it first (see below) so the shadow has
+// somewhere to paint.
+void paintSurface(QPainter& p, const QRect& rect, int radius = 8);
+
+// How many pixels of margin a widget must reserve around its content for the
+// soft shadow paintSurface() paints. A caller grows its own size by this much
+// per side and paints its surface rect inset by the same amount - see
+// paintSurface() above.
+int surfaceShadowMargin();   // 3
 
 // Installs the palette, the bundled font and the stylesheet. Call once, before
 // any window is built.

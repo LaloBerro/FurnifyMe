@@ -13,7 +13,6 @@
 #include <QMenuBar>
 #include <QMouseEvent>
 #include <QPainter>
-#include <QPainterPath>
 #include <QWidget>
 
 #include <algorithm>
@@ -160,7 +159,11 @@ void ShortcutSheet::showSheet()
         height += kGroupHeight + kRowHeight * static_cast<int>(group.rows.size());
     }
 
-    resize(width, height);
+    // Grown by Theme::surfaceShadowMargin() per side beyond the content size
+    // computed above - see paintEvent() for where that margin goes on the
+    // inside. No sibling control depends on this widget's geometry.
+    const int margin = Theme::surfaceShadowMargin();
+    resize(width + margin * 2, height + margin * 2);
     recentre();
     show();
     raise();
@@ -242,27 +245,27 @@ void ShortcutSheet::paintEvent(QPaintEvent* /*event*/)
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
 
-    QPainterPath panel;
-    panel.addRoundedRect(rect().adjusted(0, 0, -1, -1), 10.0, 10.0);
-    painter.fillPath(panel, Theme::panel());
-    painter.setPen(QPen(Theme::border(), 1.0));
-    painter.drawPath(panel);
+    // `body` is the visible card, inset from this widget's own bounds by
+    // Theme::surfaceShadowMargin() - see showSheet() for the growth.
+    const int margin = Theme::surfaceShadowMargin();
+    const QRect body = rect().adjusted(margin, margin, -margin, -margin);
+    Theme::paintSurface(painter, body, 10);
 
     painter.setFont(Theme::titleFont());
     painter.setPen(Theme::text());
-    painter.drawText(QRect(kPadding, 0, width() - kPadding * 2, kTitleHeight),
+    painter.drawText(QRect(body.left() + kPadding, body.top(), body.width() - kPadding * 2, kTitleHeight),
                      Qt::AlignVCenter | Qt::AlignLeft, tr("Keyboard shortcuts"));
 
-    int y = kTitleHeight;
+    int y = body.top() + kTitleHeight;
     for (const Group& group : myGroups) {
         painter.setFont(groupFont());
         painter.setPen(Theme::accent());
-        painter.drawText(QRect(kPadding, y, width() - kPadding * 2, kGroupHeight),
+        painter.drawText(QRect(body.left() + kPadding, y, body.width() - kPadding * 2, kGroupHeight),
                          Qt::AlignBottom | Qt::AlignLeft, group.title);
         y += kGroupHeight;
 
         for (const Row& row : group.rows) {
-            const QRect line(kPadding, y, width() - kPadding * 2, kRowHeight);
+            const QRect line(body.left() + kPadding, y, body.width() - kPadding * 2, kRowHeight);
             painter.setFont(Theme::bodyFont());
             painter.setPen(Theme::text());
             painter.drawText(line, Qt::AlignVCenter | Qt::AlignLeft, row.label);

@@ -13,7 +13,6 @@
 #include <QFontMetrics>
 #include <QMouseEvent>
 #include <QPainter>
-#include <QPainterPath>
 
 namespace {
 constexpr int kPad = 12;
@@ -184,7 +183,13 @@ void HintBalloon::reposition()
     const QFontMetrics metrics(Theme::bodyFont());
     const QRect bounds = metrics.boundingRect(QRect(0, 0, kWidth - kPad * 2, 1000),
                                               Qt::TextWordWrap, myText);
-    resize(kWidth, bounds.height() + kPad * 2 + 22);
+    // Grown by Theme::surfaceShadowMargin() per side beyond the content size
+    // computed above - see paintEvent() for where that margin goes on the
+    // inside. No sibling control depends on this widget's geometry, unlike
+    // WalkthroughPanel's skip pill or Toast's Undo pill, so there is nothing
+    // else here to keep in step.
+    const int margin = Theme::surfaceShadowMargin();
+    resize(kWidth + margin * 2, bounds.height() + kPad * 2 + 22 + margin * 2);
 
     int x = (parentWidget()->width() - width()) / 2;
     int y = parentWidget()->height() - height() - 90;
@@ -259,20 +264,21 @@ void HintBalloon::paintEvent(QPaintEvent* /*event*/)
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
 
-    QPainterPath panel;
-    panel.addRoundedRect(rect().adjusted(0, 0, -1, -1), 8.0, 8.0);
-    painter.fillPath(panel, Theme::panel());
-    painter.setPen(QPen(Theme::accent(), 1.0));
-    painter.drawPath(panel);
+    // `body` is the visible card, inset from this widget's own bounds by
+    // Theme::surfaceShadowMargin() - see reposition() for the growth.
+    const int margin = Theme::surfaceShadowMargin();
+    const QRect body = rect().adjusted(margin, margin, -margin, -margin);
+    Theme::paintSurface(painter, body, 8);
 
     painter.setFont(Theme::bodyFont());
     painter.setPen(Theme::text());
-    painter.drawText(QRect(kPad, kPad, width() - kPad * 2, height() - kPad * 2 - 20),
+    painter.drawText(QRect(body.left() + kPad, body.top() + kPad, body.width() - kPad * 2,
+                           body.height() - kPad * 2 - 20),
                      Qt::TextWordWrap | Qt::AlignTop | Qt::AlignLeft, myText);
 
     painter.setFont(Theme::labelFont());
     painter.setPen(Theme::accent());
-    painter.drawText(QRect(kPad, height() - 26, width() - kPad * 2, 20),
+    painter.drawText(QRect(body.left() + kPad, height() - margin - 26, body.width() - kPad * 2, 20),
                      Qt::AlignRight | Qt::AlignVCenter, tr("got it"));
 }
 

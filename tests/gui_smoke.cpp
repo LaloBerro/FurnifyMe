@@ -40,6 +40,7 @@
 #include <QDialog>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QEnterEvent>
 #include <QImage>
 #include <QKeyEvent>
 #include <QLabel>
@@ -2939,12 +2940,17 @@ int main(int argc, char* argv[])
             OcctViewWidget* secondView = second.view();
 
             // skipRect()'s formula, in the panel's own local coordinates:
-            // width() - 14 - 34, 8, 34, 18 (see WalkthroughPanel.cpp). Its
+            // width() - margin - 14 - 34, margin + 8, 34, 18 (see
+            // WalkthroughPanel.cpp) - margin being
+            // Theme::surfaceShadowMargin(), the room the panel now reserves
+            // around its visible card for paintSurface()'s shadow. Its
             // centre, translated into the shared parent's coordinates the
             // way syncSkipGeometry() does, is what a real click on it would
             // land on.
+            const int shadowMargin = Theme::surfaceShadowMargin();
             const QPoint skipCentre =
-                secondGuide->pos() + QPoint(secondGuide->width() - 31, 17);
+                secondGuide->pos() +
+                QPoint(secondGuide->width() - shadowMargin - 31, shadowMargin + 17);
             QWidget* hitSkip = secondView->childAt(skipCentre);
             // "not the panel" alone is the check that let an AxisGizmo
             // mis-hit through once already (see the fix-round report) - it
@@ -3244,6 +3250,72 @@ int main(int argc, char* argv[])
         }
     }
 
+    // --- Graphite: exact tokens, chip anatomy, and the shared surface ---------
+    {
+        // A drive-by "cleanup" of the palette must fail loudly - these are
+        // the exact Phase 5 values, not incidental ones a refactor could
+        // silently drift.
+        check(Theme::chip() == QColor(QStringLiteral("#2c2c31")),
+              "chip() is the Graphite token");
+        check(Theme::gridMinor() == QColor(QStringLiteral("#3e3e44")),
+              "gridMinor() is the Graphite token");
+        check(Theme::gridMajor() == QColor(QStringLiteral("#4d4d55")),
+              "gridMajor() is the Graphite token");
+        check(Theme::surfaceShadowMargin() == 3,
+              "surfaceShadowMargin() reserves 3px for paintSurface()'s shadow");
+
+        // A standalone chip driven by its own QAction, exactly like "chips
+        // mirror their action" above - not one of MainWindow's real chips.
+        // A real chip's enabled/checked state is policy that
+        // MainWindow::updateActions() can recompute at any appStateChanged,
+        // which would fight a test that pokes the action directly and could
+        // silently overwrite it back before the next grab(). The probe is
+        // driven by nothing but this block.
+        QAction probe(QStringLiteral("Probe chip"));
+        probe.setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+P")));
+        ToolChip probeChip(&probe, IconSet::Glyph::Sketch);
+        probeChip.resize(probeChip.sizeHint());
+
+        // normal vs hovered - a real Enter/Leave delivered the way Qt's own
+        // hit-testing would, not myHovered flipped by hand.
+        const QImage normal = probeChip.grab().toImage();
+        const QPointF centre(probeChip.width() / 2.0, probeChip.height() / 2.0);
+        QEnterEvent enter(centre, centre, probeChip.mapToGlobal(centre.toPoint()));
+        QCoreApplication::sendEvent(&probeChip, &enter);
+        settle(50);
+        const QImage hovered = probeChip.grab().toImage();
+        check(hovered != normal, "hovering a chip repaints it distinctly (chipHover())");
+        QEvent leave(QEvent::Leave);
+        QCoreApplication::sendEvent(&probeChip, &leave);
+        settle(50);
+
+        // enabled vs disabled - glyph, label and the shortcut badge (the
+        // probe carries one, so it is actually on screen to compare) all dim
+        // to textDisabled() together.
+        const QImage enabledImg = probeChip.grab().toImage();
+        probe.setEnabled(false);
+        settle(50);
+        const QImage disabledImg = probeChip.grab().toImage();
+        check(disabledImg != enabledImg,
+              "a disabled chip repaints distinctly (glyph, label and badge all "
+              "dim to textDisabled())");
+        probe.setEnabled(true);
+        settle(50);
+
+        // checked vs unchecked - the inset accent() ring on top of the
+        // border() every chip now always carries, not a swapped border.
+        probe.setCheckable(true);
+        probe.setChecked(false);
+        settle(50);
+        const QImage uncheckedImg = probeChip.grab().toImage();
+        probe.setChecked(true);
+        settle(50);
+        const QImage checkedImg = probeChip.grab().toImage();
+        check(checkedImg != uncheckedImg,
+              "a checked chip repaints distinctly (chipActive() fill plus an "
+              "inset accent() ring)");
+    }
+
     // --- Show tips again restores the walkthrough for a returning user too ---
     {
         // Every walkthrough check above uses persistProgress=false, so
@@ -3328,8 +3400,12 @@ int main(int argc, char* argv[])
                       returningGuide->skipControl()->isVisible(),
                   "the restored panel's skip control is visible again");
             if (returningGuide && returningGuide->skipControl()) {
+                // Same margin-adjusted formula as the earlier skip-control
+                // check above - see the comment there.
+                const int shadowMargin = Theme::surfaceShadowMargin();
                 const QPoint skipCentre =
-                    returningGuide->pos() + QPoint(returningGuide->width() - 31, 17);
+                    returningGuide->pos() +
+                    QPoint(returningGuide->width() - shadowMargin - 31, shadowMargin + 17);
                 check(returningView->childAt(skipCentre) == returningGuide->skipControl(),
                       "and a real click at its centre finds the skip control itself");
             }

@@ -3,6 +3,8 @@
 #include <QApplication>
 #include <QFont>
 #include <QFontDatabase>
+#include <QPainter>
+#include <QPainterPath>
 #include <QPalette>
 
 // Deliberately at global scope. Q_INIT_RESOURCE declares the initialiser as an
@@ -21,7 +23,7 @@ namespace Theme {
 
 QColor chrome()       { return QColor("#1b1b1d"); }
 QColor panel()        { return QColor("#232326"); }
-QColor chip()         { return QColor("#2b2b2e"); }
+QColor chip()         { return QColor("#2c2c31"); }
 QColor chipHover()    { return QColor("#34343a"); }
 QColor chipActive()   { return QColor("#3d3d45"); }
 QColor accent()       { return QColor("#3d7eff"); }
@@ -30,8 +32,8 @@ QColor textMuted()    { return QColor("#9a9aa2"); }
 QColor textDisabled() { return QColor("#5c5c64"); }
 QColor border()       { return QColor("#3a3a40"); }
 QColor viewport()     { return QColor("#45454b"); }
-QColor gridMinor()    { return QColor("#3a3a40"); }
-QColor gridMajor()    { return QColor("#4a4a52"); }
+QColor gridMinor()    { return QColor("#3e3e44"); }
+QColor gridMajor()    { return QColor("#4d4d55"); }
 QColor axisX()        { return QColor("#7a4a4a"); }   // muted red
 QColor axisY()        { return QColor("#4a7a4a"); }   // muted green
 QColor sketchPointMarker() { return QColor("#ff4fc3"); } // magenta - unclaimed
@@ -72,6 +74,39 @@ QFont badgeFont() { return scaledFont(kBadgePt, /*bold=*/false); }
 
 int motionMs() { return 160; }
 QEasingCurve motionCurve() { return QEasingCurve(QEasingCurve::OutCubic); }
+
+int surfaceShadowMargin() { return 3; }
+
+void paintSurface(QPainter& p, const QRect& rect, int radius)
+{
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing, true);
+
+    // The soft shadow: concentric rounded-rect strokes, one pixel apart,
+    // fading out as they move away from `rect` - never past
+    // surfaceShadowMargin() px, which is exactly how far a caller grows its
+    // own bounds around this rect, so the ring never spills past the
+    // widget's own edge. Drawn before the fill below, which then covers the
+    // inner ones and leaves only the outward-fading part visible.
+    const int margin = surfaceShadowMargin();
+    for (int i = margin; i >= 1; --i) {
+        const int alpha = 36 - (i - 1) * 10;   // denser near the surface, faint at the rim
+        QPainterPath ring;
+        ring.addRoundedRect(rect.adjusted(-i, -i, i, i), radius + i, radius + i);
+        p.setPen(QPen(QColor(0, 0, 0, alpha), 1.0));
+        p.setBrush(Qt::NoBrush);
+        p.drawPath(ring);
+    }
+
+    QPainterPath surface;
+    surface.addRoundedRect(rect, radius, radius);
+    p.fillPath(surface, panel());
+    p.setPen(QPen(border(), 1.0));
+    p.setBrush(Qt::NoBrush);
+    p.drawPath(surface);
+
+    p.restore();
+}
 
 void apply(QApplication& app)
 {
