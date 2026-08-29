@@ -1,7 +1,9 @@
 #include "Toast.h"
 
+#include "HintBalloon.h"
 #include "OcctViewWidget.h"
 #include "Theme.h"
+#include "WalkthroughPanel.h"
 
 #include <QEvent>
 #include <QFontMetrics>
@@ -24,6 +26,7 @@ constexpr int kWidth = 360;
 constexpr int kUndoWidth = 64;
 constexpr int kUndoHeight = 26;
 constexpr int kBottomMargin = 24;
+constexpr int kClearance = 8;   // gap left when stepping around the guide
 
 constexpr int kNoteMs = 4000;
 constexpr int kFailureMs = 8000;
@@ -35,6 +38,12 @@ constexpr int kFailureMs = 8000;
 // would be just as unreachable by a real click as the transparent toast body
 // itself, since Qt::WA_TransparentForMouseEvents excludes a widget's entire
 // subtree from hit-testing, not just the widget carrying it.
+//
+// Paints nothing of its own, exactly like SkipControl - Toast::paintEvent()
+// draws the pill and the "Undo" label at this control's own rect (undoRect()),
+// so there is exactly one place that string is spelled out (see
+// Toast::undoLabel()) rather than one copy the sweep checks and a second one
+// that is actually on screen.
 class UndoControl : public QWidget {
 public:
     UndoControl(std::function<void()> onClick, QWidget* parent)
@@ -54,17 +63,6 @@ protected:
     {
         event->accept();
         if (myOnClick) myOnClick();
-    }
-
-    void paintEvent(QPaintEvent* /*event*/) override
-    {
-        QPainter painter(this);
-        painter.setRenderHint(QPainter::Antialiasing, true);
-        QPainterPath bg;
-        bg.addRoundedRect(rect().adjusted(0, 0, -1, -1), 5.0, 5.0);
-        painter.fillPath(bg, Theme::chipHover());
-        painter.setPen(Theme::accent());
-        painter.drawText(rect(), Qt::AlignCenter, QObject::tr("Undo"));
     }
 
 private:
@@ -175,11 +173,28 @@ void Toast::paintEvent(QPaintEvent* /*event*/)
     painter.setPen(Theme::text());
     painter.drawText(QRect(kPad, 0, textWidth, height()),
                      Qt::TextWordWrap | Qt::AlignVCenter | Qt::AlignLeft, myText);
+
+    // Painted here rather than by the sibling UndoControl - see that class's
+    // comment for why, and undoLabel() for why this is the only place the
+    // word "Undo" is spelled out.
+    if (myHasUndo) {
+        const QRect r = undoRect();
+        QPainterPath pill;
+        pill.addRoundedRect(r, 5.0, 5.0);
+        painter.fillPath(pill, Theme::chipHover());
+        painter.setPen(Theme::accent());
+        painter.drawText(r, Qt::AlignCenter, undoLabel());
+    }
+}
+
+QString Toast::undoLabel() const
+{
+    return tr("Undo");
 }
 
 QStringList Toast::paintedTexts() const
 {
-    QStringList texts{ QObject::tr("Undo") };
+    QStringList texts{ undoLabel() };
     if (!myText.isEmpty()) texts << myText;
     return texts;
 }
@@ -230,6 +245,11 @@ QWidget* ToastHost::undoControl() const
     return myToast ? myToast->undoControl() : nullptr;
 }
 
+int ToastHost::remainingMs() const
+{
+    return myTimer ? myTimer->remainingTime() : -1;
+}
+
 void ToastHost::dismiss()
 {
     myTimer->stop();
@@ -240,9 +260,38 @@ void ToastHost::reposition()
 {
     if (!myViewport || !myToast) return;
     myToast->resize(myToast->sizeHint());
-    const int x = (myViewport->width() - myToast->width()) / 2;
-    const int y = myViewport->height() - myToast->height() - kBottomMargin;
+    int x = (myViewport->width() - myToast->width()) / 2;
+    int y = myViewport->height() - myToast->height() - kBottomMargin;
+
+    // The walkthrough guide is the thing teaching a newcomer what to do; the
+    // toast is transient, so it is the one that steps aside here - never the
+    // reverse. Same stepAside shape HintBalloon::reposition() uses, applied
+    // from the other direction: beside the guide when that fits, above it
+    // when it does not.
+    if (const WalkthroughPanel* guide = myViewport->findChild<WalkthroughPanel*>()) {
+        if (guide->isVisible()) {
+            const QRect obstacle = guide->geometry();
+            if (QRect(x, y, myToast->width(), myToast->height()).intersects(obstacle)) {
+                const int beside = obstacle.left() - kClearance - myToast->width();
+                if (beside >= kClearance) {
+                    x = beside;
+                } else {
+                    y = std::max(0, obstacle.top() - kClearance - myToast->height());
+                }
+            }
+        }
+    }
+
     myToast->move(x, y);
+
+    // A hint balloon may already be up and have no way to know this toast
+    // just appeared (or just moved) underneath it - reconsider() is what
+    // normally re-places a live balloon, but it only runs on
+    // appStateChanged, which showing a toast does not itself emit. Nudge it
+    // directly rather than waiting for the next unrelated state change.
+    if (HintBalloon* balloon = myViewport->findChild<HintBalloon*>()) {
+        balloon->reposition();
+    }
 }
 
 bool ToastHost::eventFilter(QObject* watched, QEvent* event)

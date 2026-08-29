@@ -504,6 +504,23 @@ int main(int argc, char* argv[])
                   "a second message replaces the first rather than stacking");
             check(toasts->currentText() == QStringLiteral("Second"),
                   "the newest message is the one showing");
+
+            // The 4000/8000 ms split is the contract - a Failure carries a
+            // sentence the user must read and act on, which is the whole
+            // reason it outlives a Note. Asserted against the armed timer
+            // rather than by actually waiting 4-8 real seconds for each one
+            // to elapse, which would meaningfully slow this suite for a
+            // property that a single read of the timer proves just as well.
+            toasts->show(QStringLiteral("Note lifetime check"), Toast::Kind::Note, false);
+            const int noteMs = toasts->remainingMs();
+            check(noteMs > 3500 && noteMs <= 4000,
+                  QStringLiteral("a Note toast is timed for 4000 ms (got %1)").arg(noteMs));
+
+            toasts->show(QStringLiteral("Failure lifetime check"), Toast::Kind::Failure, false);
+            const int failureMs = toasts->remainingMs();
+            check(failureMs > 7500 && failureMs <= 8000,
+                  QStringLiteral("a Failure outlives a Note - timed for 8000 ms (got %1)")
+                      .arg(failureMs));
         }
     }
 

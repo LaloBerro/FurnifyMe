@@ -76,6 +76,12 @@ protected:
 private:
     void syncUndoGeometry();
     QRect undoRect() const;
+    // The one place "Undo" is spelled out - paintEvent() paints it at
+    // undoRect() and paintedTexts() reads the same call, so the banned-word
+    // sweep can never be guarding a different copy than the one on screen
+    // (see WalkthroughPanel's "skip" label, painted by the panel itself for
+    // exactly this reason).
+    QString undoLabel() const;
 
     QString myText;
     Kind myKind = Kind::Note;
@@ -105,6 +111,12 @@ public:
     Toast* toast() const { return myToast; }
     QWidget* undoControl() const;
 
+    // The live dismiss countdown in ms, or -1 when nothing is showing.
+    // Exposed so gui_smoke can assert the Note/Failure duration contract (the
+    // whole reason a Failure outlives a Note) by reading the armed timer
+    // rather than actually waiting 4-8 real seconds for it to elapse.
+    int remainingMs() const;
+
 signals:
     void undoRequested();
 
@@ -114,6 +126,10 @@ private:
     void dismiss();
 
     OcctViewWidget* myViewport = nullptr;
-    Toast* myToast = nullptr;
+    // A QPointer, not a raw pointer: myToast is owned by the viewport (it is
+    // parented to it, per the class comment above), not by ToastHost, so if
+    // the viewport ever tore down first this would otherwise dangle - the
+    // same reasoning as Toast::myUndo.
+    QPointer<Toast> myToast;
     QTimer* myTimer = nullptr;
 };
