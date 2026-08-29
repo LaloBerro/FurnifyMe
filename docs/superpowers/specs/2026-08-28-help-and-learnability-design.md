@@ -1,7 +1,7 @@
 # Phase 2: Help and learnability — design
 
 Date: 2026-08-28
-Status: approved in chat, awaiting spec review
+Status: implemented 2026-08-29
 
 Phase 2 of three. Phase 1 (language and numbers) is merged; Phase 3 is feedback and polish.
 This phase adds the surfaces that teach, and the machinery that makes them stop.

@@ -181,8 +181,10 @@ Source files under `src/`, plus `tests/`:
 
 | File | Role |
 |---|---|
-| `ModelingOps.{h,cpp}` | pure geometry, **zero Qt includes** — the only file that exists so far |
+| `ModelingOps.{h,cpp}` | pure geometry, **zero Qt includes** |
 | `CameraController.{h,cpp}` | turntable camera maths, Qt-free, headless-tested |
+| `Measure.{h,cpp}` | every user-facing length and size string, Qt-free, headless-tested |
+| `UserProgress.{h,cpp}` | counts what the user has done; Qt-free, storage injected |
 | `GridRenderer.{h,cpp}` | adaptive fading ground grid (app layer) |
 | `main.cpp` | `QApplication` + `MainWindow` |
 | `MainWindow.{h,cpp}` | menus, toolbar, mode switching |
@@ -195,6 +197,10 @@ Source files under `src/`, plus `tests/`:
 | `ui/ToolCluster.{h,cpp}` | a vertical stack of chips |
 | `ui/ViewportOverlay.{h,cpp}` | anchors clusters to viewport edges; not a widget |
 | `ui/ItemsPanel.{h,cpp}` | solid list with visibility toggles |
+| `ui/AxisGizmo.{h,cpp}` | Unity-style orientation gizmo; each axis tip snaps the view |
+| `ui/WalkthroughPanel.{h,cpp}` | the guided first build; steps derived from live state |
+| `ui/HintBalloon.{h,cpp}` | one hint at a time, retired when its trigger stops holding |
+| `ui/ShortcutSheet.{h,cpp}` | shortcut list generated from the window's own `QAction`s |
 
 ### The vocabulary — enforced by test
 
@@ -236,6 +242,75 @@ those are on the `furnifyme` app target only.
 `applyBoolean()` returns a `BooleanResult{ok, shape, error}` rather than a bare shape,
 specifically so a failed boolean cannot be mistaken for a success. Surface `error` in the
 UI; never continue past `ok == false`.
+
+### Teaching surfaces, and how they go quiet
+
+`UserProgress` (`src/UserProgress.h`, Qt-free) counts what the user has actually done.
+Three completions of an action means it is learned, and that action's hint never appears
+again. **Storage is injected, not built in:** `MainWindow` persists `serialize()` through
+`QSettings`, while `gui_smoke` constructs `MainWindow(nullptr, false)` and never touches
+the real store. A suite whose result depended on how often the developer had run the app
+would not be a suite. The one place the suite does exercise persistence — the
+returning-user path, which is decided inside the constructor before `progress()` is
+reachable — goes through `ScopedTestSettings`, an RAII guard that swaps in an ini file
+under a temp directory so nothing reaches the registry.
+
+Four surfaces teach, and the counter governs all of them:
+
+| Surface | Appears | Goes quiet |
+|---|---|---|
+| `WalkthroughPanel` | first run, bottom right of the viewport | on completion or skip |
+| `HintBalloon` | when a capability first becomes available this session | after 3 completions |
+| `ShortcutSheet` | on demand, `?` | never — it is on-demand |
+| Tooltips | on hover | never |
+
+`Help → Show tips again` resets the store and brings the first two back, which is how you
+demonstrate the app to somebody without reinstalling it. It genuinely restores: the
+walkthrough panel is **always constructed** and decides its own visibility, because a panel
+built only for un-learned users cannot be restored without a restart.
+
+Three rules hold this together, and each was learned by getting it wrong first:
+
+- **Derive state; never store a cursor.** `WalkthroughPanel` recomputes which steps are
+  satisfied from live application state on each `appStateChanged()`. A stored cursor is a
+  second source of truth and it drifts. The one piece of remembered state is
+  `myBodyBaseline`, a per-session body count captured whenever the panel transitions into
+  showing, so step 4 means "a body was made since the guide appeared" rather than "a body
+  exists" — without it, `Show tips again` re-completes the walkthrough the instant it
+  restores it.
+- **A hint retires when its own trigger stops holding.** One predicate, `conditionHolds()`,
+  both raises a hint and retires it, so the two can never drift apart. That single rule
+  covers the spec's "dismissed by performing the action" and "dismissed by the capability
+  going away" at once. Note that it only runs when something emits `appStateChanged()` —
+  wiring a new hint means checking that the state it watches actually emits.
+- **Generate documentation, never write it twice.** `ShortcutSheet` builds its rows from
+  the window's own `QAction`s, so it cannot list a stale binding, and `gui_smoke` asserts
+  the row count against the same enumeration. Painted copy is invisible to the banned-word
+  sweep, so `WalkthroughPanel::paintedTexts()` and `HintBalloon::paintedTexts()` expose it —
+  and both are sourced from the same strings the widget paints, never a second copy that
+  only the sweep sees.
+
+`MainWindow::appStateChanged()` fires at the end of `updateActions()`. Slots on it may read
+state and repaint themselves; calling back into `updateActions()` from one would recurse.
+
+#### Widgets over the viewport: two traps
+
+Both cost a fix round, and both produced a green test suite while the app was broken.
+
+- **`Qt::WA_TransparentForMouseEvents` excludes the widget *and its entire subtree*** from
+  hit-testing — `QWidgetPrivate::childAtRecursiveHelper` skips past it. An interactive
+  control that is a *child* of a transparent overlay is unreachable by any real click. The
+  walkthrough's skip control is therefore a **sibling** parented to `OcctViewWidget`,
+  positioned from the panel's `moveEvent`/`showEvent` and destroyed with it.
+- **Test hit-testing with `view->childAt(point)`, compared against the actual control
+  pointer.** Asserting an attribute flag, or `sendEvent`-ing straight at the widget you hope
+  is reachable, passes against a control no user can click. The same applies to visibility:
+  assert `isVisible()`, or a stub that sets the text and never calls `show()` sails through.
+
+A widget that accepts a press must accept the release too. `HintBalloon` left the release to
+propagate, and the viewport underneath re-picked and re-emitted `selectionChanged()` on
+every dismissal. `Qt::WA_NoMousePropagation` closes that whole class of event rather than
+enumerating handlers one at a time.
 
 ### Qt plugin deployment - do not remove
 
