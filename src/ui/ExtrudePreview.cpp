@@ -101,11 +101,14 @@ void ExtrudePreview::begin(const TopoDS_Face& face)
 
     if (myField) {
         // Force the same default every time, even if a previous use already
-        // left "10" (or anything else) in the field: setText() would not
-        // emit textChanged for a value that has not actually changed, and
-        // the contract is "preview at 10 mm", unconditionally.
+        // left something else in the field: setText() would not emit
+        // textChanged for a value that has not actually changed, and the
+        // contract is "preview at a real 10 mm", unconditionally - converted
+        // to whatever the field currently reads in, so this is "10" in
+        // millimetres but "1" in centimetres, never a bare "10" that would
+        // mean 100 mm once the unit has switched.
         myField->blockSignals(true);
-        myField->setText(QStringLiteral("10"));
+        myField->setText(defaultHeightText());
         myField->blockSignals(false);
         myField->setFocus(Qt::OtherFocusReason);
         myField->selectAll();
@@ -156,12 +159,22 @@ void ExtrudePreview::onAppStateChanged()
     // for its own triggers. Reads state and calls cancel(), which touches
     // neither DocumentModel nor updateActions() - safe per CLAUDE.md's rule
     // that a slot on this signal must never call back into updateActions().
-    if (isVisible() && myWindow && !myWindow->hasPendingFace()) cancel();
-    // labelText() reads Measure::unitSuffix() fresh on every paint, so a unit
-    // switch while this panel is open needs nothing but a repaint to show up
-    // immediately - not a stored copy that setDisplayUnit() would have to
-    // know how to reach.
-    if (isVisible()) update();
+    if (isVisible() && myWindow && !myWindow->hasPendingFace()) {
+        cancel();
+        return;
+    }
+    // Fix round 1, Important: a repaint alone updated the label to "(cm)"
+    // but left the on-screen shape built from the OLD unit's reading of the
+    // field - the panel could show "10" meaning 100 mm while the viewport
+    // still displayed the 10 mm body from before the switch, and Enter then
+    // committed the number the field silently now meant, not the shape the
+    // user was looking at. updatePreview() re-reads the field through
+    // Measure::parseLength() in whatever unit is current, so the shape and
+    // the label can never disagree about which unit they mean.
+    if (isVisible()) {
+        update();
+        updatePreview();
+    }
 }
 
 double ExtrudePreview::height() const
@@ -238,6 +251,19 @@ QString ExtrudePreview::hintText() const
     // and cancel went unnoticed for a whole branch. This panel has no
     // buttons, so the two keys have to be on it in words.
     return tr("Enter adds the body — Esc cancels");
+}
+
+QString ExtrudePreview::defaultHeightText() const
+{
+    // A real 10 mm, spelled in whatever unit the field currently reads -
+    // "10" in millimetres, "1" in centimetres. formatLength() carries the
+    // rounding rule; strip its trailing " <suffix>" to get back a plain
+    // number that Measure::parseLength() can read straight from the field.
+    QString formatted = QString::fromStdString(Measure::formatLength(10.0));
+    const QString suffix =
+        QLatin1Char(' ') + QString::fromStdString(Measure::unitSuffix());
+    if (formatted.endsWith(suffix)) formatted.chop(suffix.length());
+    return formatted;
 }
 
 void ExtrudePreview::syncFieldGeometry()

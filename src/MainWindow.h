@@ -95,6 +95,10 @@ private:
     void updateActions();
     // Persistent right-hand readout: what mode we are in and what is possible.
     void updateStateLabel();
+    // The grid-step length, through Measure, so the snap tooltip never goes
+    // stale after a unit switch - refreshed from updateActions(), same as
+    // updateStateLabel().
+    QString snapTooltipText() const;
     // Rebuilds the viewport from the document. Cheaper than tracking individual
     // differences, and the only way to be sure the two agree after undo/redo.
     void resyncView();
@@ -142,7 +146,6 @@ private:
 
     class ViewportOverlay* myOverlay = nullptr;
     class QLabel* myStateLabel = nullptr;
-    class QLabel* myUnitsLabel = nullptr;
     class ItemsPanel* myItemsPanel = nullptr;
     class ShortcutSheet* myShortcutSheet = nullptr;
     ToastHost* myToasts = nullptr;

@@ -72,10 +72,13 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     myShortcutSheet = new ShortcutSheet(this);
     connect(myShortcutsAction, &QAction::triggered, myShortcutSheet, &ShortcutSheet::showSheet);
 
-    connect(this, &MainWindow::documentChanged, myItemsPanel, &ItemsPanel::refresh);
-    // Also on appStateChanged, not just documentChanged: switching the
-    // display unit does not change the document, but every dimension the
-    // panel shows still has to reread immediately - see setDisplayUnit().
+    // appStateChanged alone, not documentChanged too: every document edit
+    // already calls updateActions() (and so emits appStateChanged) before it
+    // emits documentChanged, so a second connection here only rebuilt the
+    // same rows twice per edit. appStateChanged also covers the case
+    // documentChanged never fires for - switching the display unit, which
+    // touches no document but still has to reread every dimension the panel
+    // shows (see setDisplayUnit()).
     connect(this, &MainWindow::appStateChanged, myItemsPanel, &ItemsPanel::refresh);
 
     // Selection syncs both ways.
@@ -166,8 +169,7 @@ void MainWindow::buildActions()
     mySnapAction = new QAction(tr("Snap to &Grid"), this);
     mySnapAction->setCheckable(true);
     mySnapAction->setChecked(true);
-    mySnapAction->setToolTip(tr("Snap outline points to the 10 mm grid\n"
-                                "Turn this off for freehand placement."));
+    mySnapAction->setToolTip(snapTooltipText());
     connect(mySnapAction, &QAction::toggled, this, &MainWindow::onSnapToggled);
 
     myItemsPanelAction = new QAction(tr("Items"), this);
@@ -395,8 +397,7 @@ void MainWindow::buildOverlay()
     // Unit readout under the axis gizmo - follows View -> Units rather than
     // stating a fixed unit. Refreshed from appStateChanged, same as every
     // other surface this setting reaches (see setDisplayUnit()).
-    myUnitsLabel = new QLabel(QString::fromStdString(Measure::unitSuffix()), myView);
-    QLabel* units = myUnitsLabel;
+    auto* units = new QLabel(QString::fromStdString(Measure::unitSuffix()), myView);
     units->setAlignment(Qt::AlignCenter);
     // A small chip-styled readout - Theme::labelFont(), the same size as a
     // chip label.
@@ -506,6 +507,12 @@ void MainWindow::updateActions()
     if (myToasts) myToasts->setUndoEnabled(myUndoAction->isEnabled());
     myRedoAction->setEnabled(!mySketching && myDocument.canRedo());
 
+    // Not a slot on appStateChanged - part of updateActions() itself, same
+    // as updateStateLabel(), so it recomputes on every unit switch too
+    // rather than freezing whatever unit was active when the tooltip was
+    // first built in buildActions().
+    mySnapAction->setToolTip(snapTooltipText());
+
     updateStateLabel();
     emit appStateChanged();
 }
@@ -546,6 +553,13 @@ void MainWindow::recordProgress(const std::string& event)
     QSettings settings;
     settings.setValue(QStringLiteral("progress"),
                       QString::fromStdString(myProgress.serialize()));
+}
+
+QString MainWindow::snapTooltipText() const
+{
+    return tr("Snap outline points to the %1 grid\n"
+              "Turn this off for freehand placement.")
+        .arg(QString::fromStdString(Measure::formatLength(10.0)));
 }
 
 void MainWindow::updateStateLabel()
@@ -649,9 +663,10 @@ void MainWindow::onRedo()
 void MainWindow::onSnapToggled(bool enabled)
 {
     myView->setSnap(enabled, 10.0);
-    statusBar()->showMessage(enabled
-                                 ? tr("Snapping to the 10 mm grid")
-                                 : tr("Snapping off — points land exactly where you click"));
+    statusBar()->showMessage(
+        enabled ? tr("Snapping to the %1 grid")
+                      .arg(QString::fromStdString(Measure::formatLength(10.0)))
+                : tr("Snapping off — points land exactly where you click"));
 }
 
 void MainWindow::onSketchCursorMoved(const gp_Pnt& point)

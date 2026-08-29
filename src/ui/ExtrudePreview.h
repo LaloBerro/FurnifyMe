@@ -83,6 +83,10 @@ private:
     // sweep can never be guarding a different copy than the one on screen.
     QString labelText() const;
     QString hintText() const;
+    // What begin() seeds the field with: a real 10 mm, converted to the
+    // current display unit - not a literal "10" that would silently mean
+    // 100 mm once centimetres is selected.
+    QString defaultHeightText() const;
     void syncFieldGeometry();
     // Centred along the top edge, at ViewportOverlay's own edge margin. Clear
     // of the bottom strip where the toast, the walkthrough guide and the

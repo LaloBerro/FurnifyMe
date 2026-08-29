@@ -1214,6 +1214,62 @@ int main(int argc, char* argv[])
         }
     }
 
+    // --- switching the unit while the extrude preview is open updates it -----
+    // Fix round 1, Important: onAppStateChanged() used to repaint the panel
+    // (so the label read "(cm)") without rebuilding the preview, so the
+    // shape on screen stayed the OLD unit's reading of the field - a user
+    // could pick Centimetres with "10" still in the field and see the 10 mm
+    // body they had before, then commit the 100 mm body the field silently
+    // now meant.
+    {
+        QAction* mm = action(window, QStringLiteral("Millimetres"));
+        QAction* cm = action(window, QStringLiteral("Centimetres"));
+        check(mm != nullptr && cm != nullptr, "both units are still available for this check");
+
+        trigger(window, QStringLiteral("Start Sketch"));
+        clickAt(view, QPointF(300, 300)); clickAt(view, QPointF(420, 300));
+        clickAt(view, QPointF(420, 380)); clickAt(view, QPointF(300, 380));
+        trigger(window, QStringLiteral("Finish Sketch"));
+        settle(150);
+        const int before = static_cast<int>(window.document().solids().size());
+        trigger(window, QStringLiteral("Extrude..."));
+        settle(150);
+
+        ExtrudePreview* preview = window.findChild<ExtrudePreview*>();
+        check(preview != nullptr && preview->field(),
+              "a preview with a field is open for the switch-while-open check");
+
+        if (preview && preview->field() && mm && cm) {
+            preview->field()->setText(QStringLiteral("5"));
+            settle(120);
+            check(std::fabs(preview->height() - 5.0) < 1e-6,
+                  "the field reads 5 mm before any unit switch");
+
+            cm->trigger();
+            settle(150);
+            check(std::fabs(preview->height() - 50.0) < 1e-6,
+                  QStringLiteral("the SAME field text means 50 mm once centimetres is "
+                                 "selected, not the stale 5 mm reading (got %1)")
+                      .arg(preview->height()));
+            const Measure::Extents shownInCm = Measure::extentsOf(view->previewShape());
+            check(std::fabs(shownInCm.z - 50.0) < 1e-6,
+                  QStringLiteral("and the shape actually on screen is 50 mm tall, not "
+                                 "still the 5 mm one from before the switch (got %1)")
+                      .arg(shownInCm.z));
+
+            mm->trigger();
+            settle(150);
+            check(std::fabs(preview->height() - 5.0) < 1e-6,
+                  "switching back re-reads the same text as 5 mm again");
+
+            QKeyEvent commit(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+            QCoreApplication::sendEvent(preview->field(), &commit);
+            settle(250);
+        }
+        check(static_cast<int>(window.document().solids().size()) == before + 1,
+              "the body from the switch-while-open check was created");
+    }
+
     // --- icons ----------------------------------------------------------------
     {
         const IconSet::Glyph all[] = {
