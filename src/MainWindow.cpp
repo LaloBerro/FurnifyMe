@@ -329,11 +329,15 @@ void MainWindow::buildOverlay()
     units->adjustSize();
     myOverlay->addWidget(units, ViewportOverlay::Anchor::TopRight);
 
-    // Only a newcomer sees this; it removes itself for good once completed.
-    if (!myProgress.hasLearned("walkthrough.done")) {
-        myOverlay->addWidget(new WalkthroughPanel(this, myView),
-                             ViewportOverlay::Anchor::BottomRight);
-    }
+    // Always built, even for a user who has already learned this - it
+    // decides its own visibility in its constructor (see WalkthroughPanel's
+    // refresh()) and hides itself immediately in that case. Gating
+    // construction on hasLearned() here instead would mean a returning
+    // user's window has no panel to bring back when Show tips again resets
+    // their progress, and the guide would stay gone until the app is
+    // restarted - exactly the case Show tips again exists for.
+    myOverlay->addWidget(new WalkthroughPanel(this, myView),
+                         ViewportOverlay::Anchor::BottomRight);
 }
 
 void MainWindow::updateActions()

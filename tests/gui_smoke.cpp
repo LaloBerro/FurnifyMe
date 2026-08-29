@@ -26,6 +26,7 @@
 #include "Theme.h"
 #include "ToolChip.h"
 #include "ToolCluster.h"
+#include "UserProgress.h"
 #include "ViewportOverlay.h"
 #include "WalkthroughPanel.h"
 
@@ -37,6 +38,7 @@
 #include <QLabel>
 #include <QMouseEvent>
 #include <QPointF>
+#include <QSettings>
 #include <QStatusBar>
 #include <QString>
 
@@ -678,22 +680,24 @@ int main(int argc, char* argv[])
                   .arg(tipOffenders.isEmpty() ? QStringLiteral("none")
                                               : tipOffenders.join(QStringLiteral(", "))));
 
-        // The walkthrough's step text is painted, not put on any action text
-        // or tooltip, so neither loop above ever sees it - it needs its own
-        // reach into the sweep or it drifts unenforced.
-        QStringList stepOffenders;
+        // The walkthrough panel's text - title, skip control, and steps - is
+        // all painted, not put on any action text or tooltip, so none of the
+        // loops above ever see any of it. paintedTexts() is the full set, not
+        // just the steps, so nothing painted there is left unswept.
+        QStringList walkthroughOffenders;
         for (WalkthroughPanel* panel : window.findChildren<WalkthroughPanel*>()) {
-            for (const QString& step : panel->stepTexts()) {
+            for (const QString& text : panel->paintedTexts()) {
                 for (const QString& word : banned) {
-                    if (step.contains(word, Qt::CaseInsensitive))
-                        stepOffenders << (step + QStringLiteral(" [") + word + QStringLiteral("]"));
+                    if (text.contains(word, Qt::CaseInsensitive))
+                        walkthroughOffenders << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
                 }
             }
         }
-        check(stepOffenders.isEmpty(),
-              QStringLiteral("no walkthrough step text uses a banned word (%1)")
-                  .arg(stepOffenders.isEmpty() ? QStringLiteral("none")
-                                               : stepOffenders.join(QStringLiteral(", "))));
+        check(walkthroughOffenders.isEmpty(),
+              QStringLiteral("no walkthrough panel text uses a banned word (%1)")
+                  .arg(walkthroughOffenders.isEmpty()
+                           ? QStringLiteral("none")
+                           : walkthroughOffenders.join(QStringLiteral(", "))));
 
         // The state label is the app's most-updated string; it must obey the
         // vocabulary too. It is a permanent widget on the status bar.
@@ -833,55 +837,141 @@ int main(int argc, char* argv[])
 
         // A returning user does not see it again.
         MainWindow second(nullptr, /*persistProgress=*/false);
+        // Shown (and settled) before anything below reads a widget's
+        // position: ViewportOverlay lays overlay widgets out against the
+        // viewport's size at the time of each addWidget() call, which
+        // happens during MainWindow's constructor - before the constructor's
+        // own resize(1280, 800) call near its end, let alone this resize()
+        // and show(). The corrected layout for the real size only lands once
+        // the resulting resize event is actually processed, which needs a
+        // pump of the event loop.
+        second.setAttribute(Qt::WA_ShowWithoutActivating);
+        second.resize(900, 600);
+        second.show();
+        settle(300);
 
-        // gui_smoke's clickAt() sends events straight to a target widget,
-        // bypassing real hit-testing entirely, so nothing sent that way can
-        // prove a click on this panel actually reaches the viewport end to
-        // end. What can be proven directly is the mechanism real
-        // hit-testing itself consults: Qt::WA_TransparentForMouseEvents.
-        // (A mousePressEvent() override that merely called event->ignore()
-        // was tried first and rejected - verified directly against this
-        // exact dispatch path, even a stock, unmodified QWidget's mouse
-        // press comes back "accepted" afterward in Qt6, so ignoring it from
-        // inside the handler achieves nothing for a plain sibling widget.)
-        // The skip control is the one interactive exception: a real child
-        // widget, exempt from its parent's transparency and hit-tested on
-        // its own - it is not a named type in any header, so it is found
-        // here generically, as the panel's only child.
+        // An earlier version of this check only asserted
+        // Qt::WA_TransparentForMouseEvents on the panel and nothing more.
+        // That missed that the attribute excludes a widget's ENTIRE SUBTREE
+        // from hit-testing, not just the widget carrying it (verified
+        // directly against this machine's Qt 6.11.1:
+        // QWidgetPrivate::childAtRecursiveHelper `continue`s straight past a
+        // transparent widget without descending into its children) - so the
+        // skip control, then a child of the panel, was just as unreachable
+        // by a real click as the panel's own painted "skip" text was meant
+        // to be, even though it answered fine to an event sent straight to
+        // it in a test. That is why the skip control is now a sibling of
+        // the panel instead (see WalkthroughPanel.cpp), positioned over
+        // skipRect() and raised above it, and why this check goes through
+        // childAt() - the actual mechanism real hit-testing uses - rather
+        // than an attribute flag. gui_smoke's clickAt() sends events
+        // straight to a target widget, bypassing childAt() entirely, so it
+        // could not have caught this either.
         WalkthroughPanel* secondGuide = second.findChild<WalkthroughPanel*>();
         check(secondGuide != nullptr, "the second window gets its own guide too");
         if (secondGuide) {
-            check(secondGuide->testAttribute(Qt::WA_TransparentForMouseEvents),
-                  "the guide does not block clicks meant for the viewport underneath it");
+            OcctViewWidget* secondView = second.view();
 
-            const QList<QWidget*> children =
-                secondGuide->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly);
-            check(children.size() == 1, "the guide has exactly one child: the skip control");
-            if (children.size() == 1) {
-                QWidget* skip = children.first();
-                check(!skip->testAttribute(Qt::WA_TransparentForMouseEvents),
-                      "the skip control itself stays clickable");
-                const QPointF centre(skip->width() / 2.0, skip->height() / 2.0);
+            // skipRect()'s formula, in the panel's own local coordinates:
+            // width() - 14 - 34, 8, 34, 18 (see WalkthroughPanel.cpp). Its
+            // centre, translated into the shared parent's coordinates the
+            // way syncSkipGeometry() does, is what a real click on it would
+            // land on.
+            const QPoint skipCentre =
+                secondGuide->pos() + QPoint(secondGuide->width() - 31, 17);
+            QWidget* hitSkip = secondView->childAt(skipCentre);
+            check(hitSkip != nullptr && hitSkip != secondGuide,
+                  "childAt() at the skip control's centre finds a real widget, "
+                  "not the transparent panel");
+
+            const QPoint insidePanelOutsideSkip =
+                secondGuide->pos() + QPoint(20, secondGuide->height() - 20);
+            QWidget* hitElsewhere = secondView->childAt(insidePanelOutsideSkip);
+            check(hitElsewhere == nullptr,
+                  "childAt() at a point inside the panel but well outside skip "
+                  "finds neither the panel nor the skip control");
+
+            if (hitSkip && hitSkip != secondGuide) {
+                const QPointF centre(hitSkip->width() / 2.0, hitSkip->height() / 2.0);
                 QMouseEvent press(QEvent::MouseButtonPress, centre, centre,
                                   Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-                QCoreApplication::sendEvent(skip, &press);
-                check(secondGuide->isFinished(), "clicking the skip control finishes the guide");
+                QCoreApplication::sendEvent(hitSkip, &press);
+                check(secondGuide->isFinished(),
+                      "activating the widget childAt() found at the skip control "
+                      "finishes the guide");
                 check(second.progress().hasLearned("walkthrough.done"),
                       "skipping records walkthrough.done, same as finishing for real");
             }
         }
 
+        // Redundant with the skip click above by this point (hasLearned() is
+        // already true), kept anyway as the same direct simulation of an
+        // already-learned user that this block always used.
         second.progress().record("walkthrough.done");
         second.progress().record("walkthrough.done");
         second.progress().record("walkthrough.done");
-        second.setAttribute(Qt::WA_ShowWithoutActivating);
-        second.resize(900, 600);
-        second.show();
-        settle(400);
+        settle(150);
         WalkthroughPanel* repeat = second.findChild<WalkthroughPanel*>();
         check(repeat == nullptr || !repeat->isVisible(),
               "a returning user never sees the guide again");
         second.close();
+    }
+
+    // --- Show tips again restores the walkthrough for a returning user too ---
+    {
+        // Every walkthrough check above uses persistProgress=false, so
+        // hasLearned() is always false at the moment buildOverlay() runs -
+        // none of them can exercise the actual returning-user path, where
+        // MainWindow's constructor deserializes progress from QSettings
+        // BEFORE buildOverlay() ever runs. That is the path Show tips again
+        // exists for: someone who quit, came back, and wants the guide
+        // again. Uses its own QSettings organization/application name so it
+        // can never read or write whatever the developer's own use of the
+        // real app has recorded, and restores the real names afterward.
+        const QString realOrg = QCoreApplication::organizationName();
+        const QString realApp = QCoreApplication::applicationName();
+        QCoreApplication::setOrganizationName(QStringLiteral("FurnifyMe-gui_smoke"));
+        QCoreApplication::setApplicationName(QStringLiteral("returning-user-probe"));
+
+        UserProgress seed;
+        for (int i = 0; i < UserProgress::kLearnedThreshold; ++i) seed.record("walkthrough.done");
+        {
+            QSettings seedSettings;
+            seedSettings.setValue(QStringLiteral("progress"),
+                                  QString::fromStdString(seed.serialize()));
+        }
+
+        MainWindow returning(nullptr, /*persistProgress=*/true);
+        WalkthroughPanel* returningGuide = returning.findChild<WalkthroughPanel*>();
+        check(returningGuide != nullptr,
+              "a returning user still gets a panel built, just hidden");
+        check(returningGuide != nullptr && returningGuide->isFinished(),
+              "and it already knows it is finished before ever being shown");
+
+        returning.setAttribute(Qt::WA_ShowWithoutActivating);
+        returning.resize(900, 600);
+        returning.show();
+        settle(300);
+        check(returningGuide != nullptr && !returningGuide->isVisible(),
+              "the panel stays hidden even once the window is shown - progress "
+              "was already learned before it was built");
+
+        QAction* returningReset = action(returning, QStringLiteral("Show tips again"));
+        check(returningReset != nullptr, "the returning user's window has the reset action too");
+        if (returningReset) {
+            returningReset->trigger();
+            settle(150);
+            check(returningGuide != nullptr && returningGuide->isVisible(),
+                  "Show tips again restores the panel for a returning user, "
+                  "not just a same-session one");
+            check(returningGuide != nullptr && !returningGuide->isFinished(),
+                  "the restored panel starts fresh rather than staying finished");
+        }
+        returning.close();
+
+        QSettings().clear();   // drops the test-only registry key entirely, not just the one value
+        QCoreApplication::setOrganizationName(realOrg);
+        QCoreApplication::setApplicationName(realApp);
     }
 
     std::printf("\n%s (%d failure%s)  volumes: A=%.1f B=%.1f\n",
