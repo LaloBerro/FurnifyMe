@@ -4,7 +4,6 @@
 #include <Bnd_Box.hxx>
 
 #include <cctype>
-#include <cerrno>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -28,6 +27,34 @@ std::string groupThousands(const std::string& digits)
         out.push_back(digits[i]);
     }
     return out;
+}
+
+// True when `text` is nothing but an optional leading '+'/'-' followed by
+// digits with at most one '.', and at least one digit somewhere. Checked by
+// hand, before ever calling std::strtod, so "0x10" (hex float), "1e3" /
+// "1E3" (scientific notation) and "inf" / "nan" are rejected by construction
+// rather than by a growing pile of guards after the fact - and so strtod's
+// locale-dependent decimal separator is never in play, since only plain
+// ASCII digits and '.' reach it.
+bool looksLikePlainNumber(const std::string& text)
+{
+    std::size_t i = 0;
+    if (i < text.size() && (text[i] == '+' || text[i] == '-')) ++i;
+
+    bool sawDigit = false;
+    bool sawDot = false;
+    for (; i < text.size(); ++i) {
+        const char c = text[i];
+        if (c == '.') {
+            if (sawDot) return false;
+            sawDot = true;
+        } else if (std::isdigit(static_cast<unsigned char>(c))) {
+            sawDigit = true;
+        } else {
+            return false;
+        }
+    }
+    return sawDigit;
 }
 
 // Renders a value already in the display unit, with the given suffix. The
@@ -112,17 +139,16 @@ bool parseLength(const std::string& text, double& out)
     const std::string trimmed = text.substr(begin, end - begin);
     if (trimmed.empty()) return false;
 
-    // std::strtod (never atof, which reports no error and returns 0 for
-    // garbage) reports exactly how much of the string it consumed via
-    // endPtr. Anything left over - a second decimal point, a stray letter, a
-    // trailing comma - means the text was not a single clean number.
+    // Reject anything that is not plain sign-digits-dot-digits before ever
+    // reaching std::strtod (never atof, which reports no error and returns 0
+    // for garbage) - see looksLikePlainNumber for what that rules out.
+    if (!looksLikePlainNumber(trimmed)) return false;
+
     const char* start = trimmed.c_str();
     char* endPtr = nullptr;
-    errno = 0;
     const double parsed = std::strtod(start, &endPtr);
-    if (endPtr == start) return false;              // no digits consumed at all
-    if (*endPtr != '\0') return false;               // leftover characters
-    if (!std::isfinite(parsed)) return false;         // rejects "inf"/"nan"
+    if (endPtr != start + trimmed.size()) return false;  // paranoia: should be unreachable
+    if (!std::isfinite(parsed)) return false;  // a very long digit run can still overflow
 
     out = g_unit == Unit::Centimetres ? parsed * 10.0 : parsed;
     return true;

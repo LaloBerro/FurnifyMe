@@ -46,10 +46,16 @@ std::string formatLength(double millimetres);
 std::string formatDimensions(const TopoDS_Shape& shape);
 
 // Parses a number the user typed **in the current display unit** and returns
-// millimetres in `out`. Tolerates surrounding spaces and a leading '+' or
-// '-'. Returns false and leaves `out` untouched when the text is not a
-// number - empty, non-numeric, more than one decimal point, or a bare ".".
-// Never uses atof, which reports no error and silently returns 0 for garbage.
+// millimetres in `out`. Accepted grammar, after trimming surrounding spaces:
+// an optional leading '+' or '-', then digits with at most one '.', and
+// nothing else - so a plain decimal only. Returns false and leaves `out`
+// untouched for anything outside that grammar, including but not limited to
+// "" (empty), "abc" (non-numeric), "1.2.3" (two decimal points), "." (no
+// digit), "1,2" (a comma), "1e3" (scientific notation) and "0x10" (a hex
+// float) - std::strtod alone would accept the last two, and its decimal
+// separator is locale-dependent, which is exactly why the grammar is checked
+// by hand before the string ever reaches it. Never uses atof, which reports
+// no error and silently returns 0 for garbage.
 bool parseLength(const std::string& text, double& out);
 
 // "mm" or "cm", for a label that needs the unit alone rather than baked into

@@ -119,6 +119,23 @@ int main()
     check(!Measure::parseLength(".", untouched) && untouched == 99.0, "a bare point refused");
     check(!Measure::parseLength("1,2", untouched) && untouched == 99.0, "a comma refused");
 
+    // A length field is not a general strtod - hex floats, scientific
+    // notation, and the special non-finite spellings all read as garbage
+    // here, not as numbers, even though the real strtod would happily accept
+    // most of them.
+    check(!Measure::parseLength("0x10", untouched) && untouched == 99.0,
+          "a hex float is refused");
+    check(!Measure::parseLength("1e3", untouched) && untouched == 99.0,
+          "scientific notation is refused");
+    check(!Measure::parseLength("1E3", untouched) && untouched == 99.0,
+          "scientific notation is refused regardless of case");
+    check(!Measure::parseLength("inf", untouched) && untouched == 99.0,
+          "the word inf is refused");
+    check(!Measure::parseLength("nan", untouched) && untouched == 99.0,
+          "the word nan is refused");
+    check(!Measure::parseLength("1p3", untouched) && untouched == 99.0,
+          "a stray letter after a digit is refused");
+
     Measure::setDisplayUnit(Measure::Unit::Millimetres);
     check(Measure::parseLength("4", mm) && mm == 4.0, "4 mm parses to 4 mm");
     check(Measure::formatLength(340.0) == "340 mm", "switching back restores exactly");
