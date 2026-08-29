@@ -227,8 +227,10 @@ void Toast::paintEvent(QPaintEvent* /*event*/)
     const QRect body = rect().adjusted(margin, margin, -margin, -margin);
     Theme::paintSurface(painter, body, 8);
 
-    // The kind-tinted left stripe - accent() for a Note, textMuted() for a
-    // Failure, the same two colours the pre-Graphite border used - painted
+    // The kind-tinted left stripe - accent() for a Note, danger() for a
+    // Failure. The pre-Graphite border used textMuted() for failures, which
+    // read QUIETER than a routine note - backwards, and danger() documents
+    // itself as the failure colour. Painted
     // over the shared base rather than replacing it, so the two kinds still
     // read differently at a glance the way the original spec called for.
     // Clipped to the card's own rounded outline so the stripe's outer
@@ -241,7 +243,7 @@ void Toast::paintEvent(QPaintEvent* /*event*/)
         painter.save();
         painter.setClipPath(cardPath);
         painter.fillRect(QRect(body.left(), body.top(), kStripeWidth, body.height()),
-                         myKind == Kind::Failure ? Theme::textMuted() : Theme::accent());
+                         myKind == Kind::Failure ? Theme::danger() : Theme::accent());
         painter.restore();
     }
 

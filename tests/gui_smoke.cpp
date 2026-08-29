@@ -3600,9 +3600,9 @@ int main(int argc, char* argv[])
                 check(colorDistance(noteStripe, Theme::accent()) <
                           colorDistance(noteStripe, Theme::textMuted()),
                       "the Note toast's stripe reads closer to accent()");
-                check(colorDistance(failureStripe, Theme::textMuted()) <
+                check(colorDistance(failureStripe, Theme::danger()) <
                           colorDistance(failureStripe, Theme::accent()),
-                      "the Failure toast's stripe reads closer to textMuted()");
+                      "the Failure toast's stripe reads closer to danger()");
             }
         }
 
