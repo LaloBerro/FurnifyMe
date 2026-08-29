@@ -172,7 +172,8 @@ void MainWindow::buildActions()
                                        "Click to place points; close it to make a face."));
     myFinishSketchAction->setToolTip(tr("Close the outline into a face (Enter)\n"
                                         "Needs at least three points."));
-    myExtrudeAction->setToolTip(tr("Pull the face up into a solid body (E)"));
+    myExtrudeAction->setToolTip(tr("Pull the face up into a body (E)\n"
+                                   "The outline's shape becomes the body's footprint."));
     myUnionAction->setToolTip(tr("Merge two bodies into one\n"
                                  "Overlapping material is kept once, not twice."));
     mySubtractAction->setToolTip(tr("Cut the second body out of the first\n"

@@ -637,7 +637,8 @@ int main(int argc, char* argv[])
             const QString text = candidate->text().remove(QLatin1Char('&'));
             const QString tip = candidate->toolTip();
             for (const QString& word : banned) {
-                if (text.contains(word) || tip.contains(word)) {
+                if (text.contains(word, Qt::CaseInsensitive) ||
+                    tip.contains(word, Qt::CaseInsensitive)) {
                     offenders << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
                 }
             }
@@ -652,7 +653,8 @@ int main(int argc, char* argv[])
             const QString tip = widget->toolTip();
             if (tip.isEmpty()) continue;
             for (const QString& word : banned) {
-                if (tip.contains(word)) tipOffenders << (tip.left(30) + QStringLiteral("…"));
+                if (tip.contains(word, Qt::CaseInsensitive))
+                    tipOffenders << (tip.left(30) + QStringLiteral("…"));
             }
         }
         check(tipOffenders.isEmpty(),
@@ -666,8 +668,7 @@ int main(int argc, char* argv[])
         for (QLabel* label : window.statusBar()->findChildren<QLabel*>()) {
             if (!label->text().isEmpty()) stateText = label->text();
         }
-        check(!stateText.contains(QStringLiteral("solid")) &&
-              !stateText.contains(QStringLiteral("Solid")),
+        check(!stateText.contains(QStringLiteral("solid"), Qt::CaseInsensitive),
               QStringLiteral("the state label says body, not solid (\"%1\")").arg(stateText));
         check(!stateText.contains(QStringLiteral("(s)")),
               "the state label writes plurals out rather than using (s)");
