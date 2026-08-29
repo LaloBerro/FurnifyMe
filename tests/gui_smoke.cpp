@@ -210,6 +210,18 @@ QAction* action(MainWindow& window, const QString& label)
     return nullptr;
 }
 
+// The persistent right-hand readout - a permanent widget on the status bar,
+// which MainWindow keeps no accessor for, so it is found the same way the
+// vocabulary sweep finds it.
+QString stateLabelText(MainWindow& window)
+{
+    QString text;
+    for (QLabel* label : window.statusBar()->findChildren<QLabel*>()) {
+        if (!label->text().isEmpty()) text = label->text();
+    }
+    return text;
+}
+
 bool trigger(MainWindow& window, const QString& label)
 {
     QAction* found = action(window, label);
@@ -1068,7 +1080,6 @@ int main(int argc, char* argv[])
                     const TopoDS_Face got = view->selectedFace();
                     if (!isVerticalPlane(got)) continue;   // occluded, or the pick missed
                     picked = got;
-                    pickedBody = solid.shape;
                     screen = at;
                     break;
                 }
@@ -1078,7 +1089,26 @@ int main(int argc, char* argv[])
         check(!picked.IsNull(),
               "clicking a projected face centre selects a vertical flat face");
 
+        // The host is the body that actually CONTAINS the selected face, not
+        // whichever body the loop happened to be iterating when the click
+        // landed: under occlusion those are different bodies, and measuring
+        // the locked plane against the wrong centroid makes the outwardness
+        // assertion below either vacuous or spuriously red. Derived, so the
+        // check measures what its message says it measures.
         if (!picked.IsNull()) {
+            for (const DocumentModel::Solid& solid : window.document().solids()) {
+                for (TopExp_Explorer it(solid.shape, TopAbs_FACE); it.More(); it.Next()) {
+                    if (!it.Current().IsSame(picked)) continue;
+                    pickedBody = solid.shape;
+                    break;
+                }
+                if (!pickedBody.IsNull()) break;
+            }
+        }
+        check(!picked.IsNull() && !pickedBody.IsNull(),
+              "the body that owns the selected face is identified");
+
+        if (!picked.IsNull() && !pickedBody.IsNull()) {
             QAction* lock = action(window, QStringLiteral("Lock to Face"));
             check(lock != nullptr, "there is an action to lock a face");
             check(lock != nullptr && lock->isEnabled(),
@@ -1113,6 +1143,14 @@ int main(int argc, char* argv[])
                       QStringLiteral("the locked plane's normal points out of the body, "
                                      "not into it (%1)")
                           .arg(outwardness));
+
+                // A locked sketch plane is a persistent mode, so it needs a
+                // persistent cue: the status-bar message that announces the
+                // lock scrolls away, and the grid's orientation is easy to
+                // misread once the camera moves.
+                check(stateLabelText(window).contains(QStringLiteral("locked face")),
+                      QStringLiteral("the state label says the plane is locked (\"%1\")")
+                          .arg(stateLabelText(window)));
 
                 // The grid is drawn in the 3D view, so the viewport dump is
                 // the only place it can be seen at all.
@@ -1257,6 +1295,9 @@ int main(int argc, char* argv[])
                           "and returns to the ground plane");
                     check(!unlock->isEnabled(),
                           "and there is nothing left to unlock");
+                    check(!stateLabelText(window).contains(QStringLiteral("locked face")),
+                          QStringLiteral("and the state label stops saying so (\"%1\")")
+                              .arg(stateLabelText(window)));
                     view->saveSnapshot(outDir + "/h-unlocked-ground-grid.png");
                 }
 

@@ -647,6 +647,13 @@ void MainWindow::updateStateLabel()
             state = tr("%1 bodies — click one to select").arg(bodies);
         }
     }
+    // A lock is a mode, and a mode with no persistent cue is a trap: the
+    // message that announced it is transient, and the grid's orientation is
+    // easy to misread once the camera has moved. It leads the label, because
+    // where the next outline will land governs how to read everything after
+    // it.
+    if (myFaceLocked) state = tr("On a locked face — %1").arg(state);
+
     myStateLabel->setText(state);
 }
 

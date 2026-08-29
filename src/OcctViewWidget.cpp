@@ -354,13 +354,24 @@ gp_Pln OcctViewWidget::gridPlane() const
     // Aspect_POM_Fill mode, which does nothing at all to the line primitives
     // this grid is made of.
     //
-    // The displacement is tied to the grid's own minor step rather than to
-    // the raw camera distance, because it has to be QUANTIZED: GridRenderer
-    // caches on the plane it last built, so a nudge that changed with every
-    // wheel notch would rebuild the whole grid every frame. minorStepFor()
-    // already changes at only two thresholds, and 0.2% of a grid square is
-    // far below a pixel at any distance where that square is visible.
-    const double nudge = GridRenderer::minorStepFor(myCamera.state().distance) * 0.002;
+    // The displacement has to be PROPORTIONAL to the camera distance - depth
+    // precision degrades with distance, so a fixed offset that clears the
+    // buffer up close does not clear it far away - and it also has to be
+    // QUANTIZED, because GridRenderer caches on the plane it last built and a
+    // nudge that changed with every wheel notch would rebuild the whole grid
+    // every frame.
+    //
+    // Tying it to the grid's minor step gave the quantization but not the
+    // proportionality: minorStepFor() holds one value across a whole band, so
+    // the ratio swung twentyfold inside it - 1.7e-4 at 120 mm down to 8e-6 at
+    // 2499 mm, and ~2000 mm is this app's ordinary furniture-viewing distance,
+    // the thin end of that swing. Rounding the distance itself to a power of
+    // two keeps a constant ratio to within a factor of root two while still
+    // changing only when the camera moves a whole octave. At 1e-4 of the
+    // viewing distance the nudge is about a tenth of a pixel at any distance.
+    const double distance = std::max(1.0, myCamera.state().distance);
+    const double octave = std::ldexp(1.0, static_cast<int>(std::lround(std::log2(distance))));
+    const double nudge = octave * 1.0e-4;
     const gp_Dir normal = mySketchPlane.Axis().Direction();
     const gp_Vec toEye(mySketchPlane.Location(), myCamera.eyePosition());
 
