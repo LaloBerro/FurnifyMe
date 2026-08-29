@@ -5,9 +5,9 @@
 
 #include <AIS_TextLabel.hxx>
 #include <Aspect_TypeOfDisplayText.hxx>
+#include <Font_FontMgr.hxx>
+#include <Font_SystemFont.hxx>
 #include <Graphic3d_ArrayOfSegments.hxx>
-#include <Graphic3d_ArrayOfTriangles.hxx>
-#include <Graphic3d_AspectFillArea3d.hxx>
 #include <Graphic3d_AspectLine3d.hxx>
 #include <Graphic3d_Group.hxx>
 #include <Prs3d_Presentation.hxx>
@@ -16,6 +16,11 @@
 #include <SelectMgr_Selection.hxx>
 #include <TCollection_ExtendedString.hxx>
 #include <gp_Vec.hxx>
+
+#include <QByteArray>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 
 #include <algorithm>
 #include <cmath>
@@ -27,38 +32,65 @@ Quantity_Color toOcct(const QColor& c)
     return Quantity_Color(c.redF(), c.greenF(), c.blueF(), Quantity_TOC_sRGB);
 }
 
-// The extension lines, the dimension line and the two arrowheads - one
-// object for all of it, never pickable, same shape as GridRenderer's
-// GridObject: the renderer computes the geometry, this just draws it.
+// The app's own DM Sans, registered with OCCT's font manager so the label
+// matches every other piece of text instead of falling back to a serif
+// face. Font_FontMgr only accepts a real file path, but the font ships
+// compiled into the binary as a Qt resource (see Theme.cpp) - so the first
+// call here spills it to a real file once and registers that; every later
+// call reuses the same resolved family name. Falls back to a system sans
+// face if the resource or the registration is ever unavailable - never
+// silently back to whatever OCCT's own default happens to be, which is a
+// serif face.
+const std::string& dimensionFontFamily()
+{
+    static const std::string family = [] {
+        QFile resource(QStringLiteral(":/fonts/DMSans.ttf"));
+        if (resource.exists() && resource.open(QIODevice::ReadOnly)) {
+            const QByteArray bytes = resource.readAll();
+            resource.close();
+            const QString diskPath = QDir::tempPath() + QStringLiteral("/FurnifyMe-DMSans.ttf");
+            if (!QFileInfo::exists(diskPath) || QFileInfo(diskPath).size() != bytes.size()) {
+                QFile disk(diskPath);
+                if (disk.open(QIODevice::WriteOnly)) {
+                    disk.write(bytes);
+                    disk.close();
+                }
+            }
+            const Handle(Font_FontMgr) mgr = Font_FontMgr::GetInstance();
+            const Handle(Font_SystemFont) sysFont =
+                mgr->CheckFont(diskPath.toUtf8().constData());
+            if (!sysFont.IsNull() && mgr->RegisterFont(sysFont, Standard_True)) {
+                return std::string(sysFont->FontName().ToCString());
+            }
+        }
+        return std::string("Segoe UI");   // sans fallback - never leave it serif
+    }();
+    return family;
+}
+
+// The extension lines, the dimension line and the two open, two-stroke
+// arrowheads - all one segment array, one object, never pickable, same
+// shape as GridRenderer's GridObject: the renderer computes the geometry,
+// this just draws it. A filled triangle was tried first and rendered
+// invisibly (OCCT's shading pipeline evidently needs more setup than
+// SetShadingModel(Unlit) alone to light a bare fill-area aspect); an open
+// arrowhead built from the same proven line aspect the rest of the
+// annotation already uses sidesteps that entirely.
 class DimensionLines : public AIS_InteractiveObject {
 public:
     Handle(Graphic3d_ArrayOfSegments) lines;
-    Handle(Graphic3d_ArrayOfTriangles) arrows;
     Quantity_Color colour;
 
     void Compute(const Handle(PrsMgr_PresentationManager)&,
                  const Handle(Prs3d_Presentation)& presentation,
                  const Standard_Integer) override
     {
-        if (!lines.IsNull()) {
-            Handle(Graphic3d_Group) group = presentation->NewGroup();
-            Handle(Graphic3d_AspectLine3d) aspect =
-                new Graphic3d_AspectLine3d(colour, Aspect_TOL_SOLID, 1.4);
-            group->SetGroupPrimitivesAspect(aspect);
-            group->AddPrimitiveArray(lines);
-        }
-        if (!arrows.IsNull()) {
-            Handle(Graphic3d_Group) group = presentation->NewGroup();
-            Handle(Graphic3d_AspectFillArea3d) aspect = new Graphic3d_AspectFillArea3d();
-            aspect->SetInteriorColor(colour);
-            // Flat colour regardless of scene lighting, and visible from
-            // either side - an arrowhead facing away from the light should
-            // never read as a different shade than its twin.
-            aspect->SetShadingModel(Graphic3d_TypeOfShadingModel_Unlit);
-            aspect->SetFaceCulling(Graphic3d_TypeOfBackfacingModel_DoubleSided);
-            group->SetGroupPrimitivesAspect(aspect);
-            group->AddPrimitiveArray(arrows);
-        }
+        if (lines.IsNull()) return;
+        Handle(Graphic3d_Group) group = presentation->NewGroup();
+        Handle(Graphic3d_AspectLine3d) aspect =
+            new Graphic3d_AspectLine3d(colour, Aspect_TOL_SOLID, 1.6);
+        group->SetGroupPrimitivesAspect(aspect);
+        group->AddPrimitiveArray(lines);
     }
 
     void ComputeSelection(const Handle(SelectMgr_Selection)&, const Standard_Integer) override
@@ -85,7 +117,8 @@ void DimensionRenderer::clear()
     myLabelText.clear();
 }
 
-void DimensionRenderer::show(const gp_Pnt& from, const gp_Pnt& to, const gp_Dir& normalIn)
+void DimensionRenderer::show(const gp_Pnt& from, const gp_Pnt& to, const gp_Dir& normalIn,
+                             double worldPerPixel)
 {
     if (myContext.IsNull()) return;
 
@@ -111,19 +144,27 @@ void DimensionRenderer::show(const gp_Pnt& from, const gp_Pnt& to, const gp_Dir&
     const gp_Vec ext = gp_Vec(gp_Dir(extVec));
     const gp_Vec along = gp_Vec(dir);
 
-    // Sizes scale gently with length: a short in-progress segment gets a
-    // proportionally smaller annotation instead of one that swamps it, and a
-    // long one never gets a vanishingly small arrowhead.
-    const double gap = std::min(4.0, length * 0.1);
-    const double offset = std::clamp(length * 0.15, 6.0, 30.0);
-    const double beyond = 4.0;
-    const double arrowLen = std::min(8.0, length * 0.25);
-    const double arrowWidth = arrowLen * 0.4;
+    // Every size below is a target in SCREEN PIXELS, converted through
+    // worldPerPixel at the point of use - the furniture must read as the
+    // same number of pixels whether the camera is close in or pulled all
+    // the way back, which is the one thing a fixed millimetre size (the
+    // first version of this file used one) cannot do: it either swamps a
+    // close-up segment or vanishes on a distant one. Only the span between
+    // `from` and `to` itself stays true to world scale.
+    const double wpp = std::max(worldPerPixel, 1.0e-9);
+    const double gap = 8.0 * wpp;         // clear of the endpoint before the extension line starts
+    const double offset = 34.0 * wpp;     // dimension line's distance from the segment
+    const double beyond = 8.0 * wpp;      // how far the extension line runs past the dimension line
+    const double arrowLen = 16.0 * wpp;
+    const double arrowWidth = 7.0 * wpp;
+    const double labelGap = 14.0 * wpp;   // further beyond the dimension line, to the label anchor
 
     const gp_Pnt dimStart = from.Translated(ext * offset);
     const gp_Pnt dimEnd = to.Translated(ext * offset);
 
-    Handle(Graphic3d_ArrayOfSegments) segs = new Graphic3d_ArrayOfSegments(6);
+    // 3 lines (extension x2, dimension x1) + 2 arrowheads x 2 strokes each =
+    // 7 segments, 14 vertices.
+    Handle(Graphic3d_ArrayOfSegments) segs = new Graphic3d_ArrayOfSegments(14);
     auto addSeg = [&](const gp_Pnt& a, const gp_Pnt& b) {
         segs->AddVertex(a);
         segs->AddVertex(b);
@@ -135,21 +176,19 @@ void DimensionRenderer::show(const gp_Pnt& from, const gp_Pnt& to, const gp_Dir&
     // The dimension line itself.
     addSeg(dimStart, dimEnd);
 
-    Handle(Graphic3d_ArrayOfTriangles) arrows = new Graphic3d_ArrayOfTriangles(6);
-    // Tip at the very end of the dimension line, flaring back toward the
-    // centre - the usual "<---->" look, arrows pointing outward.
+    // Open, two-stroke arrowheads: tip at the very end of the dimension
+    // line, two strokes fanning back toward the centre - the usual
+    // "<---->" look, arrows pointing outward toward the extension lines.
     auto addArrow = [&](const gp_Pnt& tip, const gp_Vec& inward) {
         const gp_Pnt base = tip.Translated(inward * arrowLen);
-        arrows->AddVertex(tip);
-        arrows->AddVertex(base.Translated(ext * (arrowWidth * 0.5)));
-        arrows->AddVertex(base.Translated(ext * (-arrowWidth * 0.5)));
+        addSeg(tip, base.Translated(ext * (arrowWidth * 0.5)));
+        addSeg(tip, base.Translated(ext * (-arrowWidth * 0.5)));
     };
     addArrow(dimStart, along);
     addArrow(dimEnd, -along);
 
     Handle(DimensionLines) linesObj = new DimensionLines();
     linesObj->lines = segs;
-    linesObj->arrows = arrows;
     linesObj->colour = toOcct(Theme::accent());
     myContext->Display(linesObj, 0, -1, Standard_False);   // mode -1: feedback only, never pickable
     myObjects.push_back(linesObj);
@@ -163,17 +202,23 @@ void DimensionRenderer::show(const gp_Pnt& from, const gp_Pnt& to, const gp_Dir&
     // Clear of the dimension line, with the anchor on the BOTTOM of the text
     // rather than its centre - centring it on the anchor would let the box's
     // own height straddle back down onto the line it is meant to sit above.
-    // The gap itself is generous rather than tuned to AIS_TextLabel's exact
-    // on-screen text height, which this class has no way to query back.
-    const gp_Pnt labelPos = mid.Translated(ext * 16.0);
+    const gp_Pnt labelPos = mid.Translated(ext * labelGap);
 
     Handle(AIS_TextLabel) label = new AIS_TextLabel();
     label->SetText(TCollection_ExtendedString(myLabelText.c_str(), Standard_True));
     label->SetPosition(labelPos);
     label->SetHJustification(Graphic3d_HTA_CENTER);
     label->SetVJustification(Graphic3d_VTA_BOTTOM);
-    label->SetHeight(16.0);
+    // Roughly Theme::bodyFont()'s pixel size - the previous 16 read oversized
+    // next to furniture this small; now that the furniture itself is a real
+    // screen-space size, a smaller label sits proportionate to it.
+    label->SetHeight(13.0);
     label->SetColor(toOcct(Theme::text()));
+    // The app's own DM Sans if OCCT could resolve it, otherwise a sans
+    // fallback - see dimensionFontFamily(). Never left at OCCT's serif
+    // default, which is the one string in the app that would otherwise
+    // ignore Phase 3's type scale entirely.
+    label->SetFont(dimensionFontFamily().c_str());
     // TODT_SUBTITLE paints a filled rectangle behind the text - the "boxed
     // label" the brief calls for, at no extra geometry.
     label->SetDisplayType(Aspect_TODT_SUBTITLE);

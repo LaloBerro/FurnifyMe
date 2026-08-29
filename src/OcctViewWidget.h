@@ -84,6 +84,15 @@ public:
     // plane has happened.
     bool lastHoverPoint(gp_Pnt& out) const;
 
+    // World units per screen pixel at the camera's current distance from its
+    // target - the same conversion panning already used internally, now
+    // shared so DimensionRenderer's furniture (arrowheads, extension gaps,
+    // the label) can be sized in constant screen pixels rather than a fixed
+    // number of millimetres that shrinks to nothing as the camera pulls
+    // back. Both dimension call sites (the live sketch segment in
+    // MainWindow, the hovered edge here) read this.
+    double worldPerPixel() const;
+
     // Document ids of the selected solids, deduplicated (face-mode selection can
     // hit several faces of one solid).
     std::vector<int> selectedSolidIds() const;

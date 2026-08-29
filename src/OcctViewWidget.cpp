@@ -360,6 +360,15 @@ bool OcctViewWidget::lastHoverPoint(gp_Pnt& out) const
     return true;
 }
 
+double OcctViewWidget::worldPerPixel() const
+{
+    // World units per pixel at target depth, for a perspective camera - the
+    // same maths panning already used inline.
+    return 2.0 * myCamera.state().distance *
+           std::tan(0.5 * kFovyDeg * 3.14159265358979323846 / 180.0) /
+           std::max(1, height());
+}
+
 void OcctViewWidget::updateHoverDimension()
 {
     if (mySelectionMode != SelectionMode::Edge || myContext.IsNull() ||
@@ -392,7 +401,7 @@ void OcctViewWidget::updateHoverDimension()
     if (sideways.Magnitude() < 1.0e-7) sideways = gp_Vec(0.0, 0.0, 1.0).Crossed(along);
     if (sideways.Magnitude() < 1.0e-7) sideways = gp_Vec(1.0, 0.0, 0.0);
 
-    myDimension.show(from, to, gp_Dir(sideways));
+    myDimension.show(from, to, gp_Dir(sideways), worldPerPixel());
 }
 
 std::vector<int> OcctViewWidget::selectedSolidIds() const
@@ -633,12 +642,8 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
         applyCameraState();
     } else if (myPanningDrag) {
         const QPoint delta = pos - myLastPos;
-        // World units per pixel at target depth, for a perspective camera.
-        const double worldPerPixel =
-            2.0 * myCamera.state().distance *
-            std::tan(0.5 * kFovyDeg * 3.14159265358979323846 / 180.0) /
-            std::max(1, height());
-        myCamera.pan(-delta.x() * worldPerPixel, delta.y() * worldPerPixel);
+        const double wpp = worldPerPixel();
+        myCamera.pan(-delta.x() * wpp, delta.y() * wpp);
         applyCameraState();
     } else if (mySketchMode) {
         // Report where the next point would land, so the rubber band and the

@@ -708,7 +708,7 @@ void MainWindow::onSketchCursorMoved(const gp_Pnt& point)
     // plane the user is actually drawing on.
     gp_Vec sideways = gp_Vec(mySketch.plane().Axis().Direction()).Crossed(segment);
     if (sideways.Magnitude() < 1.0e-7) sideways = gp_Vec(1.0, 0.0, 0.0);
-    myView->dimension().show(last, point, gp_Dir(sideways));
+    myView->dimension().show(last, point, gp_Dir(sideways), myView->worldPerPixel());
 }
 
 void MainWindow::onStartSketch()
