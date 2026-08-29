@@ -4,8 +4,10 @@
 // Qt-free on purpose: the ray/plane unprojection maths is the part most worth
 // testing, and it needs no window.
 //
-// Milestone 1 sketches on a fixed XY plane at Z=0. Arbitrary planes are already
-// representable here - only the UI for choosing one is missing.
+// The plane defaults to XY at Z=0 - the ground - and is replaced wholesale
+// when the user locks a face (see MainWindow::lockToFace). It is held BY
+// VALUE, never as a reference to the face it came from: face indices are not
+// stable across a rebuild, so a re-derived plane could move under the user.
 //
 #include <vector>
 

@@ -51,8 +51,17 @@
 #include <QStatusBar>
 #include <QString>
 
+#include <BRepAdaptor_Surface.hxx>
+#include <BRepGProp.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
+#include <GProp_GProps.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Face.hxx>
+#include <gp_Pln.hxx>
+#include <gp_Vec.hxx>
+#include <GeomAbs_SurfaceType.hxx>
 
 #include <cmath>
 #include <cstdio>
@@ -963,6 +972,177 @@ int main(int argc, char* argv[])
         settle(120);
         check(!view->dimension().isShowing(),
               "cancelling the outline clears the dimension");
+    }
+
+    // --- a flat face can become the sketch plane ------------------------------
+    // The one part of this phase that changes what the app can build: an
+    // outline on the side of a body, extruding out of it rather than up.
+    {
+        // A body to pick a side face from, and a camera that definitely
+        // frames it. Both are put back at the end of the block so the checks
+        // after this one see the state they were written against.
+        if (window.document().count() == 0) buildBody(window, 0.25, 0.35, 0.45, 0.6, 60.0);
+        check(window.document().count() > 0, "there is a body to lock a face on");
+        const CameraState cameraBefore = view->camera().state();
+        view->fitAll();
+        settle(200);
+
+        trigger(window, QStringLiteral("Select Faces"));
+        settle(120);
+
+        // Pick the face by PROJECTING it, never by a hardcoded pixel: a
+        // literal (360, 340) passes only for as long as the camera and
+        // everything built before this block stay exactly as they are today.
+        // The target is a vertical side face - locking a ground-parallel one
+        // would prove nothing that Z=0 does not already.
+        //
+        // Projecting a centre of mass says where a face WOULD be if nothing
+        // stood in front of it; several bodies exist by now and any of them
+        // can occlude any other. So each candidate is clicked and the result
+        // read back, and only a click that actually selected a vertical flat
+        // face is accepted. A check that passed because a click happened to
+        // land somewhere is a check that fails on an unrelated change three
+        // tasks from now.
+        auto isVerticalPlane = [](const TopoDS_Face& face) {
+            if (face.IsNull()) return false;
+            const BRepAdaptor_Surface surface(face);
+            if (surface.GetType() != GeomAbs_Plane) return false;
+            return std::fabs(surface.Plane().Axis().Direction().Z()) < 0.1;
+        };
+
+        TopoDS_Face picked;
+        QPoint screen;
+        for (const DocumentModel::Solid& solid : window.document().solids()) {
+            for (TopExp_Explorer it(solid.shape, TopAbs_FACE); it.More(); it.Next()) {
+                const TopoDS_Face candidate = TopoDS::Face(it.Current());
+                if (!isVerticalPlane(candidate)) continue;
+                const gp_Dir normal = BRepAdaptor_Surface(candidate).Plane().Axis().Direction();
+                // Only a face pointing back at the camera can be picked at all.
+                if (gp_Vec(normal).Dot(gp_Vec(view->camera().viewDirection())) >= 0.0) continue;
+
+                GProp_GProps props;
+                BRepGProp::SurfaceProperties(candidate, props);
+                QPoint at;
+                if (!view->projectToScreen(props.CentreOfMass(), at)) continue;
+                if (!view->rect().adjusted(20, 20, -20, -20).contains(at)) continue;
+
+                clickAt(view, QPointF(at));
+                settle(120);
+                const TopoDS_Face got = view->selectedFace();
+                if (!isVerticalPlane(got)) continue;   // occluded, or the pick missed
+                picked = got;
+                screen = at;
+                break;
+            }
+            if (!picked.IsNull()) break;
+        }
+        check(!picked.IsNull(),
+              "clicking a projected face centre selects a vertical flat face");
+
+        if (!picked.IsNull()) {
+            QAction* lock = action(window, QStringLiteral("Lock to Face"));
+            check(lock != nullptr, "there is an action to lock a face");
+            check(lock != nullptr && lock->isEnabled(),
+                  "selecting one flat face enables it");
+
+            if (lock && lock->isEnabled()) {
+                const gp_Pln facePlane = BRepAdaptor_Surface(picked).Plane();
+                lock->trigger();
+                settle(200);
+                check(window.isFaceLocked(), "the face is locked");
+
+                // The sketch plane must BE the face's plane, not merely something.
+                const gp_Pln sketchPlane = window.sketch().plane();
+                check(sketchPlane.Axis().Direction().IsParallel(
+                          facePlane.Axis().Direction(), 1.0e-7),
+                      "the sketch plane is oriented like the face");
+                check(std::fabs(facePlane.Distance(sketchPlane.Location())) < 1.0e-6,
+                      "and sits on it");
+                check(std::fabs(sketchPlane.Axis().Direction().Z()) < 0.1,
+                      "and the locked plane really is a vertical one, not the ground");
+
+                // The grid is drawn in the 3D view, so the viewport dump is
+                // the only place it can be seen at all.
+                view->saveSnapshot(outDir + "/h-locked-face-grid.png");
+
+                // The part that makes this a feature rather than a label:
+                // a point clicked now lands ON the face's plane, not on Z=0.
+                trigger(window, QStringLiteral("Start Sketch"));
+                settle(120);
+                clickAt(view, QPointF(screen));
+                settle(150);
+                check(window.sketch().pointCount() == 1,
+                      "clicking while locked places a point");
+                if (window.sketch().pointCount() == 1) {
+                    const gp_Pnt placed = window.sketch().points().front();
+                    check(std::fabs(facePlane.Distance(placed)) < 1.0e-6,
+                          QStringLiteral("the point lands on the locked face's plane "
+                                         "(%1 mm off it)")
+                              .arg(facePlane.Distance(placed)));
+                    check(std::fabs(placed.Z()) > 1.0e-6,
+                          "and not on the ground plane it would have used before");
+                }
+                trigger(window, QStringLiteral("Cancel Sketch"));
+                settle(120);
+
+                // A curved face has no single plane to draw on, and the
+                // refusal has to say so rather than silently doing nothing.
+                // Built here rather than modelled: nothing in this document
+                // is round, and the check is about the refusal, not about
+                // how the cylinder got made.
+                ToastHost* toasts = window.findChild<ToastHost*>();
+                TopoDS_Face curved;
+                const TopoDS_Shape cylinder = BRepPrimAPI_MakeCylinder(20.0, 40.0).Shape();
+                for (TopExp_Explorer it(cylinder, TopAbs_FACE); it.More(); it.Next()) {
+                    if (BRepAdaptor_Surface(TopoDS::Face(it.Current())).GetType() ==
+                        GeomAbs_Plane)
+                        continue;
+                    curved = TopoDS::Face(it.Current());
+                    break;
+                }
+                check(!curved.IsNull(), "a curved face is available to refuse");
+                if (!curved.IsNull() && toasts) {
+                    check(!window.lockToFace(curved), "a curved face cannot be locked");
+                    check(toasts->currentText() ==
+                              QStringLiteral("This face isn't flat, so it can't hold an "
+                                             "outline. Pick a flat face and try again."),
+                          QStringLiteral("and the refusal names the cause and the fix "
+                                         "(\"%1\")")
+                              .arg(toasts->currentText()));
+                    check(window.isFaceLocked() &&
+                              window.sketch().plane().Axis().Direction().IsParallel(
+                                  facePlane.Axis().Direction(), 1.0e-7) &&
+                              std::fabs(facePlane.Distance(
+                                  window.sketch().plane().Location())) < 1.0e-6,
+                          "a refused lock leaves the plane that was already locked alone");
+                }
+
+                QAction* unlock = action(window, QStringLiteral("Unlock Face"));
+                check(unlock != nullptr && unlock->isEnabled(), "it can be unlocked");
+                if (unlock) {
+                    unlock->trigger();
+                    settle(150);
+                    check(!window.isFaceLocked(), "unlocking releases it");
+                    check(std::fabs(window.sketch().plane().Location().Z()) < 1.0e-9,
+                          "and returns to the ground plane");
+                    check(!unlock->isEnabled(),
+                          "and there is nothing left to unlock");
+                    view->saveSnapshot(outDir + "/h-unlocked-ground-grid.png");
+                }
+
+                // Locking is a capability the learning system can teach, so
+                // it has to be recorded like every other one.
+                check(window.progress().count("faceLock.used") >= 1,
+                      "locking a face is recorded as something the user has done");
+            }
+        }
+
+        // Put the world back: body selection, no lock, the camera where the
+        // blocks after this one expect it.
+        trigger(window, QStringLiteral("Select Bodies"));
+        view->clearSelection();
+        view->animateTo(cameraBefore);   // animations are off: this is immediate
+        settle(150);
     }
 
     // --- extrude asks for a height without stopping the user ------------------

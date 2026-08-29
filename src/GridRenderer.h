@@ -1,16 +1,26 @@
 #pragma once
-// The adaptive ground grid. Replaces OCCT's finite ActivateGrid patch: three
-// concentric bands of line segments on Z=0 whose colours blend toward the
+// The adaptive work-plane grid. Replaces OCCT's finite ActivateGrid patch:
+// three concentric bands of line segments whose colours blend toward the
 // viewport background with distance, so there is never a visible edge.
 // App-layer only - it builds OCCT presentation objects.
+//
+// The bands are built in the SUPPLIED plane's own coordinates rather than in
+// world XY. Locking a face makes that face the sketch plane, and a world-XY
+// grid drawn across a vertical face teaches the user nothing about where
+// their next point will land. The adaptive step, the three bands and the
+// distance fade are unchanged by that - only the frame they are built in
+// moves.
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_InteractiveObject.hxx>
+#include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
 
 class GridRenderer {
 public:
     void attach(const Handle(AIS_InteractiveContext)& context);
-    void update(double cameraDistance, const gp_Pnt& cameraTarget);
+    // `plane` is the work plane the grid lies on - the ground plane by
+    // default, a locked face's own plane while one is locked.
+    void update(double cameraDistance, const gp_Pnt& cameraTarget, const gp_Pln& plane);
 
     static double minorStepFor(double cameraDistance);
 
@@ -23,6 +33,11 @@ private:
     double myBuiltStep = 0.0;
     gp_Pnt myBuiltCenter{0.0, 0.0, 0.0};
     double myBuiltExtent = 0.0;
+    // Built in the plane's frame, so a change of plane must force a rebuild
+    // that no amount of camera-motion caching can skip.
+    gp_Pln myBuiltPlane{gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0)};
 
-    void rebuild(double minorStep, const gp_Pnt& center, double extent);
+    // `center` is in `plane`'s own (u, v) coordinates, not in world space.
+    void rebuild(double minorStep, double centerU, double centerV, double extent,
+                 const gp_Pln& plane);
 };

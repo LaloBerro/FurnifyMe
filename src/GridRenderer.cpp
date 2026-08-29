@@ -2,6 +2,7 @@
 
 #include "Theme.h"
 
+#include <ElSLib.hxx>
 #include <Graphic3d_ArrayOfSegments.hxx>
 #include <Graphic3d_AspectLine3d.hxx>
 #include <Graphic3d_Group.hxx>
@@ -19,6 +20,17 @@ namespace {
 Quantity_Color toOcct(const QColor& c)
 {
     return Quantity_Color(c.redF(), c.greenF(), c.blueF(), Quantity_TOC_sRGB);
+}
+
+// Two planes are the same grid frame only when they agree on all three of
+// origin, normal and in-plane X direction: a plane rotated about its own
+// normal draws a rotated grid, so comparing normals alone would cache a
+// stale rebuild.
+bool sameFrame(const gp_Pln& a, const gp_Pln& b)
+{
+    return a.Position().Direction().IsEqual(b.Position().Direction(), 1.0e-9) &&
+           a.Position().XDirection().IsEqual(b.Position().XDirection(), 1.0e-9) &&
+           a.Location().Distance(b.Location()) < 1.0e-9;
 }
 
 QColor lerp(const QColor& a, const QColor& b, double t)
@@ -80,37 +92,54 @@ void GridRenderer::attach(const Handle(AIS_InteractiveContext)& context)
     myContext = context;
 }
 
-void GridRenderer::update(double cameraDistance, const gp_Pnt& cameraTarget)
+void GridRenderer::update(double cameraDistance, const gp_Pnt& cameraTarget,
+                          const gp_Pln& plane)
 {
     if (myContext.IsNull()) return;
 
     const double step = minorStepFor(cameraDistance);
     // Extent: comfortably beyond what a camera at this distance can see of the
-    // ground, snapped to the major step so lines do not crawl on rebuild.
+    // work plane, snapped to the major step so lines do not crawl on rebuild.
     const double major = step * 10.0;
     double extent = std::clamp(cameraDistance * 6.0, 500.0, 200000.0);
     extent = std::ceil(extent / major) * major;
-    const gp_Pnt center(std::round(cameraTarget.X() / major) * major,
-                        std::round(cameraTarget.Y() / major) * major, 0.0);
 
-    // Rebuild only when something visible changes: level, or the camera left
-    // the middle half of the built area, or extent changed by >2x.
+    // The camera target in the PLANE's own coordinates, so the grid follows
+    // the camera across a locked vertical face exactly as it does across the
+    // ground. On the ground plane these are X and Y and nothing changes.
+    Standard_Real u = 0.0, v = 0.0;
+    ElSLib::Parameters(plane, cameraTarget, u, v);
+    const double centerU = std::round(u / major) * major;
+    const double centerV = std::round(v / major) * major;
+    const gp_Pnt center = ElSLib::Value(centerU, centerV, plane);
+
+    // Rebuild only when something visible changes: level, the plane itself,
+    // the camera leaving the middle half of the built area, or extent
+    // changing by >2x.
     const bool sameLevel = (step == myBuiltStep);
+    const bool samePlane = sameFrame(myBuiltPlane, plane);
     const bool centered = center.Distance(myBuiltCenter) < myBuiltExtent * 0.25;
     const bool sized = myBuiltExtent > 0.0 &&
                        extent < myBuiltExtent * 2.0 && extent > myBuiltExtent * 0.5;
-    if (sameLevel && centered && sized) return;
+    if (sameLevel && samePlane && centered && sized) return;
 
-    rebuild(step, center, extent);
+    rebuild(step, centerU, centerV, extent, plane);
     myBuiltStep = step;
     myBuiltCenter = center;
     myBuiltExtent = extent;
+    myBuiltPlane = plane;
 }
 
-void GridRenderer::rebuild(double minorStep, const gp_Pnt& center, double extent)
+void GridRenderer::rebuild(double minorStep, double centerU, double centerV,
+                           double extent, const gp_Pln& plane)
 {
     const double major = minorStep * 10.0;
     const QColor background = Theme::viewport();
+
+    // Everything below is laid out in the plane's own (u, v) coordinates and
+    // mapped into the world here. That single indirection is the whole of
+    // this class's plane support - the band maths never sees a world axis.
+    auto at = [&plane](double u, double v) { return ElSLib::Value(u, v, plane); };
 
     // Three concentric bands; outer bands blend toward the background so the
     // grid has no visible boundary.
@@ -131,37 +160,37 @@ void GridRenderer::rebuild(double minorStep, const gp_Pnt& center, double extent
         // the band's clip range - never anchored at the band edge, which is
         // not in general a multiple of the step.
         const double first = firstLineAtOrBelow(hi, step);
-        for (double v = first; v <= hi + step * 0.5; v += step) {
-            if (!isMajor && std::fmod(std::fabs(v) + step * 0.25, major) < step * 0.5)
+        for (double offset = first; offset <= hi + step * 0.5; offset += step) {
+            if (!isMajor && std::fmod(std::fabs(offset) + step * 0.25, major) < step * 0.5)
                 continue;   // skip positions covered by a major line
-            const double a = std::fabs(v);
+            const double a = std::fabs(offset);
             // Lines fully inside an inner band are drawn by that band already;
             // draw the full length in the innermost band and only the ring
             // extension in outer bands.
             if (spec.inner == 0.0) {
                 if (a > hi) continue;
-                points.push_back(gp_Pnt(center.X() + v, center.Y() - hi, 0.0));
-                points.push_back(gp_Pnt(center.X() + v, center.Y() + hi, 0.0));
-                points.push_back(gp_Pnt(center.X() - hi, center.Y() + v, 0.0));
-                points.push_back(gp_Pnt(center.X() + hi, center.Y() + v, 0.0));
+                points.push_back(at(centerU + offset, centerV - hi));
+                points.push_back(at(centerU + offset, centerV + hi));
+                points.push_back(at(centerU - hi, centerV + offset));
+                points.push_back(at(centerU + hi, centerV + offset));
             } else {
                 if (a > hi) continue;
                 // Ring: two segments per line (the parts outside the inner square),
                 // plus full-length lines whose offset itself is in the ring.
                 if (a >= lo) {
-                    points.push_back(gp_Pnt(center.X() + v, center.Y() - hi, 0.0));
-                    points.push_back(gp_Pnt(center.X() + v, center.Y() + hi, 0.0));
-                    points.push_back(gp_Pnt(center.X() - hi, center.Y() + v, 0.0));
-                    points.push_back(gp_Pnt(center.X() + hi, center.Y() + v, 0.0));
+                    points.push_back(at(centerU + offset, centerV - hi));
+                    points.push_back(at(centerU + offset, centerV + hi));
+                    points.push_back(at(centerU - hi, centerV + offset));
+                    points.push_back(at(centerU + hi, centerV + offset));
                 } else {
-                    points.push_back(gp_Pnt(center.X() + v, center.Y() - hi, 0.0));
-                    points.push_back(gp_Pnt(center.X() + v, center.Y() - lo, 0.0));
-                    points.push_back(gp_Pnt(center.X() + v, center.Y() + lo, 0.0));
-                    points.push_back(gp_Pnt(center.X() + v, center.Y() + hi, 0.0));
-                    points.push_back(gp_Pnt(center.X() - hi, center.Y() + v, 0.0));
-                    points.push_back(gp_Pnt(center.X() - lo, center.Y() + v, 0.0));
-                    points.push_back(gp_Pnt(center.X() + lo, center.Y() + v, 0.0));
-                    points.push_back(gp_Pnt(center.X() + hi, center.Y() + v, 0.0));
+                    points.push_back(at(centerU + offset, centerV - hi));
+                    points.push_back(at(centerU + offset, centerV - lo));
+                    points.push_back(at(centerU + offset, centerV + lo));
+                    points.push_back(at(centerU + offset, centerV + hi));
+                    points.push_back(at(centerU - hi, centerV + offset));
+                    points.push_back(at(centerU - lo, centerV + offset));
+                    points.push_back(at(centerU + lo, centerV + offset));
+                    points.push_back(at(centerU + hi, centerV + offset));
                 }
             }
         }
@@ -183,16 +212,19 @@ void GridRenderer::rebuild(double minorStep, const gp_Pnt& center, double extent
         addLines(true, spec);
     }
 
-    // Axis lines through the origin, if the origin is inside the built area.
-    if (std::fabs(center.X()) < extent && std::fabs(center.Y()) < extent) {
-        auto axis = [&](const QColor& colour, bool isX) {
+    // The plane's own two axes through its origin, if that origin is inside
+    // the built area. On the ground plane these are the world X and Y axes,
+    // which is what they have always been; on a locked face they are the
+    // face's own local axes, which is what the grid is measured in.
+    if (std::fabs(centerU) < extent && std::fabs(centerV) < extent) {
+        auto axis = [&](const QColor& colour, bool isU) {
             Handle(Graphic3d_ArrayOfSegments) array = new Graphic3d_ArrayOfSegments(2);
-            if (isX) {
-                array->AddVertex(gp_Pnt(center.X() - extent, 0.0, 0.0));
-                array->AddVertex(gp_Pnt(center.X() + extent, 0.0, 0.0));
+            if (isU) {
+                array->AddVertex(at(centerU - extent, 0.0));
+                array->AddVertex(at(centerU + extent, 0.0));
             } else {
-                array->AddVertex(gp_Pnt(0.0, center.Y() - extent, 0.0));
-                array->AddVertex(gp_Pnt(0.0, center.Y() + extent, 0.0));
+                array->AddVertex(at(0.0, centerV - extent));
+                array->AddVertex(at(0.0, centerV + extent));
             }
             GridObject::Band band;
             band.segments = array;

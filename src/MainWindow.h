@@ -26,6 +26,22 @@ public:
     bool extrudePendingFace(double height);
     bool applyBooleanToSelection(int kind);   // ModelingOps::BooleanKind
 
+    // Makes `face`'s own plane the sketch plane, so the next outline is drawn
+    // on the face and extrudes perpendicular to it. False - with a toast
+    // naming the cause and the fix - when the face is not flat, which is the
+    // only way this can be refused.
+    //
+    // The plane is captured BY VALUE here and the face itself is not kept.
+    // CLAUDE.md's topological-naming warning is the reason: face indices are
+    // not stable across a rebuild, so a stored face (or a plane re-derived
+    // from one later) would let a boolean or an undo move the sketch plane
+    // under the user without a single visible event.
+    bool lockToFace(const TopoDS_Face& face);
+    // Back to the ground plane. The ground plane is the default and is never
+    // itself "locked", so this is not a toggle of the same state.
+    void unlockFace();
+    bool isFaceLocked() const { return myFaceLocked; }
+
     // Read-only state, for assertions.
     const DocumentModel& document() const { return myDocument; }
     const SketchController& sketch() const { return mySketch; }
@@ -87,6 +103,7 @@ private slots:
     void onExportStep();
     void onSelectionModeChanged();
     void onSelectionChanged();
+    void onLockToFace();
 
 private:
     void buildActions();
@@ -117,6 +134,10 @@ private:
     // Face produced by the last committed sketch, waiting to be extruded.
     TopoDS_Face myPendingFace;
     bool mySketching = false;
+    // Derivable from the sketch plane, but named because two actions' enabled
+    // state reads it and "is this plane the ground one" is a floating-point
+    // comparison nobody should repeat at four call sites.
+    bool myFaceLocked = false;
 
     UserProgress myProgress;
     bool myPersistProgress = true;
@@ -144,6 +165,8 @@ private:
     QAction* myShortcutsAction = nullptr;
     QAction* myUnitsMillimetresAction = nullptr;
     QAction* myUnitsCentimetresAction = nullptr;
+    QAction* myLockFaceAction = nullptr;
+    QAction* myUnlockFaceAction = nullptr;
 
     class ViewportOverlay* myOverlay = nullptr;
     class QLabel* myStateLabel = nullptr;

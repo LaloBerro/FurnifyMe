@@ -25,6 +25,7 @@
 #include <TopExp.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
+#include <TopoDS_Face.hxx>
 #include <TopoDS_Vertex.hxx>
 #include <BRep_Tool.hxx>
 #include <V3d_TypeOfVisualization.hxx>
@@ -118,7 +119,8 @@ void OcctViewWidget::initializeViewer()
     myContext->HighlightStyle(Prs3d_TypeOfHighlight_LocalSelected)->SetColor(Quantity_NOC_ORANGE);
 
     myGridRenderer.attach(myContext);
-    myGridRenderer.update(myCamera.state().distance, myCamera.state().target);
+    myGridRenderer.update(myCamera.state().distance, myCamera.state().target,
+                          mySketchPlane);
     myDimension.attach(myContext);
 
     // Perspective projection: the turntable model is distance-based, and OCCT's
@@ -291,10 +293,46 @@ void OcctViewWidget::setSnap(bool enabled, double step)
     if (step > 0.0) mySnapStep = step;
 }
 
+void OcctViewWidget::setWorkPlane(const gp_Pln& plane)
+{
+    mySketchPlane = plane;
+    // The grid is drawn on this plane, so it has to be rebuilt now rather
+    // than on the next camera move: locking a face and seeing the grid still
+    // lying on the ground is the whole failure this call exists to prevent.
+    if (myView.IsNull()) return;
+    myGridRenderer.update(myCamera.state().distance, myCamera.state().target, mySketchPlane);
+    myView->Redraw();
+}
+
+TopoDS_Face OcctViewWidget::selectedFace() const
+{
+    if (myContext.IsNull()) return TopoDS_Face();
+
+    TopoDS_Face found;
+    int faces = 0;
+    for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
+        const TopoDS_Shape shape = myContext->SelectedShape();
+        if (shape.IsNull() || shape.ShapeType() != TopAbs_FACE) continue;
+        if (++faces > 1) return TopoDS_Face();
+        found = TopoDS::Face(shape);
+    }
+    return found;
+}
+
+bool OcctViewWidget::projectToScreen(const gp_Pnt& world, QPoint& out) const
+{
+    if (myView.IsNull()) return false;
+
+    Standard_Integer px = 0, py = 0;
+    myView->Convert(world.X(), world.Y(), world.Z(), px, py);
+    out = QPoint(static_cast<int>(px), static_cast<int>(py));
+    return true;
+}
+
 void OcctViewWidget::setSketchMode(bool enabled, const gp_Pln& plane)
 {
     mySketchMode = enabled;
-    mySketchPlane = plane;
+    setWorkPlane(plane);
     if (enabled) clearSelection();
     // The live segment dimension belongs to one sketch: cleared whether this
     // one just committed or was cancelled, and again on entry so a stale
@@ -466,7 +504,8 @@ void OcctViewWidget::applyCameraState()
     cam->SetEye(eye);
     cam->SetCenter(at);
     cam->SetUp(up);
-    myGridRenderer.update(myCamera.state().distance, myCamera.state().target);
+    myGridRenderer.update(myCamera.state().distance, myCamera.state().target,
+                          mySketchPlane);
     myView->Redraw();
     emit cameraChanged();
 }
@@ -690,6 +729,21 @@ void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
     const QPoint pos = event->position().toPoint();
     myContext->MoveTo(pos.x(), pos.y(), myView, Standard_False);
     if (!myContext->HasDetected()) return;
+
+    // In face mode a double-click means "sketch on this" - the second route
+    // to Lock to Face, alongside the action. Framing the body instead would
+    // be the one gesture that takes the camera away from the face the user
+    // just chose to work on. The refusal for a non-planar face lives in
+    // MainWindow, which owns the toast, not here.
+    if (mySelectionMode == SelectionMode::Face && myContext->HasDetectedShape() &&
+        myContext->DetectedShape().ShapeType() == TopAbs_FACE) {
+        // Select it too, so the actions agree with what was just locked.
+        myContext->SelectDetected(AIS_SelectionScheme_Replace);
+        myView->Redraw();
+        emit selectionChanged();
+        emit faceDoubleClicked(TopoDS::Face(myContext->DetectedShape()));
+        return;
+    }
 
     const Handle(AIS_InteractiveObject) hit = myContext->DetectedInteractive();
     for (const auto& entry : mySolids) {

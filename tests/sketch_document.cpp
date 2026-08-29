@@ -282,6 +282,44 @@ int main()
         check(doc.count() == 5, "the states beyond the cap are gone for good");
     }
 
+    // --- a sketch plane that is not the ground -------------------------------
+    // A point unprojected onto a non-XY plane must land on that plane, and
+    // snapping must not lift it off.
+    {
+        const gp_Pln vertical(gp_Pnt(0, 0, 0), gp_Dir(0, 1, 0));   // the XZ plane
+        const gp_Lin ray(gp_Pnt(50, -100, 30), gp_Dir(0, 1, 0));
+        gp_Pnt hit;
+        check(SketchController::intersectRayWithPlane(ray, vertical, hit),
+              "a ray meeting a vertical plane intersects it");
+        check(std::fabs(vertical.Distance(hit)) < 1e-9,
+              "the hit lies on the plane it was cast at");
+
+        const gp_Pnt snapped = SketchController::snapToPlaneGrid(hit, vertical, 10.0);
+        check(std::fabs(vertical.Distance(snapped)) < 1e-9,
+              "snapping keeps the point on its own plane");
+
+        // The whole point of a locked face: an outline drawn on it extrudes
+        // perpendicular to it, not straight up. The direction the app uses is
+        // the plane's own axis, so assert that is what a vertical plane gives.
+        SketchController sketch;
+        sketch.setPlane(vertical);
+        check(sketch.plane().Axis().Direction().IsParallel(gp_Dir(0, 1, 0), 1.0e-7),
+              "the sketch pushes out along the locked plane's normal, not +Z");
+
+        sketch.addPoint(gp_Pnt(0, 0, 0));
+        sketch.addPoint(gp_Pnt(100, 0, 0));
+        sketch.addPoint(gp_Pnt(100, 0, 60));
+        sketch.addPoint(gp_Pnt(0, 0, 60));
+        const TopoDS_Face face = sketch.closedFace();
+        check(!face.IsNull(), "an outline drawn on a vertical plane closes into a face");
+
+        const TopoDS_Shape body =
+            ModelingOps::extrude(face, sketch.plane().Axis().Direction(), 18.0);
+        check(!body.IsNull(), "and extrudes into a body");
+        check(!body.IsNull() && std::fabs(ModelingOps::volume(body) - 100.0 * 60.0 * 18.0) < 1.0e-6,
+              "whose volume is the outline's area times the height");
+    }
+
     // --- compound for STEP export -------------------------------------------
     {
         const TopoDS_Shape one = ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 1.0, 1.0, 1.0);

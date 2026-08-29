@@ -17,7 +17,10 @@
 #include "ViewportOverlay.h"
 #include "WalkthroughPanel.h"
 
+#include <BRepAdaptor_Surface.hxx>
+#include <GeomAbs_SurfaceType.hxx>
 #include <gp_Dir.hxx>
+#include <gp_Pln.hxx>
 #include <gp_Vec.hxx>
 
 #include <QAction>
@@ -67,6 +70,11 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     connect(myView, &OcctViewWidget::sketchPointPicked, this, &MainWindow::onSketchPointPicked);
     connect(myView, &OcctViewWidget::sketchCursorMoved, this, &MainWindow::onSketchCursorMoved);
     connect(myView, &OcctViewWidget::selectionChanged, this, &MainWindow::onSelectionChanged);
+    // The second route to Lock to Face. The viewport reports the gesture; this
+    // window decides what it means, and both routes land in the same
+    // lockToFace() - including its refusal - rather than one of them growing
+    // its own copy of the rule.
+    connect(myView, &OcctViewWidget::faceDoubleClicked, this, &MainWindow::lockToFace);
 
     buildActions();
     buildMenus();
@@ -143,6 +151,18 @@ void MainWindow::buildActions()
 
     myIntersectAction = new QAction(tr("&Intersect"), this);
     connect(myIntersectAction, &QAction::triggered, this, &MainWindow::onIntersect);
+
+    myLockFaceAction = new QAction(tr("&Lock to Face"), this);
+    myLockFaceAction->setShortcut(QKeySequence(Qt::Key_L));
+    myLockFaceAction->setToolTip(tr("Draw on the selected face instead of the ground (L)\n"
+                                    "Double-clicking a face does the same. Outlines drawn "
+                                    "there extrude square to it."));
+    connect(myLockFaceAction, &QAction::triggered, this, &MainWindow::onLockToFace);
+
+    myUnlockFaceAction = new QAction(tr("U&nlock Face"), this);
+    myUnlockFaceAction->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_L));
+    myUnlockFaceAction->setToolTip(tr("Go back to drawing on the ground (Shift+L)"));
+    connect(myUnlockFaceAction, &QAction::triggered, this, &MainWindow::unlockFace);
 
     myExportStepAction = new QAction(tr("Export &STEP..."), this);
     myExportStepAction->setShortcut(QKeySequence::Save);
@@ -269,6 +289,9 @@ void MainWindow::buildMenus()
     sketchMenu->addAction(myFinishSketchAction);
     sketchMenu->addAction(myUndoPointAction);
     sketchMenu->addAction(myCancelSketchAction);
+    sketchMenu->addSeparator();
+    sketchMenu->addAction(myLockFaceAction);
+    sketchMenu->addAction(myUnlockFaceAction);
 
     QMenu* editMenu = menuBar()->addMenu(tr("&Edit"));
     editMenu->addAction(myUndoAction);
@@ -505,6 +528,21 @@ void MainWindow::updateActions()
 
     myExtrudeAction->setEnabled(!mySketching && !myPendingFace.IsNull());
 
+    // Exactly one face, and a flat one: an outline needs a single plane to
+    // live on, and a cylinder's side has no such plane. Both halves are
+    // checked again inside lockToFace(), because the double-click route can
+    // reach a curved face this enabled state never sees.
+    const TopoDS_Face selectedFace = myView->selectedFace();
+    const bool flatFaceSelected =
+        !mySketching && !selectedFace.IsNull() &&
+        BRepAdaptor_Surface(selectedFace).GetType() == GeomAbs_Plane;
+    myLockFaceAction->setEnabled(flatFaceSelected);
+    // Not while sketching either: the points already placed live on the plane
+    // that is about to be swapped, and an outline with points on two planes
+    // is not an outline. Locking is already excluded above for the same
+    // reason; the double-click route cannot fire in sketch mode at all.
+    myUnlockFaceAction->setEnabled(myFaceLocked && !mySketching);
+
     myUnionAction->setEnabled(booleanReady);
     mySubtractAction->setEnabled(booleanReady);
     myIntersectAction->setEnabled(booleanReady);
@@ -717,12 +755,17 @@ void MainWindow::onStartSketch()
     myPendingFace.Nullify();
     mySketching = true;
 
-    // Milestone 1 sketches on the fixed XY plane at Z=0.
+    // The ground plane by default, a locked face's own plane while one is
+    // locked - SketchController holds the single copy of it either way.
     myView->setSketchMode(true, mySketch.plane());
     myView->setPreview(TopoDS_Shape());
     updateActions();
-    statusBar()->showMessage(tr("Click points on the ground to draw an outline — "
-                                "Enter closes it, Backspace undoes a point, Esc cancels"));
+    statusBar()->showMessage(
+        myFaceLocked
+            ? tr("Click points on the locked face to draw an outline — "
+                 "Enter closes it, Backspace undoes a point, Esc cancels")
+            : tr("Click points on the ground to draw an outline — "
+                 "Enter closes it, Backspace undoes a point, Esc cancels"));
 }
 
 void MainWindow::onSketchPointPicked(const gp_Pnt& point)
@@ -955,6 +998,55 @@ void MainWindow::onSelectionModeChanged()
     // face selection was used the next time something unrelated happens to
     // fire appStateChanged, which left its hint lingering.
     updateActions();
+}
+
+void MainWindow::onLockToFace()
+{
+    const TopoDS_Face face = myView->selectedFace();
+    if (face.IsNull()) return;
+    lockToFace(face);
+}
+
+bool MainWindow::lockToFace(const TopoDS_Face& face)
+{
+    if (face.IsNull()) return false;
+
+    const BRepAdaptor_Surface surface(face);
+    if (surface.GetType() != GeomAbs_Plane) {
+        myToasts->show(tr("This face isn't flat, so it can't hold an outline. "
+                          "Pick a flat face and try again."),
+                      Toast::Kind::Failure, false);
+        return false;
+    }
+
+    // By value, and the face is dropped here - see lockToFace()'s comment in
+    // the header for why holding on to it would be a bug waiting for the
+    // user's next boolean.
+    const gp_Pln plane = surface.Plane();
+    mySketch.setPlane(plane);
+    myFaceLocked = true;
+    // One call sets both where clicks land and where the grid is drawn; they
+    // are the same value inside the viewport, so they cannot disagree.
+    myView->setWorkPlane(plane);
+    recordProgress("faceLock.used");
+
+    updateActions();
+    statusBar()->showMessage(tr("Locked to this face — outlines you draw now sit on it, "
+                                "and extrude square to it"));
+    return true;
+}
+
+void MainWindow::unlockFace()
+{
+    if (!myFaceLocked) return;
+
+    const gp_Pln ground(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
+    mySketch.setPlane(ground);
+    myFaceLocked = false;
+    myView->setWorkPlane(ground);
+
+    updateActions();
+    statusBar()->showMessage(tr("Back to the ground — outlines are drawn flat again"));
 }
 
 void MainWindow::onSelectionChanged()

@@ -3,6 +3,7 @@
 // that Qt drags in.
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_Shape.hxx>
+#include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 #include <V3d_View.hxx>
 #include <V3d_Viewer.hxx>
@@ -67,6 +68,27 @@ public:
     // While sketching, a left click reports a point on `plane` instead of selecting.
     void setSketchMode(bool enabled, const gp_Pln& plane);
     bool sketchMode() const { return mySketchMode; }
+
+    // The plane clicks are unprojected onto AND the plane the grid lies on -
+    // one value, not two, because a grid that disagreed with where the next
+    // point will land would be worse than no grid. The ground plane until a
+    // face is locked. Setting it rebuilds the grid immediately, whether or
+    // not a sketch is in progress: locking a face has to be visible before
+    // the user starts drawing on it.
+    void setWorkPlane(const gp_Pln& plane);
+    const gp_Pln& workPlane() const { return mySketchPlane; }
+
+    // The single selected face, or a null face when the selection is not
+    // exactly one face. Deliberately not "the first selected face": Lock to
+    // Face is enabled off this, and locking one of several highlighted faces
+    // would be a coin toss the user cannot see.
+    TopoDS_Face selectedFace() const;
+
+    // Screen position of a world point, in this widget's coordinates. False
+    // when there is no view yet. Exposed for gui_smoke: a test that hardcodes
+    // the pixel it clicks is a test that silently stops hitting what it meant
+    // to the moment the camera or the model changes.
+    bool projectToScreen(const gp_Pnt& world, QPoint& out) const;
 
     // Snapping applies to points reported while sketching, not to the camera.
     void setSnap(bool enabled, double step);
@@ -137,6 +159,9 @@ signals:
     // rubber band and the coordinate readout.
     void sketchCursorMoved(const gp_Pnt& point);
     void selectionChanged();
+    // A face double-clicked in face-selection mode. MainWindow decides what
+    // that means (it locks it); this widget knows nothing about locking.
+    void faceDoubleClicked(const TopoDS_Face& face);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
