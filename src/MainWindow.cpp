@@ -163,7 +163,7 @@ void MainWindow::buildActions()
     });
 
     myStartSketchAction->setToolTip(tr("Draw a closed outline on the XY plane (Ctrl+K)"));
-    myFinishSketchAction->setToolTip(tr("Close the outline into a face - needs 3+ points (Enter)"));
+    myFinishSketchAction->setToolTip(tr("Close the outline into a face — needs 3+ points (Enter)"));
     myExtrudeAction->setToolTip(tr("Turn the closed face into a solid (E)"));
     myUnionAction->setToolTip(tr("Merge two bodies into one\n"
                                  "Overlapping material is kept once, not twice."));
@@ -312,13 +312,14 @@ void MainWindow::updateStateLabel()
     if (mySketching) {
         const int placed = static_cast<int>(mySketch.pointCount());
         if (mySketch.canClose()) {
-            state = tr("Sketching — %1 points. Enter or click the first point to close.")
+            state = tr("Sketching — %1 points — Enter or click the first point to close")
                         .arg(placed);
+        } else if (placed == 0) {
+            state = tr("Sketching — click to place your first point");
+        } else if (placed == 1) {
+            state = tr("Sketching — 1 point, 2 more to close");
         } else {
-            const int needed = 3 - placed;
-            state = needed == 1
-                        ? tr("Sketching — %1 points, 1 more to close").arg(placed)
-                        : tr("Sketching — %1 points, %2 more to close").arg(placed).arg(needed);
+            state = tr("Sketching — 2 points, 1 more to close");
         }
     } else if (!myPendingFace.IsNull()) {
         state = tr("Face ready — press E to extrude");
@@ -424,8 +425,8 @@ void MainWindow::onStartSketch()
     myView->setSketchMode(true, mySketch.plane());
     myView->setPreview(TopoDS_Shape());
     updateActions();
-    statusBar()->showMessage(tr("Click points on the ground to draw an outline. "
-                                "Enter closes it, Backspace undoes a point, Esc cancels."));
+    statusBar()->showMessage(tr("Click points on the ground to draw an outline — "
+                                "Enter closes it, Backspace undoes a point, Esc cancels"));
 }
 
 void MainWindow::onSketchPointPicked(const gp_Pnt& point)
@@ -563,7 +564,11 @@ bool MainWindow::applyBooleanToSelection(int kind)
                                  "Near-tangent geometry is the usual cause; adjusting the "
                                  "fuzzy value sometimes helps.")
                                   .arg(QString::fromStdString(result.error)));
-        statusBar()->showMessage(tr("Boolean failed - model unchanged."));
+        const QString operationName =
+            kind == static_cast<int>(ModelingOps::BooleanKind::Fuse)   ? tr("Union")
+            : kind == static_cast<int>(ModelingOps::BooleanKind::Cut)  ? tr("Subtract")
+                                                                       : tr("Intersect");
+        statusBar()->showMessage(tr("%1 failed — nothing was changed").arg(operationName));
         return false;
     }
 
