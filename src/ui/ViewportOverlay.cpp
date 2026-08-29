@@ -18,7 +18,17 @@ ViewportOverlay::ViewportOverlay(QWidget* viewport)
 void ViewportOverlay::addWidget(QWidget* widget, Anchor anchor)
 {
     widget->setParent(myViewport);
-    widget->show();
+    // Every normal caller here hands over a freshly constructed widget that
+    // has never been shown or hidden, so unconditional show() is exactly
+    // right for it. WalkthroughPanel is the one exception: it can decide,
+    // from its own constructor, that it must stay hidden (an
+    // already-learned user). Qt marks that kind of explicit decision with
+    // WA_WState_ExplicitShowHide - a widget that merely hasn't been shown
+    // yet does not carry it - so checking for it here is what lets a
+    // widget's own hidden decision survive being added, without changing
+    // behaviour for anything that never makes that decision.
+    if (!(widget->testAttribute(Qt::WA_WState_ExplicitShowHide) && widget->isHidden()))
+        widget->show();
     widget->raise();
     myEntries.push_back(Entry{widget, anchor});
     relayout();

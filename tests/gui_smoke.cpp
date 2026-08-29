@@ -678,6 +678,23 @@ int main(int argc, char* argv[])
                   .arg(tipOffenders.isEmpty() ? QStringLiteral("none")
                                               : tipOffenders.join(QStringLiteral(", "))));
 
+        // The walkthrough's step text is painted, not put on any action text
+        // or tooltip, so neither loop above ever sees it - it needs its own
+        // reach into the sweep or it drifts unenforced.
+        QStringList stepOffenders;
+        for (WalkthroughPanel* panel : window.findChildren<WalkthroughPanel*>()) {
+            for (const QString& step : panel->stepTexts()) {
+                for (const QString& word : banned) {
+                    if (step.contains(word, Qt::CaseInsensitive))
+                        stepOffenders << (step + QStringLiteral(" [") + word + QStringLiteral("]"));
+                }
+            }
+        }
+        check(stepOffenders.isEmpty(),
+              QStringLiteral("no walkthrough step text uses a banned word (%1)")
+                  .arg(stepOffenders.isEmpty() ? QStringLiteral("none")
+                                               : stepOffenders.join(QStringLiteral(", "))));
+
         // The state label is the app's most-updated string; it must obey the
         // vocabulary too. It is a permanent widget on the status bar.
         QString stateText;
@@ -726,6 +743,33 @@ int main(int argc, char* argv[])
             settle(100);
             check(window.progress().count("extrude.completed") == 0,
                   "Show tips again clears the progress store");
+
+            // Acceptance criterion 5: Show tips again must genuinely restore
+            // the walkthrough, not just clear the counters underneath it -
+            // and it must not instantly re-complete itself just because a
+            // body from before the reset is still sitting in the document.
+            check(window.document().count() > 0,
+                  "a body from before the reset is still in the document");
+            WalkthroughPanel* guide = window.findChild<WalkthroughPanel*>();
+            check(guide != nullptr && guide->isVisible(),
+                  "Show tips again brings the guide back");
+            check(guide != nullptr && !guide->isFinished(),
+                  "the restored guide is not finished");
+            check(guide != nullptr && guide->completedSteps() == 0,
+                  "the restored guide starts over at zero steps, not "
+                  "re-completed by the body already in the document");
+
+            // Prove the restore is real, not cosmetic: walking through the
+            // guide again - building one more body - completes it again.
+            trigger(window, QStringLiteral("Start Sketch"));
+            sketchQuad(window, 0.35, 0.35, 0.45, 0.45);
+            trigger(window, QStringLiteral("Finish Sketch"));
+            check(window.extrudePendingFace(5.0), "a third extrude reports success");
+            settle(150);
+            check(guide != nullptr && guide->isFinished(),
+                  "building another body completes the restored guide");
+            check(window.progress().hasLearned("walkthrough.done"),
+                  "the guide records walkthrough.done again after completing for real");
         }
     }
 
@@ -789,6 +833,44 @@ int main(int argc, char* argv[])
 
         // A returning user does not see it again.
         MainWindow second(nullptr, /*persistProgress=*/false);
+
+        // gui_smoke's clickAt() sends events straight to a target widget,
+        // bypassing real hit-testing entirely, so nothing sent that way can
+        // prove a click on this panel actually reaches the viewport end to
+        // end. What can be proven directly is the mechanism real
+        // hit-testing itself consults: Qt::WA_TransparentForMouseEvents.
+        // (A mousePressEvent() override that merely called event->ignore()
+        // was tried first and rejected - verified directly against this
+        // exact dispatch path, even a stock, unmodified QWidget's mouse
+        // press comes back "accepted" afterward in Qt6, so ignoring it from
+        // inside the handler achieves nothing for a plain sibling widget.)
+        // The skip control is the one interactive exception: a real child
+        // widget, exempt from its parent's transparency and hit-tested on
+        // its own - it is not a named type in any header, so it is found
+        // here generically, as the panel's only child.
+        WalkthroughPanel* secondGuide = second.findChild<WalkthroughPanel*>();
+        check(secondGuide != nullptr, "the second window gets its own guide too");
+        if (secondGuide) {
+            check(secondGuide->testAttribute(Qt::WA_TransparentForMouseEvents),
+                  "the guide does not block clicks meant for the viewport underneath it");
+
+            const QList<QWidget*> children =
+                secondGuide->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly);
+            check(children.size() == 1, "the guide has exactly one child: the skip control");
+            if (children.size() == 1) {
+                QWidget* skip = children.first();
+                check(!skip->testAttribute(Qt::WA_TransparentForMouseEvents),
+                      "the skip control itself stays clickable");
+                const QPointF centre(skip->width() / 2.0, skip->height() / 2.0);
+                QMouseEvent press(QEvent::MouseButtonPress, centre, centre,
+                                  Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QCoreApplication::sendEvent(skip, &press);
+                check(secondGuide->isFinished(), "clicking the skip control finishes the guide");
+                check(second.progress().hasLearned("walkthrough.done"),
+                      "skipping records walkthrough.done, same as finishing for real");
+            }
+        }
+
         second.progress().record("walkthrough.done");
         second.progress().record("walkthrough.done");
         second.progress().record("walkthrough.done");
