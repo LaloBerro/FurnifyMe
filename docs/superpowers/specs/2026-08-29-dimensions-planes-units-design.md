@@ -1,8 +1,9 @@
 # Phase 4: Dimensions, sketch planes, and units — design
 
 Date: 2026-08-29
-Status: approved by standing instruction — the user asked for Phase 3 and Phase 4 to run
-without further questions, so the decisions below were made rather than asked.
+Status: implemented 2026-08-29. Approved by standing instruction — the user asked for
+Phase 3 and Phase 4 to run without further questions, so the decisions below were made
+rather than asked.
 
 Phase 4 of the UX overhaul. Phases 1–3 (language, learnability, feedback) are merged.
 This phase is the first to add **modelling capability**, not only presentation.
