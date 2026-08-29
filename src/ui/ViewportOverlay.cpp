@@ -1,10 +1,27 @@
 #include "ViewportOverlay.h"
 
+#include "Theme.h"
+
 #include <QEvent>
 #include <QWidget>
 
 namespace {
-constexpr int kMargin = 16;   // gap from the viewport edge
+// The mockup's gap from the viewport edge to what is actually PAINTED, not
+// to a widget's own bounding box. Most anchored widgets (the axis gizmo, the
+// unit readout) paint their whole bounding box, so the two coincide for
+// them. The chip clusters and the walkthrough guide do not any more - they
+// grew a Theme::surfaceShadowMargin() margin of shadow-only space on every
+// side (see ToolCluster.cpp) - so anchoring their bounding box at the raw 16
+// would leave their painted content sitting 16 + surfaceShadowMargin() from
+// the edge instead. Pulling every entry's anchor in by that same margin
+// keeps the ones that DID grow visually at 16 again; the ones that did not
+// grow move 16 - surfaceShadowMargin() from the edge instead, close enough
+// that nothing in this app currently distinguishes it from 16 by eye or by
+// test (see the "bottom-anchored cluster keeps its margin" range check).
+// Not constexpr: Theme::surfaceShadowMargin() is an ordinary function, not a
+// constexpr one - CLAUDE.md's Theme surface is called, not compiled in, so a
+// caller cannot accidentally bake in a stale 3 if that value ever moved.
+const int kMargin = 16 - Theme::surfaceShadowMargin();
 constexpr int kGap = 8;       // gap between clusters sharing an edge
 }  // namespace
 

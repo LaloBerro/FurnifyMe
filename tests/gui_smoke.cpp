@@ -46,6 +46,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMouseEvent>
+#include <QPainter>
 #include <QPointF>
 #include <QSet>
 #include <QSettings>
@@ -273,6 +274,114 @@ bool buildBody(MainWindow& window, double x0, double y0, double x1, double y1, d
     sketchQuad(window, x0, y0, x1, y1);
     trigger(window, QStringLiteral("Finish Sketch"));
     return window.extrudePendingFace(height);
+}
+
+// --- Graphite fix-round-1 pixel probes --------------------------------------
+// The image-diff pattern above ("does the whole widget's pixmap change at
+// all") already passed against the PRE-fix-round chip, which painted a
+// checked border, a hover fill and a dimmed disabled state of its own - none
+// of it in the specific shape the anatomy contract calls for. These probes
+// sample specific pixels instead, so a plausible-but-wrong revert (dropping
+// the always-on border, swapping the inset ring back for a border colour
+// change, un-dimming just the badge) fails loudly rather than passing
+// because SOMETHING else still repainted.
+
+// Renders a widget at its own logical size, DPI-neutral - QWidget::grab()
+// scales by the screen's devicePixelRatio, which would make a pixel-exact
+// probe's coordinates environment-dependent. Works on a hidden widget too
+// (render() does not require the widget to be shown), which the isolated
+// probe chip relies on.
+QImage renderExact(QWidget* widget)
+{
+    QImage image(widget->size(), QImage::Format_ARGB32);
+    image.fill(Qt::transparent);
+    QPainter painter(&image);
+    widget->render(&painter);
+    return image;
+}
+
+// Straight-line RGB distance - used to say "this pixel reads as X, not Y"
+// without demanding bit-exact equality, which a 1px antialiased stroke can
+// never guarantee at the exact pixel a naive test would pick.
+double colorDistance(const QColor& a, const QColor& b)
+{
+    const double dr = a.red() - b.red();
+    const double dg = a.green() - b.green();
+    const double db = a.blue() - b.blue();
+    return std::sqrt(dr * dr + dg * dg + db * db);
+}
+
+// Mean of R+G+B/3 over a rectangular region - used where the signal is
+// "this region got darker", not any one pixel's exact colour, since a
+// right-aligned run of glyphs is mostly background between the letterforms.
+double averageLuminance(const QImage& image, const QRect& region)
+{
+    double sum = 0.0;
+    int count = 0;
+    for (int y = region.top(); y <= region.bottom(); ++y) {
+        for (int x = region.left(); x <= region.right(); ++x) {
+            if (x < 0 || y < 0 || x >= image.width() || y >= image.height()) continue;
+            const QColor c = image.pixelColor(x, y);
+            sum += (c.red() + c.green() + c.blue()) / 3.0;
+            ++count;
+        }
+    }
+    return count > 0 ? sum / count : 0.0;
+}
+
+// Confirms a floating card genuinely goes through Theme::paintSurface():
+// panel() fill well inside the card, and `edgeColour` - the family's plain
+// border() for a card that adds no accent of its own at the sampled edge,
+// or the card's own override colour (WalkthroughPanel's accent() outline,
+// which replaces the family border everywhere) - measured closer at the
+// edge than the interior reads. Also confirms a shadow is genuinely present
+// just outside the card, in the margin Theme::surfaceShadowMargin()
+// reserves: nothing is painted there at all except paintSurface()'s
+// alpha-blended rings, so any nonzero alpha proves the shadow ran.
+// `edgePoint`/`interiorPoint`/`outsidePoint` are supplied by the caller,
+// in the widget's own local coordinates, rather than derived here - which
+// edge is safe to sample (clear of a stripe, a pill, a skip control) is a
+// per-card decision, not a general one.
+void checkFamilySurface(QWidget* widget, const QPoint& edgePoint, const QRect& interiorSearch,
+                        const QPoint& outsidePoint, const QColor& edgeColour, const QString& label)
+{
+    const QImage img = renderExact(widget);
+    if (!img.rect().contains(edgePoint)) {
+        check(false, QStringLiteral("%1: the edge probe point falls inside the "
+                                    "rendered image").arg(label));
+        return;
+    }
+
+    // The card's own content - a title, a message, a list of rows - can sit
+    // almost anywhere in its interior, so this searches the whole region for
+    // whichever pixel reads closest to panel() rather than trusting one
+    // hand-picked point to have dodged every card's text. Real background
+    // is common even in a text-heavy card (between glyphs, between rows), so
+    // the best match found is expected to land very close to the token
+    // itself, not just closer than some other colour.
+    double bestPanelDist = 1e9;
+    QColor bestPanelColor = Theme::panel();
+    for (int y = interiorSearch.top(); y <= interiorSearch.bottom(); y += 2) {
+        for (int x = interiorSearch.left(); x <= interiorSearch.right(); x += 2) {
+            if (!img.rect().contains(x, y)) continue;
+            const QColor c = img.pixelColor(x, y);
+            const double d = colorDistance(c, Theme::panel());
+            if (d < bestPanelDist) { bestPanelDist = d; bestPanelColor = c; }
+        }
+    }
+    check(bestPanelDist < 12.0,
+          QStringLiteral("%1's interior contains genuine panel() fill somewhere "
+                         "clear of its own painted content").arg(label));
+
+    const QColor edge = img.pixelColor(edgePoint);
+    check(colorDistance(edge, edgeColour) < colorDistance(bestPanelColor, edgeColour),
+          QStringLiteral("%1's edge reads closer to its border colour than its "
+                         "panel() interior does").arg(label));
+
+    if (img.rect().contains(outsidePoint)) {
+        check(qAlpha(img.pixel(outsidePoint)) > 0,
+              QStringLiteral("%1 paints a shadow in its reserved margin").arg(label));
+    }
 }
 
 }  // namespace
@@ -3275,9 +3384,14 @@ int main(int argc, char* argv[])
         probe.setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+P")));
         ToolChip probeChip(&probe, IconSet::Glyph::Sketch);
         probeChip.resize(probeChip.sizeHint());
+        const int chipMargin = Theme::surfaceShadowMargin();
+        const QRect chipBody =
+            probeChip.rect().adjusted(chipMargin, chipMargin, -chipMargin, -chipMargin);
 
         // normal vs hovered - a real Enter/Leave delivered the way Qt's own
-        // hit-testing would, not myHovered flipped by hand.
+        // hit-testing would, not myHovered flipped by hand. A coarse
+        // whole-image sanity net; the pixel probes below are what actually
+        // pin each state's specific anatomy.
         const QImage normal = probeChip.grab().toImage();
         const QPointF centre(probeChip.width() / 2.0, probeChip.height() / 2.0);
         QEnterEvent enter(centre, centre, probeChip.mapToGlobal(centre.toPoint()));
@@ -3289,16 +3403,52 @@ int main(int argc, char* argv[])
         QCoreApplication::sendEvent(&probeChip, &leave);
         settle(50);
 
+        // Pin the border: fix round 1, Important 1. An unchecked, enabled
+        // chip's edge pixel must read closer to border() than the chip's
+        // own interior fill does. This is what actually catches "dropped
+        // the always-on border" - the whole-image diffs above were already
+        // green against a chip with no border at all, since hover/disabled/
+        // checked all repainted the fill regardless.
+        {
+            const QImage img = renderExact(&probeChip);
+            const QColor edge = img.pixelColor(chipBody.left(), chipBody.center().y());
+            const QColor interior = img.pixelColor(chipBody.center());
+            check(colorDistance(edge, Theme::border()) < colorDistance(interior, Theme::border()),
+                  "an unchecked, enabled chip's edge pixel reads closer to "
+                  "border() than its own interior fill does");
+        }
+
         // enabled vs disabled - glyph, label and the shortcut badge (the
         // probe carries one, so it is actually on screen to compare) all dim
         // to textDisabled() together.
         const QImage enabledImg = probeChip.grab().toImage();
+        const QImage enabledExact = renderExact(&probeChip);
         probe.setEnabled(false);
         settle(50);
         const QImage disabledImg = probeChip.grab().toImage();
+        const QImage disabledExact = renderExact(&probeChip);
         check(disabledImg != enabledImg,
               "a disabled chip repaints distinctly (glyph, label and badge all "
               "dim to textDisabled())");
+
+        // Pin the badge specifically: fix round 1, Important 1. Sampled as
+        // an average over the right quarter of the body, not one pixel - a
+        // right-aligned shortcut string is mostly background between the
+        // letterforms. This is what catches "un-dimmed just the badge",
+        // which the whole-chip diff above cannot: the glyph and label
+        // dimming alone is enough to make the two images differ.
+        {
+            const QRect badgeRegion(chipBody.left() + chipBody.width() * 3 / 4,
+                                    chipBody.top() + 2, chipBody.width() / 4 - 4,
+                                    chipBody.height() - 4);
+            const double enabledLum = averageLuminance(enabledExact, badgeRegion);
+            const double disabledLum = averageLuminance(disabledExact, badgeRegion);
+            check(disabledLum < enabledLum - 3.0,
+                  QStringLiteral("the shortcut badge itself dims when the chip "
+                                 "disables (enabled avg %1, disabled avg %2)")
+                      .arg(enabledLum, 0, 'f', 1)
+                      .arg(disabledLum, 0, 'f', 1));
+        }
         probe.setEnabled(true);
         settle(50);
 
@@ -3308,12 +3458,194 @@ int main(int argc, char* argv[])
         probe.setChecked(false);
         settle(50);
         const QImage uncheckedImg = probeChip.grab().toImage();
+        const QImage uncheckedExact = renderExact(&probeChip);
         probe.setChecked(true);
         settle(50);
         const QImage checkedImg = probeChip.grab().toImage();
+        const QImage checkedExact = renderExact(&probeChip);
         check(checkedImg != uncheckedImg,
               "a checked chip repaints distinctly (chipActive() fill plus an "
               "inset accent() ring)");
+
+        // Pin the ring itself: fix round 1, Important 1. Sampled 2px in from
+        // the left edge - where ToolChip::paintEvent() draws the inset
+        // accent() ring - and compared relatively (checked's inset vs
+        // unchecked's inset), not against an absolute token: a single
+        // antialiased pixel sits too close to a coverage tie to trust in
+        // isolation, but the unchecked sample is unambiguously pure fill
+        // with zero accent() contribution, which is exactly the baseline
+        // this needs.
+        {
+            const QPoint insetPoint(chipBody.left() + 2, chipBody.center().y());
+            const QColor uncheckedInset = uncheckedExact.pixelColor(insetPoint);
+            const QColor checkedInset = checkedExact.pixelColor(insetPoint);
+            check(colorDistance(checkedInset, Theme::accent()) <
+                      colorDistance(uncheckedInset, Theme::accent()),
+                  "the checked chip's ring-inset pixel reads far closer to "
+                  "accent() than the same inset on an unchecked chip");
+        }
+        probe.setChecked(false);
+        settle(50);
+
+        // --- fix round 1, Important 2 + the mockup regression: pin every
+        // card to Theme::paintSurface(), and confirm the two cards that keep
+        // their own accent on top of it still show it. ---------------------
+
+        // The guide: its own accent() outline, unconditional, replacing the
+        // family's plain border() everywhere on its edge - not merely "the
+        // guide is visible", which reverting to the old hand-rolled
+        // background would still be.
+        QAction* showTipsAgain = action(window, QStringLiteral("Show tips again"));
+        check(showTipsAgain != nullptr, "Show tips again exists for the family-surface probes");
+        if (showTipsAgain) {
+            showTipsAgain->trigger();
+            settle(150);
+        }
+        WalkthroughPanel* guide = window.findChild<WalkthroughPanel*>();
+        check(guide != nullptr && guide->isVisible(),
+              "the guide is up for the family-surface probe");
+        if (guide && guide->isVisible()) {
+            const int m = Theme::surfaceShadowMargin();
+            const QRect body = guide->rect().adjusted(m, m, -m, -m);
+            checkFamilySurface(guide, QPoint(body.left(), body.center().y()),
+                               body.adjusted(4, 4, -4, -4),
+                               QPoint(body.left() - 1, body.center().y()), Theme::accent(),
+                               QStringLiteral("WalkthroughPanel"));
+        }
+
+        // The hint balloon: plain family, no accent of its own. Selecting
+        // exactly two bodies raises the boolean-operations hint
+        // deterministically - the same trigger HintBalloon::conditionHolds()
+        // uses elsewhere in this suite.
+        HintBalloon* hint = window.findChild<HintBalloon*>();
+        const auto solidsForHint = window.document().solids();
+        if (hint && solidsForHint.size() >= 2) {
+            view->setSelectedSolids({solidsForHint[0].id, solidsForHint[1].id});
+            settle(150);
+            check(hint->isVisible() && !hint->currentHint().isEmpty(),
+                  "a hint is up for the family-surface probe");
+            if (hint->isVisible()) {
+                const int m = Theme::surfaceShadowMargin();
+                const QRect body = hint->rect().adjusted(m, m, -m, -m);
+                checkFamilySurface(hint, QPoint(body.left(), body.center().y()),
+                                   body.adjusted(4, 4, -4, -4),
+                                   QPoint(body.left() - 1, body.center().y()), Theme::border(),
+                                   QStringLiteral("HintBalloon"));
+            }
+        }
+
+        // The shortcut sheet: plain family too.
+        ShortcutSheet* sheet = window.findChild<ShortcutSheet*>();
+        check(sheet != nullptr, "there is a shortcut sheet for the family-surface probe");
+        if (sheet) {
+            sheet->showSheet();
+            settle(100);
+            check(sheet->isVisible(), "the probe sheet is up");
+            if (sheet->isVisible()) {
+                const int m = Theme::surfaceShadowMargin();
+                const QRect body = sheet->rect().adjusted(m, m, -m, -m);
+                checkFamilySurface(sheet, QPoint(body.left(), body.center().y()),
+                                   body.adjusted(4, 4, -4, -4),
+                                   QPoint(body.left() - 1, body.center().y()), Theme::border(),
+                                   QStringLiteral("ShortcutSheet"));
+            }
+            sheet->hide();
+        }
+
+        // The toast: plain family border on the edges away from its own
+        // stripe, plus the stripe itself, kind-tinted, restoring the
+        // Note/Failure distinction the mockup regression flattened. Sampled
+        // at the TOP edge for the family-surface pin, not the left - the
+        // left edge carries the stripe on purpose and would read as neither
+        // a plain border() nor a coverage bug, just a different accent.
+        ToastHost* toasts = window.findChild<ToastHost*>();
+        check(toasts != nullptr, "there is a toast host for the family-surface probe");
+        if (toasts) {
+            toasts->show(QStringLiteral("Graphite family probe - note"), Toast::Kind::Note, false);
+            settle(120);
+            Toast* toastWidget = toasts->toast();
+            check(toastWidget != nullptr && toastWidget->isVisible(),
+                  "the probe Note toast is up");
+            if (toastWidget) {
+                const int m = Theme::surfaceShadowMargin();
+                const QRect body = toastWidget->rect().adjusted(m, m, -m, -m);
+                checkFamilySurface(toastWidget, QPoint(body.center().x(), body.top()),
+                                   body.adjusted(4, 4, -4, -4),
+                                   QPoint(body.center().x(), body.top() - 1),
+                                   Theme::border(), QStringLiteral("Toast"));
+
+                // Also saved to disk - the coordinator asked for a magnified
+                // capture of the toast alongside the chip cluster, and a
+                // toast only exists once real state (an outcome to report)
+                // puts it there, unlike the chip clusters which are always
+                // on screen. QWidget::render(), the same in-process
+                // mechanism every check in this file already uses to drive
+                // and inspect the app - never OS-level synthetic input.
+                renderExact(toastWidget).save(outDir + QStringLiteral("/toast_note.png"));
+
+                const QImage noteImg = renderExact(toastWidget);
+                const QPoint stripePoint(body.left() + 1, body.center().y());
+                const QColor noteStripe = noteImg.pixelColor(stripePoint);
+
+                toasts->show(QStringLiteral("Graphite family probe - failure"),
+                            Toast::Kind::Failure, false);
+                settle(120);
+                const QImage failureImg = renderExact(toastWidget);
+                failureImg.save(outDir + QStringLiteral("/toast_failure.png"));
+                const QColor failureStripe = failureImg.pixelColor(stripePoint);
+
+                check(colorDistance(noteStripe, failureStripe) > 15.0,
+                      "a Failure toast's stripe reads as a different colour "
+                      "than a Note's");
+                check(colorDistance(noteStripe, Theme::accent()) <
+                          colorDistance(noteStripe, Theme::textMuted()),
+                      "the Note toast's stripe reads closer to accent()");
+                check(colorDistance(failureStripe, Theme::textMuted()) <
+                          colorDistance(failureStripe, Theme::accent()),
+                      "the Failure toast's stripe reads closer to textMuted()");
+            }
+        }
+
+        // ExtrudePreview: fix round 1, Minor. Brought into the family too -
+        // plain border() while valid, and its own danger() outline over the
+        // shared base while the field's text does not parse, the same
+        // pattern as the toast's stripe.
+        trigger(window, QStringLiteral("Start Sketch"));
+        sketchQuad(window, 0.30, 0.58, 0.42, 0.68);
+        trigger(window, QStringLiteral("Finish Sketch"));
+        trigger(window, QStringLiteral("Extrude..."));
+        settle(150);
+        ExtrudePreview* extrudePreview = window.findChild<ExtrudePreview*>();
+        check(extrudePreview != nullptr && extrudePreview->isVisible(),
+              "a preview is open for the family-surface probe");
+        if (extrudePreview && extrudePreview->isVisible()) {
+            const int m = Theme::surfaceShadowMargin();
+            const QRect body = extrudePreview->rect().adjusted(m, m, -m, -m);
+            checkFamilySurface(extrudePreview, QPoint(body.left(), body.center().y()),
+                               body.adjusted(4, 4, -4, -4),
+                               QPoint(body.left() - 1, body.center().y()),
+                               Theme::border(), QStringLiteral("ExtrudePreview (valid)"));
+
+            if (extrudePreview->field()) {
+                extrudePreview->field()->setText(QStringLiteral("abc"));
+                settle(150);
+                const QImage invalidImg = renderExact(extrudePreview);
+                const QColor invalidEdge =
+                    invalidImg.pixelColor(body.left(), body.center().y());
+                const QColor invalidInterior = invalidImg.pixelColor(body.center());
+                check(colorDistance(invalidEdge, Theme::danger()) <
+                          colorDistance(invalidInterior, Theme::danger()),
+                      "an invalid ExtrudePreview's edge reads closer to "
+                      "danger() than its interior does - the overlay painted "
+                      "on top of the shared base");
+
+                extrudePreview->field()->setText(QStringLiteral("25"));
+                settle(100);
+                QKeyEvent commit(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+                QCoreApplication::sendEvent(extrudePreview->field(), &commit);
+                settle(200);
+            }
+        }
     }
 
     // --- Show tips again restores the walkthrough for a returning user too ---

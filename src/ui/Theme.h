@@ -64,11 +64,17 @@ QEasingCurve motionCurve();   // OutCubic
 // a soft shadow ring in the margin around `rect` - never outside it, since a
 // widget composited over OcctViewWidget's own GL surface cannot paint past
 // its own bounds. Every floating card in the shell (WalkthroughPanel,
-// HintBalloon, Toast, ShortcutSheet) calls this for its background instead
-// of hand-rolling its own; a chip's body counts too, painted over before its
-// state colour and content. `rect` is the surface itself - callers reserve
-// surfaceShadowMargin() px around it first (see below) so the shadow has
-// somewhere to paint.
+// HintBalloon, Toast, ShortcutSheet, ExtrudePreview) calls this for its
+// background instead of hand-rolling its own; a chip's body counts too,
+// painted over before its state colour and content. `rect` is the surface
+// itself - callers reserve surfaceShadowMargin() px around it first (see
+// below) so the shadow has somewhere to paint. Three cards each keep one
+// thing of their own painted on TOP of this shared base rather than folding
+// it in here: WalkthroughPanel's unconditional accent() outline, Toast's
+// kind-tinted left stripe, and ExtrudePreview's danger() outline while its
+// field's text is invalid - each is a single card's own accent, not
+// something every floating surface needs, so it stays out of the one shared
+// implementation.
 void paintSurface(QPainter& p, const QRect& rect, int radius = 8);
 
 // How many pixels of margin a widget must reserve around its content for the

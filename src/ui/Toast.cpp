@@ -222,14 +222,28 @@ void Toast::paintEvent(QPaintEvent* /*event*/)
     // `body` is the visible card, inset from this widget's own bounds by
     // Theme::surfaceShadowMargin() - see sizeHint() for the growth and
     // undoRect() for the sibling pill that also has to agree on where it
-    // landed. Replaces the old kind-tinted border (accent() for a Note,
-    // textMuted() for a Failure) with the one shared surface every floating
-    // card now uses - nothing in this suite asserted that distinction, and
-    // the Note/Failure difference that matters (how long each stays up) is
-    // untouched.
+    // landed.
     const int margin = Theme::surfaceShadowMargin();
     const QRect body = rect().adjusted(margin, margin, -margin, -margin);
     Theme::paintSurface(painter, body, 8);
+
+    // The kind-tinted left stripe - accent() for a Note, textMuted() for a
+    // Failure, the same two colours the pre-Graphite border used - painted
+    // over the shared base rather than replacing it, so the two kinds still
+    // read differently at a glance the way the original spec called for.
+    // Clipped to the card's own rounded outline so the stripe's outer
+    // corners follow paintSurface()'s radius instead of a hard square
+    // corner poking past it.
+    {
+        constexpr int kStripeWidth = 3;
+        QPainterPath cardPath;
+        cardPath.addRoundedRect(body, 8, 8);
+        painter.save();
+        painter.setClipPath(cardPath);
+        painter.fillRect(QRect(body.left(), body.top(), kStripeWidth, body.height()),
+                         myKind == Kind::Failure ? Theme::textMuted() : Theme::accent());
+        painter.restore();
+    }
 
     const int textWidth = body.width() - kPad * 2 - (myHasUndo ? kUndoWidth + kPad : 0);
     painter.setFont(Theme::bodyFont());

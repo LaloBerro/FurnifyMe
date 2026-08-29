@@ -11,6 +11,7 @@
 #include <QMouseEvent>
 #include <QMoveEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QResizeEvent>
 #include <QShowEvent>
 
@@ -350,6 +351,18 @@ void WalkthroughPanel::paintEvent(QPaintEvent* /*event*/)
     const int margin = Theme::surfaceShadowMargin();
     const QRect body = rect().adjusted(margin, margin, -margin, -margin);
     Theme::paintSurface(painter, body, 10);
+
+    // The guide keeps its own accent() outline, unconditionally, over the
+    // family's plain border() paintSurface() just drew - the mockup's one
+    // card framed in accent rather than the shared neutral tone, restored
+    // here on top of the shared base rather than by hand-rolling the whole
+    // background again (paintSurface() still supplies the fill, the
+    // corners and the shadow).
+    QPainterPath outline;
+    outline.addRoundedRect(body, 10, 10);
+    painter.setPen(QPen(Theme::accent(), 1.0));
+    painter.setBrush(Qt::NoBrush);
+    painter.drawPath(outline);
 
     const QStringList texts = paintedTexts();
 
