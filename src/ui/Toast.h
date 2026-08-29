@@ -160,13 +160,22 @@ private:
     // same reasoning as Toast::myUndo.
     QPointer<Toast> myToast;
     QTimer* myTimer = nullptr;
-    // A plain QVariantAnimation over a double, feeding Toast::setOpacity() -
-    // not a QPropertyAnimation on a QGraphicsEffect; see the comment on
-    // Toast::setOpacity() for why that does not work here. A QPointer, not a
-    // raw pointer: it starts with QAbstractAnimation::DeleteWhenStopped, so
-    // it self-deletes the instant it finishes on its own (a fade that simply
-    // ran to completion, nobody having called stop() on it) - a raw pointer
-    // would go dangling right there, silently, until the next fadeTo() call
-    // dereferenced it.
-    QPointer<QVariantAnimation> myFade;
+    // One QVariantAnimation, constructed once (see the constructor) and kept
+    // for the lifetime of this host - not built fresh per fadeTo() call, and
+    // deliberately left at the default KeepWhenStopped rather than
+    // DeleteWhenStopped. A DeleteWhenStopped animation self-deletes the
+    // instant it finishes on its own, including a fade that simply ran to
+    // completion with nobody calling stop() on it - an earlier version of
+    // this class used exactly that policy on a raw pointer, and a toast's
+    // own dismiss timer firing while animations happened to be briefly
+    // enabled left that pointer dangling until the next fadeTo() call
+    // dereferenced it. Reusing one animation removes the question rather
+    // than tracking it with a QPointer: valueChanged is connected once, in
+    // the constructor, reading myToast live each time rather than a capture
+    // that could go stale.
+    QVariantAnimation* myFade = nullptr;
+    // The callback for whichever fade is currently running, if any - read
+    // and cleared by the one permanent `finished` connection made in the
+    // constructor. fadeTo() itself sets this, never a second connection.
+    std::function<void()> myFadeFinished;
 };

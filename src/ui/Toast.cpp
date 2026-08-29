@@ -233,6 +233,24 @@ ToastHost::ToastHost(OcctViewWidget* viewport, QWidget* parent)
     myTimer->setSingleShot(true);
     connect(myTimer, &QTimer::timeout, this, &ToastHost::dismiss);
 
+    // One animation for the whole lifetime of this host - see the header
+    // comment on myFade for why. valueChanged reads myToast live (not a
+    // captured pointer) so it is always correct regardless of which fadeTo()
+    // call is currently in flight.
+    myFade = new QVariantAnimation(this);
+    myFade->setDuration(Theme::motionMs());
+    myFade->setEasingCurve(Theme::motionCurve());
+    connect(myFade, &QVariantAnimation::valueChanged, this, [this](const QVariant& value) {
+        if (myToast) myToast->setOpacity(value.toDouble());
+    });
+    connect(myFade, &QVariantAnimation::finished, this, [this] {
+        if (myFadeFinished) {
+            const std::function<void()> callback = std::move(myFadeFinished);
+            myFadeFinished = nullptr;
+            callback();
+        }
+    });
+
     // Repositions on a viewport resize, the same reason HintBalloon installs
     // this filter on its own parent - a toast that appeared before a resize
     // would otherwise sit stranded wherever the old viewport bounds put it.
@@ -241,23 +259,18 @@ ToastHost::ToastHost(OcctViewWidget* viewport, QWidget* parent)
 
 void ToastHost::show(const QString& text, Toast::Kind kind, bool undo)
 {
-    const bool wasVisible = myToast->isVisible();
     myToast->setMessage(text, kind, undo);
     reposition();
     myToast->show();
     myToast->raise();
     if (myToast->undoControl()) myToast->undoControl()->raise();
 
-    if (wasVisible) {
-        // A second message replacing the first - not the moment to fade in
-        // again, and this call may have landed mid a dismiss() fade-out, so
-        // make sure that one does not keep running and pull opacity back
-        // toward 0 out from under the message that just replaced it.
-        if (myFade) { myFade->stop(); myFade->deleteLater(); myFade = nullptr; }
-        myToast->setOpacity(1.0);
-    } else {
-        fadeTo(1.0, nullptr);
-    }
+    // fadeTo() stops whatever fade is already running before doing anything
+    // else, so this is correct whether the toast was hidden (a real fade-in
+    // from 0), already fully shown (a no-op fade to the value it is already
+    // at), or mid a dismiss() fade-out that this call is interrupting (a
+    // smooth reversal back up to fully shown, rather than an abrupt jump).
+    fadeTo(1.0, nullptr);
 
     // Armed here, unconditionally and synchronously - never inside fadeTo()
     // or its callback. A fade must not change when the dismiss countdown
@@ -290,6 +303,16 @@ void ToastHost::dismiss()
 {
     myTimer->stop();
     if (!myToast) return;
+
+    // Hidden immediately, before the fade even starts - not left to
+    // Toast::hideEvent(), which only runs once the fade actually finishes
+    // and the toast body itself is hidden. A visible, still-clickable Undo
+    // pill for the whole fade is exactly how an ordinary impatient
+    // double-click on Undo undid two operations: the second click landed on
+    // a toast that looked like it was on its way out but was still fully
+    // live underneath, right up until the fade completed.
+    if (QWidget* undo = myToast->undoControl()) undo->hide();
+
     // hide() only once the fade-out actually finishes - synchronously, when
     // animations are disabled (see fadeTo()), so isShowing() still flips the
     // instant dismiss() returns in that case, exactly as it did before the
@@ -303,44 +326,31 @@ void ToastHost::dismiss()
 
 void ToastHost::fadeTo(double opacity, std::function<void()> onFinished)
 {
-    if (myFade) {
-        myFade->stop();
-        myFade->deleteLater();
-        myFade = nullptr;
-    }
+    if (!myToast || !myFade) return;
 
-    if (!myToast) return;
+    // Stops whatever fade might already be running, including one this call
+    // is about to replace, before anything else - so a stale callback for
+    // the fade being interrupted can never fire once this one is set below.
+    myFade->stop();
+    myFadeFinished = nullptr;
 
     if (!myViewport || !myViewport->animationsEnabled()) {
         // Mirrors OcctViewWidget::animateTo()'s own handling of a disabled
         // camera animation: skip it entirely and apply the end state
-        // directly, synchronously, rather than starting a zero-duration
-        // animation and waiting on the event loop to notice it finished.
-        // gui_smoke relies on exactly this - it disables animations on the
-        // real viewport specifically so a fade cannot turn a lifetime check
-        // into something that has to wait.
+        // directly, synchronously, rather than starting the animation and
+        // waiting on the event loop to notice it finished. gui_smoke relies
+        // on exactly this - it disables animations on the real viewport
+        // specifically so a fade cannot turn a lifetime check into
+        // something that has to wait.
         myToast->setOpacity(opacity);
         if (onFinished) onFinished();
         return;
     }
 
-    // A plain QVariantAnimation over a double feeding Toast::setOpacity(),
-    // not a QPropertyAnimation on a QGraphicsEffect - see the comment on
-    // Toast::setOpacity() for why a graphics effect crashes here (this
-    // widget sits over OcctViewWidget's own on-screen OpenGL surface).
-    myFade = new QVariantAnimation(this);
-    myFade->setDuration(Theme::motionMs());
-    myFade->setEasingCurve(Theme::motionCurve());
+    myFadeFinished = std::move(onFinished);
     myFade->setStartValue(myToast->opacity());
     myFade->setEndValue(opacity);
-    QPointer<Toast> toast = myToast;
-    connect(myFade, &QVariantAnimation::valueChanged, this, [toast](const QVariant& value) {
-        if (toast) toast->setOpacity(value.toDouble());
-    });
-    if (onFinished) {
-        connect(myFade, &QVariantAnimation::finished, this, onFinished);
-    }
-    myFade->start(QAbstractAnimation::DeleteWhenStopped);
+    myFade->start();
 }
 
 void ToastHost::reposition()

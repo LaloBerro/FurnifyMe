@@ -41,6 +41,16 @@ QString keysFor(const QAction* action)
     }
     return keys.join(QStringLiteral(", "));
 }
+
+// The one place a group header's font is built - showSheet() measures with
+// it, paintEvent() paints with it, and there is exactly one bold-bodyFont()
+// call for both to agree with instead of two copies that happen to match.
+QFont groupFont()
+{
+    QFont f = Theme::bodyFont();
+    f.setBold(true);
+    return f;
+}
 }  // namespace
 
 ShortcutSheet::ShortcutSheet(QWidget* parent)
@@ -133,9 +143,7 @@ void ShortcutSheet::showSheet()
     // measuring with the plain font here would clip a long title), row
     // labels at plain bodyFont(), the key badges at badgeFont() - so the
     // sizing this computes can never drift from what ends up on screen.
-    QFont groupFont = Theme::bodyFont();
-    groupFont.setBold(true);
-    const QFontMetrics groupMetrics(groupFont);
+    const QFontMetrics groupMetrics(groupFont());
     const QFontMetrics bodyMetrics(Theme::bodyFont());
     const QFontMetrics badgeMetrics(Theme::badgeFont());
     int widest = 0;
@@ -245,12 +253,9 @@ void ShortcutSheet::paintEvent(QPaintEvent* /*event*/)
     painter.drawText(QRect(kPadding, 0, width() - kPadding * 2, kTitleHeight),
                      Qt::AlignVCenter | Qt::AlignLeft, tr("Keyboard shortcuts"));
 
-    QFont groupFont = Theme::bodyFont();
-    groupFont.setBold(true);
-
     int y = kTitleHeight;
     for (const Group& group : myGroups) {
-        painter.setFont(groupFont);
+        painter.setFont(groupFont());
         painter.setPen(Theme::accent());
         painter.drawText(QRect(kPadding, y, width() - kPadding * 2, kGroupHeight),
                          Qt::AlignBottom | Qt::AlignLeft, group.title);

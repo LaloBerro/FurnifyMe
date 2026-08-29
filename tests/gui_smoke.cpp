@@ -1155,6 +1155,65 @@ int main(int argc, char* argv[])
         check(!view->animationsEnabled(), "animations re-disabled for the rest of the suite");
     }
 
+    // --- a fade cannot be double-clicked into a second undo -------------------
+    // The suite otherwise runs with animations off, so ToastHost::dismiss()
+    // is synchronous there and this exact bug is invisible to it - the toast
+    // and its Undo pill vanish together in the same call that pops the undo
+    // stack, leaving nothing for a second click to land on. With animations
+    // on (the shipping default), a fade used to leave the pill visible and
+    // clickable for the whole 160 ms, so an ordinary impatient double-click
+    // undid two operations - one of them silently.
+    {
+        view->setAnimationsEnabled(true);
+
+        check(!window.document().solids().empty(),
+              "there is a body to delete for the double-click check");
+        const int before = static_cast<int>(window.document().solids().size());
+        view->setSelectedSolids({window.document().solids().front().id});
+        settle(100);
+        trigger(window, QStringLiteral("Delete Selected"));
+        settle(150);
+
+        ToastHost* toasts = window.findChild<ToastHost*>();
+        check(toasts != nullptr && toasts->isShowing(),
+              "deleting a body raises a toast with animations enabled");
+        QWidget* undo = toasts ? toasts->undoControl() : nullptr;
+        check(undo != nullptr && undo->isVisible(), "the toast offers Undo");
+
+        if (toasts && undo) {
+            const QPoint centre = undo->mapTo(view, QPoint(undo->width() / 2, undo->height() / 2));
+            check(view->childAt(centre) == undo,
+                  "the Undo control is reachable before the first click");
+
+            clickAt(undo, QPointF(undo->width() / 2.0, undo->height() / 2.0));
+            // Deliberately not settled for the full fade duration - this is
+            // the impatient double-click, landing mid fade-out.
+            const int afterFirstClick = static_cast<int>(window.document().solids().size());
+            check(afterFirstClick == before, "the first click's Undo restored the body");
+
+            // dismiss() hides the Undo control at its own top, before the
+            // fade even starts - so real hit-testing must already find
+            // something other than the control here, exactly as it would
+            // for a genuine second click a user fires off before the toast
+            // has visibly finished fading.
+            QWidget* hitDuringFade = view->childAt(centre);
+            check(hitDuringFade != undo,
+                  "the Undo control is not reachable by a real click during the fade");
+
+            // The second click a real user's double-click would produce -
+            // sent to whatever hit-testing actually finds there (nothing
+            // claims this point once the control is hidden, so it falls
+            // through to the viewport, same as clicking empty space).
+            clickAt(view, QPointF(centre));
+            settle(250);   // outlasts the 160 ms fade either way
+            check(static_cast<int>(window.document().solids().size()) == afterFirstClick,
+                  "a second click during the fade did not undo a second time");
+        }
+
+        view->setAnimationsEnabled(false);
+        check(!view->animationsEnabled(), "animations re-disabled again after the double-click check");
+    }
+
     // --- grid subdivision policy ----------------------------------------------
     {
         check(GridRenderer::minorStepFor(700.0) == 10.0,
