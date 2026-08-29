@@ -288,6 +288,17 @@ void MainWindow::buildMenus()
         // only half of what "show tips again" means.
         emit progressReset();
         emit appStateChanged();
+        // The guide has just reappeared, somewhere in the middle of that
+        // emission. Anything that places itself against it - the toast, the
+        // hint balloon - has to be told, and which slot ran first on
+        // appStateChanged is not something to rely on. relayout() re-places
+        // every anchored widget and then emits laidOut(), which is the one
+        // ordering guarantee in this file: the dependents re-place after the
+        // guide is at its final rectangle, not before. HintBalloon already
+        // handled this case for itself inside reconsider(); ToastHost did
+        // not, so a Show tips again under a live toast left the restored
+        // guide sitting on top of it.
+        if (myOverlay) myOverlay->relayout();
     });
 }
 
@@ -365,7 +376,29 @@ void MainWindow::buildOverlay()
     // happens to be on top. Undo, when a message offers it, replays through
     // the same onUndo() the Undo action itself uses.
     myToasts = new ToastHost(myView, this);
-    connect(myToasts, &ToastHost::undoRequested, this, &MainWindow::onUndo);
+    // Through the ACTION, never straight to onUndo(). The menu entry, the
+    // chip and the Ctrl+Z binding all obey myUndoAction's enabled state -
+    // "!mySketching && canUndo()", set in updateActions(), which CLAUDE.md
+    // makes the single place that decides what is available - and a toast
+    // that called the slot directly was a fourth entry point that obeyed
+    // none of it: delete a body, start a sketch inside the four-second
+    // window, click Undo, and the document was resynced and the selection
+    // cleared while the user was still placing points. updateActions() also
+    // pushes that same enabled state onto the toast (see setUndoEnabled), so
+    // the pill is dimmed and out of hit-testing rather than merely inert.
+    connect(myToasts, &ToastHost::undoRequested, this, [this] {
+        if (myUndoAction->isEnabled()) myUndoAction->trigger();
+    });
+    // A toast that offers to undo one operation must not survive that
+    // operation - see ToastHost::documentMovedTo().
+    connect(this, &MainWindow::documentChanged, this,
+            [this] { myToasts->documentMovedTo(myDocument.revision()); });
+    // A guide can appear UNDERNEATH a toast that is already up (Show tips
+    // again does exactly that), and nothing told the toast to step aside
+    // when it did - HintBalloon::reconsider() already handled that case for
+    // itself. appStateChanged is when it happens; replace() only reads
+    // geometry, so it cannot recurse back into updateActions().
+    connect(this, &MainWindow::appStateChanged, myToasts, &ToastHost::replace);
 
     // Replaces the old QInputDialog::getDouble() for extrude height. Parents
     // itself to the viewport and positions itself (top-center, clear of the
@@ -387,7 +420,22 @@ void MainWindow::buildOverlay()
     // a hint on first run. It parents itself to the viewport and positions
     // itself, centred near the bottom rather than pinned to an edge, so it
     // needs no overlay anchor of its own.
-    new HintBalloon(this, myView);
+    auto* hints = new HintBalloon(this, myView);
+
+    // The three surfaces that place themselves against widgets the overlay
+    // owns re-place themselves HERE, from the overlay's own "I have finished
+    // laying out" signal - not from their own filters on the viewport's
+    // resize event. Qt runs event filters last-installed-first, and the
+    // overlay installs its own first, so those filters all ran BEFORE the
+    // guide and the chip clusters had moved: on a shrink the toast and the
+    // balloon stepped aside from where the guide used to be and the guide
+    // then landed on top of them, and the extrude panel was raised before
+    // relayout() raised the top-left cluster back over it. Ordering off the
+    // signal makes "after the anchored widgets have moved" a property of the
+    // code rather than an accident of construction order.
+    connect(myOverlay, &ViewportOverlay::laidOut, myToasts, &ToastHost::replace);
+    connect(myOverlay, &ViewportOverlay::laidOut, hints, &HintBalloon::reposition);
+    connect(myOverlay, &ViewportOverlay::laidOut, myExtrudePreview, &ExtrudePreview::replace);
 }
 
 void MainWindow::updateActions()
@@ -409,6 +457,10 @@ void MainWindow::updateActions()
     myExportStepAction->setEnabled(myDocument.count() > 0);
     myDeleteAction->setEnabled(!mySketching && selectedCount > 0);
     myUndoAction->setEnabled(!mySketching && myDocument.canUndo());
+    // The toast's Undo pill is the same route as the action, so it obeys the
+    // same enabled state - decided here, in the one place that decides what
+    // is available, and pushed out rather than re-derived at the toast.
+    if (myToasts) myToasts->setUndoEnabled(myUndoAction->isEnabled());
     myRedoAction->setEnabled(!mySketching && myDocument.canRedo());
 
     updateStateLabel();
@@ -503,7 +555,7 @@ void MainWindow::onDeleteSelected()
         ids.size() == 1 ? tr("Deleted %1").arg(QString::fromStdString(deletedName))
                         : tr("Deleted %1 bodies").arg(ids.size());
     statusBar()->showMessage(message);
-    myToasts->show(message, Toast::Kind::Note, true);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
 }
 
 void MainWindow::onUndo()
@@ -666,7 +718,7 @@ bool MainWindow::extrudePendingFace(double height)
                                 .arg(QString::fromStdString(myDocument.nameOf(id)),
                                      QString::fromStdString(Measure::formatDimensions(solid)));
     statusBar()->showMessage(message);
-    myToasts->show(message, Toast::Kind::Note, true);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
     return true;
 }
 
@@ -742,7 +794,7 @@ bool MainWindow::applyBooleanToSelection(int kind)
                                      QString::fromStdString(
                                          Measure::formatDimensions(result.shape)));
     statusBar()->showMessage(message);
-    myToasts->show(message, Toast::Kind::Note, true);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
     return true;
 }
 

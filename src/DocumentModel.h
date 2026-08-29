@@ -40,6 +40,15 @@ public:
     const std::vector<Solid>& solids() const { return mySolids; }
     std::size_t count() const { return mySolids.size(); }
 
+    // Bumped by every call that actually changes what solids this document
+    // holds - add, replace, remove, clear, undo, redo. Not a version number
+    // anybody persists: it exists so a surface that named one change (a
+    // toast saying "Deleted Body 02" and offering Undo) can tell that the
+    // document has moved on since, and stop describing one operation while
+    // its control would perform another. Monotonic and never rolled back -
+    // an undo is itself a move, not a return to a previous revision.
+    int revision() const { return myRevision; }
+
     // --- undo / redo -------------------------------------------------------
     // A "simple shape stack", which is what the brief leaves in scope. Call
     // checkpoint() *before* mutating; it records the current solids and discards
@@ -56,6 +65,7 @@ public:
 private:
     std::vector<Solid> mySolids;
     int myNextId = 1;
+    int myRevision = 0;   // see revision() - monotonic, never rolled back
     // Like ids, never rolled back by undo: a name reappearing on a different
     // solid would be confusing in the Items panel.
     int myNextName = 1;

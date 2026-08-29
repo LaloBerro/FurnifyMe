@@ -3,9 +3,8 @@
 #include "HintBalloon.h"
 #include "OcctViewWidget.h"
 #include "Theme.h"
-#include "WalkthroughPanel.h"
+#include "ViewportOverlay.h"
 
-#include <QEvent>
 #include <QFontMetrics>
 #include <QHideEvent>
 #include <QMouseEvent>
@@ -14,6 +13,7 @@
 #include <QPainterPath>
 #include <QResizeEvent>
 #include <QShowEvent>
+#include <QRect>
 #include <QTimer>
 #include <QVariantAnimation>
 
@@ -99,6 +99,9 @@ void Toast::setMessage(const QString& text, Kind kind, bool undo)
     myText = text;
     myKind = kind;
     myHasUndo = undo;
+    // Recorded for paintedTexts(), deduped so a repeated outcome does not
+    // grow the list without bound.
+    if (!text.isEmpty() && !myShownTexts.contains(text)) myShownTexts << text;
     // A fresh message supersedes whatever dismissal, if any, was still in
     // flight - see setDismissing() and the class comment on myDismissing.
     myDismissing = false;
@@ -110,6 +113,17 @@ void Toast::setDismissing(bool dismissing)
 {
     myDismissing = dismissing;
     syncUndoGeometry();
+}
+
+void Toast::setUndoEnabled(bool enabled)
+{
+    if (myUndoEnabled == enabled) return;
+    myUndoEnabled = enabled;
+    // Same derived-visibility predicate as myDismissing, for the same
+    // reason: a one-shot hide() here would be undone by the next
+    // syncUndoGeometry() a resize or a move triggers.
+    syncUndoGeometry();
+    update();   // the pill is painted dimmed while the route is closed
 }
 
 QSize Toast::sizeHint() const
@@ -145,7 +159,7 @@ void Toast::syncUndoGeometry()
     // that is true (see ToastHost::reposition()), so a one-shot hide() at
     // the top of dismiss() alone is not enough - the next resize would
     // re-derive visibility from isVisible() && myHasUndo and re-show it.
-    myUndo->setVisible(isVisible() && myHasUndo && !myDismissing);
+    myUndo->setVisible(isVisible() && myHasUndo && !myDismissing && myUndoEnabled);
     myUndo->raise();
 }
 
@@ -212,7 +226,11 @@ void Toast::paintEvent(QPaintEvent* /*event*/)
         pill.addRoundedRect(r, 5.0, 5.0);
         painter.fillPath(pill, Theme::chipHover());
         painter.setFont(Theme::labelFont());
-        painter.setPen(Theme::accent());
+        // Dimmed while the Undo route itself is closed (mid-sketch, say):
+        // the control is hidden from hit-testing by syncUndoGeometry(), and
+        // this is what stops the pill from still looking clickable. The
+        // message keeps saying what it said - only the offer is withdrawn.
+        painter.setPen(myUndoEnabled ? Theme::accent() : Theme::textDisabled());
         painter.drawText(r, Qt::AlignCenter, undoLabel());
     }
 }
@@ -224,8 +242,11 @@ QString Toast::undoLabel() const
 
 QStringList Toast::paintedTexts() const
 {
+    // Every message this widget has been given this run, not just the live
+    // one - see the header for what that does and does not cover.
     QStringList texts{ undoLabel() };
-    if (!myText.isEmpty()) texts << myText;
+    texts << myShownTexts;
+    if (!myText.isEmpty() && !texts.contains(myText)) texts << myText;
     return texts;
 }
 
@@ -266,14 +287,21 @@ ToastHost::ToastHost(OcctViewWidget* viewport, QWidget* parent)
         }
     });
 
-    // Repositions on a viewport resize, the same reason HintBalloon installs
-    // this filter on its own parent - a toast that appeared before a resize
-    // would otherwise sit stranded wherever the old viewport bounds put it.
-    if (myViewport) myViewport->installEventFilter(this);
+    // No event filter on the viewport any more. Repositioning on a raw
+    // resize event ran BEFORE ViewportOverlay had moved the walkthrough
+    // guide this toast steps around (filters run last-installed-first, and
+    // the overlay installs its own first), so a shrink placed the toast
+    // against the guide's pre-resize rectangle and the guide then landed on
+    // top of it. MainWindow drives replace() from
+    // ViewportOverlay::laidOut() instead - see that signal's comment - which
+    // is by construction after every anchored widget is at its final
+    // rectangle, and from appStateChanged(), which covers a guide appearing
+    // underneath a toast that is already up.
 }
 
-void ToastHost::show(const QString& text, Toast::Kind kind, bool undo)
+void ToastHost::show(const QString& text, Toast::Kind kind, bool undo, int documentStamp)
 {
+    myStamp = documentStamp;
     myToast->setMessage(text, kind, undo);
     reposition();
     myToast->show();
@@ -292,6 +320,33 @@ void ToastHost::show(const QString& text, Toast::Kind kind, bool undo)
     // starts, since remainingMs() and the Note/Failure duration contract
     // both read this timer directly.
     myTimer->start(kind == Toast::Kind::Failure ? kFailureMs : kNoteMs);
+}
+
+void ToastHost::documentMovedTo(int documentStamp)
+{
+    // A toast that names an operation and offers to undo it must not outlive
+    // that operation. Nothing used to dismiss one when the document moved on,
+    // so "Deleted Body 02 - Undo" survived a Ctrl+Z and its pill then popped
+    // the checkpoint BEFORE the one it named: the label described one change
+    // and the control performed another. The stamp is DocumentModel's own
+    // revision as of the message (see show()); any change to it means this
+    // message is describing the past.
+    if (myStamp < 0 || documentStamp == myStamp) return;
+    myStamp = -1;
+    if (isShowing()) dismiss();
+}
+
+void ToastHost::setUndoEnabled(bool enabled)
+{
+    if (myToast) myToast->setUndoEnabled(enabled);
+}
+
+void ToastHost::replace()
+{
+    if (!isShowing()) return;
+    reposition();
+    myToast->raise();
+    if (myToast->undoControl()) myToast->undoControl()->raise();
 }
 
 QString ToastHost::currentText() const
@@ -374,26 +429,61 @@ void ToastHost::reposition()
 {
     if (!myViewport || !myToast) return;
     myToast->resize(myToast->sizeHint());
-    int x = (myViewport->width() - myToast->width()) / 2;
+    const int centred = (myViewport->width() - myToast->width()) / 2;
+    const int limitX = std::max(0, myViewport->width() - myToast->width());
+    int x = centred;
     int y = myViewport->height() - myToast->height() - kBottomMargin;
 
-    // The walkthrough guide is the thing teaching a newcomer what to do; the
-    // toast is transient, so it is the one that steps aside here - never the
-    // reverse. Same stepAside shape HintBalloon::reposition() uses, applied
-    // from the other direction: beside the guide when that fits, above it
-    // when it does not.
-    if (const WalkthroughPanel* guide = myViewport->findChild<WalkthroughPanel*>()) {
-        if (guide->isVisible()) {
-            const QRect obstacle = guide->geometry();
-            if (QRect(x, y, myToast->width(), myToast->height()).intersects(obstacle)) {
-                const int beside = obstacle.left() - kClearance - myToast->width();
-                if (beside >= kClearance) {
-                    x = beside;
-                } else {
-                    y = std::max(0, obstacle.top() - kClearance - myToast->height());
-                }
-            }
+    // Everything the overlay has anchored: the walkthrough guide bottom
+    // right, the Snap/Select cluster bottom left, the gizmo and unit readout
+    // top right, and so on. All of them are permanent or instructional, and
+    // all of them are z-ABOVE this widget after the next relayout() - so the
+    // transient toast is always the one that steps aside, and an overlap is
+    // not untidiness but unreadable text over an unreachable control. Asking
+    // the overlay for its own rectangles, rather than naming the widget types
+    // this file happens to know about, means a cluster added later is stepped
+    // around for free.
+    std::vector<QRect> obstacles;
+    if (const ViewportOverlay* overlay = myViewport->findChild<ViewportOverlay*>())
+        obstacles = overlay->occupiedRects();
+
+    // Solve one horizontal band at a time rather than nudging past obstacles
+    // one at a time: an obstacle to the left raises the floor, one to the
+    // right lowers the ceiling, and if the two meet there is no room at this
+    // height at all. A per-obstacle "step left" rule cannot express that -
+    // stepping left is exactly the wrong move for the bottom-LEFT cluster,
+    // which is how a message at 800x500 ended up with a third of itself
+    // under Snap/Select. When a band has no room the search moves up to the
+    // next one and asks again, because the row above can be just as occupied
+    // as the row below: a single one-shot hop landed the toast squarely on
+    // the left- and right-centre clusters.
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        int minX = 0;
+        int maxX = limitX;
+        int highestTop = -1;
+        for (const QRect& obstacle : obstacles) {
+            // Only obstacles sharing this band matter.
+            if (obstacle.bottom() < y || obstacle.top() > y + myToast->height() - 1) continue;
+            highestTop = highestTop < 0 ? obstacle.top() : std::min(highestTop, obstacle.top());
+            if (obstacle.center().x() < myViewport->width() / 2)
+                minX = std::max(minX, obstacle.right() + 1 + kClearance);
+            else
+                maxX = std::min(maxX, obstacle.left() - kClearance - myToast->width());
         }
+
+        if (minX <= maxX) {
+            x = std::min(std::max(centred, minX), maxX);
+            break;
+        }
+
+        // No room beside them at this height. Move to the band above the
+        // highest thing blocking this one and try again - never off the top
+        // edge, since a toast nudged out of the viewport reports nothing to
+        // anybody.
+        const int next = std::max(0, highestTop - kClearance - myToast->height());
+        if (next >= y) { x = centred; break; }   // no upward progress left
+        y = next;
+        x = centred;
     }
 
     myToast->move(x, y);
@@ -408,11 +498,3 @@ void ToastHost::reposition()
     }
 }
 
-bool ToastHost::eventFilter(QObject* watched, QEvent* event)
-{
-    if (watched == myViewport && event->type() == QEvent::Resize &&
-        myToast && myToast->isVisible()) {
-        reposition();
-    }
-    return QObject::eventFilter(watched, event);
-}

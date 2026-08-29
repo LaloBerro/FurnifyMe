@@ -52,6 +52,13 @@ public:
     // AIS state rather than trusted as a bare, uncrossed-checked flag - see
     // gui_smoke.cpp's extrude preview block.
     bool hasPreview() const;
+    // The shape currently in that single preview slot, or a null shape. Two
+    // features write it - MainWindow shows the closed face there, and
+    // ExtrudePreview overwrites it with the body it would build - so a test
+    // that only asked hasPreview() could not tell which of the two is
+    // actually on screen, which is exactly the confusion that let cancelling
+    // a preview erase the face.
+    TopoDS_Shape previewShape() const;
 
     void setSelectionMode(SelectionMode mode);
     SelectionMode selectionMode() const { return mySelectionMode; }

@@ -4,6 +4,7 @@
 // arrangement verified to composite correctly over OCCT's OpenGL surface.
 #include <QObject>
 #include <QPointer>
+#include <QRect>
 
 #include <vector>
 
@@ -19,6 +20,28 @@ public:
 
     void addWidget(QWidget* widget, Anchor anchor);
     void relayout();
+
+    // The rectangles currently occupied by the anchored widgets - the chip
+    // clusters, the axis gizmo, the unit readout, the walkthrough guide.
+    // Anything that places itself freely over the viewport (the toast) asks
+    // for this rather than naming the widget types it happens to know about,
+    // so a cluster added later is stepped around for free instead of
+    // becoming the next collision to discover.
+    std::vector<QRect> occupiedRects() const;
+
+signals:
+    // Emitted once relayout() has moved and raise()d every anchored entry.
+    //
+    // The overlay is the LAST thing to place anything on a viewport resize
+    // (it installs its filter first, in MainWindow::buildOverlay(), and Qt
+    // runs event filters last-installed-first), so anything that positions
+    // itself against an anchored widget - the toast and the hint balloon
+    // both step around the walkthrough guide - was reading the guide's
+    // pre-resize rectangle and then being raise()d over. Ordering off this
+    // signal, rather than off filter registration order, is what makes
+    // "after the guide has moved" a property of the code instead of an
+    // accident of construction order.
+    void laidOut();
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;

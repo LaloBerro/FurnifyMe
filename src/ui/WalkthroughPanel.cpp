@@ -67,6 +67,17 @@ public:
     {
         setAttribute(Qt::WA_NoSystemBackground);
         setAttribute(Qt::WA_TranslucentBackground);
+        // Toast's UndoControl and ExtrudePreview's field both carry this and
+        // this one did not, which is the whole of the bug: accepting the
+        // press makes this widget the grab holder for the gesture, so the
+        // RELEASE comes here too - and QWidget's default release handler
+        // ignores it, which propagates it to the parent. That parent is the
+        // viewport, whose mouseReleaseEvent() performs a real pick and
+        // unconditionally emits selectionChanged(), so clicking "skip" on
+        // first run also selected whatever body happened to sit behind the
+        // guide. WA_NoMousePropagation closes the whole event class rather
+        // than overriding release, wheel and the rest one bug at a time.
+        setAttribute(Qt::WA_NoMousePropagation);
     }
 
 protected:

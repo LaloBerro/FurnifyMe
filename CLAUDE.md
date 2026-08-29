@@ -326,17 +326,41 @@ Both cost a fix round, and both produced a green test suite while the app was br
 A widget that accepts a press must accept the release too. `HintBalloon` left the release to
 propagate, and the viewport underneath re-picked and re-emitted `selectionChanged()` on
 every dismissal. `Qt::WA_NoMousePropagation` closes that whole class of event rather than
-enumerating handlers one at a time. `ShortcutSheet` dismisses on a click *outside* itself,
+enumerating handlers one at a time. **Every sibling control over the viewport carries it** —
+`UndoControl`, `SkipControl`, `ExtrudePreview`'s field. `SkipControl` was the one that did
+not, so clicking "skip" on first run also selected whatever body sat behind the guide; the
+check is a count of `selectionChanged()` emissions across a press *and its release*, since
+a press-only probe never reproduces it. `ShortcutSheet` dismisses on a click *outside* itself,
 which it can only see through an application-wide event filter — the press lands on the
 viewport, never on the sheet or its parent. Swallowing that press is not enough either: the
 viewport picks on the **release**, so the filter stays installed one event longer than the
 sheet is visible, specifically to swallow it.
 
 Three widgets share the viewport's bottom edge — the guide bottom-right, the balloon and the
-toast centred — and they collide below about 900 px of viewport width, which `Show tips again`
-makes reachable. `HintBalloon::reposition()` steps aside when the guide is visible and would
-overlap; `reconsider()` calls it for a hint that is already up, because that is exactly when
-the guide can appear underneath one.
+toast centred — plus the Snap/Select chip cluster bottom-left, and they collide below about
+900 px of viewport width, which `Show tips again` makes reachable. `HintBalloon::reposition()`
+steps aside when the guide is visible and would overlap; `reconsider()` calls it for a hint
+that is already up, because that is exactly when the guide can appear underneath one.
+
+`ToastHost::reposition()` steps around **everything the overlay has anchored**, asked for as
+`ViewportOverlay::occupiedRects()` rather than by naming the widget classes this file happens
+to know — a cluster added later is then stepped around for free. It solves one horizontal
+band at a time: an obstacle to the left raises the floor, one to the right lowers the
+ceiling, and when the two meet the search moves to the band above and asks again, because the
+row above can be just as occupied as the row below. A per-obstacle "step left" rule cannot
+express that, and stepping left is exactly the wrong move for the bottom-**left** cluster.
+
+**Order the re-placement off `ViewportOverlay::laidOut()`, never off filter registration.**
+Qt runs event filters last-installed-first and the overlay installs its own first, so every
+widget that watched the viewport's resize event ran *before* the guide and the clusters had
+moved: on a shrink the toast and the balloon stepped aside from where the guide used to be
+and the guide then landed on top of them, and `ExtrudePreview` was raised before `relayout()`
+re-raised the top-left cluster over its field. `relayout()` now emits `laidOut()` when every
+anchored entry is at its final rectangle, and `ToastHost::replace()`,
+`HintBalloon::reposition()` and `ExtrudePreview::replace()` hang off that — re-placing **and**
+re-raising. `Show tips again` calls `relayout()` itself after its `appStateChanged()`, so a
+guide that reappears underneath a live toast moves it aside without depending on which slot
+happened to run first.
 
 A sibling's visibility must be **derived, not inherited from an event**. The walkthrough's
 skip control is synced from the panel's `showEvent`/`hideEvent`/`moveEvent`, and on the
@@ -370,6 +394,22 @@ were each found by a review after passing a green suite:
   part of the predicate. The rule from the sibling-visibility paragraph applies one level
   down: derive it, or something later will undo your one-shot.
 
+Two more, found only once the whole branch was assembled:
+
+- **The pill is not a fourth entry point.** It triggers `myUndoAction`, so it obeys the same
+  `!mySketching && canUndo()` that `updateActions()` — CLAUDE.md's single place that decides
+  what is available — sets for the menu entry, the chip and `Ctrl+Z`. `updateActions()` also
+  pushes that state onto the toast (`setUndoEnabled`), which folds it into the same derived
+  predicate as `myDismissing`: the control leaves hit-testing and the pill paints dimmed,
+  rather than looking live and doing nothing.
+- **A toast must not outlive the change it names.** `show()` records
+  `DocumentModel::revision()` and `documentMovedTo()` dismisses the toast when it moves, so
+  "Deleted Body 02 — Undo" cannot survive a `Ctrl+Z` and then pop the *previous* checkpoint.
+  `revision()` is monotonic and never rolled back; an undo is a move, not a return.
+- **`Toast::paintedTexts()` records every message shown this run**, not just the live one —
+  the banned-word sweep was otherwise a coin toss over whichever string happened to be up.
+  A message never triggered during a run is still not covered, and the comment says so.
+
 **`ExtrudePreview` must build its preview through the same `ModelingOps::extrude` the
 commit uses.** A preview built by a different path is a lie, and this is the one place a
 user judges a number by what it looks like. The preview shape goes through
@@ -379,6 +419,21 @@ this widget could produce. It cancels itself off `appStateChanged()` when the pe
 goes away, because `Start Sketch` stays enabled while it is open. Invalid input keeps the
 last good preview rather than clearing it: no flicker, and `0` is refused while a negative
 extrudes downward, matching what the old dialog's range allowed.
+
+**It owns Enter and Escape while it is visible, regardless of what holds focus** — an
+application-wide filter installed on `show` and removed on `hide`, plus a
+`QEvent::ShortcutOverride` claim so `QShortcutMap` cannot take the key first. This is
+`ShortcutSheet`'s shape, and it is not optional: the field-only filter it replaced stopped
+working the moment anything else took focus, and an RMB orbit — the entire reason a *live*
+preview exists — does exactly that. The panel also names both keys in painted text; a
+modeless panel with invisible verbs is how that went unnoticed for a whole branch.
+
+**Cancelling restores the face; it does not clear the slot.** `OcctViewWidget` has one
+preview channel and two features write it — `onFinishSketch()` puts the closed face there,
+`updatePreview()` overwrites it with the body. Clearing on cancel left an intact pending
+face, an enabled `Extrude` and a status bar saying "Outline closed" above an empty viewport,
+against Milestone 1's own criterion. `OcctViewWidget::previewShape()` exists so a test can
+tell *which* of the two is on screen, since `hasPreview()` cannot.
 
 **Type, motion and focus are `Theme` tokens** — four font sizes and no more, `motionMs()`
 at 160 with `motionCurve()`. `gui_smoke` walks every visible widget and fails on a size

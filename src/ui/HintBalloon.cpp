@@ -10,7 +10,6 @@
 
 #include <algorithm>
 
-#include <QEvent>
 #include <QFontMetrics>
 #include <QMouseEvent>
 #include <QPainter>
@@ -50,10 +49,14 @@ HintBalloon::HintBalloon(MainWindow* window, QWidget* parent)
     // camera, so there is nothing an orbit frame could change. See the
     // header for why the view hint retires on its event instead.
     connect(myWindow, &MainWindow::progressReset, this, &HintBalloon::onProgressReset);
-    // Repositioning only happened inside showHint(), so a window resize while
-    // a hint was up left it stranded wherever the viewport used to end - see
-    // eventFilter() below.
-    if (parent) parent->installEventFilter(this);
+    // No filter on the viewport's resize any more. It ran BEFORE
+    // ViewportOverlay had moved the walkthrough guide this balloon steps
+    // around - Qt runs event filters last-installed-first and the overlay
+    // installs its own first - so a shrink placed the balloon against the
+    // guide's pre-resize rectangle and the guide then landed on top of it.
+    // MainWindow drives reposition() from ViewportOverlay::laidOut()
+    // instead, which is by construction after every anchored widget is at
+    // its final rectangle. See that signal's comment.
 }
 
 bool HintBalloon::conditionHolds(const QString& event) const
@@ -216,6 +219,10 @@ void HintBalloon::reposition()
     if (toast && toast->isVisible()) stepAside(toast->geometry());
 
     move(x, y);
+    // Re-raised here as well as re-placed: this runs from
+    // ViewportOverlay::laidOut(), immediately after the overlay has raise()d
+    // every anchored widget - including the guide - back above this one.
+    if (isVisible()) raise();
 }
 
 void HintBalloon::showHint(const QString& event)
@@ -243,14 +250,6 @@ void HintBalloon::mousePressEvent(QMouseEvent* /*event*/)
     // every other mouse event from reaching the viewport behind the balloon;
     // nothing here needs to touch accept()/ignore() to make that true.
     dismiss();
-}
-
-bool HintBalloon::eventFilter(QObject* watched, QEvent* event)
-{
-    if (watched == parentWidget() && event->type() == QEvent::Resize) {
-        reposition();
-    }
-    return QWidget::eventFilter(watched, event);
 }
 
 void HintBalloon::paintEvent(QPaintEvent* /*event*/)

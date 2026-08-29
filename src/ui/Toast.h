@@ -65,6 +65,17 @@ public:
     // fresh show() clears it, a dismiss() sets it.
     void setDismissing(bool dismissing);
 
+    // Whether the Undo the message offers is currently allowed at all.
+    // MainWindow derives this from myUndoAction's own enabled state inside
+    // updateActions() - CLAUDE.md's single place that decides what is
+    // available - so the pill cannot offer a route the menu entry and the
+    // chip both refuse. Folded into the same derived predicate
+    // syncUndoGeometry() computes, so the control is not merely ignored on
+    // click but genuinely absent from hit-testing, and paintEvent() dims the
+    // pill to match rather than silently leaving a live-looking control.
+    void setUndoEnabled(bool enabled);
+    bool undoEnabled() const { return myUndoEnabled; }
+
     QString text() const { return myText; }
     bool hasUndo() const { return myHasUndo; }
 
@@ -92,10 +103,15 @@ public:
     // sweep has no blind spot here the way it has none for WalkthroughPanel
     // or HintBalloon. "Undo" is painted on the sibling control, never put on
     // a QAction or a tooltip, so nothing else makes it visible to that sweep.
-    // The currently displayed message is included too, since - unlike the
-    // other two widgets - this one has no fixed set of strings to enumerate
-    // up front; whatever is live when the sweep runs is what a viewer would
-    // actually be reading.
+    // Unlike those two widgets this one has no fixed set of strings to
+    // enumerate up front - its messages are composed at the call site - so
+    // it records every message it has been given this run and returns all of
+    // them, not just whichever one happens to be live when the sweep runs.
+    // HONEST LIMIT: a message string that was never actually shown during a
+    // run is not covered by that sweep. Reaching every call site would mean
+    // a second, hand-written copy of the app's messages here, which is
+    // exactly the drift the sweep exists to catch; the suite instead earns
+    // coverage by triggering the outcomes it cares about.
     QStringList paintedTexts() const;
 
     // Public, unlike most of this widget's overrides: ToastHost::reposition()
@@ -125,6 +141,11 @@ private:
     QString myText;
     Kind myKind = Kind::Note;
     bool myHasUndo = false;
+    bool myUndoEnabled = true;   // see setUndoEnabled()
+    // Every distinct message this widget has been asked to show, in order,
+    // for paintedTexts() - see the comment there for what it does and does
+    // not cover.
+    QStringList myShownTexts;
     QPointer<QWidget> myUndo;   // sibling, not a child - see class comment
     double myOpacity = 1.0;     // read by paintEvent() via painter.setOpacity()
     // Part of the same derived state syncUndoGeometry() reads myHasUndo and
@@ -152,7 +173,31 @@ public:
     // for a sentence the user must actually read before it goes away.
     // Calling this while a toast is already up replaces its content and
     // restarts the timer; it never creates a second Toast and never stacks.
-    void show(const QString& text, Toast::Kind kind, bool undo);
+    //
+    // `documentStamp` is DocumentModel::revision() at the moment the message
+    // was composed, or -1 for a message that does not describe a document
+    // change at all. A toast that names one operation and offers Undo must
+    // not outlive that operation: with a stamp recorded here,
+    // documentMovedTo() below dismisses it the moment the document moves on
+    // (a Ctrl+Z, another delete, anything), so the label can never describe
+    // one checkpoint while the pill pops a different one.
+    void show(const QString& text, Toast::Kind kind, bool undo, int documentStamp = -1);
+
+    // Called by MainWindow on every documentChanged(). Dismisses a stamped
+    // toast whose stamp no longer matches - see show() above.
+    void documentMovedTo(int documentStamp);
+
+    // Forwarded to the Toast - see Toast::setUndoEnabled().
+    void setUndoEnabled(bool enabled);
+
+    // Re-places (and re-raises) a live toast. Driven by
+    // ViewportOverlay::laidOut(), so it runs AFTER the overlay has moved the
+    // walkthrough guide this toast steps around rather than before it, and
+    // by MainWindow::appStateChanged(), which is when a guide can appear
+    // underneath an already-showing toast (Show tips again) - the case
+    // HintBalloon::reconsider() already handled for itself and this class
+    // did not.
+    void replace();
 
     QString currentText() const;   // empty when nothing is showing
     bool isShowing() const;
@@ -169,7 +214,11 @@ signals:
     void undoRequested();
 
 private:
-    bool eventFilter(QObject* watched, QEvent* event) override;
+    // Places the toast centred along the bottom edge, then steps it clear of
+    // whatever else is anchored in that strip - the walkthrough guide on the
+    // right, the Snap/Select chip cluster on the left. Both are z-above it
+    // after any relayout(), so an overlap is not merely untidy: it is text
+    // the user cannot read and a control they cannot reach.
     void reposition();
     void dismiss();
     // Animates myToast's opacity from its current value to `opacity` over
@@ -190,6 +239,9 @@ private:
     // same reasoning as Toast::myUndo.
     QPointer<Toast> myToast;
     QTimer* myTimer = nullptr;
+    // DocumentModel::revision() as of the live message, or -1 when the
+    // message does not describe a document change - see show().
+    int myStamp = -1;
     // One QVariantAnimation, constructed once (see the constructor) and kept
     // for the lifetime of this host - not built fresh per fadeTo() call, and
     // deliberately left at the default KeepWhenStopped rather than

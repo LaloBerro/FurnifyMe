@@ -50,6 +50,12 @@ public:
 
     double height() const;
     bool hasPreview() const { return myHasPreview; }
+
+    // Re-places and re-raises the panel and its field. Driven by
+    // ViewportOverlay::laidOut(), which is the one moment the chip clusters
+    // this panel shares the top edge with are known to be at their final
+    // rectangle and already raise()d - a raw resize event runs before both.
+    void replace();
     // Defined in the .cpp, not inline here: QPointer<QLineEdit>'s converting
     // operator needs QLineEdit to be a complete type, and this header only
     // forward-declares it (the same reason Toast.h keeps its own sibling
@@ -71,16 +77,22 @@ protected:
 
 private:
     QRect fieldRect() const;
+    QRect hintRect() const;
+    // The one place each painted string is spelled out - paintEvent() draws
+    // through these and paintedTexts() reports them, so the banned-word
+    // sweep can never be guarding a different copy than the one on screen.
+    QString labelText() const;
+    QString hintText() const;
     void syncFieldGeometry();
     // Centred along the top edge, at ViewportOverlay's own edge margin. Clear
     // of the bottom strip where the toast, the walkthrough guide and the
     // hint balloon all live at every width this app runs at - but NOT
     // collision-free against the top corners: it overlaps the axis gizmo
-    // (top-right) below ~472px of viewport width, and the top-left chip
-    // cluster (Items/Undo/Redo) somewhere in the 530-580px range depending on
-    // that cluster's own label widths. Neither is tracked at runtime the way
-    // HintBalloon/ToastHost step around the guide - see ExtrudePreview.cpp
-    // for the reasoning and the exact thresholds.
+    // (top-right) and the top-left chip cluster (Items/Undo/Redo) on a
+    // sufficiently narrow viewport. Neither is stepped around the way
+    // HintBalloon/ToastHost step around the guide; replace() does at least
+    // keep this panel and its field z-ABOVE them, so the field stays
+    // clickable where they do overlap. See ExtrudePreview.cpp.
     void reposition();
     // Rebuilds the preview from the field's current text through
     // ModelingOps::extrude(). Leaves the last good preview alone - and marks

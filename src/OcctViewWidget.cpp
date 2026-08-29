@@ -247,6 +247,11 @@ bool OcctViewWidget::hasPreview() const
     return !myPreview.IsNull();
 }
 
+TopoDS_Shape OcctViewWidget::previewShape() const
+{
+    return myPreview.IsNull() ? TopoDS_Shape() : myPreview->Shape();
+}
+
 void OcctViewWidget::applySelectionMode(const Handle(AIS_Shape)& shape)
 {
     if (myContext.IsNull() || shape.IsNull()) return;
