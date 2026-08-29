@@ -1,11 +1,11 @@
 #include "HintBalloon.h"
 
-#include "AxisGizmo.h"
 #include "DocumentModel.h"
 #include "MainWindow.h"
 #include "OcctViewWidget.h"
 #include "Theme.h"
 #include "UserProgress.h"
+#include "WalkthroughPanel.h"
 
 #include <QEvent>
 #include <QFontMetrics>
@@ -16,6 +16,7 @@
 namespace {
 constexpr int kPad = 12;
 constexpr int kWidth = 250;
+constexpr int kClearance = 8;   // gap left when stepping around the guide
 
 const QString kBooleanEvent = QStringLiteral("boolean.completed");
 const QString kFaceModeEvent = QStringLiteral("faceMode.used");
@@ -42,12 +43,10 @@ HintBalloon::HintBalloon(MainWindow* window, QWidget* parent)
     setAttribute(Qt::WA_NoMousePropagation);
     hide();
     connect(myWindow, &MainWindow::appStateChanged, this, &HintBalloon::reconsider);
-    // cameraChanged is the one live-predicate trigger appStateChanged does
-    // not cover on its own - see the header - so it needs its own,
-    // deliberately cheap, connection rather than driving a full
-    // reconsider() at drag-frame rate.
-    connect(myWindow->view(), &OcctViewWidget::cameraChanged, this,
-            &HintBalloon::onCameraChanged);
+    // No connection to cameraChanged any more: no predicate here reads the
+    // camera, so there is nothing an orbit frame could change. See the
+    // header for why the view hint retires on its event instead.
+    connect(myWindow, &MainWindow::progressReset, this, &HintBalloon::onProgressReset);
     // Repositioning only happened inside showHint(), so a window resize while
     // a hint was up left it stranded wherever the viewport used to end - see
     // eventFilter() below.
@@ -75,16 +74,18 @@ bool HintBalloon::conditionHolds(const QString& event) const
                myWindow->view()->selectionMode() != OcctViewWidget::SelectionMode::Face;
     }
     if (event == kViewChangedEvent) {
-        // True while a body exists and the camera is not aligned to a named
-        // view. AxisGizmo::labelText() already answers exactly this question
-        // - "Persp" covers both "never touched" and free-orbited, and it
-        // reports one of Top/Front/Right/... the moment a gizmo click or a
-        // 0-3 key snaps the camera to one, which is the action this hint
-        // teaches. A gizmo that is somehow not found is treated as "not yet
-        // aligned" so the hint stays available rather than silently vanishing.
-        const AxisGizmo* gizmo = myWindow->findChild<AxisGizmo*>();
+        // True while a body exists and the user has not yet looked from a
+        // named direction. Reading the recorded event rather than the camera
+        // pose is what keeps this hint's retirement identical in kind to the
+        // other two: whatever route records view.changed - the View menu, a
+        // 0-3 key, a click on the gizmo - retires the hint by the same rule,
+        // and there is no camera pose that can disagree with the event. The
+        // pose-based version could not: pressing 0 records the event but
+        // leaves the camera at azimuth -45 / elevation 30, which the gizmo
+        // labels "Persp", so the balloon sat there after the user had done
+        // exactly what it taught.
         return myWindow->document().count() > 0 &&
-               (!gizmo || gizmo->labelText() == QStringLiteral("Persp"));
+               myWindow->progress().count(event.toStdString()) == 0;
     }
     return false;
 }
@@ -141,7 +142,14 @@ void HintBalloon::reconsider()
         return;
     }
 
-    if (!myText.isEmpty()) return;   // do not interrupt a hint already up
+    if (!myText.isEmpty()) {
+        // Do not interrupt a hint already up - but do re-place it. The
+        // walkthrough panel shares this viewport and can appear underneath a
+        // balloon that is already showing (Show tips again restores it), and
+        // appStateChanged is exactly when that happens.
+        reposition();
+        return;
+    }
 
     if (isDue(kFaceModeEvent)) {
         showHint(kFaceModeEvent);
@@ -153,21 +161,13 @@ void HintBalloon::reconsider()
     }
 }
 
-void HintBalloon::onCameraChanged()
+void HintBalloon::onProgressReset()
 {
-    // cameraChanged fires on every frame of an orbit or pan drag and every
-    // step of a snap-to-view animation, so this deliberately does as little
-    // as possible on the common path: only the view hint's condition can
-    // ever be affected by a camera move, so there is nothing to do unless
-    // that specific hint is the one currently up - which is true for a tiny
-    // fraction of the app's lifetime. Only in that case does this pay for
-    // conditionHolds()'s findChild() and AxisGizmo::labelText() call; a full
-    // reconsider() pass (selection queries, three hasLearned() lookups, a
-    // second findChild()) would otherwise run at drag-frame rate for no
-    // benefit, since raising a *new* hint on a camera move was never a
-    // requirement - only retiring the one already up is.
-    if (myEvent != kViewChangedEvent || myText.isEmpty()) return;
-    if (!conditionHolds(myEvent)) dismiss();
+    myShownThisSession.clear();
+    // Except the one actually on screen: it has had its turn and is still
+    // having it, and leaving it out of the set would let the reconsider()
+    // that follows this "raise" it a second time on top of itself.
+    if (!myEvent.isEmpty()) myShownThisSession.insert(myEvent);
 }
 
 void HintBalloon::reposition()
@@ -178,8 +178,32 @@ void HintBalloon::reposition()
     const QRect bounds = metrics.boundingRect(QRect(0, 0, kWidth - kPad * 2, 1000),
                                               Qt::TextWordWrap, myText);
     resize(kWidth, bounds.height() + kPad * 2 + 22);
-    move((parentWidget()->width() - width()) / 2,
-         parentWidget()->height() - height() - 90);
+
+    int x = (parentWidget()->width() - width()) / 2;
+    int y = parentWidget()->height() - height() - 90;
+
+    // The walkthrough guide occupies the bottom-right corner of this same
+    // viewport, and below roughly 800 px of viewport width the centred
+    // balloon runs straight into it. That is reachable in practice, not a
+    // theoretical narrow-window case: Show tips again restores the guide
+    // while a hint is up. Overlap would be worse than it looks, because
+    // ViewportOverlay::relayout() raises the guide back above the balloon
+    // while the balloon is still the click target underneath it. So step
+    // aside - to the left of the guide when that fits, above it when it does
+    // not.
+    const WalkthroughPanel* guide = parentWidget()->findChild<WalkthroughPanel*>();
+    if (guide && guide->isVisible()) {
+        const QRect panel = guide->geometry();
+        if (QRect(x, y, width(), height()).intersects(panel)) {
+            const int beside = panel.left() - kClearance - width();
+            if (beside >= kClearance) {
+                x = beside;
+            } else {
+                y = panel.top() - kClearance - height();
+            }
+        }
+    }
+    move(x, y);
 }
 
 void HintBalloon::showHint(const QString& event)

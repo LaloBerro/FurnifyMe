@@ -136,6 +136,7 @@ void AxisGizmo::snapToAxis(int axis, bool positive)
             break;
     }
     myView->animateTo(goal);
+    emit viewSnapped();
 }
 
 void AxisGizmo::mousePressEvent(QMouseEvent* event)

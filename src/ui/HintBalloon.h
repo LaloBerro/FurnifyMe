@@ -13,16 +13,21 @@
 // re-evaluates it - not just the learned threshold - against whatever is
 // currently on screen, every time it runs.
 //
-// reconsider() only runs when MainWindow::appStateChanged fires, so the two
-// live predicates that are not driven by anything already wired to that
-// signal need their own path in: switching selection mode now explicitly
-// calls updateActions() (see MainWindow::onSelectionModeChanged), and camera
-// changes are routed through onCameraChanged() below rather than through
-// reconsider() itself - cameraChanged fires on every frame of an orbit or
-// pan drag, and reconsider()'s full pass (selection queries, a findChild(),
-// trig in AxisGizmo::labelText()) is not something to pay for at that rate.
-// onCameraChanged() only pays for any of that when the view hint is actually
-// the one currently up, which is rare - see the .cpp.
+// reconsider() only runs when MainWindow::appStateChanged fires, so a live
+// predicate driven by nothing already wired to that signal would linger no
+// matter how correct it is: switching selection mode explicitly calls
+// updateActions() (see MainWindow::onSelectionModeChanged), and every route
+// that changes the camera to a named direction - the View menu and a click
+// on the axis gizmo alike - goes through MainWindow::recordViewChanged(),
+// which records the event and calls updateActions() too.
+//
+// That last one is why no predicate here reads the camera. The view hint
+// used to retire on AxisGizmo::labelText() != "Persp", which disagreed with
+// the event it is governed by in both directions: pressing 0 records
+// view.changed but leaves the camera at a pose labelText() calls "Persp",
+// and nothing about a free orbit records anything. All three hints now
+// retire by the same single rule - their event, not the state that happens
+// to accompany it.
 //
 #include <QString>
 #include <QWidget>
@@ -56,7 +61,13 @@ protected:
 
 private:
     void reconsider();
-    void onCameraChanged();
+    // Help -> Show tips again. Clearing the store is not enough on its own:
+    // myShownThisSession would still hold every hint already seen, so none of
+    // them could come back until a restart - the guide would return and the
+    // hints would not, which is exactly what that menu entry promises not to
+    // do. MainWindow announces the reset and this decides what it costs;
+    // MainWindow never touches this set.
+    void onProgressReset();
     void showHint(const QString& event);
     void dismiss();
     void reposition();

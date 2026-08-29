@@ -236,19 +236,19 @@ void MainWindow::buildMenus()
     viewMenu->addSeparator();
     viewMenu->addAction(tr("&Axonometric"), QKeySequence(Qt::Key_0), this, [this] {
         myView->setViewAxonometric();
-        recordProgress("view.changed");
+        recordViewChanged();
     });
     viewMenu->addAction(tr("&Top"), QKeySequence(Qt::Key_1), this, [this] {
         myView->setViewTop();
-        recordProgress("view.changed");
+        recordViewChanged();
     });
     viewMenu->addAction(tr("F&ront"), QKeySequence(Qt::Key_2), this, [this] {
         myView->setViewFront();
-        recordProgress("view.changed");
+        recordViewChanged();
     });
     viewMenu->addAction(tr("&Right"), QKeySequence(Qt::Key_3), this, [this] {
         myView->setViewRight();
-        recordProgress("view.changed");
+        recordViewChanged();
     });
     viewMenu->addSeparator();
     viewMenu->addAction(mySnapAction);
@@ -260,8 +260,11 @@ void MainWindow::buildMenus()
     QMenu* helpMenu = menuBar()->addMenu(tr("&Help"));
 
     myShortcutsAction = new QAction(tr("Keyboard Shortcuts"), this);
-    myShortcutsAction->setShortcut(QKeySequence(Qt::Key_Question));
-    myShortcutsAction->setToolTip(tr("List every keyboard shortcut (?)"));
+    // Both bindings the design calls for. F1 is what people reach for without
+    // being told; ? is what the sheet itself is worth advertising.
+    myShortcutsAction->setShortcuts(
+        {QKeySequence(Qt::Key_Question), QKeySequence(Qt::Key_F1)});
+    myShortcutsAction->setToolTip(tr("List every keyboard shortcut (? or F1)"));
     helpMenu->addAction(myShortcutsAction);
 
     helpMenu->addAction(tr("Show tips again"), this, [this] {
@@ -271,6 +274,12 @@ void MainWindow::buildMenus()
             settings.setValue(QStringLiteral("progress"), QString());
         }
         statusBar()->showMessage(tr("Tips reset — the guide and hints will appear again"));
+        // Before appStateChanged, not after: a surface that remembers what it
+        // already showed this session has to forget that first, or the
+        // reconsider() this emission drives would find every hint still
+        // marked as spent and put none of them back. Emptying the store is
+        // only half of what "show tips again" means.
+        emit progressReset();
         emit appStateChanged();
     });
 }
@@ -316,7 +325,16 @@ void MainWindow::buildOverlay()
     });
 
     // The orientation gizmo, then the unit readout beneath it.
-    myOverlay->addWidget(new AxisGizmo(myView, myView), ViewportOverlay::Anchor::TopRight);
+    auto* gizmo = new AxisGizmo(myView, myView);
+    // Clicking an arm of the gizmo is the other way to look from a named
+    // direction, and the hint that teaches the gizmo is retired by
+    // view.changed - so a user who only ever used the gizmo used to dismiss
+    // that hint every session and never cross the threshold. The gizmo
+    // announces the snap and this window decides what it means; giving the
+    // gizmo a MainWindow just to record an event would hand a painted
+    // overlay a dependency on the whole application.
+    connect(gizmo, &AxisGizmo::viewSnapped, this, &MainWindow::recordViewChanged);
+    myOverlay->addWidget(gizmo, ViewportOverlay::Anchor::TopRight);
 
     // Static unit readout under the axis gizmo. We have no unit system; this
     // states the one the whole app assumes rather than pretending to offer a
@@ -370,6 +388,17 @@ void MainWindow::updateActions()
 
     updateStateLabel();
     emit appStateChanged();
+}
+
+void MainWindow::recordViewChanged()
+{
+    recordProgress("view.changed");
+    // Recording alone teaches nothing: the hint that points at the gizmo is
+    // retired by reconsider(), which only ever runs off appStateChanged.
+    // Without this the third press of 0 left a hint on screen for an action
+    // the user had already learned. updateActions() touches nothing this
+    // path depends on, so it cannot recurse back in here.
+    updateActions();
 }
 
 void MainWindow::recordProgress(const std::string& event)

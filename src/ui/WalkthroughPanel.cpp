@@ -101,6 +101,10 @@ WalkthroughPanel::WalkthroughPanel(MainWindow* window, QWidget* parent)
     // panel is not showing at all (an already-learned user), in which case
     // the value simply goes unused until a restore captures it again.
     myBodyBaseline = static_cast<int>(myWindow->document().count());
+    // Places mySkip and, since this panel is not visible yet (its top level
+    // has not been shown), gives it the explicit hide that keeps
+    // showChildren() from revealing it later at this constructor-time
+    // geometry - see syncSkipGeometry().
     syncSkipGeometry();
 
     connect(myWindow, &MainWindow::appStateChanged, this, &WalkthroughPanel::refresh);
@@ -205,6 +209,18 @@ void WalkthroughPanel::syncSkipGeometry()
     // widget's own local coordinates - needs translating by pos() to land in
     // that shared coordinate space.
     mySkip->setGeometry(skipRect().translated(pos()));
+    // Visibility is set here, explicitly, rather than left to hideEvent().
+    // Qt delivers no QHideEvent for hide() on a widget that was never shown,
+    // and the returning-user path in refresh() hides this panel before it has
+    // ever appeared - so hideEvent() never ran, mySkip never got an explicit
+    // hide, and lacking WA_WState_ExplicitShowHide it was then shown by
+    // showChildren() when the window appeared, at the stale geometry it had
+    // been constructed with. An invisible 34x18 rectangle near the top-left
+    // cluster silently ate picks, for every returning user. Deriving the
+    // state here means it cannot depend on an event that may not arrive:
+    // this runs from the constructor, from every move and resize, and from
+    // show/hide.
+    mySkip->setVisible(isVisible());
     // Belt and suspenders, not a guarantee: ViewportOverlay::relayout() will
     // usually raise() this panel again right after moving it, putting the
     // panel back above mySkip - see the class comment on SkipControl for why
@@ -215,8 +231,9 @@ void WalkthroughPanel::syncSkipGeometry()
 void WalkthroughPanel::showEvent(QShowEvent* event)
 {
     QWidget::showEvent(event);
+    // syncSkipGeometry() reads isVisible(), which is already true by the time
+    // a show event is delivered, so this both places and shows mySkip.
     syncSkipGeometry();
-    if (mySkip) mySkip->show();
     // May decide this panel is not actually showing after all (an
     // already-learned user reaching this via the deferred-show path - see
     // the class comment) and hide both again immediately; hideEvent() below
@@ -227,8 +244,9 @@ void WalkthroughPanel::showEvent(QShowEvent* event)
 void WalkthroughPanel::hideEvent(QHideEvent* event)
 {
     QWidget::hideEvent(event);
-    // A floating skip button over a dismissed guide would be worse than no
-    // button at all.
+    // A floating skip control over a dismissed guide would be worse than no
+    // control at all. This covers the ordinary case; syncSkipGeometry() is
+    // what covers the case where this event never arrives at all.
     if (mySkip) mySkip->hide();
 }
 

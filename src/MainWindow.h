@@ -47,6 +47,15 @@ signals:
     // updateActions() from here would recurse.
     void appStateChanged();
 
+    // Emitted by Help -> Show tips again, immediately before the
+    // appStateChanged() that follows it. Clearing the store is not enough on
+    // its own to bring every teaching surface back: a surface that also
+    // remembers what it has already shown *this session* would stay quiet
+    // until a restart, which is precisely what Show tips again exists to
+    // avoid. This lets each surface drop that session memory itself, without
+    // MainWindow having to know any of them has one.
+    void progressReset();
+
 private slots:
     void onStartSketch();
     void onFinishSketch();
@@ -80,6 +89,12 @@ private:
     // differences, and the only way to be sure the two agree after undo/redo.
     void resyncView();
     void runBoolean(int kind);   // ModelingOps::BooleanKind as int, to keep it out of the header
+    // The one place "the camera was moved to a named direction" is recorded.
+    // Every route to that - the four View menu entries and a click on the
+    // axis gizmo - goes through here, so no route can record the event
+    // without also emitting appStateChanged, which is what actually retires
+    // the hint that teaches it.
+    void recordViewChanged();
 
     OcctViewWidget* myView = nullptr;
     DocumentModel myDocument;

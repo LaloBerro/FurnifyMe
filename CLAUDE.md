@@ -261,13 +261,18 @@ Four surfaces teach, and the counter governs all of them:
 |---|---|---|
 | `WalkthroughPanel` | first run, bottom right of the viewport | on completion or skip |
 | `HintBalloon` | when a capability first becomes available this session | after 3 completions |
-| `ShortcutSheet` | on demand, `?` | never — it is on-demand |
+| `ShortcutSheet` | on demand, `?` or `F1` | never — it is on-demand |
 | Tooltips | on hover | never |
 
 `Help → Show tips again` resets the store and brings the first two back, which is how you
-demonstrate the app to somebody without reinstalling it. It genuinely restores: the
-walkthrough panel is **always constructed** and decides its own visibility, because a panel
-built only for un-learned users cannot be restored without a restart.
+demonstrate the app to somebody without reinstalling it. It genuinely restores, and that
+takes two things, not one. The walkthrough panel is **always constructed** and decides its
+own visibility, because a panel built only for un-learned users cannot be restored without
+a restart. And the store is not the only state involved: `HintBalloon` also remembers which
+hints it has already shown *this session*, which clearing the store cannot reach — so the
+handler emits `progressReset()` before `appStateChanged()`, and the balloon drops that
+memory itself. `MainWindow` announces the reset; it never touches another surface's
+internals.
 
 Three rules hold this together, and each was learned by getting it wrong first:
 
@@ -282,13 +287,22 @@ Three rules hold this together, and each was learned by getting it wrong first:
   both raises a hint and retires it, so the two can never drift apart. That single rule
   covers the spec's "dismissed by performing the action" and "dismissed by the capability
   going away" at once. Note that it only runs when something emits `appStateChanged()` —
-  wiring a new hint means checking that the state it watches actually emits.
+  wiring a new hint means checking that the state it watches actually emits. Each predicate
+  reads the **recorded event**, never a piece of state that merely tends to accompany it:
+  the view hint used to retire on `AxisGizmo::labelText() != "Persp"`, and pressing `0`
+  records `view.changed` while leaving a camera pose the gizmo still calls `Persp`, so the
+  balloon sat there after the user had done exactly what it taught. Every route that changes
+  the camera to a named direction — the four View entries and a click on the gizmo — now
+  goes through `MainWindow::recordViewChanged()`, which records *and* calls
+  `updateActions()`. `AxisGizmo` emits `viewSnapped()` and knows nothing about `MainWindow`.
 - **Generate documentation, never write it twice.** `ShortcutSheet` builds its rows from
   the window's own `QAction`s, so it cannot list a stale binding, and `gui_smoke` asserts
-  the row count against the same enumeration. Painted copy is invisible to the banned-word
-  sweep, so `WalkthroughPanel::paintedTexts()` and `HintBalloon::paintedTexts()` expose it —
-  and both are sourced from the same strings the widget paints, never a second copy that
-  only the sweep sees.
+  the row count against the same enumeration. The grouping is generated too — rows sit under
+  the menu that owns them, read off the menu bar, with a catch-all group so an action bound
+  outside the menus can never be silently dropped. Painted copy is invisible to the
+  banned-word sweep, so `WalkthroughPanel::paintedTexts()`, `HintBalloon::paintedTexts()`
+  and `ShortcutSheet::paintedTexts()` expose it — and all three are sourced from the same
+  strings the widget paints, never a second copy that only the sweep sees.
 
 `MainWindow::appStateChanged()` fires at the end of `updateActions()`. Slots on it may read
 state and repaint themselves; calling back into `updateActions()` from one would recurse.
@@ -310,7 +324,23 @@ Both cost a fix round, and both produced a green test suite while the app was br
 A widget that accepts a press must accept the release too. `HintBalloon` left the release to
 propagate, and the viewport underneath re-picked and re-emitted `selectionChanged()` on
 every dismissal. `Qt::WA_NoMousePropagation` closes that whole class of event rather than
-enumerating handlers one at a time.
+enumerating handlers one at a time. `ShortcutSheet` dismisses on a click *outside* itself,
+which it can only see through an application-wide event filter — the press lands on the
+viewport, never on the sheet or its parent. Swallowing that press is not enough either: the
+viewport picks on the **release**, so the filter stays installed one event longer than the
+sheet is visible, specifically to swallow it.
+
+Two widgets share the viewport's bottom edge — the guide bottom-right, the balloon centred —
+and they collide below about 800 px of viewport width, which `Show tips again` makes
+reachable. `HintBalloon::reposition()` steps aside when the guide is visible and would
+overlap; `reconsider()` calls it for a hint that is already up, because that is exactly when
+the guide can appear underneath one.
+
+A sibling's visibility must be **derived, not inherited from an event**. The walkthrough's
+skip control is synced from the panel's `showEvent`/`hideEvent`/`moveEvent`, and on the
+returning-user path `refresh()` calls `hide()` on a panel that was never shown — a case Qt
+delivers no `QHideEvent` for. `syncSkipGeometry()` therefore sets `mySkip->setVisible(isVisible())`
+itself, so the control's hidden state never depends on an event arriving.
 
 ### Qt plugin deployment - do not remove
 
