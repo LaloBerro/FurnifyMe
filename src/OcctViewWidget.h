@@ -3,6 +3,8 @@
 // that Qt drags in.
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_Shape.hxx>
+#include <TopoDS_Edge.hxx>
+#include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 #include <V3d_View.hxx>
 #include <V3d_Viewer.hxx>
@@ -10,6 +12,7 @@
 #include <gp_Pnt.hxx>
 
 #include "CameraController.h"
+#include "DimensionRenderer.h"
 #include "GridRenderer.h"
 
 #include <QPoint>
@@ -27,7 +30,7 @@ class OcctViewWidget : public QWidget {
     Q_OBJECT
 
 public:
-    enum class SelectionMode { Solid, Face };
+    enum class SelectionMode { Solid, Face, Edge };
 
     explicit OcctViewWidget(QWidget* parent = nullptr);
     ~OcctViewWidget() override;
@@ -67,10 +70,61 @@ public:
     void setSketchMode(bool enabled, const gp_Pln& plane);
     bool sketchMode() const { return mySketchMode; }
 
+    // The plane clicks are unprojected onto AND the plane the grid lies on -
+    // one value, not two, because a grid that disagreed with where the next
+    // point will land would be worse than no grid. The ground plane until a
+    // face is locked. Setting it rebuilds the grid immediately, whether or
+    // not a sketch is in progress: locking a face has to be visible before
+    // the user starts drawing on it.
+    void setWorkPlane(const gp_Pln& plane);
+    const gp_Pln& workPlane() const { return mySketchPlane; }
+
+    // The single selected face, or a null face when the selection is not
+    // exactly one face. Deliberately not "the first selected face": Lock to
+    // Face is enabled off this, and locking one of several highlighted faces
+    // would be a coin toss the user cannot see.
+    TopoDS_Face selectedFace() const;
+
+    // The single selected edge, or a null edge otherwise - the same rule as
+    // selectedFace(), for the same reason. This is what the dimension falls
+    // back to when the cursor leaves an edge the user has selected.
+    TopoDS_Edge selectedEdge() const;
+
+    // Redraws whatever dimension is on screen without changing which span it
+    // measures - for a display-unit switch, which changes the label's text
+    // under an annotation nothing else would touch until the next mouse move.
+    void refreshDimension() { myDimension.refresh(); }
+
+    // Screen position of a world point, in this widget's coordinates. False
+    // when there is no view yet. Exposed for gui_smoke: a test that hardcodes
+    // the pixel it clicks is a test that silently stops hitting what it meant
+    // to the moment the camera or the model changes.
+    bool projectToScreen(const gp_Pnt& world, QPoint& out) const;
+
     // Snapping applies to points reported while sketching, not to the camera.
     void setSnap(bool enabled, double step);
     bool snapEnabled() const { return mySnapEnabled; }
     double snapStep() const { return mySnapStep; }
+
+    // The live length annotation - the last placed sketch point out to the
+    // cursor while sketching, or a hovered edge in edge-selection mode. One
+    // instance serves both call sites; see DimensionRenderer.
+    DimensionRenderer& dimension() { return myDimension; }
+
+    // The most recent point reported through sketchCursorMoved, so a test can
+    // compute the true distance independently rather than trusting the
+    // renderer as its own oracle. False before any cursor move on the sketch
+    // plane has happened.
+    bool lastHoverPoint(gp_Pnt& out) const;
+
+    // World units per screen pixel at the camera's current distance from its
+    // target - the same conversion panning already used internally, now
+    // shared so DimensionRenderer's furniture (arrowheads, extension gaps,
+    // the label) can be sized in constant screen pixels rather than a fixed
+    // number of millimetres that shrinks to nothing as the camera pulls
+    // back. Both dimension call sites (the live sketch segment in
+    // MainWindow, the hovered edge here) read this.
+    double worldPerPixel() const;
 
     // Document ids of the selected solids, deduplicated (face-mode selection can
     // hit several faces of one solid).
@@ -116,6 +170,9 @@ signals:
     // rubber band and the coordinate readout.
     void sketchCursorMoved(const gp_Pnt& point);
     void selectionChanged();
+    // A face double-clicked in face-selection mode. MainWindow decides what
+    // that means (it locks it); this widget knows nothing about locking.
+    void faceDoubleClicked(const TopoDS_Face& face);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -128,11 +185,23 @@ protected:
 
 private:
     void initializeViewer();
+    // The work plane, nudged a hair toward the eye. Locking a face makes the
+    // grid exactly coplanar with a shaded face, and two coplanar surfaces are
+    // a depth-buffer tie - stipple, and flicker under camera motion. See the
+    // definition for why this is a geometric nudge rather than a ZLayer.
+    gp_Pln gridPlane() const;
     bool pointOnSketchPlane(int px, int py, gp_Pnt& out) const;
     bool pickWorldPoint(int px, int py, gp_Pnt& out) const;
     void applySelectionMode(const Handle(AIS_Shape)& shape);
     void applyCameraState();
     void stopCameraAnimation();
+    // Shows or clears the edge dimension: the edge the last MoveTo detected
+    // if there is one, otherwise the single selected edge. Clears outside
+    // edge-selection mode. Every route that can change either of those two
+    // inputs - a hover, a click that selects, a cleared selection, a body
+    // that went away - calls this, because an annotation that only some of
+    // them refresh is an annotation that is sometimes a lie.
+    void updateEdgeDimension();
 
     Handle(V3d_Viewer) myViewer;
     Handle(V3d_View) myView;
@@ -141,6 +210,7 @@ private:
 
     CameraController myCamera;
     GridRenderer myGridRenderer;
+    DimensionRenderer myDimension;
 
     std::map<int, Handle(AIS_Shape)> mySolids;
 
@@ -152,6 +222,9 @@ private:
     gp_Pln mySketchPlane;
     bool mySnapEnabled = true;
     double mySnapStep = 10.0;      // matches the drawn grid
+
+    gp_Pnt myLastHoverPoint{0.0, 0.0, 0.0};
+    bool myHasLastHoverPoint = false;
 
     QPoint myLastPos;
     bool myOrbiting = false;

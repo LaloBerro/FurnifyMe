@@ -21,6 +21,13 @@
 #include <Quantity_Color.hxx>
 #include <Quantity_NameOfColor.hxx>
 #include <StdSelect_ViewerSelector3d.hxx>
+#include <TopAbs_ShapeEnum.hxx>
+#include <TopExp.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Edge.hxx>
+#include <TopoDS_Face.hxx>
+#include <TopoDS_Vertex.hxx>
+#include <BRep_Tool.hxx>
 #include <V3d_TypeOfVisualization.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Lin.hxx>
@@ -43,8 +50,9 @@
 #include <cmath>
 
 namespace {
-// AIS_Shape selection modes are plain integers: 0 whole shape, 4 face.
+// AIS_Shape selection modes are plain integers: 0 whole shape, 2 edge, 4 face.
 constexpr int kSelectionModeWholeShape = 0;
+constexpr int kSelectionModeEdge       = 2;
 constexpr int kSelectionModeFace       = 4;
 }  // namespace
 
@@ -111,7 +119,8 @@ void OcctViewWidget::initializeViewer()
     myContext->HighlightStyle(Prs3d_TypeOfHighlight_LocalSelected)->SetColor(Quantity_NOC_ORANGE);
 
     myGridRenderer.attach(myContext);
-    myGridRenderer.update(myCamera.state().distance, myCamera.state().target);
+    myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane());
+    myDimension.attach(myContext);
 
     // Perspective projection: the turntable model is distance-based, and OCCT's
     // default orthographic camera zooms by scale, which would make
@@ -172,6 +181,13 @@ void OcctViewWidget::removeSolid(int id)
 
     myContext->Remove(it->second, Standard_False);
     mySolids.erase(it);
+    // An annotation must never outlive the thing it measures: Delete and Undo
+    // both come through here, and a dimension left behind hangs in empty space
+    // labelling a body that is gone. Unconditional, because the only other
+    // thing the renderer ever holds is the live sketch segment, and no route
+    // removes a body while a sketch is in progress (Undo and Redo are disabled
+    // while sketching, and the booleans need a selection sketch mode clears).
+    myDimension.clear();
     myContext->UpdateCurrentViewer();
 }
 
@@ -181,6 +197,7 @@ void OcctViewWidget::clearSolids()
 
     for (auto& entry : mySolids) myContext->Remove(entry.second, Standard_False);
     mySolids.clear();
+    myDimension.clear();   // same rule as removeSolid(): nothing left to measure
     myContext->UpdateCurrentViewer();
 }
 
@@ -256,9 +273,11 @@ void OcctViewWidget::applySelectionMode(const Handle(AIS_Shape)& shape)
 {
     if (myContext.IsNull() || shape.IsNull()) return;
 
+    const int mode = mySelectionMode == SelectionMode::Face  ? kSelectionModeFace
+                    : mySelectionMode == SelectionMode::Edge ? kSelectionModeEdge
+                                                              : kSelectionModeWholeShape;
     myContext->Deactivate(shape);
-    myContext->Activate(shape, mySelectionMode == SelectionMode::Face ? kSelectionModeFace
-                                                                     : kSelectionModeWholeShape);
+    myContext->Activate(shape, mode);
 }
 
 void OcctViewWidget::setSelectionMode(SelectionMode mode)
@@ -266,6 +285,7 @@ void OcctViewWidget::setSelectionMode(SelectionMode mode)
     if (mode == mySelectionMode) return;
 
     mySelectionMode = mode;
+    myDimension.clear();   // a hover annotation from the old mode means nothing in the new one
     if (myContext.IsNull()) return;
 
     myContext->ClearSelected(Standard_False);
@@ -280,11 +300,92 @@ void OcctViewWidget::setSnap(bool enabled, double step)
     if (step > 0.0) mySnapStep = step;
 }
 
+void OcctViewWidget::setWorkPlane(const gp_Pln& plane)
+{
+    mySketchPlane = plane;
+    // The grid is drawn on this plane, so it has to be rebuilt now rather
+    // than on the next camera move: locking a face and seeing the grid still
+    // lying on the ground is the whole failure this call exists to prevent.
+    if (myView.IsNull()) return;
+    myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane());
+    myView->Redraw();
+}
+
+TopoDS_Face OcctViewWidget::selectedFace() const
+{
+    if (myContext.IsNull()) return TopoDS_Face();
+
+    TopoDS_Face found;
+    int faces = 0;
+    for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
+        const TopoDS_Shape shape = myContext->SelectedShape();
+        if (shape.IsNull() || shape.ShapeType() != TopAbs_FACE) continue;
+        if (++faces > 1) return TopoDS_Face();
+        found = TopoDS::Face(shape);
+    }
+    return found;
+}
+
+bool OcctViewWidget::projectToScreen(const gp_Pnt& world, QPoint& out) const
+{
+    if (myView.IsNull()) return false;
+
+    Standard_Integer px = 0, py = 0;
+    myView->Convert(world.X(), world.Y(), world.Z(), px, py);
+    out = QPoint(static_cast<int>(px), static_cast<int>(py));
+    return true;
+}
+
 void OcctViewWidget::setSketchMode(bool enabled, const gp_Pln& plane)
 {
     mySketchMode = enabled;
-    mySketchPlane = plane;
+    setWorkPlane(plane);
     if (enabled) clearSelection();
+    // The live segment dimension belongs to one sketch: cleared whether this
+    // one just committed or was cancelled, and again on entry so a stale
+    // edge-hover annotation cannot bleed into the sketch that follows it.
+    myDimension.clear();
+    myHasLastHoverPoint = false;
+}
+
+gp_Pln OcctViewWidget::gridPlane() const
+{
+    // Since a face can be locked, the grid is drawn exactly coplanar with a
+    // shaded face, and two coplanar surfaces are a depth-buffer tie: the grid
+    // stipples through the face and flickers as the camera moves. So the grid
+    // is displaced a hair toward whichever side of the plane the eye is on.
+    //
+    // Not Graphic3d_ZLayerId_Topmost: that layer draws with the depth buffer
+    // cleared, so the GROUND grid would then paint over every body standing
+    // on it. And not a depth-offset ZLayer either - OCCT's
+    // Graphic3d_ZLayerSettings depth offset drives glPolygonOffset in
+    // Aspect_POM_Fill mode, which does nothing at all to the line primitives
+    // this grid is made of.
+    //
+    // The displacement has to be PROPORTIONAL to the camera distance - depth
+    // precision degrades with distance, so a fixed offset that clears the
+    // buffer up close does not clear it far away - and it also has to be
+    // QUANTIZED, because GridRenderer caches on the plane it last built and a
+    // nudge that changed with every wheel notch would rebuild the whole grid
+    // every frame.
+    //
+    // Tying it to the grid's minor step gave the quantization but not the
+    // proportionality: minorStepFor() holds one value across a whole band, so
+    // the ratio swung twentyfold inside it - 1.7e-4 at 120 mm down to 8e-6 at
+    // 2499 mm, and ~2000 mm is this app's ordinary furniture-viewing distance,
+    // the thin end of that swing. Rounding the distance itself to a power of
+    // two keeps a constant ratio to within a factor of root two while still
+    // changing only when the camera moves a whole octave. At 1e-4 of the
+    // viewing distance the nudge is about a tenth of a pixel at any distance.
+    const double distance = std::max(1.0, myCamera.state().distance);
+    const double octave = std::ldexp(1.0, static_cast<int>(std::lround(std::log2(distance))));
+    const double nudge = octave * 1.0e-4;
+    const gp_Dir normal = mySketchPlane.Axis().Direction();
+    const gp_Vec toEye(mySketchPlane.Location(), myCamera.eyePosition());
+
+    gp_Pln plane = mySketchPlane;
+    plane.Translate(gp_Vec(normal) * (toEye.Dot(gp_Vec(normal)) >= 0.0 ? nudge : -nudge));
+    return plane;
 }
 
 bool OcctViewWidget::pointOnSketchPlane(int px, int py, gp_Pnt& out) const
@@ -337,6 +438,91 @@ bool OcctViewWidget::pickWorldPoint(int px, int py, gp_Pnt& out) const
     return true;
 }
 
+bool OcctViewWidget::lastHoverPoint(gp_Pnt& out) const
+{
+    if (!myHasLastHoverPoint) return false;
+    out = myLastHoverPoint;
+    return true;
+}
+
+double OcctViewWidget::worldPerPixel() const
+{
+    // World units per pixel at target depth, for a perspective camera - the
+    // same maths panning already used inline.
+    return 2.0 * myCamera.state().distance *
+           std::tan(0.5 * kFovyDeg * 3.14159265358979323846 / 180.0) /
+           std::max(1, height());
+}
+
+TopoDS_Edge OcctViewWidget::selectedEdge() const
+{
+    if (myContext.IsNull()) return TopoDS_Edge();
+
+    TopoDS_Edge found;
+    int edges = 0;
+    for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
+        if (!myContext->HasSelectedShape()) continue;
+        const TopoDS_Shape shape = myContext->SelectedShape();
+        if (shape.IsNull() || shape.ShapeType() != TopAbs_EDGE) continue;
+        // Same rule as selectedFace(): "the one selected edge", never "the
+        // first of several", so a dimension can never be a coin toss between
+        // two highlighted edges.
+        if (++edges > 1) return TopoDS_Edge();
+        found = TopoDS::Edge(shape);
+    }
+    return found;
+}
+
+void OcctViewWidget::updateEdgeDimension()
+{
+    if (mySelectionMode != SelectionMode::Edge || myContext.IsNull() || myView.IsNull()) {
+        myDimension.clear();
+        return;
+    }
+
+    // Hover first, selection second. Acceptance criterion 1 asks for both, and
+    // this is the single place that decides between them: the hovered edge is
+    // what the cursor is asking about right now, and a selected edge is what
+    // the user asked about and has not let go of - so moving the cursor off a
+    // selected edge falls back to it rather than dropping the annotation, which
+    // is what used to happen.
+    TopoDS_Edge edge;
+    if (myContext->HasDetectedShape() &&
+        myContext->DetectedShape().ShapeType() == TopAbs_EDGE) {
+        edge = TopoDS::Edge(myContext->DetectedShape());
+    } else {
+        edge = selectedEdge();
+    }
+    if (edge.IsNull()) {
+        myDimension.clear();
+        return;
+    }
+
+    TopoDS_Vertex v1, v2;
+    TopExp::Vertices(edge, v1, v2);
+    if (v1.IsNull() || v2.IsNull()) {
+        myDimension.clear();
+        return;
+    }
+
+    const gp_Pnt from = BRep_Tool::Pnt(v1);
+    const gp_Pnt to = BRep_Tool::Pnt(v2);
+    const gp_Vec along(from, to);
+    if (along.Magnitude() < 1.0e-7) {
+        myDimension.clear();
+        return;
+    }
+
+    // Extension lines run sideways in the screen plane - perpendicular to
+    // both the edge and the direction we are looking - so they read the same
+    // whichever way the camera happens to be turned.
+    gp_Vec sideways = along.Crossed(gp_Vec(myView->Camera()->Direction()));
+    if (sideways.Magnitude() < 1.0e-7) sideways = gp_Vec(0.0, 0.0, 1.0).Crossed(along);
+    if (sideways.Magnitude() < 1.0e-7) sideways = gp_Vec(1.0, 0.0, 0.0);
+
+    myDimension.show(from, to, gp_Dir(sideways), worldPerPixel());
+}
+
 std::vector<int> OcctViewWidget::selectedSolidIds() const
 {
     std::vector<int> ids;
@@ -362,6 +548,7 @@ void OcctViewWidget::clearSelection()
     if (myContext.IsNull()) return;
 
     myContext->ClearSelected(Standard_True);
+    updateEdgeDimension();   // nothing selected, so nothing left for it to fall back to
     emit selectionChanged();
 }
 
@@ -376,6 +563,7 @@ void OcctViewWidget::setSelectedSolids(const std::vector<int>& ids)
         if (!myContext->IsDisplayed(it->second)) continue;   // never select the hidden
         myContext->AddOrRemoveSelected(it->second, Standard_False);
     }
+    updateEdgeDimension();
     myContext->UpdateCurrentViewer();
     emit selectionChanged();
 }
@@ -399,7 +587,7 @@ void OcctViewWidget::applyCameraState()
     cam->SetEye(eye);
     cam->SetCenter(at);
     cam->SetUp(up);
-    myGridRenderer.update(myCamera.state().distance, myCamera.state().target);
+    myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane());
     myView->Redraw();
     emit cameraChanged();
 }
@@ -557,6 +745,10 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
     myContext->MoveTo(pos.x(), pos.y(), myView, Standard_False);
     myContext->SelectDetected(additive ? AIS_SelectionScheme_XOR
                                        : AIS_SelectionScheme_Replace);
+    // The selection just changed, and in edge mode the dimension follows it as
+    // well as the hover - selecting a second edge has to stop the annotation
+    // claiming to measure the one before it.
+    updateEdgeDimension();
     myView->Redraw();
     emit selectionChanged();
 }
@@ -575,22 +767,23 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
         applyCameraState();
     } else if (myPanningDrag) {
         const QPoint delta = pos - myLastPos;
-        // World units per pixel at target depth, for a perspective camera.
-        const double worldPerPixel =
-            2.0 * myCamera.state().distance *
-            std::tan(0.5 * kFovyDeg * 3.14159265358979323846 / 180.0) /
-            std::max(1, height());
-        myCamera.pan(-delta.x() * worldPerPixel, delta.y() * worldPerPixel);
+        const double wpp = worldPerPixel();
+        myCamera.pan(-delta.x() * wpp, delta.y() * wpp);
         applyCameraState();
     } else if (mySketchMode) {
         // Report where the next point would land, so the rubber band and the
         // coordinate readout track the cursor before anything is committed.
         gp_Pnt onPlane;
-        if (pointOnSketchPlane(pos.x(), pos.y(), onPlane)) emit sketchCursorMoved(onPlane);
+        if (pointOnSketchPlane(pos.x(), pos.y(), onPlane)) {
+            myLastHoverPoint = onPlane;
+            myHasLastHoverPoint = true;
+            emit sketchCursorMoved(onPlane);
+        }
     } else if (!myContext.IsNull()) {
         // Hover highlight. Suppressed while sketching so the in-progress wire
         // does not fight the highlighter for attention.
         myContext->MoveTo(pos.x(), pos.y(), myView, Standard_True);
+        updateEdgeDimension();
     }
 
     myLastPos = pos;
@@ -622,6 +815,21 @@ void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
     const QPoint pos = event->position().toPoint();
     myContext->MoveTo(pos.x(), pos.y(), myView, Standard_False);
     if (!myContext->HasDetected()) return;
+
+    // In face mode a double-click means "sketch on this" - the second route
+    // to Lock to Face, alongside the action. Framing the body instead would
+    // be the one gesture that takes the camera away from the face the user
+    // just chose to work on. The refusal for a non-planar face lives in
+    // MainWindow, which owns the toast, not here.
+    if (mySelectionMode == SelectionMode::Face && myContext->HasDetectedShape() &&
+        myContext->DetectedShape().ShapeType() == TopAbs_FACE) {
+        // Select it too, so the actions agree with what was just locked.
+        myContext->SelectDetected(AIS_SelectionScheme_Replace);
+        myView->Redraw();
+        emit selectionChanged();
+        emit faceDoubleClicked(TopoDS::Face(myContext->DetectedShape()));
+        return;
+    }
 
     const Handle(AIS_InteractiveObject) hit = myContext->DetectedInteractive();
     for (const auto& entry : mySolids) {

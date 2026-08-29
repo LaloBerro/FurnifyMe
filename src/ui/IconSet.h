@@ -8,7 +8,7 @@ namespace IconSet {
 
 enum class Glyph {
     Sketch, Extrude, Fuse, Cut, Intersect, Delete,
-    Undo, Redo, Items, Snap, SelectSolid, SelectFace,
+    Undo, Redo, Items, Snap, SelectSolid, SelectFace, SelectEdge,
     DisplayMode, Screenshot, Fit,
 };
 

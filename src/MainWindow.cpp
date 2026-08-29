@@ -17,6 +17,15 @@
 #include "ViewportOverlay.h"
 #include "WalkthroughPanel.h"
 
+#include <BRepAdaptor_Surface.hxx>
+#include <ElSLib.hxx>
+#include <GeomAbs_SurfaceType.hxx>
+#include <TopAbs_Orientation.hxx>
+#include <gp_Ax3.hxx>
+#include <gp_Dir.hxx>
+#include <gp_Pln.hxx>
+#include <gp_Vec.hxx>
+
 #include <QAction>
 #include <QActionGroup>
 #include <QFileDialog>
@@ -40,6 +49,14 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
         const QSettings settings;
         myProgress.deserialize(
             settings.value(QStringLiteral("progress")).toString().toStdString());
+        // Read before buildActions() so the Units menu's initial checked
+        // state, and the readout label built in buildOverlay(), both agree
+        // with what was last chosen - same guard as the learning progress,
+        // so the suite (persistProgress=false) can never read the
+        // developer's real store.
+        if (settings.value(QStringLiteral("displayUnit")).toString() ==
+            QStringLiteral("cm"))
+            Measure::setDisplayUnit(Measure::Unit::Centimetres);
     }
 
     myView = new OcctViewWidget(this);
@@ -56,6 +73,11 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     connect(myView, &OcctViewWidget::sketchPointPicked, this, &MainWindow::onSketchPointPicked);
     connect(myView, &OcctViewWidget::sketchCursorMoved, this, &MainWindow::onSketchCursorMoved);
     connect(myView, &OcctViewWidget::selectionChanged, this, &MainWindow::onSelectionChanged);
+    // The second route to Lock to Face. The viewport reports the gesture; this
+    // window decides what it means, and both routes land in the same
+    // lockToFace() - including its refusal - rather than one of them growing
+    // its own copy of the rule.
+    connect(myView, &OcctViewWidget::faceDoubleClicked, this, &MainWindow::lockToFace);
 
     buildActions();
     buildMenus();
@@ -64,7 +86,25 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     myShortcutSheet = new ShortcutSheet(this);
     connect(myShortcutsAction, &QAction::triggered, myShortcutSheet, &ShortcutSheet::showSheet);
 
-    connect(this, &MainWindow::documentChanged, myItemsPanel, &ItemsPanel::refresh);
+    // appStateChanged alone, not documentChanged too: every document edit
+    // already calls updateActions() (and so emits appStateChanged) before it
+    // emits documentChanged, so a second connection here only rebuilt the
+    // same rows twice per edit. appStateChanged also covers the case
+    // documentChanged never fires for - switching the display unit, which
+    // touches no document but still has to reread every dimension the panel
+    // shows (see setDisplayUnit()).
+    connect(this, &MainWindow::appStateChanged, myItemsPanel, &ItemsPanel::refresh);
+
+    // A dimension label reads through Measure too, so it has to follow a unit
+    // switch the way the items panel and the status bar do. DimensionRenderer
+    // is not a QObject - it draws, it does not listen - so the window drives
+    // it from the one signal every unit-following surface already refreshes
+    // on, rather than setDisplayUnit() growing a private list of everything
+    // that shows a length. refreshDimension() redraws only what is already on
+    // screen and is a no-op otherwise, so this cannot make an annotation
+    // appear; and it only reads and repaints, so it cannot recurse back into
+    // updateActions().
+    connect(this, &MainWindow::appStateChanged, myView, &OcctViewWidget::refreshDimension);
 
     // Selection syncs both ways.
     connect(myItemsPanel, &ItemsPanel::solidActivated, this,
@@ -126,6 +166,16 @@ void MainWindow::buildActions()
     myIntersectAction = new QAction(tr("&Intersect"), this);
     connect(myIntersectAction, &QAction::triggered, this, &MainWindow::onIntersect);
 
+    myLockFaceAction = new QAction(tr("&Lock to Face"), this);
+    myLockFaceAction->setShortcut(QKeySequence(Qt::Key_L));
+    myLockFaceAction->setToolTip(lockTooltipText());
+    connect(myLockFaceAction, &QAction::triggered, this, &MainWindow::onLockToFace);
+
+    myUnlockFaceAction = new QAction(tr("U&nlock Face"), this);
+    myUnlockFaceAction->setShortcut(QKeySequence(Qt::SHIFT | Qt::Key_L));
+    myUnlockFaceAction->setToolTip(unlockTooltipText());
+    connect(myUnlockFaceAction, &QAction::triggered, this, &MainWindow::unlockFace);
+
     myExportStepAction = new QAction(tr("Export &STEP..."), this);
     myExportStepAction->setShortcut(QKeySequence::Save);
     connect(myExportStepAction, &QAction::triggered, this, &MainWindow::onExportStep);
@@ -135,6 +185,10 @@ void MainWindow::buildActions()
     mySolidSelectAction->setChecked(true);
     myFaceSelectAction = new QAction(tr("Select F&aces"), this);
     myFaceSelectAction->setCheckable(true);
+    myEdgeSelectAction = new QAction(tr("Select &Edges"), this);
+    myEdgeSelectAction->setCheckable(true);
+    myEdgeSelectAction->setToolTip(tr("Pick one edge at a time\n"
+                                      "Hovering shows its length."));
 
     myDeleteAction = new QAction(tr("&Delete Selected"), this);
     myDeleteAction->setShortcut(QKeySequence::Delete);
@@ -154,8 +208,7 @@ void MainWindow::buildActions()
     mySnapAction = new QAction(tr("Snap to &Grid"), this);
     mySnapAction->setCheckable(true);
     mySnapAction->setChecked(true);
-    mySnapAction->setToolTip(tr("Snap outline points to the 10 mm grid\n"
-                                "Turn this off for freehand placement."));
+    mySnapAction->setToolTip(snapTooltipText());
     connect(mySnapAction, &QAction::toggled, this, &MainWindow::onSnapToggled);
 
     myItemsPanelAction = new QAction(tr("Items"), this);
@@ -206,9 +259,33 @@ void MainWindow::buildActions()
     auto* selectionGroup = new QActionGroup(this);
     selectionGroup->addAction(mySolidSelectAction);
     selectionGroup->addAction(myFaceSelectAction);
+    selectionGroup->addAction(myEdgeSelectAction);
     selectionGroup->setExclusive(true);
     connect(mySolidSelectAction, &QAction::triggered, this, &MainWindow::onSelectionModeChanged);
     connect(myFaceSelectAction, &QAction::triggered, this, &MainWindow::onSelectionModeChanged);
+    connect(myEdgeSelectAction, &QAction::triggered, this, &MainWindow::onSelectionModeChanged);
+
+    myUnitsMillimetresAction = new QAction(tr("Millimetres"), this);
+    myUnitsMillimetresAction->setCheckable(true);
+    myUnitsCentimetresAction = new QAction(tr("Centimetres"), this);
+    myUnitsCentimetresAction->setCheckable(true);
+
+    auto* unitsGroup = new QActionGroup(this);
+    unitsGroup->addAction(myUnitsMillimetresAction);
+    unitsGroup->addAction(myUnitsCentimetresAction);
+    unitsGroup->setExclusive(true);
+
+    // Reflects whatever setDisplayUnit() the constructor already applied from
+    // the persisted setting (or the Millimetres default), before this action
+    // group exists at all.
+    const bool startsInCentimetres = Measure::displayUnit() == Measure::Unit::Centimetres;
+    myUnitsMillimetresAction->setChecked(!startsInCentimetres);
+    myUnitsCentimetresAction->setChecked(startsInCentimetres);
+
+    connect(myUnitsMillimetresAction, &QAction::triggered, this,
+            [this] { setDisplayUnit(Measure::Unit::Millimetres); });
+    connect(myUnitsCentimetresAction, &QAction::triggered, this,
+            [this] { setDisplayUnit(Measure::Unit::Centimetres); });
 }
 
 void MainWindow::buildMenus()
@@ -224,6 +301,9 @@ void MainWindow::buildMenus()
     sketchMenu->addAction(myFinishSketchAction);
     sketchMenu->addAction(myUndoPointAction);
     sketchMenu->addAction(myCancelSketchAction);
+    sketchMenu->addSeparator();
+    sketchMenu->addAction(myLockFaceAction);
+    sketchMenu->addAction(myUnlockFaceAction);
 
     QMenu* editMenu = menuBar()->addMenu(tr("&Edit"));
     editMenu->addAction(myUndoAction);
@@ -262,7 +342,12 @@ void MainWindow::buildMenus()
     viewMenu->addSeparator();
     viewMenu->addAction(mySolidSelectAction);
     viewMenu->addAction(myFaceSelectAction);
+    viewMenu->addAction(myEdgeSelectAction);
     viewMenu->addAction(myItemsPanelAction);
+    viewMenu->addSeparator();
+    QMenu* unitsMenu = viewMenu->addMenu(tr("Units"));
+    unitsMenu->addAction(myUnitsMillimetresAction);
+    unitsMenu->addAction(myUnitsCentimetresAction);
 
     QMenu* helpMenu = menuBar()->addMenu(tr("&Help"));
 
@@ -328,6 +413,7 @@ void MainWindow::buildOverlay()
         {mySnapAction,         IconSet::Glyph::Snap},
         {mySolidSelectAction,  IconSet::Glyph::SelectSolid},
         {myFaceSelectAction,   IconSet::Glyph::SelectFace},
+        {myEdgeSelectAction,   IconSet::Glyph::SelectEdge},
     });
 
     cluster(ViewportOverlay::Anchor::TopLeft, {
@@ -354,10 +440,10 @@ void MainWindow::buildOverlay()
     connect(gizmo, &AxisGizmo::viewSnapped, this, &MainWindow::recordViewChanged);
     myOverlay->addWidget(gizmo, ViewportOverlay::Anchor::TopRight);
 
-    // Static unit readout under the axis gizmo. We have no unit system; this
-    // states the one the whole app assumes rather than pretending to offer a
-    // choice.
-    auto* units = new QLabel(tr("mm"), myView);
+    // Unit readout under the axis gizmo - follows View -> Units rather than
+    // stating a fixed unit. Refreshed from appStateChanged, same as every
+    // other surface this setting reaches (see setDisplayUnit()).
+    auto* units = new QLabel(QString::fromStdString(Measure::unitSuffix()), myView);
     units->setAlignment(Qt::AlignCenter);
     // A small chip-styled readout - Theme::labelFont(), the same size as a
     // chip label.
@@ -367,6 +453,10 @@ void MainWindow::buildOverlay()
                              .arg(Theme::chip().name(), Theme::textMuted().name())
                              .arg(Theme::labelFont().pointSizeF()));
     units->adjustSize();
+    connect(this, &MainWindow::appStateChanged, units, [units] {
+        units->setText(QString::fromStdString(Measure::unitSuffix()));
+        units->adjustSize();
+    });
     myOverlay->addWidget(units, ViewportOverlay::Anchor::TopRight);
 
     // Every outcome the app reports - success or failure - goes through this
@@ -450,6 +540,31 @@ void MainWindow::updateActions()
 
     myExtrudeAction->setEnabled(!mySketching && !myPendingFace.IsNull());
 
+    // Exactly one face, and a flat one: an outline needs a single plane to
+    // live on, and a cylinder's side has no such plane. Both halves are
+    // checked again inside lockToFace(), because the double-click route can
+    // reach a curved face this enabled state never sees.
+    const TopoDS_Face selectedFace = myView->selectedFace();
+    // Not while sketching: the points already placed live on the plane that is
+    // about to be swapped, and an outline with points on two planes is not an
+    // outline. Not while a closed outline is waiting either - see
+    // canChangeSketchPlane() for what moving the plane out from under it does.
+    const bool planeCanMove = !mySketching && myPendingFace.IsNull();
+    const bool flatFaceSelected =
+        planeCanMove && !selectedFace.IsNull() &&
+        BRepAdaptor_Surface(selectedFace).GetType() == GeomAbs_Plane;
+    myLockFaceAction->setEnabled(flatFaceSelected);
+    myUnlockFaceAction->setEnabled(myFaceLocked && planeCanMove);
+    // A disabled control that does not say why is a control the user reads as
+    // broken. Same idea as snapTooltipText(): recomputed here rather than
+    // frozen at buildActions() time, so the reason is current.
+    const QString pendingReason =
+        tr("Unavailable while an outline is waiting — press E to extrude it, "
+           "or Ctrl+K to start a new one");
+    myLockFaceAction->setToolTip(myPendingFace.IsNull() ? lockTooltipText() : pendingReason);
+    myUnlockFaceAction->setToolTip(myPendingFace.IsNull() ? unlockTooltipText()
+                                                          : pendingReason);
+
     myUnionAction->setEnabled(booleanReady);
     mySubtractAction->setEnabled(booleanReady);
     myIntersectAction->setEnabled(booleanReady);
@@ -462,6 +577,12 @@ void MainWindow::updateActions()
     // is available, and pushed out rather than re-derived at the toast.
     if (myToasts) myToasts->setUndoEnabled(myUndoAction->isEnabled());
     myRedoAction->setEnabled(!mySketching && myDocument.canRedo());
+
+    // Not a slot on appStateChanged - part of updateActions() itself, same
+    // as updateStateLabel(), so it recomputes on every unit switch too
+    // rather than freezing whatever unit was active when the tooltip was
+    // first built in buildActions().
+    mySnapAction->setToolTip(snapTooltipText());
 
     updateStateLabel();
     emit appStateChanged();
@@ -478,6 +599,23 @@ void MainWindow::recordViewChanged()
     updateActions();
 }
 
+void MainWindow::setDisplayUnit(Measure::Unit unit)
+{
+    Measure::setDisplayUnit(unit);
+    if (myPersistProgress) {
+        QSettings settings;
+        settings.setValue(QStringLiteral("displayUnit"),
+                          unit == Measure::Unit::Centimetres ? QStringLiteral("cm")
+                                                              : QStringLiteral("mm"));
+    }
+    // Not recordProgress(): the unit is a display preference, not a learned
+    // capability, so it never touches UserProgress. updateActions() ends by
+    // emitting appStateChanged(), which is what the items panel, the units
+    // readout and the status bar all already refresh from - no second
+    // refresh path needed.
+    updateActions();
+}
+
 void MainWindow::recordProgress(const std::string& event)
 {
     myProgress.record(event);
@@ -486,6 +624,25 @@ void MainWindow::recordProgress(const std::string& event)
     QSettings settings;
     settings.setValue(QStringLiteral("progress"),
                       QString::fromStdString(myProgress.serialize()));
+}
+
+QString MainWindow::lockTooltipText() const
+{
+    return tr("Draw on the selected face instead of the ground (L)\n"
+              "Double-clicking a face does the same. Outlines drawn "
+              "there extrude square to it.");
+}
+
+QString MainWindow::unlockTooltipText() const
+{
+    return tr("Go back to drawing on the ground (Shift+L)");
+}
+
+QString MainWindow::snapTooltipText() const
+{
+    return tr("Snap outline points to the %1 grid\n"
+              "Turn this off for freehand placement.")
+        .arg(QString::fromStdString(Measure::formatLength(10.0)));
 }
 
 void MainWindow::updateStateLabel()
@@ -522,6 +679,13 @@ void MainWindow::updateStateLabel()
             state = tr("%1 bodies — click one to select").arg(bodies);
         }
     }
+    // A lock is a mode, and a mode with no persistent cue is a trap: the
+    // message that announced it is transient, and the grid's orientation is
+    // easy to misread once the camera has moved. It leads the label, because
+    // where the next outline will land governs how to read everything after
+    // it.
+    if (myFaceLocked) state = tr("On a locked face — %1").arg(state);
+
     myStateLabel->setText(state);
 }
 
@@ -589,9 +753,10 @@ void MainWindow::onRedo()
 void MainWindow::onSnapToggled(bool enabled)
 {
     myView->setSnap(enabled, 10.0);
-    statusBar()->showMessage(enabled
-                                 ? tr("Snapping to the 10 mm grid")
-                                 : tr("Snapping off — points land exactly where you click"));
+    statusBar()->showMessage(
+        enabled ? tr("Snapping to the %1 grid")
+                      .arg(QString::fromStdString(Measure::formatLength(10.0)))
+                : tr("Snapping off — points land exactly where you click"));
 }
 
 void MainWindow::onSketchCursorMoved(const gp_Pnt& point)
@@ -599,9 +764,39 @@ void MainWindow::onSketchCursorMoved(const gp_Pnt& point)
     if (!mySketching) return;
 
     myView->setPreview(mySketch.previewShapeWithCursor(point));
+    // The plane's OWN coordinates, not the world's. On a face locked at
+    // y = 220 the world Y never changes as the cursor runs up the face, so a
+    // world X/Y readout froze one number and made the other meaningless in
+    // the plane the user is actually drawing in. ElSLib::Parameters is the
+    // same conversion SketchController::snapToPlaneGrid uses, so the readout
+    // and the snap grid agree by construction rather than by coincidence -
+    // and on the ground plane (u, v) is (X, Y), so nothing changes there.
+    Standard_Real u = 0.0, v = 0.0;
+    ElSLib::Parameters(mySketch.plane(), point, u, v);
     statusBar()->showMessage(tr("Cursor at %1, %2")
-                                 .arg(QString::fromStdString(Measure::formatLength(point.X())),
-                                      QString::fromStdString(Measure::formatLength(point.Y()))));
+                                 .arg(QString::fromStdString(Measure::formatLength(u)),
+                                      QString::fromStdString(Measure::formatLength(v))));
+
+    // The live length of the segment being dragged out - the last placed
+    // point to the cursor. Only one call site touches this in
+    // OcctViewWidget's own hover branch too (a selected edge); this is the
+    // other of the two, per DimensionRenderer's contract.
+    if (mySketch.points().empty()) {
+        myView->dimension().clear();
+        return;
+    }
+    const gp_Pnt& last = mySketch.points().back();
+    const gp_Vec segment(last, point);
+    if (segment.Magnitude() < 1.0e-4) {
+        myView->dimension().clear();
+        return;
+    }
+    // Sideways within the sketch plane - perpendicular to both the segment
+    // and the plane's own normal - so the extension lines lie flat on the
+    // plane the user is actually drawing on.
+    gp_Vec sideways = gp_Vec(mySketch.plane().Axis().Direction()).Crossed(segment);
+    if (sideways.Magnitude() < 1.0e-7) sideways = gp_Vec(1.0, 0.0, 0.0);
+    myView->dimension().show(last, point, gp_Dir(sideways), myView->worldPerPixel());
 }
 
 void MainWindow::onStartSketch()
@@ -610,12 +805,17 @@ void MainWindow::onStartSketch()
     myPendingFace.Nullify();
     mySketching = true;
 
-    // Milestone 1 sketches on the fixed XY plane at Z=0.
+    // The ground plane by default, a locked face's own plane while one is
+    // locked - SketchController holds the single copy of it either way.
     myView->setSketchMode(true, mySketch.plane());
     myView->setPreview(TopoDS_Shape());
     updateActions();
-    statusBar()->showMessage(tr("Click points on the ground to draw an outline — "
-                                "Enter closes it, Backspace undoes a point, Esc cancels"));
+    statusBar()->showMessage(
+        myFaceLocked
+            ? tr("Click points on the locked face to draw an outline — "
+                 "Enter closes it, Backspace undoes a point, Esc cancels")
+            : tr("Click points on the ground to draw an outline — "
+                 "Enter closes it, Backspace undoes a point, Esc cancels"));
 }
 
 void MainWindow::onSketchPointPicked(const gp_Pnt& point)
@@ -829,12 +1029,18 @@ void MainWindow::onExportStep()
 
 void MainWindow::onSelectionModeChanged()
 {
-    myView->setSelectionMode(myFaceSelectAction->isChecked() ? OcctViewWidget::SelectionMode::Face
-                                                             : OcctViewWidget::SelectionMode::Solid);
+    const OcctViewWidget::SelectionMode mode =
+        myFaceSelectAction->isChecked() ? OcctViewWidget::SelectionMode::Face
+        : myEdgeSelectAction->isChecked() ? OcctViewWidget::SelectionMode::Edge
+                                          : OcctViewWidget::SelectionMode::Solid;
+    myView->setSelectionMode(mode);
     if (myFaceSelectAction->isChecked()) recordProgress("faceMode.used");
-    statusBar()->showMessage(myFaceSelectAction->isChecked()
-                                 ? tr("Face selection — hovering highlights one face at a time")
-                                 : tr("Body selection — click whole bodies to combine them"));
+    statusBar()->showMessage(
+        myFaceSelectAction->isChecked()
+            ? tr("Face selection — hovering highlights one face at a time")
+        : myEdgeSelectAction->isChecked()
+            ? tr("Edge selection — hovering shows one edge's length at a time")
+            : tr("Body selection — click whole bodies to combine them"));
     // Neither mySolidSelectAction nor myFaceSelectAction is touched by
     // updateActions() itself (their checked state is handled entirely by the
     // QActionGroup they belong to), so this cannot recurse back in here -
@@ -842,6 +1048,103 @@ void MainWindow::onSelectionModeChanged()
     // face selection was used the next time something unrelated happens to
     // fire appStateChanged, which left its hint lingering.
     updateActions();
+}
+
+bool MainWindow::canChangeSketchPlane()
+{
+    // A closed outline that has not been extruded yet still belongs to the
+    // plane it was drawn on, and both the commit (extrudePendingFace) and the
+    // live preview sweep it along whatever the sketch plane's normal happens
+    // to be AT THAT MOMENT. Move the plane in between and the outline is swept
+    // in a direction lying in its own plane: a body with no volume at all,
+    // which BRepPrimAPI_MakePrism reports as done. ModelingOps::extrude now
+    // refuses that sweep outright, so nothing degenerate can reach the
+    // document either way - but a refusal the user meets only after pressing E
+    // is not an explanation, so the plane simply does not move while an
+    // outline is waiting.
+    //
+    // Discarding the pending outline instead was the alternative, and it is
+    // worse: it throws away work the user did without being asked.
+    if (myPendingFace.IsNull()) return true;
+
+    myToasts->show(tr("There's an outline waiting to be extruded, and it belongs to the "
+                      "plane it was drawn on. Press E to turn it into a body, or Ctrl+K "
+                      "to start a new outline, before you change the face you draw on."),
+                  Toast::Kind::Note, false);
+    return false;
+}
+
+void MainWindow::onLockToFace()
+{
+    const TopoDS_Face face = myView->selectedFace();
+    if (face.IsNull()) return;
+    lockToFace(face);
+}
+
+bool MainWindow::lockToFace(const TopoDS_Face& face)
+{
+    if (face.IsNull()) return false;
+    if (!canChangeSketchPlane()) return false;
+
+    const BRepAdaptor_Surface surface(face);
+    if (surface.GetType() != GeomAbs_Plane) {
+        myToasts->show(tr("This face isn't flat, so it can't hold an outline. "
+                          "Pick a flat face and try again."),
+                      Toast::Kind::Failure, false);
+        return false;
+    }
+
+    // By value, and the face is dropped here - see lockToFace()'s comment in
+    // the header for why holding on to it would be a bug waiting for the
+    // user's next boolean.
+    //
+    // DIRECTION CONVENTION: the stored plane's normal is the face's OUTWARD
+    // normal, because extrude sweeps along it (see extrudePendingFace and
+    // ExtrudePreview) and a shelf has to come out of the cabinet rather than
+    // into it.
+    //
+    // BRepAdaptor_Surface carries the underlying geometry and its location
+    // and nothing else - it never applies TopAbs_Orientation. On a plain
+    // BRepPrimAPI_MakeBox three of the six faces are TopAbs_REVERSED, and
+    // for those the surface normal points INTO the body. Locking one of them
+    // without this flip sweeps the prism straight through the body it is
+    // standing on. Reverse it here, once, so no consumer of the sketch plane
+    // has to know any of this.
+    gp_Pln plane = surface.Plane();
+    if (face.Orientation() == TopAbs_REVERSED) {
+        // Origin and in-plane X direction preserved, normal flipped: gp_Ax3's
+        // (P, N, Vx) constructor keeps Vx as the X direction when it is
+        // already perpendicular to N, which it is, so only the normal (and
+        // with it the derived Y direction) changes. The grid is symmetric
+        // about both, so nothing visible moves.
+        plane = gp_Pln(gp_Ax3(plane.Location(), plane.Axis().Direction().Reversed(),
+                              plane.Position().XDirection()));
+    }
+    mySketch.setPlane(plane);
+    myFaceLocked = true;
+    // One call sets both where clicks land and where the grid is drawn; they
+    // are the same value inside the viewport, so they cannot disagree.
+    myView->setWorkPlane(plane);
+    recordProgress("faceLock.used");
+
+    updateActions();
+    statusBar()->showMessage(tr("Locked to this face — outlines you draw now sit on it, "
+                                "and extrude square to it"));
+    return true;
+}
+
+void MainWindow::unlockFace()
+{
+    if (!myFaceLocked) return;
+    if (!canChangeSketchPlane()) return;
+
+    const gp_Pln ground(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
+    mySketch.setPlane(ground);
+    myFaceLocked = false;
+    myView->setWorkPlane(ground);
+
+    updateActions();
+    statusBar()->showMessage(tr("Back to the ground — outlines are drawn flat again"));
 }
 
 void MainWindow::onSelectionChanged()

@@ -13,6 +13,7 @@
 // the viewport stay in agreement.
 //
 #include "CameraController.h"
+#include "DimensionRenderer.h"
 #include "DocumentModel.h"
 #include "ExtrudePreview.h"
 #include "GridRenderer.h"
@@ -50,8 +51,24 @@
 #include <QStatusBar>
 #include <QString>
 
+#include <BRepAdaptor_Surface.hxx>
+#include <BRepGProp.hxx>
+#include <BRep_Tool.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
+#include <ElSLib.hxx>
+#include <TopAbs_Orientation.hxx>
+#include <GProp_GProps.hxx>
 #include <TopAbs_ShapeEnum.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Edge.hxx>
+#include <TopoDS_Face.hxx>
+#include <TopoDS_Vertex.hxx>
+#include <gp_Pln.hxx>
+#include <gp_Vec.hxx>
+#include <GeomAbs_SurfaceType.hxx>
 
 #include <cmath>
 #include <cstdio>
@@ -138,6 +155,18 @@ void clickAt(QWidget* target, const QPointF& pos,
     settle(80);
 }
 
+// A hover move with no button down - the live dimension and the hover
+// highlight both key off this, not a click.
+void moveTo(QWidget* target, const QPointF& pos, Qt::KeyboardModifiers mods = Qt::NoModifier)
+{
+    const QPointF global = target->mapToGlobal(pos);
+
+    QMouseEvent move(QEvent::MouseMove, pos, global, Qt::NoButton, Qt::NoButton, mods);
+    QCoreApplication::sendEvent(target, &move);
+
+    settle(80);
+}
+
 // A key press delivered the way a real one arrives: to whatever currently
 // holds focus inside `scope`, not to the widget the test hopes will handle
 // it. Aiming a key at a specific widget is precisely the blind spot that let
@@ -183,6 +212,18 @@ QAction* action(MainWindow& window, const QString& label)
         if (candidate->text().remove(QLatin1Char('&')) == label) return candidate;
     }
     return nullptr;
+}
+
+// The persistent right-hand readout - a permanent widget on the status bar,
+// which MainWindow keeps no accessor for, so it is found the same way the
+// vocabulary sweep finds it.
+QString stateLabelText(MainWindow& window)
+{
+    QString text;
+    for (QLabel* label : window.statusBar()->findChildren<QLabel*>()) {
+        if (!label->text().isEmpty()) text = label->text();
+    }
+    return text;
 }
 
 bool trigger(MainWindow& window, const QString& label)
@@ -908,6 +949,669 @@ int main(int argc, char* argv[])
         view->saveSnapshot(outDir + "/g3-after-cut.png");
     }
 
+    // --- a length you can see while you make it -------------------------------
+    {
+        trigger(window, QStringLiteral("Start Sketch"));
+        settle(100);
+        clickAt(view, QPointF(300, 300));
+        moveTo(view, QPointF(420, 300));
+        settle(120);
+
+        check(view->dimension().isShowing(),
+              "dragging out a segment shows its length");
+        view->saveSnapshot(outDir + "/g-dimension-live.png");
+
+        // Computed independently: the renderer must not be its own oracle.
+        const gp_Pnt a = window.sketch().points().front();
+        gp_Pnt b;
+        check(view->lastHoverPoint(b), "the cursor's ground point is known");
+        const std::string expected = Measure::formatLength(a.Distance(b));
+        check(view->dimension().labelText() == expected,
+              QStringLiteral("the label reads the true distance (\"%1\" vs \"%2\")")
+                  .arg(QString::fromStdString(view->dimension().labelText()))
+                  .arg(QString::fromStdString(expected)));
+
+        // The one copy of the banned list (bannedWords(), below) reaches this
+        // painted-not-tooltipped string too, the same way it already reaches
+        // the walkthrough panel, the hint balloon and the toast.
+        const QString labelText = QString::fromStdString(view->dimension().labelText());
+        QStringList labelOffenders;
+        for (const QString& word : bannedWords()) {
+            if (labelText.contains(word, Qt::CaseInsensitive)) labelOffenders << word;
+        }
+        check(labelOffenders.isEmpty(),
+              QStringLiteral("the dimension label uses no banned word (\"%1\"%2)")
+                  .arg(labelText,
+                       labelOffenders.isEmpty()
+                           ? QString()
+                           : QStringLiteral(" [") + labelOffenders.join(QStringLiteral(", ")) +
+                                 QStringLiteral("]")));
+
+        trigger(window, QStringLiteral("Cancel Sketch"));
+        settle(120);
+        check(!view->dimension().isShowing(),
+              "cancelling the outline clears the dimension");
+    }
+
+    // --- an edge's length, hovered and selected -------------------------------
+    // Acceptance criterion 1 asks for both, and edge mode had no coverage at
+    // all: the dimension was refreshed only from the hover branch and cleared
+    // whenever nothing was detected, so moving the cursor off an edge the user
+    // had SELECTED dropped its annotation. The last two checks are the other
+    // half of the same rule - an annotation must not outlive the body it
+    // measures.
+    {
+        const CameraState cameraBefore = view->camera().state();
+        view->fitAll();
+        settle(200);
+        trigger(window, QStringLiteral("Select Edges"));
+        settle(120);
+        check(!view->dimension().isShowing(),
+              "entering edge selection annotates nothing on its own");
+
+        // The edge is found by clicking and then READ BACK through
+        // selectedEdge(), so the expected length comes from the edge the app
+        // actually picked rather than from whichever one this loop hoped it
+        // would hit - several bodies exist by now and any of them can occlude
+        // any other.
+        TopoDS_Edge picked;
+        QPoint screen;
+        for (const DocumentModel::Solid& solid : window.document().solids()) {
+            for (TopExp_Explorer it(solid.shape, TopAbs_EDGE); it.More(); it.Next()) {
+                const TopoDS_Edge candidate = TopoDS::Edge(it.Current());
+                TopoDS_Vertex v1, v2;
+                TopExp::Vertices(candidate, v1, v2);
+                if (v1.IsNull() || v2.IsNull()) continue;
+                const gp_Pnt a = BRep_Tool::Pnt(v1);
+                const gp_Pnt b = BRep_Tool::Pnt(v2);
+                if (a.Distance(b) < 1.0) continue;
+                const gp_Pnt mid(0.5 * (a.X() + b.X()), 0.5 * (a.Y() + b.Y()),
+                                 0.5 * (a.Z() + b.Z()));
+                QPoint at;
+                if (!view->projectToScreen(mid, at)) continue;
+                if (!view->rect().adjusted(40, 40, -40, -40).contains(at)) continue;
+                clickAt(view, QPointF(at));
+                settle(100);
+                const TopoDS_Edge got = view->selectedEdge();
+                if (got.IsNull() || !got.IsSame(candidate)) continue;
+                picked = got;
+                screen = at;
+                break;
+            }
+            if (!picked.IsNull()) break;
+        }
+        check(!picked.IsNull(), "clicking a projected edge midpoint selects that edge");
+
+        if (!picked.IsNull()) {
+            TopoDS_Vertex v1, v2;
+            TopExp::Vertices(picked, v1, v2);
+            // Computed here, from the edge the app handed back: the renderer
+            // must not be its own oracle.
+            const std::string expected =
+                Measure::formatLength(BRep_Tool::Pnt(v1).Distance(BRep_Tool::Pnt(v2)));
+
+            check(view->dimension().isShowing(), "selecting an edge shows its length");
+            check(view->dimension().labelText() == expected,
+                  QStringLiteral("which reads the true length (\"%1\" against \"%2\")")
+                      .arg(QString::fromStdString(view->dimension().labelText()),
+                           QString::fromStdString(expected)));
+
+            // The defect: the cursor leaving a SELECTED edge used to clear it.
+            moveTo(view, QPointF(8, 8));
+            check(view->dimension().isShowing(),
+                  "and it survives the cursor moving off the edge, because the edge "
+                  "is still selected");
+            check(view->dimension().labelText() == expected,
+                  "still reading the same length rather than some other edge's");
+
+            view->clearSelection();
+            settle(120);
+            check(!view->dimension().isShowing(),
+                  "letting go of the edge is what clears it");
+
+            // The hover half, with nothing selected to fall back on.
+            moveTo(view, QPointF(screen));
+            check(view->dimension().isShowing(), "hovering an edge shows its length");
+            check(view->dimension().labelText() == expected,
+                  "the hovered length is the same edge's true length");
+            moveTo(view, QPointF(8, 8));
+            check(!view->dimension().isShowing(), "and leaving it clears the dimension");
+
+            // An annotation must not outlive what it measures: Delete and Undo
+            // both go through removeSolid()/clearSolids(), which left it
+            // hanging in empty space until the next mouse move.
+            clickAt(view, QPointF(screen));
+            settle(100);
+            check(view->dimension().isShowing(), "the edge is annotated again");
+            check(view->selectedSolidIds().size() == 1,
+                  "and selecting an edge selects the body it belongs to");
+            const std::size_t bodiesBefore = window.document().count();
+            trigger(window, QStringLiteral("Delete Selected"));
+            settle(150);
+            check(window.document().count() == bodiesBefore - 1, "deleting removes the body");
+            check(!view->dimension().isShowing(),
+                  "and its dimension goes with it rather than floating where it was");
+
+            trigger(window, QStringLiteral("Undo"));
+            settle(150);
+            check(window.document().count() == bodiesBefore,
+                  "the body comes back for the checks that follow");
+        }
+
+        // Put the world back for the blocks written against it.
+        trigger(window, QStringLiteral("Select Bodies"));
+        view->clearSelection();
+        view->animateTo(cameraBefore);   // animations are off: this is immediate
+        settle(150);
+    }
+
+    // --- a flat face can become the sketch plane ------------------------------
+    // The one part of this phase that changes what the app can build: an
+    // outline on the side of a body, extruding out of it rather than up.
+    {
+        // A body to pick a side face from, and a camera that definitely
+        // frames it. Both are put back at the end of the block so the checks
+        // after this one see the state they were written against.
+        if (window.document().count() == 0) buildBody(window, 0.25, 0.35, 0.45, 0.6, 60.0);
+        check(window.document().count() > 0, "there is a body to lock a face on");
+        const CameraState cameraBefore = view->camera().state();
+        view->fitAll();
+        settle(200);
+
+        trigger(window, QStringLiteral("Select Faces"));
+        settle(120);
+
+        // Pick the face by PROJECTING it, never by a hardcoded pixel: a
+        // literal (360, 340) passes only for as long as the camera and
+        // everything built before this block stay exactly as they are today.
+        // The target is a vertical side face - locking a ground-parallel one
+        // would prove nothing that Z=0 does not already.
+        //
+        // Projecting a centre of mass says where a face WOULD be if nothing
+        // stood in front of it; several bodies exist by now and any of them
+        // can occlude any other. So each candidate is clicked and the result
+        // read back, and only a click that actually selected a vertical flat
+        // face is accepted. A check that passed because a click happened to
+        // land somewhere is a check that fails on an unrelated change three
+        // tasks from now.
+        // BRepAdaptor_Surface carries geometry and location only - it never
+        // applies TopAbs_Orientation - so on a TopAbs_REVERSED face the
+        // surface normal points INTO the body. Everything below reasons about
+        // the OUTWARD normal, which is what the app stores and extrudes along.
+        //
+        // This lambda is also why the orientation bug did not show up here
+        // first: the "is it facing the camera" test used the raw surface
+        // normal, and on a REVERSED face that normal points away from the eye,
+        // so every REVERSED face was silently filtered out of the candidate
+        // list. The picker could only ever land on a face whose surface normal
+        // already happened to be the outward one.
+        auto outwardNormal = [](const TopoDS_Face& face) {
+            gp_Dir normal = BRepAdaptor_Surface(face).Plane().Axis().Direction();
+            if (face.Orientation() == TopAbs_REVERSED) normal.Reverse();
+            return normal;
+        };
+        auto isVerticalPlane = [](const TopoDS_Face& face) {
+            if (face.IsNull()) return false;
+            const BRepAdaptor_Surface surface(face);
+            if (surface.GetType() != GeomAbs_Plane) return false;
+            return std::fabs(surface.Plane().Axis().Direction().Z()) < 0.1;
+        };
+
+        TopoDS_Face picked;
+        TopoDS_Shape pickedBody;
+        QPoint screen;
+        // Projecting a centre of mass says where a face WOULD be if nothing
+        // stood in front of it; several bodies exist by now and any of them
+        // can occlude any other. So each candidate is clicked and the result
+        // read back, and only a click that actually selected a vertical flat
+        // face is accepted. A check that passed because a click happened to
+        // land somewhere is a check that fails on an unrelated change three
+        // tasks from now.
+        //
+        // REVERSED faces are tried first, so that when the model offers one
+        // the end-to-end path runs over the case the orientation fix exists
+        // for rather than over the easy one. The deterministic coverage of
+        // that fix is the box probe further down; this is belt and braces.
+        for (int pass = 0; pass < 2 && picked.IsNull(); ++pass) {
+            const bool wantReversed = (pass == 0);
+            for (const DocumentModel::Solid& solid : window.document().solids()) {
+                for (TopExp_Explorer it(solid.shape, TopAbs_FACE); it.More(); it.Next()) {
+                    const TopoDS_Face candidate = TopoDS::Face(it.Current());
+                    if (!isVerticalPlane(candidate)) continue;
+                    if ((candidate.Orientation() == TopAbs_REVERSED) != wantReversed) continue;
+                    // Only a face whose OUTWARD normal points back at the
+                    // camera can be picked at all.
+                    if (gp_Vec(outwardNormal(candidate))
+                            .Dot(gp_Vec(view->camera().viewDirection())) >= 0.0)
+                        continue;
+
+                    GProp_GProps props;
+                    BRepGProp::SurfaceProperties(candidate, props);
+                    QPoint at;
+                    if (!view->projectToScreen(props.CentreOfMass(), at)) continue;
+                    if (!view->rect().adjusted(20, 20, -20, -20).contains(at)) continue;
+
+                    clickAt(view, QPointF(at));
+                    settle(120);
+                    const TopoDS_Face got = view->selectedFace();
+                    if (!isVerticalPlane(got)) continue;   // occluded, or the pick missed
+                    picked = got;
+                    screen = at;
+                    break;
+                }
+                if (!picked.IsNull()) break;
+            }
+        }
+        check(!picked.IsNull(),
+              "clicking a projected face centre selects a vertical flat face");
+
+        // The host is the body that actually CONTAINS the selected face, not
+        // whichever body the loop happened to be iterating when the click
+        // landed: under occlusion those are different bodies, and measuring
+        // the locked plane against the wrong centroid makes the outwardness
+        // assertion below either vacuous or spuriously red. Derived, so the
+        // check measures what its message says it measures.
+        if (!picked.IsNull()) {
+            for (const DocumentModel::Solid& solid : window.document().solids()) {
+                for (TopExp_Explorer it(solid.shape, TopAbs_FACE); it.More(); it.Next()) {
+                    if (!it.Current().IsSame(picked)) continue;
+                    pickedBody = solid.shape;
+                    break;
+                }
+                if (!pickedBody.IsNull()) break;
+            }
+        }
+        check(!picked.IsNull() && !pickedBody.IsNull(),
+              "the body that owns the selected face is identified");
+
+        if (!picked.IsNull() && !pickedBody.IsNull()) {
+            QAction* lock = action(window, QStringLiteral("Lock to Face"));
+            check(lock != nullptr, "there is an action to lock a face");
+            check(lock != nullptr && lock->isEnabled(),
+                  "selecting one flat face enables it");
+
+            if (lock && lock->isEnabled()) {
+                const gp_Pln facePlane = BRepAdaptor_Surface(picked).Plane();
+                lock->trigger();
+                settle(200);
+                check(window.isFaceLocked(), "the face is locked");
+
+                // The sketch plane must BE the face's plane, not merely something.
+                const gp_Pln sketchPlane = window.sketch().plane();
+                check(std::fabs(facePlane.Distance(sketchPlane.Location())) < 1.0e-6,
+                      "the sketch plane sits on the face");
+                check(std::fabs(sketchPlane.Axis().Direction().Z()) < 0.1,
+                      "and the locked plane really is a vertical one, not the ground");
+
+                // SIGNED, not IsParallel. IsParallel is true for antiparallel
+                // directions too, so a plane whose normal points INTO the body
+                // sails through it - and that is exactly the bug: extrude
+                // sweeps along this normal, so an inward one puts the shelf
+                // inside the cabinet. The centroid of the body the face came
+                // from is the reference that cannot be argued with.
+                GProp_GProps hostProps;
+                BRepGProp::VolumeProperties(pickedBody, hostProps);
+                const gp_Pnt hostCentre = hostProps.CentreOfMass();
+                const double outwardness =
+                    gp_Vec(hostCentre, sketchPlane.Location())
+                        .Dot(gp_Vec(sketchPlane.Axis().Direction()));
+                check(outwardness > 0.0,
+                      QStringLiteral("the locked plane's normal points out of the body, "
+                                     "not into it (%1)")
+                          .arg(outwardness));
+
+                // A locked sketch plane is a persistent mode, so it needs a
+                // persistent cue: the status-bar message that announces the
+                // lock scrolls away, and the grid's orientation is easy to
+                // misread once the camera moves.
+                check(stateLabelText(window).contains(QStringLiteral("locked face")),
+                      QStringLiteral("the state label says the plane is locked (\"%1\")")
+                          .arg(stateLabelText(window)));
+
+                // The grid is drawn in the 3D view, so the viewport dump is
+                // the only place it can be seen at all.
+                view->saveSnapshot(outDir + "/h-locked-face-grid.png");
+
+                // The part that makes this a feature rather than a label:
+                // a point clicked now lands ON the face's plane, not on Z=0.
+                trigger(window, QStringLiteral("Start Sketch"));
+                settle(120);
+                clickAt(view, QPointF(screen));
+                settle(150);
+                check(window.sketch().pointCount() == 1,
+                      "clicking while locked places a point");
+                if (window.sketch().pointCount() == 1) {
+                    const gp_Pnt placed = window.sketch().points().front();
+                    check(std::fabs(facePlane.Distance(placed)) < 1.0e-6,
+                          QStringLiteral("the point lands on the locked face's plane "
+                                         "(%1 mm off it)")
+                              .arg(facePlane.Distance(placed)));
+                    check(std::fabs(placed.Z()) > 1.0e-6,
+                          "and not on the ground plane it would have used before");
+                }
+
+                // The readout has to be the PLANE's own coordinates. On a face
+                // locked at a fixed world y, running the cursor up the face
+                // changes only Z - so a world X/Y readout froze one number and
+                // left the other meaningless in the plane the user is drawing
+                // in. ElSLib::Parameters is what snapToPlaneGrid already uses,
+                // so the two agree by construction.
+                moveTo(view, QPointF(screen + QPoint(30, -20)));
+                settle(120);
+                gp_Pnt cursor;
+                check(view->lastHoverPoint(cursor),
+                      "the cursor's point on the locked plane is known");
+                Standard_Real cu = 0.0, cv = 0.0;
+                ElSLib::Parameters(window.sketch().plane(), cursor, cu, cv);
+                const QString inPlane =
+                    QStringLiteral("Cursor at %1, %2")
+                        .arg(QString::fromStdString(Measure::formatLength(cu)),
+                             QString::fromStdString(Measure::formatLength(cv)));
+                const QString inWorld =
+                    QStringLiteral("Cursor at %1, %2")
+                        .arg(QString::fromStdString(Measure::formatLength(cursor.X())),
+                             QString::fromStdString(Measure::formatLength(cursor.Y())));
+                check(window.statusBar()->currentMessage() == inPlane,
+                      QStringLiteral("the readout is the locked plane's own coordinates "
+                                     "(\"%1\")").arg(window.statusBar()->currentMessage()));
+                check(inPlane != inWorld,
+                      QStringLiteral("and on this face the two really do differ, so that "
+                                     "check is not vacuous (plane \"%1\", world \"%2\")")
+                          .arg(inPlane, inWorld));
+
+                trigger(window, QStringLiteral("Cancel Sketch"));
+                settle(120);
+
+                // And now the whole point of the feature: draw an outline on
+                // the locked face and extrude it. Volume alone would NOT have
+                // caught the inward-sweep bug - a prism swept into the body is
+                // still a valid prism of the right volume, just in the wrong
+                // place - so the check that bites is where the new body's
+                // centre of mass ends up relative to the face it grew from.
+                trigger(window, QStringLiteral("Start Sketch"));
+                settle(120);
+                clickAt(view, QPointF(screen + QPoint(-60, -40)));
+                clickAt(view, QPointF(screen + QPoint(60, -40)));
+                clickAt(view, QPointF(screen + QPoint(60, 40)));
+                clickAt(view, QPointF(screen + QPoint(-60, 40)));
+                settle(120);
+                check(window.sketch().pointCount() == 4,
+                      "four points land on the locked face");
+
+                // The outline's area, in the plane's own coordinates, computed
+                // here so the expected volume is not read back out of the
+                // thing under test.
+                double area = 0.0;
+                const std::vector<gp_Pnt> outline = window.sketch().points();
+                for (std::size_t k = 0; k < outline.size(); ++k) {
+                    Standard_Real u0 = 0.0, v0 = 0.0, u1 = 0.0, v1 = 0.0;
+                    ElSLib::Parameters(sketchPlane, outline[k], u0, v0);
+                    ElSLib::Parameters(sketchPlane, outline[(k + 1) % outline.size()], u1, v1);
+                    area += u0 * v1 - u1 * v0;
+                }
+                area = std::fabs(area) * 0.5;
+                check(area > 1.0, QStringLiteral("the outline encloses real area (%1)").arg(area));
+
+                trigger(window, QStringLiteral("Finish Sketch"));
+                settle(150);
+                check(window.hasPendingFace(), "the outline on the locked face closes");
+
+                const std::size_t bodiesBefore = window.document().count();
+                const double shelfHeight = 30.0;
+                check(window.extrudePendingFace(shelfHeight),
+                      "and extrudes into a body");
+                settle(150);
+                if (window.document().count() == bodiesBefore + 1) {
+                    const TopoDS_Shape shelf = window.document().solids().back().shape;
+                    check(std::fabs(ModelingOps::volume(shelf) - area * shelfHeight) <
+                              area * shelfHeight * 1.0e-6,
+                          QStringLiteral("whose volume is the outline times the height "
+                                         "(%1 against %2)")
+                              .arg(ModelingOps::volume(shelf))
+                              .arg(area * shelfHeight));
+
+                    GProp_GProps shelfProps;
+                    BRepGProp::VolumeProperties(shelf, shelfProps);
+                    const double standsProud =
+                        gp_Vec(sketchPlane.Location(), shelfProps.CentreOfMass())
+                            .Dot(gp_Vec(sketchPlane.Axis().Direction()));
+                    check(standsProud > 0.0,
+                          QStringLiteral("and stands proud of the locked face rather than "
+                                         "sinking into the body behind it (%1)")
+                              .arg(standsProud));
+                }
+
+                // Extruding calls SketchController::reset(), which clears the
+                // points and must NOT clear the plane - a lock that silently
+                // expired on the first extrude would make the feature useless
+                // for the second shelf.
+                check(window.isFaceLocked() &&
+                          std::fabs(facePlane.Distance(window.sketch().plane().Location())) <
+                              1.0e-6,
+                      "the face stays locked after extruding on it");
+
+                // Put the document back where the rest of the suite expects it.
+                trigger(window, QStringLiteral("Undo"));
+                settle(150);
+                check(window.document().count() == bodiesBefore,
+                      "the shelf is undone, leaving the document as it was");
+
+                // A curved face has no single plane to draw on, and the
+                // refusal has to say so rather than silently doing nothing.
+                // Built here rather than modelled: nothing in this document
+                // is round, and the check is about the refusal, not about
+                // how the cylinder got made.
+                ToastHost* toasts = window.findChild<ToastHost*>();
+                TopoDS_Face curved;
+                const TopoDS_Shape cylinder = BRepPrimAPI_MakeCylinder(20.0, 40.0).Shape();
+                for (TopExp_Explorer it(cylinder, TopAbs_FACE); it.More(); it.Next()) {
+                    if (BRepAdaptor_Surface(TopoDS::Face(it.Current())).GetType() ==
+                        GeomAbs_Plane)
+                        continue;
+                    curved = TopoDS::Face(it.Current());
+                    break;
+                }
+                check(!curved.IsNull(), "a curved face is available to refuse");
+                if (!curved.IsNull() && toasts) {
+                    check(!window.lockToFace(curved), "a curved face cannot be locked");
+                    check(toasts->currentText() ==
+                              QStringLiteral("This face isn't flat, so it can't hold an "
+                                             "outline. Pick a flat face and try again."),
+                          QStringLiteral("and the refusal names the cause and the fix "
+                                         "(\"%1\")")
+                              .arg(toasts->currentText()));
+                    // IsEqual, not IsParallel: "unchanged" has to include the
+                    // sense of the normal, or a refusal that quietly flipped
+                    // the plane the user is drawing on would read as a pass.
+                    check(window.isFaceLocked() &&
+                              window.sketch().plane().Axis().Direction().IsEqual(
+                                  sketchPlane.Axis().Direction(), 1.0e-9) &&
+                              std::fabs(facePlane.Distance(
+                                  window.sketch().plane().Location())) < 1.0e-6,
+                          "a refused lock leaves the plane that was already locked alone");
+                }
+
+                QAction* unlock = action(window, QStringLiteral("Unlock Face"));
+                check(unlock != nullptr && unlock->isEnabled(), "it can be unlocked");
+                if (unlock) {
+                    unlock->trigger();
+                    settle(150);
+                    check(!window.isFaceLocked(), "unlocking releases it");
+                    check(std::fabs(window.sketch().plane().Location().Z()) < 1.0e-9,
+                          "and returns to the ground plane");
+                    check(!unlock->isEnabled(),
+                          "and there is nothing left to unlock");
+                    check(!stateLabelText(window).contains(QStringLiteral("locked face")),
+                          QStringLiteral("and the state label stops saying so (\"%1\")")
+                              .arg(stateLabelText(window)));
+                    view->saveSnapshot(outDir + "/h-unlocked-ground-grid.png");
+                }
+
+                // Locking is a capability the learning system can teach, so
+                // it has to be recorded like every other one.
+                check(window.progress().count("faceLock.used") >= 1,
+                      "locking a face is recorded as something the user has done");
+
+                // Deterministic coverage of the orientation flip, independent
+                // of which face the picker above happened to reach. A plain
+                // BRepPrimAPI_MakeBox has three TopAbs_REVERSED faces whose
+                // surface normals point into the box; every one of the six
+                // must lock to a plane whose normal points OUT.
+                {
+                    const TopoDS_Shape probe =
+                        BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 100.0, 60.0, 40.0).Shape();
+                    GProp_GProps probeProps;
+                    BRepGProp::VolumeProperties(probe, probeProps);
+                    const gp_Pnt probeCentre = probeProps.CentreOfMass();
+
+                    int reversedSeen = 0, outward = 0, faces = 0;
+                    for (TopExp_Explorer it(probe, TopAbs_FACE); it.More(); it.Next()) {
+                        const TopoDS_Face f = TopoDS::Face(it.Current());
+                        if (f.Orientation() == TopAbs_REVERSED) ++reversedSeen;
+                        if (!window.lockToFace(f)) continue;
+                        ++faces;
+                        const gp_Pln locked = window.sketch().plane();
+                        if (gp_Vec(probeCentre, locked.Location())
+                                .Dot(gp_Vec(locked.Axis().Direction())) > 0.0)
+                            ++outward;
+                    }
+                    check(faces == 6, "every face of the probe box locks");
+                    check(reversedSeen > 0,
+                          QStringLiteral("the probe box really does carry reversed faces "
+                                         "(%1 of 6), so this check exercises the flip")
+                              .arg(reversedSeen));
+                    check(outward == faces,
+                          QStringLiteral("every locked face stores its OUTWARD normal "
+                                         "(%1 of %2)").arg(outward).arg(faces));
+
+                    // The probe leaves the window locked to a box that is not
+                    // in the document; hand the rest of the suite the ground
+                    // plane it was written against.
+                    window.unlockFace();
+                    check(!window.isFaceLocked(), "the probe leaves nothing locked");
+                }
+
+                // A closed outline pins the plane it was drawn on. Both the
+                // commit and the live preview sweep the pending face along
+                // whatever the sketch plane's normal is AT THAT MOMENT, so
+                // locking a different face in between sweeps a ground-plane
+                // outline along a direction lying in its own plane - a body
+                // with no volume that BRepPrimAPI_MakePrism calls done.
+                {
+                    // Selected again first, so "unavailable" below means the
+                    // pending outline rather than merely an empty selection.
+                    clickAt(view, QPointF(screen));
+                    settle(120);
+                    check(!view->selectedFace().IsNull(),
+                          "a flat face is selected for the pending-outline probe");
+                    QAction* lockAgain = action(window, QStringLiteral("Lock to Face"));
+                    check(lockAgain != nullptr && lockAgain->isEnabled(),
+                          "Lock to Face is available while nothing is pending");
+                    const QString ordinaryTip = lockAgain ? lockAgain->toolTip() : QString();
+
+                    trigger(window, QStringLiteral("Start Sketch"));
+                    sketchQuad(window, 0.30, 0.30, 0.44, 0.44);
+                    trigger(window, QStringLiteral("Finish Sketch"));
+                    settle(150);
+                    check(window.hasPendingFace(),
+                          "an outline is closed and waiting to be extruded");
+                    const gp_Pln waitingPlane = window.sketch().plane();
+
+                    // Entering sketch mode cleared the selection, so it has to
+                    // be re-established before the check below means anything:
+                    // "unavailable" has to be attributable to the pending
+                    // outline and not to there being no face selected at all.
+                    clickAt(view, QPointF(screen));
+                    settle(120);
+                    check(!view->selectedFace().IsNull(),
+                          "a flat face is selected again, so the next check is not vacuous");
+
+                    check(lockAgain != nullptr && !lockAgain->isEnabled(),
+                          "Lock to Face goes unavailable while that outline waits");
+                    check(lockAgain != nullptr && lockAgain->toolTip() != ordinaryTip &&
+                              lockAgain->toolTip().contains(QStringLiteral("outline")),
+                          QStringLiteral("and says why, rather than just looking broken "
+                                         "(\"%1\")")
+                              .arg(lockAgain ? lockAgain->toolTip() : QString()));
+
+                    // The double-click route never consults that enabled
+                    // state, so the refusal has to live in lockToFace() too.
+                    check(!window.lockToFace(picked),
+                          "and the call the double-click route uses refuses as well");
+                    check(toasts != nullptr &&
+                              toasts->currentText().contains(QStringLiteral("outline")),
+                          QStringLiteral("naming the cause and the fix (\"%1\")")
+                              .arg(toasts ? toasts->currentText() : QString()));
+                    check(!window.isFaceLocked() &&
+                              window.sketch().plane().Axis().Direction().IsEqual(
+                                  waitingPlane.Axis().Direction(), 1.0e-9),
+                          "leaving the plane the waiting outline belongs to exactly alone");
+
+                    // And the outline it protected still extrudes, on that
+                    // plane, into a body with real volume.
+                    const std::size_t bodiesNow = window.document().count();
+                    check(window.extrudePendingFace(15.0),
+                          "the protected outline still extrudes");
+                    settle(150);
+                    check(window.document().count() == bodiesNow + 1 &&
+                              ModelingOps::volume(
+                                  window.document().solids().back().shape) > 1.0,
+                          "into a body with real volume, not a flat one");
+                    trigger(window, QStringLiteral("Undo"));
+                    settle(150);
+                    check(window.document().count() == bodiesNow,
+                          "which is undone again for the checks that follow");
+
+                    // The same refusal the other way round: locked, with an
+                    // outline pending on the locked face, unlocking would
+                    // re-aim it back at the ground.
+                    check(window.lockToFace(picked),
+                          "the face locks again once nothing is pending");
+                    trigger(window, QStringLiteral("Start Sketch"));
+                    clickAt(view, QPointF(screen + QPoint(-60, -40)));
+                    clickAt(view, QPointF(screen + QPoint(60, -40)));
+                    clickAt(view, QPointF(screen + QPoint(60, 40)));
+                    clickAt(view, QPointF(screen + QPoint(-60, 40)));
+                    trigger(window, QStringLiteral("Finish Sketch"));
+                    settle(150);
+                    check(window.hasPendingFace(),
+                          "an outline on the locked face is waiting in turn");
+
+                    QAction* unlockAgain = action(window, QStringLiteral("Unlock Face"));
+                    check(unlockAgain != nullptr && !unlockAgain->isEnabled(),
+                          "Unlock Face goes unavailable while it waits");
+                    check(unlockAgain != nullptr &&
+                              unlockAgain->toolTip().contains(QStringLiteral("outline")),
+                          QStringLiteral("and says why too (\"%1\")")
+                              .arg(unlockAgain ? unlockAgain->toolTip() : QString()));
+                    window.unlockFace();
+                    check(window.isFaceLocked(),
+                          "and calling it directly leaves the face locked");
+
+                    // Starting another outline is the way out, and it brings
+                    // both actions back.
+                    trigger(window, QStringLiteral("Start Sketch"));
+                    trigger(window, QStringLiteral("Cancel Sketch"));
+                    settle(120);
+                    check(!window.hasPendingFace(),
+                          "starting a fresh outline drops the one that was waiting");
+                    check(unlockAgain != nullptr && unlockAgain->isEnabled(),
+                          "and Unlock Face is available again");
+                    window.unlockFace();
+                    check(!window.isFaceLocked(),
+                          "the pending-outline probe leaves nothing locked either");
+                }
+            }
+        }
+
+        // Put the world back: body selection, no lock, the camera where the
+        // blocks after this one expect it.
+        trigger(window, QStringLiteral("Select Bodies"));
+        view->clearSelection();
+        view->animateTo(cameraBefore);   // animations are off: this is immediate
+        settle(150);
+    }
+
     // --- extrude asks for a height without stopping the user ------------------
     {
         // Draw an outline and close it, so a face is pending.
@@ -1156,6 +1860,188 @@ int main(int argc, char* argv[])
         }
         check(static_cast<int>(window.document().solids().size()) == before + 1,
               "the pending face left behind by Escape can still be extruded");
+    }
+
+    // --- the whole app reads in one unit --------------------------------------
+    {
+        QAction* mm = action(window, QStringLiteral("Millimetres"));
+        QAction* cm = action(window, QStringLiteral("Centimetres"));
+        check(mm != nullptr && cm != nullptr, "both units are offered");
+        check(mm != nullptr && mm->isChecked(), "millimetres is the default");
+
+        ItemsPanel* items = window.findChild<ItemsPanel*>();
+        check(items != nullptr, "the items panel is present");
+        const QString beforeItems = items ? items->rowTextAt(0) : QString();
+        check(beforeItems.contains(QStringLiteral("mm")),
+              QStringLiteral("the panel reads in millimetres (\"%1\")").arg(beforeItems));
+
+        if (cm) {
+            cm->trigger();
+            settle(150);
+            const QString afterItems = items ? items->rowTextAt(0) : QString();
+            check(afterItems.contains(QStringLiteral("cm")),
+                  QStringLiteral("the panel follows the unit (\"%1\")").arg(afterItems));
+            check(!afterItems.contains(QStringLiteral("mm")),
+                  "and no millimetre value is left behind");
+
+            // The trap: a field that displays centimetres and reads millimetres.
+            trigger(window, QStringLiteral("Start Sketch"));
+            clickAt(view, QPointF(300, 300)); clickAt(view, QPointF(420, 300));
+            clickAt(view, QPointF(420, 380)); clickAt(view, QPointF(300, 380));
+            trigger(window, QStringLiteral("Finish Sketch"));
+            settle(150);
+            const int before = static_cast<int>(window.document().solids().size());
+            trigger(window, QStringLiteral("Extrude..."));
+            settle(150);
+            ExtrudePreview* preview = window.findChild<ExtrudePreview*>();
+            if (preview && preview->field()) {
+                preview->field()->setText(QStringLiteral("4"));
+                settle(120);
+                QKeyEvent commit(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+                QCoreApplication::sendEvent(preview->field(), &commit);
+                settle(250);
+            }
+            check(static_cast<int>(window.document().solids().size()) == before + 1,
+                  "the body was created");
+            if (!window.document().solids().empty()) {
+                const Measure::Extents e =
+                    Measure::extentsOf(window.document().solids().back().shape);
+                check(std::fabs(e.z - 40.0) < 1e-6,
+                      QStringLiteral("4 typed in centimetres is 40 mm, not 4 (got %1)")
+                          .arg(e.z));
+            }
+
+            mm->trigger();
+            settle(150);
+            check(items && items->rowTextAt(0).contains(QStringLiteral("mm")),
+                  "switching back restores millimetres");
+        }
+    }
+
+    // --- a dimension already on screen follows the unit too -------------------
+    // DimensionRenderer is not a QObject and nothing rebuilt a label that was
+    // already up, so it kept saying "40 mm" over a viewport that had switched
+    // to centimetres, until the next mouse move happened to redraw it. The
+    // spec asked for the status bar, the items panel and a dimension label
+    // checked together, which is what this does - and the label is checked
+    // BEFORE any mouse move, because a move would rebuild it either way.
+    {
+        QAction* mm = action(window, QStringLiteral("Millimetres"));
+        QAction* cm = action(window, QStringLiteral("Centimetres"));
+        ItemsPanel* items = window.findChild<ItemsPanel*>();
+        check(mm != nullptr && cm != nullptr && items != nullptr,
+              "both units and the items panel are available for this check");
+
+        trigger(window, QStringLiteral("Start Sketch"));
+        settle(100);
+        clickAt(view, QPointF(300, 300));
+        moveTo(view, QPointF(430, 300));
+        settle(120);
+        check(view->dimension().isShowing(), "a live dimension is up before the switch");
+
+        gp_Pnt cursor;
+        const gp_Pnt anchor = window.sketch().points().empty() ? gp_Pnt()
+                                                               : window.sketch().points().front();
+        check(!window.sketch().points().empty() && view->lastHoverPoint(cursor),
+              "the segment's two ends are known independently of the renderer");
+        const double span = anchor.Distance(cursor);
+        check(view->dimension().labelText() == Measure::formatLength(span),
+              "and it reads in millimetres to begin with");
+
+        if (mm && cm && items) {
+            cm->trigger();
+            settle(150);
+            const QString label = QString::fromStdString(view->dimension().labelText());
+            check(label == QString::fromStdString(Measure::formatLength(span)),
+                  QStringLiteral("the label already on screen re-reads in centimetres "
+                                 "with no mouse move at all (\"%1\")").arg(label));
+            check(label.endsWith(QStringLiteral("cm")),
+                  QStringLiteral("and carries the new unit, not the old one (\"%1\")")
+                      .arg(label));
+            check(items->rowTextAt(0).contains(QStringLiteral("cm")),
+                  QStringLiteral("the items panel switched in the same breath (\"%1\")")
+                      .arg(items->rowTextAt(0)));
+
+            // The status bar's cursor readout is written on each move, so one
+            // move is what proves it formats in the new unit as well.
+            moveTo(view, QPointF(432, 300));
+            settle(100);
+            const QString status = window.statusBar()->currentMessage();
+            check(status.contains(QStringLiteral("cm")) &&
+                      !status.contains(QStringLiteral("mm")),
+                  QStringLiteral("and so does the status bar (\"%1\")").arg(status));
+
+            mm->trigger();
+            settle(150);
+            gp_Pnt moved;
+            view->lastHoverPoint(moved);
+            check(view->dimension().labelText() ==
+                      Measure::formatLength(anchor.Distance(moved)),
+                  QStringLiteral("switching back restores millimetres on the label that "
+                                 "is still up (\"%1\")")
+                      .arg(QString::fromStdString(view->dimension().labelText())));
+        }
+
+        trigger(window, QStringLiteral("Cancel Sketch"));
+        settle(120);
+        check(!view->dimension().isShowing(),
+              "and the probe leaves no dimension behind");
+    }
+
+    // --- switching the unit while the extrude preview is open updates it -----
+    // Fix round 1, Important: onAppStateChanged() used to repaint the panel
+    // (so the label read "(cm)") without rebuilding the preview, so the
+    // shape on screen stayed the OLD unit's reading of the field - a user
+    // could pick Centimetres with "10" still in the field and see the 10 mm
+    // body they had before, then commit the 100 mm body the field silently
+    // now meant.
+    {
+        QAction* mm = action(window, QStringLiteral("Millimetres"));
+        QAction* cm = action(window, QStringLiteral("Centimetres"));
+        check(mm != nullptr && cm != nullptr, "both units are still available for this check");
+
+        trigger(window, QStringLiteral("Start Sketch"));
+        clickAt(view, QPointF(300, 300)); clickAt(view, QPointF(420, 300));
+        clickAt(view, QPointF(420, 380)); clickAt(view, QPointF(300, 380));
+        trigger(window, QStringLiteral("Finish Sketch"));
+        settle(150);
+        const int before = static_cast<int>(window.document().solids().size());
+        trigger(window, QStringLiteral("Extrude..."));
+        settle(150);
+
+        ExtrudePreview* preview = window.findChild<ExtrudePreview*>();
+        check(preview != nullptr && preview->field(),
+              "a preview with a field is open for the switch-while-open check");
+
+        if (preview && preview->field() && mm && cm) {
+            preview->field()->setText(QStringLiteral("5"));
+            settle(120);
+            check(std::fabs(preview->height() - 5.0) < 1e-6,
+                  "the field reads 5 mm before any unit switch");
+
+            cm->trigger();
+            settle(150);
+            check(std::fabs(preview->height() - 50.0) < 1e-6,
+                  QStringLiteral("the SAME field text means 50 mm once centimetres is "
+                                 "selected, not the stale 5 mm reading (got %1)")
+                      .arg(preview->height()));
+            const Measure::Extents shownInCm = Measure::extentsOf(view->previewShape());
+            check(std::fabs(shownInCm.z - 50.0) < 1e-6,
+                  QStringLiteral("and the shape actually on screen is 50 mm tall, not "
+                                 "still the 5 mm one from before the switch (got %1)")
+                      .arg(shownInCm.z));
+
+            mm->trigger();
+            settle(150);
+            check(std::fabs(preview->height() - 5.0) < 1e-6,
+                  "switching back re-reads the same text as 5 mm again");
+
+            QKeyEvent commit(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+            QCoreApplication::sendEvent(preview->field(), &commit);
+            settle(250);
+        }
+        check(static_cast<int>(window.document().solids().size()) == before + 1,
+              "the body from the switch-while-open check was created");
     }
 
     // --- icons ----------------------------------------------------------------

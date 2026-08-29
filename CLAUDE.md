@@ -203,6 +203,7 @@ Source files under `src/`, plus `tests/`:
 | `ui/ShortcutSheet.{h,cpp}` | shortcut list generated from the window's own `QAction`s |
 | `ui/Toast.{h,cpp}` | one non-blocking message at a time, with Undo where it applies |
 | `ui/ExtrudePreview.{h,cpp}` | height entry with a live preview built by the commit's own path |
+| `ui/DimensionRenderer.{h,cpp}` | CAD length annotation; one renderer for the sketch and edges |
 
 ### The vocabulary — enforced by test
 
@@ -457,6 +458,94 @@ widget painted over `OcctViewWidget`'s on-screen GL surface — it crashes; fade
 animation on *natural completion* too, so a retained raw pointer dangles; one long-lived
 animation at `KeepWhenStopped` removes the question rather than detecting it.
 
+### Dimensions, planes and units
+
+**Millimetres are the only unit anything stores.** The model, the kernel, `DocumentModel`,
+every persisted value and every number handed to `ModelingOps` are millimetres. The
+conversion lives in `Measure` alone, at the formatting boundary. `formatLength` still
+*takes* millimetres — changing the parameter's meaning would silently convert twice at any
+call site that was missed, so the unit lives in the formatter, not the argument.
+
+**Input is read in the displayed unit.** `Measure::parseLength` returns millimetres from
+whatever the user typed, so with centimetres selected typing `4` builds a 40 mm body. A
+field that displays one unit and reads another is a trap, and it is the specific thing this
+work existed to avoid. `parseLength` validates the grammar itself before calling `strtod` —
+an optional sign, digits, at most one point — because `strtod` alone accepts `0x10` and
+`1e3` and is locale-dependent for the decimal separator.
+
+Anything that changes the unit must re-read, not just repaint: `ExtrudePreview` rebuilds its
+preview shape on `appStateChanged()`, or the label would say `(cm)` over a shape still built
+from the old unit's reading of the same field, and Enter would commit ten times what the
+viewport showed.
+
+**One `DimensionRenderer` serves both cases** — the live sketch segment and a hovered edge.
+It holds no opinion about which it is drawing; if it ever needs one, the two cases have
+diverged and want separate renderers. Its label is `Measure::formatLength`, never a local
+format, which is why it follows the unit for free. Everything except the measured span
+itself — gap, offset, extension overrun, arrow size, label gap — is sized in screen pixels
+through `OcctViewWidget::worldPerPixel()`; furniture scaled in model units vanishes when you
+zoom out. Two OCCT notes: `AIS_TextLabel` needs a family `Font_FontMgr` can resolve, so the
+app's DM Sans is spilled from its Qt resource to a temp file and registered once; and
+`Graphic3d_ArrayOfTriangles` drew nothing at all here, so arrowheads are two strokes on the
+same `Graphic3d_AspectLine3d` path the lines use.
+
+#### Locking a face
+
+A flat face can become the sketch plane, which is what makes it possible to put a shelf on
+the side of a cabinet. `SketchController` already took an arbitrary `gp_Pln`, and
+`snapToPlaneGrid` already rounded in the plane's own coordinates — what this added is the UI
+that chooses one and the grid that shows it.
+
+- **The plane is captured by value.** Face indices are not stable across a rebuild (see the
+  topological-naming pitfall below), so re-deriving the plane from a stored face later would
+  let a boolean or an undo move the sketch plane under the user. The lock therefore survives
+  the deletion of the body it came from, as a plane floating where the face was. That is
+  deliberate and safe, not an oversight.
+- **`BRepAdaptor_Surface` never applies `TopAbs_Orientation`.** It carries geometry and
+  location only. On a plain box, **three of six faces are `TopAbs_REVERSED` and their plane
+  normals point into the body** — lock one without flipping and Extrude sweeps the prism
+  through the body it is standing on. `lockToFace` reverses the plane when the face is
+  `REVERSED`. Verified against a `BRepClass3d_SolidClassifier` ground truth on a box, a Cut,
+  a Fuse and a translated body: every outward normal correct, FORWARD faces untouched.
+- **This hid behind the face picker**, which skipped faces by `Dot(surfaceNormal, viewDirection) >= 0`
+  — on the same wrong assumption, which filtered out precisely the `REVERSED` faces, so
+  testing could only ever land on one where the two normals already agreed. Both places
+  derive the outward normal now.
+- **A volume check cannot catch it.** An inward prism is a valid prism of the right volume.
+  The suite asserts the new body's centre of mass on the outward side, and carries a
+  deterministic six-face box probe; stubbing the flip to `if (false)` fails the probe while
+  the end-to-end path stays green, which is the argument for having both.
+- The grid is coplanar with a shaded face and would z-fight, so **only the drawn plane** is
+  nudged toward the eye by `octave * 1e-4`, quantized by octave because `GridRenderer` caches
+  on the plane it built. `mySketchPlane` is untouched, so clicks land on the true face plane.
+  `Graphic3d_ZLayerId_Topmost` was rejected — it clears depth, so the ground grid would paint
+  over every body standing on it — and a depth-offset ZLayer does nothing to line primitives.
+- A locked plane is a mode, and a mode with no persistent cue is a trap: `updateStateLabel`
+  leads with `On a locked face — …` so the label says where the next outline will land.
+- **A closed outline pins the plane it was drawn on.** Both the commit
+  (`extrudePendingFace`) and the preview (`ExtrudePreview`) sweep the pending face along
+  the sketch plane's normal *as it is at that moment*, so locking or unlocking in between
+  silently re-aims the extrude — a ground-plane outline swept along a direction lying in
+  its own plane, which `BRepPrimAPI_MakePrism` reports as `IsDone()`. Both plane changes
+  therefore ask `canChangeSketchPlane()`, which refuses while `hasPendingFace()` and says
+  why; `updateActions()` disables both actions and swaps their tooltips for the reason,
+  because a disabled control that will not say why reads as broken. The refusal lives in
+  `lockToFace`/`unlockFace` too, not only in the enabled state, because the
+  `faceDoubleClicked` route never consults an action. And `ModelingOps::extrude` refuses an
+  in-plane sweep direction outright — a rule enforced only where a UI path remembered it is
+  not a rule, and it is `furnify_geometry`, so it is headless-tested.
+- **The cursor readout is the plane's own (u, v)**, through `ElSLib::Parameters` — the same
+  call `snapToPlaneGrid` uses, so the two agree by construction. World X/Y froze one number
+  and made the other meaningless the moment the plane stopped being the ground.
+- **The dimension follows selection as well as hover, and follows the unit.**
+  `updateEdgeDimension()` prefers the detected edge and falls back to the single selected
+  one, so leaving a selected edge does not drop its label; every route that can change
+  either input calls it, including `clearSolids`/`removeSolid`, because an annotation must
+  not outlive the body it measures. `DimensionRenderer` is not a `QObject`, so it keeps the
+  span it last drew and `MainWindow` drives `refresh()` from `appStateChanged` — the same
+  signal the items panel and the extrude preview already follow, rather than
+  `setDisplayUnit()` growing a private list of everything that shows a length.
+
 ### Qt plugin deployment - do not remove
 
 Qt will not start without a platform plugin, and it looks for one in a `platforms/`
@@ -509,8 +598,8 @@ Iterate with `InitSelected()`/`MoreSelected()`/`NextSelected()`, pull topology v
 ### The modeling loop
 
 - **Sketch:** unproject the click with `view->ConvertWithProj(...)` into a `gp_Lin`, then
-  intersect with the sketch plane via `IntAna_IntConicQuad`. Start with a fixed XY plane at
-  Z=0; arbitrary planes come later. Accumulate points into `BRepBuilderAPI_MakePolygon`,
+  intersect with the sketch plane via `IntAna_IntConicQuad`. The plane is the ground plane
+  at Z=0 until a face is locked — arbitrary planes are **no longer deferred**, see below. Accumulate points into `BRepBuilderAPI_MakePolygon`,
   `Close()`, then `BRepBuilderAPI_MakeFace(wire, true)`. Show the in-progress polyline as a
   temporary `AIS_Shape` and remove it on commit.
 - **Extrude:** `BRepPrimAPI_MakePrism(face, gp_Vec(plane.Axis().Direction()) * height)`.

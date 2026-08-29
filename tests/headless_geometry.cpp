@@ -58,6 +58,28 @@ int main()
     check(countFaces(solidA) == 6,     "extruded box has 6 faces");
     checkNear(volume(solidA), 4000.0, 1.0e-6, "extruded box volume is 20*20*10");
 
+    // 3b. A sweep direction lying IN the profile's own plane must be refused.
+    //     BRepPrimAPI_MakePrism reports IsDone() for it and hands back a flat,
+    //     zero-volume prism, so without this guard a degenerate body reaches
+    //     the document, gets a name and is exported. The app can ask for
+    //     exactly this by locking a different plane while a closed outline is
+    //     still pending - and "never surface a failed operation as a success"
+    //     has to hold in the geometry, not only wherever the UI remembered it.
+    check(extrude(face, gp_Dir(1.0, 0.0, 0.0), 10.0).IsNull(),
+          "a sweep along the profile's own plane is refused, not returned flat");
+    check(extrude(face, gp_Dir(0.0, 1.0, 0.0), 10.0).IsNull(),
+          "and refused in the other in-plane direction too");
+    check(extrude(face, gp_Dir(1.0, 1.0, 0.0), -10.0).IsNull(),
+          "and for a negative height, which sweeps the other way along the same plane");
+    {
+        // The refusal is on the sweep direction, not on the face: a direction
+        // only slightly out of the plane still builds, so this cannot quietly
+        // become "extrude only works square to the profile".
+        const TopoDS_Shape shallow = extrude(face, gp_Dir(1.0, 0.0, 0.01), 10.0);
+        check(!shallow.IsNull() && volume(shallow) > 0.0,
+              "a shallow but genuinely out-of-plane sweep still builds a body");
+    }
+
     // 4. Second box, offset so it removes one corner quadrant clean through Z.
     const TopoDS_Shape solidB = makeBox(gp_Pnt(10.0, 10.0, -5.0), 20.0, 20.0, 20.0);
     check(!solidB.IsNull(), "offset tool box built");

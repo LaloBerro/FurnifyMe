@@ -5,6 +5,7 @@
 #include <QMainWindow>
 
 #include "DocumentModel.h"
+#include "Measure.h"
 #include "SketchController.h"
 #include "UserProgress.h"
 
@@ -25,6 +26,27 @@ public:
     bool extrudePendingFace(double height);
     bool applyBooleanToSelection(int kind);   // ModelingOps::BooleanKind
 
+    // Makes `face`'s own plane the sketch plane, so the next outline is drawn
+    // on the face and extrudes perpendicular to it. False - with a toast
+    // naming the cause and the fix - when the face is not flat, or when a
+    // closed outline is still waiting to be extruded on the plane this would
+    // replace (see canChangeSketchPlane). Both refusals are checked here as
+    // well as in the actions' enabled state, because the double-click route
+    // never consults that.
+    //
+    // The plane is captured BY VALUE here and the face itself is not kept.
+    // CLAUDE.md's topological-naming warning is the reason: face indices are
+    // not stable across a rebuild, so a stored face (or a plane re-derived
+    // from one later) would let a boolean or an undo move the sketch plane
+    // under the user without a single visible event.
+    bool lockToFace(const TopoDS_Face& face);
+    // Back to the ground plane. The ground plane is the default and is never
+    // itself "locked", so this is not a toggle of the same state. Refused,
+    // with the same toast, while an outline is pending - unlocking re-aims a
+    // pending extrude exactly as locking does, only the other way.
+    void unlockFace();
+    bool isFaceLocked() const { return myFaceLocked; }
+
     // Read-only state, for assertions.
     const DocumentModel& document() const { return myDocument; }
     const SketchController& sketch() const { return mySketch; }
@@ -39,6 +61,13 @@ public:
     // Records an event and writes the store through immediately, so a crash
     // never costs the user their learning history.
     void recordProgress(const std::string& event);
+
+    // Sets the unit the whole app reads and types in, persists it through the
+    // same QSettings guard as the learning progress, and refreshes every
+    // visible string via updateActions()/appStateChanged() - no separate
+    // refresh path. Records nothing in UserProgress; this is a display
+    // preference, not a learned capability.
+    void setDisplayUnit(Measure::Unit unit);
 
 signals:
     // DocumentModel is Qt-free by design, so the window announces its changes.
@@ -79,6 +108,7 @@ private slots:
     void onExportStep();
     void onSelectionModeChanged();
     void onSelectionChanged();
+    void onLockToFace();
 
 private:
     void buildActions();
@@ -87,6 +117,19 @@ private:
     void updateActions();
     // Persistent right-hand readout: what mode we are in and what is possible.
     void updateStateLabel();
+    // The grid-step length, through Measure, so the snap tooltip never goes
+    // stale after a unit switch - refreshed from updateActions(), same as
+    // updateStateLabel().
+    QString snapTooltipText() const;
+    // The two plane actions' ordinary tooltips, in one place, because
+    // updateActions() swaps them for a reason-it-is-unavailable message while
+    // an outline is pending and has to be able to put them back.
+    QString lockTooltipText() const;
+    QString unlockTooltipText() const;
+    // False - with a toast naming the cause and the fix - while a closed
+    // outline is waiting to be extruded. Both plane changes ask this, because
+    // both would silently re-aim that outline's extrude. See its definition.
+    bool canChangeSketchPlane();
     // Rebuilds the viewport from the document. Cheaper than tracking individual
     // differences, and the only way to be sure the two agree after undo/redo.
     void resyncView();
@@ -105,6 +148,10 @@ private:
     // Face produced by the last committed sketch, waiting to be extruded.
     TopoDS_Face myPendingFace;
     bool mySketching = false;
+    // Derivable from the sketch plane, but named because two actions' enabled
+    // state reads it and "is this plane the ground one" is a floating-point
+    // comparison nobody should repeat at four call sites.
+    bool myFaceLocked = false;
 
     UserProgress myProgress;
     bool myPersistProgress = true;
@@ -120,6 +167,7 @@ private:
     QAction* myExportStepAction = nullptr;
     QAction* mySolidSelectAction = nullptr;
     QAction* myFaceSelectAction = nullptr;
+    QAction* myEdgeSelectAction = nullptr;
     QAction* mySnapAction = nullptr;
     QAction* myDeleteAction = nullptr;
     QAction* myUndoAction = nullptr;
@@ -129,6 +177,10 @@ private:
     QAction* myFitAction = nullptr;
     QAction* myScreenshotAction = nullptr;
     QAction* myShortcutsAction = nullptr;
+    QAction* myUnitsMillimetresAction = nullptr;
+    QAction* myUnitsCentimetresAction = nullptr;
+    QAction* myLockFaceAction = nullptr;
+    QAction* myUnlockFaceAction = nullptr;
 
     class ViewportOverlay* myOverlay = nullptr;
     class QLabel* myStateLabel = nullptr;

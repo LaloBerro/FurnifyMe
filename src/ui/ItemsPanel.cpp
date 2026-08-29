@@ -54,6 +54,7 @@ void ItemsPanel::refresh()
     }
     myRowWidgets.clear();
     myRowIds.clear();
+    myRowTexts.clear();
     if (!myDocument) return;
 
     for (const DocumentModel::Solid& solid : myDocument->solids()) {
@@ -93,6 +94,7 @@ void ItemsPanel::refresh()
         myRows->addWidget(row);
         myRowWidgets.push_back(row);
         myRowIds.push_back(id);
+        myRowTexts.push_back(name->text() + QLatin1Char(' ') + size->text());
     }
 
     if (myRowWidgets.empty()) {
