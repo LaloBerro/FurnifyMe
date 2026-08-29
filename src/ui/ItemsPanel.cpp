@@ -73,7 +73,7 @@ void ItemsPanel::refresh()
         eye->setChecked(myView && myView->isSolidVisible(solid.id));
         eye->setFixedSize(24, 24);
         eye->setIcon(IconSet::icon(IconSet::Glyph::SelectSolid));
-        eye->setToolTip(tr("Show or hide this solid"));
+        eye->setToolTip(tr("Show or hide this body"));
         const int id = solid.id;
         connect(eye, &QPushButton::toggled, this, [this, id](bool visible) {
             if (myView) myView->setSolidVisible(id, visible);
@@ -87,6 +87,17 @@ void ItemsPanel::refresh()
         myRows->addWidget(row);
         myRowWidgets.push_back(row);
         myRowIds.push_back(id);
+    }
+
+    if (myRowWidgets.empty()) {
+        auto* empty = new QLabel(tr("No bodies yet.\n\nPress Ctrl+K and click points on "
+                                    "the ground to draw your first outline."),
+                                 this);
+        empty->setWordWrap(true);
+        empty->setAlignment(Qt::AlignTop);
+        empty->setStyleSheet(QStringLiteral("color: %1; font-size: 11px;")
+                                 .arg(Theme::textMuted().name()));
+        myRows->addWidget(empty);
     }
 
     if (myView) showSelection(myView->selectedSolidIds());

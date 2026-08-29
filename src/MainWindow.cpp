@@ -21,6 +21,7 @@
 #include <QMessageBox>
 #include <QSplitter>
 #include <QStatusBar>
+#include <QtGlobal>
 
 #include <algorithm>
 #include <initializer_list>
@@ -116,55 +117,62 @@ void MainWindow::buildActions()
 
     myDeleteAction = new QAction(tr("&Delete Selected"), this);
     myDeleteAction->setShortcut(QKeySequence::Delete);
-    myDeleteAction->setToolTip(tr("Remove the selected solids (Del)"));
+    myDeleteAction->setToolTip(tr("Delete the selected bodies (Del)"));
     connect(myDeleteAction, &QAction::triggered, this, &MainWindow::onDeleteSelected);
 
     myUndoAction = new QAction(tr("&Undo"), this);
     myUndoAction->setShortcut(QKeySequence::Undo);
-    myUndoAction->setToolTip(tr("Undo the last solid change (Ctrl+Z)"));
+    myUndoAction->setToolTip(tr("Undo the last change to your bodies (Ctrl+Z)"));
     connect(myUndoAction, &QAction::triggered, this, &MainWindow::onUndo);
 
     myRedoAction = new QAction(tr("&Redo"), this);
     myRedoAction->setShortcut(QKeySequence::Redo);
-    myRedoAction->setToolTip(tr("Redo the last undone change (Ctrl+Y)"));
+    myRedoAction->setToolTip(tr("Redo the change you just undid (Ctrl+Y)"));
     connect(myRedoAction, &QAction::triggered, this, &MainWindow::onRedo);
 
     mySnapAction = new QAction(tr("Snap to &Grid"), this);
     mySnapAction->setCheckable(true);
     mySnapAction->setChecked(true);
-    mySnapAction->setToolTip(tr("Round sketch points to the 10mm grid"));
+    mySnapAction->setToolTip(tr("Snap outline points to the 10 mm grid\n"
+                                "Turn this off for freehand placement."));
     connect(mySnapAction, &QAction::toggled, this, &MainWindow::onSnapToggled);
 
     myItemsPanelAction = new QAction(tr("Items"), this);
     myItemsPanelAction->setCheckable(true);
     myItemsPanelAction->setChecked(true);
     myItemsPanelAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Alt+S")));
-    myItemsPanelAction->setToolTip(tr("Show or hide the items panel (Ctrl+Alt+S)"));
+    myItemsPanelAction->setToolTip(tr("Show or hide the list of bodies (Ctrl+Alt+S)"));
 
     myDisplayModeAction = new QAction(tr("Wireframe"), this);
     myDisplayModeAction->setCheckable(true);
-    myDisplayModeAction->setToolTip(tr("Show solids as wireframe instead of shaded"));
+    myDisplayModeAction->setToolTip(tr("Draw bodies as edges only\n"
+                                       "Useful for seeing through to what is behind."));
     connect(myDisplayModeAction, &QAction::toggled, this,
             [this](bool on) { myView->setWireframe(on); });
 
     myFitAction = new QAction(tr("&Fit All"), this);
     myFitAction->setShortcut(QKeySequence(Qt::Key_F));
-    myFitAction->setToolTip(tr("Frame everything in the document (F)"));
+    myFitAction->setToolTip(tr("Frame every body in the viewport (F)"));
     connect(myFitAction, &QAction::triggered, myView, &OcctViewWidget::fitAll);
 
     myScreenshotAction = new QAction(tr("Save S&creenshot..."), this);
-    myScreenshotAction->setToolTip(tr("Save the viewport as a PNG"));
+    myScreenshotAction->setToolTip(tr("Save the viewport as a PNG image"));
     connect(myScreenshotAction, &QAction::triggered, this, [this] {
         const QString path = QFileDialog::getSaveFileName(this, tr("Save Screenshot"),
                                                           QString(), tr("PNG image (*.png)"));
         if (!path.isEmpty() && !myView->saveSnapshot(path)) {
-            QMessageBox::warning(this, tr("Screenshot"), tr("Could not write %1").arg(path));
+            QMessageBox::warning(this, tr("Screenshot failed"),
+                                 tr("Couldn't save the image to %1.\n\n"
+                                    "Check that the folder exists and isn't read-only.")
+                                     .arg(path));
         }
     });
 
-    myStartSketchAction->setToolTip(tr("Draw a closed outline on the XY plane (Ctrl+K)"));
-    myFinishSketchAction->setToolTip(tr("Close the outline into a face — needs 3+ points (Enter)"));
-    myExtrudeAction->setToolTip(tr("Turn the closed face into a solid (E)"));
+    myStartSketchAction->setToolTip(tr("Draw an outline on the ground (Ctrl+K)\n"
+                                       "Click to place points; close it to make a face."));
+    myFinishSketchAction->setToolTip(tr("Close the outline into a face (Enter)\n"
+                                        "Needs at least three points."));
+    myExtrudeAction->setToolTip(tr("Pull the face up into a solid body (E)"));
     myUnionAction->setToolTip(tr("Merge two bodies into one\n"
                                  "Overlapping material is kept once, not twice."));
     mySubtractAction->setToolTip(tr("Cut the second body out of the first\n"
@@ -470,10 +478,11 @@ void MainWindow::onFinishSketch()
 {
     const TopoDS_Face face = mySketch.closedFace();
     if (face.IsNull()) {
-        QMessageBox::warning(this, tr("Sketch"),
-                             tr("Could not build a planar face from these points. "
-                                "A closed, non-self-intersecting outline of at least "
-                                "3 points is required."));
+        QMessageBox::warning(this, tr("Can't close this outline"),
+                             tr("This outline can't close into a flat face. It probably "
+                                "crosses itself.\n\n"
+                                "Press Backspace to undo the last point and redraw it, or "
+                                "Esc to start over."));
         return;
     }
 
@@ -504,7 +513,10 @@ bool MainWindow::extrudePendingFace(double height)
     const TopoDS_Shape solid =
         ModelingOps::extrude(myPendingFace, mySketch.plane().Axis().Direction(), height);
     if (solid.IsNull()) {
-        QMessageBox::warning(this, tr("Extrude"), tr("The extrusion failed."));
+        QMessageBox::warning(this, tr("Extrude failed"),
+                             tr("This face couldn't be extruded into a body.\n\n"
+                                "The outline may cross itself or be too small to have an "
+                                "inside. Try redrawing it with Ctrl+K."));
         return false;
     }
 
@@ -538,10 +550,17 @@ void MainWindow::runBoolean(int kind)
 
 bool MainWindow::applyBooleanToSelection(int kind)
 {
+    const QString operationName =
+        kind == static_cast<int>(ModelingOps::BooleanKind::Fuse)   ? tr("Union")
+        : kind == static_cast<int>(ModelingOps::BooleanKind::Cut)  ? tr("Subtract")
+                                                                   : tr("Intersect");
+
     std::vector<int> ids = myView->selectedSolidIds();
     if (ids.size() != 2) {
-        QMessageBox::information(this, tr("Boolean"),
-                                 tr("Select exactly two solids (Shift-click to add)."));
+        QMessageBox::information(this, operationName,
+                                 tr("%1 needs exactly two bodies.\n\n"
+                                    "Click one body, then Shift-click another.")
+                                     .arg(operationName));
         return false;
     }
 
@@ -558,16 +577,14 @@ bool MainWindow::applyBooleanToSelection(int kind)
         ModelingOps::applyBoolean(static_cast<ModelingOps::BooleanKind>(kind), a, b);
 
     if (!result.ok) {
-        // Never present a failed boolean as a success.
-        QMessageBox::critical(this, tr("Boolean failed"),
-                              tr("OCCT could not complete the operation:\n\n%1\n\n"
-                                 "Near-tangent geometry is the usual cause; adjusting the "
-                                 "fuzzy value sometimes helps.")
-                                  .arg(QString::fromStdString(result.error)));
-        const QString operationName =
-            kind == static_cast<int>(ModelingOps::BooleanKind::Fuse)   ? tr("Union")
-            : kind == static_cast<int>(ModelingOps::BooleanKind::Cut)  ? tr("Subtract")
-                                                                       : tr("Intersect");
+        // Never present a failed boolean as a success. The engine's error text is
+        // genuinely useful for debugging, so keep it in the log, not the dialog.
+        qWarning("%s failed: %s", qPrintable(operationName), result.error.c_str());
+        QMessageBox::critical(this, tr("%1 failed").arg(operationName),
+                              tr("The two bodies couldn't be combined.\n\n"
+                                 "This usually means they only touch at a single edge or "
+                                 "corner, which the geometry engine can't resolve. Move one "
+                                 "body so they overlap properly, then try again."));
         statusBar()->showMessage(tr("%1 failed — nothing was changed").arg(operationName));
         return false;
     }
@@ -615,8 +632,11 @@ void MainWindow::onExportStep()
         ModelingOps::exportStep(ModelingOps::makeCompound(shapes), path.toStdString());
 
     if (!result.ok) {
+        qWarning("STEP export failed: %s", result.error.c_str());
         QMessageBox::critical(this, tr("Export failed"),
-                              QString::fromStdString(result.error));
+                              tr("Couldn't write the STEP file.\n\n"
+                                 "Check that the folder exists and isn't read-only, then "
+                                 "try a different location."));
         return;
     }
     statusBar()->showMessage(myDocument.count() == 1

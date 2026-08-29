@@ -647,6 +647,19 @@ int main(int argc, char* argv[])
                   .arg(offenders.isEmpty() ? QStringLiteral("none")
                                            : offenders.join(QStringLiteral(", "))));
 
+        QStringList tipOffenders;
+        for (QWidget* widget : window.findChildren<QWidget*>()) {
+            const QString tip = widget->toolTip();
+            if (tip.isEmpty()) continue;
+            for (const QString& word : banned) {
+                if (tip.contains(word)) tipOffenders << (tip.left(30) + QStringLiteral("…"));
+            }
+        }
+        check(tipOffenders.isEmpty(),
+              QStringLiteral("no widget tooltip uses a banned word (%1)")
+                  .arg(tipOffenders.isEmpty() ? QStringLiteral("none")
+                                              : tipOffenders.join(QStringLiteral(", "))));
+
         // The state label is the app's most-updated string; it must obey the
         // vocabulary too. It is a permanent widget on the status bar.
         QString stateText;
