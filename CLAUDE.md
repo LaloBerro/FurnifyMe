@@ -201,6 +201,8 @@ Source files under `src/`, plus `tests/`:
 | `ui/WalkthroughPanel.{h,cpp}` | the guided first build; steps derived from live state |
 | `ui/HintBalloon.{h,cpp}` | one hint at a time, retired when its trigger stops holding |
 | `ui/ShortcutSheet.{h,cpp}` | shortcut list generated from the window's own `QAction`s |
+| `ui/Toast.{h,cpp}` | one non-blocking message at a time, with Undo where it applies |
+| `ui/ExtrudePreview.{h,cpp}` | height entry with a live preview built by the commit's own path |
 
 ### The vocabulary — enforced by test
 
@@ -330,9 +332,9 @@ viewport, never on the sheet or its parent. Swallowing that press is not enough 
 viewport picks on the **release**, so the filter stays installed one event longer than the
 sheet is visible, specifically to swallow it.
 
-Two widgets share the viewport's bottom edge — the guide bottom-right, the balloon centred —
-and they collide below about 800 px of viewport width, which `Show tips again` makes
-reachable. `HintBalloon::reposition()` steps aside when the guide is visible and would
+Three widgets share the viewport's bottom edge — the guide bottom-right, the balloon and the
+toast centred — and they collide below about 900 px of viewport width, which `Show tips again`
+makes reachable. `HintBalloon::reposition()` steps aside when the guide is visible and would
 overlap; `reconsider()` calls it for a hint that is already up, because that is exactly when
 the guide can appear underneath one.
 
@@ -341,6 +343,64 @@ skip control is synced from the panel's `showEvent`/`hideEvent`/`moveEvent`, and
 returning-user path `refresh()` calls `hide()` on a panel that was never shown — a case Qt
 delivers no `QHideEvent` for. `syncSkipGeometry()` therefore sets `mySkip->setVisible(isVisible())`
 itself, so the control's hidden state never depends on an event arriving.
+
+### Reporting outcomes
+
+**The app has no modal dialogs.** Nothing it has to say requires an answer, so nothing
+blocks. Seven `QMessageBox` calls and one `QInputDialog` were removed and none should come
+back; `gui_smoke` asserts the window holds no `QDialog` after an outcome, and the honest
+backstop is that a modal would *hang* the suite rather than fail it politely.
+
+`ToastHost` owns exactly one `Toast`. A second message replaces the first and restarts the
+timer — a stack of toasts is a dialog with extra steps. A `Note` lives 4 seconds and a
+`Failure` 8, because a failure carries a sentence the user has to read and act on; the
+suite asserts both against the armed timer rather than waiting real seconds.
+
+**A toast that reports a change to the document offers Undo**, and that control is a
+sibling parented to `OcctViewWidget` for the reason recorded above. Two things about it
+were each found by a review after passing a green suite:
+
+- **The fade made Undo double-clickable.** With animations on — the shipping default —
+  `dismiss()` fades rather than hides, so the control stayed live for 160 ms, inside the
+  system double-click interval, and a second click popped the undo stack again. It is now
+  hidden at the top of `dismiss()`, before the fade starts.
+- **A hide is not a state.** `syncUndoGeometry()` re-derives visibility from the toast's
+  own flags, and `ToastHost::reposition()` runs on any viewport resize — so a resize
+  landing mid-fade re-showed the control `dismiss()` had just hidden. `myDismissing` is now
+  part of the predicate. The rule from the sibling-visibility paragraph applies one level
+  down: derive it, or something later will undo your one-shot.
+
+**`ExtrudePreview` must build its preview through the same `ModelingOps::extrude` the
+commit uses.** A preview built by a different path is a lie, and this is the one place a
+user judges a number by what it looks like. The preview shape goes through
+`OcctViewWidget::setPreview` with selection mode `-1` and is **never** added to
+`DocumentModel` — a shape the user can see that exists in no document is the worst thing
+this widget could produce. It cancels itself off `appStateChanged()` when the pending face
+goes away, because `Start Sketch` stays enabled while it is open. Invalid input keeps the
+last good preview rather than clearing it: no flicker, and `0` is refused while a negative
+extrudes downward, matching what the old dialog's range allowed.
+
+**Type, motion and focus are `Theme` tokens** — four font sizes and no more, `motionMs()`
+at 160 with `motionCurve()`. `gui_smoke` walks every visible widget and fails on a size
+outside the scale, so the sizes are set through the stylesheet `Theme::apply` installs and
+inherit into Qt's own children. Note that Qt 6's `QStatusBar` has **no** internal `QLabel`:
+`showMessage()` stores a string and `paintEvent` draws it with the status bar's own font,
+so `statusBar()->setFont(...)` is what covers it.
+
+`OcctViewWidget`'s camera animation deliberately keeps its own 250 ms and does not read
+`motionMs()`. A camera move is not a UI transition; reading well at the same speed as a
+chip hover would be a coincidence, not a rule.
+
+**Measure text with the font you paint it with.** Bold is wider than regular, and a title
+measured non-bold and painted bold clips. Widgets that size themselves — `WalkthroughPanel`
+most of all — derive their width from the same strings `paintedTexts()` exposes, so a new
+line cannot silently exceed the box.
+
+**Two Qt facts this phase paid for.** `QGraphicsOpacityEffect` is incompatible with a
+widget painted over `OcctViewWidget`'s on-screen GL surface — it crashes; fade with
+`QPainter::setOpacity()` instead. And `QAbstractAnimation::DeleteWhenStopped` deletes the
+animation on *natural completion* too, so a retained raw pointer dangles; one long-lived
+animation at `KeepWhenStopped` removes the question rather than detecting it.
 
 ### Qt plugin deployment - do not remove
 

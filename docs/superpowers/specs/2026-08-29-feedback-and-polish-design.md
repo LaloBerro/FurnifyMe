@@ -1,8 +1,9 @@
 # Phase 3: Feedback and polish — design
 
 Date: 2026-08-29
-Status: approved by standing instruction — the user asked for Phase 3 and Phase 4 to run
-without further questions, so the design decisions below were made rather than asked.
+Status: implemented 2026-08-29. Approved by standing instruction — the user asked for
+Phase 3 and Phase 4 to run without further questions, so the design decisions below were
+made rather than asked.
 
 Phase 3 of the UX overhaul. Phase 1 (language and numbers) and Phase 2 (help and
 learnability) are merged. This phase changes how the app *answers* the user.
