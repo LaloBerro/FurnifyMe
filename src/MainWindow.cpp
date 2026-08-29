@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 
+#include "Measure.h"
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
 
@@ -503,9 +504,9 @@ bool MainWindow::extrudePendingFace(double height)
     mySketch.reset();
     updateActions();
     emit documentChanged();
-    statusBar()->showMessage(tr("Solid #%1 created (volume %2 mm3).")
-                                 .arg(id)
-                                 .arg(ModelingOps::volume(solid), 0, 'f', 2));
+    statusBar()->showMessage(tr("%1 created — %2")
+                                 .arg(QString::fromStdString(myDocument.nameOf(id)),
+                                      QString::fromStdString(Measure::formatDimensions(solid))));
     return true;
 }
 
@@ -530,6 +531,8 @@ bool MainWindow::applyBooleanToSelection(int kind)
     // Cut is not commutative. The lower document id is the base, so the result is
     // predictable rather than dependent on pick order, which AIS does not preserve.
     std::sort(ids.begin(), ids.end());
+    const std::string nameA = myDocument.nameOf(ids[0]);
+    const std::string nameB = myDocument.nameOf(ids[1]);
     const TopoDS_Shape a = myDocument.shapeOf(ids[0]);
     const TopoDS_Shape b = myDocument.shapeOf(ids[1]);
     if (a.IsNull() || b.IsNull()) return false;
@@ -560,9 +563,18 @@ bool MainWindow::applyBooleanToSelection(int kind)
 
     updateActions();
     emit documentChanged();
-    statusBar()->showMessage(tr("Solid #%1 created from #%2 and #%3 (volume %4 mm3).")
-                                 .arg(id).arg(ids[0]).arg(ids[1])
-                                 .arg(ModelingOps::volume(result.shape), 0, 'f', 2));
+    const QString verb = kind == static_cast<int>(ModelingOps::BooleanKind::Fuse)
+                             ? tr("Merged")
+                             : kind == static_cast<int>(ModelingOps::BooleanKind::Cut)
+                                   ? tr("Subtracted")
+                                   : tr("Intersected");
+    statusBar()->showMessage(tr("%1 %2 and %3 → %4 — %5")
+                                 .arg(verb,
+                                      QString::fromStdString(nameA),
+                                      QString::fromStdString(nameB),
+                                      QString::fromStdString(myDocument.nameOf(id)),
+                                      QString::fromStdString(
+                                          Measure::formatDimensions(result.shape))));
     return true;
 }
 

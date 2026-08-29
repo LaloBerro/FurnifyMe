@@ -33,6 +33,7 @@
 #include <QElapsedTimer>
 #include <QMouseEvent>
 #include <QPointF>
+#include <QStatusBar>
 #include <QString>
 
 #include <cmath>
@@ -276,6 +277,18 @@ int main(int argc, char* argv[])
 
     check(window.extrudePendingFace(10.0), "extrude reports success");
     check(window.document().count() == 1, "one solid in the document");
+
+    // --- the app reports dimensions, not volume -------------------------------
+    {
+        const QString status = window.statusBar()->currentMessage();
+        check(status.contains(QStringLiteral("Body 0")),
+              QStringLiteral("the status line names the body (\"%1\")").arg(status));
+        check(status.contains(QString::fromUtf8("\xC3\x97")),
+              "the status line reports dimensions with a multiplication sign");
+        check(!status.contains(QStringLiteral("volume")) &&
+              !status.contains(QStringLiteral("mm3")),
+              "the status line no longer mentions volume");
+    }
 
     // --- items panel ----------------------------------------------------------
     check(window.itemsPanel() != nullptr, "the window has an items panel");

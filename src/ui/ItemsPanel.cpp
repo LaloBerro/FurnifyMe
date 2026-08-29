@@ -2,6 +2,7 @@
 
 #include "DocumentModel.h"
 #include "IconSet.h"
+#include "Measure.h"
 #include "OcctViewWidget.h"
 #include "Theme.h"
 
@@ -60,6 +61,12 @@ void ItemsPanel::refresh()
         auto* name = new QLabel(QString::fromStdString(solid.name), row);
         name->setStyleSheet(QStringLiteral("color: %1;").arg(Theme::text().name()));
         layout->addWidget(name, 1);
+
+        auto* size = new QLabel(
+            QString::fromStdString(Measure::formatDimensions(solid.shape)), row);
+        size->setStyleSheet(QStringLiteral("color: %1; font-size: 11px;")
+                                .arg(Theme::textMuted().name()));
+        layout->addWidget(size);
 
         auto* eye = new QPushButton(row);
         eye->setCheckable(true);
