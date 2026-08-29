@@ -8,18 +8,25 @@
 #include <AIS_DisplayMode.hxx>
 #include <AIS_SelectionScheme.hxx>
 #include <Aspect_DisplayConnection.hxx>
+#include <Aspect_TypeOfMarker.hxx>
 #include <Aspect_TypeOfTriedronPosition.hxx>
 #include <Bnd_Box.hxx>
 #include <BRepBndLib.hxx>
+#include <Graphic3d_ArrayOfPoints.hxx>
+#include <Graphic3d_AspectMarker3d.hxx>
 #include <Graphic3d_Camera.hxx>
+#include <Graphic3d_Group.hxx>
 #include <Graphic3d_TransformPers.hxx>
 #include <Graphic3d_Vec2.hxx>
 #include <OpenGl_GraphicDriver.hxx>
 #include <Prs3d_Drawer.hxx>
 #include <Prs3d_LineAspect.hxx>
+#include <Prs3d_Presentation.hxx>
 #include <Prs3d_TypeOfHighlight.hxx>
+#include <PrsMgr_PresentationManager.hxx>
 #include <Quantity_Color.hxx>
 #include <Quantity_NameOfColor.hxx>
+#include <SelectMgr_Selection.hxx>
 #include <StdSelect_ViewerSelector3d.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopExp.hxx>
@@ -54,6 +61,65 @@ namespace {
 constexpr int kSelectionModeWholeShape = 0;
 constexpr int kSelectionModeEdge       = 2;
 constexpr int kSelectionModeFace       = 4;
+
+Quantity_Color toOcctColor(const QColor& c)
+{
+    return Quantity_Color(c.redF(), c.greenF(), c.blueF(), Quantity_TOC_sRGB);
+}
+
+// One tiny point in world space, drawn as a marker whose size lives in
+// screen pixels - Graphic3d_AspectMarker3d/Prs3d_PointAspect's own documented
+// contract ("size does not depend on the zoom value of the views"), so a
+// marker never balloons up close or vanishes far away the way a fixed
+// millimetre size would. That contract held up (confirmed: these markers
+// stay a constant pixel size as the camera moves). The scale argument does
+// grow the rendered size, but not proportionally at the low end: 2.2
+// against the ordinary dots' 1.5 measured pixel-for-pixel identical in this
+// build, so the first-point ring below leans on a much larger jump (4.0)
+// AND a different colour rather than trusting a small scale delta alone -
+// colour is the one difference here that cannot silently fail to render,
+// unlike fill and, it turns out, a modest scale bump. Same shape as
+// DimensionRenderer's DimensionLines: a bespoke AIS_InteractiveObject that
+// only implements Compute() and a no-op ComputeSelection(), because the
+// primitive it draws (Graphic3d_ArrayOfPoints via a Graphic3d_Group) needs
+// no more than that. Points are a simple enough GL primitive to trust
+// without the extra shading setup that left Graphic3d_ArrayOfTriangles
+// drawing nothing in this build (see DimensionRenderer's arrowhead
+// comment) - confirmed by an actual snapshot before this shipped, not by
+// that reasoning alone.
+class SketchPointMarker : public AIS_InteractiveObject {
+public:
+    gp_Pnt point;
+    Handle(Graphic3d_AspectMarker3d) aspect;
+
+    void Compute(const Handle(PrsMgr_PresentationManager)&,
+                 const Handle(Prs3d_Presentation)& presentation,
+                 const Standard_Integer) override
+    {
+        if (aspect.IsNull()) return;
+        Handle(Graphic3d_ArrayOfPoints) pts = new Graphic3d_ArrayOfPoints(1);
+        pts->AddVertex(point);
+        Handle(Graphic3d_Group) group = presentation->NewGroup();
+        group->SetGroupPrimitivesAspect(aspect);
+        group->AddPrimitiveArray(pts);
+    }
+
+    void ComputeSelection(const Handle(SelectMgr_Selection)&, const Standard_Integer) override
+    {
+        // Never pickable - feedback only, the same rule setPreview() and
+        // DimensionRenderer already follow. A marker the user could select
+        // would be a shape that exists in no document.
+    }
+};
+
+Handle(SketchPointMarker) makeMarker(const gp_Pnt& point, Aspect_TypeOfMarker type,
+                                     const Quantity_Color& colour, double scale)
+{
+    Handle(SketchPointMarker) marker = new SketchPointMarker();
+    marker->point = point;
+    marker->aspect = new Graphic3d_AspectMarker3d(type, colour, scale);
+    return marker;
+}
 }  // namespace
 
 OcctViewWidget::OcctViewWidget(QWidget* parent)
@@ -269,6 +335,101 @@ TopoDS_Shape OcctViewWidget::previewShape() const
     return myPreview.IsNull() ? TopoDS_Shape() : myPreview->Shape();
 }
 
+void OcctViewWidget::setSketchPointMarkers(const std::vector<gp_Pnt>& points)
+{
+    initializeViewer();
+    if (myContext.IsNull()) return;
+
+    clearSketchPointMarkers();
+    if (points.empty()) return;
+
+    // Aspect_TOM_POINT was tried first for the ordinary dots and is
+    // documented as OCCT's smallest displayable dot, but it drew nothing at
+    // all in this build - a snapshot caught that before it shipped (see
+    // this class's own comment on Graphic3d_ArrayOfTriangles for the
+    // earlier instance of the same lesson). Aspect_TOM_BALL, tried next,
+    // does draw - but pixel-sampled, it turned out to be a small HOLLOW
+    // ring rather than the filled disc its name and doc suggest, in this
+    // build. It still reads clearly as "a small marker at this point",
+    // which is what matters here.
+    for (const gp_Pnt& p : points) {
+        Handle(SketchPointMarker) dot =
+            makeMarker(p, Aspect_TOM_BALL, toOcctColor(Theme::sketchPointMarker()), 1.5);
+        myContext->Display(dot, 0, -1, Standard_False);
+        myPlacedMarkers.push_back(dot);
+    }
+
+    // The first point additionally gets a ring around its dot - "a ring, or
+    // a larger dot" - because clicking it back is what closes the outline,
+    // and that has to be visibly true, not just structurally true: a first
+    // pass used the same colour as the ordinary dots and only a modest
+    // scale bump (2.2 against 1.5), and pixel-sampling the two side by side
+    // showed IDENTICAL marker geometry - whatever this driver does with the
+    // scale argument at these small deltas, it was not visible. Scale 4.0
+    // against 1.5 does clear that threshold (confirmed by the same
+    // pixel-sampling, and it is dramatically bigger - see the crop
+    // comparison in the branch's report), but Theme::focusRing() (amber, a
+    // hue no other placed-point marker or the cursor dot carries) is the
+    // difference this does not have to hope survives a rendering quirk.
+    Handle(SketchPointMarker) ring =
+        makeMarker(points.front(), Aspect_TOM_RING1, toOcctColor(Theme::focusRing()), 4.0);
+    myContext->Display(ring, 0, -1, Standard_False);
+    myFirstPointMarker = ring;
+
+    myContext->UpdateCurrentViewer();
+}
+
+void OcctViewWidget::clearSketchPointMarkers()
+{
+    if (!myContext.IsNull()) {
+        for (auto& marker : myPlacedMarkers) myContext->Remove(marker, Standard_False);
+        if (!myFirstPointMarker.IsNull()) myContext->Remove(myFirstPointMarker, Standard_False);
+    }
+    myPlacedMarkers.clear();
+    myFirstPointMarker.Nullify();
+    if (!myContext.IsNull()) myContext->UpdateCurrentViewer();
+}
+
+int OcctViewWidget::sketchPointMarkerCount() const
+{
+    return static_cast<int>(myPlacedMarkers.size());
+}
+
+bool OcctViewWidget::hasSketchStartMarker() const
+{
+    return !myFirstPointMarker.IsNull();
+}
+
+void OcctViewWidget::setSketchCursorMarker(const gp_Pnt& point)
+{
+    initializeViewer();
+    if (myContext.IsNull()) return;
+
+    clearSketchCursorMarker();
+    // Same marker family as the placed dots (Aspect_TOM_BALL, proven above
+    // to actually render), but larger and in Theme::accent() - already the
+    // viewport's own colour for "here's the interactive thing", via
+    // DimensionRenderer's annotation lines - so the live cursor is never
+    // mistaken for a point already committed.
+    Handle(SketchPointMarker) cursor =
+        makeMarker(point, Aspect_TOM_BALL, toOcctColor(Theme::accent()), 2.0);
+    myContext->Display(cursor, 0, -1, Standard_False);
+    myCursorMarker = cursor;
+    myContext->UpdateCurrentViewer();
+}
+
+void OcctViewWidget::clearSketchCursorMarker()
+{
+    if (!myContext.IsNull() && !myCursorMarker.IsNull()) myContext->Remove(myCursorMarker, Standard_False);
+    myCursorMarker.Nullify();
+    if (!myContext.IsNull()) myContext->UpdateCurrentViewer();
+}
+
+bool OcctViewWidget::hasSketchCursorMarker() const
+{
+    return !myCursorMarker.IsNull();
+}
+
 void OcctViewWidget::applySelectionMode(const Handle(AIS_Shape)& shape)
 {
     if (myContext.IsNull() || shape.IsNull()) return;
@@ -346,6 +507,10 @@ void OcctViewWidget::setSketchMode(bool enabled, const gp_Pln& plane)
     // edge-hover annotation cannot bleed into the sketch that follows it.
     myDimension.clear();
     myHasLastHoverPoint = false;
+    // Same rule for the point markers: gone on commit, on cancel, and on
+    // entry, so nothing from a previous sketch can survive into this one.
+    clearSketchPointMarkers();
+    clearSketchCursorMarker();
 }
 
 gp_Pln OcctViewWidget::gridPlane() const

@@ -764,6 +764,9 @@ void MainWindow::onSketchCursorMoved(const gp_Pnt& point)
     if (!mySketching) return;
 
     myView->setPreview(mySketch.previewShapeWithCursor(point));
+    // The live snapped cursor dot - see setSketchCursorMarker()'s comment
+    // on why Snap to Grid is exactly when this matters most.
+    myView->setSketchCursorMarker(point);
     // The plane's OWN coordinates, not the world's. On a face locked at
     // y = 220 the world Y never changes as the cursor runs up the face, so a
     // world X/Y readout froze one number and made the other meaningless in
@@ -830,6 +833,7 @@ void MainWindow::onSketchPointPicked(const gp_Pnt& point)
 
     mySketch.addPoint(point);
     myView->setPreview(mySketch.previewShape());
+    myView->setSketchPointMarkers(mySketch.points());
     updateActions();
     statusBar()->showMessage(
         mySketch.pointCount() == 1
@@ -841,6 +845,7 @@ void MainWindow::onUndoSketchPoint()
 {
     mySketch.removeLastPoint();
     myView->setPreview(mySketch.previewShape());
+    myView->setSketchPointMarkers(mySketch.points());
     updateActions();
 }
 

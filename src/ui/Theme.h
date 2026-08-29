@@ -26,6 +26,12 @@ QColor gridMinor();     // ground grid, minor lines
 QColor gridMajor();     // ground grid, major lines
 QColor axisX();         // ground grid, X axis tint (muted red)
 QColor axisY();         // ground grid, Y axis tint (muted green)
+QColor sketchPointMarker(); // in-progress sketch: the dot at each placed
+                        // point and the ring on the first one - a hue none
+                        // of the above already carries (not the yellow
+                        // preview outline, the cyan hover or the orange
+                        // selection tint), chosen to read against both the
+                        // viewport background and a shaded grey body
 QColor danger();        // invalid input, failure accents - NOT the same
                         // concept as axisX(), which is a grid-axis tint that
                         // happens to be red; this is the semantic "something
