@@ -184,6 +184,16 @@ void sketchQuad(MainWindow& window, double x0, double y0, double x1, double y1)
     clickAt(view, QPointF(x0 * w, y1 * h));
 }
 
+// Sketch-quad-then-extrude, for probes that only care about ending up with a
+// given number of bodies and would otherwise repeat this boilerplate inline.
+bool buildBody(MainWindow& window, double x0, double y0, double x1, double y1, double height)
+{
+    trigger(window, QStringLiteral("Start Sketch"));
+    sketchQuad(window, x0, y0, x1, y1);
+    trigger(window, QStringLiteral("Finish Sketch"));
+    return window.extrudePendingFace(height);
+}
+
 }  // namespace
 
 int main(int argc, char* argv[])
@@ -217,6 +227,17 @@ int main(int argc, char* argv[])
         check(guide != nullptr && guide->isVisible(), "the guide is visible on first run");
         check(guide != nullptr && guide->completedSteps() == 0,
               "no steps are complete before the user does anything");
+    }
+
+    // --- the hint balloon has nothing to say before any body exists -----------
+    // Visibility is asserted directly (isVisible()), not inferred from
+    // currentHint() alone: a stub that sets myText without ever calling
+    // show()/hide() would pass a text-only check just as well.
+    {
+        HintBalloon* hint = window.findChild<HintBalloon*>();
+        check(hint != nullptr, "the window has a hint balloon");
+        check(hint != nullptr && !hint->isVisible() && hint->currentHint().isEmpty(),
+              "no hint is up before any body exists");
     }
 
     OcctViewWidget* view = window.view();
@@ -476,8 +497,8 @@ int main(int argc, char* argv[])
     // --- a learned hint never appears again ------------------------------------
     {
         // The live window already has two bodies and has shown the boolean hint.
-        // Teach it, dismiss what is up, then reproduce the exact condition that
-        // raised it and assert nothing comes back.
+        // Teach it, then reproduce the exact condition that raised it and
+        // assert nothing comes back.
         HintBalloon* hint = window.findChild<HintBalloon*>();
         check(hint != nullptr, "the hint balloon is still around");
         if (hint) {
@@ -489,16 +510,104 @@ int main(int argc, char* argv[])
             // Force a fresh look at the state with everything learned.
             view->clearSelection();
             settle(150);
-            const std::vector<int> two = {window.document().solids().front().id,
-                                          window.document().solids().back().id};
-            if (two.size() == 2 && two[0] != two[1]) {
-                view->setSelectedSolids(two);
-                settle(200);
-                check(hint->currentHint().isEmpty(),
-                      "a user who has run three booleans is not told about them again");
-            } else {
-                check(false, "expected two distinct bodies to re-trigger the hint");
+            const int firstId = window.document().solids().front().id;
+            const int secondId = window.document().solids().back().id;
+            check(firstId != secondId, "the document holds two distinct bodies");
+            view->setSelectedSolids({firstId, secondId});
+            settle(200);
+            check(hint->currentHint().isEmpty(),
+                  "a user who has run three booleans is not told about them again");
+        }
+    }
+
+    // --- hint balloon: visibility, real hit-testing, all three dismissal ------
+    // triggers, and preemption, pinned down in one tightly controlled scenario.
+    //
+    // A dedicated window rather than reusing `window` above: by this point in
+    // the suite, `window`'s own delete/undo/redo traffic and status-bar
+    // updates have already dismissed and consumed each hint's one showing per
+    // session in ways that depend on exactly how earlier checks happen to be
+    // ordered (deleting the only body, for instance, makes both the
+    // face-selection and view hints' conditions go false well before this
+    // point runs). Asserting anything precise against that would be asserting
+    // an accident of ordering, not the balloon's actual contract - so this
+    // scenario is built from scratch, deterministically, to pin the contract
+    // down instead.
+    {
+        MainWindow probe(nullptr, /*persistProgress=*/false);
+        probe.setAttribute(Qt::WA_ShowWithoutActivating);
+        probe.resize(900, 600);
+        probe.show();
+        settle(300);
+        OcctViewWidget* probeView = probe.view();
+        probeView->setAnimationsEnabled(false);
+
+        HintBalloon* hint = probe.findChild<HintBalloon*>();
+        check(hint != nullptr, "the probe window has a hint balloon");
+        check(hint != nullptr && !hint->isVisible() && hint->currentHint().isEmpty(),
+              "no hint is up before any body exists");
+
+        if (hint) {
+            check(buildBody(probe, 0.30, 0.30, 0.50, 0.50, 10.0),
+                  "first body for the hint-balloon probe");
+
+            const QString firstHint = hint->currentHint();
+            check(hint->isVisible() && !firstHint.isEmpty() &&
+                  !firstHint.contains(QStringLiteral("Union")),
+                  QStringLiteral("a lower-priority hint is up with one body (\"%1\")")
+                      .arg(firstHint));
+
+            // --- real hit-testing, not a synthetic event sent straight to a
+            // widget we merely hope is reachable - see the Task 4 skip-control
+            // regression this mirrors: childAt() is the actual mechanism a
+            // real click uses, and this checks identity against it directly.
+            const QPoint centre = hint->geometry().center();
+            QWidget* hitBalloon = probeView->childAt(centre);
+            check(hitBalloon == hint,
+                  "childAt() at the balloon's centre finds the balloon itself, "
+                  "the way a real click would");
+
+            // --- trigger 1: "got it" genuinely dismisses it, not just myText --
+            if (hitBalloon == hint) {
+                clickAt(hint, QPointF(hint->width() / 2.0, hint->height() / 2.0));
             }
+            check(hint->currentHint().isEmpty() && !hint->isVisible(),
+                  "\"got it\" dismisses the balloon for real - hidden, not just "
+                  "text-empty");
+
+            // --- the session flag holds: building the second body re-derives
+            // state with the dismissed hint's own condition still true (a body
+            // exists, face selection still untried) - it must not come back.
+            check(buildBody(probe, 0.55, 0.30, 0.75, 0.50, 10.0),
+                  "second body for the hint-balloon probe");
+            const QString secondHint = hint->currentHint();
+            check(!secondHint.contains(QStringLiteral("Select Faces")),
+                  "the hint dismissed with \"got it\" does not return this session");
+            check(hint->isVisible() && !secondHint.isEmpty() &&
+                  secondHint.contains(QStringLiteral("gizmo")),
+                  QStringLiteral("a second, different lower-priority hint is up "
+                                 "instead (\"%1\")").arg(secondHint));
+
+            // --- preemption: the boolean hint displaces one already on screen -
+            const int idA = probe.document().solids().front().id;
+            const int idB = probe.document().solids().back().id;
+            check(idA != idB, "the probe window holds two distinct bodies");
+            probeView->setSelectedSolids({idA, idB});
+            settle(200);
+            const QString thirdHint = hint->currentHint();
+            check(thirdHint.contains(QStringLiteral("Union")) && thirdHint != secondHint,
+                  "selecting two bodies preempts the hint that was already up");
+            check(hint->isVisible(), "the boolean hint is genuinely visible");
+
+            // --- trigger 2: the condition going away clears it, not just a
+            // click and not just the learned threshold. Both other hints
+            // already had their one showing this session (above), so nothing
+            // else is due to take the freed slot - the balloon goes fully
+            // quiet, not merely off-topic.
+            probeView->setSelectedSolids({idA});
+            settle(200);
+            check(hint->currentHint().isEmpty(),
+                  "dropping the selection to one body clears the boolean hint");
         }
     }
 
