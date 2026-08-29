@@ -27,8 +27,27 @@ HintBalloon::HintBalloon(MainWindow* window, QWidget* parent)
     , myWindow(window)
 {
     setAttribute(Qt::WA_NoSystemBackground);
+    // Closes the whole class of "unhandled mouse event bubbles to the
+    // viewport behind this balloon" bugs in one line, rather than overriding
+    // press, release, wheel, and whatever else individually: without it, any
+    // mouse event this widget does not explicitly accept - and QWidget's
+    // defaults leave plenty unaccepted, release included - propagates to the
+    // parent. That parent is the viewport, whose own mouseReleaseEvent()
+    // performs a real pick and unconditionally emits selectionChanged() on
+    // every left-button release; a "got it" click was quietly re-firing
+    // selection handling underneath the balloon and could raise the next due
+    // hint in the same gesture. A click-to-dismiss balloon has no reason to
+    // let any mouse event reach whatever is behind it, so this closes the
+    // whole event class rather than enumerating members of it as bugs turn up.
+    setAttribute(Qt::WA_NoMousePropagation);
     hide();
     connect(myWindow, &MainWindow::appStateChanged, this, &HintBalloon::reconsider);
+    // cameraChanged is the one live-predicate trigger appStateChanged does
+    // not cover on its own - see the header - so it needs its own,
+    // deliberately cheap, connection rather than driving a full
+    // reconsider() at drag-frame rate.
+    connect(myWindow->view(), &OcctViewWidget::cameraChanged, this,
+            &HintBalloon::onCameraChanged);
     // Repositioning only happened inside showHint(), so a window resize while
     // a hint was up left it stranded wherever the viewport used to end - see
     // eventFilter() below.
@@ -134,6 +153,23 @@ void HintBalloon::reconsider()
     }
 }
 
+void HintBalloon::onCameraChanged()
+{
+    // cameraChanged fires on every frame of an orbit or pan drag and every
+    // step of a snap-to-view animation, so this deliberately does as little
+    // as possible on the common path: only the view hint's condition can
+    // ever be affected by a camera move, so there is nothing to do unless
+    // that specific hint is the one currently up - which is true for a tiny
+    // fraction of the app's lifetime. Only in that case does this pay for
+    // conditionHolds()'s findChild() and AxisGizmo::labelText() call; a full
+    // reconsider() pass (selection queries, three hasLearned() lookups, a
+    // second findChild()) would otherwise run at drag-frame rate for no
+    // benefit, since raising a *new* hint on a camera move was never a
+    // requirement - only retiring the one already up is.
+    if (myEvent != kViewChangedEvent || myText.isEmpty()) return;
+    if (!conditionHolds(myEvent)) dismiss();
+}
+
 void HintBalloon::reposition()
 {
     if (myText.isEmpty() || !parentWidget()) return;
@@ -165,18 +201,12 @@ void HintBalloon::dismiss()
     hide();
 }
 
-void HintBalloon::mousePressEvent(QMouseEvent* event)
+void HintBalloon::mousePressEvent(QMouseEvent* /*event*/)
 {
+    // WA_NoMousePropagation (see the constructor) is what stops this and
+    // every other mouse event from reaching the viewport behind the balloon;
+    // nothing here needs to touch accept()/ignore() to make that true.
     dismiss();
-    event->accept();
-}
-
-void HintBalloon::mouseReleaseEvent(QMouseEvent* event)
-{
-    // See the header: this exists purely to stop the release from
-    // propagating to the viewport underneath once dismiss() has already
-    // done its job on the press.
-    event->accept();
 }
 
 bool HintBalloon::eventFilter(QObject* watched, QEvent* event)

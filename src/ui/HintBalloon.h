@@ -13,6 +13,17 @@
 // re-evaluates it - not just the learned threshold - against whatever is
 // currently on screen, every time it runs.
 //
+// reconsider() only runs when MainWindow::appStateChanged fires, so the two
+// live predicates that are not driven by anything already wired to that
+// signal need their own path in: switching selection mode now explicitly
+// calls updateActions() (see MainWindow::onSelectionModeChanged), and camera
+// changes are routed through onCameraChanged() below rather than through
+// reconsider() itself - cameraChanged fires on every frame of an orbit or
+// pan drag, and reconsider()'s full pass (selection queries, a findChild(),
+// trig in AxisGizmo::labelText()) is not something to pay for at that rate.
+// onCameraChanged() only pays for any of that when the view hint is actually
+// the one currently up, which is rare - see the .cpp.
+//
 #include <QString>
 #include <QWidget>
 
@@ -41,19 +52,11 @@ public:
 protected:
     void paintEvent(QPaintEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
-    // QWidget's default mouseReleaseEvent() calls ignore(), and Qt
-    // propagates an ignored mouse event up to the parent - the viewport
-    // sitting right behind this balloon, whose own mouseReleaseEvent()
-    // performs a real pick and unconditionally emits selectionChanged() on
-    // every left-button release it sees. Left unoverridden, dismissing a
-    // hint with a click quietly re-fires selection handling underneath it,
-    // which can raise the next due hint in the same gesture. Overriding
-    // this to simply accept the event is what actually stops there.
-    void mouseReleaseEvent(QMouseEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     void reconsider();
+    void onCameraChanged();
     void showHint(const QString& event);
     void dismiss();
     void reposition();

@@ -611,6 +611,71 @@ int main(int argc, char* argv[])
         }
     }
 
+    // --- hint balloon: the two dismissal edges that do not run through -------
+    // ordinary appStateChanged traffic. HintBalloon::reconsider() is driven
+    // solely by MainWindow::appStateChanged, so a live predicate that flips
+    // for a reason nothing already wired to that signal notices would
+    // linger regardless of how correct conditionHolds() itself is -
+    // MainWindow::onSelectionModeChanged() now calls updateActions()
+    // explicitly, and OcctViewWidget::cameraChanged is now routed to
+    // HintBalloon::onCameraChanged(). Each gets its own probe because both
+    // the face-selection and the view hint can only show once per session,
+    // and each hint's one showing in the probes above is already spent
+    // proving a different trigger.
+    {
+        MainWindow modeProbe(nullptr, /*persistProgress=*/false);
+        modeProbe.setAttribute(Qt::WA_ShowWithoutActivating);
+        modeProbe.resize(900, 600);
+        modeProbe.show();
+        settle(300);
+        OcctViewWidget* modeProbeView = modeProbe.view();
+        modeProbeView->setAnimationsEnabled(false);
+
+        HintBalloon* hint = modeProbe.findChild<HintBalloon*>();
+        check(hint != nullptr, "the mode-transition probe has a hint balloon");
+        if (hint) {
+            check(buildBody(modeProbe, 0.30, 0.30, 0.50, 0.50, 10.0),
+                  "a body for the mode-transition probe");
+            check(hint->isVisible() &&
+                  hint->currentHint().contains(QStringLiteral("Select Faces")),
+                  QStringLiteral("the face-selection hint is up before face mode "
+                                 "is tried (\"%1\")").arg(hint->currentHint()));
+
+            // Entering face selection mode - the action the hint is teaching -
+            // must clear it on its own, with no click and no unrelated action
+            // to fire appStateChanged first.
+            trigger(modeProbe, QStringLiteral("Select Faces"));
+            // Not necessarily empty: the view hint's own condition (a body
+            // exists, no named view tried yet) is already satisfied and it
+            // has not had its turn this session, so reconsider()'s cascade
+            // correctly raises it the instant the slot is free - the same
+            // "another due hint may legitimately take the freed slot"
+            // behaviour as the condition-loss probe above. What matters here
+            // is that the *face-selection* hint specifically is gone.
+            check(!hint->currentHint().contains(QStringLiteral("Select Faces")),
+                  QStringLiteral("switching to face selection clears its own "
+                                 "hint directly (now: \"%1\")").arg(hint->currentHint()));
+            check(hint->isVisible() && hint->currentHint().contains(QStringLiteral("gizmo")),
+                  "the view hint - already due - fills the freed slot immediately");
+
+            // The face-selection hint already had its one showing this
+            // session, so a second body changes nothing about which hint is
+            // up; it is still the view hint from above.
+            check(buildBody(modeProbe, 0.55, 0.30, 0.75, 0.50, 10.0),
+                  "a second body for the mode-transition probe");
+            check(hint->isVisible() && hint->currentHint().contains(QStringLiteral("gizmo")),
+                  QStringLiteral("the view hint is still up before a named view "
+                                 "is tried (\"%1\")").arg(hint->currentHint()));
+
+            // Snapping to a named view - the action the hint is teaching -
+            // must clear it on its own, driven by cameraChanged rather than
+            // by appStateChanged.
+            trigger(modeProbe, QStringLiteral("Front"));
+            check(hint->currentHint().isEmpty(),
+                  "triggering a standard view clears its own hint directly");
+        }
+    }
+
     if (view->selectedSolidIds().size() == 2) {
         check(window.applyBooleanToSelection(static_cast<int>(ModelingOps::BooleanKind::Cut)),
               "Cut reports success");

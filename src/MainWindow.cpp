@@ -724,6 +724,13 @@ void MainWindow::onSelectionModeChanged()
     statusBar()->showMessage(myFaceSelectAction->isChecked()
                                  ? tr("Face selection — hovering highlights one face at a time")
                                  : tr("Body selection — click whole bodies to combine them"));
+    // Neither mySolidSelectAction nor myFaceSelectAction is touched by
+    // updateActions() itself (their checked state is handled entirely by the
+    // QActionGroup they belong to), so this cannot recurse back in here -
+    // but without this call, HintBalloon::reconsider() only ever finds out
+    // face selection was used the next time something unrelated happens to
+    // fire appStateChanged, which left its hint lingering.
+    updateActions();
 }
 
 void MainWindow::onSelectionChanged()
