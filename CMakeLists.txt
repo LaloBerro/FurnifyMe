@@ -105,6 +105,7 @@ if(FURNIFYME_BUILD_APP)
       src/ui/ViewportOverlay.cpp
       src/ui/ItemsPanel.cpp
       src/ui/ShortcutSheet.cpp
+      src/ui/WalkthroughPanel.cpp
     )
     target_include_directories(furnify_app PUBLIC src/ui)
     target_link_libraries(furnify_app PUBLIC

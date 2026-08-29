@@ -39,6 +39,7 @@ void ViewportOverlay::relayout()
     int topLeftY = kMargin;
     int topRightY = kMargin;
     int bottomLeftY = h - kMargin;
+    int bottomRightY = h - kMargin;
     int leftCenterY = 0;
     int rightCenterY = 0;
 
@@ -81,6 +82,11 @@ void ViewportOverlay::relayout()
             case Anchor::RightCenter:
                 placed->move(w - cw - kMargin, rightCursor);
                 rightCursor += ch + kGap;
+                break;
+            case Anchor::BottomRight:
+                bottomRightY -= ch;
+                placed->move(w - cw - kMargin, bottomRightY);
+                bottomRightY -= kGap;
                 break;
         }
         placed->raise();

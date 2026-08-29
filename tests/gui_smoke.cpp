@@ -27,6 +27,7 @@
 #include "ToolChip.h"
 #include "ToolCluster.h"
 #include "ViewportOverlay.h"
+#include "WalkthroughPanel.h"
 
 #include <QAction>
 #include <QApplication>
@@ -159,6 +160,15 @@ int main(int argc, char* argv[])
     window.show();
     settle(900);
     window.view()->setAnimationsEnabled(false);   // deterministic camera for the suite
+
+    // --- the walkthrough appears for a newcomer -------------------------------
+    {
+        WalkthroughPanel* guide = window.findChild<WalkthroughPanel*>();
+        check(guide != nullptr, "a new user gets the guided first build");
+        check(guide != nullptr && guide->isVisible(), "the guide is visible on first run");
+        check(guide != nullptr && guide->completedSteps() == 0,
+              "no steps are complete before the user does anything");
+    }
 
     OcctViewWidget* view = window.view();
     check(view != nullptr && view->width() > 100, "viewport has a usable size");
@@ -765,6 +775,31 @@ int main(int argc, char* argv[])
             settle(150);
             check(sheet != nullptr && !sheet->isVisible(), "Escape closes the sheet");
         }
+    }
+
+    // --- the walkthrough completes and stays gone ------------------------------
+    {
+        WalkthroughPanel* guide = window.findChild<WalkthroughPanel*>();
+        check(guide != nullptr && guide->isFinished(),
+              "building a body completes the guide");
+        check(guide != nullptr && !guide->isVisible(),
+              "a finished guide hides itself");
+        check(window.progress().hasLearned("walkthrough.done"),
+              "finishing records walkthrough.done");
+
+        // A returning user does not see it again.
+        MainWindow second(nullptr, /*persistProgress=*/false);
+        second.progress().record("walkthrough.done");
+        second.progress().record("walkthrough.done");
+        second.progress().record("walkthrough.done");
+        second.setAttribute(Qt::WA_ShowWithoutActivating);
+        second.resize(900, 600);
+        second.show();
+        settle(400);
+        WalkthroughPanel* repeat = second.findChild<WalkthroughPanel*>();
+        check(repeat == nullptr || !repeat->isVisible(),
+              "a returning user never sees the guide again");
+        second.close();
     }
 
     std::printf("\n%s (%d failure%s)  volumes: A=%.1f B=%.1f\n",

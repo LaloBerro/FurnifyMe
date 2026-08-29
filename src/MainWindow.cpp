@@ -12,6 +12,7 @@
 #include "ToolChip.h"
 #include "ToolCluster.h"
 #include "ViewportOverlay.h"
+#include "WalkthroughPanel.h"
 
 #include <QAction>
 #include <QActionGroup>
@@ -327,6 +328,12 @@ void MainWindow::buildOverlay()
                              .arg(Theme::chip().name(), Theme::textMuted().name()));
     units->adjustSize();
     myOverlay->addWidget(units, ViewportOverlay::Anchor::TopRight);
+
+    // Only a newcomer sees this; it removes itself for good once completed.
+    if (!myProgress.hasLearned("walkthrough.done")) {
+        myOverlay->addWidget(new WalkthroughPanel(this, myView),
+                             ViewportOverlay::Anchor::BottomRight);
+    }
 }
 
 void MainWindow::updateActions()
