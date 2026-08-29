@@ -1,6 +1,7 @@
 #include "ExtrudePreview.h"
 
 #include "MainWindow.h"
+#include "Measure.h"
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
 #include "SketchController.h"
@@ -156,6 +157,11 @@ void ExtrudePreview::onAppStateChanged()
     // neither DocumentModel nor updateActions() - safe per CLAUDE.md's rule
     // that a slot on this signal must never call back into updateActions().
     if (isVisible() && myWindow && !myWindow->hasPendingFace()) cancel();
+    // labelText() reads Measure::unitSuffix() fresh on every paint, so a unit
+    // switch while this panel is open needs nothing but a repaint to show up
+    // immediately - not a stored copy that setDisplayUnit() would have to
+    // know how to reach.
+    if (isVisible()) update();
 }
 
 double ExtrudePreview::height() const
@@ -222,7 +228,8 @@ QRect ExtrudePreview::hintRect() const
 
 QString ExtrudePreview::labelText() const
 {
-    return tr("Extrude height (mm)");
+    return tr("Extrude height (%1)")
+        .arg(QString::fromStdString(Measure::unitSuffix()));
 }
 
 QString ExtrudePreview::hintText() const
@@ -251,9 +258,12 @@ void ExtrudePreview::updatePreview()
 {
     if (!myField || !myView || !myWindow || myFace.IsNull()) return;
 
-    bool ok = false;
-    const double h = myField->text().toDouble(&ok);
-    if (!ok || h == 0.0) {
+    // Through Measure::parseLength, not QString::toDouble - the field shows
+    // the current display unit (see labelText()), so it must be read back in
+    // that same unit. Typing "4" with centimetres selected has to mean 40 mm,
+    // not 4.
+    double h = 0.0;
+    if (!Measure::parseLength(myField->text().toStdString(), h) || h == 0.0) {
         // Invalid input never previews: the last good shape, if any, stays
         // exactly as it was - only the field's own border marks the problem.
         markInvalid(true);
@@ -289,9 +299,8 @@ void ExtrudePreview::commit()
 {
     if (!myField || !myHasPreview || myInvalid) return;
 
-    bool ok = false;
-    const double h = myField->text().toDouble(&ok);
-    if (!ok || h == 0.0) return;
+    double h = 0.0;
+    if (!Measure::parseLength(myField->text().toStdString(), h) || h == 0.0) return;
 
     // extrudePendingFace() re-runs the same extrude, clears whatever preview
     // is on screen, adds the real body, records progress, and reports the

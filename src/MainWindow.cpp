@@ -40,6 +40,14 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
         const QSettings settings;
         myProgress.deserialize(
             settings.value(QStringLiteral("progress")).toString().toStdString());
+        // Read before buildActions() so the Units menu's initial checked
+        // state, and the readout label built in buildOverlay(), both agree
+        // with what was last chosen - same guard as the learning progress,
+        // so the suite (persistProgress=false) can never read the
+        // developer's real store.
+        if (settings.value(QStringLiteral("displayUnit")).toString() ==
+            QStringLiteral("cm"))
+            Measure::setDisplayUnit(Measure::Unit::Centimetres);
     }
 
     myView = new OcctViewWidget(this);
@@ -65,6 +73,10 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     connect(myShortcutsAction, &QAction::triggered, myShortcutSheet, &ShortcutSheet::showSheet);
 
     connect(this, &MainWindow::documentChanged, myItemsPanel, &ItemsPanel::refresh);
+    // Also on appStateChanged, not just documentChanged: switching the
+    // display unit does not change the document, but every dimension the
+    // panel shows still has to reread immediately - see setDisplayUnit().
+    connect(this, &MainWindow::appStateChanged, myItemsPanel, &ItemsPanel::refresh);
 
     // Selection syncs both ways.
     connect(myItemsPanel, &ItemsPanel::solidActivated, this,
@@ -209,6 +221,28 @@ void MainWindow::buildActions()
     selectionGroup->setExclusive(true);
     connect(mySolidSelectAction, &QAction::triggered, this, &MainWindow::onSelectionModeChanged);
     connect(myFaceSelectAction, &QAction::triggered, this, &MainWindow::onSelectionModeChanged);
+
+    myUnitsMillimetresAction = new QAction(tr("Millimetres"), this);
+    myUnitsMillimetresAction->setCheckable(true);
+    myUnitsCentimetresAction = new QAction(tr("Centimetres"), this);
+    myUnitsCentimetresAction->setCheckable(true);
+
+    auto* unitsGroup = new QActionGroup(this);
+    unitsGroup->addAction(myUnitsMillimetresAction);
+    unitsGroup->addAction(myUnitsCentimetresAction);
+    unitsGroup->setExclusive(true);
+
+    // Reflects whatever setDisplayUnit() the constructor already applied from
+    // the persisted setting (or the Millimetres default), before this action
+    // group exists at all.
+    const bool startsInCentimetres = Measure::displayUnit() == Measure::Unit::Centimetres;
+    myUnitsMillimetresAction->setChecked(!startsInCentimetres);
+    myUnitsCentimetresAction->setChecked(startsInCentimetres);
+
+    connect(myUnitsMillimetresAction, &QAction::triggered, this,
+            [this] { setDisplayUnit(Measure::Unit::Millimetres); });
+    connect(myUnitsCentimetresAction, &QAction::triggered, this,
+            [this] { setDisplayUnit(Measure::Unit::Centimetres); });
 }
 
 void MainWindow::buildMenus()
@@ -263,6 +297,10 @@ void MainWindow::buildMenus()
     viewMenu->addAction(mySolidSelectAction);
     viewMenu->addAction(myFaceSelectAction);
     viewMenu->addAction(myItemsPanelAction);
+    viewMenu->addSeparator();
+    QMenu* unitsMenu = viewMenu->addMenu(tr("Units"));
+    unitsMenu->addAction(myUnitsMillimetresAction);
+    unitsMenu->addAction(myUnitsCentimetresAction);
 
     QMenu* helpMenu = menuBar()->addMenu(tr("&Help"));
 
@@ -354,10 +392,11 @@ void MainWindow::buildOverlay()
     connect(gizmo, &AxisGizmo::viewSnapped, this, &MainWindow::recordViewChanged);
     myOverlay->addWidget(gizmo, ViewportOverlay::Anchor::TopRight);
 
-    // Static unit readout under the axis gizmo. We have no unit system; this
-    // states the one the whole app assumes rather than pretending to offer a
-    // choice.
-    auto* units = new QLabel(tr("mm"), myView);
+    // Unit readout under the axis gizmo - follows View -> Units rather than
+    // stating a fixed unit. Refreshed from appStateChanged, same as every
+    // other surface this setting reaches (see setDisplayUnit()).
+    myUnitsLabel = new QLabel(QString::fromStdString(Measure::unitSuffix()), myView);
+    QLabel* units = myUnitsLabel;
     units->setAlignment(Qt::AlignCenter);
     // A small chip-styled readout - Theme::labelFont(), the same size as a
     // chip label.
@@ -367,6 +406,10 @@ void MainWindow::buildOverlay()
                              .arg(Theme::chip().name(), Theme::textMuted().name())
                              .arg(Theme::labelFont().pointSizeF()));
     units->adjustSize();
+    connect(this, &MainWindow::appStateChanged, units, [units] {
+        units->setText(QString::fromStdString(Measure::unitSuffix()));
+        units->adjustSize();
+    });
     myOverlay->addWidget(units, ViewportOverlay::Anchor::TopRight);
 
     // Every outcome the app reports - success or failure - goes through this
@@ -475,6 +518,23 @@ void MainWindow::recordViewChanged()
     // Without this the third press of 0 left a hint on screen for an action
     // the user had already learned. updateActions() touches nothing this
     // path depends on, so it cannot recurse back in here.
+    updateActions();
+}
+
+void MainWindow::setDisplayUnit(Measure::Unit unit)
+{
+    Measure::setDisplayUnit(unit);
+    if (myPersistProgress) {
+        QSettings settings;
+        settings.setValue(QStringLiteral("displayUnit"),
+                          unit == Measure::Unit::Centimetres ? QStringLiteral("cm")
+                                                              : QStringLiteral("mm"));
+    }
+    // Not recordProgress(): the unit is a display preference, not a learned
+    // capability, so it never touches UserProgress. updateActions() ends by
+    // emitting appStateChanged(), which is what the items panel, the units
+    // readout and the status bar all already refresh from - no second
+    // refresh path needed.
     updateActions();
 }
 

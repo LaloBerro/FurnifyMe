@@ -5,6 +5,7 @@
 #include <QMainWindow>
 
 #include "DocumentModel.h"
+#include "Measure.h"
 #include "SketchController.h"
 #include "UserProgress.h"
 
@@ -39,6 +40,13 @@ public:
     // Records an event and writes the store through immediately, so a crash
     // never costs the user their learning history.
     void recordProgress(const std::string& event);
+
+    // Sets the unit the whole app reads and types in, persists it through the
+    // same QSettings guard as the learning progress, and refreshes every
+    // visible string via updateActions()/appStateChanged() - no separate
+    // refresh path. Records nothing in UserProgress; this is a display
+    // preference, not a learned capability.
+    void setDisplayUnit(Measure::Unit unit);
 
 signals:
     // DocumentModel is Qt-free by design, so the window announces its changes.
@@ -129,9 +137,12 @@ private:
     QAction* myFitAction = nullptr;
     QAction* myScreenshotAction = nullptr;
     QAction* myShortcutsAction = nullptr;
+    QAction* myUnitsMillimetresAction = nullptr;
+    QAction* myUnitsCentimetresAction = nullptr;
 
     class ViewportOverlay* myOverlay = nullptr;
     class QLabel* myStateLabel = nullptr;
+    class QLabel* myUnitsLabel = nullptr;
     class ItemsPanel* myItemsPanel = nullptr;
     class ShortcutSheet* myShortcutSheet = nullptr;
     ToastHost* myToasts = nullptr;

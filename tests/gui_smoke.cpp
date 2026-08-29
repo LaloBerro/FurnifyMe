@@ -1158,6 +1158,62 @@ int main(int argc, char* argv[])
               "the pending face left behind by Escape can still be extruded");
     }
 
+    // --- the whole app reads in one unit --------------------------------------
+    {
+        QAction* mm = action(window, QStringLiteral("Millimetres"));
+        QAction* cm = action(window, QStringLiteral("Centimetres"));
+        check(mm != nullptr && cm != nullptr, "both units are offered");
+        check(mm != nullptr && mm->isChecked(), "millimetres is the default");
+
+        ItemsPanel* items = window.findChild<ItemsPanel*>();
+        check(items != nullptr, "the items panel is present");
+        const QString beforeItems = items ? items->rowTextAt(0) : QString();
+        check(beforeItems.contains(QStringLiteral("mm")),
+              QStringLiteral("the panel reads in millimetres (\"%1\")").arg(beforeItems));
+
+        if (cm) {
+            cm->trigger();
+            settle(150);
+            const QString afterItems = items ? items->rowTextAt(0) : QString();
+            check(afterItems.contains(QStringLiteral("cm")),
+                  QStringLiteral("the panel follows the unit (\"%1\")").arg(afterItems));
+            check(!afterItems.contains(QStringLiteral("mm")),
+                  "and no millimetre value is left behind");
+
+            // The trap: a field that displays centimetres and reads millimetres.
+            trigger(window, QStringLiteral("Start Sketch"));
+            clickAt(view, QPointF(300, 300)); clickAt(view, QPointF(420, 300));
+            clickAt(view, QPointF(420, 380)); clickAt(view, QPointF(300, 380));
+            trigger(window, QStringLiteral("Finish Sketch"));
+            settle(150);
+            const int before = static_cast<int>(window.document().solids().size());
+            trigger(window, QStringLiteral("Extrude..."));
+            settle(150);
+            ExtrudePreview* preview = window.findChild<ExtrudePreview*>();
+            if (preview && preview->field()) {
+                preview->field()->setText(QStringLiteral("4"));
+                settle(120);
+                QKeyEvent commit(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+                QCoreApplication::sendEvent(preview->field(), &commit);
+                settle(250);
+            }
+            check(static_cast<int>(window.document().solids().size()) == before + 1,
+                  "the body was created");
+            if (!window.document().solids().empty()) {
+                const Measure::Extents e =
+                    Measure::extentsOf(window.document().solids().back().shape);
+                check(std::fabs(e.z - 40.0) < 1e-6,
+                      QStringLiteral("4 typed in centimetres is 40 mm, not 4 (got %1)")
+                          .arg(e.z));
+            }
+
+            mm->trigger();
+            settle(150);
+            check(items && items->rowTextAt(0).contains(QStringLiteral("mm")),
+                  "switching back restores millimetres");
+        }
+    }
+
     // --- icons ----------------------------------------------------------------
     {
         const IconSet::Glyph all[] = {
