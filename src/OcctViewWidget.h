@@ -2,6 +2,7 @@
 // OCCT headers first: Handle() is a macro and collides with some Windows headers
 // that Qt drags in.
 #include <AIS_InteractiveContext.hxx>
+#include <AIS_InteractiveObject.hxx>
 #include <AIS_Shape.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
@@ -21,8 +22,6 @@
 
 #include <map>
 #include <vector>
-
-class AIS_InteractiveObject;
 
 // The Qt <-> OCCT bridge. Hosts a V3d_View on this widget's native window and
 // forwards Qt input to the OCCT camera and selector.
@@ -69,6 +68,29 @@ public:
     // While sketching, a left click reports a point on `plane` instead of selecting.
     void setSketchMode(bool enabled, const gp_Pln& plane);
     bool sketchMode() const { return mySketchMode; }
+
+    // Feedback for the in-progress outline, in a channel of its own -
+    // setPreview() above is already shared by two features, and CLAUDE.md
+    // records the bug that caused (cancelling the extrude preview erased
+    // the pending face). Every placed point gets a small dot; the first
+    // additionally gets a ring on top of its dot, because clicking it back
+    // is what closes the outline. Rebuilds from scratch each call - the
+    // point count here is small enough that caching would be complexity
+    // with no payoff. Non-selectable, the same way the preview shape is.
+    void setSketchPointMarkers(const std::vector<gp_Pnt>& points);
+    void clearSketchPointMarkers();
+    // Number of placed-point dots currently displayed - not the count of
+    // marker objects, which is one more whenever the start ring is up too.
+    int sketchPointMarkerCount() const;
+    // Whether the first point's extra ring is currently displayed.
+    bool hasSketchStartMarker() const;
+
+    // The live snapped cursor point while sketching - a dot at exactly
+    // where the next click will land, which matters most with Snap to Grid
+    // on, where the pointer and the click site are not the same pixel.
+    void setSketchCursorMarker(const gp_Pnt& point);
+    void clearSketchCursorMarker();
+    bool hasSketchCursorMarker() const;
 
     // The plane clicks are unprojected onto AND the plane the grid lies on -
     // one value, not two, because a grid that disagreed with where the next
@@ -207,6 +229,15 @@ private:
     Handle(V3d_View) myView;
     Handle(AIS_InteractiveContext) myContext;
     Handle(AIS_Shape) myPreview;
+
+    // The sketch point markers - see setSketchPointMarkers()'s comment for
+    // why these are not the preview slot above. One object per placed
+    // point (each is a single-point marker; see SketchPointMarker in the
+    // .cpp), plus one more for the first point's ring and one for the live
+    // cursor dot.
+    std::vector<Handle(AIS_InteractiveObject)> myPlacedMarkers;
+    Handle(AIS_InteractiveObject) myFirstPointMarker;
+    Handle(AIS_InteractiveObject) myCursorMarker;
 
     CameraController myCamera;
     GridRenderer myGridRenderer;

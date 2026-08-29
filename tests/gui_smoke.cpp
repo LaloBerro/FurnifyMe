@@ -433,12 +433,68 @@ int main(int argc, char* argv[])
     trigger(window, QStringLiteral("Start Sketch"));
     check(window.isSketching(), "Start Sketch enters sketch mode");
 
+    // --- sketch point markers --------------------------------------------
+    // A dot at each placed point, a ring on the first (clicking it back is
+    // what closes the outline), and a dot at the live cursor - see
+    // OcctViewWidget::setSketchPointMarkers()/setSketchCursorMarker().
+    {
+        check(view->sketchPointMarkerCount() == 0, "no point markers before any click");
+        check(!view->hasSketchStartMarker(), "no start marker before any click");
+        check(!view->hasSketchCursorMarker(), "no cursor marker before any hover");
+
+        const double w = view->width();
+        const double h = view->height();
+
+        moveTo(view, QPointF(0.35 * w, 0.35 * h));
+        check(view->hasSketchCursorMarker(), "the cursor marker appears on the first hover");
+
+        clickAt(view, QPointF(0.35 * w, 0.35 * h));
+        check(view->sketchPointMarkerCount() == 1, "one placed-point marker after one click");
+        check(view->hasSketchStartMarker(), "the first point gets its own start marker");
+
+        clickAt(view, QPointF(0.62 * w, 0.35 * h));
+        clickAt(view, QPointF(0.62 * w, 0.56 * h));
+        check(view->sketchPointMarkerCount() == 3, "the marker count tracks placed points");
+        check(view->hasSketchStartMarker(), "the start marker survives later points");
+
+        moveTo(view, QPointF(0.35 * w, 0.56 * h));
+        check(view->hasSketchCursorMarker(), "the cursor marker follows the live cursor");
+
+        // Mid-sketch, several points down and the cursor live over the
+        // fourth corner - what "look at it" asks for.
+        view->saveSnapshot(outDir + "/i-sketch-markers.png");
+
+        trigger(window, QStringLiteral("Undo Last Point"));
+        check(view->sketchPointMarkerCount() == 2, "undoing a point drops its marker");
+        check(view->hasSketchStartMarker(), "the start marker survives an undo above it");
+
+        // Markers are feedback, not geometry: clicking exactly on top of one
+        // must place an ordinary sketch point, never select anything - the
+        // sketch point count is the observable proof, since selection is
+        // already disabled outright while sketching.
+        const auto pointsBefore = window.sketch().pointCount();
+        clickAt(view, QPointF(0.62 * w, 0.35 * h));   // exactly on the second marker
+        check(window.sketch().pointCount() == pointsBefore + 1,
+              "clicking on a marker's own position still places an ordinary sketch point");
+
+        trigger(window, QStringLiteral("Cancel Sketch"));
+        check(view->sketchPointMarkerCount() == 0, "Cancel Sketch clears the point markers");
+        check(!view->hasSketchStartMarker(), "Cancel Sketch clears the start marker");
+        check(!view->hasSketchCursorMarker(), "Cancel Sketch clears the cursor marker");
+
+        trigger(window, QStringLiteral("Start Sketch"));
+    }
+
     sketchQuad(window, 0.35, 0.35, 0.62, 0.56);
     check(window.sketch().pointCount() == 4, "four clicks became four sketch points");
+    check(view->sketchPointMarkerCount() == 4, "sketchQuad's four clicks left four markers");
 
     trigger(window, QStringLiteral("Finish Sketch"));
     check(!window.isSketching(), "Finish Sketch leaves sketch mode");
     check(window.hasPendingFace(), "a face is waiting to be extruded");
+    check(view->sketchPointMarkerCount() == 0, "Finish Sketch clears the point markers");
+    check(!view->hasSketchStartMarker(), "Finish Sketch clears the start marker");
+    check(!view->hasSketchCursorMarker(), "Finish Sketch clears the cursor marker");
 
     check(window.extrudePendingFace(10.0), "extrude reports success");
     check(window.document().count() == 1, "one solid in the document");

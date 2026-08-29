@@ -34,6 +34,8 @@ QColor gridMinor()    { return QColor("#3a3a40"); }
 QColor gridMajor()    { return QColor("#4a4a52"); }
 QColor axisX()        { return QColor("#7a4a4a"); }   // muted red
 QColor axisY()        { return QColor("#4a7a4a"); }   // muted green
+QColor sketchPointMarker() { return QColor("#ff4fc3"); } // magenta - unclaimed
+                                                       // by any other viewport hue
 QColor danger()       { return QColor("#e0564a"); }   // invalid input, failures
 QColor focusRing()    { return QColor("#ffca4a"); }   // amber - distinct from
                                                        // accent(), which already
