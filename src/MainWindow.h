@@ -116,4 +116,5 @@ private:
     class ViewportOverlay* myOverlay = nullptr;
     class QLabel* myStateLabel = nullptr;
     class ItemsPanel* myItemsPanel = nullptr;
+    class ShortcutSheet* myShortcutSheet = nullptr;
 };

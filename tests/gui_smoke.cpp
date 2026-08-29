@@ -22,6 +22,7 @@
 #include "OcctViewWidget.h"
 #include "SketchController.h"
 #include "AxisGizmo.h"
+#include "ShortcutSheet.h"
 #include "Theme.h"
 #include "ToolChip.h"
 #include "ToolCluster.h"
@@ -31,6 +32,7 @@
 #include <QApplication>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QMouseEvent>
 #include <QPointF>
@@ -714,6 +716,35 @@ int main(int argc, char* argv[])
             settle(100);
             check(window.progress().count("extrude.completed") == 0,
                   "Show tips again clears the progress store");
+        }
+    }
+
+    // --- the shortcut sheet lists every real binding --------------------------
+    {
+        QAction* open = action(window, QStringLiteral("Keyboard Shortcuts"));
+        check(open != nullptr, "the shortcut sheet has an action to open it");
+        if (open) {
+            open->trigger();
+            settle(150);
+            ShortcutSheet* sheet = window.findChild<ShortcutSheet*>();
+            check(sheet != nullptr && sheet->isVisible(), "triggering it shows the sheet");
+
+            // Generated, not hand written: every action carrying a shortcut must
+            // appear, so the sheet cannot go stale when a binding is added.
+            int expected = 0;
+            for (QAction* candidate : window.findChildren<QAction*>()) {
+                if (!candidate->shortcut().isEmpty()) ++expected;
+            }
+            check(sheet != nullptr && sheet->rowCount() == expected,
+                  QStringLiteral("the sheet lists all %1 bound actions (got %2)")
+                      .arg(expected)
+                      .arg(sheet ? sheet->rowCount() : -1));
+            check(expected > 5, "there are enough bound actions for this to mean something");
+
+            QKeyEvent escape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+            QCoreApplication::sendEvent(sheet, &escape);
+            settle(150);
+            check(sheet != nullptr && !sheet->isVisible(), "Escape closes the sheet");
         }
     }
 

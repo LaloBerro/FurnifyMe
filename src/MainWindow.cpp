@@ -7,6 +7,7 @@
 #include "AxisGizmo.h"
 #include "IconSet.h"
 #include "ItemsPanel.h"
+#include "ShortcutSheet.h"
 #include "Theme.h"
 #include "ToolChip.h"
 #include "ToolCluster.h"
@@ -57,6 +58,9 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     buildActions();
     buildMenus();
     buildOverlay();
+
+    myShortcutSheet = new ShortcutSheet(this);
+    connect(myShortcutsAction, &QAction::triggered, myShortcutSheet, &ShortcutSheet::showSheet);
 
     connect(this, &MainWindow::documentChanged, myItemsPanel, &ItemsPanel::refresh);
 
