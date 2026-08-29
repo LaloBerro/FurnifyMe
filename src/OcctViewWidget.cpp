@@ -71,7 +71,14 @@ Quantity_Color toOcctColor(const QColor& c)
 // screen pixels - Graphic3d_AspectMarker3d/Prs3d_PointAspect's own documented
 // contract ("size does not depend on the zoom value of the views"), so a
 // marker never balloons up close or vanishes far away the way a fixed
-// millimetre size would. Same shape as
+// millimetre size would. That contract held up (confirmed: these markers
+// stay a constant pixel size as the camera moves). The scale argument does
+// grow the rendered size, but not proportionally at the low end: 2.2
+// against the ordinary dots' 1.5 measured pixel-for-pixel identical in this
+// build, so the first-point ring below leans on a much larger jump (4.0)
+// AND a different colour rather than trusting a small scale delta alone -
+// colour is the one difference here that cannot silently fail to render,
+// unlike fill and, it turns out, a modest scale bump. Same shape as
 // DimensionRenderer's DimensionLines: a bespoke AIS_InteractiveObject that
 // only implements Compute() and a no-op ComputeSelection(), because the
 // primitive it draws (Graphic3d_ArrayOfPoints via a Graphic3d_Group) needs
@@ -336,12 +343,15 @@ void OcctViewWidget::setSketchPointMarkers(const std::vector<gp_Pnt>& points)
     clearSketchPointMarkers();
     if (points.empty()) return;
 
-    // Aspect_TOM_BALL is a small filled, shaded circle - a real "dot" for
-    // every placed point. Aspect_TOM_POINT was tried first and is described
-    // as OCCT's smallest displayable dot, but it drew nothing at all in this
-    // build; a snapshot caught that before it shipped (see this class's own
-    // comment on Graphic3d_ArrayOfTriangles for the earlier instance of the
-    // same lesson).
+    // Aspect_TOM_POINT was tried first for the ordinary dots and is
+    // documented as OCCT's smallest displayable dot, but it drew nothing at
+    // all in this build - a snapshot caught that before it shipped (see
+    // this class's own comment on Graphic3d_ArrayOfTriangles for the
+    // earlier instance of the same lesson). Aspect_TOM_BALL, tried next,
+    // does draw - but pixel-sampled, it turned out to be a small HOLLOW
+    // ring rather than the filled disc its name and doc suggest, in this
+    // build. It still reads clearly as "a small marker at this point",
+    // which is what matters here.
     for (const gp_Pnt& p : points) {
         Handle(SketchPointMarker) dot =
             makeMarker(p, Aspect_TOM_BALL, toOcctColor(Theme::sketchPointMarker()), 1.5);
@@ -350,9 +360,19 @@ void OcctViewWidget::setSketchPointMarkers(const std::vector<gp_Pnt>& points)
     }
 
     // The first point additionally gets a ring around its dot - "a ring, or
-    // a larger dot" - because clicking it back is what closes the outline.
+    // a larger dot" - because clicking it back is what closes the outline,
+    // and that has to be visibly true, not just structurally true: a first
+    // pass used the same colour as the ordinary dots and only a modest
+    // scale bump (2.2 against 1.5), and pixel-sampling the two side by side
+    // showed IDENTICAL marker geometry - whatever this driver does with the
+    // scale argument at these small deltas, it was not visible. Scale 4.0
+    // against 1.5 does clear that threshold (confirmed by the same
+    // pixel-sampling, and it is dramatically bigger - see the crop
+    // comparison in the branch's report), but Theme::focusRing() (amber, a
+    // hue no other placed-point marker or the cursor dot carries) is the
+    // difference this does not have to hope survives a rendering quirk.
     Handle(SketchPointMarker) ring =
-        makeMarker(points.front(), Aspect_TOM_RING1, toOcctColor(Theme::sketchPointMarker()), 2.2);
+        makeMarker(points.front(), Aspect_TOM_RING1, toOcctColor(Theme::focusRing()), 4.0);
     myContext->Display(ring, 0, -1, Standard_False);
     myFirstPointMarker = ring;
 
