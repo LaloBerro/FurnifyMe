@@ -70,7 +70,7 @@ MainWindow::MainWindow(QWidget* parent)
 
     setWindowTitle(tr("FurnifyMe"));
     resize(1280, 800);
-    statusBar()->showMessage(tr("RMB drag orbits, MMB drag pans, wheel zooms."));
+    statusBar()->showMessage(tr("Right-drag to orbit, middle-drag to pan, wheel to zoom"));
 }
 
 void MainWindow::buildActions()
@@ -310,23 +310,31 @@ void MainWindow::updateStateLabel()
 
     QString state;
     if (mySketching) {
-        state = mySketch.canClose()
-                    ? tr("Sketching - %1 points - Enter or click the start point to close")
-                          .arg(mySketch.pointCount())
-                    : tr("Sketching - %1 of 3 points needed").arg(mySketch.pointCount());
+        const int placed = static_cast<int>(mySketch.pointCount());
+        if (mySketch.canClose()) {
+            state = tr("Sketching — %1 points. Enter or click the first point to close.")
+                        .arg(placed);
+        } else {
+            const int needed = 3 - placed;
+            state = needed == 1
+                        ? tr("Sketching — %1 points, 1 more to close").arg(placed)
+                        : tr("Sketching — %1 points, %2 more to close").arg(placed).arg(needed);
+        }
     } else if (!myPendingFace.IsNull()) {
-        state = tr("Face ready - press E to extrude");
+        state = tr("Face ready — press E to extrude");
     } else {
         const std::size_t selected = myView->selectedSolidIds().size();
-        const std::size_t solids = myDocument.count();
+        const std::size_t bodies = myDocument.count();
         if (selected == 2) {
-            state = tr("2 solids selected - Fuse / Cut / Intersect available");
+            state = tr("2 bodies selected — Union, Subtract and Intersect available");
         } else if (selected == 1) {
-            state = tr("1 solid selected - shift-click a second one for a boolean");
-        } else if (solids == 0) {
-            state = tr("Empty - start a sketch (Ctrl+K)");
+            state = tr("1 body selected — shift-click another for a boolean");
+        } else if (bodies == 0) {
+            state = tr("Nothing yet — press Ctrl+K to draw an outline");
+        } else if (bodies == 1) {
+            state = tr("1 body — click it to select");
         } else {
-            state = tr("%1 solid(s) - click one to select").arg(solids);
+            state = tr("%1 bodies — click one to select").arg(bodies);
         }
     }
     myStateLabel->setText(state);
@@ -345,6 +353,9 @@ void MainWindow::onDeleteSelected()
     const std::vector<int> ids = myView->selectedSolidIds();
     if (ids.empty()) return;
 
+    const std::string deletedName = ids.size() == 1 ? myDocument.nameOf(ids.front())
+                                                    : std::string();
+
     myDocument.checkpoint();
     myView->clearSelection();
     for (int id : ids) {
@@ -354,7 +365,9 @@ void MainWindow::onDeleteSelected()
 
     updateActions();
     emit documentChanged();
-    statusBar()->showMessage(tr("Deleted %1 solid(s).").arg(ids.size()));
+    statusBar()->showMessage(
+        ids.size() == 1 ? tr("Deleted %1").arg(QString::fromStdString(deletedName))
+                        : tr("Deleted %1 bodies").arg(ids.size()));
 }
 
 void MainWindow::onUndo()
@@ -365,7 +378,9 @@ void MainWindow::onUndo()
     resyncView();
     updateActions();
     emit documentChanged();
-    statusBar()->showMessage(tr("Undone. %1 solid(s) in the document.").arg(myDocument.count()));
+    statusBar()->showMessage(myDocument.count() == 1
+                                 ? tr("Undone — 1 body in the document")
+                                 : tr("Undone — %1 bodies in the document").arg(myDocument.count()));
 }
 
 void MainWindow::onRedo()
@@ -376,14 +391,17 @@ void MainWindow::onRedo()
     resyncView();
     updateActions();
     emit documentChanged();
-    statusBar()->showMessage(tr("Redone. %1 solid(s) in the document.").arg(myDocument.count()));
+    statusBar()->showMessage(myDocument.count() == 1
+                                 ? tr("Redone — 1 body in the document")
+                                 : tr("Redone — %1 bodies in the document").arg(myDocument.count()));
 }
 
 void MainWindow::onSnapToggled(bool enabled)
 {
     myView->setSnap(enabled, 10.0);
-    statusBar()->showMessage(enabled ? tr("Snapping to the 10mm grid.")
-                                     : tr("Snapping off - points land exactly where you click."));
+    statusBar()->showMessage(enabled
+                                 ? tr("Snapping to the 10 mm grid")
+                                 : tr("Snapping off — points land exactly where you click"));
 }
 
 void MainWindow::onSketchCursorMoved(const gp_Pnt& point)
@@ -391,10 +409,9 @@ void MainWindow::onSketchCursorMoved(const gp_Pnt& point)
     if (!mySketching) return;
 
     myView->setPreview(mySketch.previewShapeWithCursor(point));
-    statusBar()->showMessage(tr("Cursor: (%1, %2, %3)")
-                                 .arg(point.X(), 0, 'f', 1)
-                                 .arg(point.Y(), 0, 'f', 1)
-                                 .arg(point.Z(), 0, 'f', 1));
+    statusBar()->showMessage(tr("Cursor at %1, %2")
+                                 .arg(QString::fromStdString(Measure::formatLength(point.X())),
+                                      QString::fromStdString(Measure::formatLength(point.Y()))));
 }
 
 void MainWindow::onStartSketch()
@@ -407,8 +424,8 @@ void MainWindow::onStartSketch()
     myView->setSketchMode(true, mySketch.plane());
     myView->setPreview(TopoDS_Shape());
     updateActions();
-    statusBar()->showMessage(tr("Sketch mode: click points on the XY plane. "
-                                "Enter closes the wire, Backspace undoes, Esc cancels."));
+    statusBar()->showMessage(tr("Click points on the ground to draw an outline. "
+                                "Enter closes it, Backspace undoes a point, Esc cancels."));
 }
 
 void MainWindow::onSketchPointPicked(const gp_Pnt& point)
@@ -424,11 +441,10 @@ void MainWindow::onSketchPointPicked(const gp_Pnt& point)
     mySketch.addPoint(point);
     myView->setPreview(mySketch.previewShape());
     updateActions();
-    statusBar()->showMessage(tr("%1 point(s). Last: (%2, %3, %4)")
-                                 .arg(mySketch.pointCount())
-                                 .arg(point.X(), 0, 'f', 2)
-                                 .arg(point.Y(), 0, 'f', 2)
-                                 .arg(point.Z(), 0, 'f', 2));
+    statusBar()->showMessage(
+        mySketch.pointCount() == 1
+            ? tr("1 point placed")
+            : tr("%1 points placed").arg(mySketch.pointCount()));
 }
 
 void MainWindow::onUndoSketchPoint()
@@ -446,7 +462,7 @@ void MainWindow::onCancelSketch()
     myView->setSketchMode(false, mySketch.plane());
     myView->clearPreview();
     updateActions();
-    statusBar()->showMessage(tr("Sketch cancelled."));
+    statusBar()->showMessage(tr("Sketch cancelled"));
 }
 
 void MainWindow::onFinishSketch()
@@ -465,7 +481,7 @@ void MainWindow::onFinishSketch()
     myView->setSketchMode(false, mySketch.plane());
     myView->setPreview(face, /*shaded=*/true);
     updateActions();
-    statusBar()->showMessage(tr("Face closed. Extrude (E) to make it a solid."));
+    statusBar()->showMessage(tr("Outline closed — press E to extrude it into a body"));
 }
 
 void MainWindow::onExtrude()
@@ -598,8 +614,10 @@ void MainWindow::onExportStep()
                               QString::fromStdString(result.error));
         return;
     }
-    statusBar()->showMessage(tr("Exported %1 solid(s) to %2")
-                                 .arg(myDocument.count()).arg(path));
+    statusBar()->showMessage(myDocument.count() == 1
+                                 ? tr("Exported 1 body to %1").arg(path)
+                                 : tr("Exported %1 bodies to %2")
+                                       .arg(myDocument.count()).arg(path));
 }
 
 void MainWindow::onSelectionModeChanged()
@@ -607,8 +625,8 @@ void MainWindow::onSelectionModeChanged()
     myView->setSelectionMode(myFaceSelectAction->isChecked() ? OcctViewWidget::SelectionMode::Face
                                                              : OcctViewWidget::SelectionMode::Solid);
     statusBar()->showMessage(myFaceSelectAction->isChecked()
-                                 ? tr("Face selection: hover highlights faces.")
-                                 : tr("Solid selection: pick whole solids for booleans."));
+                                 ? tr("Face selection — hovering highlights one face at a time")
+                                 : tr("Body selection — click whole bodies for booleans"));
 }
 
 void MainWindow::onSelectionChanged()
@@ -616,7 +634,7 @@ void MainWindow::onSelectionChanged()
     updateActions();
 
     const std::size_t count = myView->selectedSolidIds().size();
-    statusBar()->showMessage(count == 0
-                                 ? tr("Nothing selected.")
-                                 : tr("%1 solid(s) selected.").arg(count));
+    statusBar()->showMessage(count == 0   ? tr("Nothing selected")
+                             : count == 1 ? tr("1 body selected")
+                                          : tr("%1 bodies selected").arg(count));
 }

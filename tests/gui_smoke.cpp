@@ -31,6 +31,7 @@
 #include <QApplication>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QLabel>
 #include <QMouseEvent>
 #include <QPointF>
 #include <QStatusBar>
@@ -645,6 +646,18 @@ int main(int argc, char* argv[])
               QStringLiteral("no action uses a banned word (%1)")
                   .arg(offenders.isEmpty() ? QStringLiteral("none")
                                            : offenders.join(QStringLiteral(", "))));
+
+        // The state label is the app's most-updated string; it must obey the
+        // vocabulary too. It is a permanent widget on the status bar.
+        QString stateText;
+        for (QLabel* label : window.statusBar()->findChildren<QLabel*>()) {
+            if (!label->text().isEmpty()) stateText = label->text();
+        }
+        check(!stateText.contains(QStringLiteral("solid")) &&
+              !stateText.contains(QStringLiteral("Solid")),
+              QStringLiteral("the state label says body, not solid (\"%1\")").arg(stateText));
+        check(!stateText.contains(QStringLiteral("(s)")),
+              "the state label writes plurals out rather than using (s)");
 
         check(action(window, QStringLiteral("Union")) != nullptr, "the Union action exists");
         check(action(window, QStringLiteral("Subtract")) != nullptr, "the Subtract action exists");
