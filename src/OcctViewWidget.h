@@ -3,14 +3,18 @@
 // that Qt drags in.
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_InteractiveObject.hxx>
+#include <AIS_Manipulator.hxx>
+#include <AIS_ManipulatorMode.hxx>
 #include <AIS_Shape.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 #include <V3d_View.hxx>
 #include <V3d_Viewer.hxx>
+#include <gp_Ax2.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Trsf.hxx>
 
 #include "CameraController.h"
 #include "DimensionRenderer.h"
@@ -97,6 +101,50 @@ public:
     // the pull. While it is true this widget picks nothing on release - see
     // mouseReleaseEvent().
     bool pullDragActive() const { return myPullDragActive; }
+
+    // The transform gizmo. AIS_Manipulator is OCCT's own: it draws the three
+    // arrows, the three rings and the three scale cubes, and it owns the drag
+    // maths that turns a cursor position into a gp_Trsf. This widget wires it
+    // to Qt's mouse events and nothing more - which is exactly why it lives
+    // here and not in a widget of its own, the way PullArrow's value chip
+    // needed to (a field has to take a keystroke; a manipulator does not).
+    //
+    // Attaching is idempotent per body, because the predicate that drives it
+    // fires on every appStateChanged and a fresh manipulator on each of those
+    // would reset its position mid-gesture.
+    void attachManipulator(int solidId);
+    void detachManipulator();
+    bool hasManipulator() const { return !myManipulator.IsNull(); }
+    // The body it is attached to, or -1.
+    int manipulatorSolid() const { return myManipulatorSolid; }
+
+    // Where the manipulator is and how big it is, in world units. Exposed so a
+    // test can aim at the gizmo's OWN geometry - a hardcoded pixel is a probe
+    // that silently stops hitting what it meant to the moment the camera or
+    // the body moves.
+    bool manipulatorFrame(gp_Ax2& position, double& size) const;
+
+    // The manipulation mode hover detection has armed right now: 0 none,
+    // 1 Move along an axis, 2 Rotate, 3 Scale, 4 Move in a plane - the values
+    // of OCCT's own AIS_ManipulatorMode. A test hovers candidate points and
+    // reads this to find a handle, rather than guessing at the arrow lengths
+    // the API keeps to itself.
+    int manipulatorActiveMode() const;
+    // 0, 1 or 2 for the armed part's axis, or -1.
+    int manipulatorActiveAxis() const;
+    // True between the press that grabbed a manipulator part and the release
+    // that ends the gesture. While it is true this widget picks nothing on
+    // release - the same rule pullDragActive() carries, for the same reason.
+    bool gizmoDragActive() const { return myGizmoDragActive; }
+
+    // The local transformation sitting on a body's PRESENTATION right now.
+    // Outside an active gizmo drag it is the identity for every body, because
+    // the gizmo moves the presentation and puts it back before it reports -
+    // so this is how the "the viewport and the document must never disagree"
+    // invariant is asserted. A volume check cannot answer it: a body drawn
+    // 200 mm from where the document says it is has exactly the right volume.
+    // False for an unknown id.
+    bool solidPresentationTransform(int id, gp_Trsf& out) const;
 
     void setSelectionMode(SelectionMode mode);
     SelectionMode selectionMode() const { return mySelectionMode; }
@@ -260,6 +308,16 @@ signals:
     // that never moved - a click on the arrow, which is not a pull.
     void pullReleased(bool dragged);
 
+    // The end of a transform-gizmo drag. `delta` is the whole accumulated
+    // transform of the gesture, ALREADY SNAPPED when Snap to Grid is on -
+    // this widget owns the snap state, so snapping here keeps the rule in one
+    // place rather than handing a raw transform out and hoping the consumer
+    // remembers. An identity `delta` means the drag netted nothing and must be
+    // treated as a cancel; the presentation has already been put back either
+    // way, so a consumer that ignores this signal entirely still leaves the
+    // viewport agreeing with the document.
+    void gizmoReleased(int solidId, const gp_Trsf& delta);
+
 protected:
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
@@ -311,6 +369,17 @@ private:
     // comment on PullArrowLines in PullArrow.cpp for why the arrow must not
     // be an AIS-pickable object.
     bool pullArrowHit(const QPoint& point) const;
+    // Whether the context's LAST detection landed on the manipulator. The
+    // caller is responsible for the MoveTo that produced it, so the question
+    // and the answer belong to the same event.
+    bool detectedIsManipulator() const;
+    // Reads the accumulated transform, puts the PRESENTATION back to where the
+    // document says it should be, snaps, and emits gizmoReleased(). The
+    // presentation reset is unconditional and happens here rather than in the
+    // consumer: a bake can be refused, and a viewport still showing the
+    // dragged pose above a document that never changed is the one outcome
+    // this gesture must not be able to produce.
+    void endGizmoDrag();
     void applySelectionMode(const Handle(AIS_Shape)& shape);
     void applyCameraState();
     void stopCameraAnimation();
@@ -374,6 +443,19 @@ private:
     // emission, so a slot that changes the scene can skip its own viewer
     // update and let that function's redraw carry it - see showPullArrow().
     bool myApplyingCamera = false;
+
+    // The transform gizmo and the live drag on it. myGizmoDelta is the WHOLE
+    // transform from the press, not an increment: AIS_Manipulator recomputes
+    // it from the original pick on every move (Transform() sets the object's
+    // local transformation to `delta * startTrsf`), so the last one it handed
+    // back is the accumulated answer. myGizmoStartPosition is the manipulator's
+    // own frame at the press, and it is the pivot snapTransform() decomposes
+    // about - the rotation and the scale both leave it fixed.
+    Handle(AIS_Manipulator) myManipulator;
+    int myManipulatorSolid = -1;
+    bool myGizmoDragActive = false;
+    gp_Trsf myGizmoDelta;
+    gp_Ax2 myGizmoStartPosition;
 
     bool myPullDragActive = false;
     bool myPullDragMoved = false;

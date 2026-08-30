@@ -82,10 +82,12 @@
 #include <QString>
 
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepBndLib.hxx>
 #include <BRepGProp.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
+#include <Bnd_Box.hxx>
 #include <ElSLib.hxx>
 #include <TopAbs_Orientation.hxx>
 #include <GProp_GProps.hxx>
@@ -96,8 +98,13 @@
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Vertex.hxx>
+#include <gp_Ax1.hxx>
+#include <gp_Ax2.hxx>
+#include <gp_Dir.hxx>
 #include <gp_Pln.hxx>
+#include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
+#include <gp_XYZ.hxx>
 #include <GeomAbs_SurfaceType.hxx>
 
 #include <algorithm>
@@ -544,6 +551,13 @@ void checkFamilySurface(QWidget* widget, const QPoint& edgePoint, const QRect& i
 
 int main(int argc, char* argv[])
 {
+    // Unbuffered, deliberately. This suite drives a real GL window through a
+    // kernel that can abort the process, and stdout to a pipe or a file is
+    // block-buffered - so the last few kilobytes of a run that dies are simply
+    // lost, and the visible tail points at a check that passed long before the
+    // fault. A crash whose location you cannot read costs far more than the
+    // syscall per line this gives up.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
 #ifndef _WIN32
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) qputenv("QT_QPA_PLATFORM", "xcb");
 #endif
@@ -3829,6 +3843,688 @@ int main(int argc, char* argv[])
         view->clearSelection();
         view->animateTo(pullCameraBefore);   // animations are off: immediate
         settle(200);
+    }
+
+    // --- the transform gizmo: move, rotate and scale a whole body -------------
+    // Everything the gizmo is aimed at here is derived from AIS_Manipulator's
+    // OWN position and size, hovered until the widget reports which part the
+    // detection actually armed. A hardcoded pixel would be a probe that
+    // silently stops hitting what it meant to; guessing at the arrow lengths
+    // would be worse still, because AIS_Manipulator keeps them private and is
+    // free to change them.
+    {
+        trigger(window, QStringLiteral("Select Bodies"));
+        settle(150);
+        view->clearSelection();
+        settle(120);
+
+        QAction* snapAction = action(window, QStringLiteral("Snap to Grid"));
+        check(snapAction != nullptr, "there is a Snap to Grid action for the gizmo probes");
+        if (snapAction && !snapAction->isChecked()) { snapAction->trigger(); settle(120); }
+
+        // A fresh box of its own, so the rotation probe below can read an
+        // angle back out of axis-aligned extents. Every sub-probe undoes
+        // itself, which is what keeps it axis-aligned until then.
+        const int gizmoBodiesBefore = static_cast<int>(window.document().count());
+        check(buildBody(window, 0.30, 0.56, 0.52, 0.70, 40.0),
+              "a fresh body for the transform gizmo");
+        check(static_cast<int>(window.document().count()) == gizmoBodiesBefore + 1,
+              "and it reached the document");
+        const int gizmoId = window.document().solids().empty()
+                                ? -1
+                                : window.document().solids().back().id;
+        view->fitAll();
+        settle(250);
+
+        auto gizmoShape = [&window, gizmoId] { return window.document().shapeOf(gizmoId); };
+        auto gizmoVolume = [&] { return ModelingOps::volume(gizmoShape()); };
+        auto gizmoCentre = [&] {
+            GProp_GProps props;
+            BRepGProp::VolumeProperties(gizmoShape(), props);
+            return props.CentreOfMass();
+        };
+        // The invariant the whole gesture is built around: outside an active
+        // drag the body's PRESENTATION carries no transformation of its own,
+        // so what is on screen IS what the document holds. A gizmo drag moves
+        // the presentation and nothing else until it commits, and a volume or
+        // centre-of-mass check reads the document and so cannot see a
+        // viewport that stayed behind - this can.
+        auto presentationIsClean = [&] {
+            gp_Trsf local;
+            if (!view->solidPresentationTransform(gizmoId, local)) return false;
+            return ModelingOps::isIdentityTransform(local, 1.0e-6, 1.0e-4);
+        };
+        auto gizmoExtents = [&] {
+            Bnd_Box box;
+            BRepBndLib::Add(gizmoShape(), box);
+            Standard_Real x0, y0, z0, x1, y1, z1;
+            box.Get(x0, y0, z0, x1, y1, z1);
+            return gp_XYZ(x1 - x0, y1 - y0, z1 - z0);
+        };
+
+        // --- the predicate: exactly one body, in body mode -----------------
+        check(!view->hasManipulator(),
+              "nothing selected, no gizmo");
+        view->setSelectedSolids({gizmoId});
+        settle(200);
+        check(view->hasManipulator(),
+              "selecting exactly one body raises the transform gizmo");
+        check(view->manipulatorSolid() == gizmoId,
+              "and it stands on that body, not another");
+        check(window.canTransformSelectedBody(),
+              "the window's own predicate agrees");
+        // It lives outside the document, so it must never be counted as one of
+        // its bodies - the suite's body-count checks would notice, and so
+        // would every boolean.
+        check(view->selectedSolidIds().size() == 1,
+              "the gizmo is not itself pickable as a body");
+        check(static_cast<int>(window.document().count()) == gizmoBodiesBefore + 1,
+              "and it added nothing to the document");
+
+        if (window.document().count() >= 2) {
+            const int otherId = window.document().solids().front().id;
+            view->setSelectedSolids({otherId, gizmoId});
+            settle(200);
+            check(!view->hasManipulator(),
+                  "two bodies selected retires it - there is no one body to transform");
+            view->setSelectedSolids({gizmoId});
+            settle(200);
+            check(view->hasManipulator(), "and one body brings it back");
+        }
+
+        trigger(window, QStringLiteral("Select Faces"));
+        settle(200);
+        check(!view->hasManipulator(),
+              "face selection retires it, so it can never fight the pull arrow");
+        trigger(window, QStringLiteral("Select Bodies"));
+        view->setSelectedSolids({gizmoId});
+        settle(200);
+        check(view->hasManipulator(), "back in body selection it returns");
+
+        trigger(window, QStringLiteral("Start Sketch"));
+        settle(200);
+        check(!view->hasManipulator(), "starting a sketch retires it");
+        trigger(window, QStringLiteral("Cancel Sketch"));
+        view->setSelectedSolids({gizmoId});
+        settle(200);
+        check(view->hasManipulator(), "cancelling the sketch brings it back");
+
+        // A hover with no settle: MoveTo runs inside the handler, so the
+        // armed mode is readable the moment the event has been delivered, and
+        // a search that walked ~60 candidates through settle() would cost
+        // most of a minute for nothing.
+        auto hover = [view](const QPoint& at) {
+            const QPointF p(at);
+            QMouseEvent move(QEvent::MouseMove, p, view->mapToGlobal(p),
+                             Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+            QCoreApplication::sendEvent(view, &move);
+        };
+
+        // Walks out from the gizmo's centre along `along`, in fractions of its
+        // own size, and stops at the first point whose hover arms `wantMode`
+        // (1 Move along an axis, 2 Rotate, 3 Scale) on `wantAxis` (-1 for any).
+        // Returning true IS the pick assertion this block's drags depend on: a
+        // drag that starts where detection never found the manipulator is a
+        // drag on nothing, and would pass every "the body did not move" check
+        // for the wrong reason.
+        //
+        // The axis matters for the rings in particular. Detection answers in
+        // SCREEN pixels, so a camera that sees one ring nearly edge-on happily
+        // reports a different one under the pixel a world-space walk aimed at
+        // - and then the world point the walk found is not on the ring that
+        // armed, so a drag computed around it turns the body by nothing. That
+        // is exactly what a 100% display did to a probe written at 150%.
+        auto findHandle = [&](int wantMode, int wantAxis, const gp_Dir& along, QPoint& out,
+                              gp_Pnt& world) {
+            gp_Ax2 frame;
+            double size = 0.0;
+            if (!view->manipulatorFrame(frame, size)) return false;
+            for (int percent = 8; percent <= 140; percent += 2) {
+                const gp_Pnt candidate =
+                    frame.Location().Translated(gp_Vec(along) * (size * percent / 100.0));
+                QPoint at;
+                if (!view->projectToScreen(candidate, at)) continue;
+                if (!view->rect().adjusted(6, 6, -6, -6).contains(at)) continue;
+                hover(at);
+                if (view->manipulatorActiveMode() != wantMode) continue;
+                if (wantAxis >= 0 && view->manipulatorActiveAxis() != wantAxis) continue;
+                out = at;
+                world = candidate;
+                return true;
+            }
+            return false;
+        };
+
+        // Undo, but only for a gesture that actually committed. An unguarded
+        // Undo after a drag that netted nothing rewinds a checkpoint some
+        // EARLIER probe took - and enough of those in a row rewind past the
+        // body's own creation, at which point every later probe is reading a
+        // null shape. That is not a hypothetical: it crashed this suite
+        // outright (BRepGProp on a null shape throws, and an OCCT exception
+        // escaping a Qt handler terminates the process), turning one legible
+        // failing check into no output at all.
+        auto undoIfCommitted = [&](std::size_t depthBefore) {
+            if (window.document().undoDepth() > depthBefore) {
+                trigger(window, QStringLiteral("Undo"));
+                settle(250);
+            }
+            view->setSelectedSolids({gizmoId});
+            settle(200);
+        };
+
+        // Read first, assert second. The condition and the message are two
+        // arguments to the same call and C++ leaves their evaluation order
+        // unspecified, so a check() that both fills a value and formats it
+        // prints whatever the value was BEFORE the call - which is how the
+        // first version of this reported a healthy gizmo as "0 mm".
+        gp_Ax2 gizmoFrame;
+        double gizmoSize = 0.0;
+        const bool haveFrame = view->manipulatorFrame(gizmoFrame, gizmoSize);
+        check(haveFrame && gizmoSize > 0.0,
+              QStringLiteral("the gizmo reports its own frame and size (%1 mm)")
+                  .arg(gizmoSize));
+
+        // --- Snap on: the Z arrow moves the body by a whole grid step ------
+        {
+            QPoint handleAt;
+            gp_Pnt handleWorld;
+            const bool found =
+                findHandle(1, 2, gizmoFrame.Direction(), handleAt, handleWorld);
+            check(found,
+                  "hovering out along the gizmo's own Z axis finds the Move handle - "
+                  "detection armed it, so the drag below really starts on the gizmo");
+            check(!found || view->manipulatorActiveAxis() == 2,
+                  "and it is the Z arm, not another");
+
+            QPoint dragTo;
+            const bool haveTarget =
+                found &&
+                view->projectToScreen(handleWorld.Translated(gp_Vec(0.0, 0.0, 30.0)),
+                                      dragTo) &&
+                view->rect().contains(dragTo);
+            check(haveTarget, "a point 30 mm up the Z axis projects into the viewport");
+
+            if (haveTarget) {
+                const double volumeBefore = gizmoVolume();
+                const gp_Pnt centreBefore = gizmoCentre();
+                const std::size_t depthBefore = window.document().undoDepth();
+
+                dragButton(view, QPointF(handleAt), QPointF(dragTo), Qt::LeftButton);
+                settle(300);
+
+                const gp_Pnt centreAfter = gizmoCentre();
+                const double dz = centreAfter.Z() - centreBefore.Z();
+                check(std::fabs(dz - std::round(dz / 10.0) * 10.0) < 1.0e-6,
+                      QStringLiteral("with Snap on the body lands on a whole 10 mm step "
+                                     "(moved %1 mm)").arg(dz));
+                check(dz > 1.0,
+                      QStringLiteral("and it really moved, upward, rather than nowhere "
+                                     "(%1 mm)").arg(dz));
+                check(std::fabs(dz - 30.0) < 10.001,
+                      QStringLiteral("within one step of the 30 mm dragged (%1 mm)").arg(dz));
+                check(std::hypot(centreAfter.X() - centreBefore.X(),
+                                 centreAfter.Y() - centreBefore.Y()) < 1.0e-6,
+                      "the Z arrow moves along Z only - X and Y are untouched");
+                check(std::fabs(gizmoVolume() - volumeBefore) < 1.0e-6,
+                      "a move changes where a body is, never how big it is");
+                check(window.document().undoDepth() == depthBefore + 1,
+                      "it took exactly one undo checkpoint");
+
+                ToastHost* toasts = window.findChild<ToastHost*>();
+                check(toasts != nullptr && toasts->isShowing() &&
+                          toasts->toast() != nullptr && toasts->toast()->hasUndo(),
+                      "and reported it through a toast that offers Undo");
+                check(toasts != nullptr &&
+                          toasts->currentText().contains(QStringLiteral("moved")),
+                      QStringLiteral("which names the gesture (\"%1\")")
+                          .arg(toasts ? toasts->currentText() : QString()));
+
+                check(view->hasManipulator() && view->manipulatorSolid() == gizmoId,
+                      "the gizmo is still standing on the body it just moved");
+                check(presentationIsClean(),
+                      "and the body on screen IS the body in the document - the drag's "
+                      "transform was baked into the geometry, not left sitting on the "
+                      "presentation");
+
+                undoIfCommitted(depthBefore);
+                check(gizmoCentre().Distance(centreBefore) < 1.0e-6,
+                      "Undo puts the body back exactly where it was");
+                check(std::fabs(gizmoVolume() - volumeBefore) < 1.0e-6,
+                      "at exactly the size it was");
+                check(view->hasManipulator(),
+                      "and the gizmo comes back with the restored body's presentation");
+            }
+        }
+
+        // --- Snap off: the body lands where it was dragged, not on the grid -
+        {
+            if (snapAction && snapAction->isChecked()) { snapAction->trigger(); settle(150); }
+            check(snapAction != nullptr && !snapAction->isChecked(),
+                  "Snap to Grid is off for the free-move probe");
+
+            QPoint handleAt;
+            gp_Pnt handleWorld;
+            const bool found =
+                findHandle(1, 2, gizmoFrame.Direction(), handleAt, handleWorld);
+            check(found, "the Move handle is still findable with Snap off");
+
+            // 35 mm, deliberately: its nearest 10 mm neighbours are 5 mm away,
+            // so a result within a couple of millimetres of it cannot be
+            // mistaken for a snapped one - which is the whole point here.
+            QPoint dragTo;
+            const bool haveTarget =
+                found &&
+                view->projectToScreen(handleWorld.Translated(gp_Vec(0.0, 0.0, 35.0)),
+                                      dragTo) &&
+                view->rect().contains(dragTo);
+            check(haveTarget, "a point 35 mm up the Z axis projects into the viewport");
+
+            if (haveTarget) {
+                const gp_Pnt centreBefore = gizmoCentre();
+                const double volumeBefore = gizmoVolume();
+                const std::size_t depthBefore = window.document().undoDepth();
+                dragButton(view, QPointF(handleAt), QPointF(dragTo), Qt::LeftButton);
+                settle(300);
+
+                const double dz = gizmoCentre().Z() - centreBefore.Z();
+                check(std::fabs(dz - 35.0) < 2.0,
+                      QStringLiteral("with Snap off the body lands at the 35 mm dragged, "
+                                     "not at a grid step (%1 mm)").arg(dz));
+                check(std::fabs(dz - std::round(dz / 10.0) * 10.0) > 2.0,
+                      QStringLiteral("and that really is off the 10 mm grid (%1 mm from "
+                                     "the nearest step)")
+                          .arg(std::fabs(dz - std::round(dz / 10.0) * 10.0)));
+                check(std::fabs(gizmoVolume() - volumeBefore) < 1.0e-6,
+                      "still the same size");
+
+                undoIfCommitted(depthBefore);
+                check(gizmoCentre().Distance(centreBefore) < 1.0e-6,
+                      "and Undo puts that back too");
+            }
+            if (snapAction && !snapAction->isChecked()) { snapAction->trigger(); settle(150); }
+            check(snapAction != nullptr && snapAction->isChecked(),
+                  "Snap to Grid is back on for the probes that follow");
+        }
+
+        // --- the scale cube: volume by the cube of a 5% multiple -----------
+        {
+            QPoint handleAt;
+            gp_Pnt handleWorld;
+            const bool found =
+                findHandle(3, 0, gizmoFrame.XDirection(), handleAt, handleWorld);
+            check(found, "walking out along X finds the Scale handle past the arrow");
+
+            // Further out along the same axis: AIS_Manipulator reads a scale
+            // as the ratio of the cursor's distance from the gizmo centre to
+            // the handle's, so a target further out is a growth.
+            QPoint dragTo;
+            gp_Pnt scaleTarget;
+            bool haveTarget = false;
+            if (found) {
+                scaleTarget = gizmoFrame.Location().Translated(
+                    gp_Vec(gizmoFrame.Location(), handleWorld) * 1.30);
+                haveTarget = view->projectToScreen(scaleTarget, dragTo) &&
+                             view->rect().contains(dragTo);
+            }
+            check(haveTarget, "and a point 30% further out projects into the viewport");
+
+            if (haveTarget) {
+                const double volumeBefore = gizmoVolume();
+                const gp_XYZ extentsBefore = gizmoExtents();
+                const std::size_t depthBefore = window.document().undoDepth();
+                dragButton(view, QPointF(handleAt), QPointF(dragTo), Qt::LeftButton);
+                settle(300);
+
+                const double ratio = gizmoVolume() / std::max(1.0e-9, volumeBefore);
+                const double factor = std::cbrt(ratio);
+                check(factor > 1.02,
+                      QStringLiteral("dragging the scale cube outward grows the body "
+                                     "(x%1 on each side)").arg(factor));
+                check(std::fabs(factor - std::round(factor / 0.05) * 0.05) < 1.0e-4,
+                      QStringLiteral("by exactly a 5 per cent multiple with Snap on (x%1)")
+                          .arg(factor));
+                const gp_XYZ extentsAfter = gizmoExtents();
+                check(std::fabs(extentsAfter.X() / extentsBefore.X() - factor) < 1.0e-4 &&
+                          std::fabs(extentsAfter.Z() / extentsBefore.Z() - factor) < 1.0e-4,
+                      QStringLiteral("and it is a UNIFORM scale - every extent by the "
+                                     "same factor (%1, %2)")
+                          .arg(extentsAfter.X() / extentsBefore.X())
+                          .arg(extentsAfter.Z() / extentsBefore.Z()));
+
+                ToastHost* toasts = window.findChild<ToastHost*>();
+                check(toasts != nullptr &&
+                          toasts->currentText().contains(QStringLiteral("scaled")),
+                      QStringLiteral("the toast names this one Scale (\"%1\")")
+                          .arg(toasts ? toasts->currentText() : QString()));
+
+                undoIfCommitted(depthBefore);
+                check(std::fabs(gizmoVolume() - volumeBefore) < 1.0e-6,
+                      "and Undo restores the body's size exactly");
+            }
+        }
+
+        // --- the rotation ring: extents consistent with a snapped angle ----
+        {
+            // Out along the bisector of X and Y - a direction the arrows and
+            // the scale cubes do not lie along, so a walk out there meets a
+            // ring first. WHICH ring is not something the probe gets to
+            // assume: detection answers in screen pixels, and a camera that
+            // sees one ring nearly edge-on will happily report a different
+            // one under the same pixel. Demanding the Z ring is how the first
+            // version of this failed at a display scale it was not written on
+            // - so the probe reads the ring the widget says it armed and
+            // measures against THAT axis instead.
+            const gp_Vec bisector =
+                (gp_Vec(gizmoFrame.XDirection()) + gp_Vec(gizmoFrame.YDirection()))
+                    .Normalized();
+            const gp_Vec antiBisector =
+                (gp_Vec(gizmoFrame.XDirection()) - gp_Vec(gizmoFrame.YDirection()))
+                    .Normalized();
+            // Every direction tried lies IN the XY plane, which is the Z
+            // ring's own plane - so wherever the walk stops with the Z ring
+            // armed, the world point really is ON that ring, and the drag
+            // computed around it is a drag around the thing that armed.
+            // Demanding the Z ring rather than accepting whichever one
+            // answered is the whole point: a 100% display reported the Y ring
+            // under a pixel a 150% one gave to the Z ring, the walk's world
+            // point was nowhere near the Y ring, and the drag turned the body
+            // by nothing at all. Eight directions because which arc of the
+            // ring is on screen and unoccluded is the camera's business.
+            const gp_Vec inPlane[] = {bisector,          bisector.Reversed(),
+                                      antiBisector,      antiBisector.Reversed(),
+                                      gp_Vec(gizmoFrame.XDirection()),
+                                      gp_Vec(gizmoFrame.XDirection()).Reversed(),
+                                      gp_Vec(gizmoFrame.YDirection()),
+                                      gp_Vec(gizmoFrame.YDirection()).Reversed()};
+            QPoint handleAt;
+            gp_Pnt handleWorld;
+            bool found = false;
+            for (const gp_Vec& direction : inPlane) {
+                if (found) break;
+                found = findHandle(2, 2, gp_Dir(direction), handleAt, handleWorld);
+            }
+            check(found, "walking the XY plane finds the Rotate ring about Z");
+            check(!found || view->manipulatorActiveAxis() == 2,
+                  "and it is the ring about Z, so the drag below turns about Z");
+
+            // The gizmo's frame RIGHT NOW - the undos above re-attached it, and
+            // Attach re-derives its position from the body's bounding box.
+            gp_Ax2 ringFrame;
+            double ringSize = 0.0;
+            const bool haveRingFrame = view->manipulatorFrame(ringFrame, ringSize);
+            const gp_Dir ringDir =
+                haveRingFrame ? ringFrame.Direction() : gp_Dir(0.0, 0.0, 1.0);
+
+            // 30 degrees around that ring, in world space, then projected.
+            QPoint dragTo;
+            bool haveTarget = false;
+            if (found && haveRingFrame) {
+                gp_Trsf spin;
+                spin.SetRotation(gp_Ax1(ringFrame.Location(), ringDir),
+                                 30.0 * 3.14159265358979323846 / 180.0);
+                haveTarget = view->projectToScreen(handleWorld.Transformed(spin), dragTo) &&
+                             view->rect().contains(dragTo);
+            }
+            check(haveTarget, "and a point 30 degrees round it projects inside the viewport");
+
+            if (haveTarget) {
+                const double volumeBefore = gizmoVolume();
+                const TopoDS_Shape shapeBefore = gizmoShape();
+                const gp_XYZ before = gizmoExtents();
+                const std::size_t depthBefore = window.document().undoDepth();
+                dragButton(view, QPointF(handleAt), QPointF(dragTo), Qt::LeftButton);
+                settle(300);
+
+                check(std::fabs(gizmoVolume() - volumeBefore) < volumeBefore * 1.0e-6,
+                      "a rotation changes which way a body faces, never its volume");
+
+                // The oracle is the geometry itself, not a closed form for a
+                // box's footprint: a sketched quad is NOT a box. The four
+                // clicks are screen-space corners of a rectangle, and a
+                // perspective camera unprojects those onto the ground as a
+                // trapezoid - so dx.cos a + dy.sin a describes a shape this
+                // body is not, and the first version of this check duly
+                // failed against a perfectly correct 30 degree turn. Turning
+                // the PRE-drag shape through each candidate step and comparing
+                // extents makes no assumption about its footprint at all.
+                // Extents are invariant to where the rotation is centred, so
+                // the pivot does not have to be reproduced here.
+                const gp_XYZ after = gizmoExtents();
+                check(std::fabs(after.X() - before.X()) + std::fabs(after.Y() - before.Y()) +
+                              std::fabs(after.Z() - before.Z()) > 1.0,
+                      QStringLiteral("the body really turned (%1 x %2 x %3 became "
+                                     "%4 x %5 x %6)")
+                          .arg(before.X()).arg(before.Y()).arg(before.Z())
+                          .arg(after.X()).arg(after.Y()).arg(after.Z()));
+                int matchedStep = 0;
+                for (int step = -5; step <= 5 && matchedStep == 0; ++step) {
+                    if (step == 0) continue;
+                    gp_Trsf spin;
+                    spin.SetRotation(gp_Ax1(gp_Pnt(0.0, 0.0, 0.0), ringDir),
+                                     step * 15.0 * 3.14159265358979323846 / 180.0);
+                    const ModelingOps::BooleanResult turned =
+                        ModelingOps::transformShape(shapeBefore, spin);
+                    if (!turned.ok) continue;
+                    Bnd_Box probe;
+                    BRepBndLib::Add(turned.shape, probe);
+                    Standard_Real px0, py0, pz0, px1, py1, pz1;
+                    probe.Get(px0, py0, pz0, px1, py1, pz1);
+                    if (std::fabs((px1 - px0) - after.X()) < 1.0 &&
+                        std::fabs((py1 - py0) - after.Y()) < 1.0 &&
+                        std::fabs((pz1 - pz0) - after.Z()) < 1.0) {
+                        matchedStep = step;
+                    }
+                }
+                check(matchedStep != 0,
+                      QStringLiteral("and its extents are exactly those of the same body "
+                                     "turned a whole 15 degree step about the ring's own "
+                                     "axis (%1 deg; %2 x %3 became %4 x %5)")
+                          .arg(matchedStep * 15).arg(before.X()).arg(before.Y())
+                          .arg(after.X()).arg(after.Y()));
+
+                ToastHost* toasts = window.findChild<ToastHost*>();
+                check(toasts != nullptr &&
+                          toasts->currentText().contains(QStringLiteral("rotated")),
+                      QStringLiteral("the toast names this one Rotate (\"%1\")")
+                          .arg(toasts ? toasts->currentText() : QString()));
+
+                undoIfCommitted(depthBefore);
+                const gp_XYZ restored = gizmoExtents();
+                check(std::fabs(restored.X() - before.X()) < 1.0e-6 &&
+                          std::fabs(restored.Y() - before.Y()) < 1.0e-6 &&
+                          std::fabs(restored.Z() - before.Z()) < 1.0e-6,
+                      "and Undo turns it back exactly");
+            }
+        }
+
+        // --- a drag that nets nothing is a cancel, not an edit --------------
+        {
+            QPoint handleAt;
+            gp_Pnt handleWorld;
+            const bool found =
+                findHandle(1, 2, gizmoFrame.Direction(), handleAt, handleWorld);
+            check(found, "the Move handle is findable for the no-op probe");
+
+            if (found) {
+                const std::size_t depthBefore = window.document().undoDepth();
+                const int revisionBefore = window.document().revision();
+                const gp_Pnt centreBefore = gizmoCentre();
+                ToastHost* toasts = window.findChild<ToastHost*>();
+                if (toasts) { toasts->documentMovedTo(window.document().revision() + 1); settle(150); }
+
+                // Press, move away, and come back to exactly where it started
+                // before releasing. Not a bare press-and-release: that would
+                // pass against an implementation which simply never reads the
+                // transform, while this one has genuinely moved the
+                // presentation and has to notice it came home.
+                dragButton(view, QPointF(handleAt), QPointF(handleAt + QPoint(0, -60)),
+                           Qt::LeftButton, Qt::NoModifier);
+                settle(120);
+                dragButton(view, QPointF(handleAt), QPointF(handleAt), Qt::LeftButton);
+                settle(250);
+
+                check(window.document().undoDepth() == depthBefore + 1,
+                      "the first of those two drags did commit, so the probe is not "
+                      "vacuous");
+                undoIfCommitted(depthBefore);
+
+                const std::size_t depthNow = window.document().undoDepth();
+                const int revisionNow = window.document().revision();
+                if (toasts) { toasts->documentMovedTo(window.document().revision() + 1); settle(150); }
+                dragButton(view, QPointF(handleAt), QPointF(handleAt), Qt::LeftButton);
+                settle(250);
+                check(window.document().undoDepth() == depthNow,
+                      QStringLiteral("a drag that releases where it started takes no "
+                                     "checkpoint (%1 -> %2)")
+                          .arg(depthNow).arg(window.document().undoDepth()));
+                check(window.document().revision() == revisionNow,
+                      "and moves the document not at all");
+                check(toasts == nullptr || !toasts->isShowing(),
+                      "and says nothing");
+                check(gizmoCentre().Distance(centreBefore) < 1.0e-6,
+                      "leaving the body exactly where it was");
+                check(presentationIsClean(),
+                      "and the presentation back where the document says it is, rather "
+                      "than stuck at the pose the cancelled drag left it in");
+            }
+        }
+
+        // --- a scale nobody could have meant is refused, not clamped -------
+        // The kernel only refuses a factor <= 0: it will happily build a body
+        // a billionth of its size, which is a body the user has lost rather
+        // than an edit they can see. This band is MainWindow's, so it is
+        // asserted through MainWindow's own commit path - the same one a drag
+        // reaches - rather than through a gesture that would have to be
+        // dragged implausibly far to get there.
+        {
+            const double volumeBefore = gizmoVolume();
+            const std::size_t depthBefore = window.document().undoDepth();
+            gp_Trsf absurd;
+            absurd.SetScale(gizmoCentre(), 50.0);
+            check(!window.transformBody(gizmoId, absurd),
+                  "a x50 scale is refused rather than baked");
+            check(std::fabs(gizmoVolume() - volumeBefore) < 1.0e-6,
+                  "and the body is left byte-for-byte as it was");
+            check(window.document().undoDepth() == depthBefore,
+                  "with no checkpoint taken for the change that never happened");
+
+            ToastHost* toasts = window.findChild<ToastHost*>();
+            check(toasts != nullptr && toasts->isShowing() &&
+                      toasts->currentText().contains(QStringLiteral("change of size")),
+                  QStringLiteral("reported as a failure in cause-and-fix form (\"%1\")")
+                      .arg(toasts ? toasts->currentText() : QString()));
+
+            gp_Trsf vanishing;
+            vanishing.SetScale(gizmoCentre(), 0.01);
+            check(!window.transformBody(gizmoId, vanishing),
+                  "and so is a shrink to a hundredth, at the other end of the band");
+            check(std::fabs(gizmoVolume() - volumeBefore) < 1.0e-6,
+                  "leaving the body alone that time too");
+            check(presentationIsClean(),
+                  "and a refused bake leaves the viewport agreeing with the document, "
+                  "never showing a pose that exists nowhere");
+
+            // Non-vacuity: a factor INSIDE the band still commits, so the two
+            // refusals above are the clamp doing its job rather than
+            // transformBody refusing everything.
+            gp_Trsf sensible;
+            sensible.SetScale(gizmoCentre(), 1.5);
+            check(window.transformBody(gizmoId, sensible),
+                  "while a x1.5 scale inside the band is baked as normal");
+            undoIfCommitted(depthBefore);
+            check(std::fabs(gizmoVolume() - volumeBefore) < 1.0e-6,
+                  "and undone again for the probes that follow");
+        }
+
+        // --- the gizmo must not fight the camera ---------------------------
+        {
+            QPoint handleAt;
+            gp_Pnt handleWorld;
+            const bool found =
+                findHandle(1, 2, gizmoFrame.Direction(), handleAt, handleWorld);
+            check(found, "the Move handle is findable for the camera probes");
+
+            const double azimuth = view->camera().state().azimuthDeg;
+            const gp_Pnt centreBefore = gizmoCentre();
+            if (found)
+                dragButton(view, QPointF(handleAt), QPointF(handleAt + QPoint(70, 0)),
+                           Qt::RightButton);
+            check(std::fabs(view->camera().state().azimuthDeg - azimuth) > 5.0,
+                  "an RMB drag starting on a gizmo handle still orbits the camera");
+            check(gizmoCentre().Distance(centreBefore) < 1.0e-6,
+                  "and moves the body not at all");
+
+            const gp_Pnt panTarget = view->camera().state().target;
+            QPoint again;
+            gp_Pnt againWorld;
+            if (findHandle(1, 2, gizmoFrame.Direction(), again, againWorld))
+                dragButton(view, QPointF(again), QPointF(again + QPoint(50, 30)),
+                           Qt::MiddleButton);
+            check(view->camera().state().target.Distance(panTarget) > 1.0,
+                  "and an MMB drag starting on it still pans");
+        }
+
+        // --- Step 5's evidence: the gizmo at the body ----------------------
+        {
+            view->setViewAxonometric();
+            settle(250);
+            view->setSelectedSolids({gizmoId});
+            settle(250);
+            check(view->hasManipulator(), "the gizmo is up for the capture");
+
+            const QImage shot =
+                printWindowCapture(&window, outDir + QStringLiteral("/transform-gizmo.png"));
+            check(!shot.isNull(), "the gizmo capture came back with pixels");
+            if (!shot.isNull()) {
+                gp_Ax2 frame;
+                double size = 0.0;
+                QPoint centreAt;
+                if (view->manipulatorFrame(frame, size) &&
+                    view->projectToScreen(frame.Location(), centreAt)) {
+                    // A box around the whole gizmo, sized from its own reach
+                    // rather than a pixel guess: the outermost ring sits about
+                    // one `size` from the centre, so project that and use it.
+                    QPoint tipAt;
+                    int reach = 160;
+                    if (view->projectToScreen(
+                            frame.Location().Translated(gp_Vec(frame.Direction()) * size),
+                            tipAt))
+                        reach = std::max(120, (tipAt - centreAt).manhattanLength() + 60);
+                    QRect focus(centreAt, QSize(1, 1));
+                    focus.adjust(-reach, -reach, reach, reach);
+                    focus.translate(view->mapTo(&window, QPoint(0, 0)));
+                    const double sx = double(shot.width()) / std::max(1, window.width());
+                    const double sy = double(shot.height()) / std::max(1, window.height());
+                    const QRect scaled(int(focus.left() * sx), int(focus.top() * sy),
+                                       int(focus.width() * sx), int(focus.height() * sy));
+                    const QImage crop = shot.copy(scaled.intersected(shot.rect()));
+                    if (!crop.isNull())
+                        crop.scaled(crop.width() * 3, crop.height() * 3,
+                                    Qt::KeepAspectRatio, Qt::SmoothTransformation)
+                            .save(outDir + QStringLiteral("/transform-gizmo-crop.png"));
+                }
+            }
+            view->saveSnapshot(outDir + QStringLiteral("/transform-gizmo-viewport.png"));
+        }
+
+        // The gizmo goes the moment its predicate stops holding.
+        view->clearSelection();
+        settle(200);
+        check(!view->hasManipulator(),
+              "clearing the selection retires the gizmo");
+        check(view->manipulatorSolid() == -1,
+              "and it lets go of the body it was standing on");
+
+        // Leave the document as this block found it, so every later probe's
+        // body counts still add up.
+        view->setSelectedSolids({gizmoId});
+        settle(150);
+        trigger(window, QStringLiteral("Delete Selected"));
+        settle(200);
+        check(static_cast<int>(window.document().count()) == gizmoBodiesBefore,
+              "the gizmo probe leaves the document as it found it");
+        view->clearSelection();
+        settle(150);
     }
 
     // --- the whole app reads in one unit --------------------------------------

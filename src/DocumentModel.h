@@ -57,6 +57,11 @@ public:
     static constexpr std::size_t kMaxHistory = 20;
 
     void checkpoint();
+    // How many checkpoints are on the undo stack. canUndo() answers "is there
+    // one at all", which cannot tell a gesture that took a checkpoint from one
+    // that did not when the stack was already non-empty - and "this drag
+    // netted nothing, so it must not have taken one" is exactly that question.
+    std::size_t undoDepth() const { return myUndo.size(); }
     bool canUndo() const { return !myUndo.empty(); }
     bool canRedo() const { return !myRedo.empty(); }
     bool undo();

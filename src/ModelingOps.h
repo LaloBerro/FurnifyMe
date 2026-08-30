@@ -97,6 +97,37 @@ BooleanResult chamferEdge(const TopoDS_Shape& body, const TopoDS_Edge& edge,
 // whose scale factor is <= 0.
 BooleanResult transformShape(const TopoDS_Shape& body, const gp_Trsf& trsf);
 
+// Round `delta` onto steps the user can predict, and hand back a rebuilt
+// transform - never a nudged copy of the original, because the three
+// components are not independent. `pivot` is the point `delta`'s rotation
+// and scale leave fixed (the transform gizmo's own position), and it is
+// what makes the decomposition well posed:
+//
+//   delta = Translate(t) . Scale(pivot, s) . Rotate(axis through pivot, a)
+//
+// so t is exactly `pivot.Transformed(delta) - pivot`, and snapping t on its
+// own is meaningful. Snapping gp_Trsf::TranslationPart() instead would be
+// wrong for anything but a pure translation: a rotation about a pivot away
+// from the origin carries a translation part of `pivot - R*pivot`, which is
+// a consequence of the rotation rather than a movement of its own.
+//
+// A step <= 0 leaves that component alone, so a caller can snap one thing
+// and not another. `rotationStepDeg` is in degrees for readability at the
+// call site; the angle itself is radians throughout. A scale that would
+// round to zero or below is pulled back up to one step - the kernel refuses
+// a factor <= 0, and so does every caller, but a snap must not be the thing
+// that creates the refusal.
+gp_Trsf snapTransform(const gp_Trsf& delta, const gp_Pnt& pivot,
+                      double translationStep, double rotationStepDeg,
+                      double scaleStep);
+
+// True when `trsf` moves nothing: no translation past `linearTolerance`, no
+// rotation past `angularToleranceDeg`, and a scale factor within
+// `linearTolerance` of one. The one definition of "this drag netted
+// nothing", so the gizmo's cancel path and any test asserting it agree.
+bool isIdentityTransform(const gp_Trsf& trsf, double linearTolerance = 1.0e-7,
+                         double angularToleranceDeg = 1.0e-5);
+
 // Must run before display or STL export, or curved faces render faceted / not at all.
 void tessellate(const TopoDS_Shape& shape, double linearDeflection = 0.1);
 

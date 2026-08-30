@@ -29,6 +29,7 @@
 #include <gp_Ax1.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Quaternion.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
 
@@ -398,6 +399,92 @@ int main()
         check(!transformShape(box, t).ok, "a zero scale factor is refused");
     }
     check(!transformShape(TopoDS_Shape(), gp_Trsf()).ok, "transform of a null body is refused");
+
+    // --- snapping a gizmo drag onto steps the user can predict --------------
+    // The transform gizmo's release path runs every drag through this before
+    // it is baked, so the arithmetic is proven here rather than inferred from
+    // a body that happened to land somewhere plausible.
+    std::printf("\n-- snapTransform --\n");
+    {
+        const gp_Pnt pivot(37.0, -11.0, 5.0);   // deliberately not the origin
+
+        gp_Trsf move;
+        move.SetTranslation(gp_Vec(23.0, -4.0, 71.0));
+        const gp_Trsf snapped = snapTransform(move, pivot, 10.0, 15.0, 0.05);
+        checkNear(snapped.TranslationPart().X(), 20.0, 1.0e-9, "23 mm snaps to 20");
+        checkNear(snapped.TranslationPart().Y(), 0.0, 1.0e-9, "-4 mm snaps to 0");
+        checkNear(snapped.TranslationPart().Z(), 70.0, 1.0e-9, "71 mm snaps to 70");
+        checkNear(snapped.ScaleFactor(), 1.0, 1.0e-9, "and a pure move stays scale 1");
+    }
+    {
+        // A rotation about a pivot away from the origin carries a translation
+        // part of its own (pivot - R.pivot). Snapping that part directly - the
+        // obvious wrong implementation - would drag the body off the axis it
+        // was turned about; snapTransform decomposes about the pivot instead,
+        // so the pivot must come back exactly where it started.
+        const gp_Pnt pivot(120.0, 80.0, 5.0);
+        gp_Trsf turn;
+        turn.SetRotation(gp_Ax1(pivot, gp_Dir(0.0, 0.0, 1.0)), 32.0 * kPi / 180.0);
+        const gp_Trsf snapped = snapTransform(turn, pivot, 10.0, 15.0, 0.05);
+        gp_Vec axis;
+        Standard_Real angle = 0.0;
+        snapped.GetRotation().GetVectorAndAngle(axis, angle);
+        checkNear(angle * 180.0 / kPi, 30.0, 1.0e-6, "32 degrees snaps to 30");
+        checkNear(pivot.Transformed(snapped).Distance(pivot), 0.0, 1.0e-9,
+                  "and the pivot the rotation turned about does not move");
+        checkNear(snapped.ScaleFactor(), 1.0, 1.0e-9, "a pure rotation stays scale 1");
+    }
+    {
+        const gp_Pnt pivot(50.0, 40.0, 5.0);
+        gp_Trsf grow;
+        grow.SetScale(pivot, 1.263);
+        const gp_Trsf snapped = snapTransform(grow, pivot, 10.0, 15.0, 0.05);
+        checkNear(snapped.ScaleFactor(), 1.25, 1.0e-9, "x1.263 snaps to x1.25");
+        checkNear(pivot.Transformed(snapped).Distance(pivot), 0.0, 1.0e-9,
+                  "and a scale leaves its own pivot where it is");
+    }
+    {
+        // A snap must never be what makes a transform illegal: the kernel
+        // refuses a factor <= 0, so a shrink that would round to nothing is
+        // held at one step instead of becoming a refusal nobody asked for.
+        const gp_Pnt origin(0.0, 0.0, 0.0);
+        gp_Trsf shrink;
+        shrink.SetScale(origin, 0.01);
+        const gp_Trsf snapped = snapTransform(shrink, origin, 10.0, 15.0, 0.05);
+        check(snapped.ScaleFactor() > 0.0,
+              "a shrink that would round to zero is held at one step, not made illegal");
+        check(transformShape(box, snapped).ok,
+              "so the kernel still accepts what the snap produced");
+    }
+    {
+        // Steps <= 0 leave their component alone, which is how Snap-off works.
+        gp_Trsf move;
+        move.SetTranslation(gp_Vec(23.0, -4.0, 71.0));
+        const gp_Trsf untouched = snapTransform(move, gp_Pnt(0.0, 0.0, 0.0), 0.0, 0.0, 0.0);
+        checkNear(untouched.TranslationPart().X(), 23.0, 1.0e-9,
+                  "a step of zero leaves the translation exactly as dragged");
+    }
+    {
+        check(isIdentityTransform(gp_Trsf()), "a default transform is the identity");
+        gp_Trsf nudge;
+        nudge.SetTranslation(gp_Vec(0.0, 0.0, 1.0));
+        check(!isIdentityTransform(nudge), "a 1 mm move is not");
+        gp_Trsf turn;
+        turn.SetRotation(gp_Ax1(gp_Pnt(9.0, 9.0, 0.0), gp_Dir(0.0, 0.0, 1.0)),
+                         1.0 * kPi / 180.0);
+        check(!isIdentityTransform(turn),
+              "nor is a one-degree turn about a pivot away from the origin");
+        gp_Trsf grow;
+        grow.SetScale(gp_Pnt(0.0, 0.0, 0.0), 1.05);
+        check(!isIdentityTransform(grow), "nor a 5% growth");
+        // The whole point of the cancel path: a drag snapped back to nothing
+        // has to read as identity, however far the cursor actually travelled.
+        gp_Trsf small;
+        small.SetTranslation(gp_Vec(3.0, -2.0, 1.0));
+        check(isIdentityTransform(snapTransform(small, gp_Pnt(0.0, 0.0, 0.0),
+                                                10.0, 15.0, 0.05)),
+              "a drag the 10 mm snap rounds away reads as no change at all");
+    }
 
     std::printf("\n%s (%d failure%s)\n",
                 g_failures == 0 ? "PASS" : "FAIL",

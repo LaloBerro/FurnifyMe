@@ -15,11 +15,14 @@
 #include <Graphic3d_AspectMarker3d.hxx>
 #include <Graphic3d_Camera.hxx>
 #include <Graphic3d_Group.hxx>
+#include <Graphic3d_MaterialAspect.hxx>
+#include <Graphic3d_NameOfMaterial.hxx>
 #include <Graphic3d_TransformPers.hxx>
 #include <Graphic3d_Vec2.hxx>
 #include <OpenGl_GraphicDriver.hxx>
 #include <Prs3d_Drawer.hxx>
 #include <Prs3d_LineAspect.hxx>
+#include <Prs3d_ShadingAspect.hxx>
 #include <Prs3d_Presentation.hxx>
 #include <Prs3d_TypeOfHighlight.hxx>
 #include <PrsMgr_PresentationManager.hxx>
@@ -60,6 +63,13 @@ namespace {
 constexpr int kSelectionModeWholeShape = 0;
 constexpr int kSelectionModeEdge       = 2;
 constexpr int kSelectionModeFace       = 4;
+
+// The transform gizmo's two extra snap steps. The translation step is not
+// here: it is the viewport's own mySnapStep, the same 10 mm grid outline
+// points and face pulls already land on, because a body that moved off the
+// grid the outlines were drawn on would be a body nothing lines up with.
+constexpr double kGizmoRotationStepDeg = 15.0;
+constexpr double kGizmoScaleStep       = 0.05;
 
 Quantity_Color toOcctColor(const QColor& c)
 {
@@ -225,6 +235,11 @@ void OcctViewWidget::displaySolid(int id, const TopoDS_Shape& shape)
 
     const auto existing = mySolids.find(id);
     if (existing != mySolids.end()) {
+        // The gizmo holds a handle to the presentation about to be removed, so
+        // it goes first. MainWindow's predicate re-attaches it on the next
+        // updateActions() if the body is still the one selected - which is how
+        // a transform leaves the gizmo standing on the body it just moved.
+        if (myManipulatorSolid == id) detachManipulator();
         myContext->Remove(existing->second, Standard_False);
         mySolids.erase(existing);
     }
@@ -256,6 +271,8 @@ void OcctViewWidget::removeSolid(int id)
     // goes with it for the same reason the dimension below does.
     clearModelingPreview();
     clearPullArrow();
+    // Same reason: the gizmo is attached to the presentation about to go.
+    if (myManipulatorSolid == id) detachManipulator();
 
     myContext->Remove(it->second, Standard_False);
     mySolids.erase(it);
@@ -275,6 +292,7 @@ void OcctViewWidget::clearSolids()
 
     clearModelingPreview();   // same reasoning as removeSolid(), before the bodies go
     clearPullArrow();
+    detachManipulator();
 
     for (auto& entry : mySolids) myContext->Remove(entry.second, Standard_False);
     mySolids.clear();
@@ -467,6 +485,150 @@ bool OcctViewWidget::pullArrowHit(const QPoint& point) const
     const double nx = tail.x() + dx * t - point.x();
     const double ny = tail.y() + dy * t - point.y();
     return std::sqrt(nx * nx + ny * ny) <= 14.0;
+}
+
+void OcctViewWidget::attachManipulator(int solidId)
+{
+    initializeViewer();
+    if (myContext.IsNull()) return;
+    // Idempotent per body. The predicate that drives this runs on every
+    // appStateChanged, and a fresh AIS_Manipulator on each of those would
+    // re-derive its position from the bounding box every time - including in
+    // the middle of a gesture, which is how a gizmo ends up snapping back to
+    // the body while the user is still holding it.
+    if (!myManipulator.IsNull() && myManipulatorSolid == solidId) return;
+
+    detachManipulator();
+    const auto it = mySolids.find(solidId);
+    if (it == mySolids.end() || !myContext->IsDisplayed(it->second)) return;
+
+    myManipulator = new AIS_Manipulator();
+    // Modes arm on DETECTION, not on selection. The alternative - OCCT's
+    // default - activates a mode when a manipulator part is SELECTED, and
+    // selecting a part replaces the body selection that raised the gizmo in
+    // the first place: the gizmo would vanish under the hand reaching for it.
+    myManipulator->SetModeActivationOnDetection(Standard_True);
+    // Sized and placed from the body it serves, so a 40 mm shelf and a 2 m
+    // wardrobe both get a gizmo you can actually grab.
+    AIS_Manipulator::OptionsForAttach options;
+    options.SetAdjustPosition(Standard_True);
+    options.SetAdjustSize(Standard_True);
+    options.SetEnableModes(Standard_True);
+    myManipulator->Attach(it->second, options);
+    // Move along an axis, Move in a plane, Rotate, Scale - every mode the API
+    // offers. gp_Trsf cannot express a per-axis scale, so the scale cubes are
+    // uniform whichever one is grabbed; see MainWindow's bake for the clamp
+    // that keeps a uniform scale to something that is still furniture.
+    myManipulator->EnableMode(AIS_MM_Translation);
+    myManipulator->EnableMode(AIS_MM_TranslationPlane);
+    myManipulator->EnableMode(AIS_MM_Rotation);
+    myManipulator->EnableMode(AIS_MM_Scaling);
+    // The one styling hook AIS_Manipulator actually exposes: the shading
+    // aspect its parts are computed from. The per-axis HUES are private
+    // (AIS_Manipulator::Axis::myColor, set in init() and reachable through no
+    // public setter), and red/green/blue for X/Y/Z is the universal gizmo
+    // language anyway - tinting all three to one accent would cost more than
+    // it bought. What this does reach is the material, so the gizmo reads as
+    // part of this app's matte surface family rather than a glossy default.
+    const Handle(Prs3d_ShadingAspect) gizmoAspect =
+        myManipulator->Attributes()->ShadingAspect();
+    if (!gizmoAspect.IsNull()) {
+        Graphic3d_MaterialAspect material(Graphic3d_NameOfMaterial_UserDefined);
+        material.SetAmbientColor(Quantity_Color(0.35, 0.35, 0.35, Quantity_TOC_sRGB));
+        material.SetDiffuseColor(Quantity_Color(0.75, 0.75, 0.75, Quantity_TOC_sRGB));
+        material.SetSpecularColor(Quantity_Color(0.05, 0.05, 0.05, Quantity_TOC_sRGB));
+        gizmoAspect->SetMaterial(material);
+    }
+
+    myManipulatorSolid = solidId;
+    myContext->UpdateCurrentViewer();
+}
+
+void OcctViewWidget::detachManipulator()
+{
+    if (myManipulator.IsNull()) {
+        myManipulatorSolid = -1;
+        return;
+    }
+
+    // A gesture cannot outlive the gizmo it was made on.
+    myGizmoDragActive = false;
+    myGizmoDelta = gp_Trsf();
+    // Detach() erases it from the context as well as letting go of the body.
+    myManipulator->Detach();
+    if (!myContext.IsNull()) {
+        myContext->Remove(myManipulator, Standard_False);
+        myContext->UpdateCurrentViewer();
+    }
+    myManipulator.Nullify();
+    myManipulatorSolid = -1;
+}
+
+bool OcctViewWidget::manipulatorFrame(gp_Ax2& position, double& size) const
+{
+    if (myManipulator.IsNull()) return false;
+    position = myManipulator->Position();
+    size = myManipulator->Size();
+    return true;
+}
+
+int OcctViewWidget::manipulatorActiveMode() const
+{
+    return myManipulator.IsNull() ? 0 : static_cast<int>(myManipulator->ActiveMode());
+}
+
+int OcctViewWidget::manipulatorActiveAxis() const
+{
+    if (myManipulator.IsNull() || myManipulator->ActiveMode() == AIS_MM_None) return -1;
+    return myManipulator->ActiveAxisIndex();
+}
+
+bool OcctViewWidget::solidPresentationTransform(int id, gp_Trsf& out) const
+{
+    const auto it = mySolids.find(id);
+    if (it == mySolids.end() || it->second.IsNull()) return false;
+    out = it->second->LocalTransformation();
+    return true;
+}
+
+bool OcctViewWidget::detectedIsManipulator() const
+{
+    if (myManipulator.IsNull() || myContext.IsNull()) return false;
+    const Handle(AIS_InteractiveObject) detected = myContext->DetectedInteractive();
+    return !detected.IsNull() && detected.get() == myManipulator.get();
+}
+
+void OcctViewWidget::endGizmoDrag()
+{
+    myGizmoDragActive = false;
+    if (myManipulator.IsNull()) return;
+
+    const int solidId = myManipulatorSolid;
+    const gp_Pnt pivot = myGizmoStartPosition.Location();
+    gp_Trsf delta = myGizmoDelta;
+    myGizmoDelta = gp_Trsf();
+
+    // StopTransform(false), not (true): it restores every attached object's
+    // local transformation and the manipulator's own position to what they
+    // were at the press. The drag moved the PRESENTATION and nothing else, and
+    // the document only changes if the bake that follows succeeds - so the
+    // presentation goes back first, unconditionally, and the consumer's job is
+    // purely to add a change rather than to undo one it did not make. A bake
+    // that is refused therefore leaves the viewport already agreeing with the
+    // document instead of showing a pose that exists nowhere.
+    myManipulator->StopTransform(Standard_False);
+    myManipulator->DeactivateCurrentMode();
+    if (!myView.IsNull()) myView->Redraw();
+
+    if (mySnapEnabled) {
+        // The same 10 mm grid outline points and face pulls land on, plus the
+        // two steps this gesture adds. 15 degrees is the smallest rotation
+        // anyone eyeballs; 5% is a size change you can see without measuring.
+        delta = ModelingOps::snapTransform(delta, pivot, mySnapStep,
+                                           kGizmoRotationStepDeg, kGizmoScaleStep);
+    }
+
+    emit gizmoReleased(solidId, delta);
 }
 
 void OcctViewWidget::setSketchPointMarkers(const std::vector<gp_Pnt>& points)
@@ -1120,6 +1282,37 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
         myHasPullPressParam =
             rayThroughPixel(myLastPos.x(), myLastPos.y(), ray) &&
             CameraController::axisParameterForRay(ray, myPullArrow.axis(), myPullPressParam);
+        return;
+    }
+
+    // The transform gizmo owns LEFT drags that start on one of its parts, and
+    // only those. RMB orbit and MMB pan returned above; a Shift-click is the
+    // "add this body to the selection" gesture and must reach the picker even
+    // when it lands on an arm of the gizmo standing on the first body.
+    const bool additive = (event->modifiers() & Qt::ShiftModifier) != 0;
+    if (event->button() == Qt::LeftButton && !mySketchMode && !additive &&
+        !myManipulator.IsNull() && !myContext.IsNull() && !myView.IsNull()) {
+        // Detection is what arms a mode (SetModeActivationOnDetection), so the
+        // press asks for it at its own pixel rather than trusting whatever the
+        // last hover happened to leave behind.
+        const QPoint device = toDevicePixels(myLastPos);
+        myContext->MoveTo(device.x(), device.y(), myView, Standard_False);
+        if (detectedIsManipulator()) {
+            // The press CLAIMS the gesture whether or not a mode armed - the
+            // pull arrow's lesson one gizmo over. If it fell through, the
+            // release would run an ordinary pick, select a manipulator part,
+            // and drop the body selection that raised the gizmo in the first
+            // place: the thing the user just grabbed would deselect itself.
+            myGizmoDragActive = true;
+            myGizmoDelta = gp_Trsf();
+            myGizmoStartPosition = myManipulator->Position();
+            if (myManipulator->HasActiveMode())
+                myManipulator->StartTransform(device.x(), device.y(), myView);
+            return;
+        }
+        // Nothing in OCCT disarms a mode when the cursor leaves the part that
+        // armed it, so a press that missed says so explicitly.
+        myManipulator->DeactivateCurrentMode();
     }
 }
 
@@ -1140,6 +1333,12 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
         return;
     }
 
+    // The end of a gizmo drag, swallowed for exactly the same reason.
+    if (myGizmoDragActive && event->button() == Qt::LeftButton) {
+        endGizmoDrag();
+        return;
+    }
+
     if (event->button() != Qt::LeftButton || myContext.IsNull()) return;
 
     const QPoint pos = event->position().toPoint();
@@ -1151,8 +1350,30 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
     }
 
     const bool additive = (event->modifiers() & Qt::ShiftModifier) != 0;
+    if (additive && !myManipulator.IsNull()) {
+        // A Shift-click means "add this body to the selection", and the gizmo
+        // standing on the FIRST body must not be what the pick lands on.
+        // AIS_ManipulatorOwner carries a higher selection priority than a
+        // shape's owner, so an arm or a ring crossing the second body wins the
+        // pick outright and the click selects nothing at all - which is how a
+        // 100% display found this and a 150% one did not: at the smaller
+        // scale the second body sat under a ring, at the larger it did not.
+        // Taking the gizmo out of the scene for the duration is the whole fix;
+        // MainWindow's predicate puts it back, or does not, from whatever
+        // selection this click produces.
+        detachManipulator();
+    }
     const QPoint device = toDevicePixels(pos);
     myContext->MoveTo(device.x(), device.y(), myView, Standard_False);
+    // A click that landed on the gizmo but never became a drag - a press the
+    // gizmo declined, or a cursor that wandered onto it between press and
+    // release - must not select a manipulator part: SelectDetected would
+    // replace the body selection with an owner that belongs to no document,
+    // and the gizmo would erase itself.
+    if (detectedIsManipulator()) {
+        myManipulator->DeactivateCurrentMode();
+        return;
+    }
     myContext->SelectDetected(additive ? AIS_SelectionScheme_XOR
                                        : AIS_SelectionScheme_Replace);
     // The selection just changed, and in edge mode the dimension follows it as
@@ -1169,7 +1390,27 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
 
     const QPoint pos = event->position().toPoint();
 
-    if (myPullDragActive) {
+    if (myGizmoDragActive) {
+        // AIS_Manipulator does the drag maths. ObjectTransformation() answers
+        // "given this cursor position, what transform does the armed part
+        // mean" WITHOUT applying it, and returns false for a position it
+        // cannot resolve - which is why it is used in place of the
+        // Transform(x, y, view) convenience, whose return value is an identity
+        // transform in exactly that case and would clobber the accumulated
+        // delta with nothing.
+        //
+        // The transform it hands back is measured from the ORIGINAL press, not
+        // from the previous move, so the last one is the whole gesture.
+        if (!myManipulator.IsNull() && myManipulator->HasActiveTransformation()) {
+            const QPoint device = toDevicePixels(pos);
+            gp_Trsf trsf;
+            if (myManipulator->ObjectTransformation(device.x(), device.y(), myView, trsf)) {
+                myManipulator->Transform(trsf);
+                myGizmoDelta = trsf;
+                myView->Redraw();
+            }
+        }
+    } else if (myPullDragActive) {
         // Where the cursor now points along the arrow's axis, minus where it
         // pointed at the press. A ray too close to parallel with the axis
         // resolves to nothing and the last value simply stands - see
@@ -1226,6 +1467,13 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
         // does not fight the highlighter for attention.
         const QPoint device = toDevicePixels(pos);
         myContext->MoveTo(device.x(), device.y(), myView, Standard_True);
+        // The manipulator arms a manipulation mode when one of its parts is
+        // DETECTED, and OCCT disarms it for nobody - so a hover that once
+        // brushed an arrow would leave every later press anywhere in the
+        // viewport claiming a gizmo drag. Answered here, at the detection that
+        // would otherwise have armed it, rather than guessed at later.
+        if (!myManipulator.IsNull() && !detectedIsManipulator())
+            myManipulator->DeactivateCurrentMode();
         updateEdgeDimension();
     }
 
@@ -1262,6 +1510,9 @@ void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
     const QPoint device = toDevicePixels(pos);
     myContext->MoveTo(device.x(), device.y(), myView, Standard_False);
     if (!myContext->HasDetected()) return;
+    // A second click on a gizmo handle is another grab, not a request to frame
+    // the body underneath it - the same rule the pull arrow keeps above.
+    if (detectedIsManipulator()) return;
 
     // In face mode a double-click means "sketch on this" - the second route
     // to Lock to Face, alongside the action. Framing the body instead would

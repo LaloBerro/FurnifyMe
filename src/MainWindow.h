@@ -1,6 +1,7 @@
 #pragma once
 // OCCT first (Handle() macro vs. Windows headers pulled in by Qt).
 #include <TopoDS_Face.hxx>
+#include <gp_Trsf.hxx>
 
 #include <QMainWindow>
 
@@ -65,6 +66,39 @@ public:
     // Enter/Escape claims are therefore mutually exclusive by construction
     // rather than by luck.
     bool canPullSelectedFace() const;
+
+    // THE predicate behind the transform gizmo: the document id of the one
+    // body it should be standing on, or 0. Exactly one body selected, in body
+    // selection mode, with no sketch in progress and no outline waiting.
+    //
+    // The mode check is what keeps the three gizmos mutually exclusive BY
+    // CONSTRUCTION rather than by three predicates that have to be kept in
+    // step: face pull needs face mode, bevels need edge mode, and this needs
+    // body mode, so no two of them can ever be true at once. The sketch and
+    // pending-face halves are canPullSelectedFace()'s, for the same reasons
+    // spelled out there.
+    int transformableBodyId() const;
+    bool canTransformSelectedBody() const { return transformableBodyId() > 0; }
+
+    // Bakes `delta` into body `id` through ModelingOps::transformShape and
+    // replaces it, with an undo checkpoint and a Note toast offering Undo -
+    // the one commit path for the transform gizmo, so nothing else touches
+    // DocumentModel on its behalf.
+    //
+    // False, with a Failure toast and the body untouched, when the kernel
+    // refuses or when the scale factor falls outside kMinScale..kMaxScale.
+    // That clamp is this layer's, deliberately: the kernel only refuses a
+    // factor <= 0, and it will happily build a body 1e-9 of its size or a
+    // thousand times it - both of which are a lost body rather than an edit.
+    bool transformBody(int id, const gp_Trsf& delta);
+
+    // The band a single scale gesture may land in. Below the first, a body is
+    // gone from the viewport without looking deleted; above the second, it
+    // swallows the scene. Both are recoverable by scaling again, which is why
+    // this refuses the gesture rather than clamping the number - a clamp would
+    // silently do something other than what the user dragged.
+    static constexpr double kMinScale = 0.05;
+    static constexpr double kMaxScale = 20.0;
 
     // The document id of the body `face` belongs to, or 0. Derived by walking
     // the document rather than remembered: face indices are not stable across
@@ -142,6 +176,12 @@ private slots:
     void onSelectionModeChanged();
     void onSelectionChanged();
     void onLockToFace();
+    // The end of a transform-gizmo drag. An identity delta is a cancel - the
+    // user released where they started, or the snap rounded the whole gesture
+    // away - and a cancel takes no checkpoint and says nothing. The viewport
+    // has already put its presentation back by the time this runs (see
+    // OcctViewWidget::endGizmoDrag), so there is nothing to undo here either.
+    void onGizmoReleased(int solidId, const gp_Trsf& delta);
 
 private:
     void buildActions();
@@ -178,6 +218,13 @@ private:
     // Rebuilds the viewport from the document. Cheaper than tracking individual
     // differences, and the only way to be sure the two agree after undo/redo.
     void resyncView();
+    // Shows or hides the transform gizmo from transformableBodyId(). A slot on
+    // appStateChanged, and the ONE thing that attaches or detaches it - a
+    // gizmo raised on a click and dismissed on some other click would be two
+    // rules that drift, which is PullArrow's rule one gizmo over. Reads state
+    // and moves AIS objects only, so it cannot recurse back into
+    // updateActions().
+    void refreshTransformGizmo();
     void runBoolean(int kind);   // ModelingOps::BooleanKind as int, to keep it out of the header
     // The one place "the camera was moved to a named direction" is recorded.
     // Every route to that - the four View menu entries and a click on the

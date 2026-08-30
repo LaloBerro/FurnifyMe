@@ -35,8 +35,10 @@
 #include <TopExp_Explorer.hxx>
 #include <TopoDS_Compound.hxx>
 #include <TopTools_ListOfShape.hxx>
+#include <gp_Ax1.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Pln.hxx>
+#include <gp_Quaternion.hxx>
 #include <gp_Vec.hxx>
 
 namespace ModelingOps {
@@ -384,6 +386,79 @@ BooleanResult transformShape(const TopoDS_Shape& body, const gp_Trsf& trsf)
                      (e.GetMessageString() ? e.GetMessageString() : "unknown");
     }
     return out;
+}
+
+namespace {
+constexpr double kPi = 3.14159265358979323846;
+
+// One step, or the value untouched when the step is not a step. Every
+// component of snapTransform() rounds through here so "a step <= 0 leaves
+// that component alone" is one rule rather than three copies of it.
+double snapToStep(double value, double step)
+{
+    if (step <= 0.0) return value;
+    return std::round(value / step) * step;
+}
+}  // namespace
+
+gp_Trsf snapTransform(const gp_Trsf& delta, const gp_Pnt& pivot,
+                      double translationStep, double rotationStepDeg,
+                      double scaleStep)
+{
+    // The three components, pulled apart about the pivot - see the header for
+    // why the translation is read off the pivot's own movement rather than
+    // gp_Trsf::TranslationPart().
+    const double scale = delta.ScaleFactor();
+    gp_Vec axisVec;
+    Standard_Real angle = 0.0;
+    delta.GetRotation().GetVectorAndAngle(axisVec, angle);
+    const gp_Vec movement(pivot, pivot.Transformed(delta));
+
+    double snappedScale = snapToStep(scale, scaleStep);
+    // A snap must never be what makes a transform illegal: the kernel refuses
+    // a factor <= 0, so a shrink that rounds to nothing is held at one step
+    // instead. The caller's own sanity clamp then has something to refuse.
+    if (snappedScale <= 0.0) snappedScale = scaleStep > 0.0 ? scaleStep : scale;
+
+    const double stepRad = rotationStepDeg * kPi / 180.0;
+    const double snappedAngle = snapToStep(angle, stepRad);
+
+    const gp_Vec snappedMove(snapToStep(movement.X(), translationStep),
+                             snapToStep(movement.Y(), translationStep),
+                             snapToStep(movement.Z(), translationStep));
+
+    // Rebuilt in the order the decomposition names, not edited in place.
+    // Rotation and scale both fix the pivot, so they compose either way round;
+    // the translation has to come last, or it would itself be scaled.
+    gp_Trsf out;
+    if (std::fabs(snappedAngle) > 1.0e-12 && axisVec.Magnitude() > 1.0e-12) {
+        gp_Trsf rotation;
+        rotation.SetRotation(gp_Ax1(pivot, gp_Dir(axisVec)), snappedAngle);
+        out = rotation;
+    }
+    if (std::fabs(snappedScale - 1.0) > 1.0e-12) {
+        gp_Trsf scaling;
+        scaling.SetScale(pivot, snappedScale);
+        out = scaling * out;
+    }
+    if (snappedMove.Magnitude() > 1.0e-12) {
+        gp_Trsf translation;
+        translation.SetTranslation(snappedMove);
+        out = translation * out;
+    }
+    return out;
+}
+
+bool isIdentityTransform(const gp_Trsf& trsf, double linearTolerance,
+                         double angularToleranceDeg)
+{
+    if (std::fabs(trsf.ScaleFactor() - 1.0) > linearTolerance) return false;
+    if (trsf.TranslationPart().Modulus() > linearTolerance) return false;
+
+    gp_Vec axis;
+    Standard_Real angle = 0.0;
+    trsf.GetRotation().GetVectorAndAngle(axis, angle);
+    return std::fabs(angle) <= angularToleranceDeg * kPi / 180.0;
 }
 
 void tessellate(const TopoDS_Shape& shape, double linearDeflection)

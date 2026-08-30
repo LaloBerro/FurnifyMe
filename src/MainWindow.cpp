@@ -27,6 +27,7 @@
 #include <gp_Ax3.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pln.hxx>
+#include <gp_Quaternion.hxx>
 #include <gp_Vec.hxx>
 
 #include <QAction>
@@ -39,6 +40,7 @@
 #include <QtGlobal>
 
 #include <algorithm>
+#include <cmath>
 #include <initializer_list>
 #include <utility>
 #include <vector>
@@ -81,6 +83,9 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     // lockToFace() - including its refusal - rather than one of them growing
     // its own copy of the rule.
     connect(myView, &OcctViewWidget::faceDoubleClicked, this, &MainWindow::lockToFace);
+    // The transform gizmo reports the end of a drag; this window decides what
+    // it means, exactly as it does for the face-pull arrow above.
+    connect(myView, &OcctViewWidget::gizmoReleased, this, &MainWindow::onGizmoReleased);
 
     buildActions();
     buildAppBar(buildMenus());
@@ -129,6 +134,12 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     // appear; and it only reads and repaints, so it cannot recurse back into
     // updateActions().
     connect(this, &MainWindow::appStateChanged, myView, &OcctViewWidget::refreshDimension);
+
+    // The transform gizmo's visibility, derived on every state change from the
+    // one predicate that decides it - never set from the event that happened
+    // to make it true. Only reads state and attaches or detaches an AIS
+    // object, so it cannot recurse back into updateActions().
+    connect(this, &MainWindow::appStateChanged, this, &MainWindow::refreshTransformGizmo);
 
     // Selection syncs both ways.
     connect(myItemsPanel, &ItemsPanel::solidActivated, this,
@@ -812,7 +823,15 @@ void MainWindow::updateStateLabel()
         if (selected == 2) {
             state = tr("2 bodies selected — Union, Subtract and Intersect available");
         } else if (selected == 1) {
-            state = tr("1 body selected — Shift-click another to combine them");
+            // The transform gizmo is on screen whenever this holds, and a
+            // handful of arrows and rings with no words is a guess. Reads the
+            // same predicate the gizmo itself does, so the label cannot
+            // describe a gizmo that is not there - or stay quiet about one
+            // that is.
+            state = canTransformSelectedBody()
+                        ? tr("1 body selected — drag a handle to Move, Rotate or Scale — "
+                             "Shift-click another to combine them")
+                        : tr("1 body selected — Shift-click another to combine them");
         } else if (bodies == 0) {
             state = tr("Nothing yet — press Ctrl+K to draw an outline");
         } else if (bodies == 1) {
@@ -1135,6 +1154,106 @@ bool MainWindow::pullFaceBy(const TopoDS_Face& face, double distance)
     const QString message =
         tr("%1 pulled — %2")
             .arg(QString::fromStdString(myDocument.nameOf(id)),
+                 QString::fromStdString(Measure::formatDimensions(result.shape)));
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    return true;
+}
+
+int MainWindow::transformableBodyId() const
+{
+    // The same two halves canPullSelectedFace() opens with, for the same
+    // reasons: an outline in progress lives on a plane, and a body that moved
+    // under it would take the plane's meaning with it.
+    if (mySketching || !myPendingFace.IsNull()) return 0;
+
+    // Body mode explicitly. selectedSolidIds() reports the owning body of a
+    // selected FACE too, so without this the gizmo would appear over a face
+    // selection and fight the pull arrow for the same drag.
+    if (myView->selectionMode() != OcctViewWidget::SelectionMode::Solid) return 0;
+
+    const std::vector<int> ids = myView->selectedSolidIds();
+    if (ids.size() != 1) return 0;
+    return ids.front();
+}
+
+void MainWindow::refreshTransformGizmo()
+{
+    const int id = transformableBodyId();
+    if (id > 0) myView->attachManipulator(id);
+    else        myView->detachManipulator();
+}
+
+void MainWindow::onGizmoReleased(int solidId, const gp_Trsf& delta)
+{
+    // A drag that nets nothing is a cancel, not an edit: no checkpoint, no
+    // toast, no revision. It reaches here for two reasons that look identical
+    // from the document's side - a press and release at the same point, and a
+    // real drag the snap rounded back to where it started - and both deserve
+    // the same silence. The viewport already restored its own presentation
+    // before emitting, so there is nothing to put back.
+    if (ModelingOps::isIdentityTransform(delta)) return;
+    transformBody(solidId, delta);
+}
+
+bool MainWindow::transformBody(int id, const gp_Trsf& delta)
+{
+    const TopoDS_Shape body = myDocument.shapeOf(id);
+    if (id <= 0 || body.IsNull()) return false;
+
+    // This layer's clamp, not the kernel's: transformShape refuses only a
+    // factor <= 0, and a body scaled to 1e-9 is not an error the kernel can
+    // see - it is a body the user has lost. See kMinScale/kMaxScale.
+    const double scale = delta.ScaleFactor();
+    if (scale < kMinScale || scale > kMaxScale) {
+        myToasts->show(tr("That's too big a change of size to make at once — anything "
+                          "under a twentieth or over twenty times leaves a body you "
+                          "can't see or can't fit on screen. Drag the handle back "
+                          "toward the body and scale it in smaller steps"),
+                      Toast::Kind::Failure, false);
+        statusBar()->showMessage(tr("Scale refused — nothing was changed"));
+        return false;
+    }
+
+    const ModelingOps::BooleanResult result = ModelingOps::transformShape(body, delta);
+    if (!result.ok) {
+        // Never present a failed kernel operation as a success, and never show
+        // its error text - it is written for this file, not for the user.
+        qWarning("Transform failed: %s", result.error.c_str());
+        myToasts->show(tr("This body couldn't be moved there — the geometry engine "
+                          "refused the change. Try a smaller move, or a different "
+                          "handle"),
+                      Toast::Kind::Failure, false);
+        statusBar()->showMessage(tr("Move refused — nothing was changed"));
+        return false;
+    }
+
+    myDocument.checkpoint();
+    myDocument.replaceSolid(id, result.shape);
+    myView->displaySolid(id, result.shape);
+    // Selected again on purpose, unlike the face pull's clearSelection(): the
+    // body is still the same body, and keeping it selected is what leaves the
+    // gizmo standing on it for a second drag. displaySolid() detached the
+    // gizmo along with the presentation it was holding; the updateActions()
+    // below re-attaches it at the body's new position.
+    myView->setSelectedSolids({id});
+    recordProgress("transform.completed");
+
+    updateActions();
+    emit documentChanged();
+
+    // Which of the three it was, read off the transform itself rather than
+    // remembered from the handle that was grabbed - one source, and it stays
+    // right if a gesture ever combines two of them.
+    gp_Vec axis;
+    Standard_Real angle = 0.0;
+    delta.GetRotation().GetVectorAndAngle(axis, angle);
+    const QString verb = std::fabs(scale - 1.0) > 1.0e-9 ? tr("scaled")
+                         : std::fabs(angle) > 1.0e-9     ? tr("rotated")
+                                                         : tr("moved");
+    const QString message =
+        tr("%1 %2 — %3")
+            .arg(QString::fromStdString(myDocument.nameOf(id)), verb,
                  QString::fromStdString(Measure::formatDimensions(result.shape)));
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
