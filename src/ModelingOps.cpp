@@ -102,6 +102,21 @@ gp_Pln outwardPlane(const TopoDS_Face& face, const BRepAdaptor_Surface& surface)
     return plane;
 }
 
+// filletEdge/chamferEdge get this check for free - BRepFilletAPI throws on
+// an edge foreign to the shape. pullFace has no such kernel-level guard: a
+// prism built from a foreign face and fused/cut against `body` is a
+// perfectly well-formed boolean between two unrelated shapes, so OCCT
+// happily reports success. Without this, one mis-wired pick from the UI
+// (the gizmo tasks feed a picked TopoDS_Face straight in) silently produces
+// two disconnected solids instead of a refusal.
+bool faceBelongsToBody(const TopoDS_Shape& body, const TopoDS_Face& face)
+{
+    for (TopExp_Explorer it(body, TopAbs_FACE); it.More(); it.Next()) {
+        if (it.Current().IsSame(face)) return true;
+    }
+    return false;
+}
+
 }  // namespace
 
 TopoDS_Shape extrude(const TopoDS_Face& profile, const gp_Dir& direction, double height)
@@ -205,6 +220,10 @@ BooleanResult pullFace(const TopoDS_Shape& body, const TopoDS_Face& face, double
     }
     if (std::fabs(distance) < 1.0e-7) {
         out.error = "pull: distance is effectively zero";
+        return out;
+    }
+    if (!faceBelongsToBody(body, face)) {
+        out.error = "pull: face does not belong to the body";
         return out;
     }
 

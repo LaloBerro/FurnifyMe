@@ -23,6 +23,12 @@ enum class BooleanKind { Fuse, Cut, Common };
 
 // Booleans on near-tangent geometry are OCCT's known weak spot. Callers must
 // look at `ok` - never present a failed boolean as a success.
+//
+// Refusal contract, binding for every function in this file that returns
+// one: when ok == false, `shape` is left null. Never a partially-applied
+// shape, never the pre-operation body, never a stale value from a previous
+// call - null. Callers (the three direct-modeling gizmos in particular) may
+// rely on `!ok` implying `shape.IsNull()` without checking both.
 struct BooleanResult {
     bool ok = false;
     TopoDS_Shape shape;
@@ -63,10 +69,13 @@ TopoDS_Shape makeCompound(const std::vector<TopoDS_Shape>& shapes);
 // outward normal is derived here, the same way MainWindow::lockToFace does
 // it: BRepAdaptor_Surface never applies TopAbs_Orientation, so a REVERSED
 // face's plane normal is flipped before use.
-// Refuses: a null body/face, a non-planar face, |distance| < 1e-7, a carve
-// that consumes the body entirely (result empty or volume ~0), and any
-// kernel failure. Result goes through ShapeUpgrade_UnifySameDomain, same as
-// applyBoolean, so pulled faces do not accumulate junk edges.
+// Refuses: a null body/face, a face that is not one of `body`'s own faces
+// (checked by TopoDS_Shape::IsSame - a foreign face would otherwise fuse or
+// cut a perfectly valid boolean between two unrelated shapes), a non-planar
+// face, |distance| < 1e-7, a carve that consumes the body entirely (result
+// empty or volume ~0), and any kernel failure. Result goes through
+// ShapeUpgrade_UnifySameDomain, same as applyBoolean, so pulled faces do not
+// accumulate junk edges.
 BooleanResult pullFace(const TopoDS_Shape& body, const TopoDS_Face& face,
                        double distance);
 

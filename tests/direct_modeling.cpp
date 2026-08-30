@@ -19,6 +19,7 @@
 #include <BRepGProp.hxx>
 #include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
+#include <TopAbs_Orientation.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
@@ -106,6 +107,12 @@ int main()
     const TopoDS_Face topFace = faceAtZ(box, 10.0);
     check(!topFace.IsNull(), "top face (Z=10) found");
 
+    // A shape unrelated to `box`, entirely off in space - used to build
+    // "foreign" faces/edges for the membership-guard and foreign-topology
+    // refusal tests below.
+    const TopoDS_Shape distantBox = makeBox(gp_Pnt(1000.0, 1000.0, 1000.0), 10.0, 10.0, 10.0);
+    check(!distantBox.IsNull(), "distant box (for foreign-topology tests) built");
+
     // --- pullFace ---------------------------------------------------------
     {
         const BooleanResult grown = pullFace(box, topFace, 5.0);
@@ -137,6 +144,50 @@ int main()
     check(!pullFace(box, topFace, 0.0).ok, "pull with zero distance is refused");
     check(!pullFace(box, topFace, 1.0e-9).ok,
           "pull with a distance under the 1e-7 threshold is refused");
+
+    // The Phase 4 lesson, now covered here too: BRepAdaptor_Surface never
+    // applies TopAbs_Orientation, and on a plain box three of the six faces
+    // are REVERSED with their raw plane normal pointing INTO the body. Every
+    // pullFace assertion above used the top face, which happens to be
+    // FORWARD - stubbing the REVERSED flip out would leave that whole block
+    // green, which is exactly the hole that hid the Phase 4 picker bug.
+    // Pull the bottom face (confirmed REVERSED below) instead, so a broken
+    // flip fails loudly here.
+    {
+        const TopoDS_Face bottomFace = faceAtZ(box, 0.0);
+        check(!bottomFace.IsNull(), "bottom face (Z=0) found");
+        check(bottomFace.Orientation() == TopAbs_REVERSED,
+              "the bottom face is REVERSED, so this test actually exercises the flip "
+              "rather than passing vacuously");
+
+        const BooleanResult grownDown = pullFace(box, bottomFace, 5.0);
+        check(grownDown.ok, "pull +5 on the REVERSED bottom face succeeds" +
+                            (grownDown.ok ? std::string() : ": " + grownDown.error));
+        if (grownDown.ok) {
+            checkNear(volume(grownDown.shape) - boxVolume, 100.0 * 80.0 * 5.0, 1.0e-3,
+                      "pull +5 on the REVERSED bottom face grows volume by exactly 100*80*5");
+            check(centreOfMass(grownDown.shape).Z() < centreOfMass(box).Z(),
+                  "pull +5 on the bottom face moves the centre of mass DOWN - outward for "
+                  "that face is -Z, so this only passes if the REVERSED flip actually fired");
+        }
+    }
+
+    // pullFace has no kernel-level guard against a face that simply does not
+    // belong to `body` - a prism built from it and fused/cut against `body`
+    // is a perfectly well-formed boolean between two unrelated shapes, so
+    // OCCT alone would report success. One mis-wired pick from the UI (the
+    // gizmo tasks feed a picked TopoDS_Face straight in) would otherwise
+    // silently produce two disconnected solids.
+    {
+        TopExp_Explorer faceIt(distantBox, TopAbs_FACE);
+        check(faceIt.More(), "distant box has at least one face");
+        const TopoDS_Face foreignFace = TopoDS::Face(faceIt.Current());
+
+        const BooleanResult foreign = pullFace(box, foreignFace, 5.0);
+        check(!foreign.ok,
+              "pull with a face that does not belong to the body is refused, not silently "
+              "fused/cut into two disconnected solids");
+    }
 
     // --- filletEdge / chamferEdge ------------------------------------------
     const TopoDS_Edge longEdge = longEdgeAlongX(box, 100.0);
@@ -183,6 +234,108 @@ int main()
     check(!chamferEdge(box, longEdge, 0.0).ok, "chamfer d=0 is refused");
     check(!chamferEdge(box, longEdge, -1.0).ok, "chamfer with negative distance is refused");
     check(!chamferEdge(box, TopoDS_Edge(), 3.0).ok, "chamfer with a null edge is refused");
+
+    // filletEdge/chamferEdge get the "does this belong to the body" guard
+    // for free: BRepFilletAPI throws Standard_Failure ("no suitable edges")
+    // on an edge foreign to the shape, rather than politely failing
+    // IsDone(). These two lines pin that the catch converts it to a refusal
+    // rather than letting the exception escape.
+    {
+        TopExp_Explorer edgeIt(distantBox, TopAbs_EDGE);
+        check(edgeIt.More(), "distant box has at least one edge");
+        const TopoDS_Edge foreignEdge = TopoDS::Edge(edgeIt.Current());
+
+        check(!filletEdge(box, foreignEdge, 2.0).ok,
+              "fillet on an edge foreign to the body is refused, not an uncaught "
+              "Standard_Failure");
+        check(!chamferEdge(box, foreignEdge, 2.0).ok,
+              "chamfer on an edge foreign to the body is refused for the same reason");
+    }
+
+    // --- pullFace on non-trivial topology ------------------------------------
+    //
+    // A C-shaped body whose pulled face grows past a notch's own depth and
+    // genuinely overlaps material already belonging to the body's other
+    // limb - an overlapping fuse, not a merely touching one. Built so the
+    // numbers are exact: outer bounding block 100 x 40 x 100 (400000 mm3);
+    // notch 60 x 40 x 20 removed from the right side (48000), leaving a
+    // spine (X:0-40) and two limbs (X:40-100, split by the notch at
+    // Z:40-60). Pulling the bottom limb's top face (Z=40) up by 25 fills
+    // the entire 20mm notch and juts 5mm into the top limb, which is
+    // already solid there - so the union exactly reconstructs the outer
+    // block.
+    {
+        const TopoDS_Shape outer = makeBox(gp_Pnt(0.0, 0.0, 0.0), 100.0, 40.0, 100.0);
+        const TopoDS_Shape notchTool = makeBox(gp_Pnt(40.0, 0.0, 40.0), 60.0, 40.0, 20.0);
+        const BooleanResult cResult = applyBoolean(BooleanKind::Cut, outer, notchTool);
+        check(cResult.ok, "C-shaped body built (outer block minus a notch)" +
+                          (cResult.ok ? std::string() : ": " + cResult.error));
+        if (cResult.ok) {
+            const TopoDS_Shape cShape = cResult.shape;
+            checkNear(volume(cShape), 352000.0, 1.0e-3, "C-shape volume is 400000 - 48000");
+
+            const TopoDS_Face shelf = faceAtZ(cShape, 40.0);
+            check(!shelf.IsNull(), "the bottom limb's top face (Z=40) found on the C-shape");
+
+            const BooleanResult filled = pullFace(cShape, shelf, 25.0);
+            check(filled.ok,
+                  "pulling the shelf +25 - past the notch and into the top limb - succeeds" +
+                  (filled.ok ? std::string() : ": " + filled.error));
+            if (filled.ok) {
+                checkNear(volume(filled.shape), 400000.0, 1.0e-3,
+                          "the overlapping fuse exactly reconstructs the outer block's "
+                          "400000 mm3");
+                check(countSolids(filled.shape) == 1, "C-shape pull result is one solid");
+                check(countFaces(filled.shape) == 6,
+                      "C-shape pull result unifies back down to a plain 6-face box");
+                const BRepCheck_Analyzer analyzer(filled.shape);
+                check(analyzer.IsValid(), "C-shape pull result passes BRepCheck_Analyzer");
+            }
+        }
+    }
+
+    // A stepped body (a wide base with a narrower, taller step on one side)
+    // carved by a distance that protrudes clean through the step's own
+    // height and continues into the base beneath it - a carve whose tool
+    // outlives the local feature it started on. Base 100 x 80 x 10
+    // (80000 mm3); step 30 x 80 x 20 flush with the base's right edge and
+    // running its full depth, so the fused body is a clean 6-edge step
+    // prism (128000 mm3, 8 faces). Carving the step's top face by -25
+    // removes the whole step (30*80*20 = 48000) plus a 5mm-deep slice of
+    // the base under its footprint (30*80*5 = 12000): 128000 - 60000 =
+    // 68000, and because the notch's footprint is flush with the body's
+    // edge and spans its full depth, the result is still a clean 6-edge
+    // step prism - 8 faces, just a shorter step.
+    {
+        const TopoDS_Shape base = makeBox(gp_Pnt(0.0, 0.0, 0.0), 100.0, 80.0, 10.0);
+        const TopoDS_Shape step = makeBox(gp_Pnt(70.0, 0.0, 10.0), 30.0, 80.0, 20.0);
+        const BooleanResult steppedResult = applyBoolean(BooleanKind::Fuse, base, step);
+        check(steppedResult.ok, "stepped body built (base fused with a flush step)" +
+                                (steppedResult.ok ? std::string() : ": " + steppedResult.error));
+        if (steppedResult.ok) {
+            const TopoDS_Shape steppedBody = steppedResult.shape;
+            checkNear(volume(steppedBody), 128000.0, 1.0e-3,
+                      "stepped body volume is 80000 + 48000");
+            check(countFaces(steppedBody) == 8, "stepped body is a clean 8-face step prism");
+
+            const TopoDS_Face stepTop = faceAtZ(steppedBody, 30.0);
+            check(!stepTop.IsNull(), "the step's top face (Z=30) found");
+
+            const BooleanResult carved = pullFace(steppedBody, stepTop, -25.0);
+            check(carved.ok,
+                  "carving the step -25 - through the step and into the base - succeeds" +
+                  (carved.ok ? std::string() : ": " + carved.error));
+            if (carved.ok) {
+                checkNear(volume(carved.shape), 68000.0, 1.0e-3,
+                          "the protruding carve leaves exactly 68000 mm3");
+                check(countFaces(carved.shape) == 8,
+                      "the carved stepped body is still a clean 8-face step prism");
+                check(countSolids(carved.shape) == 1, "the carved stepped body is one solid");
+                const BRepCheck_Analyzer analyzer(carved.shape);
+                check(analyzer.IsValid(), "carved stepped body passes BRepCheck_Analyzer");
+            }
+        }
+    }
 
     // --- transformShape ------------------------------------------------------
     {
