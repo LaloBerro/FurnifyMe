@@ -198,7 +198,13 @@ void HintBalloon::reposition()
     // WalkthroughPanel's skip pill or Toast's Undo pill, so there is nothing
     // else here to keep in step.
     const int margin = Theme::surfaceShadowMargin();
-    resize(kWidth + margin * 2, bounds.height() + kPad * 2 + 22 + margin * 2);
+    // Through Theme::wholeDevicePixels() - see Theme.h. This card sizes
+    // itself from MEASURED TEXT, so its height is as arbitrary a number as
+    // this app produces, and the position snap below only makes the near edge
+    // whole: a whole origin with a fractional extent still lands the far edge
+    // between device rows.
+    resize(Theme::wholeDevicePixels(
+        QSize(kWidth + margin * 2, bounds.height() + kPad * 2 + 22 + margin * 2)));
 
     int x = (parentWidget()->width() - width()) / 2;
     int y = parentWidget()->height() - height() - 90;

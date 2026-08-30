@@ -693,6 +693,25 @@ bool OcctViewWidget::solidPresentationTransform(int id, gp_Trsf& out) const
 bool OcctViewWidget::detectedIsManipulator() const
 {
     if (myManipulator.IsNull() || myContext.IsNull()) return false;
+    // HasDetected() FIRST, and it is not defensive padding - it is the whole
+    // reason this function does not crash the app.
+    //
+    // AIS_InteractiveContext::DetectedInteractive() is an inline that reads
+    // `myLastPicked->Selectable()` with no null check of its own, and a MoveTo
+    // that detects nothing sets myLastPicked to null. HasDetected() is
+    // literally `!myLastPicked.IsNull()`, so this line is the guard OCCT's own
+    // accessor does not carry.
+    //
+    // The reachable trigger was one click: select a body (which attaches the
+    // manipulator), then click empty viewport to deselect. The press handler
+    // MoveTo's, detects nothing, and asks this - null deref, process gone. It
+    // is a hover away too, through mouseMoveEvent's hover-highlight branch.
+    // Every other DetectedInteractive() call in this file already sits behind
+    // an explicit HasDetected() (see mouseDoubleClickEvent, which MoveTo's and
+    // returns early on !HasDetected() before it asks anything); this one
+    // function was the exception, and 850 green checks never went near it
+    // because nothing in the suite clicked empty space with a gizmo up.
+    if (!myContext->HasDetected()) return false;
     const Handle(AIS_InteractiveObject) detected = myContext->DetectedInteractive();
     return !detected.IsNull() && detected.get() == myManipulator.get();
 }

@@ -98,7 +98,13 @@ WalkthroughPanel::WalkthroughPanel(MainWindow* window, QWidget* parent)
     , myWindow(window)
 {
     setAttribute(Qt::WA_NoSystemBackground);
-    setFixedSize(sizeHint());
+    // Through Theme::wholeDevicePixels() - see Theme.h. setFixedSize() is
+    // why this cannot be left to ViewportOverlay: a fixed-size widget IGNORES
+    // resize() silently, so the overlay's rounding is a no-op here and this
+    // card measured 382.5 device pixels wide at 150% scaling, with the half
+    // row Qt flushes but the widget's own logical clip cannot reach coming
+    // back black over the GL surface.
+    setFixedSize(Theme::wholeDevicePixels(sizeHint()));
 
     // The panel sits directly over the viewport it is teaching someone to
     // click and drag in. Transparent to mouse events for its whole subtree

@@ -714,6 +714,16 @@ Iterate with `InitSelected()`/`MoreSelected()`/`NextSelected()`, pull topology v
   `QApplication`, or run with `QT_QPA_PLATFORM=xcb`. This costs an afternoon if unknown.
 - **`paintEngine()` must return `nullptr`** or Qt and OpenGL fight over the surface.
 - **Never `delete` an OCCT handle.** `Handle(Foo)` is refcounted; let it go out of scope.
+- **`AIS_InteractiveContext::DetectedInteractive()` dereferences a null on its own.** It is
+  an inline that returns `myLastPicked->Selectable()` with no check, and any `MoveTo` that
+  detects nothing sets `myLastPicked` to null. **Always guard it with `HasDetected()`**,
+  which is literally `!myLastPicked.IsNull()`. This is not hypothetical hardening: one
+  unguarded call in `detectedIsManipulator()` crashed the app in a single click — select a
+  body, which attaches the transform gizmo, then click empty viewport to deselect. A hover
+  over empty space did it too, through a different call site. It survived 850 green checks
+  because every one of them clicked something that was there; `gui_smoke` now hovers *and*
+  clicks a pixel derived to have nothing behind it with the gizmo up, and surviving to the
+  next check is the assertion.
 - **`Handle()` is a macro** that collides with some Windows headers. Include OCCT headers
   before `<windows.h>` where possible.
 - **Tessellate before display or STL export:** `BRepMesh_IncrementalMesh(shape, 0.1)`.

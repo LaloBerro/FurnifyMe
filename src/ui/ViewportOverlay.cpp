@@ -124,6 +124,24 @@ void ViewportOverlay::relayout()
     int leftCursor = (h - (leftCenterY - kGap)) / 2;
     int rightCursor = (h - (rightCenterY - kGap)) / 2;
 
+    // The POSITION half of Theme's whole-device-pixel rule, for everything
+    // anchored here - see Theme.h.
+    //
+    // Rounding the sizes alone is not enough and this cost a second round to
+    // learn: a card's far edge is its origin plus its extent, so a whole
+    // extent on a fractional origin lands right back between device rows. The
+    // origins here look safe - the rail goes to a flat (8, 8) - but they are
+    // relative to the VIEWPORT, and the viewport sits under the app bar at
+    // whatever offset that bar's height leaves. At 125% that put the rail's
+    // bottom edge back on a half row and the black-line sweep caught it again,
+    // 39 device pixels of it, after the size half had already been fixed.
+    const QPoint origin = myViewport->mapTo(myViewport->window(), QPoint(0, 0));
+    const double dpr = myViewport->devicePixelRatioF();
+    auto snapped = [&origin, dpr](int x, int y) {
+        return QPoint(Theme::snapToDevicePixels(x, origin.x(), dpr),
+                      Theme::snapToDevicePixels(y, origin.y(), dpr));
+    };
+
     for (const Entry& entry : myEntries) {
         if (!entry.widget) continue;   // the widget was destroyed; nothing to place
         // Hidden entries are skipped here for the same reason they are skipped
@@ -152,39 +170,46 @@ void ViewportOverlay::relayout()
         // would rediscover this. The growth is at most three pixels of slack
         // inside a card whose contents are top-aligned, so nothing inside
         // moves; the positions below then follow the grown size.
+        //
+        // It does NOT reach a card that pins itself with setFixedSize(), and
+        // that is not a gap this line can close: resize() on a fixed-size
+        // widget is a silent no-op, not an error. WalkthroughPanel and
+        // AxisGizmo both do, and both therefore round their OWN sizeHint()
+        // through wholeDevicePixels() in their constructors. Anything added
+        // here that pins its size has to do the same.
         placed->resize(Theme::wholeDevicePixels(placed->size()));
         const int cw = placed->width();
         const int ch = placed->height();
 
         switch (entry.anchor) {
             case Anchor::TopLeft:
-                placed->move(leftX, topLeftY);
+                placed->move(snapped(leftX, topLeftY));
                 topLeftY += ch + kGap;
                 break;
             case Anchor::LeftCenter:
-                placed->move(leftX, leftCursor);
+                placed->move(snapped(leftX, leftCursor));
                 leftCursor += ch + kGap;
                 break;
             case Anchor::BottomLeft:
                 bottomLeftY -= ch;
-                placed->move(leftX, bottomLeftY);
+                placed->move(snapped(leftX, bottomLeftY));
                 bottomLeftY -= kGap;
                 break;
             case Anchor::TopRight:
-                placed->move(w - cw - kMargin, topRightY);
+                placed->move(snapped(w - cw - kMargin, topRightY));
                 topRightY += ch + kGap;
                 break;
             case Anchor::RightCenter:
-                placed->move(w - cw - kMargin, rightCursor);
+                placed->move(snapped(w - cw - kMargin, rightCursor));
                 rightCursor += ch + kGap;
                 break;
             case Anchor::BottomRight:
                 bottomRightY -= ch;
-                placed->move(w - cw - kMargin, bottomRightY);
+                placed->move(snapped(w - cw - kMargin, bottomRightY));
                 bottomRightY -= kGap;
                 break;
             case Anchor::LeftEdge:
-                placed->move(kEdgeMargin, kEdgeMargin);
+                placed->move(snapped(kEdgeMargin, kEdgeMargin));
                 // std::max, not the available height alone: on a viewport
                 // too short for every tool the rail carries, shrinking it
                 // would ask its layout to squeeze fourteen fixed-size chips

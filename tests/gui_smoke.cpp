@@ -4083,6 +4083,105 @@ int main(int argc, char* argv[])
             QCoreApplication::sendEvent(view, &move);
         };
 
+        // --- a hover and a click on EMPTY space, with the gizmo up ---------
+        //
+        // The one-click crash 850 green checks never went near, because every
+        // one of them clicked something that was there.
+        //
+        // AIS_InteractiveContext::DetectedInteractive() is an inline that
+        // reads myLastPicked->Selectable() with no null check of its own, and
+        // a MoveTo that detects nothing nulls myLastPicked.
+        // detectedIsManipulator() asked it without guarding, so selecting a
+        // body - which attaches the manipulator - and then clicking empty
+        // viewport to deselect took the process down. That is the most
+        // ordinary gesture in the app, and it is reachable from a cold start
+        // in two clicks.
+        //
+        // SURVIVING to the next check is the assertion for the crash itself;
+        // the two after it are what say the click still did its job rather
+        // than being swallowed by a guard that returns early too eagerly.
+        {
+            check(view->hasManipulator(),
+                  "the gizmo is up before the empty-space probe, so the crashing "
+                  "path is actually reachable from here");
+
+            // "Empty" is DERIVED: the union of every body's projected bounding
+            // box and the gizmo's own projected reach, stepped well clear of.
+            // A hardcoded pixel is a probe that stops meaning anything the
+            // moment the camera or the document moves.
+            QRect occupied;
+            auto swallow = [&](const gp_Pnt& world) {
+                QPoint at;
+                if (!view->projectToScreen(world, at)) return;
+                const QRect dot(at, QSize(1, 1));
+                occupied = occupied.isNull() ? dot : occupied.united(dot);
+            };
+            for (const DocumentModel::Solid& body : window.document().solids()) {
+                Bnd_Box box;
+                BRepBndLib::Add(body.shape, box);
+                if (box.IsVoid()) continue;
+                Standard_Real x0, y0, z0, x1, y1, z1;
+                box.Get(x0, y0, z0, x1, y1, z1);
+                for (int corner = 0; corner < 8; ++corner)
+                    swallow(gp_Pnt(corner & 1 ? x1 : x0, corner & 2 ? y1 : y0,
+                                   corner & 4 ? z1 : z0));
+            }
+            gp_Ax2 reach;
+            double reachSize = 0.0;
+            if (view->manipulatorFrame(reach, reachSize)) {
+                const gp_Dir axes[3] = {reach.XDirection(), reach.YDirection(),
+                                        reach.Direction()};
+                for (const gp_Dir& axis : axes) {
+                    swallow(reach.Location().Translated(gp_Vec(axis) * reachSize));
+                    swallow(reach.Location().Translated(gp_Vec(axis) * -reachSize));
+                }
+            }
+
+            // 40 px clear of all of it, and inside the viewport's own edges.
+            QPoint empty(-1, -1);
+            const QRect keepOut = occupied.adjusted(-40, -40, 40, 40);
+            for (int y = 20; y < view->height() - 20 && empty.x() < 0; y += 12) {
+                for (int x = 20; x < view->width() - 20; x += 12) {
+                    if (keepOut.contains(QPoint(x, y))) continue;
+                    empty = QPoint(x, y);
+                    break;
+                }
+            }
+            check(empty.x() >= 0,
+                  QStringLiteral("there is a pixel with nothing behind it to click "
+                                 "(bodies and gizmo occupy %1,%2 %3x%4 of %5x%6)")
+                      .arg(occupied.left()).arg(occupied.top())
+                      .arg(occupied.width()).arg(occupied.height())
+                      .arg(view->width()).arg(view->height()));
+
+            if (empty.x() >= 0) {
+                // The bare hover first: mouseMoveEvent's hover-highlight branch
+                // asks detectedIsManipulator() too, and it crashes there just
+                // as readily as on the press. Two separate call sites, two
+                // separate ways in.
+                hover(empty);
+                settle(80);
+                check(view->hasManipulator(),
+                      "a hover over empty space with the gizmo up is survivable, and "
+                      "leaves the gizmo alone");
+
+                clickAt(view, QPointF(empty));
+                settle(200);
+                check(view->selectedSolidIds().empty(),
+                      QStringLiteral("clicking empty space clears the selection (%1 "
+                                     "still selected)")
+                          .arg(view->selectedSolidIds().size()));
+                check(!view->hasManipulator(),
+                      "and the gizmo goes with it, from the same predicate that "
+                      "raised it");
+            }
+
+            view->setSelectedSolids({gizmoId});
+            settle(200);
+            check(view->hasManipulator(),
+                  "the gizmo is back for the probes that follow");
+        }
+
         // Walks out from the gizmo's centre along `along`, in fractions of its
         // own size, and stops at the first point whose hover arms `wantMode`
         // (1 Move along an axis, 2 Rotate, 3 Scale) on `wantAxis` (-1 for any).
@@ -4255,23 +4354,6 @@ int main(int argc, char* argv[])
             check(snapAction != nullptr && !snapAction->isChecked(),
                   "Snap to Grid is off for the free-move probe");
 
-            // Frame THIS body before measuring a distance in millimetres off a
-            // drag measured in pixels.
-            //
-            // fitAll() frames the whole document - six bodies by now - which
-            // left roughly 1.8 mm to the logical pixel, so the 35 mm below
-            // spanned FOURTEEN pixels and one pixel of rounding was 13% of the
-            // answer. The check's 2 mm tolerance was barely over one pixel, so
-            // it passed on where the rounding happened to land: 34.70 mm at
-            // one display scale and 32.74 mm at another, from the same code.
-            // Both are the same drag; only one of them passed.
-            //
-            // Dollying in until the gizmo fills about a quarter of the
-            // viewport puts the pixel well under a millimetre, which is what
-            // makes an absolute 2 mm tolerance mean something. The framing is
-            // DERIVED from the gizmo's own size and the viewport's own height,
-            // so it holds at any window size and any display scale rather than
-            // inheriting whichever one the machine happens to run.
             // The handle is found FIRST, at the framing every other probe
             // uses, and only then is the camera dollied in. Order matters and
             // it cost a crash to learn: findHandle() walks the arm hovering
@@ -4298,13 +4380,6 @@ int main(int argc, char* argv[])
             // it passed on where the rounding happened to land: 34.70 mm at
             // one display scale and 32.74 mm at another, from the same code.
             // Both are the same drag; only one of them passed.
-            //
-            // Dollying in until the gizmo fills about a quarter of the
-            // viewport puts the pixel well under a millimetre, which is what
-            // makes an absolute 2 mm tolerance mean something. The framing is
-            // DERIVED from the gizmo's own size and the viewport's own height,
-            // so it holds at any window size and any display scale rather than
-            // inheriting whichever one the machine happens to run.
             const CameraState framedBefore = view->camera().state();
             // Dollied until the 35 mm this drag is about to travel spans a
             // healthy number of PIXELS - measured on the projection itself,
@@ -4453,11 +4528,76 @@ int main(int argc, char* argv[])
 
         // --- the scale cube: volume by the cube of a 5% multiple -----------
         {
+            // Tried FIRST at the framing every other probe inherits, and
+            // re-framed only if that finds nothing.
+            //
+            // The gizmo has to be the right size on screen for the walk to
+            // find the scale cube, and the constraint has two sides: too big
+            // and the far end of the walk projects outside the viewport,
+            // where findHandle() skips every candidate; too small and the
+            // cube - a little box at the arrow's tip - is a couple of pixels
+            // and loses detection to the arrow and to the translation planes.
+            // At a forced display scale that left this window 813x565 logical
+            // the walk reported plane handles the whole way out and never a
+            // cube, which is the second case.
+            //
+            // The re-framing is a FALLBACK rather than an unconditional step,
+            // because an unconditional one broke the case it was not needed
+            // for: framing "correctly" by a reach-to-viewport ratio moved a
+            // camera where the walk already worked, and the cube stopped
+            // arming there instead. Doing nothing when nothing is wrong is
+            // the only version of this that holds at every scale.
             QPoint handleAt;
             gp_Pnt handleWorld;
-            const bool found =
-                findHandle(3, 0, gizmoFrame.XDirection(), handleAt, handleWorld);
-            check(found, "walking out along X finds the Scale handle past the arrow");
+            bool found = findHandle(3, 0, gizmoFrame.XDirection(), handleAt, handleWorld);
+            const CameraState scaleFramedBefore = view->camera().state();
+            for (int pass = 0; pass < 2 && !found; ++pass) {
+                const gp_Pnt reachTip = gizmoFrame.Location().Translated(
+                    gp_Vec(gizmoFrame.XDirection()) * (gizmoSize * 1.4));
+                QPoint centreAt, tipAt;
+                if (!view->projectToScreen(gizmoFrame.Location(), centreAt) ||
+                    !view->projectToScreen(reachTip, tipAt))
+                    break;
+                const double reach = std::hypot(double(tipAt.x() - centreAt.x()),
+                                                double(tipAt.y() - centreAt.y()));
+                const double wanted = 0.25 * std::min(view->width(), view->height());
+                if (reach <= 0.0 || wanted <= 0.0) break;
+                CameraState framed = view->camera().state();
+                // Bounded to half or double the distance it started at, so a
+                // recovery can never dolly far enough to put the manipulator
+                // somewhere OCCT's own detection falls over.
+                framed.distance *= std::clamp(reach / wanted, 0.5, 2.0);
+                view->animateTo(framed);   // animations are off: immediate
+                settle(200);
+                found = findHandle(3, 0, gizmoFrame.XDirection(), handleAt, handleWorld);
+            }
+
+            // What the walk actually saw, when it saw no scale cube. A probe
+            // that reports only "not found" has failed twice here for two
+            // different reasons - candidates off-screen at a small viewport,
+            // and the cube too few pixels across to win the detection - and
+            // the two are indistinguishable without this.
+            QString trail;
+            if (!found) {
+                for (int percent = 8; percent <= 140; percent += 12) {
+                    const gp_Pnt candidate = gizmoFrame.Location().Translated(
+                        gp_Vec(gizmoFrame.XDirection()) * (gizmoSize * percent / 100.0));
+                    QPoint at;
+                    if (!view->projectToScreen(candidate, at)) { trail += QStringLiteral(" ?"); continue; }
+                    if (!view->rect().adjusted(6, 6, -6, -6).contains(at)) {
+                        trail += QStringLiteral(" off");
+                        continue;
+                    }
+                    hover(at);
+                    trail += QStringLiteral(" %1%%:m%2a%3")
+                                 .arg(percent).arg(view->manipulatorActiveMode())
+                                 .arg(view->manipulatorActiveAxis());
+                }
+            }
+            check(found,
+                  QStringLiteral("walking out along X finds the Scale handle past the "
+                                 "arrow (%1)")
+                      .arg(found ? QStringLiteral("armed") : trail.trimmed()));
 
             // Further out along the same axis: AIS_Manipulator reads a scale
             // as the ratio of the cursor's distance from the gizmo centre to
@@ -4465,13 +4605,33 @@ int main(int argc, char* argv[])
             QPoint dragTo;
             gp_Pnt scaleTarget;
             bool haveTarget = false;
+            double growth = 0.0;
             if (found) {
-                scaleTarget = gizmoFrame.Location().Translated(
-                    gp_Vec(gizmoFrame.Location(), handleWorld) * 1.30);
-                haveTarget = view->projectToScreen(scaleTarget, dragTo) &&
-                             view->rect().contains(dragTo);
+                // The LARGEST growth that still lands on screen, not a fixed
+                // 30%. The assertions below ask for a 5 per cent multiple and
+                // for something over 1.02 - they do not care which multiple -
+                // so a viewport too small to show the 30% point is a reason to
+                // drag less far, not a reason to fail. It was failing at one
+                // display scale for exactly that, with the handle found and
+                // the gesture never attempted.
+                for (const double candidate : {1.30, 1.25, 1.20, 1.15, 1.10}) {
+                    const gp_Pnt at = gizmoFrame.Location().Translated(
+                        gp_Vec(gizmoFrame.Location(), handleWorld) * candidate);
+                    QPoint projected;
+                    if (!view->projectToScreen(at, projected)) continue;
+                    if (!view->rect().contains(projected)) continue;
+                    scaleTarget = at;
+                    dragTo = projected;
+                    growth = candidate;
+                    haveTarget = true;
+                    break;
+                }
             }
-            check(haveTarget, "and a point 30% further out projects into the viewport");
+            check(haveTarget,
+                  QStringLiteral("and a point further out along it projects into the "
+                                 "viewport to drag to (%1)")
+                      .arg(haveTarget ? QStringLiteral("x%1").arg(growth)
+                                      : QStringLiteral("none of 1.30 down to 1.10")));
 
             if (haveTarget) {
                 const double volumeBefore = gizmoVolume();
@@ -4506,6 +4666,11 @@ int main(int argc, char* argv[])
                 check(std::fabs(gizmoVolume() - volumeBefore) < 1.0e-6,
                       "and Undo restores the body's size exactly");
             }
+            // Back to the framing every probe after this one inherits.
+            view->animateTo(scaleFramedBefore);
+            settle(200);
+            view->setSelectedSolids({gizmoId});
+            settle(150);
         }
 
         // --- the rotation ring: extents consistent with a snapped angle ----
@@ -4547,6 +4712,34 @@ int main(int argc, char* argv[])
             for (const gp_Vec& direction : inPlane) {
                 if (found) break;
                 found = findHandle(2, 2, gp_Dir(direction), handleAt, handleWorld);
+            }
+            // The same fallback the scale cube gets, for the same reason and
+            // on the same terms: a ring too few pixels across loses the
+            // detection to whatever else is under the cursor, and the walk
+            // then reports nothing for a reason that has nothing to do with
+            // the ring. Only entered when the walk found nothing, bounded to
+            // two passes and to half or double the starting distance, and
+            // restored at the end of this block.
+            const CameraState ringFramedBefore = view->camera().state();
+            for (int pass = 0; pass < 2 && !found; ++pass) {
+                QPoint centreAt, tipAt;
+                const gp_Pnt reachTip = gizmoFrame.Location().Translated(
+                    gp_Vec(gizmoFrame.XDirection()) * gizmoSize);
+                if (!view->projectToScreen(gizmoFrame.Location(), centreAt) ||
+                    !view->projectToScreen(reachTip, tipAt))
+                    break;
+                const double reach = std::hypot(double(tipAt.x() - centreAt.x()),
+                                                double(tipAt.y() - centreAt.y()));
+                const double wanted = 0.22 * std::min(view->width(), view->height());
+                if (reach <= 0.0 || wanted <= 0.0) break;
+                CameraState framed = view->camera().state();
+                framed.distance *= std::clamp(reach / wanted, 0.5, 2.0);
+                view->animateTo(framed);   // animations are off: immediate
+                settle(200);
+                for (const gp_Vec& direction : inPlane) {
+                    if (found) break;
+                    found = findHandle(2, 2, gp_Dir(direction), handleAt, handleWorld);
+                }
             }
             check(found, "walking the XY plane finds the Rotate ring about Z");
             check(!found || view->manipulatorActiveAxis() == 2,
@@ -4640,6 +4833,11 @@ int main(int argc, char* argv[])
                           std::fabs(restored.Z() - before.Z()) < 1.0e-6,
                       "and Undo turns it back exactly");
             }
+            // Back to the framing every probe after this one inherits.
+            view->animateTo(ringFramedBefore);
+            settle(200);
+            view->setSelectedSolids({gizmoId});
+            settle(150);
         }
 
         // --- a drag that nets nothing is a cancel, not an edit --------------
@@ -7094,19 +7292,24 @@ int main(int argc, char* argv[])
                 // QWidgetItem::isEmpty() is isHidden() - so the layout
                 // measured the list as empty. Height and hint agreeing is
                 // the property that was actually broken.
-                // Through Theme::wholeDevicePixels(), which is what the
-                // overlay now grows every anchored card to so its far edge
-                // lands on a whole device pixel - up to three pixels of slack
-                // inside the card, and the equality is written against that
-                // rather than relaxed to an inequality, so the property this
-                // check exists for stays exact.
-                check(drawer->height() ==
-                          Theme::wholeDevicePixels(
-                              static_cast<QWidget*>(drawer)->sizeHint().height()),
+                // A band, not an equality, and the band is exactly the
+                // overlay's device-pixel rounding: it grows an anchored card
+                // by up to three pixels so its far edge lands on a whole
+                // device pixel. Writing this as == wholeDevicePixels(hint)
+                // looked tighter and was wrong - the card re-adjusts itself
+                // when its rows change, so at some scales it is sitting at
+                // the raw hint and at others at the rounded one, and pinning
+                // either exact value fails at the other. The property this
+                // check exists for survives both: the card measures the rows
+                // it actually holds rather than sitting at its 176px
+                // empty-state floor with eight bodies listed in it, which is
+                // a ~150px error, not a three-pixel one.
+                const int hint = static_cast<QWidget*>(drawer)->sizeHint().height();
+                check(drawer->height() >= hint &&
+                          drawer->height() <= Theme::wholeDevicePixels(hint),
                       QStringLiteral("and the card's height is the height its own "
                                      "contents ask for (%1 against %2)")
-                          .arg(drawer->height())
-                          .arg(static_cast<QWidget*>(drawer)->sizeHint().height()));
+                          .arg(drawer->height()).arg(hint));
 
                 // Drive the toast INTO the drawer's band. The drawer is a
                 // top-left card and the toast a bottom-centre one, so on any

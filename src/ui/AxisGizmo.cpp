@@ -42,7 +42,12 @@ AxisGizmo::AxisGizmo(OcctViewWidget* view, QWidget* parent)
     setAttribute(Qt::WA_NoSystemBackground);
     setMouseTracking(true);
     setCursor(Qt::PointingHandCursor);
-    setFixedSize(sizeHint());
+    // Through Theme::wholeDevicePixels() - see Theme.h, and see
+    // WalkthroughPanel's constructor for why a setFixedSize() card has to do
+    // this itself rather than leaving it to ViewportOverlay: resize() on a
+    // fixed-size widget is a silent no-op. This one measured 147.5 device
+    // pixels tall at 125% scaling.
+    setFixedSize(Theme::wholeDevicePixels(sizeHint()));
     // Baseline for this widget's own font() (what the type-scale sweep in
     // gui_smoke checks): the only text it paints now is the axis letters,
     // which are badge-sized. A per-widget stylesheet wins over the app-wide
