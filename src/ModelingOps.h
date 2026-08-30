@@ -9,11 +9,13 @@
 #include <string>
 #include <vector>
 
+#include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 #include <TopoDS_Wire.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Trsf.hxx>
 
 namespace ModelingOps {
 
@@ -53,6 +55,38 @@ BooleanResult applyBoolean(BooleanKind kind,
 
 // Single compound of several shapes, for exporting a whole document at once.
 TopoDS_Shape makeCompound(const std::vector<TopoDS_Shape>& shapes);
+
+// --- Direct modeling (Milestone 2) -----------------------------------------
+//
+// Pull a planar face of `body` by `distance` along its OUTWARD normal.
+// Positive grows (prism fused on), negative carves (prism cut away). The
+// outward normal is derived here, the same way MainWindow::lockToFace does
+// it: BRepAdaptor_Surface never applies TopAbs_Orientation, so a REVERSED
+// face's plane normal is flipped before use.
+// Refuses: a null body/face, a non-planar face, |distance| < 1e-7, a carve
+// that consumes the body entirely (result empty or volume ~0), and any
+// kernel failure. Result goes through ShapeUpgrade_UnifySameDomain, same as
+// applyBoolean, so pulled faces do not accumulate junk edges.
+BooleanResult pullFace(const TopoDS_Shape& body, const TopoDS_Face& face,
+                       double distance);
+
+// Round one edge of `body` with radius r / flatten it with distance d.
+// Refuses a null body/edge, r/d <= 0, and any BRepFilletAPI failure
+// (IsDone false, null or empty/invalid result) - OCCT fillets legitimately
+// fail on hard geometry (e.g. a radius that would eat a neighbouring face)
+// and BRepFilletAPI can throw Standard_Failure rather than politely fail;
+// both are caught at this boundary and converted to ok == false, body
+// untouched.
+BooleanResult filletEdge(const TopoDS_Shape& body, const TopoDS_Edge& edge,
+                         double radius);
+BooleanResult chamferEdge(const TopoDS_Shape& body, const TopoDS_Edge& edge,
+                          double distance);
+
+// Bake a rigid transform (+ uniform scale) into the shape's geometry via
+// BRepBuilderAPI_Transform with copy = true. gp_Trsf carries
+// rotation/translation/uniform scale; refuses a null body or a transform
+// whose scale factor is <= 0.
+BooleanResult transformShape(const TopoDS_Shape& body, const gp_Trsf& trsf);
 
 // Must run before display or STL export, or curved faces render faceted / not at all.
 void tessellate(const TopoDS_Shape& shape, double linearDeflection = 0.1);
