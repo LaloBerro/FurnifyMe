@@ -27,9 +27,10 @@ constexpr int kHintGap = 6;
 constexpr int kHintHeight = 16;
 // The PAINTED offset from the viewport's top edge - matches what
 // ViewportOverlay's own kMargin targets for the widgets it anchors (see
-// ViewportOverlay.cpp), even though that file's raw constant is smaller now
-// to compensate for the same shadow-margin growth this widget also
-// compensates for in reposition() below.
+// ViewportOverlay.cpp). Both files subtract Theme::surfaceShadowMargin() from
+// it, and that is zero now, so painted edge and widget rect coincide; the
+// subtraction survives in both places as the record of what the number
+// actually measures.
 constexpr int kMargin = 16;
 }  // namespace
 
@@ -44,9 +45,11 @@ ExtrudePreview::ExtrudePreview(MainWindow* window, OcctViewWidget* view)
     // means the field cannot be a child of this widget.
     setAttribute(Qt::WA_NoSystemBackground);
     setAttribute(Qt::WA_TransparentForMouseEvents);
-    // Grown by Theme::surfaceShadowMargin() per side beyond the content size
-    // this used to be exactly - see paintEvent(), fieldRect() and hintRect()
-    // for where that margin goes on the inside, the same pattern as
+    // Grown by Theme::surfaceShadowMargin() per side beyond the content
+    // size. That margin is zero - the family paints no shadow and reserves no
+    // room for one (see Theme.h) - so this panel's widget rect and its
+    // painted card are the same rectangle; paintEvent(), fieldRect() and
+    // hintRect() apply the same zero on the inside, the same pattern as
     // WalkthroughPanel's sizeHint() and Toast's.
     {
         const int margin = Theme::surfaceShadowMargin();
@@ -369,9 +372,21 @@ void ExtrudePreview::markInvalid(bool invalid)
     myInvalid = invalid;
     if (!myField) return;
     const QColor border = invalid ? Theme::danger() : Theme::accent();
+    // border-radius: 0, not 4. This field is a SIBLING parented straight to
+    // the viewport (see the header for why it cannot be a child of the panel
+    // it belongs to), so it sits directly on OCCT's on-screen GL surface with
+    // no card of its own underneath. A rounded corner is a corner the
+    // stylesheet does not paint, and over that surface an unpainted pixel is
+    // not transparent - it is whatever the driver left there, which reads as
+    // black. Four small black nubs, the same failure mode that showed up as a
+    // band down the rail before ToolCluster painted its whole rect. The other
+    // rounded cards get away with it because they paint their own opaque
+    // surface; this one has nothing behind it. Square corners on one 26px
+    // field are a smaller price than the nubs, and it is the only control in
+    // the shell in this position.
     myField->setStyleSheet(QStringLiteral(
                                "QLineEdit { background-color: %1; color: %2; "
-                               "border: 1px solid %3; border-radius: 4px; padding: 2px 6px; }")
+                               "border: 1px solid %3; border-radius: 0px; padding: 2px 6px; }")
                                .arg(Theme::chip().name(), Theme::text().name(), border.name()));
 }
 

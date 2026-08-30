@@ -81,6 +81,16 @@ void ViewportOverlay::relayout()
     int leftCenterY = 0;
     int rightCenterY = 0;
 
+    // Where the left-hand corner and edge-centre anchors start. Ordinarily
+    // kMargin from the viewport's edge - but a LeftEdge entry is a spine
+    // pinned against that edge for the viewport's whole height, so anything
+    // anchored to the left would otherwise be placed UNDER it rather than
+    // beside it. The items drawer is the first widget for which that matters;
+    // computing it here rather than at the drawer's own call site means the
+    // next left-hand card is placed beside the rail for free, and means the
+    // answer does not depend on which entry happens to have been added first.
+    int leftX = kMargin;
+
     for (const Entry& entry : myEntries) {
         if (!entry.widget) continue;
         // Size every widget before measuring: the centring sums below are wrong
@@ -88,6 +98,25 @@ void ViewportOverlay::relayout()
         entry.widget->adjustSize();
         if (entry.anchor == Anchor::LeftCenter)  leftCenterY += entry.widget->height() + kGap;
         if (entry.anchor == Anchor::RightCenter) rightCenterY += entry.widget->height() + kGap;
+        // isHidden(), not isVisible(). isVisible() is false for every child of
+        // a window that has not been shown yet - and the ONLY relayout the
+        // application performs before the user touches anything runs inside
+        // that window's own show sequence, because QMainWindow's layout sizes
+        // the viewport (which is what this class filters for) BEFORE
+        // showChildren() marks the rail visible. Guarding on isVisible()
+        // therefore computed a left edge of kMargin at exactly the moment
+        // that mattered, and the drawer opened on top of the rail, hiding its
+        // top six buttons until the first action of the session moved it.
+        // Green suite throughout: gui_smoke reaches this check after dozens
+        // of relayouts, by which time it has long since corrected itself.
+        // Caught in a PrintWindow capture, like every visual bug this project
+        // has shipped.
+        //
+        // isHidden() asks the question that is actually meant - "is this
+        // widget meant to be on screen" - and its answer does not depend on
+        // whether an ancestor has been shown yet.
+        if (entry.anchor == Anchor::LeftEdge && !entry.widget->isHidden())
+            leftX = std::max(leftX, kEdgeMargin + entry.widget->width() + kGap);
     }
     int leftCursor = (h - (leftCenterY - kGap)) / 2;
     int rightCursor = (h - (rightCenterY - kGap)) / 2;
@@ -101,16 +130,16 @@ void ViewportOverlay::relayout()
 
         switch (entry.anchor) {
             case Anchor::TopLeft:
-                placed->move(kMargin, topLeftY);
+                placed->move(leftX, topLeftY);
                 topLeftY += ch + kGap;
                 break;
             case Anchor::LeftCenter:
-                placed->move(kMargin, leftCursor);
+                placed->move(leftX, leftCursor);
                 leftCursor += ch + kGap;
                 break;
             case Anchor::BottomLeft:
                 bottomLeftY -= ch;
-                placed->move(kMargin, bottomLeftY);
+                placed->move(leftX, bottomLeftY);
                 bottomLeftY -= kGap;
                 break;
             case Anchor::TopRight:

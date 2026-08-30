@@ -135,10 +135,13 @@ QSize Toast::sizeHint() const
                                               Qt::TextWordWrap, myText);
     const int minHeight = myHasUndo ? kUndoHeight + kPad * 2 : 0;
     // Grown by Theme::surfaceShadowMargin() per side beyond the content size
-    // computed above - see paintEvent() and undoRect() for where that margin
-    // goes on the inside. ToastHost::reposition() resizes this widget
-    // straight from this return value, the same way WalkthroughPanel's
-    // constructor uses its own sizeHint() directly.
+    // computed above. That margin is zero - the family paints no shadow and
+    // reserves no room for one (see Theme.h) - so this card's widget rect and
+    // its painted card are the same rectangle; paintEvent() and undoRect()
+    // apply the same zero on the inside. Kept as arithmetic so every member
+    // of the family still reads as one scheme. ToastHost::reposition()
+    // resizes this widget straight from this return value, the same way
+    // WalkthroughPanel's constructor uses its own sizeHint() directly.
     const int margin = Theme::surfaceShadowMargin();
     return QSize(kWidth + margin * 2, std::max(bounds.height() + kPad * 2, minHeight) + margin * 2);
 }

@@ -93,9 +93,11 @@ QSize BarButton::sizeHint() const
     // measured in the wrong weight clips.
     const QFontMetrics metrics(Theme::labelFont());
     const int textWidth = std::max(metrics.horizontalAdvance(text()), myReservedTextWidth);
-    // Grown by Theme::surfaceShadowMargin() per side: the visible card is
-    // inset by that much so paintSurface()'s shadow has somewhere to go
-    // without painting past this widget's own bounds.
+    // Grown by Theme::surfaceShadowMargin() per side. It is zero - the family
+    // paints no shadow and reserves no room for one (see Theme.h) - so this
+    // button's widget rect and its painted card are the same rectangle. Kept
+    // as arithmetic rather than folded away, the same way ToolChip,
+    // ToolCluster and ViewportOverlay keep it.
     const int margin = Theme::surfaceShadowMargin();
     return QSize(textWidth + kPadX * 2 + margin * 2,
                  metrics.height() + kPadY * 2 + margin * 2);
@@ -109,10 +111,11 @@ void BarButton::paintEvent(QPaintEvent* /*event*/)
     const int margin = Theme::surfaceShadowMargin();
     const QRect body = rect().adjusted(margin, margin, -margin, -margin);
 
-    // The shared floating-surface routine paints the shadow and a panel()
-    // fill/border() stroke; the fill is overpainted below with this button's
-    // own state colour, so only the shadow is what this call is for.
-    Theme::paintSurface(painter, body, kRadius);
+    // No Theme::paintSurface() call here, for the reason spelled out at the
+    // same place in ToolChip::paintEvent(): it fills `body` with panel() and
+    // strokes border() around it, and the two statements below do exactly
+    // that again in this button's own state colour. Nothing it painted
+    // survived the call after it.
 
     QColor background = Theme::chip();
     if (!isEnabled())        background = Theme::chip().darker(115);
@@ -123,10 +126,8 @@ void BarButton::paintEvent(QPaintEvent* /*event*/)
     QPainterPath path;
     path.addRoundedRect(body, kRadius, kRadius);
     painter.fillPath(path, background);
-    // 1px border(), always. The fill above covers half the stroke
-    // paintSurface() drew (a stroke straddles its path), so it is redrawn
-    // here rather than trusted to survive underneath - through Theme's one
-    // crisp-border idiom, the same call ToolChip and ToolCluster make.
+    // 1px border(), always - through Theme's one crisp-border idiom, the same
+    // call ToolChip and ToolCluster make.
     Theme::drawCrispBorder(painter, QRectF(body), Theme::border(), kRadius);
 
     if (isChecked()) {

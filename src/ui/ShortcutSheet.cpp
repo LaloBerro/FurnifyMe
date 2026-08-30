@@ -160,8 +160,11 @@ void ShortcutSheet::showSheet()
     }
 
     // Grown by Theme::surfaceShadowMargin() per side beyond the content size
-    // computed above - see paintEvent() for where that margin goes on the
-    // inside. No sibling control depends on this widget's geometry.
+    // computed above. That margin is zero - the family paints no shadow and
+    // reserves no room for one (see Theme.h) - so this sheet's widget rect
+    // and its painted card are the same rectangle, and paintEvent() applies
+    // the same zero on the inside. No sibling control depends on this
+    // widget's geometry.
     const int margin = Theme::surfaceShadowMargin();
     resize(width + margin * 2, height + margin * 2);
     recentre();

@@ -18,8 +18,9 @@ public:
     // Labelled is the original and the default: glyph, label and a shortcut
     // badge on one row, sized to its own text.
     //
-    // IconOnly is the rail's form - a 34x34 square (plus the shadow margin
-    // every chip now reserves) carrying nothing but the glyph. The label and
+    // IconOnly is the rail's form - a 34x34 square (plus
+    // Theme::surfaceShadowMargin() per side, which is now zero, so 34x34 of
+    // painted card) carrying nothing but the glyph. The label and
     // the shortcut do not disappear, they move into the tooltip: a rail that
     // spelled its commands out would be a toolbar, and the menus keep every
     // command labelled and discoverable regardless. Everything else about a

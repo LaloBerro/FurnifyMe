@@ -21,6 +21,13 @@ public:
     // start near the top. The rail's own layout decides where the slack goes
     // (a stretch between Select Edges and Undo puts history at the bottom);
     // this anchor only decides how much slack there is.
+    //
+    // A visible LeftEdge entry also moves the three left-hand anchors -
+    // TopLeft, LeftCenter, BottomLeft - out past it, so a card anchored there
+    // (the items drawer) lands BESIDE the spine rather than underneath it.
+    // That is a property of the layout rather than of any one caller: it does
+    // not depend on the order entries were added, and it holds for whatever
+    // is anchored left next.
     enum class Anchor { TopLeft, LeftCenter, BottomLeft, TopRight, RightCenter, BottomRight,
                         LeftEdge };
 

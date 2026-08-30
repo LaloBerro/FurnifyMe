@@ -179,11 +179,15 @@ void AxisGizmo::paintEvent(QPaintEvent* /*event*/)
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
 
-    // The app stylesheet would paint this widget chrome-black. True per-pixel
-    // transparency over the OCCT GL surface is the one compositing case the
-    // overlay probe flagged as unreliable, so fill with the viewport's own
-    // colour instead - the panel disappears against the empty sky.
-    painter.fillRect(rect(), Theme::viewport());
+    // A card, like every other floating widget over this viewport, rather
+    // than a flat fill of Theme::viewport() pretending to be transparent.
+    // That trick only ever worked against the empty sky: the viewport paints
+    // a gradient and a ground grid, so a flat viewport() rectangle read as a
+    // lighter BOX sitting on the scene - a fake transparency that announced
+    // itself. Since fix round 1's ruling is that nothing over the GL surface
+    // is translucent anyway, the honest form is the one the rail and the
+    // drawer already wear: panel() fill, 1px border(), rounded.
+    Theme::paintSurface(painter, rect());
 
     Tip tips[6];
     computeTips(tips);
@@ -237,7 +241,10 @@ void AxisGizmo::paintEvent(QPaintEvent* /*event*/)
             painter.setPen(QPen(colour, 1.4));
             const QPointF dir = tip->screen - centre;
             painter.drawLine(centre + dir * 0.35, tip->screen);
-            painter.setBrush(Theme::viewport());
+            // The card's own fill, not Theme::viewport() - a "hollow" ball is
+            // hollow onto whatever this widget is painted on, and that is the
+            // card now.
+            painter.setBrush(Theme::panel());
             painter.drawEllipse(tip->screen, kBallSize, kBallSize);
         }
     }

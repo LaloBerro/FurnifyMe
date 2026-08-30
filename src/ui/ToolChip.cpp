@@ -85,8 +85,13 @@ void ToolChip::syncFromAction()
 
 QSize ToolChip::sizeHint() const
 {
-    // Grown by Theme::surfaceShadowMargin() per side in both modes - see
-    // paintEvent() below for where that margin goes.
+    // Grown by Theme::surfaceShadowMargin() per side in both modes. That is
+    // zero - the family paints no shadow and reserves no room for one (see
+    // Theme.h) - so a chip's widget rect and its painted card coincide. The
+    // arithmetic stays rather than being folded away: it is the same
+    // compensation ToolCluster, AppBar and ViewportOverlay express, and
+    // collapsing it in one place would leave four call sites disagreeing
+    // about whether the scheme exists.
     const int margin = Theme::surfaceShadowMargin();
     if (myMode == ChipMode::IconOnly) {
         // No text is measured because none is painted: the label and the
@@ -108,20 +113,23 @@ void ToolChip::paintEvent(QPaintEvent* /*event*/)
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
 
-    // `body` is the visible card, inset from this widget's own (grown) bounds
-    // by Theme::surfaceShadowMargin() - the margin sizeHint() reserved above.
-    // Every rect below is body-relative rather than rect()-relative, so
-    // hit-testing the extra margin still lands on the chip (per the
-    // behaviour contract) while everything actually painted stays on the
-    // card itself.
+    // `body` is the visible card, inset from this widget's own bounds by
+    // Theme::surfaceShadowMargin() - the margin sizeHint() reserved above,
+    // which is zero, so the two are the same rectangle today. Every rect
+    // below is body-relative rather than rect()-relative anyway, so should
+    // that margin ever return, everything painted stays on the card while
+    // hit-testing the margin still lands on the chip.
     const int margin = Theme::surfaceShadowMargin();
     const QRect body = rect().adjusted(margin, margin, -margin, -margin);
 
-    // The shared floating-surface routine paints the shadow and a panel()
-    // fill/border() stroke; the panel() fill is immediately overpainted
-    // below with this chip's own state colour; only the shadow and the
-    // border it leaves behind are what this call is actually for.
-    Theme::paintSurface(painter, body, kRadius);
+    // No Theme::paintSurface() call here, deliberately. It fills `body` with
+    // panel() and strokes border() around it - and the two statements below
+    // do exactly that again: the fill in this chip's own state colour over an
+    // identical rounded path, the border through the identical crisp-border
+    // idiom. Calling it first painted a panel() rectangle not one pixel of
+    // which survived. A chip belongs to the floating-surface family by
+    // wearing the family's fill, border and radius, not by routing through a
+    // call whose every effect it overwrites.
 
     QColor background = Theme::chip();
     if (!isEnabled())        background = Theme::chip().darker(115);
@@ -132,11 +140,8 @@ void ToolChip::paintEvent(QPaintEvent* /*event*/)
     QPainterPath path;
     path.addRoundedRect(body, kRadius, kRadius);
     painter.fillPath(path, background);
-    // 1px border(), always - not just when checked. The fill above sits on
-    // top of half of the stroke paintSurface() already drew (a stroke
-    // straddles its path), so it is redrawn here rather than trusted to
-    // survive underneath the fill. Through Theme's one crisp-border idiom:
-    // stroked on the integer path this used to use, a chip's border painted
+    // 1px border(), always - not just when checked. Through Theme's one
+    // crisp-border idiom: stroked on the integer path this used to use, a chip's border painted
     // two columns at half intensity, which was invisible until it sat inside
     // the rail's own crisp card.
     Theme::drawCrispBorder(painter, QRectF(body), Theme::border(), kRadius);

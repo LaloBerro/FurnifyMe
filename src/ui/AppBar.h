@@ -30,8 +30,9 @@ class QMenuBar;
 
 // A compact bordered button wearing the same anatomy ToolChip settled in
 // Task 1 - 1px border() always, chipHover() on hover, chipActive() plus an
-// inset accent() ring when checked, everything dimmed together when disabled,
-// all of it inside Theme::paintSurface()'s shadow margin. It is that chip
+// inset accent() ring when checked, everything dimmed together when disabled.
+// Its painted card is its whole widget rect - the family reserves no margin
+// and paints no shadow (see Theme.h). It is that chip
 // without the glyph and the shortcut badge, which is what the bar's row of
 // controls wants; it is deliberately NOT a second button look, and the state
 // colours below are read in the same order ToolChip reads them.

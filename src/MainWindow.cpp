@@ -33,7 +33,6 @@
 #include <QLabel>
 #include <QMenuBar>
 #include <QSettings>
-#include <QSplitter>
 #include <QStatusBar>
 #include <QtGlobal>
 
@@ -61,15 +60,16 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     }
 
     myView = new OcctViewWidget(this);
+    // Full bleed: the central widget is the viewport and nothing else. The
+    // items panel used to take a splitter pane out of the window's width;
+    // it is a floating drawer over the viewport now (see buildOverlay()),
+    // which is why there is no longer anything to split.
+    setCentralWidget(myView);
 
-    myItemsPanel = new ItemsPanel(&myDocument, myView, this);
-
-    auto* splitter = new QSplitter(Qt::Horizontal, this);
-    splitter->addWidget(myItemsPanel);
-    splitter->addWidget(myView);
-    splitter->setStretchFactor(1, 1);
-    splitter->setSizes({240, 1000});
-    setCentralWidget(splitter);
+    // Parented to the viewport from birth - buildOverlay() anchors it, and
+    // ViewportOverlay would reparent it anyway, but a card that is a child of
+    // the window until then would flash in the wrong place on the first show.
+    myItemsPanel = new ItemsPanel(&myDocument, myView, myView);
 
     connect(myView, &OcctViewWidget::sketchPointPicked, this, &MainWindow::onSketchPointPicked);
     connect(myView, &OcctViewWidget::sketchCursorMoved, this, &MainWindow::onSketchCursorMoved);
@@ -96,6 +96,27 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     // shows (see setDisplayUnit()).
     connect(this, &MainWindow::appStateChanged, myItemsPanel, &ItemsPanel::refresh);
 
+    // Connected AFTER the refresh above, so it runs after it: a row added or
+    // removed changes the drawer's height, and the drawer's rectangle is one
+    // of the obstacles the toast, the balloon and the guide place themselves
+    // against - re-laying out here is what keeps that set current between
+    // resizes.
+    //
+    // Its visibility is re-DERIVED from the action here rather than only
+    // being set when the action is toggled. CLAUDE.md's rule, learned twice
+    // already on this viewport (WalkthroughPanel's skip control, Toast's undo
+    // pill): a one-shot hide is not a state, and anything that shows a
+    // widget's siblings wholesale - QWidget::showChildren() on the window's
+    // first show, for one - will happily undo it. Reading it off the action
+    // on every state change means the two cannot drift.
+    //
+    // Only reads state and moves geometry, so it cannot recurse back into
+    // updateActions().
+    connect(this, &MainWindow::appStateChanged, this, [this] {
+        myItemsPanel->setVisible(myItemsPanelAction->isChecked());
+        if (myOverlay) myOverlay->relayout();
+    });
+
     // A dimension label reads through Measure too, so it has to follow a unit
     // switch the way the items panel and the status bar do. DimensionRenderer
     // is not a QObject - it draws, it does not listen - so the window drives
@@ -113,8 +134,22 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     connect(myView, &OcctViewWidget::selectionChanged, this,
             [this] { myItemsPanel->showSelection(myView->selectedSolidIds()); });
 
-    // The Items chip and menu entry collapse the panel.
-    connect(myItemsPanelAction, &QAction::toggled, myItemsPanel, &QWidget::setVisible);
+    // The Items rail button, the menu entry and Ctrl+Alt+S all drive the one
+    // action, and the action is the ONLY thing that opens or closes the
+    // drawer. Nothing else may call setVisible() on it: the drawer stores no
+    // state of its own, exactly as every chip mirrors an action rather than
+    // remembering a mode.
+    //
+    // Opening or closing it also re-lays the overlay out, because the drawer
+    // is one of the rectangles ViewportOverlay::occupiedRects() reports and
+    // the toast, the balloon and the guide place themselves against that set.
+    // Without this, opening the drawer would leave a live toast sitting
+    // underneath it until the next resize. relayout() only reads and moves
+    // geometry, so it cannot recurse back into updateActions().
+    connect(myItemsPanelAction, &QAction::toggled, this, [this](bool shown) {
+        myItemsPanel->setVisible(shown);
+        if (myOverlay) myOverlay->relayout();
+    });
 
     updateActions();
 
@@ -491,6 +526,13 @@ void MainWindow::buildOverlay()
     tool(myRedoAction,        IconSet::Glyph::Redo);
 
     myOverlay->addWidget(rail, ViewportOverlay::Anchor::LeftEdge);
+
+    // The items drawer, beside the rail rather than under it - see
+    // ViewportOverlay's Anchor comment for why that is the layout's business
+    // and not a hard-coded offset here. Anchoring it is also the whole of
+    // what puts it in occupiedRects(), so the toast, the balloon and the
+    // guide step around it without any of them naming this widget.
+    myOverlay->addWidget(myItemsPanel, ViewportOverlay::Anchor::TopLeft);
 
     // Wireframe and Fit All are buttons in the app bar, and Save Screenshot -
     // the least used of the three, and absent from the design's bar and rail

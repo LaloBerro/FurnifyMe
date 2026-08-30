@@ -333,8 +333,11 @@ QSize WalkthroughPanel::sizeHint() const
     widest += kPad * 2;
 
     // Grown by Theme::surfaceShadowMargin() per side beyond the content size
-    // computed above - see paintEvent() and skipRect() for where that margin
-    // goes on the inside.
+    // computed above. That margin is zero - the family paints no shadow and
+    // reserves no room for one (see Theme.h) - so this card's widget rect and
+    // its painted card are the same rectangle; paintEvent() and skipRect()
+    // apply the same zero on the inside. The arithmetic is kept rather than
+    // folded away so every member of the family still reads as one scheme.
     const int margin = Theme::surfaceShadowMargin();
     return QSize(std::max(widest, titleWidth) + margin * 2,
                 kTitle + kStep * static_cast<int>(steps.size()) + kBottomPad + margin * 2);
@@ -356,8 +359,9 @@ void WalkthroughPanel::paintEvent(QPaintEvent* /*event*/)
     // family's plain border() paintSurface() just drew - the mockup's one
     // card framed in accent rather than the shared neutral tone, restored
     // here on top of the shared base rather than by hand-rolling the whole
-    // background again (paintSurface() still supplies the fill, the
-    // corners and the shadow).
+    // background again (paintSurface() still supplies the fill and the
+    // rounded corners; there is no shadow, and has not been since fix round
+    // 1 - see Theme.h).
     QPainterPath outline;
     outline.addRoundedRect(body, 10, 10);
     painter.setPen(QPen(Theme::accent(), 1.0));

@@ -185,8 +185,11 @@ void HintBalloon::reposition()
     const QRect bounds = metrics.boundingRect(QRect(0, 0, kWidth - kPad * 2, 1000),
                                               Qt::TextWordWrap, myText);
     // Grown by Theme::surfaceShadowMargin() per side beyond the content size
-    // computed above - see paintEvent() for where that margin goes on the
-    // inside. No sibling control depends on this widget's geometry, unlike
+    // computed above. That margin is zero - the family paints no shadow and
+    // reserves no room for one (see Theme.h) - so this balloon's widget rect
+    // and its painted card are the same rectangle, and paintEvent() applies
+    // the same zero on the inside. No sibling control depends on this
+    // widget's geometry, unlike
     // WalkthroughPanel's skip pill or Toast's Undo pill, so there is nothing
     // else here to keep in step.
     const int margin = Theme::surfaceShadowMargin();
@@ -253,8 +256,19 @@ void HintBalloon::reposition()
     if (toast && toast->isVisible()) stepAside(toast->geometry());
 
     // Never off either edge, whatever the floor and the steps above worked
-    // out between them.
-    x = std::max(0, std::min(x, parentWidget()->width() - width()));
+    // out between them - but clamped against the FLOOR, not against zero.
+    // Clamping to zero ran after the floor and could undo it: once the
+    // viewport is narrower than leftFloor + width(), the right-edge limit
+    // goes below the floor, the min() picks it, and the max(0, ...) parked
+    // the balloon at x=0 - underneath the rail, which relayout() then raises
+    // back on top of it. That is reachable below about 322px of viewport
+    // width with only the rail in the way, and much sooner than that with the
+    // items drawer open, since the drawer's right edge is the floor then.
+    // When the two genuinely cannot both be satisfied the floor wins: a
+    // balloon whose right end runs past the viewport edge is still readable
+    // and still clickable, while one under the rail is neither.
+    const int rightLimit = std::max(leftFloor, parentWidget()->width() - width());
+    x = std::max(leftFloor, std::min(x, rightLimit));
 
     move(x, y);
     // Re-raised here as well as re-placed: this runs from
