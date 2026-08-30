@@ -424,7 +424,12 @@ void OcctViewWidget::showPullArrow(const gp_Pnt& centre, const gp_Dir& outward)
 {
     initializeViewer();
     if (myView.IsNull()) return;
-    myPullArrow.show(centre, outward, myView->Camera()->Direction(), worldPerPixel());
+    // No viewer update of its own while a camera change is being applied:
+    // applyCameraState() emits cameraChanged() and then redraws, and this
+    // rebuild rides along with that redraw. Forcing one here as well made
+    // every orbit step pay for two vsync-bound frames instead of one.
+    myPullArrow.show(centre, outward, myView->Camera()->Direction(), worldPerPixel(),
+                     /*updateViewer=*/!myApplyingCamera);
 }
 
 void OcctViewWidget::clearPullArrow()
@@ -905,8 +910,17 @@ void OcctViewWidget::applyCameraState()
     cam->SetCenter(at);
     cam->SetUp(up);
     myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane());
-    myView->Redraw();
+    // Slots FIRST, redraw second. A slot on cameraChanged() that changes the
+    // scene - PullArrow rebuilds its 3D arrow, which is sized in screen
+    // pixels and so has to be rebuilt whenever the camera moves - was
+    // otherwise both one frame stale and forced to call UpdateCurrentViewer()
+    // itself, so every orbit step cost two vsync-bound redraws instead of
+    // one. myApplyingCamera is how showPullArrow() knows the redraw below is
+    // coming; nothing else reads it.
+    myApplyingCamera = true;
     emit cameraChanged();
+    myApplyingCamera = false;
+    myView->Redraw();
 }
 
 void OcctViewWidget::fitAll()
@@ -1090,13 +1104,22 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
     // arrow never costs the user the camera.
     if (event->button() == Qt::LeftButton && !mySketchMode && myPullArrow.isShowing() &&
         pullArrowHit(myLastPos)) {
+        // The press CLAIMS the gesture whether or not the drag maths can
+        // measure it yet. It used to claim it only when
+        // axisParameterForRay() resolved - so with the arrow near edge-on to
+        // the camera (looking straight down it, which is exactly when a user
+        // reaches for a top face from above) the press did nothing, the
+        // release fell through to an ordinary pick, and the face the user had
+        // just grabbed was silently deselected and its arrow dismissed. A
+        // grab has to be a grab; an unmeasurable angle is a reason to
+        // contribute nothing, not a reason to hand the gesture back.
+        myPullDragActive = true;
+        myPullDragMoved = false;
+        myPullDistance = 0.0;
         gp_Lin ray;
-        if (rayThroughPixel(myLastPos.x(), myLastPos.y(), ray) &&
-            CameraController::axisParameterForRay(ray, myPullArrow.axis(), myPullPressParam)) {
-            myPullDragActive = true;
-            myPullDragMoved = false;
-            myPullDistance = 0.0;
-        }
+        myHasPullPressParam =
+            rayThroughPixel(myLastPos.x(), myLastPos.y(), ray) &&
+            CameraController::axisParameterForRay(ray, myPullArrow.axis(), myPullPressParam);
     }
 }
 
@@ -1155,6 +1178,18 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
         double parameter = 0.0;
         if (rayThroughPixel(pos.x(), pos.y(), ray) &&
             CameraController::axisParameterForRay(ray, myPullArrow.axis(), parameter)) {
+            if (!myHasPullPressParam) {
+                // The press itself could not be measured (see
+                // mousePressEvent). Anchor here instead, the first moment it
+                // can be anchored at all: the drag contributes nothing until
+                // the angle improves and then starts from zero, rather than
+                // jumping by whatever the unmeasurable press would have
+                // implied.
+                myPullPressParam = parameter;
+                myHasPullPressParam = true;
+                myLastPos = pos;   // the invariant this handler's tail keeps
+                return;
+            }
             double distance = parameter - myPullPressParam;
             // The same grid the outline points snap to, applied to the pull
             // distance rather than to a position.

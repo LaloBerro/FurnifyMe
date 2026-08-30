@@ -102,11 +102,15 @@ void PullArrowRenderer::attach(const Handle(AIS_InteractiveContext)& context)
     myContext = context;
 }
 
-void PullArrowRenderer::clear()
+void PullArrowRenderer::clear(bool updateViewer)
 {
     if (!myContext.IsNull() && !myObjects.empty()) {
         for (auto& obj : myObjects) myContext->Remove(obj, Standard_False);
-        myContext->UpdateCurrentViewer();
+        // UpdateCurrentViewer() is a full viewer redraw and this build blocks
+        // on vsync for it - measured at ~16 ms a call. show() therefore
+        // clears with updateViewer = false and updates ONCE at the end,
+        // rather than paying for two frames to replace one arrow.
+        if (updateViewer) myContext->UpdateCurrentViewer();
     }
     myObjects.clear();
 }
@@ -122,14 +126,55 @@ gp_Pnt PullArrowRenderer::tail() const
 }
 
 void PullArrowRenderer::show(const gp_Pnt& centre, const gp_Dir& outward,
-                             const gp_Dir& viewDirection, double worldPerPixel)
+                             const gp_Dir& viewDirection, double worldPerPixel,
+                             bool updateViewer)
 {
     if (myContext.IsNull()) return;
 
-    clear();
+    // Nothing to do when nothing has actually moved.
+    //
+    // PullArrow::reposition() drives this from cameraChanged AND from every
+    // appStateChanged, so the great majority of calls ask for exactly the
+    // arrow already on screen - and a rebuild is emphatically not free.
+    //
+    // MEASURED, not assumed. The first version of this file cost 33.3 ms per
+    // rebuild: it called UpdateCurrentViewer() twice, once to remove the old
+    // arrow and once to display the new one, and each of those blocks on
+    // vsync in this build. Two whole frames to redraw five line segments, on
+    // every camera step. Three changes fixed it, and this early-out is the
+    // third:
+    //   - clear() no longer updates the viewer on show()'s internal path:
+    //     33.3 ms -> 16.3 ms, which is one vsync and therefore what that
+    //     figure almost entirely IS;
+    //   - applyCameraState() emits cameraChanged() before its own Redraw(),
+    //     so a rebuild driven by a camera move passes updateViewer = false
+    //     and rides along with the redraw already coming - no viewer update
+    //     at all on that path, leaving just the AIS rebuild, which the
+    //     16.3-ms-is-one-vsync figure shows is well under a millisecond;
+    //   - and a call asking for the arrow already on screen returns right
+    //     here without touching AIS: 0.17 ms. That is the common case -
+    //     every pan, every zoom notch inside the same octave, and every
+    //     appStateChanged that moved no camera at all.
+    //
+    // The tolerances are what "actually moved" means: half a degree of view
+    // rotation is below the point where the arrowheads' fan direction reads
+    // differently, and 1% of scale is below the point where the arrow's
+    // pixel length changes at all.
+    constexpr double kHalfDegree = 0.0087266;   // radians
+    if (isShowing() && centre.IsEqual(myCentre, 1.0e-9) &&
+        outward.IsEqual(myOutward, 1.0e-9) &&
+        viewDirection.IsEqual(myViewDirection, kHalfDegree) &&
+        std::fabs(worldPerPixel - myWorldPerPixel) <=
+            std::max(myWorldPerPixel, 1.0e-9) * 0.01) {
+        return;
+    }
+
+    clear(/*updateViewer=*/false);
 
     myCentre = centre;
     myOutward = outward;
+    myViewDirection = viewDirection;
+    myWorldPerPixel = worldPerPixel;
 
     // Every size here is a target in SCREEN PIXELS, converted at the point of
     // use - DimensionRenderer's rule, and for the same reason: furniture
@@ -186,7 +231,11 @@ void PullArrowRenderer::show(const gp_Pnt& centre, const gp_Dir& outward,
     myContext->SetZLayer(arrow, Graphic3d_ZLayerId_Topmost);
     myObjects.push_back(arrow);
 
-    myContext->UpdateCurrentViewer();
+    // Skipped when the caller is about to redraw anyway - see
+    // OcctViewWidget::applyCameraState(), which now emits cameraChanged()
+    // BEFORE its own Redraw() precisely so this rebuild can ride along with
+    // it instead of forcing a second frame of its own.
+    if (updateViewer) myContext->UpdateCurrentViewer();
 }
 
 // --- the value chip ---------------------------------------------------------
@@ -443,6 +492,16 @@ QString PullArrow::textForDistance(double millimetres) const
     const QString suffix =
         QLatin1Char(' ') + QString::fromStdString(Measure::unitSuffix());
     if (formatted.endsWith(suffix)) formatted.chop(suffix.length());
+    // The separator has to come out. This text is not just displayed - it is
+    // READ BACK by Measure::parseLength() on the very next textChanged, and
+    // that grammar has no comma in it (deliberately: see Measure.h, where
+    // "1,2" is listed among the things it must refuse). formatLength() puts
+    // one in past a thousand, so a drag past 1,000 mm wrote "1,410" into the
+    // field and then could not read its own writing: the preview froze at the
+    // last good value and Enter committed nothing. Caught by a probe that
+    // dragged far enough to cross that boundary - every earlier drag in the
+    // suite was a few hundred millimetres and never reached it.
+    formatted.remove(QLatin1Char(','));
     return formatted;
 }
 

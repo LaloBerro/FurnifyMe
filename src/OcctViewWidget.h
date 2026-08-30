@@ -284,10 +284,15 @@ private:
     // all speak device pixels. The two coincide at 100% display scaling and
     // diverge by exactly the scale factor at any other - which is why passing
     // a Qt position straight to MoveTo worked everywhere it was ever tested
-    // and missed by half a viewport on a 150% display: every pick landed 1.5x
-    // too far right and down, and projectToScreen() answered in a pixel space
-    // no Qt caller could use (the pull arrow's value chip landed nowhere near
-    // its arrow, which is how this finally surfaced).
+    // and missed by half a viewport on a 150% display. The two directions err
+    // OPPOSITE ways, and the comment here used to give only one of them:
+    //   - a PICK hands OCCT a logical position where a device one is wanted,
+    //     so it lands at 1/1.5 of the intended distance from the origin -
+    //     UP AND LEFT of where the user clicked;
+    //   - projectToScreen() returns a device position where Qt wants a
+    //     logical one, so a widget placed at it lands 1.5x too far RIGHT AND
+    //     DOWN. That is the half that surfaced this: the pull arrow's value
+    //     chip appeared nowhere near its arrow.
     //
     // Everything OUTSIDE these two functions - every signal, every accessor,
     // every caller in gui_smoke - is logical, so a projected point can be
@@ -365,8 +370,19 @@ private:
     // reported relative to it; myPullDistance is the last value emitted, kept
     // so a near-parallel ray (which resolves to nothing) simply holds instead
     // of jumping.
+    // True only for the duration of applyCameraState()'s cameraChanged()
+    // emission, so a slot that changes the scene can skip its own viewer
+    // update and let that function's redraw carry it - see showPullArrow().
+    bool myApplyingCamera = false;
+
     bool myPullDragActive = false;
     bool myPullDragMoved = false;
+    // Whether myPullPressParam holds anything. False when the press landed at
+    // an angle axisParameterForRay() refuses - the gesture is still claimed
+    // (see mousePressEvent), and the first mouse move that DOES resolve
+    // anchors it, so the drag contributes nothing until then instead of
+    // jumping.
+    bool myHasPullPressParam = false;
     double myPullPressParam = 0.0;
     double myPullDistance = 0.0;
 

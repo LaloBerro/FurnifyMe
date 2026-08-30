@@ -186,6 +186,24 @@ void clickAt(QWidget* target, const QPointF& pos,
     settle(80);
 }
 
+// A press at one point and a release at ANOTHER, with no move event between
+// them. Deliberately not a drag: it isolates what a handler does with the
+// release POSITION from what it does with the movement, which is the only way
+// to tell a viewport that swallows its own release-pick from one that
+// re-picks and happens to land on the same thing. dragButton() cannot answer
+// that question, because a drag that moves also commits.
+void pressThenReleaseAt(QWidget* target, const QPointF& press, const QPointF& release,
+                        Qt::MouseButton button = Qt::LeftButton)
+{
+    QMouseEvent down(QEvent::MouseButtonPress, press, target->mapToGlobal(press),
+                     button, button, Qt::NoModifier);
+    QCoreApplication::sendEvent(target, &down);
+    QMouseEvent up(QEvent::MouseButtonRelease, release, target->mapToGlobal(release),
+                   button, Qt::NoButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(target, &up);
+    settle(120);
+}
+
 // A hover move with no button down - the live dimension and the hover
 // highlight both key off this, not a click.
 void moveTo(QWidget* target, const QPointF& pos, Qt::KeyboardModifiers mods = Qt::NoModifier)
@@ -1791,6 +1809,27 @@ int main(int argc, char* argv[])
                              "camera target lands at the viewport centre (%1,%2 vs %3,%4)")
                   .arg(targetAt.x()).arg(targetAt.y())
                   .arg(view->width() / 2).arg(view->height() / 2));
+
+        // The OTHER direction, pinned directly. The check above exercises
+        // only the device -> logical half; toDevicePixels() is what carries a
+        // click back the other way, and a round trip is the one thing that is
+        // false unless BOTH halves agree. A point known to be on the body,
+        // projected to a pixel and clicked at that pixel, must select that
+        // body.
+        GProp_GProps bodyProps;
+        BRepGProp::VolumeProperties(window.document().solids().front().shape, bodyProps);
+        QPoint bodyAt;
+        const int bodyId = window.document().solids().front().id;
+        check(view->projectToScreen(bodyProps.CentreOfMass(), bodyAt),
+              "a point inside the one body projects to a pixel");
+        view->clearSelection();
+        clickAt(view, QPointF(bodyAt));
+        settle(120);
+        check(view->selectedSolidIds().size() == 1 &&
+                  view->selectedSolidIds().front() == bodyId,
+              QStringLiteral("and clicking that pixel selects that body - the projection "
+                             "and the pick agree on one pixel space, in both directions"));
+        view->clearSelection();
     }
 
     // --- picking -------------------------------------------------------------
@@ -2572,7 +2611,16 @@ int main(int argc, char* argv[])
                     clickAt(view, QPointF(at));
                     settle(120);
                     const TopoDS_Face got = view->selectedFace();
-                    if (!isVerticalPlane(got)) continue;   // occluded, or the pick missed
+                    // The face this loop is REASONING about, not merely some
+                    // vertical face that happens to be selected. Everything
+                    // below - the outline corners, the plane, the outwardness
+                    // assertion, the lifted click - is derived from
+                    // `candidate`, so accepting a different face under
+                    // occlusion would silently measure one face's plane
+                    // against another face's geometry. The pull loop further
+                    // down has required IsSame from the start; this one
+                    // checked only the shape's kind.
+                    if (got.IsNull() || !got.IsSame(candidate)) continue;
                     picked = got;
                     pickedCentre = props.CentreOfMass();
                     screen = at;
@@ -3429,6 +3477,92 @@ int main(int argc, char* argv[])
                   "and Undo puts that back too");
         }
 
+        // The body is back to its built size here - both drags above were
+        // undone - and the two probes that follow both measure against it.
+        const double steadyVolumeBase = bodyVolume();
+
+        // --- the chip must be able to read its own writing -----------------
+        // A drag writes the field and the field is what previews and commits,
+        // so the text the chip writes has to survive Measure::parseLength()
+        // going back the other way. It did not past a thousand:
+        // formatLength() inserts a thousands separator and parseLength()'s
+        // grammar has no comma in it, so the chip wrote "1,410" and then
+        // refused to read it - the preview froze at the last good value and
+        // Enter committed nothing. Every other drag in this file is a few
+        // hundred millimetres and never crosses that boundary; this one is
+        // zoomed out until a few hundred pixels really is that far.
+        {
+            clickAt(view, QPointF(centreAt));
+            settle(150);
+            const CameraState nearCamera = view->camera().state();
+            CameraState farCamera = nearCamera;
+            farCamera.distance = 6000.0;
+            view->animateTo(farCamera);
+            settle(200);
+
+            QPoint farFrom, farTo;
+            const bool haveFar =
+                view->projectToScreen(targetCentre, farFrom) &&
+                view->projectToScreen(
+                    targetCentre.Translated(gp_Vec(targetOutward) * 1500.0), farTo) &&
+                view->rect().adjusted(10, 10, -10, -10).contains(farFrom) &&
+                view->rect().adjusted(10, 10, -10, -10).contains(farTo);
+            check(haveFar, "zoomed out, a 1,500 mm pull projects inside the viewport");
+
+            PullArrow* farArrow = window.findChild<PullArrow*>();
+            check(farArrow != nullptr && farArrow->field() != nullptr,
+                  "and the chip is up to be dragged");
+            if (haveFar && farArrow && farArrow->field()) {
+                // Press and move but do NOT release yet - the field has to be
+                // read while the drag is live.
+                const QPointF pressAt(farFrom);
+                QMouseEvent down(QEvent::MouseButtonPress, pressAt, view->mapToGlobal(pressAt),
+                                 Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QCoreApplication::sendEvent(view, &down);
+                for (int i = 1; i <= 8; ++i) {
+                    const QPointF p =
+                        pressAt + (QPointF(farTo) - pressAt) * (double(i) / 8.0);
+                    QMouseEvent move(QEvent::MouseMove, p, view->mapToGlobal(p),
+                                     Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+                    QCoreApplication::sendEvent(view, &move);
+                }
+                settle(200);
+
+                const QString text = farArrow->field()->text();
+                double readBack = 0.0;
+                const bool reads = Measure::parseLength(text.toStdString(), readBack);
+                check(!text.contains(QLatin1Char(',')),
+                      QStringLiteral("the chip writes a value with no thousands separator "
+                                     "(\"%1\")").arg(text));
+                check(reads && std::fabs(readBack - farArrow->distance()) < 1.0e-6,
+                      QStringLiteral("and Measure::parseLength reads it back as exactly the "
+                                     "distance the preview was built from (%1 vs %2)")
+                          .arg(readBack).arg(farArrow->distance()));
+                check(readBack > 1000.0,
+                      QStringLiteral("and that distance really is past the thousand this "
+                                     "probe exists for (%1 mm)").arg(readBack));
+                check(view->hasModelingPreview(),
+                      "the preview is live at that distance rather than frozen at the "
+                      "last value the chip could still read");
+
+                const QPointF releaseAt(farTo);
+                QMouseEvent up(QEvent::MouseButtonRelease, releaseAt,
+                               view->mapToGlobal(releaseAt), Qt::LeftButton, Qt::NoButton,
+                               Qt::NoModifier);
+                QCoreApplication::sendEvent(view, &up);
+                settle(300);
+                check(bodyVolume() > steadyVolumeBase * 1.5,
+                      "and releasing commits that big pull for real");
+                trigger(window, QStringLiteral("Undo"));
+                settle(250);
+                check(std::fabs(bodyVolume() - steadyVolumeBase) < 1.0,
+                      "which Undo puts back like any other");
+            }
+
+            view->animateTo(nearCamera);
+            settle(200);
+        }
+
         // --- a typed carve the kernel refuses -----------------------------
         clickAt(view, QPointF(centreAt));
         settle(150);
@@ -3437,6 +3571,14 @@ int main(int argc, char* argv[])
               "the arrow is up again for the typed-value probe");
         const double steadyVolume = bodyVolume();
         ToastHost* toasts = window.findChild<ToastHost*>();
+        // Pinned before it guards anything. `field()` is a QPointer, and an
+        // `if (arrow && arrow->field())` with nothing asserting it deletes
+        // every check inside without a single red line - CLAUDE.md's
+        // vacuous-probe shape, the one that went silent five at a time in
+        // Phase 5. Both blocks below are `check(); if ()` for that reason.
+        check(arrow != nullptr && arrow->field() != nullptr,
+              "the arrow's value field exists, so the eleven checks that need it "
+              "cannot vanish quietly");
         if (arrow && arrow->field()) {
             arrow->field()->setText(QStringLiteral("-999"));
             settle(250);
@@ -3457,6 +3599,8 @@ int main(int argc, char* argv[])
         }
 
         // --- Escape clears the dedicated preview channel -------------------
+        check(arrow != nullptr && arrow->field() != nullptr,
+              "and it is still there for the preview-channel and capture checks");
         if (arrow && arrow->field()) {
             arrow->field()->setText(QStringLiteral("20"));
             settle(250);
@@ -3511,27 +3655,163 @@ int main(int argc, char* argv[])
 
         // --- the arrow owns LMB only --------------------------------------
         {
-            // A press and release on the arrow with no movement between them
-            // is not a pull, and - the release-pick the viewport has to
-            // swallow - must not disturb the selection either.
+            // Where the arrow is RIGHT NOW. The camera moves inside this
+            // block, so a `centreAt` captured before it goes stale - and a
+            // camera check that claims to start "on the arrow" while
+            // starting somewhere else is a check that has stopped meaning
+            // what it says.
+            auto arrowOnScreen = [&](QPoint& out) {
+                return view->projectToScreen(targetCentre, out);
+            };
+
+            // The release has to land somewhere a real pick would give a
+            // DIFFERENT answer, or the probe cannot tell a swallowed
+            // release-pick from one that re-picked the same face and looked
+            // identical. 400 mm out along the normal is well clear of the
+            // arrow (which is 52 px long) and of every body.
+            QPoint emptyAt;
+            const bool haveEmpty =
+                view->projectToScreen(targetCentre.Translated(gp_Vec(targetOutward) * 400.0),
+                                      emptyAt) &&
+                view->rect().adjusted(20, 20, -20, -20).contains(emptyAt) &&
+                (emptyAt - centreAt).manhattanLength() > 60;
+            check(haveEmpty,
+                  "a release point well clear of the arrow and of every body projects "
+                  "inside the viewport");
+
             const double before = bodyVolume();
-            clickAt(view, QPointF(centreAt));
+            pressThenReleaseAt(view, QPointF(centreAt),
+                               QPointF(haveEmpty ? emptyAt : centreAt));
             settle(150);
             check(std::fabs(bodyVolume() - before) < 1.0e-6,
-                  "a click on the arrow with no drag commits nothing");
-            check(!view->selectedFace().IsNull(),
-                  "and the swallowed release leaves the face still selected");
+                  "a press on the arrow released without a drag commits nothing");
+            check(!view->selectedFace().IsNull() && view->selectedFace().IsSame(target),
+                  "and the viewport swallows its own release-pick - the SAME face is "
+                  "still selected, though the release landed in empty space");
+            check(view->hasPullArrow(),
+                  "so the arrow that press grabbed is still on screen");
 
+            // Non-vacuity for the three checks above: that point really does
+            // deselect when an ordinary pick happens there. Without this the
+            // release check would pass just as well against a release point
+            // that happened to hit the same face again - which is exactly
+            // how it passed before, aimed at the face's own centre.
+            clickAt(view, QPointF(haveEmpty ? emptyAt : centreAt));
+            settle(150);
+            check(!haveEmpty || (view->selectedFace().IsNull() && !view->hasPullArrow()),
+                  "a plain click at that same empty point DOES clear the selection and "
+                  "retire the arrow - so the swallowed release was a real difference");
+
+            clickAt(view, QPointF(centreAt));
+            settle(150);
+            check(!view->selectedFace().IsNull() && view->hasPullArrow(),
+                  "the face selects again for the camera checks");
+
+            QPoint at = centreAt;
             const double azimuth = view->camera().state().azimuthDeg;
-            dragButton(view, QPointF(centreAt), QPointF(centreAt + QPoint(70, 0)),
-                       Qt::RightButton);
+            if (arrowOnScreen(at))
+                dragButton(view, QPointF(at), QPointF(at + QPoint(70, 0)), Qt::RightButton);
             check(std::fabs(view->camera().state().azimuthDeg - azimuth) > 5.0,
                   "an RMB drag starting on the arrow still orbits the camera");
             const gp_Pnt panTarget = view->camera().state().target;
-            dragButton(view, QPointF(centreAt), QPointF(centreAt + QPoint(50, 30)),
-                       Qt::MiddleButton);
+            if (arrowOnScreen(at))
+                dragButton(view, QPointF(at), QPointF(at + QPoint(50, 30)), Qt::MiddleButton);
             check(view->camera().state().target.Distance(panTarget) > 1.0,
                   "and an MMB drag starting on it still pans");
+        }
+
+        // --- a press the drag maths cannot measure still claims the grab ---
+        // Looking straight DOWN the arrow is not a corner case: it is what a
+        // user gets by pressing 1 for a top view and reaching for the face in
+        // front of them. axisParameterForRay() refuses inside ~1.8 degrees of
+        // parallel, and the press used to claim the gesture only when it
+        // resolved - so in that pose the press did nothing, the release fell
+        // through to an ordinary pick, and the face the user had just grabbed
+        // was silently deselected.
+        {
+            // Put the EYE exactly above the face centre. Then the ray through
+            // the face centre's own pixel is exactly vertical - exactly
+            // parallel to the arrow's axis - and the refusal is by
+            // construction rather than by luck.
+            //
+            // Aiming the camera's target at the face and steepening the
+            // elevation is NOT enough, and that is worth recording: the
+            // controller clamps elevation to 88 degrees (kMaxElevation), so
+            // the steepest pose reachable that way leaves the ray 2.0 degrees
+            // off the axis - just outside the ~1.81 degree band
+            // axisParameterForRay() refuses. The first version of this probe
+            // did exactly that, resolved, and read a 1,410 mm jump out of the
+            // field. The eye position is what has to be arranged, not the
+            // elevation.
+            CameraState edgeOn = view->camera().state();
+            edgeOn.elevationDeg = 88.0;
+            // Where the eye sits relative to its target at this pose, from
+            // the same controller the viewport uses rather than a second copy
+            // of the spherical maths.
+            CameraController scratchCam;
+            CameraState atOrigin = edgeOn;
+            atOrigin.target = gp_Pnt(0.0, 0.0, 0.0);
+            scratchCam.setState(atOrigin);
+            const gp_Pnt eyeOffset = scratchCam.eyePosition();
+            edgeOn.target = gp_Pnt(targetCentre.X() - eyeOffset.X(),
+                                   targetCentre.Y() - eyeOffset.Y(),
+                                   targetCentre.Z());
+            view->animateTo(edgeOn);   // animations are off: immediate
+            settle(250);
+            const gp_Pnt eyeNow = view->camera().eyePosition();
+            check(std::hypot(eyeNow.X() - targetCentre.X(), eyeNow.Y() - targetCentre.Y()) < 1.0e-6,
+                  QStringLiteral("the eye is directly above the face centre, so the ray "
+                                 "through it runs straight down the arrow (off by %1 mm)")
+                      .arg(std::hypot(eyeNow.X() - targetCentre.X(),
+                                      eyeNow.Y() - targetCentre.Y())));
+
+            QPoint downTheArrow;
+            const bool haveDown = view->projectToScreen(targetCentre, downTheArrow);
+            check(haveDown && view->hasPullArrow(),
+                  "the arrow is still up with the camera looking straight down it");
+
+            PullArrow* edgeArrow = window.findChild<PullArrow*>();
+            check(edgeArrow != nullptr && edgeArrow->field() != nullptr,
+                  "and its value field is there to read the drag off");
+            const QString beforeText =
+                (edgeArrow && edgeArrow->field()) ? edgeArrow->field()->text() : QString();
+
+            if (haveDown && edgeArrow && edgeArrow->field()) {
+                const QPointF press(downTheArrow);
+                QMouseEvent down(QEvent::MouseButtonPress, press, view->mapToGlobal(press),
+                                 Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QCoreApplication::sendEvent(view, &down);
+                settle(80);
+                check(view->pullDragActive(),
+                      "a press on the arrow claims the gesture even at an angle the drag "
+                      "maths refuses to measure");
+
+                // A long move, at an angle that DOES resolve. The field must
+                // still read what it did - which is also the non-vacuity for
+                // the check above: had the press resolved, this move would
+                // have produced a large distance and rewritten the field.
+                const QPointF moved = press + QPointF(0.0, -200.0);
+                for (int i = 1; i <= 8; ++i) {
+                    const QPointF p = press + (moved - press) * (double(i) / 8.0);
+                    QMouseEvent move(QEvent::MouseMove, p, view->mapToGlobal(p),
+                                     Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+                    QCoreApplication::sendEvent(view, &move);
+                }
+                settle(150);
+                check(edgeArrow->field()->text() == beforeText,
+                      QStringLiteral("and an unmeasurable press contributes nothing rather "
+                                     "than jumping - the value is untouched (\"%1\")")
+                          .arg(edgeArrow->field()->text()));
+
+                QMouseEvent up(QEvent::MouseButtonRelease, moved, view->mapToGlobal(moved),
+                               Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+                QCoreApplication::sendEvent(view, &up);
+                settle(200);
+                check(!view->selectedFace().IsNull() &&
+                          view->selectedFace().IsSame(target) && view->hasPullArrow(),
+                      "and that release is swallowed too, so the face the user grabbed "
+                      "is still selected");
+            }
         }
 
         // The arrow goes the moment its predicate stops holding - one

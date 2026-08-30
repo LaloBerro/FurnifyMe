@@ -56,9 +56,14 @@ public:
     // only orients the arrowheads' two strokes so they fan out across the
     // screen rather than edge-on to it; `worldPerPixel` sizes the whole
     // thing in screen pixels. Replaces whatever was drawn before.
+    // `updateViewer` false leaves the redraw to the caller, for the one
+    // caller that is about to redraw anyway - see
+    // OcctViewWidget::applyCameraState(). UpdateCurrentViewer() blocks on
+    // vsync in this build (~16 ms), so an arrow that forced its own frame on
+    // every camera step doubled the cost of an orbit.
     void show(const gp_Pnt& centre, const gp_Dir& outward, const gp_Dir& viewDirection,
-              double worldPerPixel);
-    void clear();
+              double worldPerPixel, bool updateViewer = true);
+    void clear(bool updateViewer = true);
     bool isShowing() const { return !myObjects.empty(); }
 
     // The line a drag is measured against: the outward normal through the
@@ -74,6 +79,10 @@ private:
     gp_Pnt myCentre;
     gp_Dir myOutward{0.0, 0.0, 1.0};
     double myHalfLength = 1.0;
+    // What the arrow currently on screen was built from, so show() can tell a
+    // call that changes nothing from one that does - see the early-out there.
+    gp_Dir myViewDirection{0.0, 0.0, -1.0};
+    double myWorldPerPixel = 0.0;
 };
 
 class PullArrow : public QWidget {
