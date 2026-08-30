@@ -218,11 +218,28 @@ void HintBalloon::reposition()
     // balloon at x=8 - underneath the rail - at viewport widths around
     // 585-640, which is reachable the moment Show tips again restores the
     // guide on a narrow window.
-    int leftFloor = 0;
-    for (const QRect& obstacle : obstacles) {
-        if (obstacle.center().x() < parentWidget()->width() / 2)
-            leftFloor = std::max(leftFloor, obstacle.right() + 1 + kClearance);
-    }
+    //
+    // Only obstacles sharing this balloon's own horizontal BAND raise it, the
+    // same rule ToastHost's solver applies. Without that clause every
+    // left-hand card is treated as a full-height wall, and the items drawer
+    // is not one: it is a top-left card, the balloon lives at the bottom, and
+    // on any viewport tall enough for the two never to meet it was still
+    // shoving the balloon out to the drawer's right edge - far enough, on a
+    // narrow window, to hang it off the right of the viewport. The rail is a
+    // genuine spine and shares every band there is, so it is unaffected;
+    // that is the difference the band test is there to draw.
+    auto floorForBand = [&](int bandTop) {
+        int floorX = 0;
+        for (const QRect& obstacle : obstacles) {
+            if (obstacle.bottom() < bandTop || obstacle.top() > bandTop + height() - 1)
+                continue;
+            if (obstacle.center().x() < parentWidget()->width() / 2)
+                floorX = std::max(floorX, obstacle.right() + 1 + kClearance);
+        }
+        return floorX;
+    };
+
+    int leftFloor = floorForBand(y);
     x = std::max(x, leftFloor);
 
     // Overlap with what is left would be worse than it looks, because
@@ -239,6 +256,11 @@ void HintBalloon::reposition()
             // Never above the top edge: on a viewport too short for both,
             // a balloon nudged off-screen teaches nobody anything.
             y = std::max(0, obstacle.top() - kClearance - height());
+            // The floor is a property of the band, so moving bands re-asks
+            // for it: the row this balloon has just climbed into can be
+            // occupied on the left by things the row below was not.
+            leftFloor = floorForBand(y);
+            x = std::max(x, leftFloor);
         }
     };
 

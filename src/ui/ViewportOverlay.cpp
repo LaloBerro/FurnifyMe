@@ -96,6 +96,14 @@ void ViewportOverlay::relayout()
         // Size every widget before measuring: the centring sums below are wrong
         // if a widget is still at its default size on first layout.
         entry.widget->adjustSize();
+        // A hidden entry takes up none of an edge - it neither raises the left
+        // margin nor occupies a slot in a stack. That has to hold for the
+        // CURSORS as well as for leftX below, or a closed items drawer would
+        // still push the next TopLeft card down by its height. Latent while
+        // the drawer is the only thing anchored there, and exactly the kind of
+        // half-applied invariant that stops being latent the moment something
+        // else is added beside it.
+        if (entry.widget->isHidden()) continue;
         if (entry.anchor == Anchor::LeftCenter)  leftCenterY += entry.widget->height() + kGap;
         if (entry.anchor == Anchor::RightCenter) rightCenterY += entry.widget->height() + kGap;
         // isHidden(), not isVisible(). isVisible() is false for every child of
@@ -115,7 +123,7 @@ void ViewportOverlay::relayout()
         // isHidden() asks the question that is actually meant - "is this
         // widget meant to be on screen" - and its answer does not depend on
         // whether an ancestor has been shown yet.
-        if (entry.anchor == Anchor::LeftEdge && !entry.widget->isHidden())
+        if (entry.anchor == Anchor::LeftEdge)
             leftX = std::max(leftX, kEdgeMargin + entry.widget->width() + kGap);
     }
     int leftCursor = (h - (leftCenterY - kGap)) / 2;
@@ -123,6 +131,12 @@ void ViewportOverlay::relayout()
 
     for (const Entry& entry : myEntries) {
         if (!entry.widget) continue;   // the widget was destroyed; nothing to place
+        // Hidden entries are skipped here for the same reason they are skipped
+        // in the measuring pass above: they occupy no slot. Nothing is lost by
+        // leaving one at a stale rectangle - occupiedRects() ignores it too,
+        // and whatever shows it again runs a relayout in the same breath (see
+        // MainWindow's Items toggle).
+        if (entry.widget->isHidden()) continue;
         QWidget* placed = entry.widget;
         placed->adjustSize();
         const int cw = placed->width();

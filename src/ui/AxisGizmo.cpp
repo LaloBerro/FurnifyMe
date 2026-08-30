@@ -186,8 +186,20 @@ void AxisGizmo::paintEvent(QPaintEvent* /*event*/)
     // lighter BOX sitting on the scene - a fake transparency that announced
     // itself. Since fix round 1's ruling is that nothing over the GL surface
     // is translucent anyway, the honest form is the one the rail and the
-    // drawer already wear: panel() fill, 1px border(), rounded.
-    Theme::paintSurface(painter, rect());
+    // drawer already wear: panel() fill and a 1px border().
+    //
+    // Radius ZERO, unlike the rest of the family, and that is the whole point
+    // rather than an oversight. A rounded card does not cover its own four
+    // corners, and over this surface an uncovered pixel is not transparent
+    // but whatever the driver left there - black. Every other card in the
+    // shell already carries those nubs and Task 5 will settle whether the
+    // family keeps them; this widget did NOT, because a flat fillRect()
+    // covers every pixel it owns. Bringing it into the family at radius 8
+    // would have been a punch-list item that introduced the very defect the
+    // punch list above it was clearing. Zero keeps the card filling its rect
+    // exactly, which is what ruling 8 asks for, and leaves the corner
+    // question where it belongs.
+    Theme::paintSurface(painter, rect(), 0);
 
     Tip tips[6];
     computeTips(tips);

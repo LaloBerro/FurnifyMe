@@ -53,6 +53,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPointF>
+#include <QPointer>
 #include <QPushButton>
 #include <QSet>
 #include <QSettings>
@@ -620,6 +621,40 @@ int main(int argc, char* argv[])
             check(std::fabs(view->camera().state().azimuthDeg - azBefore) < 1e-9 &&
                       std::fabs(view->camera().state().elevationDeg - elBefore) < 1e-9,
                   "the gizmo no longer carries a label chip to click");
+
+            // The gizmo wears the floating-surface family's card now, in
+            // place of the flat Theme::viewport() fill that read as a lighter
+            // box against the real gradient. It had no check of its own while
+            // it was that flat fill, which is how it could change ground
+            // without anything noticing - so it joins the same sweep every
+            // other card in the family carries.
+            checkFamilySurface(gizmo, QPoint(0, gizmo->height() / 2),
+                               gizmo->rect().adjusted(2, 2, -2, -2), Theme::border(),
+                               QStringLiteral("AxisGizmo"));
+
+            // ...and specifically its CORNERS, which the sweep above excludes
+            // by design. The flat fill this card replaced covered every pixel
+            // the widget owned; a rounded card would not, and four black nubs
+            // where there had been none would be a punch-list item that
+            // introduced the defect the punch list was clearing. Radius 0 is
+            // what makes this pass, and this is what says so.
+            const QImage gizmoImg = renderExact(gizmo);
+            QStringList gizmoNubs;
+            const QPoint gizmoCorners[4] = {
+                QPoint(0, 0), QPoint(gizmoImg.width() - 1, 0),
+                QPoint(0, gizmoImg.height() - 1),
+                QPoint(gizmoImg.width() - 1, gizmoImg.height() - 1)};
+            for (const QPoint& c : gizmoCorners) {
+                if (!gizmoImg.rect().contains(c)) continue;
+                if (qAlpha(gizmoImg.pixel(c)) != 255)
+                    gizmoNubs << QStringLiteral("%1,%2 alpha %3")
+                                     .arg(c.x()).arg(c.y()).arg(qAlpha(gizmoImg.pixel(c)));
+            }
+            check(!gizmoImg.isNull() && gizmoNubs.isEmpty(),
+                  QStringLiteral("and its card covers all four corners, so joining the "
+                                 "family cost it no uncovered pixels (%1)")
+                      .arg(gizmoNubs.isEmpty() ? QStringLiteral("all four solid")
+                                               : gizmoNubs.join(QStringLiteral("; "))));
         }
     }
 
@@ -1358,9 +1393,19 @@ int main(int argc, char* argv[])
                              "(drawer x=%1, rail right=%2)")
                   .arg(drawer ? drawer->x() : -1)
                   .arg(rail ? rail->geometry().right() : -1));
-        check(drawer != nullptr && drawer->y() >= 0 && drawer->y() <= 24,
-              QStringLiteral("and pinned near the viewport's top edge (y=%1)")
-                  .arg(drawer ? drawer->y() : -1));
+        // Its top edge, derived rather than allowed a corridor. The overlay's
+        // own margin is private to ViewportOverlay.cpp, so this reads it off
+        // the widget anchored to the OPPOSITE top corner - the axis gizmo,
+        // whose TopRight placement uses the very same constant. Two cards on
+        // one top edge that disagree about where that edge is would be
+        // visible at a glance, and a "0 to 24" corridor would not have said
+        // so.
+        AxisGizmo* topRight = view->findChild<AxisGizmo*>();
+        check(drawer != nullptr && topRight != nullptr && drawer->y() == topRight->y(),
+              QStringLiteral("and its top edge is the overlay's own margin, the same one "
+                             "the gizmo hangs from across the top edge (drawer y=%1, "
+                             "gizmo y=%2)")
+                  .arg(drawer ? drawer->y() : -1).arg(topRight ? topRight->y() : -1));
         check(drawer != nullptr && view->rect().contains(drawer->geometry()),
               "and lies entirely inside the viewport");
 
@@ -1431,6 +1476,29 @@ int main(int argc, char* argv[])
                              "rows (%1)")
                   .arg(stale.isEmpty() ? QStringLiteral("clean")
                                        : stale.join(QStringLiteral(" | "))));
+
+        // The text sweep above catches the empty state and nothing else - a
+        // replaced BODY row carries text that legitimately reappears on the
+        // new row, so only the widget's own state can distinguish "gone" from
+        // "still there". Held by pointer across a rebuild: settle() runs a
+        // nested event loop, which does not deliver DeferredDelete, so the
+        // old row is still alive here and its visibility is the whole
+        // question.
+        if (drawer && drawer->rowCount() > 0) {
+            QPointer<QWidget> deadRow = drawer->findChild<QWidget*>(QStringLiteral("itemsRow"));
+            check(deadRow != nullptr && deadRow->isVisible(),
+                  "a live row is visible before the rebuild that replaces it");
+            drawer->refresh();
+            settle(60);
+            check(deadRow.isNull() || !deadRow->isVisible(),
+                  QStringLiteral("and the row a rebuild replaced is hidden the instant it "
+                                 "is replaced, not merely on its way to deleteLater() "
+                                 "(%1)")
+                      .arg(deadRow.isNull() ? QStringLiteral("already destroyed")
+                                            : QStringLiteral("still alive, hidden")));
+            check(drawer->rowCount() == static_cast<int>(window.document().solids().size()),
+                  "and the rebuild left exactly one row per body");
+        }
 
         // Content unchanged: the row still carries name and dimensions.
         check(drawer != nullptr &&
@@ -4516,10 +4584,13 @@ int main(int argc, char* argv[])
             // it is one more thing the balloon has to be clear of while the
             // readings below are taken.
 
-            // The balloon uses a floor rather than a band, so an open drawer
-            // moves it whatever height it is at. Measured open and closed:
-            // the difference is what proves the drawer, and not the rail, is
-            // what put it there.
+            // The balloon raises a floor for left-hand obstacles that share
+            // its own horizontal band - ToastHost's rule, and now this
+            // widget's. Measured three ways, because only the set of three
+            // says what the rule is: with the drawer IN the band (it moves
+            // the balloon), with the drawer closed (it stops), and on a
+            // viewport tall enough that the drawer is nowhere near the
+            // balloon's row (it must not move it at all).
             const auto probeSolids = probe.document().solids();
             if (probeSolids.size() >= 2) {
                 pv->setSelectedSolids({probeSolids[0].id, probeSolids[1].id});
@@ -4528,6 +4599,16 @@ int main(int argc, char* argv[])
             check(balloon->isVisible(), "a hint is up for the obstacle probe");
             if (balloon->isVisible()) {
                 const QRect drawerRect = drawer->geometry();
+                // Non-vacuity for the whole open/closed comparison below: on
+                // this short viewport the drawer genuinely reaches down into
+                // the balloon's row, which is the only circumstance in which
+                // a band-aware floor lets it move anything.
+                check(drawerRect.top() <= balloon->geometry().bottom() &&
+                          drawerRect.bottom() >= balloon->geometry().top(),
+                      QStringLiteral("the drawer really does share the balloon's band here "
+                                     "(drawer %1..%2, balloon %3..%4)")
+                          .arg(drawerRect.top()).arg(drawerRect.bottom())
+                          .arg(balloon->geometry().top()).arg(balloon->geometry().bottom()));
                 check(balloon->x() > drawerRect.right(),
                       QStringLiteral("the balloon clears the open drawer (balloon x=%1, "
                                      "drawer right=%2)")
@@ -4554,30 +4635,53 @@ int main(int argc, char* argv[])
                 check(drawer->isVisible() && balloon->x() == openX,
                       "reopening it puts the balloon back where it was");
 
-                // Close quarters: a width at which the balloon's right-edge
-                // limit falls BELOW the floor the drawer raises. The final
-                // clamp used to be written against zero rather than against
-                // that floor, so the limit won and the balloon was parked at
-                // x=0 - underneath the rail, which ViewportOverlay::relayout()
-                // then raises back on top of it, leaving a hint nobody can
-                // read or dismiss. Reachable below about 322px of viewport
-                // with only the rail in the way, and far sooner than that
-                // whenever the drawer is open, which is the case this probe
-                // can actually drive the window to.
-                resizeViewport(540, pv->height());
-                settle(250);
-                const QRect tightDrawer = drawer->geometry();
-                check(pv->width() - balloon->width() < tightDrawer.right(),
-                      QStringLiteral("at this width the right-edge limit really is below "
-                                     "the drawer's floor, so the clamp is the thing under "
-                                     "test (viewport %1 wide, balloon %2 wide, drawer "
-                                     "right %3)")
-                          .arg(pv->width()).arg(balloon->width()).arg(tightDrawer.right()));
-                check(balloon->x() > tightDrawer.right(),
-                      QStringLiteral("and the clamp does not pull the balloon back under "
-                                     "the drawer (balloon x=%1)").arg(balloon->x()));
+                // The third reading, and the one that says the floor is a
+                // BAND rule rather than a wall. A taller viewport moves the
+                // balloon's row well below the drawer's bottom edge; a
+                // top-left card the balloon can never touch must then stop
+                // constraining it entirely, and the balloon returns to
+                // centre. Treating every left-hand card as full-height did
+                // the opposite: it held the balloon out at the drawer's right
+                // edge at any height, which on a narrow window pushed it off
+                // the right of the viewport - the case the two neighbouring
+                // readings above check with rect().contains() and this one
+                // therefore checks too.
+                resizeViewport(540, 560);
+                settle(300);
+                const QRect tallDrawer = drawer->geometry();
+                check(pv->width() == 540 && pv->height() == 560,
+                      QStringLiteral("the probe reached the taller viewport (got %1x%2)")
+                          .arg(pv->width()).arg(pv->height()));
+                check(tallDrawer.bottom() < balloon->geometry().top(),
+                      QStringLiteral("where the drawer is clear of the balloon's band, so "
+                                     "a band-aware floor has to ignore it (drawer bottom "
+                                     "%1, balloon top %2)")
+                          .arg(tallDrawer.bottom()).arg(balloon->geometry().top()));
+                check(balloon->x() < tallDrawer.right(),
+                      QStringLiteral("so it no longer holds the balloon out past its right "
+                                     "edge (balloon x=%1, drawer right=%2)")
+                          .arg(balloon->x()).arg(tallDrawer.right()));
                 check(balloon->x() > rail->geometry().right(),
-                      "nor under the rail");
+                      QStringLiteral("while the rail - a genuine full-height spine, in "
+                                     "every band there is - still holds its floor "
+                                     "(balloon x=%1, rail right=%2)")
+                          .arg(balloon->x()).arg(rail->geometry().right()));
+                check(pv->rect().contains(balloon->geometry()),
+                      QStringLiteral("and the balloon is entirely inside the viewport "
+                                     "(balloon %1,%2 %3x%4 in %5x%6)")
+                          .arg(balloon->x()).arg(balloon->y())
+                          .arg(balloon->width()).arg(balloon->height())
+                          .arg(pv->width()).arg(pv->height()));
+
+                // Saved for the visual check the numbers above stand in for.
+                // QWidget::grab() on the window renders the widget tree; the
+                // viewport itself paints nothing into it (paintEngine() is
+                // null, by design - see CLAUDE.md), but every card floating
+                // over it does, at its real position. That is exactly the
+                // layout evidence this case needs, and it comes from the
+                // same in-process rendering the rest of this file uses
+                // rather than from OS-level capture.
+                probe.grab().save(outDir + QStringLiteral("/balloon_540_band.png"));
             }
         }
         probe.close();

@@ -135,10 +135,17 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
             [this] { myItemsPanel->showSelection(myView->selectedSolidIds()); });
 
     // The Items rail button, the menu entry and Ctrl+Alt+S all drive the one
-    // action, and the action is the ONLY thing that opens or closes the
-    // drawer. Nothing else may call setVisible() on it: the drawer stores no
-    // state of its own, exactly as every chip mirrors an action rather than
+    // action, and the drawer's shown state is read off that action rather
+    // than stored - exactly as every chip mirrors an action rather than
     // remembering a mode.
+    //
+    // One other thing does call setVisible() on it: ViewportOverlay::addWidget()
+    // show()s whatever it anchors, which is right for every other entry it
+    // takes. The derivation wins rather than the initial show, because the
+    // appStateChanged slot below re-reads the action on every state change -
+    // so an overlay that shows a drawer whose action is unchecked is
+    // corrected before the window is ever on screen. That is the point of
+    // deriving it repeatedly instead of only on toggle.
     //
     // Opening or closing it also re-lays the overlay out, because the drawer
     // is one of the rectangles ViewportOverlay::occupiedRects() reports and

@@ -5,13 +5,16 @@
 // replaces could only ever look like a box.
 //
 // It wears the floating-surface family's own card (Theme::paintSurface()),
-// like the rail, the drawer, the guide, the balloon and the toast. It used to
-// fill itself flat with Theme::viewport() instead, on the theory that the
-// panel would disappear against the sky - which it did, right up until the
-// viewport had a gradient and a ground grid under it, after which the flat
-// fill read as a lighter box pasted onto the scene. Nothing over this surface
-// is translucent (see Theme.h), so an honest card is the only alternative to
-// a fake one.
+// like the rail, the drawer, the guide, the balloon and the toast - at radius
+// ZERO, so the card covers every pixel this widget owns. It used to fill
+// itself flat with Theme::viewport() instead, on the theory that the panel
+// would disappear against the sky - which it did, right up until the viewport
+// had a gradient and a ground grid under it, after which the flat fill read
+// as a lighter box pasted onto the scene. Nothing over this surface is
+// translucent (see Theme.h), so an honest card is the only alternative to a
+// fake one; and the flat fill it replaced had no uncovered corners, so
+// rounding it would have traded one visual defect for four. See
+// AxisGizmo.cpp's paintEvent() for the whole argument.
 //
 // Axes and tips, and nothing else. It used to carry a chip below them naming
 // the current view, and that chip's job - showing the name, and snapping back
