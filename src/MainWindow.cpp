@@ -497,18 +497,18 @@ void MainWindow::buildOverlay()
     // at, what to draw, what to build, what to pick, and - pushed to the
     // bottom by the stretch - what to take back.
     //
-    // Thirteen buttons give the rail a measured natural height of 524px
-    // (13 x 34 of card, three 7px separators, 3px between each, 8px of card
-    // padding top and bottom). Anchored 14px down, its bottom sits at 538, so
-    // a viewport shorter than that starts clipping - Redo is the first
-    // casualty, then Undo - and 552px is what keeps the bottom margin too.
-    // Below the threshold the LeftEdge anchor deliberately keeps every button
-    // its designed size and lets the last one run off the edge rather than
-    // squeezing thirteen fixed-size buttons into twelve buttons' worth of
-    // space, which Qt resolves by overlapping them. Every screen this app is
-    // used on clears 552 comfortably - at 1200x800 the viewport is 743 and
-    // the rail has ~190px of slack - but a fourteenth tool needs a real
-    // answer, not another 37px.
+    // ViewportOverlay::relayout()'s LeftEdge case deliberately keeps every
+    // button its designed size on a too-short viewport and lets the last one
+    // run off the bottom edge - Redo first, then Undo - rather than squeezing
+    // fixed-size buttons into a space they do not fit, which Qt resolves by
+    // overlapping them. See that comment for why the clip is legible rather
+    // than fixed there. It is fixed HERE instead, a few lines down, by never
+    // letting the viewport get that short in the first place - the minimum
+    // height is DERIVED from the rail's own sizeHint() rather than a measured
+    // literal, so it cannot go stale the day a fourteenth button is added
+    // (see CLAUDE.md's warning that the rail wants a rework well before a
+    // screen's own height becomes the real ceiling this derivation cannot
+    // push past).
     auto* rail = new ToolCluster(myView);
     auto tool = [rail](QAction* action, IconSet::Glyph glyph) {
         rail->addChip(new ToolChip(action, glyph, ToolChip::ChipMode::IconOnly));
@@ -531,6 +531,18 @@ void MainWindow::buildOverlay()
     rail->addStretch();
     tool(myUndoAction,        IconSet::Glyph::Undo);
     tool(myRedoAction,        IconSet::Glyph::Redo);
+
+    // The viewport must never be able to shrink shorter than the rail needs.
+    // rail->sizeHint() is the rail's own natural stack height - every chip,
+    // separator and gap, plus the card's own top/bottom padding - with the
+    // stretch between Select Edges and Undo contributing nothing, the same
+    // number ViewportOverlay::relayout() calls `ch` for a LeftEdge entry.
+    // ViewportOverlay pins that entry kEdgeMargin px off BOTH the top and the
+    // bottom of the viewport (see relayout()'s LeftEdge case), so the
+    // viewport needs at least the rail's height plus twice that margin.
+    // Read from ViewportOverlay itself rather than repeated here, so the two
+    // cannot silently disagree about what the rail is pinned against.
+    myView->setMinimumHeight(rail->sizeHint().height() + 2 * ViewportOverlay::kEdgeMargin);
 
     myOverlay->addWidget(rail, ViewportOverlay::Anchor::LeftEdge);
 
@@ -585,9 +597,19 @@ void MainWindow::buildOverlay()
     // A guide can appear UNDERNEATH a toast that is already up (Show tips
     // again does exactly that), and nothing told the toast to step aside
     // when it did - HintBalloon::reconsider() already handled that case for
-    // itself. appStateChanged is when it happens; replace() only reads
-    // geometry, so it cannot recurse back into updateActions().
-    connect(this, &MainWindow::appStateChanged, myToasts, &ToastHost::replace);
+    // itself. appStateChanged is when it happens - but the connection that
+    // used to sit here, straight from appStateChanged to replace(), was
+    // REDUNDANT with the one below on ViewportOverlay::laidOut(), not a
+    // second necessary route: the lambda a few lines up
+    // (myItemsPanel->setVisible(...)) already calls myOverlay->relayout() on
+    // every appStateChanged, and relayout() itself emits laidOut() once every
+    // anchored widget is at its final rectangle - so replace() was already
+    // running once, in the right order, before this line ran it a second
+    // time. Removed rather than kept as a belt-and-braces call: two
+    // connections that fire from the same event and do the same thing is the
+    // sort of drift this file's own rule against a second refresh path warns
+    // about, and the survivor is the one ordered correctly - see the comment
+    // on the laidOut() connection below.
 
     // Replaces the old QInputDialog::getDouble() for extrude height. Parents
     // itself to the viewport and positions itself (top-center, clear of the
@@ -622,6 +644,11 @@ void MainWindow::buildOverlay()
     // relayout() raised the top-left cluster back over it. Ordering off the
     // signal makes "after the anchored widgets have moved" a property of the
     // code rather than an accident of construction order.
+    //
+    // This is myToasts's ONE connection to replace() - appStateChanged
+    // reaches it too, but only by relaying through relayout()'s own laidOut()
+    // emission (see the comment further up, where a second direct connection
+    // to appStateChanged used to sit and double-call this).
     connect(myOverlay, &ViewportOverlay::laidOut, myToasts, &ToastHost::replace);
     connect(myOverlay, &ViewportOverlay::laidOut, hints, &HintBalloon::reposition);
     connect(myOverlay, &ViewportOverlay::laidOut, myExtrudePreview, &ExtrudePreview::replace);

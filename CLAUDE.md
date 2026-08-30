@@ -578,8 +578,14 @@ The shell's composition, settled in Phase 5 against HTML mockups the user chose 
   Fit All. `Save Screenshot` is menu-only.
 - **The rail** is one `ToolCluster` in `ChipMode::IconOnly` at `Anchor::LeftEdge` -
   every tool as an icon button, labels and shortcuts in tooltips that auto-update from
-  the actions. Natural height 551 px; below 579 px of viewport Undo clips first. Rework
-  the rail before adding a fourteenth tool.
+  the actions. `MainWindow::buildOverlay()` sets the viewport's own minimum height from
+  the rail's `sizeHint()` plus both `ViewportOverlay` edge margins - derived, not a
+  literal, so it cannot go stale the day a button is added - which is what keeps the
+  viewport from ever shrinking short enough to clip the rail (Redo was the first
+  casualty, then Undo). A fourteenth tool raises that floor rather than reintroducing
+  the clip, but the user's actual screen height is a real ceiling the floor cannot push
+  past, so the rail still wants a rework - scrolling, grouping, something - well before
+  it gets there.
 - **The items drawer** floats beside the rail, toggled by the existing Items action -
   visibility is derived from the action's checked state, both directions, and nothing
   else may show or hide it. The viewport is full-bleed; there is no dock.
@@ -596,11 +602,18 @@ this was already the law: the chip shadows introduced early in the phase "worked
 blending alpha over garbage, and the rail's unpainted slack rendered as a solid black band
 down the app. `Theme::paintSurface()` is the one implementation of the floating-surface
 family - an **opaque ground fill across the full widget rect** (`viewport()` by default,
-`chrome()` for bar buttons), then the rounded panel card and a crisp 1px border on top, so
-a rounded card's corners are flat viewport-grey instead of black. There are no shadows;
+`chrome()` for any future caller painted on a non-viewport ground - the bar's own buttons
+paint their own body directly and never call this), then the rounded panel card and a crisp
+1px border on top, so a rounded card's corners are flat viewport-grey instead of black.
+There are no shadows;
 borders carry the separation. `surfaceShadowMargin()` returns 0 and stays only so caller
 arithmetic keeps working. `Theme::drawCrispBorder` is the one half-pixel-alignment idiom -
 an antialiased 1px pen at an integer coordinate smears across two rows at half intensity.
+
+**One ruled exception:** `Toast::paintEvent()`'s `painter.setOpacity(myOpacity)` blends the
+whole toast during its 160 ms dismiss fade - permitted because it is transient and
+motion-token-driven rather than a resting translucent surface, and because gui_smoke runs
+with animations off, so the opacity/colour sweeps never actually see a blended pixel.
 
 **Verify appearance with measured pixels, never by eyeballing a crop.** This phase's worst
 finding was a commit message claiming a magnified crop confirmed a 3px gap while the real

@@ -105,9 +105,11 @@ void drawCrispRule(QPainter& p, const QPointF& from, const QPointF& to, const QC
 // stopgap. Filling `rect` with an opaque ground before the rounded panel
 // settles it family-wide: the default is viewport(), near-invisible against
 // the real viewport behind every card that floats directly over the GL
-// surface; a card that instead sits on the chrome bar (AppBar's buttons, if
-// they ever route through this rather than painting their own body) passes
-// chrome() so its corners do not read as a viewport-grey nub on chrome.
+// surface. The `ground` parameter exists for a future caller painted on a
+// non-viewport ground - a card sitting on the chrome bar would pass chrome()
+// so its corners read as flat chrome-grey rather than a viewport-grey nub.
+// No such caller exists today: AppBar's own buttons paint their own body
+// directly (see BarButton::paintEvent()) rather than routing through this.
 //
 // It still paints NO shadow, and that is a rule rather than a simplification.
 // CLAUDE.md's probe result is that Qt composites plain OPAQUE children over

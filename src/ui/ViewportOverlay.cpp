@@ -20,11 +20,6 @@ namespace {
 // again.
 const int kMargin = 16 - Theme::surfaceShadowMargin();
 constexpr int kGap = 8;       // gap between clusters sharing an edge
-
-// The rail's own margin: the plan's 14px from the viewport's left, top and
-// bottom edges, two pixels tighter than kMargin deliberately - a rail pinned
-// to an edge hugs it; a card floating in a corner stands off it.
-constexpr int kEdgeMargin = 14;
 }  // namespace
 
 ViewportOverlay::ViewportOverlay(QWidget* viewport)
@@ -179,6 +174,15 @@ void ViewportOverlay::relayout()
                 // instead means a short viewport clips the last button
                 // cleanly off the bottom edge - still wrong, but legibly so,
                 // and every button above it stays the size it should be.
+                //
+                // This class has no way to know it, but the branch is dead
+                // in the shipped app: MainWindow::buildOverlay() sets the
+                // viewport's own minimum height from the rail's sizeHint()
+                // plus kEdgeMargin twice, specifically so `h` here can never
+                // be smaller than `ch` needs. Kept as a real std::max rather
+                // than an assert, because this class is not the one that
+                // enforces that invariant and must not assume a caller
+                // always will.
                 placed->resize(cw, std::max(ch, h - kEdgeMargin * 2));
                 break;
         }

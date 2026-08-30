@@ -1266,6 +1266,74 @@ int main(int argc, char* argv[])
         }
     }
 
+    // --- the viewport enforces a minimum height the rail actually fits in ----
+    // Regression: ViewportOverlay::relayout()'s LeftEdge case deliberately
+    // keeps the rail at its natural size on a too-short viewport and lets
+    // the last button run off the bottom edge - Redo first, then Undo - see
+    // that function's own comment. Nothing used to stop the window from
+    // actually being shrunk that far: at gui_smoke's own 800x500 probe (see
+    // "nothing in the bottom strip lands on top of anything else" further
+    // down) the rail measured 50x524 and Redo had 4px left on screen.
+    // MainWindow::buildOverlay() now derives the viewport's own minimum
+    // height from the rail's sizeHint(), so resizing a window down to ITS
+    // minimum - the shortest this probe can ever legally be - must still
+    // leave the whole rail, Redo included, inside the viewport and reachable
+    // by a real click.
+    {
+        MainWindow minWin(nullptr, /*persistProgress=*/false);
+        minWin.setAttribute(Qt::WA_ShowWithoutActivating);
+        minWin.show();
+        settle(300);
+        minWin.view()->setAnimationsEnabled(false);
+
+        // Straight to the window's own computed minimum, not an iterative
+        // shrink toward a guessed target - this probe wants exactly what
+        // the layout considers the smallest legal size, whatever that
+        // number is today.
+        minWin.resize(minWin.minimumSizeHint());
+        settle(250);
+
+        OcctViewWidget* mv = minWin.view();
+        ToolCluster* minRail = mv ? mv->findChild<ToolCluster*>() : nullptr;
+        check(minRail != nullptr, "the minimum-size probe still has a rail");
+        if (minRail) {
+            const QVector<ToolChip*> minChips = minRail->chips();
+            check(!minChips.isEmpty(), "and the rail still carries its buttons");
+            if (!minChips.isEmpty()) {
+                // Redo is the LAST chip added in MainWindow::buildOverlay() -
+                // the one the old clip claimed first - so it is what this
+                // probe has to find intact, not merely "some chip or other".
+                ToolChip* lastButton = minChips.last();
+                check(lastButton->text() == QStringLiteral("Redo"),
+                      QStringLiteral("and the rail's last button really is Redo, so this "
+                                     "probes the actual regression (got '%1')")
+                          .arg(lastButton->text()));
+
+                const QRect lastInViewport(lastButton->mapTo(mv, QPoint(0, 0)),
+                                           lastButton->size());
+                check(mv->rect().contains(lastInViewport),
+                      QStringLiteral("Redo sits fully inside the viewport at the "
+                                     "window's own minimum size (viewport %1x%2, Redo "
+                                     "%3,%4 %5x%6)")
+                          .arg(mv->width()).arg(mv->height())
+                          .arg(lastInViewport.x()).arg(lastInViewport.y())
+                          .arg(lastInViewport.width()).arg(lastInViewport.height()));
+
+                // childAt(), not a geometry check alone - CLAUDE.md's rule:
+                // a control can sit at the right coordinates and still be
+                // unreachable by a real click if something else is on top of
+                // it, and a geometry-only assertion is exactly the kind of
+                // check that stayed green while the old clip shipped.
+                const QPoint centre = lastButton->mapTo(
+                    mv, QPoint(lastButton->width() / 2, lastButton->height() / 2));
+                check(mv->childAt(centre) == lastButton,
+                      "and a real click at its centre finds Redo itself, not a "
+                      "clipped edge or whatever is behind it");
+            }
+        }
+        minWin.close();
+    }
+
     // --- above-horizon clicks are rejected, not mirrored behind the eye -------
     {
         trigger(window, QStringLiteral("Front"));
@@ -3290,6 +3358,11 @@ int main(int argc, char* argv[])
 
     // --- icons ----------------------------------------------------------------
     {
+        // DisplayMode, Screenshot and Fit are gone - Task 3 folded Wireframe
+        // and Fit All into the app bar as text buttons and left Save
+        // Screenshot menu-only, so the rail never needed those three icons
+        // and IconSet dropped them rather than keeping dead glyphs (see
+        // IconSet.h).
         const IconSet::Glyph all[] = {
             IconSet::Glyph::Sketch,      IconSet::Glyph::Extrude,
             IconSet::Glyph::Fuse,        IconSet::Glyph::Cut,
@@ -3297,8 +3370,6 @@ int main(int argc, char* argv[])
             IconSet::Glyph::Undo,        IconSet::Glyph::Redo,
             IconSet::Glyph::Items,       IconSet::Glyph::Snap,
             IconSet::Glyph::SelectSolid, IconSet::Glyph::SelectFace,
-            IconSet::Glyph::DisplayMode, IconSet::Glyph::Screenshot,
-            IconSet::Glyph::Fit,
         };
         bool allDrawn = true;
         for (IconSet::Glyph glyph : all) {
@@ -3347,16 +3418,19 @@ int main(int argc, char* argv[])
 
     // --- overlay anchoring ----------------------------------------------------
     {
+        // Glyph::Fit no longer exists (Task 3 folded Fit All into the app bar
+        // as a text button; Minor 8 removed the now-dead icon) - any glyph
+        // does for this probe, which only cares that a chip is a chip.
         QAction probe(QStringLiteral("Probe"));
         auto* cluster = new ToolCluster(view);
-        cluster->addChip(new ToolChip(&probe, IconSet::Glyph::Fit));
+        cluster->addChip(new ToolChip(&probe, IconSet::Glyph::Sketch));
 
         // A second, independent cluster that outlives the first - the real
         // post-condition for "relayout survives a destroyed cluster" is that
         // this one is still laid out correctly afterwards.
         QAction probe2(QStringLiteral("Probe2"));
         auto* survivor = new ToolCluster(view);
-        survivor->addChip(new ToolChip(&probe2, IconSet::Glyph::Fit));
+        survivor->addChip(new ToolChip(&probe2, IconSet::Glyph::Sketch));
 
         ViewportOverlay overlay(view);
         overlay.addWidget(cluster, ViewportOverlay::Anchor::BottomLeft);
@@ -4279,11 +4353,26 @@ int main(int argc, char* argv[])
             check(toast != nullptr && toast->isVisible(),
                   "a failure message is up alongside the guide");
 
-            // The shrink, to the exact 800x500 viewport the defect names.
-            resizeViewport(800, 500);
-            check(nv->width() == 800 && nv->height() == 500,
-                  QStringLiteral("the probe really is at the 800x500 viewport under "
-                                 "test (got %1x%2)").arg(nv->width()).arg(nv->height()));
+            // The shrink, to the 800-wide viewport the defect names, at the
+            // shortest height this window can actually reach.
+            //
+            // Regression: the defect this block guards against was found at
+            // a LITERAL 800x500, but 500 is no longer a height this window
+            // can be shrunk to - MainWindow::buildOverlay() now derives the
+            // viewport's minimum height from the rail's own sizeHint(), and
+            // that floor (nv->minimumHeight()) is taller than 500. Aiming
+            // past a real floor does not skip the collision-avoidance case
+            // this test exists for, it just means the shortest viewport
+            // really is the floor now - which is also the single most
+            // cramped case left to test, so reading the floor here rather
+            // than hard-coding 500 keeps this check meaningful instead of
+            // quietly aiming at an unreachable size forever.
+            const int floorHeight = nv->minimumHeight();
+            resizeViewport(800, floorHeight);
+            check(nv->width() == 800 && nv->height() == floorHeight,
+                  QStringLiteral("the probe really is at the 800-wide viewport's own "
+                                 "floor height under test (got %1x%2, floor %3)")
+                      .arg(nv->width()).arg(nv->height()).arg(floorHeight));
 
             if (toast) {
                 check(!toast->geometry().intersects(guide->geometry()),
@@ -4379,7 +4468,9 @@ int main(int argc, char* argv[])
             // relayout() raising the rail back on top. 600px is inside the
             // 585-640 band where that lands.
             {
-                resizeViewport(600, 500);
+                // Same floor-height reasoning as the 800-wide probe above:
+                // 500 is no longer reachable, so use the real floor.
+                resizeViewport(600, nv->minimumHeight());
                 check(buildBody(narrow, 0.30, 0.30, 0.50, 0.50, 10.0),
                       "a second body on the narrow probe, so a hint has a reason to "
                       "be up");
@@ -4543,36 +4634,6 @@ int main(int argc, char* argv[])
         ItemsPanel* drawer = probe.itemsPanel();
         check(drawer != nullptr, "the obstacle probe has a drawer");
 
-        // Bodies until the drawer is tall enough to reach the toast's band on
-        // the shortest viewport this window can actually be shrunk to (the
-        // window bottoms out around 300px of viewport, so a drawer that stops
-        // at its empty-state floor never meets the toast at all). Derived
-        // from the drawer's own height rather than a hard-coded body count:
-        // the row height is the drawer's business, not this probe's, and a
-        // count would go quietly vacuous the day it changed.
-        int built = 0;
-        for (int i = 0; i < 8 && drawer && drawer->height() < 240; ++i) {
-            const double y0 = 0.16 + i * 0.09;
-            if (buildBody(probe, 0.55, y0, 0.70, y0 + 0.06, 10.0)) ++built;
-            settle(60);
-        }
-        check(built >= 2 && drawer != nullptr && drawer->height() >= 240,
-              QStringLiteral("enough bodies to make the drawer reach the toast's band "
-                             "(%1 bodies, %2 rows, drawer %3px tall, hint %4)")
-                  .arg(built)
-                  .arg(drawer ? drawer->rowCount() : -1)
-                  .arg(drawer ? drawer->height() : 0)
-                  .arg(drawer ? static_cast<QWidget*>(drawer)->sizeHint().height() : 0));
-        // The card measures the rows it actually holds. It used to report a
-        // sizeHint of 325 while sitting at its 176px empty-state floor with
-        // eight bodies listed in it, because a row is hidden until the event
-        // loop shows it and QWidgetItem::isEmpty() is isHidden() - so the
-        // layout measured the list as empty. Height and hint agreeing is the
-        // property that was actually broken.
-        check(drawer != nullptr &&
-                  drawer->height() == static_cast<QWidget*>(drawer)->sizeHint().height(),
-              "and the card's height is the height its own contents ask for");
-
         ToolCluster* rail = pv->findChild<ToolCluster*>();
         ToastHost* toasts = probe.findChild<ToastHost*>();
         HintBalloon* balloon = probe.findChild<HintBalloon*>();
@@ -4582,7 +4643,24 @@ int main(int argc, char* argv[])
               "the obstacle probe has a drawer, a rail, a toast host and a balloon");
 
         if (drawer && rail && toasts && balloon && items) {
-            // Failure, not Note, purely for its longer life: the resize loop
+            // Regression: MainWindow::buildOverlay() now sets the viewport's
+            // own minimum height from the rail's sizeHint(), so "the
+            // shortest viewport this window can be shrunk to" is a real
+            // floor (pv->minimumHeight()) rather than an arbitrary number
+            // this probe used to be able to aim past. Reaching that floor
+            // FIRST - before the toast is shown and before the drawer is
+            // grown - is what lets everything measured below (the toast's
+            // row, how tall the drawer has to get to reach it) be read at
+            // the actual worst case instead of at a height that turned out
+            // to be unreachable once the rail raised the floor.
+            resizeViewport(760, pv->minimumHeight());
+            settle(200);
+            check(pv->width() == 760 && pv->height() == pv->minimumHeight(),
+                  QStringLiteral("the probe reaches its shortest reachable viewport "
+                                 "(got %1x%2, floor %3)")
+                      .arg(pv->width()).arg(pv->height()).arg(pv->minimumHeight()));
+
+            // Failure, not Note, purely for its longer life: the growth loop
             // below takes over a second and a four-second message could
             // retire mid-probe.
             toasts->show(QStringLiteral("Graphite drawer probe"),
@@ -4593,22 +4671,50 @@ int main(int argc, char* argv[])
                   "a message is up for the obstacle probe");
 
             if (toast) {
+                // Bodies until the drawer is tall enough to reach the
+                // toast's own band on the shortest viewport this window can
+                // actually be shrunk to. Driven off the toast's live
+                // geometry rather than a fixed drawer height, so this cannot
+                // quietly go vacuous the day either widget's size changes -
+                // exactly what happened to the fixed 240px threshold this
+                // replaced once the rail's own minimum-height floor pushed
+                // the toast further down than 240px could reach.
+                int built = 0;
+                for (int i = 0; i < 14 &&
+                                drawer->geometry().bottom() < toast->geometry().top(); ++i) {
+                    const double y0 = 0.10 + i * 0.065;
+                    if (buildBody(probe, 0.55, y0, 0.70, y0 + 0.05, 10.0)) ++built;
+                    settle(60);
+                }
+                check(built >= 2 && drawer->geometry().bottom() >= toast->geometry().top(),
+                      QStringLiteral("enough bodies to make the drawer reach the toast's "
+                                     "band (%1 bodies, %2 rows, drawer bottom %3, toast "
+                                     "top %4, hint %5)")
+                          .arg(built)
+                          .arg(drawer->rowCount())
+                          .arg(drawer->geometry().bottom())
+                          .arg(toast->geometry().top())
+                          .arg(static_cast<QWidget*>(drawer)->sizeHint().height()));
+                // The card measures the rows it actually holds. It used to
+                // report a sizeHint of 325 while sitting at its 176px
+                // empty-state floor with eight bodies listed in it, because
+                // a row is hidden until the event loop shows it and
+                // QWidgetItem::isEmpty() is isHidden() - so the layout
+                // measured the list as empty. Height and hint agreeing is
+                // the property that was actually broken.
+                check(drawer->height() ==
+                          static_cast<QWidget*>(drawer)->sizeHint().height(),
+                      "and the card's height is the height its own contents ask for");
+
                 // Drive the toast INTO the drawer's band. The drawer is a
                 // top-left card and the toast a bottom-centre one, so on any
                 // roomy viewport they never meet and "the toast steps around
-                // the drawer" is a check that cannot fail. The target height
-                // is derived from the two widgets' own geometry rather than
-                // hard-coded, so it cannot quietly go vacuous when either
-                // changes size.
-                const int bottomMargin = pv->height() - (toast->y() + toast->height());
-                const int wantH =
-                    drawer->geometry().bottom() + toast->height() + bottomMargin - 8;
-                resizeViewport(760, wantH);
-                settle(200);
-                check(pv->width() == 760,
-                      QStringLiteral("the probe really is at the width under test "
-                                     "(got %1x%2, wanted 760x%3)")
-                          .arg(pv->width()).arg(pv->height()).arg(wantH));
+                // the drawer" is a check that cannot fail - the resize and
+                // growth above are what make it non-vacuous.
+                check(pv->width() == 760 && pv->height() == pv->minimumHeight(),
+                      QStringLiteral("the probe is still at the width and floor height "
+                                     "under test (got %1x%2)")
+                          .arg(pv->width()).arg(pv->height()));
 
                 const QRect drawerRect = drawer->geometry();
                 const QRect toastRect = toast->geometry();
@@ -4700,12 +4806,25 @@ int main(int argc, char* argv[])
                 // the right of the viewport - the case the two neighbouring
                 // readings above check with rect().contains() and this one
                 // therefore checks too.
-                resizeViewport(540, 560);
+                //
+                // The target height used to be a flat 560 - a comfortable
+                // margin above whatever short floor the window could reach
+                // before the rail set a real one. With the drawer now grown
+                // tall enough to reach the toast at THAT floor
+                // (pv->minimumHeight()), a flat 560 can be only a few
+                // pixels above it and no longer comfortable at all. Derived
+                // instead from the drawer's own bottom and the balloon's own
+                // height, the same way the toast's target further up is, so
+                // this reading keeps real clearance rather than sitting on a
+                // knife's edge the day either widget's size changes.
+                const int clearH = drawerRect.bottom() + balloon->height() + 130;
+                resizeViewport(540, clearH);
                 settle(300);
                 const QRect tallDrawer = drawer->geometry();
-                check(pv->width() == 540 && pv->height() == 560,
-                      QStringLiteral("the probe reached the taller viewport (got %1x%2)")
-                          .arg(pv->width()).arg(pv->height()));
+                check(pv->width() == 540 && pv->height() == clearH,
+                      QStringLiteral("the probe reached the taller viewport "
+                                     "(got %1x%2, wanted 540x%3)")
+                          .arg(pv->width()).arg(pv->height()).arg(clearH));
                 check(tallDrawer.bottom() < balloon->geometry().top(),
                       QStringLiteral("where the drawer is clear of the balloon's band, so "
                                      "a band-aware floor has to ignore it (drawer bottom "

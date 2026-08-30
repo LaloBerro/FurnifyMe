@@ -133,6 +133,11 @@ OcctViewWidget::OcctViewWidget(QWidget* parent)
     setAutoFillBackground(false);
     setMouseTracking(true);          // hover highlight needs move events with no button down
     setFocusPolicy(Qt::StrongFocus);
+    // A bare floor - this class knows nothing about the rail or any other
+    // overlay content that gets pinned to it later. MainWindow::buildOverlay()
+    // raises the height component once the rail exists, to whatever height
+    // guarantees the rail itself fits; see that call for why 300 alone is not
+    // enough to keep the rail's own buttons on screen.
     setMinimumSize(400, 300);
 }
 

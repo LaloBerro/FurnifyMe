@@ -89,22 +89,6 @@ void paintGlyph(QPainter& p, Glyph glyph)
             p.drawLine(6, 6, 18, 6);
             break;
         }
-        case Glyph::DisplayMode:                  // half-shaded circle
-            p.drawEllipse(QPoint(12, 12), 8, 8);
-            p.drawLine(12, 4, 12, 20);
-            break;
-        case Glyph::Screenshot:                   // camera
-            p.drawRect(4, 8, 16, 11);
-            p.drawEllipse(QPoint(12, 13), 4, 4);
-            p.drawLine(9, 8, 11, 5);
-            p.drawLine(11, 5, 13, 5);
-            break;
-        case Glyph::Fit:                          // frame corners
-            p.drawLine(4, 8, 4, 4);  p.drawLine(4, 4, 8, 4);
-            p.drawLine(16, 4, 20, 4); p.drawLine(20, 4, 20, 8);
-            p.drawLine(20, 16, 20, 20); p.drawLine(20, 20, 16, 20);
-            p.drawLine(8, 20, 4, 20); p.drawLine(4, 20, 4, 16);
-            break;
     }
 }
 

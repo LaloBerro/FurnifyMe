@@ -182,11 +182,13 @@ void AxisGizmo::paintEvent(QPaintEvent* /*event*/)
     // A card, like every other floating widget over this viewport, rather
     // than a flat fill of Theme::viewport() pretending to be transparent.
     // That trick only ever worked against the empty sky: the viewport paints
-    // a gradient and a ground grid, so a flat viewport() rectangle read as a
-    // lighter BOX sitting on the scene - a fake transparency that announced
-    // itself. Since fix round 1's ruling is that nothing over the GL surface
-    // is translucent anyway, the honest form is the one the rail and the
-    // drawer already wear: panel() fill and a 1px border().
+    // a ground grid over its own flat background colour
+    // (OcctViewWidget::initializeViewer() sets SetBackgroundColor once, not a
+    // gradient), so a flat viewport() rectangle read as a lighter BOX sitting
+    // on the scene the moment the grid was under it - a fake transparency
+    // that announced itself. Since fix round 1's ruling is that nothing over
+    // the GL surface is translucent anyway, the honest form is the one the
+    // rail and the drawer already wear: panel() fill and a 1px border().
     //
     // Radius 8, the family default - not the 0 this widget carried as a
     // stopgap while its rounded corners had nowhere honest to land. That gap

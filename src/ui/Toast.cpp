@@ -220,6 +220,20 @@ void Toast::paintEvent(QPaintEvent* /*event*/)
     // plain QPainter opacity rather than a QGraphicsEffect. Applies to
     // everything drawn below with this same QPainter: the panel, the
     // message, and the Undo pill alike.
+    //
+    // This is the SINGLE ruled exception to "no widget paints a translucent
+    // pixel over the GL surface" (CLAUDE.md's opaque-family section) - every
+    // other floating card is fully opaque, always. It survives review
+    // because it is not a static translucent surface sitting over the
+    // viewport, which is the case the project's own probe found unreliable:
+    // it is a 160 ms, Theme::motionMs()-driven transition that starts and
+    // ends fully opaque, so the window during which any blending is visible
+    // is transient rather than a resting state. It is also invisible to the
+    // suite's opacity/colour sweeps, which is exactly why it needed calling
+    // out here rather than being caught by them: every gui_smoke probe calls
+    // OcctViewWidget::setAnimationsEnabled(false), which makes
+    // ToastHost::fadeTo() skip straight to the end value instead of animating
+    // through it, so a probe never observes myOpacity at anything but 0 or 1.
     painter.setOpacity(myOpacity);
 
     // `body` is the visible card, inset from this widget's own bounds by

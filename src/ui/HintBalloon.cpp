@@ -103,8 +103,13 @@ QString HintBalloon::textForEvent(const QString& event) const
                   "out of the first, Intersect keeps only the overlap.");
     }
     if (event == kFaceModeEvent) {
-        return tr("Switch to Select Faces to pick one face at a time instead of a "
-                  "whole body.");
+        // Amended for the rail: the chip this used to name painted its own
+        // label ("Select Faces") right on the viewport. The rail is
+        // icon-only - the label moved into the chip's tooltip - so the old
+        // wording pointed at text that appears nowhere on screen. The fix is
+        // to locate the control instead of merely naming it.
+        return tr("Switch to Select Faces — on the rail at the left edge — to "
+                  "pick one face at a time instead of a whole body.");
     }
     if (event == kViewChangedEvent) {
         return tr("Click an arm of the gizmo, top right, to look from that direction. "

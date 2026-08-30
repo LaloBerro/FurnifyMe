@@ -31,6 +31,16 @@ public:
     enum class Anchor { TopLeft, LeftCenter, BottomLeft, TopRight, RightCenter, BottomRight,
                         LeftEdge };
 
+    // How far a LeftEdge entry (the rail) stands off the viewport's left,
+    // top and bottom edges - the plan's 14px, two pixels tighter than the
+    // corner/edge-centre anchors' own margin, because a rail pinned to an
+    // edge hugs it while a card floating in a corner stands off it. Public
+    // so a caller that needs to guarantee a LeftEdge entry actually fits -
+    // MainWindow derives the viewport's minimum height from the rail's own
+    // sizeHint() plus two of these - reads the real margin relayout() places
+    // against, rather than a second copy that could drift from it.
+    static constexpr int kEdgeMargin = 14;
+
     explicit ViewportOverlay(QWidget* viewport);
 
     void addWidget(QWidget* widget, Anchor anchor);
