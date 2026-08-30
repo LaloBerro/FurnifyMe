@@ -6,6 +6,7 @@
 //
 #include <Bnd_Box.hxx>
 #include <gp_Dir.hxx>
+#include <gp_Lin.hxx>
 #include <gp_Pnt.hxx>
 
 struct CameraState {
@@ -40,6 +41,28 @@ public:
 
     // Signed shortest rotation from one angle to another, in (-180, 180].
     static double shortestArcDelta(double fromDeg, double toDeg);
+
+    // Where along `axis` the cursor is pointing: the parameter, measured from
+    // the axis's own location and signed along its direction, of the point on
+    // `axis` closest to `ray`. This is the whole of the face-pull drag
+    // mapping - `ray` is the unprojected cursor (the same
+    // V3d_View::ConvertWithProj ray the sketch unprojection uses) and `axis`
+    // is the outward normal through the pulled face's centre, so the caller
+    // subtracts the parameter it recorded at the press to get a signed
+    // distance to pull by.
+    //
+    // The two lines are generally SKEW - there is no intersection to find,
+    // which is why this is a closest approach rather than a ray/plane hit -
+    // and the answer is exact whenever they are not parallel.
+    //
+    // Returns false, leaving `out` untouched, when the ray lies within about
+    // 1.8 degrees of the axis (sin^2 of the angle below 1e-3). Looking down
+    // the arrow, one pixel of cursor movement means an unbounded jump in
+    // distance: there is no useful answer there, so the caller keeps whatever
+    // value it last had rather than the model exploding. Qt-free and in
+    // furnify_geometry so tests/camera_controller.cpp covers it with no
+    // window.
+    static bool axisParameterForRay(const gp_Lin& ray, const gp_Lin& axis, double& out);
 
 private:
     CameraState myState;

@@ -115,6 +115,7 @@ if(FURNIFYME_BUILD_APP)
       src/ui/HintBalloon.cpp
       src/ui/Toast.cpp
       src/ui/ExtrudePreview.cpp
+      src/ui/PullArrow.cpp
     )
     target_include_directories(furnify_app PUBLIC src/ui)
     target_link_libraries(furnify_app PUBLIC

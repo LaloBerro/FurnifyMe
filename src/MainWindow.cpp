@@ -10,6 +10,7 @@
 #include "HintBalloon.h"
 #include "IconSet.h"
 #include "ItemsPanel.h"
+#include "PullArrow.h"
 #include "ShortcutSheet.h"
 #include "Theme.h"
 #include "Toast.h"
@@ -22,6 +23,7 @@
 #include <ElSLib.hxx>
 #include <GeomAbs_SurfaceType.hxx>
 #include <TopAbs_Orientation.hxx>
+#include <TopExp_Explorer.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pln.hxx>
@@ -617,6 +619,13 @@ void MainWindow::buildOverlay()
     // so it needs no overlay anchor of its own either.
     myExtrudePreview = new ExtrudePreview(this, myView);
 
+    // The face-pull gizmo. Like the extrude panel it parents itself to the
+    // viewport and places itself - beside the arrow's projected head rather
+    // than against a viewport edge, so it needs no overlay anchor. It decides
+    // its own visibility from MainWindow::canPullSelectedFace() on every
+    // appStateChanged; nothing here shows or hides it.
+    myPullArrow = new PullArrow(this, myView);
+
     // Always built, even for a user who has already learned this - it
     // decides its own visibility in its constructor (see WalkthroughPanel's
     // refresh()) and hides itself immediately in that case. Gating
@@ -652,6 +661,7 @@ void MainWindow::buildOverlay()
     connect(myOverlay, &ViewportOverlay::laidOut, myToasts, &ToastHost::replace);
     connect(myOverlay, &ViewportOverlay::laidOut, hints, &HintBalloon::reposition);
     connect(myOverlay, &ViewportOverlay::laidOut, myExtrudePreview, &ExtrudePreview::replace);
+    connect(myOverlay, &ViewportOverlay::laidOut, myPullArrow, &PullArrow::replace);
 }
 
 void MainWindow::updateActions()
@@ -670,15 +680,15 @@ void MainWindow::updateActions()
     // live on, and a cylinder's side has no such plane. Both halves are
     // checked again inside lockToFace(), because the double-click route can
     // reach a curved face this enabled state never sees.
-    const TopoDS_Face selectedFace = myView->selectedFace();
+    //
     // Not while sketching: the points already placed live on the plane that is
     // about to be swapped, and an outline with points on two planes is not an
     // outline. Not while a closed outline is waiting either - see
     // canChangeSketchPlane() for what moving the plane out from under it does.
+    // That is exactly canPullSelectedFace()'s rule too, so the two read the
+    // same function rather than each carrying a copy of it.
     const bool planeCanMove = !mySketching && myPendingFace.IsNull();
-    const bool flatFaceSelected =
-        planeCanMove && !selectedFace.IsNull() &&
-        BRepAdaptor_Surface(selectedFace).GetType() == GeomAbs_Plane;
+    const bool flatFaceSelected = canPullSelectedFace();
     myLockFaceAction->setEnabled(flatFaceSelected);
     myUnlockFaceAction->setEnabled(myFaceLocked && planeCanMove);
     // A disabled control that does not say why is a control the user reads as
@@ -790,6 +800,12 @@ void MainWindow::updateStateLabel()
         }
     } else if (!myPendingFace.IsNull()) {
         state = tr("Face ready — press E to extrude");
+    } else if (canPullSelectedFace()) {
+        // The gizmo is on screen and it is not obvious what to do with it -
+        // an arrow with no words is a guess. Reads the same predicate the
+        // arrow itself does, so the label cannot describe a gizmo that is not
+        // there (or stay quiet about one that is).
+        state = tr("Face selected — drag the arrow to pull, or type a distance");
     } else {
         const std::size_t selected = myView->selectedSolidIds().size();
         const std::size_t bodies = myDocument.count();
@@ -1048,6 +1064,78 @@ bool MainWindow::extrudePendingFace(double height)
     const QString message = tr("%1 created — %2")
                                 .arg(QString::fromStdString(myDocument.nameOf(id)),
                                      QString::fromStdString(Measure::formatDimensions(solid)));
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    return true;
+}
+
+bool MainWindow::canPullSelectedFace() const
+{
+    // No sketch in progress, and no closed outline waiting - see
+    // canChangeSketchPlane() and the header for both halves. The pending-face
+    // half is what keeps this and ExtrudePreview mutually exclusive.
+    if (mySketching || !myPendingFace.IsNull()) return false;
+
+    // selectedFace() is deliberately "the ONE selected face", never the first
+    // of several, so this cannot be a coin toss between two highlighted
+    // faces. It is null outside face-selection mode, which is what makes the
+    // mode check implicit rather than a second condition to keep in step.
+    const TopoDS_Face face = myView->selectedFace();
+    if (face.IsNull()) return false;
+    return BRepAdaptor_Surface(face).GetType() == GeomAbs_Plane;
+}
+
+int MainWindow::bodyIdForFace(const TopoDS_Face& face) const
+{
+    if (face.IsNull()) return 0;
+    for (const DocumentModel::Solid& solid : myDocument.solids()) {
+        for (TopExp_Explorer it(solid.shape, TopAbs_FACE); it.More(); it.Next()) {
+            if (it.Current().IsSame(face)) return solid.id;
+        }
+    }
+    return 0;
+}
+
+bool MainWindow::pullFaceBy(const TopoDS_Face& face, double distance)
+{
+    if (face.IsNull() || distance == 0.0) return false;
+
+    const int id = bodyIdForFace(face);
+    const TopoDS_Shape body = myDocument.shapeOf(id);
+    if (id <= 0 || body.IsNull()) return false;
+
+    const ModelingOps::BooleanResult result = ModelingOps::pullFace(body, face, distance);
+    if (!result.ok) {
+        // Never present a failed kernel operation as a success, and never
+        // show its error text: it is written for this file, not for the user.
+        qWarning("Pull failed: %s", result.error.c_str());
+        myToasts->show(tr("This face can't be pulled that far — a carve deeper than the "
+                          "body removes the whole thing, and the geometry engine has "
+                          "nothing left to build. Try a smaller distance, or drag the "
+                          "arrow the other way"),
+                      Toast::Kind::Failure, false);
+        statusBar()->showMessage(tr("Pull refused — nothing was changed"));
+        return false;
+    }
+
+    myDocument.checkpoint();
+    myDocument.replaceSolid(id, result.shape);
+    // The preview and the arrow both describe the face that is about to stop
+    // existing; the selection holds that face too. All three go before the
+    // body is redisplayed, in that order, so nothing is left pointing at
+    // topology from before the rebuild.
+    myView->clearModelingPreview();
+    myView->clearPullArrow();
+    myView->clearSelection();
+    myView->displaySolid(id, result.shape);
+    recordProgress("pull.completed");
+
+    updateActions();
+    emit documentChanged();
+    const QString message =
+        tr("%1 pulled — %2")
+            .arg(QString::fromStdString(myDocument.nameOf(id)),
+                 QString::fromStdString(Measure::formatDimensions(result.shape)));
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
     return true;

@@ -12,6 +12,7 @@
 class AppBar;
 class ExtrudePreview;
 class OcctViewWidget;
+class PullArrow;
 class QAction;
 class QMenuBar;
 class ToastHost;
@@ -41,6 +42,36 @@ public:
     // not stable across a rebuild, so a stored face (or a plane re-derived
     // from one later) would let a boolean or an undo move the sketch plane
     // under the user without a single visible event.
+    // Pulls `face` by `distance` along its own outward normal - positive
+    // grows, negative carves - through ModelingOps::pullFace, replacing the
+    // body the face belongs to. The one commit path for the face-pull gizmo:
+    // it takes the undo checkpoint, resyncs the viewport, records progress
+    // and reports the outcome, so PullArrow never touches DocumentModel.
+    //
+    // False, with a Failure toast in cause-and-fix form and the body left
+    // exactly as it was, whenever the kernel refuses - which it legitimately
+    // does for a carve deeper than the body. The kernel's own error string is
+    // logged, never shown: it is written for this file, not for the user.
+    bool pullFaceBy(const TopoDS_Face& face, double distance);
+
+    // Exactly one flat face selected, no sketch in progress, no outline
+    // waiting. THE predicate behind the pull arrow, and the same one
+    // updateActions() uses for Lock to Face and updateStateLabel() uses for
+    // its teaching text - one function, so the gizmo, the enabled state and
+    // the label can never disagree about whether a pull is possible.
+    //
+    // It refuses while a face is pending, which is exactly when
+    // ExtrudePreview can be open: the two panels' application-wide
+    // Enter/Escape claims are therefore mutually exclusive by construction
+    // rather than by luck.
+    bool canPullSelectedFace() const;
+
+    // The document id of the body `face` belongs to, or 0. Derived by walking
+    // the document rather than remembered: face indices are not stable across
+    // a rebuild (CLAUDE.md's topological-naming warning), so a cached
+    // face-to-body mapping is a bug waiting for the user's next boolean.
+    int bodyIdForFace(const TopoDS_Face& face) const;
+
     bool lockToFace(const TopoDS_Face& face);
     // Back to the ground plane. The ground plane is the default and is never
     // itself "locked", so this is not a toggle of the same state. Refused,
@@ -203,4 +234,5 @@ private:
     class ShortcutSheet* myShortcutSheet = nullptr;
     ToastHost* myToasts = nullptr;
     ExtrudePreview* myExtrudePreview = nullptr;
+    PullArrow* myPullArrow = nullptr;
 };

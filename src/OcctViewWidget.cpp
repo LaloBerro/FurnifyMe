@@ -192,6 +192,7 @@ void OcctViewWidget::initializeViewer()
     myGridRenderer.attach(myContext);
     myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane());
     myDimension.attach(myContext);
+    myPullArrow.attach(myContext);
 
     // Perspective projection: the turntable model is distance-based, and OCCT's
     // default orthographic camera zooms by scale, which would make
@@ -250,6 +251,12 @@ void OcctViewWidget::removeSolid(int id)
     const auto it = mySolids.find(id);
     if (it == mySolids.end() || myContext.IsNull()) return;
 
+    // Before the body goes, so the display mode it borrowed is put back on a
+    // presentation that still exists - see setModelingPreview(). The arrow
+    // goes with it for the same reason the dimension below does.
+    clearModelingPreview();
+    clearPullArrow();
+
     myContext->Remove(it->second, Standard_False);
     mySolids.erase(it);
     // An annotation must never outlive the thing it measures: Delete and Undo
@@ -265,6 +272,9 @@ void OcctViewWidget::removeSolid(int id)
 void OcctViewWidget::clearSolids()
 {
     if (myContext.IsNull()) return;
+
+    clearModelingPreview();   // same reasoning as removeSolid(), before the bodies go
+    clearPullArrow();
 
     for (auto& entry : mySolids) myContext->Remove(entry.second, Standard_False);
     mySolids.clear();
@@ -338,6 +348,120 @@ bool OcctViewWidget::hasPreview() const
 TopoDS_Shape OcctViewWidget::previewShape() const
 {
     return myPreview.IsNull() ? TopoDS_Shape() : myPreview->Shape();
+}
+
+void OcctViewWidget::setModelingPreview(const TopoDS_Shape& shape, int replacesSolidId)
+{
+    initializeViewer();
+    if (myContext.IsNull()) return;
+
+    clearModelingPreview();
+    if (shape.IsNull()) return;
+
+    ModelingOps::tessellate(shape, 0.1);
+
+    myModelingPreview = new AIS_Shape(shape);
+    // The same yellow setPreview() uses. One rule - a preview is yellow, a
+    // body is grey - rather than a second preview colour per feature. It also
+    // has to differ from the pull arrow standing on top of it: both were
+    // Theme::accent() at first, and the magnified capture showed an arrow
+    // that was technically drawn and practically invisible against the shape
+    // it was pulling.
+    myModelingPreview->SetColor(Quantity_Color(Quantity_NOC_YELLOW));
+    myModelingPreview->SetWidth(2.0);
+    // Selection mode -1: feedback only, never pickable - the same rule the
+    // sketch preview and every marker follows. A shape the user can select
+    // that exists in no document is the worst thing a preview can produce.
+    myContext->Display(myModelingPreview, AIS_Shaded, -1, Standard_False);
+
+    // The body this preview stands in for becomes a cage for the duration -
+    // see the header for why, and why this is SetDisplayMode rather than
+    // Erase (Erase would drop the selection the gizmo's predicate reads).
+    const auto it = mySolids.find(replacesSolidId);
+    if (it != mySolids.end()) {
+        myContext->SetDisplayMode(it->second, AIS_WireFrame, Standard_False);
+        myModelingPreviewSolid = replacesSolidId;
+    }
+
+    myContext->UpdateCurrentViewer();
+}
+
+void OcctViewWidget::clearModelingPreview()
+{
+    if (myContext.IsNull()) return;
+
+    bool changed = false;
+    if (myModelingPreviewSolid >= 0) {
+        const auto it = mySolids.find(myModelingPreviewSolid);
+        if (it != mySolids.end()) {
+            myContext->SetDisplayMode(it->second, myWireframe ? AIS_WireFrame : AIS_Shaded,
+                                      Standard_False);
+            changed = true;
+        }
+        // Cleared even when the body has gone (a commit replaces it), so the
+        // id can never be restored onto a different body later.
+        myModelingPreviewSolid = -1;
+    }
+    if (!myModelingPreview.IsNull()) {
+        myContext->Remove(myModelingPreview, Standard_False);
+        myModelingPreview.Nullify();
+        changed = true;
+    }
+    if (changed) myContext->UpdateCurrentViewer();
+}
+
+bool OcctViewWidget::hasModelingPreview() const
+{
+    return !myModelingPreview.IsNull();
+}
+
+TopoDS_Shape OcctViewWidget::modelingPreviewShape() const
+{
+    return myModelingPreview.IsNull() ? TopoDS_Shape() : myModelingPreview->Shape();
+}
+
+void OcctViewWidget::showPullArrow(const gp_Pnt& centre, const gp_Dir& outward)
+{
+    initializeViewer();
+    if (myView.IsNull()) return;
+    myPullArrow.show(centre, outward, myView->Camera()->Direction(), worldPerPixel());
+}
+
+void OcctViewWidget::clearPullArrow()
+{
+    myPullArrow.clear();
+    myPullDragActive = false;
+}
+
+bool OcctViewWidget::pullArrowHead(gp_Pnt& out) const
+{
+    if (!myPullArrow.isShowing()) return false;
+    out = myPullArrow.head();
+    return true;
+}
+
+bool OcctViewWidget::pullArrowHit(const QPoint& point) const
+{
+    if (!myPullArrow.isShowing()) return false;
+
+    QPoint tail, head;
+    if (!projectToScreen(myPullArrow.tail(), tail)) return false;
+    if (!projectToScreen(myPullArrow.head(), head)) return false;
+
+    // Distance from the point to the projected shaft, in pixels. A generous
+    // 14 px: the arrow is a hairline, and a target the user has to hit
+    // exactly is one they will miss.
+    const double dx = head.x() - tail.x();
+    const double dy = head.y() - tail.y();
+    const double lengthSquared = dx * dx + dy * dy;
+    double t = 0.0;
+    if (lengthSquared > 1.0e-9) {
+        t = ((point.x() - tail.x()) * dx + (point.y() - tail.y()) * dy) / lengthSquared;
+        t = std::clamp(t, 0.0, 1.0);
+    }
+    const double nx = tail.x() + dx * t - point.x();
+    const double ny = tail.y() + dy * t - point.y();
+    return std::sqrt(nx * nx + ny * ny) <= 14.0;
 }
 
 void OcctViewWidget::setSketchPointMarkers(const std::vector<gp_Pnt>& points)
@@ -492,13 +616,29 @@ TopoDS_Face OcctViewWidget::selectedFace() const
     return found;
 }
 
+QPoint OcctViewWidget::toDevicePixels(const QPoint& logical) const
+{
+    const double ratio = devicePixelRatioF();
+    return QPoint(static_cast<int>(std::lround(logical.x() * ratio)),
+                  static_cast<int>(std::lround(logical.y() * ratio)));
+}
+
+QPoint OcctViewWidget::fromDevicePixels(int px, int py) const
+{
+    const double ratio = std::max(devicePixelRatioF(), 1.0e-6);
+    return QPoint(static_cast<int>(std::lround(px / ratio)),
+                  static_cast<int>(std::lround(py / ratio)));
+}
+
 bool OcctViewWidget::projectToScreen(const gp_Pnt& world, QPoint& out) const
 {
     if (myView.IsNull()) return false;
 
     Standard_Integer px = 0, py = 0;
     myView->Convert(world.X(), world.Y(), world.Z(), px, py);
-    out = QPoint(static_cast<int>(px), static_cast<int>(py));
+    // Back into the logical space every Qt caller lives in - see
+    // toDevicePixels()'s comment in the header.
+    out = fromDevicePixels(static_cast<int>(px), static_cast<int>(py));
     return true;
 }
 
@@ -558,14 +698,22 @@ gp_Pln OcctViewWidget::gridPlane() const
     return plane;
 }
 
-bool OcctViewWidget::pointOnSketchPlane(int px, int py, gp_Pnt& out) const
+bool OcctViewWidget::rayThroughPixel(int px, int py, gp_Lin& out) const
 {
     if (myView.IsNull()) return false;
 
+    const QPoint device = toDevicePixels(QPoint(px, py));
     Standard_Real x = 0.0, y = 0.0, z = 0.0, vx = 0.0, vy = 0.0, vz = 0.0;
-    myView->ConvertWithProj(px, py, x, y, z, vx, vy, vz);
+    myView->ConvertWithProj(device.x(), device.y(), x, y, z, vx, vy, vz);
+    out = gp_Lin(gp_Pnt(x, y, z), gp_Dir(vx, vy, vz));
+    return true;
+}
 
-    const gp_Lin ray(gp_Pnt(x, y, z), gp_Dir(vx, vy, vz));
+bool OcctViewWidget::pointOnSketchPlane(int px, int py, gp_Pnt& out) const
+{
+    gp_Lin ray;
+    if (!rayThroughPixel(px, py, ray)) return false;
+
     if (!SketchController::intersectRayWithPlane(ray, mySketchPlane, out)) return false;
     // A perspective camera has a horizon: an intersection with the sketch plane
     // can lie BEHIND the eye when the cursor is above it. Such a hit is not a
@@ -584,7 +732,8 @@ bool OcctViewWidget::pickWorldPoint(int px, int py, gp_Pnt& out) const
     // Prefer a real hit on the model: MoveTo + detection gives the picked point
     // on the surface under the cursor.
     if (!myContext.IsNull() && !myView.IsNull()) {
-        myContext->MoveTo(px, py, myView, Standard_False);
+        const QPoint device = toDevicePixels(QPoint(px, py));
+        myContext->MoveTo(device.x(), device.y(), myView, Standard_False);
         if (myContext->HasDetected()) {
             const Handle(StdSelect_ViewerSelector3d) selector = myContext->MainSelector();
             if (selector->NbPicked() > 0) {
@@ -594,10 +743,8 @@ bool OcctViewWidget::pickWorldPoint(int px, int py, gp_Pnt& out) const
         }
     }
     // Otherwise the ground plane, reusing the sketch unprojection.
-    if (myView.IsNull()) return false;
-    Standard_Real x, y, z, vx, vy, vz;
-    myView->ConvertWithProj(px, py, x, y, z, vx, vy, vz);
-    const gp_Lin ray(gp_Pnt(x, y, z), gp_Dir(vx, vy, vz));
+    gp_Lin ray;
+    if (!rayThroughPixel(px, py, ray)) return false;
     const gp_Pln ground(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
     if (!SketchController::intersectRayWithPlane(ray, ground, out)) return false;
     // A perspective camera has a horizon: an intersection with the ground can
@@ -931,8 +1078,25 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
     // no cursor-anchored re-pivoting), MMB pans.
     if (event->button() == Qt::RightButton) {
         myOrbiting = true;
-    } else if (event->button() == Qt::MiddleButton) {
+        return;
+    }
+    if (event->button() == Qt::MiddleButton) {
         myPanningDrag = true;
+        return;
+    }
+
+    // The pull arrow owns LEFT drags that start on it, and nothing else -
+    // RMB orbit and MMB pan pass straight through above, so grabbing the
+    // arrow never costs the user the camera.
+    if (event->button() == Qt::LeftButton && !mySketchMode && myPullArrow.isShowing() &&
+        pullArrowHit(myLastPos)) {
+        gp_Lin ray;
+        if (rayThroughPixel(myLastPos.x(), myLastPos.y(), ray) &&
+            CameraController::axisParameterForRay(ray, myPullArrow.axis(), myPullPressParam)) {
+            myPullDragActive = true;
+            myPullDragMoved = false;
+            myPullDistance = 0.0;
+        }
     }
 }
 
@@ -940,6 +1104,18 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
 {
     if (event->button() == Qt::RightButton)  myOrbiting = false;
     if (event->button() == Qt::MiddleButton) myPanningDrag = false;
+
+    // The end of a pull. This widget picks NOTHING on this release: the press
+    // that started the drag was aimed at the arrow, and re-picking here would
+    // replace the face selection that raised the arrow in the first place -
+    // the same class of bug WA_NoMousePropagation closes for the Qt overlays,
+    // one layer down, where the culprit is this widget's own handler rather
+    // than a propagating child event.
+    if (myPullDragActive && event->button() == Qt::LeftButton) {
+        myPullDragActive = false;
+        emit pullReleased(myPullDragMoved);
+        return;
+    }
 
     if (event->button() != Qt::LeftButton || myContext.IsNull()) return;
 
@@ -952,7 +1128,8 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
     }
 
     const bool additive = (event->modifiers() & Qt::ShiftModifier) != 0;
-    myContext->MoveTo(pos.x(), pos.y(), myView, Standard_False);
+    const QPoint device = toDevicePixels(pos);
+    myContext->MoveTo(device.x(), device.y(), myView, Standard_False);
     myContext->SelectDetected(additive ? AIS_SelectionScheme_XOR
                                        : AIS_SelectionScheme_Replace);
     // The selection just changed, and in edge mode the dimension follows it as
@@ -969,7 +1146,27 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
 
     const QPoint pos = event->position().toPoint();
 
-    if (myOrbiting) {
+    if (myPullDragActive) {
+        // Where the cursor now points along the arrow's axis, minus where it
+        // pointed at the press. A ray too close to parallel with the axis
+        // resolves to nothing and the last value simply stands - see
+        // CameraController::axisParameterForRay().
+        gp_Lin ray;
+        double parameter = 0.0;
+        if (rayThroughPixel(pos.x(), pos.y(), ray) &&
+            CameraController::axisParameterForRay(ray, myPullArrow.axis(), parameter)) {
+            double distance = parameter - myPullPressParam;
+            // The same grid the outline points snap to, applied to the pull
+            // distance rather than to a position.
+            if (mySnapEnabled && mySnapStep > 0.0)
+                distance = std::round(distance / mySnapStep) * mySnapStep;
+            if (std::fabs(distance - myPullDistance) > 1.0e-9) {
+                myPullDistance = distance;
+                if (std::fabs(distance) > 1.0e-9) myPullDragMoved = true;
+                emit pullDragged(distance);
+            }
+        }
+    } else if (myOrbiting) {
         const QPoint delta = pos - myLastPos;
         // Dragging right swings the scene right: azimuth decreases; dragging up
         // raises the eye. 0.4 deg/px and 0.3 deg/px feel close to Fusion.
@@ -992,7 +1189,8 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
     } else if (!myContext.IsNull()) {
         // Hover highlight. Suppressed while sketching so the in-progress wire
         // does not fight the highlighter for attention.
-        myContext->MoveTo(pos.x(), pos.y(), myView, Standard_True);
+        const QPoint device = toDevicePixels(pos);
+        myContext->MoveTo(device.x(), device.y(), myView, Standard_True);
         updateEdgeDimension();
     }
 
@@ -1023,7 +1221,11 @@ void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
     if (event->button() != Qt::LeftButton || mySketchMode || myContext.IsNull()) return;
 
     const QPoint pos = event->position().toPoint();
-    myContext->MoveTo(pos.x(), pos.y(), myView, Standard_False);
+    // A second click on the arrow is another pull, not a request to frame the
+    // body or lock the face underneath it.
+    if (pullArrowHit(pos)) return;
+    const QPoint device = toDevicePixels(pos);
+    myContext->MoveTo(device.x(), device.y(), myView, Standard_False);
     if (!myContext->HasDetected()) return;
 
     // In face mode a double-click means "sketch on this" - the second route

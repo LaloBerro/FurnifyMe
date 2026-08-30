@@ -221,6 +221,59 @@ int main()
                   "deltas beyond a full turn reduce correctly");
     }
 
+    // --- the face-pull drag mapping -------------------------------------------
+    // The whole of PullArrow's drag maths: where along the face's outward
+    // normal is the cursor pointing? Qt-free and here rather than in the
+    // widget, so it is covered without a window - the same reason the
+    // ray/plane unprojection lives in SketchController.
+    {
+        const gp_Lin zAxis(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
+        double t = -12345.0;
+
+        // A ray that meets the axis square on: the answer is simply where it
+        // crosses.
+        check(CameraController::axisParameterForRay(
+                  gp_Lin(gp_Pnt(100.0, 0.0, 50.0), gp_Dir(-1.0, 0.0, 0.0)), zAxis, t),
+              "a perpendicular ray has a closest-approach parameter");
+        checkNear(t, 50.0, 1e-9, "and it is the height where the ray crosses the axis");
+
+        // A skew ray never touches the axis at all - the closest point is
+        // still perfectly well defined, which is the whole reason this is a
+        // closest-approach rather than an intersection.
+        check(CameraController::axisParameterForRay(
+                  gp_Lin(gp_Pnt(100.0, 10.0, 30.0), gp_Dir(0.0, -1.0, 0.0)), zAxis, t),
+              "a skew ray still resolves");
+        checkNear(t, 30.0, 1e-9, "to the closest point on the axis, not an intersection");
+
+        // The parameter is measured from the axis's own origin and signed
+        // along its direction: a face pull needs "how far out", and inward
+        // has to come back negative.
+        const gp_Lin offset(gp_Pnt(5.0, 5.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
+        check(CameraController::axisParameterForRay(
+                  gp_Lin(gp_Pnt(105.0, 5.0, -20.0), gp_Dir(-1.0, 0.0, 0.0)), offset, t),
+              "an axis away from the origin resolves too");
+        checkNear(t, -20.0, 1e-9, "and behind its origin the parameter is negative");
+
+        // Looking straight down the arrow, a pixel of cursor movement means
+        // an unbounded jump in distance. Refused, so the caller keeps the
+        // last value instead of the model exploding.
+        double untouched = 7.0;
+        check(!CameraController::axisParameterForRay(
+                  gp_Lin(gp_Pnt(0.0, 0.0, 100.0), gp_Dir(0.0, 0.0, -1.0)), zAxis, untouched),
+              "a ray straight down the axis is refused");
+        checkNear(untouched, 7.0, 1e-12, "and the caller's value is left untouched");
+
+        // The refusal is a band, not an exact-parallel test - it has to catch
+        // the nearly-parallel case that is numerically just as bad. These two
+        // bracket the documented threshold.
+        check(!CameraController::axisParameterForRay(
+                  gp_Lin(gp_Pnt(10.0, 0.0, 0.0), gp_Dir(0.03, 0.0, 1.0)), zAxis, t),
+              "a ray within ~1.8 degrees of the axis is refused too");
+        check(CameraController::axisParameterForRay(
+                  gp_Lin(gp_Pnt(10.0, 0.0, 0.0), gp_Dir(0.05, 0.0, 1.0)), zAxis, t),
+              "and one just outside that band still resolves");
+    }
+
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL",
                 g_failures, g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;

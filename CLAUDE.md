@@ -669,6 +669,18 @@ Iterate with `InitSelected()`/`MoreSelected()`/`NextSelected()`, pull topology v
 
 ## Pitfalls (read before debugging)
 
+- **Qt speaks logical pixels; OCCT speaks device pixels.** Qt reports mouse positions and
+  widget geometry in *logical* pixels, while the native window handed to OCCT is sized in
+  *device* pixels — so `AIS_InteractiveContext::MoveTo`, `V3d_View::Convert` and
+  `ConvertWithProj` all want device pixels. The two coincide at 100% display scaling and
+  diverge by exactly the scale factor at any other, which is why passing a `QMouseEvent`
+  position straight through worked for two milestones and then missed every pick by 1.5× on
+  a 150% display. `OcctViewWidget::toDevicePixels()`/`fromDevicePixels()` are the only two
+  places that conversion happens; everything outside them — every signal, accessor and test —
+  is logical, so a projected point can be clicked and a clicked point projected without
+  either side knowing the ratio exists. A projected-geometry test can pass right through
+  this bug (it round-trips in the wrong space), so `gui_smoke` pins it directly: the camera's
+  own target must project to the viewport's logical centre.
 - **Wayland breaks the native window handle.** `winId()` under Wayland gives OCCT something
   it cannot use. Force XCB: `qputenv("QT_QPA_PLATFORM", "xcb")` before constructing
   `QApplication`, or run with `QT_QPA_PLATFORM=xcb`. This costs an afternoon if unknown.

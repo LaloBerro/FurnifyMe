@@ -15,6 +15,7 @@
 #include "CameraController.h"
 #include "DimensionRenderer.h"
 #include "GridRenderer.h"
+#include "PullArrow.h"
 
 #include <QPoint>
 #include <QString>
@@ -62,6 +63,40 @@ public:
     // actually on screen, which is exactly the confusion that let cancelling
     // a preview erase the face.
     TopoDS_Shape previewShape() const;
+
+    // The DEDICATED direct-modeling preview channel, and deliberately not
+    // setPreview() above. That slot already has two writers - the in-progress
+    // sketch outline and ExtrudePreview's body - and CLAUDE.md records what
+    // that cost: cancelling the extrude preview cleared the slot and erased
+    // the pending face with it. A third writer on the same slot would be the
+    // same bug waiting for a different gesture, so the gizmos get their own.
+    // Selection mode -1: feedback only, never pickable, never in the document.
+    //
+    // `replacesSolidId` names the body this preview stands in for, or -1.
+    // That body's presentation is switched to wireframe for as long as the
+    // preview is up and restored when it clears - a carve preview sits
+    // INSIDE the body it carves, so without this the one operation the user
+    // most needs to see would be hidden behind the shape it is changing.
+    // SetDisplayMode is presentation state only: unlike Erase it does not
+    // touch the selection, which the gizmo's own predicate depends on.
+    void setModelingPreview(const TopoDS_Shape& shape, int replacesSolidId = -1);
+    void clearModelingPreview();
+    bool hasModelingPreview() const;
+    TopoDS_Shape modelingPreviewShape() const;
+
+    // The face-pull arrow, drawn in the scene so it stays glued to its face
+    // under orbit. See PullArrow.h for the split between this presentation
+    // and the Qt value chip.
+    void showPullArrow(const gp_Pnt& centre, const gp_Dir& outward);
+    void clearPullArrow();
+    bool hasPullArrow() const { return myPullArrow.isShowing(); }
+    // The outward tip in world space, for placing the value chip. False when
+    // no arrow is up.
+    bool pullArrowHead(gp_Pnt& out) const;
+    // True between the press that grabbed the arrow and the release that ends
+    // the pull. While it is true this widget picks nothing on release - see
+    // mouseReleaseEvent().
+    bool pullDragActive() const { return myPullDragActive; }
 
     void setSelectionMode(SelectionMode mode);
     SelectionMode selectionMode() const { return mySelectionMode; }
@@ -213,6 +248,18 @@ signals:
     // that means (it locks it); this widget knows nothing about locking.
     void faceDoubleClicked(const TopoDS_Face& face);
 
+    // A live face pull. `distance` is signed along the pulled face's outward
+    // normal and measured from the press - positive grows, negative carves -
+    // already snapped to the grid step when Snap to Grid is on. Emitted only
+    // when the value actually changes, and never at all while the cursor ray
+    // is too close to parallel with the arrow to mean anything (see
+    // CameraController::axisParameterForRay), so the chip simply keeps the
+    // last value rather than jumping.
+    void pullDragged(double distance);
+    // The end of that gesture. `dragged` is false for a press and release
+    // that never moved - a click on the arrow, which is not a pull.
+    void pullReleased(bool dragged);
+
 protected:
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
@@ -229,8 +276,36 @@ private:
     // a depth-buffer tie - stipple, and flicker under camera motion. See the
     // definition for why this is a geometric nudge rather than a ZLayer.
     gp_Pln gridPlane() const;
+    // THE Qt/OCCT pixel boundary, in one place each way.
+    //
+    // Qt reports mouse positions and widget geometry in LOGICAL pixels. The
+    // native window this widget handed to OCCT is sized in DEVICE pixels, so
+    // V3d_View::Convert, ConvertWithProj and AIS_InteractiveContext::MoveTo
+    // all speak device pixels. The two coincide at 100% display scaling and
+    // diverge by exactly the scale factor at any other - which is why passing
+    // a Qt position straight to MoveTo worked everywhere it was ever tested
+    // and missed by half a viewport on a 150% display: every pick landed 1.5x
+    // too far right and down, and projectToScreen() answered in a pixel space
+    // no Qt caller could use (the pull arrow's value chip landed nowhere near
+    // its arrow, which is how this finally surfaced).
+    //
+    // Everything OUTSIDE these two functions - every signal, every accessor,
+    // every caller in gui_smoke - is logical, so a projected point can be
+    // clicked and a clicked point can be projected without either side
+    // knowing the ratio exists.
+    QPoint toDevicePixels(const QPoint& logical) const;
+    QPoint fromDevicePixels(int px, int py) const;
+    // The unprojected cursor ray - V3d_View::ConvertWithProj, in one place.
+    // Both the sketch unprojection and the pull-drag mapping start here, so
+    // "where is the cursor pointing" cannot be answered two different ways.
+    bool rayThroughPixel(int px, int py, gp_Lin& out) const;
     bool pointOnSketchPlane(int px, int py, gp_Pnt& out) const;
     bool pickWorldPoint(int px, int py, gp_Pnt& out) const;
+    // Whether `point` lands on the pull arrow, tested in SCREEN space against
+    // the arrow's own projected endpoints rather than through AIS - see the
+    // comment on PullArrowLines in PullArrow.cpp for why the arrow must not
+    // be an AIS-pickable object.
+    bool pullArrowHit(const QPoint& point) const;
     void applySelectionMode(const Handle(AIS_Shape)& shape);
     void applyCameraState();
     void stopCameraAnimation();
@@ -246,6 +321,12 @@ private:
     Handle(V3d_View) myView;
     Handle(AIS_InteractiveContext) myContext;
     Handle(AIS_Shape) myPreview;
+    // The direct-modeling channel, kept strictly apart from myPreview above.
+    Handle(AIS_Shape) myModelingPreview;
+    // The body myModelingPreview stands in for while it is up, or -1. Its
+    // presentation is restored to the viewport's own display mode when the
+    // preview clears - see setModelingPreview().
+    int myModelingPreviewSolid = -1;
 
     // The sketch point markers - see setSketchPointMarkers()'s comment for
     // why these are not the preview slot above. One object per placed
@@ -259,6 +340,7 @@ private:
     CameraController myCamera;
     GridRenderer myGridRenderer;
     DimensionRenderer myDimension;
+    PullArrowRenderer myPullArrow;
 
     std::map<int, Handle(AIS_Shape)> mySolids;
 
@@ -277,6 +359,16 @@ private:
     QPoint myLastPos;
     bool myOrbiting = false;
     bool myPanningDrag = false;
+
+    // The live pull gesture. myPullPressParam is where along the arrow's axis
+    // the cursor pointed when the drag started, so every later position is
+    // reported relative to it; myPullDistance is the last value emitted, kept
+    // so a near-parallel ray (which resolves to nothing) simply holds instead
+    // of jumping.
+    bool myPullDragActive = false;
+    bool myPullDragMoved = false;
+    double myPullPressParam = 0.0;
+    double myPullDistance = 0.0;
 
     class QVariantAnimation* myCameraAnimation = nullptr;
     bool myAnimationsEnabled = true;

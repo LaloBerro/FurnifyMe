@@ -150,16 +150,16 @@ BooleanResult transformShape(const TopoDS_Shape& body, const gp_Trsf& trsf);
   pull, or type a distance`.
 - Snapping: when Snap to Grid is on, the drag distance snaps to the 10 mm step.
 
-- [ ] **Step 1 — failing test:** select a face on a known body (derive the click from
+- [x] **Step 1 — failing test:** select a face on a known body (derive the click from
   projected geometry, assert the pick); arrow appears (`childAt` identity) with its
   field; synthesise an in-process drag on the arrow — press, move, release; assert the
   document body's extents grew by the dragged amount (within the snap step), the toast
   offers Undo, Undo restores; repeat inward and assert carve; type `-999` (a full
   carve) and assert refusal with body untouched; Escape leaves no modeling preview
   (`hasModelingPreview()` accessor).
-- [ ] **Step 2 — RED.** — [ ] **Step 3 — implement.** — [ ] **Step 4 — GREEN** (full
-  suite + headless). — [ ] **Step 5 — capture**, magnified at the arrow, against image
-  1's anatomy. — [ ] **Step 6 — commit.**
+- [x] **Step 2 — RED.** — [x] **Step 3 — implement.** — [x] **Step 4 — GREEN** (full
+  suite + headless). — [x] **Step 5 — capture**, magnified at the arrow, against image
+  1's anatomy. — [x] **Step 6 — commit.**
 
 ---
 
