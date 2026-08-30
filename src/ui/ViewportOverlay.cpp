@@ -5,6 +5,8 @@
 #include <QEvent>
 #include <QWidget>
 
+#include <algorithm>
+
 namespace {
 // The mockup's gap from the viewport edge to what is actually PAINTED, not
 // to a widget's own bounding box. Most anchored widgets (the axis gizmo, the
@@ -23,6 +25,16 @@ namespace {
 // caller cannot accidentally bake in a stale 3 if that value ever moved.
 const int kMargin = 16 - Theme::surfaceShadowMargin();
 constexpr int kGap = 8;       // gap between clusters sharing an edge
+
+// The rail's own margin: the plan's 14px from the viewport's left, top and
+// bottom edges. No shadow-margin compensation here, unlike kMargin above -
+// the rail's card fills its whole widget box rather than reserving a
+// shadow-only margin inside it (see ToolCluster::paintEvent for why a
+// painted shadow cannot work for a widget sitting directly on the GL
+// surface), so its widget offset and its painted offset are the same number.
+// It is two pixels tighter than kMargin deliberately: a rail pinned to an
+// edge hugs it; a card floating in a corner stands off it.
+constexpr int kEdgeMargin = 14;
 }  // namespace
 
 ViewportOverlay::ViewportOverlay(QWidget* viewport)
@@ -123,6 +135,18 @@ void ViewportOverlay::relayout()
                 bottomRightY -= ch;
                 placed->move(w - cw - kMargin, bottomRightY);
                 bottomRightY -= kGap;
+                break;
+            case Anchor::LeftEdge:
+                placed->move(kEdgeMargin, kEdgeMargin);
+                // std::max, not the available height alone: on a viewport
+                // too short for every tool the rail carries, shrinking it
+                // would ask its layout to squeeze fourteen fixed-size chips
+                // into a space they do not fit, which Qt resolves by
+                // overlapping them. Keeping the rail at its natural height
+                // instead means a short viewport clips the last button
+                // cleanly off the bottom edge - still wrong, but legibly so,
+                // and every button above it stays the size it should be.
+                placed->resize(cw, std::max(ch, h - kEdgeMargin * 2));
                 break;
         }
         placed->raise();

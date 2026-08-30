@@ -446,40 +446,42 @@ void MainWindow::buildOverlay()
 {
     myOverlay = new ViewportOverlay(myView);
 
-    auto cluster = [this](ViewportOverlay::Anchor anchor,
-                          std::initializer_list<std::pair<QAction*, IconSet::Glyph>> chips) {
-        auto* group = new ToolCluster(myView);
-        for (const auto& entry : chips) {
-            group->addChip(new ToolChip(entry.first, entry.second));
-        }
-        myOverlay->addWidget(group, anchor);
+    // ONE rail, pinned to the viewport's left edge, in place of the four
+    // chip clusters that used to float in three corners and one edge centre.
+    // Every button is an existing QAction rendered icon-only; nothing here
+    // creates an action, and nothing here decides whether a button is
+    // enabled or checked - updateActions() remains the single place that
+    // does. The groups read top to bottom as the order of work: what to look
+    // at, what to draw, what to build, what to pick, and - pushed to the
+    // bottom by the stretch - what to take back.
+    auto* rail = new ToolCluster(myView);
+    auto tool = [rail](QAction* action, IconSet::Glyph glyph) {
+        rail->addChip(new ToolChip(action, glyph, ToolChip::ChipMode::IconOnly));
     };
 
-    cluster(ViewportOverlay::Anchor::LeftCenter, {
-        {myStartSketchAction, IconSet::Glyph::Sketch},
-        {myExtrudeAction,     IconSet::Glyph::Extrude},
-        {myUnionAction,       IconSet::Glyph::Fuse},
-        {mySubtractAction,    IconSet::Glyph::Cut},
-        {myIntersectAction,   IconSet::Glyph::Intersect},
-        {myDeleteAction,      IconSet::Glyph::Delete},
-    });
+    tool(myItemsPanelAction, IconSet::Glyph::Items);
+    rail->addSeparator();
+    tool(myStartSketchAction, IconSet::Glyph::Sketch);
+    tool(myExtrudeAction,     IconSet::Glyph::Extrude);
+    rail->addSeparator();
+    tool(myUnionAction,       IconSet::Glyph::Fuse);
+    tool(mySubtractAction,    IconSet::Glyph::Cut);
+    tool(myIntersectAction,   IconSet::Glyph::Intersect);
+    tool(myDeleteAction,      IconSet::Glyph::Delete);
+    rail->addSeparator();
+    tool(mySnapAction,        IconSet::Glyph::Snap);
+    tool(mySolidSelectAction, IconSet::Glyph::SelectSolid);
+    tool(myFaceSelectAction,  IconSet::Glyph::SelectFace);
+    tool(myEdgeSelectAction,  IconSet::Glyph::SelectEdge);
+    rail->addStretch();
+    tool(myUndoAction,        IconSet::Glyph::Undo);
+    tool(myRedoAction,        IconSet::Glyph::Redo);
 
-    cluster(ViewportOverlay::Anchor::BottomLeft, {
-        {mySnapAction,         IconSet::Glyph::Snap},
-        {mySolidSelectAction,  IconSet::Glyph::SelectSolid},
-        {myFaceSelectAction,   IconSet::Glyph::SelectFace},
-        {myEdgeSelectAction,   IconSet::Glyph::SelectEdge},
-    });
+    myOverlay->addWidget(rail, ViewportOverlay::Anchor::LeftEdge);
 
-    cluster(ViewportOverlay::Anchor::TopLeft, {
-        {myItemsPanelAction, IconSet::Glyph::Items},
-        {myUndoAction,       IconSet::Glyph::Undo},
-        {myRedoAction,       IconSet::Glyph::Redo},
-    });
-
-    // No right-center cluster: Wireframe and Fit All are buttons in the app
-    // bar now, and Save Screenshot - the least used of the three, and absent
-    // from the design's bar - is reachable from the File menu.
+    // Wireframe and Fit All are buttons in the app bar, and Save Screenshot -
+    // the least used of the three, and absent from the design's bar and rail
+    // alike - is reachable from the File menu.
 
     // The orientation gizmo. Its own label chip and the unit readout that sat
     // under it are in the app bar; only the axes stay over the viewport.

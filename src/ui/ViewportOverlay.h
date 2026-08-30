@@ -14,7 +14,15 @@ class ViewportOverlay : public QObject {
     Q_OBJECT
 
 public:
-    enum class Anchor { TopLeft, LeftCenter, BottomLeft, TopRight, RightCenter, BottomRight };
+    // The six corner/edge-centre anchors place a widget at its own natural
+    // size. LeftEdge is different in kind: it PINS its widget top to bottom
+    // against the viewport's left edge, so the tool rail is a spine the
+    // viewport is laid out beside rather than a tall card that happens to
+    // start near the top. The rail's own layout decides where the slack goes
+    // (a stretch between Select Edges and Undo puts history at the bottom);
+    // this anchor only decides how much slack there is.
+    enum class Anchor { TopLeft, LeftCenter, BottomLeft, TopRight, RightCenter, BottomRight,
+                        LeftEdge };
 
     explicit ViewportOverlay(QWidget* viewport);
 
