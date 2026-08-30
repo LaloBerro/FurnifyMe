@@ -204,6 +204,7 @@ Source files under `src/`, plus `tests/`:
 | `ui/Toast.{h,cpp}` | one non-blocking message at a time, with Undo where it applies |
 | `ui/ExtrudePreview.{h,cpp}` | height entry with a live preview built by the commit's own path |
 | `ui/DimensionRenderer.{h,cpp}` | CAD length annotation; one renderer for the sketch and edges |
+| `ui/AppBar.{h,cpp}` | the menu strip: wordmark, real `QMenuBar`, view controls |
 
 ### The vocabulary — enforced by test
 
@@ -338,8 +339,11 @@ viewport picks on the **release**, so the filter stays installed one event longe
 sheet is visible, specifically to swallow it.
 
 Three widgets share the viewport's bottom edge — the guide bottom-right, the balloon and the
-toast centred — plus the Snap/Select chip cluster bottom-left, and they collide below about
-900 px of viewport width, which `Show tips again` makes reachable. `HintBalloon::reposition()`
+toast centred — and since Phase 5 the rail spans the full left edge, which every avoider must
+treat as an obstacle. They collide below about 900 px of viewport width, which `Show tips
+again` makes reachable. `HintBalloon`'s left floor is **band-aware**, as `ToastHost`'s solver
+is: only an obstacle whose vertical span intersects the balloon's own band constrains it —
+the top-left drawer must not shove a bottom-strip balloon. `HintBalloon::reposition()`
 steps aside when the guide is visible and would overlap; `reconsider()` calls it for a hint
 that is already up, because that is exactly when the guide can appear underneath one.
 
@@ -556,16 +560,56 @@ copies `QWindowsIntegrationPlugin` and `QModernWindowsStylePlugin` itself in a P
 step. Delete that and the app dies at startup with
 `could not find the Qt platform plugin "windows"`.
 
-### The shell is action-driven
+### The shell is action-driven, and composed as bar + rail + drawer
 
-Every tool chip is constructed from a `QAction` and mirrors it - enabled state,
-checked state, label, shortcut. Never give a chip its own state: menus, chips and
-shortcuts would drift, and `gui_smoke` finds actions by text, so the chips are covered
+Every control is constructed from a `QAction` and mirrors it - enabled state, checked
+state, label, shortcut. Never give a control its own state: menus, rail buttons and
+shortcuts would drift, and `gui_smoke` finds actions by text, so the controls are covered
 for free. `updateActions()` remains the single place that decides what is available.
 
-Cluster widgets are **direct children of `OcctViewWidget`**. A probe confirmed Qt
-composites plain children over OCCT's OpenGL surface correctly on Windows; a translucent
-container was deliberately avoided as the least reliable variant of that.
+The shell's composition, settled in Phase 5 against HTML mockups the user chose from:
+
+- **The app bar** replaces the menu strip via `QMainWindow::setMenuWidget`. It holds the
+  wordmark, the window's **real `QMenuBar`** (reparented in - menus, shortcuts, the
+  generated sheet and the vocabulary sweep all keep working untouched), and the view
+  controls: the view label button (text from `OcctViewWidget::viewLabelText()`, the one
+  source; clicking goes through `MainWindow::goAxonometric()`, the one route), the unit
+  chip (triggers the *other* unit's existing action - it holds no state), Wireframe and
+  Fit All. `Save Screenshot` is menu-only.
+- **The rail** is one `ToolCluster` in `ChipMode::IconOnly` at `Anchor::LeftEdge` -
+  every tool as an icon button, labels and shortcuts in tooltips that auto-update from
+  the actions. Natural height 551 px; below 579 px of viewport Undo clips first. Rework
+  the rail before adding a fourteenth tool.
+- **The items drawer** floats beside the rail, toggled by the existing Items action -
+  visibility is derived from the action's checked state, both directions, and nothing
+  else may show or hide it. The viewport is full-bleed; there is no dock.
+
+Overlay widgets are **direct children of `OcctViewWidget`**. A probe confirmed Qt
+composites plain children over OCCT's OpenGL surface correctly on Windows - but see the
+opacity rule below: translucency over that surface is the unreliable variant, and this
+project no longer paints any.
+
+### One opaque paint family, and the rule that made it
+
+**No widget paints a translucent pixel over the GL surface.** Phase 5 paid twice to learn
+this was already the law: the chip shadows introduced early in the phase "worked" only by
+blending alpha over garbage, and the rail's unpainted slack rendered as a solid black band
+down the app. `Theme::paintSurface()` is the one implementation of the floating-surface
+family - an **opaque ground fill across the full widget rect** (`viewport()` by default,
+`chrome()` for bar buttons), then the rounded panel card and a crisp 1px border on top, so
+a rounded card's corners are flat viewport-grey instead of black. There are no shadows;
+borders carry the separation. `surfaceShadowMargin()` returns 0 and stays only so caller
+arithmetic keeps working. `Theme::drawCrispBorder` is the one half-pixel-alignment idiom -
+an antialiased 1px pen at an integer coordinate smears across two rows at half intensity.
+
+**Verify appearance with measured pixels, never by eyeballing a crop.** This phase's worst
+finding was a commit message claiming a magnified crop confirmed a 3px gap while the real
+gap was 12px - `QBoxLayout` silently ignores negative spacing, and no crop was ever checked
+against a number. The suite now measures: gap rows counted between adjacent rail buttons'
+borders, corner pixels sampled for exact token colours at alpha 255, whole-perimeter
+sweeps with non-vacuity assertions (a sweep that runs zero iterations must fail, not
+pass). A probe guarded by a condition that can quietly skip is how five shadow checks
+went silent instead of red when the behaviour under them changed.
 
 ### CMake note
 

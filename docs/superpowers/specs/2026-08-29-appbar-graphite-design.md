@@ -1,7 +1,7 @@
 # Phase 5: Graphite × App Bar — design
 
 Date: 2026-08-29
-Status: approved in chat after two rounds of HTML mockups
+Status: implemented 2026-08-30. Approved in chat after two rounds of HTML mockups.
 
 Phase 5 of the UX overhaul. Phases 1–4 are merged. This phase restyles and restructures
 the shell; it adds no modelling capability.
@@ -88,6 +88,17 @@ eyes, dims — unchanged. The viewport becomes full-bleed.
   shadow — implemented once as a shared `Theme` paint helper and used by the drawer, the
   rail, the guide, the balloon, the toast, the shortcut sheet and the bar's buttons, so
   the family cannot drift widget by widget.
+
+### Amendment (ruling 8, mid-phase): no shadows, no translucency
+
+The two shadow sentences above did not survive implementation. Painted shadow rings are
+translucent pixels, and translucency over the GL surface is the compositing case the
+project's own probe flagged as unreliable — the shadows "worked" only by blending over
+garbage, and the rail's unpainted slack rendered as a solid black band. The family as
+shipped is **fully opaque**: a ground fill across the whole widget rect (`viewport()` by
+default, `chrome()` for bar buttons), the rounded panel card, and a crisp 1px border.
+Borders carry the separation; there are no shadows anywhere. Acceptance criterion 4 reads
+accordingly: border, radius, ground, inset checked ring, honest disabled state.
 
 ## What deliberately does not change
 

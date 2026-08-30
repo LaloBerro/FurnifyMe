@@ -9,7 +9,6 @@
 #include <AIS_SelectionScheme.hxx>
 #include <Aspect_DisplayConnection.hxx>
 #include <Aspect_TypeOfMarker.hxx>
-#include <Aspect_TypeOfTriedronPosition.hxx>
 #include <Bnd_Box.hxx>
 #include <BRepBndLib.hxx>
 #include <Graphic3d_ArrayOfPoints.hxx>
@@ -164,8 +163,9 @@ void OcctViewWidget::initializeViewer()
     const QColor bg = Theme::viewport();
     myView->SetBackgroundColor(Quantity_Color(bg.redF(), bg.greenF(), bg.blueF(),
                                               Quantity_TOC_sRGB));
-    myView->TriedronDisplay(Aspect_TOTP_LEFT_LOWER, Quantity_Color(Quantity_NOC_WHITE),
-                            0.08, V3d_ZBUFFER);
+    // No corner trihedron: AxisGizmo (top right) is the orientation surface,
+    // and since the rail took the left edge the trihedron sat behind it with
+    // one axis tip peeking out - redundant at best, a visual defect at worst.
 
     // OCCT's default highlight barely reads against a shaded solid. Make hover
     // and selection unmistakable - not being able to tell what is selected was
