@@ -454,6 +454,19 @@ void MainWindow::buildOverlay()
     // does. The groups read top to bottom as the order of work: what to look
     // at, what to draw, what to build, what to pick, and - pushed to the
     // bottom by the stretch - what to take back.
+    //
+    // Thirteen buttons give the rail a measured natural height of 524px
+    // (13 x 34 of card, three 7px separators, 3px between each, 8px of card
+    // padding top and bottom). Anchored 14px down, its bottom sits at 538, so
+    // a viewport shorter than that starts clipping - Redo is the first
+    // casualty, then Undo - and 552px is what keeps the bottom margin too.
+    // Below the threshold the LeftEdge anchor deliberately keeps every button
+    // its designed size and lets the last one run off the edge rather than
+    // squeezing thirteen fixed-size buttons into twelve buttons' worth of
+    // space, which Qt resolves by overlapping them. Every screen this app is
+    // used on clears 552 comfortably - at 1200x800 the viewport is 743 and
+    // the rail has ~190px of slack - but a fourteenth tool needs a real
+    // answer, not another 37px.
     auto* rail = new ToolCluster(myView);
     auto tool = [rail](QAction* action, IconSet::Glyph glyph) {
         rail->addChip(new ToolChip(action, glyph, ToolChip::ChipMode::IconOnly));

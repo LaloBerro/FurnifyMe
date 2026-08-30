@@ -125,18 +125,15 @@ void BarButton::paintEvent(QPaintEvent* /*event*/)
     painter.fillPath(path, background);
     // 1px border(), always. The fill above covers half the stroke
     // paintSurface() drew (a stroke straddles its path), so it is redrawn
-    // here rather than trusted to survive underneath.
-    painter.setPen(QPen(Theme::border(), 1.0));
-    painter.setBrush(Qt::NoBrush);
-    painter.drawPath(path);
+    // here rather than trusted to survive underneath - through Theme's one
+    // crisp-border idiom, the same call ToolChip and ToolCluster make.
+    Theme::drawCrispBorder(painter, QRectF(body), Theme::border(), kRadius);
 
     if (isChecked()) {
         // A second, inset ring - not a replacement for the border above.
         // Checked reads as "bordered, plus marked".
-        QPainterPath ring;
-        ring.addRoundedRect(body.adjusted(2, 2, -2, -2), kRadius - 1, kRadius - 1);
-        painter.setPen(QPen(Theme::accent(), 1.0));
-        painter.drawPath(ring);
+        Theme::drawCrispBorder(painter, QRectF(body).adjusted(2, 2, -2, -2),
+                               Theme::accent(), kRadius - 2);
     }
 
     painter.setFont(Theme::labelFont());
@@ -149,12 +146,10 @@ void BarButton::paintEvent(QPaintEvent* /*event*/)
     // activates its windows.
     if (window() && this == window()->focusWidget()) {
         const bool active = window()->isActiveWindow();
-        QPainterPath ring;
-        ring.addRoundedRect(body.adjusted(3, 3, -3, -3), kRadius - 2, kRadius - 2);
-        painter.setPen(QPen(active ? Theme::focusRing() : Theme::focusRingMuted(),
-                            active ? kFocusRingWidth : kFocusRingWidth - 0.5));
-        painter.setBrush(Qt::NoBrush);
-        painter.drawPath(ring);
+        Theme::drawCrispBorder(painter, QRectF(body).adjusted(3, 3, -3, -3),
+                               active ? Theme::focusRing() : Theme::focusRingMuted(),
+                               kRadius - 3,
+                               active ? kFocusRingWidth : kFocusRingWidth - 0.5);
     }
 }
 
@@ -174,11 +169,14 @@ AppBar::AppBar(QMenuBar* menuBar, QAction* wireframe, QAction* fitAll, QWidget* 
     setAttribute(Qt::WA_NoSystemBackground);
 
     auto* row = new QHBoxLayout(this);
-    // The bar's right-hand controls each reserve surfaceShadowMargin() px of
-    // their own for the painted shadow, so the layout's margins and spacing
-    // are reduced by that much - what should measure 14px and 8px is the gap
-    // between PAINTED edges, not between widget rects. Same compensation
-    // ToolCluster and ViewportOverlay make.
+    // What should measure 14px and 8px is the gap between PAINTED edges, not
+    // between widget rects, so the layout subtracts whatever each control
+    // reserves around its own card. That reservation is surfaceShadowMargin()
+    // and it is now zero - the family paints no shadow (see Theme.h) - so the
+    // two coincide again. The arithmetic stays rather than being folded away:
+    // it is the same compensation ToolCluster and ViewportOverlay express,
+    // and collapsing it here would leave three call sites disagreeing about
+    // whether the scheme exists.
     const int margin = Theme::surfaceShadowMargin();
     row->setContentsMargins(kEdgeX, 4 - margin > 0 ? 4 - margin : 0,
                             kEdgeX - margin, 4 - margin > 0 ? 4 - margin : 0);
@@ -276,16 +274,13 @@ void AppBar::paintEvent(QPaintEvent* /*event*/)
 
     painter.fillRect(rect(), Theme::chrome());
     // The rule that used to belong to the QMenuBar, drawn across the whole
-    // bar rather than under the menus alone.
-    //
-    // At height() - 0.5, not rect().bottomLeft(). An antialiased 1px pen is
-    // centred on the coordinate it is given, so an integer y splits it across
-    // two rows at half intensity each - the rule read as a soft #2b2b2f smudge
-    // rather than one crisp row of border(). Half-pixel centres fill exactly
-    // one row. Caught in a magnified crop, which is what they are for.
-    const double ruleY = height() - 0.5;
-    painter.setPen(QPen(Theme::border(), 1.0));
-    painter.drawLine(QPointF(0.0, ruleY), QPointF(width(), ruleY));
+    // bar rather than under the menus alone. Through Theme's shared rule
+    // helper, which owns the half-pixel snap that keeps it one crisp row of
+    // border() instead of the #2b2b2f smudge across two rows a magnified crop
+    // caught here first - the local `height() - 0.5` this used to carry has
+    // gone the same way as ToolCluster's translate.
+    Theme::drawCrispRule(painter, QPointF(0.0, height() - 1.0),
+                         QPointF(width(), height() - 1.0), Theme::border());
 
     // "<glyph> FurnifyMe" as one string, drawn in two runs so only the glyph
     // takes accent(). Splitting on the first space keeps the two runs and

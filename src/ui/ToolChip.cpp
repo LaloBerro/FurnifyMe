@@ -135,19 +135,18 @@ void ToolChip::paintEvent(QPaintEvent* /*event*/)
     // 1px border(), always - not just when checked. The fill above sits on
     // top of half of the stroke paintSurface() already drew (a stroke
     // straddles its path), so it is redrawn here rather than trusted to
-    // survive underneath the fill.
-    painter.setPen(QPen(Theme::border(), 1.0));
-    painter.setBrush(Qt::NoBrush);
-    painter.drawPath(path);
+    // survive underneath the fill. Through Theme's one crisp-border idiom:
+    // stroked on the integer path this used to use, a chip's border painted
+    // two columns at half intensity, which was invisible until it sat inside
+    // the rail's own crisp card.
+    Theme::drawCrispBorder(painter, QRectF(body), Theme::border(), kRadius);
 
     if (isChecked()) {
         // A second, inset ring - not a replacement for the border above.
         // Checked reads as "bordered, plus marked", not "a differently
         // coloured border instead of the usual one".
-        QPainterPath ring;
-        ring.addRoundedRect(body.adjusted(2, 2, -2, -2), kRadius - 1, kRadius - 1);
-        painter.setPen(QPen(Theme::accent(), 1.0));
-        painter.drawPath(ring);
+        Theme::drawCrispBorder(painter, QRectF(body).adjusted(2, 2, -2, -2),
+                               Theme::accent(), kRadius - 2);
     }
 
     // The glyph. Centred in the body when there is nothing beside it,
@@ -211,11 +210,8 @@ void ToolChip::paintEvent(QPaintEvent* /*event*/)
         const bool active = window()->isActiveWindow();
         const QColor ringColor = active ? Theme::focusRing() : Theme::focusRingMuted();
         const double ringWidth = active ? kFocusRingWidth : kFocusRingWidth - 0.5;
-        QPainterPath ring;
-        ring.addRoundedRect(body.adjusted(4, 4, -4, -4), kRadius - 2, kRadius - 2);
-        painter.setPen(QPen(ringColor, ringWidth));
-        painter.setBrush(Qt::NoBrush);
-        painter.drawPath(ring);
+        Theme::drawCrispBorder(painter, QRectF(body).adjusted(4, 4, -4, -4),
+                               ringColor, kRadius - 4, ringWidth);
     }
 }
 

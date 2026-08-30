@@ -59,29 +59,59 @@ QFont badgeFont();      // shortcut badges
 int motionMs();               // 160
 QEasingCurve motionCurve();   // OutCubic
 
+// Strokes a `width`px border whose OUTER edge is exactly the outer edge of
+// `rect`, aligned so the stroke lands on whole device pixels.
+//
+// This exists because the same bug was found three times in one phase. An
+// antialiased pen is centred on the path it is given, so a 1px pen on a path
+// with integer edges covers half of the pixel either side of it and paints
+// two rows at half intensity - a soft smudge where a hairline was intended.
+// The app bar's bottom rule was measured at #2b2b2f instead of border(); the
+// rail's card at #2e2e33 and #2a2a2f down its two sides; every chip and bar
+// button drew its border, its checked ring and its focus ring the same way.
+// Each was being fixed with a different local idiom. Offsetting the path
+// inward by half the pen width is the whole rule, and it lives here now.
+void drawCrispBorder(QPainter& p, const QRectF& rect, const QColor& colour,
+                     double radius, double width = 1.0);
+
+// The same rule for a straight 1px line: whichever coordinate is constant is
+// snapped to a half-integer so the line fills exactly one row or column.
+void drawCrispRule(QPainter& p, const QPointF& from, const QPointF& to, const QColor& colour);
+
 // The one implementation of the floating-surface family: fills `rect` with
-// panel(), strokes a 1px border(), rounds the corners to `radius`, and paints
-// a soft shadow ring in the margin around `rect` - never outside it, since a
-// widget composited over OcctViewWidget's own GL surface cannot paint past
-// its own bounds. Every floating card in the shell (WalkthroughPanel,
-// HintBalloon, Toast, ShortcutSheet, ExtrudePreview) calls this for its
-// background instead of hand-rolling its own; a chip's body counts too,
-// painted over before its state colour and content. `rect` is the surface
-// itself - callers reserve surfaceShadowMargin() px around it first (see
-// below) so the shadow has somewhere to paint. Three cards each keep one
-// thing of their own painted on TOP of this shared base rather than folding
-// it in here: WalkthroughPanel's unconditional accent() outline, Toast's
-// kind-tinted left stripe, and ExtrudePreview's danger() outline while its
-// field's text is invalid - each is a single card's own accent, not
-// something every floating surface needs, so it stays out of the one shared
-// implementation.
+// panel(), then strokes a crisp 1px border() around it, corners rounded to
+// `radius`. Every floating card in the shell (WalkthroughPanel, HintBalloon,
+// Toast, ShortcutSheet, ExtrudePreview, ToolCluster's rail) calls this for
+// its background instead of hand-rolling its own; a chip's body counts too,
+// painted over before its state colour and content. Three cards each keep
+// one thing of their own painted on TOP of this shared base rather than
+// folding it in here: WalkthroughPanel's unconditional accent() outline,
+// Toast's kind-tinted left stripe, and ExtrudePreview's danger() outline
+// while its field's text is invalid - each is a single card's own accent,
+// not something every floating surface needs, so it stays out of the one
+// shared implementation.
+//
+// It paints NO shadow, and that is a rule rather than a simplification.
+// CLAUDE.md's probe result is that Qt composites plain OPAQUE children over
+// OCCT's GL surface correctly on Windows and that translucency is the
+// unreliable variant. A drop shadow is translucent pixels by definition, and
+// over the GL surface there is nothing behind them in the widget's backing
+// store to blend with - the alpha lands on whatever the driver left there,
+// which is black. That was invisible while the shadow only ever occupied a
+// 3px ring around a small chip; the tool rail, spanning the viewport's whole
+// height, rendered it as a black band down the left of the application. On
+// this ground the family is carried by the 1px border() anyway, which is
+// what the mockup's near-invisible rgba-on-dark shadows amounted to.
 void paintSurface(QPainter& p, const QRect& rect, int radius = 8);
 
-// How many pixels of margin a widget must reserve around its content for the
-// soft shadow paintSurface() paints. A caller grows its own size by this much
-// per side and paints its surface rect inset by the same amount - see
-// paintSurface() above.
-int surfaceShadowMargin();   // 3
+// Zero. Kept as a function rather than deleted so every caller's
+// grow-by-this-much / inset-by-this-much arithmetic, and the sibling-geometry
+// sync that hangs off it (WalkthroughPanel's skip pill, Toast's Undo pill,
+// ExtrudePreview's field), still reads as one coherent scheme - it now adds
+// nothing. See paintSurface() above for why there is no shadow to reserve
+// room for. A widget's painted card and its widget rect are therefore the
+// same rectangle.
+int surfaceShadowMargin();   // 0
 
 // Installs the palette, the bundled font and the stylesheet. Call once, before
 // any window is built.

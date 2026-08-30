@@ -6,9 +6,10 @@
 #include "Theme.h"
 #include "Toast.h"
 #include "UserProgress.h"
-#include "WalkthroughPanel.h"
+#include "ViewportOverlay.h"
 
 #include <algorithm>
+#include <vector>
 
 #include <QFontMetrics>
 #include <QMouseEvent>
@@ -17,7 +18,7 @@
 namespace {
 constexpr int kPad = 12;
 constexpr int kWidth = 250;
-constexpr int kClearance = 8;   // gap left when stepping around the guide
+constexpr int kClearance = 8;   // gap left when stepping around an obstacle
 
 const QString kBooleanEvent = QStringLiteral("boolean.completed");
 const QString kFaceModeEvent = QStringLiteral("faceMode.used");
@@ -194,21 +195,42 @@ void HintBalloon::reposition()
     int x = (parentWidget()->width() - width()) / 2;
     int y = parentWidget()->height() - height() - 90;
 
-    // The walkthrough guide occupies the bottom-right corner of this same
-    // viewport, and below roughly 800 px of viewport width the centred
-    // balloon runs straight into it. That is reachable in practice, not a
-    // theoretical narrow-window case: Show tips again restores the guide
-    // while a hint is up. Overlap would be worse than it looks, because
-    // ViewportOverlay::relayout() raises the guide back above the balloon
-    // while the balloon is still the click target underneath it. So step
-    // aside - to the left of an obstacle when that fits, above it when it
-    // does not. A toast lands in the same bottom strip whenever an outcome
-    // is reported while a hint is already up, so it steps aside by the same
-    // rule rather than a second mechanism invented just for it.
+    // Everything the overlay has anchored - the walkthrough guide bottom
+    // right, the tool rail down the whole left edge, the axis gizmo top
+    // right - asked for as ViewportOverlay::occupiedRects() rather than by
+    // naming the widget classes this file happens to know about. It used to
+    // name WalkthroughPanel by type, which meant it could not see the rail
+    // at all: ToastHost was already asking the overlay, and the two now
+    // avoid the same set of obstacles by the same route, so a surface added
+    // later is stepped around for free instead of becoming the next
+    // collision to discover.
+    std::vector<QRect> obstacles;
+    if (const ViewportOverlay* overlay = parentWidget()->findChild<ViewportOverlay*>())
+        obstacles = overlay->occupiedRects();
+
+    // Anything pinned to the LEFT half raises a floor this balloon may not
+    // cross, exactly as ToastHost's band solver treats one. Stepping left is
+    // the wrong move for a left-edge obstacle and there is now a permanent
+    // one: the rail. Without the floor, "step left of the guide" put the
+    // balloon at x=8 - underneath the rail - at viewport widths around
+    // 585-640, which is reachable the moment Show tips again restores the
+    // guide on a narrow window.
+    int leftFloor = 0;
+    for (const QRect& obstacle : obstacles) {
+        if (obstacle.center().x() < parentWidget()->width() / 2)
+            leftFloor = std::max(leftFloor, obstacle.right() + 1 + kClearance);
+    }
+    x = std::max(x, leftFloor);
+
+    // Overlap with what is left would be worse than it looks, because
+    // ViewportOverlay::relayout() raises every anchored widget back above
+    // this one while the balloon is still the click target underneath. So
+    // step aside - to the left of an obstacle when that fits without
+    // crossing the floor, above it when it does not.
     auto stepAside = [&](const QRect& obstacle) {
         if (!QRect(x, y, width(), height()).intersects(obstacle)) return;
         const int beside = obstacle.left() - kClearance - width();
-        if (beside >= kClearance) {
+        if (beside >= kClearance && beside >= leftFloor) {
             x = beside;
         } else {
             // Never above the top edge: on a viewport too short for both,
@@ -217,11 +239,22 @@ void HintBalloon::reposition()
         }
     };
 
-    const WalkthroughPanel* guide = parentWidget()->findChild<WalkthroughPanel*>();
-    if (guide && guide->isVisible()) stepAside(guide->geometry());
+    for (const QRect& obstacle : obstacles) {
+        // Left-half obstacles are the floor's business, not the step's -
+        // stepping "to the left of" the rail is off the viewport.
+        if (obstacle.center().x() < parentWidget()->width() / 2) continue;
+        stepAside(obstacle);
+    }
 
+    // The toast places itself and is not an overlay entry, so it is still
+    // named here - it lands in this same bottom strip whenever an outcome is
+    // reported while a hint is up.
     const Toast* toast = parentWidget()->findChild<Toast*>();
     if (toast && toast->isVisible()) stepAside(toast->geometry());
+
+    // Never off either edge, whatever the floor and the steps above worked
+    // out between them.
+    x = std::max(0, std::min(x, parentWidget()->width() - width()));
 
     move(x, y);
     // Re-raised here as well as re-placed: this runs from

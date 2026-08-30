@@ -338,16 +338,26 @@ double averageLuminance(const QImage& image, const QRect& region)
 // border() for a card that adds no accent of its own at the sampled edge,
 // or the card's own override colour (WalkthroughPanel's accent() outline,
 // which replaces the family border everywhere) - measured closer at the
-// edge than the interior reads. Also confirms a shadow is genuinely present
-// just outside the card, in the margin Theme::surfaceShadowMargin()
-// reserves: nothing is painted there at all except paintSurface()'s
-// alpha-blended rings, so any nonzero alpha proves the shadow ran.
-// `edgePoint`/`interiorPoint`/`outsidePoint` are supplied by the caller,
-// in the widget's own local coordinates, rather than derived here - which
-// edge is safe to sample (clear of a stripe, a pill, a skip control) is a
-// per-card decision, not a general one.
+// edge than the interior reads.
+//
+// The third check used to be "a shadow is genuinely present just outside the
+// card, in the margin surfaceShadowMargin() reserves". That margin is gone
+// and so is the shadow: fix round 1's ruling is that NOTHING paints
+// translucent pixels over the GL surface, because there is nothing behind
+// them in the widget's backing store to blend with and the alpha lands on
+// black. So the check is inverted rather than dropped - the card must be
+// fully OPAQUE right out to its own edge, which is the property the ruling
+// actually cares about and which a returning shadow would fail on its first
+// row. Swept around the whole perimeter, not sampled at one point, because a
+// shadow reintroduced on one side only is exactly the shape this regresses
+// in.
+//
+// `edgePoint` and `interiorSearch` are supplied by the caller, in the
+// widget's own local coordinates, rather than derived here - which edge is
+// safe to sample (clear of a stripe, a pill, a skip control) is a per-card
+// decision, not a general one.
 void checkFamilySurface(QWidget* widget, const QPoint& edgePoint, const QRect& interiorSearch,
-                        const QPoint& outsidePoint, const QColor& edgeColour, const QString& label)
+                        const QColor& edgeColour, const QString& label)
 {
     const QImage img = renderExact(widget);
     if (!img.rect().contains(edgePoint)) {
@@ -382,10 +392,34 @@ void checkFamilySurface(QWidget* widget, const QPoint& edgePoint, const QRect& i
           QStringLiteral("%1's edge reads closer to its border colour than its "
                          "panel() interior does").arg(label));
 
-    if (img.rect().contains(outsidePoint)) {
-        check(qAlpha(img.pixel(outsidePoint)) > 0,
-              QStringLiteral("%1 paints a shadow in its reserved margin").arg(label));
+    // Fully opaque out to the edge. The four corners are excluded by the
+    // radius: a rounded card genuinely does not cover them, which is a
+    // property of the corner radius rather than of translucency.
+    const int corner = 12;
+    int seeThrough = 0;
+    QPoint firstSeeThrough;
+    auto sweep = [&](int x, int y) {
+        if (!img.rect().contains(x, y)) return;
+        if (qAlpha(img.pixel(x, y)) == 255) return;
+        if (seeThrough == 0) firstSeeThrough = QPoint(x, y);
+        ++seeThrough;
+    };
+    for (int x = corner; x < img.width() - corner; ++x) {
+        sweep(x, 0);
+        sweep(x, img.height() - 1);
     }
+    for (int y = corner; y < img.height() - corner; ++y) {
+        sweep(0, y);
+        sweep(img.width() - 1, y);
+    }
+    check(seeThrough == 0,
+          QStringLiteral("%1 is opaque right out to its own edge - no translucent "
+                         "pixels over the GL surface (%2)")
+              .arg(label)
+              .arg(seeThrough == 0
+                       ? QStringLiteral("every edge pixel solid")
+                       : QStringLiteral("%1 see-through, first at %2,%3")
+                             .arg(seeThrough).arg(firstSeeThrough.x()).arg(firstSeeThrough.y())));
 }
 
 }  // namespace
@@ -834,11 +868,45 @@ int main(int argc, char* argv[])
                                      .arg(chip->text()).arg(chip->width()).arg(chip->height());
             }
             check(mis_sized.isEmpty(),
-                  QStringLiteral("each is a %1x%1 square - 34 of painted card plus the "
-                                 "shadow margin (%2)")
+                  QStringLiteral("each is a %1x%1 square of painted card (%2)")
                       .arg(side)
                       .arg(mis_sized.isEmpty() ? QStringLiteral("all are")
                                                : mis_sized.join(QStringLiteral(", "))));
+
+            // --- the painted gap, MEASURED --------------------------------
+            // Task 1's source claimed a 3px painted gap between chip bodies
+            // and a magnified crop confirming it. Neither was true:
+            // QLayout::spacing() silently ignored the negative value it was
+            // given and ran at the style's 6px, so the gap was 12px for two
+            // whole tasks and no check could tell. This counts the actual
+            // rows of card background between two adjacent buttons' painted
+            // borders in a rendered image of the rail - so the number in the
+            // source and the number on screen cannot diverge again.
+            //
+            // Deliberately two chips inside one GROUP (Union and Subtract),
+            // not a pair with a separator between them: the separator's own
+            // band is a different measurement.
+            if (chips.size() >= 6) {
+                ToolChip* first = chips[3];    // Union
+                ToolChip* second = chips[4];   // Subtract
+                const QImage railImg = renderExact(rail);
+                const int column = first->x() + first->width() / 2;
+                int background = 0;
+                QStringList rowColours;
+                for (int y = first->y() + first->height(); y < second->y(); ++y) {
+                    const QColor c = railImg.pixelColor(column, y);
+                    rowColours << c.name();
+                    if (colorDistance(c, Theme::panel()) < 12.0) ++background;
+                }
+                check(second->y() - (first->y() + first->height()) == 3 && background == 3,
+                      QStringLiteral("exactly 3 rows of card background separate two "
+                                     "adjacent rail buttons - the painted gap the source "
+                                     "claims, counted in pixels (%1 rows, %2 of them "
+                                     "background: %3)")
+                          .arg(second->y() - (first->y() + first->height()))
+                          .arg(background)
+                          .arg(rowColours.join(QStringLiteral(" "))));
+            }
 
             // Three group dividers - drawer | sketch | model | select - as
             // separate widgets between the chips, not gaps that merely look
@@ -973,6 +1041,45 @@ int main(int argc, char* argv[])
                       .arg(items ? items->toolTip().replace(QLatin1Char('\n'),
                                                             QStringLiteral(" / "))
                                  : QString()));
+
+            // ...and it is RECOMPOSED whenever the action changes, not
+            // captured once at construction. Items' tooltip never varies, so
+            // the check above passes against a capture-once implementation.
+            // Snap to Grid's does: updateActions() rebuilds it from
+            // snapTooltipText(), which formats the grid step through Measure
+            // and therefore reads differently in every display unit. Driven
+            // through the real Units actions - the same path the app bar's
+            // unit chip uses - and put back, so the units blocks further down
+            // still start from millimetres.
+            ToolChip* snapButton = nullptr;
+            for (ToolChip* chip : chips) {
+                if (chip->action() == action(window, QStringLiteral("Snap to Grid")))
+                    snapButton = chip;
+            }
+            QAction* toCentimetres = action(window, QStringLiteral("Centimetres"));
+            QAction* toMillimetres = action(window, QStringLiteral("Millimetres"));
+            if (snapButton && toCentimetres && toMillimetres) {
+                const QString before = snapButton->toolTip();
+                check(before.contains(QStringLiteral("Snap to Grid")) &&
+                          before.contains(QStringLiteral("10 mm")),
+                      QStringLiteral("the Snap button's tooltip names its command and "
+                                     "the grid step in millimetres (\"%1\")")
+                          .arg(QString(before).replace(QLatin1Char('\n'),
+                                                       QStringLiteral(" / "))));
+                toCentimetres->trigger();
+                settle(150);
+                const QString after = snapButton->toolTip();
+                check(after != before && after.contains(QStringLiteral("1 cm")) &&
+                          after.contains(QStringLiteral("Snap to Grid")),
+                      QStringLiteral("and it follows the action when the unit changes "
+                                     "rather than being captured once (\"%1\")")
+                          .arg(QString(after).replace(QLatin1Char('\n'),
+                                                      QStringLiteral(" / "))));
+                toMillimetres->trigger();
+                settle(150);
+                check(snapButton->toolTip() == before,
+                      "and back again when the unit is put back");
+            }
 
             // --- state rendering, at the glyph -----------------------------
             // Disabled: the SAME chip, rendered either way, sampled over the
@@ -3900,6 +4007,71 @@ int main(int argc, char* argv[])
                           .arg(guide->width()).arg(guide->height()));
             }
 
+            // The hint balloon has the same obstacle problem as the toast and
+            // used to solve it from a shorter list: it named WalkthroughPanel
+            // and Toast by type, so it could not see the rail at all. Its
+            // step-aside is "go to the LEFT of the obstacle", and to the left
+            // of the bottom-right guide at these widths is underneath a rail
+            // that now spans the whole left edge - x=8, behind it, with
+            // relayout() raising the rail back on top. 600px is inside the
+            // 585-640 band where that lands.
+            {
+                resizeViewport(600, 500);
+                check(buildBody(narrow, 0.30, 0.30, 0.50, 0.50, 10.0),
+                      "a second body on the narrow probe, so a hint has a reason to "
+                      "be up");
+                // The guide is what the balloon steps around, and building
+                // that body completed it. Restoring it AFTER the build is
+                // what puts both surfaces on screen at once - which is the
+                // whole collision, and is exactly the sequence a real user
+                // hits when Show tips again lands on a narrow window.
+                if (QAction* restore = action(narrow, QStringLiteral("Show tips again"))) {
+                    restore->trigger();
+                    settle(250);
+                }
+                const auto narrowSolids = narrow.document().solids();
+                HintBalloon* balloon = narrow.findChild<HintBalloon*>();
+                ToolCluster* rail = nv->findChild<ToolCluster*>();
+                WalkthroughPanel* narrowGuide = narrow.findChild<WalkthroughPanel*>();
+                check(balloon != nullptr && rail != nullptr && narrowSolids.size() >= 2 &&
+                          narrowGuide != nullptr && narrowGuide->isVisible(),
+                      "the narrow probe has a balloon, a rail, a visible guide and two "
+                      "bodies");
+                if (balloon && rail && narrowGuide && narrowSolids.size() >= 2) {
+                    nv->setSelectedSolids({narrowSolids[0].id, narrowSolids[1].id});
+                    settle(250);
+                    check(balloon->isVisible(),
+                          "selecting two bodies raises the boolean hint on the narrow "
+                          "viewport");
+                    check(balloon->isVisible() &&
+                              balloon->geometry().intersects(
+                                  QRect(0, balloon->y(), narrowGuide->geometry().right(),
+                                        balloon->height())) &&
+                              narrowGuide->isVisible(),
+                          QStringLiteral("and the guide really is in its way, so stepping "
+                                         "aside is not a no-op (guide %1,%2 %3x%4)")
+                              .arg(narrowGuide->x()).arg(narrowGuide->y())
+                              .arg(narrowGuide->width()).arg(narrowGuide->height()));
+                    if (balloon->isVisible()) {
+                        check(!balloon->geometry().intersects(rail->geometry()),
+                              QStringLiteral("and the balloon steps clear of the rail "
+                                             "rather than under it (viewport %1 wide - "
+                                             "balloon %2,%3 %4x%5 - rail %6,%7 %8x%9)")
+                                  .arg(nv->width())
+                                  .arg(balloon->x()).arg(balloon->y())
+                                  .arg(balloon->width()).arg(balloon->height())
+                                  .arg(rail->x()).arg(rail->y())
+                                  .arg(rail->width()).arg(rail->height()));
+                        check(!balloon->geometry().intersects(narrowGuide->geometry()),
+                              "and still clear of the guide it was already avoiding");
+                        check(nv->rect().contains(balloon->geometry()),
+                              "and entirely inside the viewport");
+                    }
+                    nv->setSelectedSolids({});
+                    settle(150);
+                }
+            }
+
             // ExtrudePreview has the mirror problem at the top edge: it is
             // raised once, at begin(), and relayout() then raises the
             // top-left Items/Undo/Redo cluster back over it, so its field
@@ -4045,8 +4217,18 @@ int main(int argc, char* argv[])
               "gridMinor() is the Graphite token");
         check(Theme::gridMajor() == QColor(QStringLiteral("#4d4d55")),
               "gridMajor() is the Graphite token");
-        check(Theme::surfaceShadowMargin() == 3,
-              "surfaceShadowMargin() reserves 3px for paintSurface()'s shadow");
+        // Was 3, for a soft shadow ring paintSurface() painted around every
+        // card. Fix round 1 removed the shadow entirely: translucent pixels
+        // over OCCT's GL surface have nothing behind them in the widget's
+        // backing store, so the alpha lands on black - a 3px halo on a chip,
+        // and a black band down the viewport once the tool rail was the card.
+        // The function stays, returning zero, so every caller's
+        // grow-by-this-much arithmetic and the sibling-geometry sync built on
+        // it still read as one scheme. Pinned at 0 for the same reason it was
+        // pinned at 3: a drive-by "restore the shadow" must fail loudly.
+        check(Theme::surfaceShadowMargin() == 0,
+              "surfaceShadowMargin() is 0 - the family paints no shadow, so a "
+              "card's widget rect and its painted card are the same rectangle");
 
         // A standalone chip driven by its own QAction, exactly like "chips
         // mirror their action" above - not one of MainWindow's real chips.
@@ -4183,8 +4365,7 @@ int main(int argc, char* argv[])
             const int m = Theme::surfaceShadowMargin();
             const QRect body = guide->rect().adjusted(m, m, -m, -m);
             checkFamilySurface(guide, QPoint(body.left(), body.center().y()),
-                               body.adjusted(4, 4, -4, -4),
-                               QPoint(body.left() - 1, body.center().y()), Theme::accent(),
+                               body.adjusted(4, 4, -4, -4), Theme::accent(),
                                QStringLiteral("WalkthroughPanel"));
         }
 
@@ -4203,8 +4384,7 @@ int main(int argc, char* argv[])
                 const int m = Theme::surfaceShadowMargin();
                 const QRect body = hint->rect().adjusted(m, m, -m, -m);
                 checkFamilySurface(hint, QPoint(body.left(), body.center().y()),
-                                   body.adjusted(4, 4, -4, -4),
-                                   QPoint(body.left() - 1, body.center().y()), Theme::border(),
+                                   body.adjusted(4, 4, -4, -4), Theme::border(),
                                    QStringLiteral("HintBalloon"));
             }
         }
@@ -4220,8 +4400,7 @@ int main(int argc, char* argv[])
                 const int m = Theme::surfaceShadowMargin();
                 const QRect body = sheet->rect().adjusted(m, m, -m, -m);
                 checkFamilySurface(sheet, QPoint(body.left(), body.center().y()),
-                                   body.adjusted(4, 4, -4, -4),
-                                   QPoint(body.left() - 1, body.center().y()), Theme::border(),
+                                   body.adjusted(4, 4, -4, -4), Theme::border(),
                                    QStringLiteral("ShortcutSheet"));
             }
             sheet->hide();
@@ -4246,7 +4425,6 @@ int main(int argc, char* argv[])
                 const QRect body = toastWidget->rect().adjusted(m, m, -m, -m);
                 checkFamilySurface(toastWidget, QPoint(body.center().x(), body.top()),
                                    body.adjusted(4, 4, -4, -4),
-                                   QPoint(body.center().x(), body.top() - 1),
                                    Theme::border(), QStringLiteral("Toast"));
 
                 // Also saved to disk - the coordinator asked for a magnified
@@ -4298,7 +4476,6 @@ int main(int argc, char* argv[])
             const QRect body = extrudePreview->rect().adjusted(m, m, -m, -m);
             checkFamilySurface(extrudePreview, QPoint(body.left(), body.center().y()),
                                body.adjusted(4, 4, -4, -4),
-                               QPoint(body.left() - 1, body.center().y()),
                                Theme::border(), QStringLiteral("ExtrudePreview (valid)"));
 
             if (extrudePreview->field()) {

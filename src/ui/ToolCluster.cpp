@@ -7,44 +7,38 @@
 #include <QVBoxLayout>
 
 namespace {
-// The gap between chip bodies is not the layout's spacing any more. Each
-// chip's widget box is bigger than what it paints - it reserves
-// Theme::surfaceShadowMargin() of shadow-only space on every side - so the
-// PAINTED gap between two stacked chips is always
-// spacing + 2 * surfaceShadowMargin(), and only the painted gap is anything
-// a user can see.
+// The painted gap between two stacked chip bodies, in pixels - and now
+// literally the layout's spacing, because a chip's widget rect and its
+// painted card are the same rectangle again (Theme::surfaceShadowMargin() is
+// zero; there is no shadow to reserve room for).
 //
-// This file used to set a NEGATIVE spacing to cancel those two margins and
-// land the painted gap back on the mockup's 3px. That never took effect and
-// the comment claiming it did was wrong: QLayout::spacing() treats any
-// negative insideSpacing as "unset" and returns the style's smart spacing
-// instead, so the layout ran at the Windows style's 6px throughout, and the
-// painted gap has been 12px since the chips grew their margin. Measured, not
-// reasoned about: the rail's sizeHint came back 96px taller than its
-// contents at spacing 0.
-//
-// A layout cannot express a negative gap at all, so 3px is simply not
-// reachable through one; zero spacing is the tightest it goes, and the two
-// shadow margins meeting give a 6px painted gap. That is the value the rail
-// is built and captured against.
-constexpr int kSpacing = 0;
+// The history matters, because this number has never been what the source
+// said it was. This file used to set spacing to
+// `kPaintedGap - 2 * surfaceShadowMargin()` = -3, to cancel the margin each
+// neighbouring chip reserved, and its comment claimed a magnified crop had
+// confirmed the 3px result. It had not, and could not have:
+// QLayout::spacing() treats any negative insideSpacing as "unset" and
+// returns the style's smart spacing instead, so the layout silently ran at
+// the Windows style's 6px and the painted gap was 12px throughout. Measured,
+// not reasoned about - the rail's sizeHint came back 96px taller than its
+// contents. gui_smoke now samples the rows between two adjacent rail buttons
+// and asserts exactly this many of them are card background, so the claim is
+// checked rather than asserted in prose.
+constexpr int kPaintedGap = 3;
 
 // A separator's own height, and with it the whole painted band between the
-// two chip bodies it divides: (shadow) + kSpacing + kSeparatorHeight +
-// kSpacing + (shadow) = 13px, with the rule on the middle row - about 6px of
-// air, one hairline, about 6px of air. Odd on purpose: height()/2.0 must
-// land on a half-integer for the 1px rule to paint crisply on one row (see
-// paintEvent below).
+// two chip bodies it divides: kPaintedGap + kSeparatorHeight + kPaintedGap =
+// 13px, with the rule on its middle row - 6px of air, one hairline, 6px of
+// air. Odd on purpose: height()/2.0 must land on a half-integer for the 1px
+// rule to fill exactly one row.
 constexpr int kSeparatorHeight = 7;
 // How far the rule stops short of the chip bodies it divides, so it reads as
 // a group divider rather than a full-width cut across the rail.
 constexpr int kSeparatorInset = 7;
 
 // The card's own padding: how far the panel's edge stands off the chip
-// bodies it holds. The chips add their own surfaceShadowMargin() inside it,
-// so the visible inset from the rail's edge to a chip's body is this plus
-// that - 8px.
-constexpr int kCardPad = 5;
+// bodies it holds.
+constexpr int kCardPad = 8;
 constexpr int kCardRadius = 10;
 
 // Decoration only. It carries WA_TransparentForMouseEvents so a click in the
@@ -67,15 +61,11 @@ protected:
     void paintEvent(QPaintEvent*) override
     {
         QPainter painter(this);
-        // Half-integer centre for the same reason the app bar's bottom rule
-        // needed one (Task 2): an antialiased 1px pen is centred on the
-        // coordinate it is given, so an INTEGER y splits the rule across two
-        // rows at half intensity and reads as a smudge instead of a line.
-        // kSeparatorHeight is odd precisely so height()/2.0 lands on one.
+        // Theme::drawCrispRule owns the half-pixel snap that keeps this one
+        // row of border() rather than two rows at half intensity.
         const double y = height() / 2.0;
-        const int inset = Theme::surfaceShadowMargin() + kSeparatorInset;
-        painter.setPen(QPen(Theme::border(), 1.0));
-        painter.drawLine(QPointF(inset, y), QPointF(width() - inset, y));
+        Theme::drawCrispRule(painter, QPointF(kSeparatorInset, y),
+                             QPointF(width() - kSeparatorInset, y), Theme::border());
     }
 };
 }  // namespace
@@ -97,40 +87,20 @@ ToolCluster::ToolCluster(QWidget* parent)
     // family's own card is the fix, and it is also what the design asks for.
     myLayout = new QVBoxLayout(this);
     myLayout->setContentsMargins(kCardPad, kCardPad, kCardPad, kCardPad);
-    myLayout->setSpacing(kSpacing);
+    myLayout->setSpacing(kPaintedGap);
     myLayout->setSizeConstraint(QLayout::SetFixedSize);
 }
 
 void ToolCluster::paintEvent(QPaintEvent* /*event*/)
 {
     QPainter painter(this);
-    painter.setRenderHint(QPainter::Antialiasing, true);
-    // The card fills this widget's ENTIRE bounds - it does NOT reserve
-    // Theme::surfaceShadowMargin() the way a chip or the guide does, and
-    // that is the one place this surface departs from the family.
-    //
-    // A painted shadow needs something behind it to darken. A chip has one:
-    // it sits on this cluster's card, so its own margin composites over
-    // panel() and the shadow reads correctly. A widget sitting DIRECTLY on
-    // OCCT's on-screen GL surface has nothing behind it in its backing
-    // store, so the semi-transparent black rings land on black and the
-    // reserved margin renders as a hard black frame. On a 40px chip that is
-    // a 3px halo nobody has picked out; on a rail spanning the whole
-    // viewport it was a black rule down the left edge of the app, plainly
-    // visible in this task's first capture. Filling the whole rect is what
-    // removes it. The rounded corners still leave four small unpainted nubs
-    // - every rounded card over this viewport has those, and they are dark
-    // against a dark card rather than dark against the mid-grey grid.
-    //
-    // The half-pixel translate is the app bar's bottom-rule lesson again: an
-    // antialiased 1px pen is centred on the path it is given, so a path on
-    // integer edges splits the border across two columns at half intensity -
-    // measured at #2e2e33 and #2a2a2f down the two sides instead of one
-    // column of border(). Offset by half a pixel the stroke lands on exactly
-    // the outermost column, and the fill it half-uncovers there is the same
-    // half the stroke covers.
-    painter.translate(0.5, 0.5);
-    Theme::paintSurface(painter, rect().adjusted(0, 0, -1, -1), kCardRadius);
+    // Every pixel of this widget is the card: fill and border, both opaque,
+    // no reserved margin and no shadow. Theme::paintSurface() is now the
+    // whole of that - it owns the crisp-border alignment this file used to
+    // do for itself with a local half-pixel translate. The rounded corners
+    // still leave four small unpainted nubs; every rounded card over this
+    // viewport has those.
+    Theme::paintSurface(painter, rect(), kCardRadius);
 }
 
 void ToolCluster::addChip(ToolChip* chip)

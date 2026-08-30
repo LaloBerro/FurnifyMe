@@ -7,6 +7,8 @@
 #include <QPainterPath>
 #include <QPalette>
 
+#include <cmath>
+
 // Deliberately at global scope. Q_INIT_RESOURCE declares the initialiser as an
 // extern at block scope, which binds to the innermost enclosing namespace - so
 // calling it from inside `namespace Theme` would look for
@@ -75,37 +77,68 @@ QFont badgeFont() { return scaledFont(kBadgePt, /*bold=*/false); }
 int motionMs() { return 160; }
 QEasingCurve motionCurve() { return QEasingCurve(QEasingCurve::OutCubic); }
 
-int surfaceShadowMargin() { return 3; }
+int surfaceShadowMargin() { return 0; }
+
+void drawCrispBorder(QPainter& p, const QRectF& rect, const QColor& colour,
+                     double radius, double width)
+{
+    // Half the pen width inward, so the stroke's OUTER edge lands on the
+    // outer edge of `rect` and the stroke itself covers whole pixels. The
+    // radius follows the path in, or the corners would bulge by the same
+    // half-pixel the sides just lost.
+    const double inset = width / 2.0;
+    const double r = radius > inset ? radius - inset : 0.0;
+
+    QPainterPath path;
+    path.addRoundedRect(rect.adjusted(inset, inset, -inset, -inset), r, r);
+
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setPen(QPen(colour, width));
+    p.setBrush(Qt::NoBrush);
+    p.drawPath(path);
+    p.restore();
+}
+
+void drawCrispRule(QPainter& p, const QPointF& from, const QPointF& to, const QColor& colour)
+{
+    QPointF a = from;
+    QPointF b = to;
+    // Only the constant coordinate can be snapped: snapping the other one
+    // would shorten the rule by half a pixel at each end for no benefit.
+    if (std::abs(from.y() - to.y()) < 0.001) {
+        const double y = std::floor(from.y()) + 0.5;
+        a.setY(y);
+        b.setY(y);
+    }
+    if (std::abs(from.x() - to.x()) < 0.001) {
+        const double x = std::floor(from.x()) + 0.5;
+        a.setX(x);
+        b.setX(x);
+    }
+
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setPen(QPen(colour, 1.0));
+    p.drawLine(a, b);
+    p.restore();
+}
 
 void paintSurface(QPainter& p, const QRect& rect, int radius)
 {
+    // Opaque, and no shadow - see the header for why translucent pixels
+    // cannot be painted over OCCT's GL surface. The fill covers `rect`
+    // entirely; the border is then stroked crisply along its outer edge, so
+    // the outermost row and column of a card ARE its border rather than a
+    // half-covered blend of border and fill.
     p.save();
     p.setRenderHint(QPainter::Antialiasing, true);
-
-    // The soft shadow: concentric rounded-rect strokes, one pixel apart,
-    // fading out as they move away from `rect` - never past
-    // surfaceShadowMargin() px, which is exactly how far a caller grows its
-    // own bounds around this rect, so the ring never spills past the
-    // widget's own edge. Drawn before the fill below, which then covers the
-    // inner ones and leaves only the outward-fading part visible.
-    const int margin = surfaceShadowMargin();
-    for (int i = margin; i >= 1; --i) {
-        const int alpha = 36 - (i - 1) * 10;   // denser near the surface, faint at the rim
-        QPainterPath ring;
-        ring.addRoundedRect(rect.adjusted(-i, -i, i, i), radius + i, radius + i);
-        p.setPen(QPen(QColor(0, 0, 0, alpha), 1.0));
-        p.setBrush(Qt::NoBrush);
-        p.drawPath(ring);
-    }
-
     QPainterPath surface;
     surface.addRoundedRect(rect, radius, radius);
     p.fillPath(surface, panel());
-    p.setPen(QPen(border(), 1.0));
-    p.setBrush(Qt::NoBrush);
-    p.drawPath(surface);
-
     p.restore();
+
+    drawCrispBorder(p, QRectF(rect), border(), radius);
 }
 
 void apply(QApplication& app)

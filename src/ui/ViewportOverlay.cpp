@@ -9,31 +9,21 @@
 
 namespace {
 // The mockup's gap from the viewport edge to what is actually PAINTED, not
-// to a widget's own bounding box. Most anchored widgets (the axis gizmo, the
-// unit readout) paint their whole bounding box, so the two coincide for
-// them. The chip clusters and the walkthrough guide do not any more - they
-// grew a Theme::surfaceShadowMargin() margin of shadow-only space on every
-// side (see ToolCluster.cpp) - so anchoring their bounding box at the raw 16
-// would leave their painted content sitting 16 + surfaceShadowMargin() from
-// the edge instead. Pulling every entry's anchor in by that same margin
-// keeps the ones that DID grow visually at 16 again; the ones that did not
-// grow move 16 - surfaceShadowMargin() from the edge instead, close enough
-// that nothing in this app currently distinguishes it from 16 by eye or by
-// test (see the "bottom-anchored cluster keeps its margin" range check).
-// Not constexpr: Theme::surfaceShadowMargin() is an ordinary function, not a
-// constexpr one - CLAUDE.md's Theme surface is called, not compiled in, so a
-// caller cannot accidentally bake in a stale 3 if that value ever moved.
+// to a widget's own bounding box. The two coincide again now that the
+// floating-surface family reserves no shadow margin
+// (Theme::surfaceShadowMargin() is zero), so this is simply 16 - but the
+// subtraction stays rather than being folded away: it is the one line that
+// records WHY the anchor is measured against painted edges, and the same
+// compensation AppBar's layout and the rail's own padding express. Not
+// constexpr, deliberately: CLAUDE.md's Theme surface is called, not compiled
+// in, so a caller cannot bake in a stale value if that number ever moves
+// again.
 const int kMargin = 16 - Theme::surfaceShadowMargin();
 constexpr int kGap = 8;       // gap between clusters sharing an edge
 
 // The rail's own margin: the plan's 14px from the viewport's left, top and
-// bottom edges. No shadow-margin compensation here, unlike kMargin above -
-// the rail's card fills its whole widget box rather than reserving a
-// shadow-only margin inside it (see ToolCluster::paintEvent for why a
-// painted shadow cannot work for a widget sitting directly on the GL
-// surface), so its widget offset and its painted offset are the same number.
-// It is two pixels tighter than kMargin deliberately: a rail pinned to an
-// edge hugs it; a card floating in a corner stands off it.
+// bottom edges, two pixels tighter than kMargin deliberately - a rail pinned
+// to an edge hugs it; a card floating in a corner stands off it.
 constexpr int kEdgeMargin = 14;
 }  // namespace
 
