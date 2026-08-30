@@ -92,11 +92,17 @@ public:
     // thousand times it - both of which are a lost body rather than an edit.
     bool transformBody(int id, const gp_Trsf& delta);
 
-    // The band a single scale gesture may land in. Below the first, a body is
-    // gone from the viewport without looking deleted; above the second, it
-    // swallows the scene. Both are recoverable by scaling again, which is why
-    // this refuses the gesture rather than clamping the number - a clamp would
-    // silently do something other than what the user dragged.
+    // The OPEN band a single scale gesture may land in - both ends are
+    // refused, not merely everything beyond them. Exclusive on purpose: a
+    // shrink dragged all the way down snaps to exactly kMinScale with Snap on
+    // and lands a hair below it with Snap off, so a half-open band would let
+    // Snap to Grid decide whether the same gesture was legal.
+    //
+    // Below the low end a body is gone from the viewport without looking
+    // deleted; above the high end it swallows the scene. Both are recoverable
+    // by scaling again, which is why this refuses the gesture rather than
+    // clamping the number - a clamp would silently do something other than
+    // what the user dragged.
     static constexpr double kMinScale = 0.05;
     static constexpr double kMaxScale = 20.0;
 

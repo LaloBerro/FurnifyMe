@@ -444,9 +444,40 @@ int main()
                   "and a scale leaves its own pivot where it is");
     }
     {
-        // A snap must never be what makes a transform illegal: the kernel
-        // refuses a factor <= 0, so a shrink that would round to nothing is
-        // held at one step instead of becoming a refusal nobody asked for.
+        // A COMPOUND gesture - turned about a pivot and moved - is the case the
+        // T . S . R rebuild exists for: snapping the components separately is
+        // only possible because they were pulled apart about the pivot first.
+        // Nothing in the gizmo produces one today, because exactly one mode is
+        // armed at a time - which is precisely why it is pinned here. A
+        // refactor that "simplified" the rebuild into snapping the trsf's own
+        // translation part would still pass every single-mode case above and
+        // silently break this one.
+        const gp_Pnt pivot(200.0, -60.0, 12.0);
+        gp_Trsf turn;
+        turn.SetRotation(gp_Ax1(pivot, gp_Dir(0.0, 0.0, 1.0)), 41.0 * kPi / 180.0);
+        gp_Trsf move;
+        move.SetTranslation(gp_Vec(48.0, -13.0, 6.0));
+
+        const gp_Trsf snapped = snapTransform(move * turn, pivot, 10.0, 15.0, 0.05);
+        gp_Vec axis;
+        Standard_Real angle = 0.0;
+        snapped.GetRotation().GetVectorAndAngle(axis, angle);
+        checkNear(angle * 180.0 / kPi, 45.0, 1.0e-6,
+                  "in a compound move-and-turn, 41 degrees still snaps to 45");
+        checkNear(axis.Z(), 1.0, 1.0e-9, "about the axis it was actually turned on");
+        const gp_Pnt moved = pivot.Transformed(snapped);
+        checkNear(moved.X() - pivot.X(), 50.0, 1.0e-9,
+                  "and the 48 mm of X in it snaps to 50, not swallowed by the rotation");
+        checkNear(moved.Y() - pivot.Y(), -10.0, 1.0e-9, "-13 mm of Y snaps to -10");
+        checkNear(moved.Z() - pivot.Z(), 10.0, 1.0e-9, "6 mm of Z snaps to 10");
+        checkNear(snapped.ScaleFactor(), 1.0, 1.0e-9, "with no scale invented on the way");
+    }
+    {
+        // A snap must never leave a transform the kernel cannot apply: gp_Trsf
+        // and BRepBuilderAPI_Transform want a positive factor, so a shrink that
+        // would round to nothing is held at one step. A caller's own sanity
+        // band may still refuse that value - MainWindow's does - but that is a
+        // refusal with a reason, not a degenerate transform.
         const gp_Pnt origin(0.0, 0.0, 0.0);
         gp_Trsf shrink;
         shrink.SetScale(origin, 0.01);

@@ -113,10 +113,16 @@ BooleanResult transformShape(const TopoDS_Shape& body, const gp_Trsf& trsf);
 //
 // A step <= 0 leaves that component alone, so a caller can snap one thing
 // and not another. `rotationStepDeg` is in degrees for readability at the
-// call site; the angle itself is radians throughout. A scale that would
-// round to zero or below is pulled back up to one step - the kernel refuses
-// a factor <= 0, and so does every caller, but a snap must not be the thing
-// that creates the refusal.
+// call site; the angle itself is radians throughout.
+//
+// A scale that would round to zero or below is pulled back up to one step.
+// That is about the RESULT being well formed, not about avoiding a refusal:
+// gp_Trsf and BRepBuilderAPI_Transform want a positive factor, and handing
+// them a zero one is a kernel error rather than an answer. A caller with its
+// own sanity band is free to refuse the one-step value that comes back - and
+// MainWindow's does, since its band excludes both ends - but it refuses a
+// meaningful number with an explanation, which is not the same thing as the
+// snap having produced a degenerate transform.
 gp_Trsf snapTransform(const gp_Trsf& delta, const gp_Pnt& pivot,
                       double translationStep, double rotationStepDeg,
                       double scaleStep);

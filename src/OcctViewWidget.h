@@ -373,6 +373,11 @@ private:
     // caller is responsible for the MoveTo that produced it, so the question
     // and the answer belong to the same event.
     bool detectedIsManipulator() const;
+    // Puts the manipulator's four manipulation modes back into the context's
+    // pick candidates. Two callers - the attach, and the restore after an
+    // additive pick has taken it out for the duration - so the list of modes
+    // lives in one place rather than being repeated and drifting.
+    void activateManipulatorModes();
     // Reads the accumulated transform, puts the PRESENTATION back to where the
     // document says it should be, snaps, and emits gizmoReleased(). The
     // presentation reset is unconditional and happens here rather than in the

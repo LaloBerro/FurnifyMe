@@ -515,14 +515,7 @@ void OcctViewWidget::attachManipulator(int solidId)
     options.SetAdjustSize(Standard_True);
     options.SetEnableModes(Standard_True);
     myManipulator->Attach(it->second, options);
-    // Move along an axis, Move in a plane, Rotate, Scale - every mode the API
-    // offers. gp_Trsf cannot express a per-axis scale, so the scale cubes are
-    // uniform whichever one is grabbed; see MainWindow's bake for the clamp
-    // that keeps a uniform scale to something that is still furniture.
-    myManipulator->EnableMode(AIS_MM_Translation);
-    myManipulator->EnableMode(AIS_MM_TranslationPlane);
-    myManipulator->EnableMode(AIS_MM_Rotation);
-    myManipulator->EnableMode(AIS_MM_Scaling);
+    activateManipulatorModes();
     // The one styling hook AIS_Manipulator actually exposes: the shading
     // aspect its parts are computed from. The per-axis HUES are private
     // (AIS_Manipulator::Axis::myColor, set in init() and reachable through no
@@ -544,6 +537,19 @@ void OcctViewWidget::attachManipulator(int solidId)
     myContext->UpdateCurrentViewer();
 }
 
+void OcctViewWidget::activateManipulatorModes()
+{
+    if (myManipulator.IsNull()) return;
+    // Move along an axis, Move in a plane, Rotate, Scale - every mode the API
+    // offers. gp_Trsf cannot express a per-axis scale, so the scale cubes are
+    // uniform whichever one is grabbed; see MainWindow's bake for the clamp
+    // that keeps a uniform scale to something that is still furniture.
+    myManipulator->EnableMode(AIS_MM_Translation);
+    myManipulator->EnableMode(AIS_MM_TranslationPlane);
+    myManipulator->EnableMode(AIS_MM_Rotation);
+    myManipulator->EnableMode(AIS_MM_Scaling);
+}
+
 void OcctViewWidget::detachManipulator()
 {
     if (myManipulator.IsNull()) {
@@ -551,7 +557,16 @@ void OcctViewWidget::detachManipulator()
         return;
     }
 
-    // A gesture cannot outlive the gizmo it was made on.
+    // A gesture cannot outlive the gizmo it was made on - and OCCT's Detach()
+    // does NOT put back the local transformations a live drag has written, so
+    // dropping the flag alone would leave the body frozen at the pose the drag
+    // reached while the document still said something else. Cancelling it is
+    // the reset. Unreachable today, because every route in here runs between
+    // gestures rather than during one; that is exactly what makes the line
+    // cheap to have, and it is the difference between a future mid-drag detach
+    // being harmless and being a body stuck where nothing put it.
+    if (myManipulator->HasActiveTransformation())
+        myManipulator->StopTransform(Standard_False);
     myGizmoDragActive = false;
     myGizmoDelta = gp_Trsf();
     // Detach() erases it from the context as well as letting go of the body.
@@ -1350,32 +1365,48 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
     }
 
     const bool additive = (event->modifiers() & Qt::ShiftModifier) != 0;
-    if (additive && !myManipulator.IsNull()) {
-        // A Shift-click means "add this body to the selection", and the gizmo
-        // standing on the FIRST body must not be what the pick lands on.
-        // AIS_ManipulatorOwner carries a higher selection priority than a
-        // shape's owner, so an arm or a ring crossing the second body wins the
-        // pick outright and the click selects nothing at all - which is how a
-        // 100% display found this and a 150% one did not: at the smaller
-        // scale the second body sat under a ring, at the larger it did not.
-        // Taking the gizmo out of the scene for the duration is the whole fix;
-        // MainWindow's predicate puts it back, or does not, from whatever
-        // selection this click produces.
-        detachManipulator();
-    }
+    // A Shift-click means "add this body to the selection", and the gizmo
+    // standing on the FIRST body must not be what the pick lands on.
+    // AIS_ManipulatorOwner carries a higher selection priority than a shape's
+    // owner, so an arm or a ring crossing the second body wins the pick
+    // outright and the click selects nothing at all - which is how a 100%
+    // display found this and a 150% one did not: at the smaller scale the
+    // second body sat under a ring, at the larger it did not.
+    //
+    // Deactivate(), not a detach: the pick only needs the manipulator's owners
+    // out of the CANDIDATES, and that is exactly what deactivating its modes
+    // does. Destroying and re-attaching it would do the same by demolition -
+    // an Attach and four EnableMode calls and two viewer updates on every
+    // additive click, even one nowhere near an arm - and would have to be put
+    // back indirectly, by relying on the selectionChanged() below to reach
+    // MainWindow's predicate. This restores itself, locally and
+    // unconditionally, a few lines down.
+    const bool hideGizmoFromPick = additive && !myManipulator.IsNull();
+    if (hideGizmoFromPick) myContext->Deactivate(myManipulator);
+
     const QPoint device = toDevicePixels(pos);
     myContext->MoveTo(device.x(), device.y(), myView, Standard_False);
     // A click that landed on the gizmo but never became a drag - a press the
     // gizmo declined, or a cursor that wandered onto it between press and
     // release - must not select a manipulator part: SelectDetected would
     // replace the body selection with an owner that belongs to no document,
-    // and the gizmo would erase itself.
-    if (detectedIsManipulator()) {
+    // and the gizmo would erase itself. It cannot be detected at all on the
+    // additive path above, which is the point of that branch.
+    const bool onGizmo = detectedIsManipulator();
+    if (!onGizmo) {
+        myContext->SelectDetected(additive ? AIS_SelectionScheme_XOR
+                                           : AIS_SelectionScheme_Replace);
+    }
+
+    // Straight back into the picker, before anything can return. Unconditional
+    // on purpose: a restore that some path can skip is a gizmo that silently
+    // stops being grabbable.
+    if (hideGizmoFromPick) activateManipulatorModes();
+
+    if (onGizmo) {
         myManipulator->DeactivateCurrentMode();
         return;
     }
-    myContext->SelectDetected(additive ? AIS_SelectionScheme_XOR
-                                       : AIS_SelectionScheme_Replace);
     // The selection just changed, and in edge mode the dimension follows it as
     // well as the hover - selecting a second edge has to stop the annotation
     // claiming to measure the one before it.

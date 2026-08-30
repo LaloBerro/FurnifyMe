@@ -1204,8 +1204,13 @@ bool MainWindow::transformBody(int id, const gp_Trsf& delta)
     // This layer's clamp, not the kernel's: transformShape refuses only a
     // factor <= 0, and a body scaled to 1e-9 is not an error the kernel can
     // see - it is a body the user has lost. See kMinScale/kMaxScale.
+    // INCLUSIVE on both ends, and that is the whole point: a shrink dragged to
+    // the floor snaps to exactly kMinScale with Snap on and lands fractionally
+    // below it with Snap off, so an exclusive test (`< kMinScale`) let the
+    // SAME gesture commit or be refused depending on a toggle that is supposed
+    // to change where a drag lands, not whether it is allowed at all.
     const double scale = delta.ScaleFactor();
-    if (scale < kMinScale || scale > kMaxScale) {
+    if (scale <= kMinScale || scale >= kMaxScale) {
         myToasts->show(tr("That's too big a change of size to make at once — anything "
                           "under a twentieth or over twenty times leaves a body you "
                           "can't see or can't fit on screen. Drag the handle back "

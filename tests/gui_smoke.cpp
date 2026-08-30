@@ -3974,14 +3974,21 @@ int main(int argc, char* argv[])
         // - and then the world point the walk found is not on the ring that
         // armed, so a drag computed around it turns the body by nothing. That
         // is exactly what a 100% display did to a probe written at 150%.
+        // `clearOf`, when given, rejects candidates INSIDE that box. The gizmo
+        // is centred on the body's bounding box, so the inner end of every arm
+        // is buried in the body - fine for a drag, useless for the Shift-click
+        // probe below, which has to park a second body on the arm point and
+        // then click it: a point inside the first body has that body's own
+        // surface in front of it, and the click finds the wrong one.
         auto findHandle = [&](int wantMode, int wantAxis, const gp_Dir& along, QPoint& out,
-                              gp_Pnt& world) {
+                              gp_Pnt& world, const Bnd_Box* clearOf = nullptr) {
             gp_Ax2 frame;
             double size = 0.0;
             if (!view->manipulatorFrame(frame, size)) return false;
             for (int percent = 8; percent <= 140; percent += 2) {
                 const gp_Pnt candidate =
                     frame.Location().Translated(gp_Vec(along) * (size * percent / 100.0));
+                if (clearOf && !clearOf->IsOut(candidate)) continue;
                 QPoint at;
                 if (!view->projectToScreen(candidate, at)) continue;
                 if (!view->rect().adjusted(6, 6, -6, -6).contains(at)) continue;
@@ -4091,8 +4098,31 @@ int main(int argc, char* argv[])
                       "Undo puts the body back exactly where it was");
                 check(std::fabs(gizmoVolume() - volumeBefore) < 1.0e-6,
                       "at exactly the size it was");
+                check(presentationIsClean(),
+                      "with the presentation agreeing with the restored document too");
                 check(view->hasManipulator(),
                       "and the gizmo comes back with the restored body's presentation");
+
+                // Redo is the other half of the same invariant. It is
+                // structurally safe today - resyncView() rebuilds every
+                // presentation from the document - which is exactly when a
+                // check costs nothing and is worth having: the day a transform
+                // is ever restored by re-applying a stored trsf instead of
+                // redisplaying the shape, this is what notices.
+                trigger(window, QStringLiteral("Redo"));
+                settle(250);
+                view->setSelectedSolids({gizmoId});
+                settle(200);
+                check(std::fabs((gizmoCentre().Z() - centreBefore.Z()) - dz) < 1.0e-6,
+                      "Redo puts the move back exactly");
+                check(presentationIsClean(),
+                      "and the redone body on screen IS the redone body in the document");
+                trigger(window, QStringLiteral("Undo"));
+                settle(250);
+                view->setSelectedSolids({gizmoId});
+                settle(200);
+                check(gizmoCentre().Distance(centreBefore) < 1.0e-6,
+                      "and Undo takes it away again for the probes that follow");
             }
         }
 
@@ -4462,6 +4492,154 @@ int main(int argc, char* argv[])
                            Qt::MiddleButton);
             check(view->camera().state().target.Distance(panTarget) > 1.0,
                   "and an MMB drag starting on it still pans");
+        }
+
+        // --- a Shift-click must reach the body under a gizmo arm -----------
+        // The regression net for the bug a 100% display found and a 150% one
+        // hid: AIS_ManipulatorOwner outranks a shape's owner, so an arm
+        // crossing a second body wins the pick and "add this body to the
+        // selection" adds nothing at all.
+        //
+        // Everything here goes through the REAL mouse handler. Every other
+        // multi-body check in this block uses setSelectedSolids(), which
+        // bypasses the exact code the fix lives in - so without this, deleting
+        // the fix leaves the suite green at this machine's own scale and the
+        // bug has no net under it. The pixel is derived from the manipulator's
+        // own geometry and the second body is parked on it, so the arrangement
+        // holds at any display scale rather than depending on where two bodies
+        // happened to fall.
+        {
+            // A known camera, so which arm faces the eye is decided rather
+            // than inherited from whatever the camera probes above left
+            // behind, and a FRESH convex body to park on it. The document's
+            // first body was the obvious candidate and the wrong one: it has
+            // been through the booleans further up, and the centre of mass of
+            // a carved body need not lie in its own material - so parking it
+            // "at" the arm point put no material there at all, and the
+            // non-vacuity click found the body behind instead.
+            view->setViewAxonometric();
+            settle(250);
+            const int helperBefore = static_cast<int>(window.document().count());
+            check(buildBody(window, 0.62, 0.30, 0.76, 0.42, 30.0),
+                  "a second body for the Shift-click probe");
+            const int helperId = window.document().solids().empty()
+                                     ? -1
+                                     : window.document().solids().back().id;
+            check(helperId > 0 && helperId != gizmoId,
+                  "and it is a different body from the one the gizmo stands on");
+
+            view->setSelectedSolids({gizmoId});
+            settle(200);
+            check(view->hasManipulator(), "the gizmo is up for the Shift-click probe");
+
+            // Prefer the arm pointing most toward the camera, so the body
+            // parked on it is the NEAREST thing along that ray. Then a failure
+            // means the pick chose the manipulator over the body on selection
+            // priority - which is the bug - rather than choosing something in
+            // front of both on depth, which would be nobody's fault.
+            const gp_Dir viewDir = view->camera().viewDirection();
+            auto armDirection = [&](int axis) {
+                return axis == 0   ? gizmoFrame.XDirection()
+                       : axis == 1 ? gizmoFrame.YDirection()
+                                   : gizmoFrame.Direction();
+            };
+            int order[3] = {0, 1, 2};
+            for (int a = 0; a < 3; ++a) {
+                for (int b = a + 1; b < 3; ++b) {
+                    const double facingA =
+                        -gp_Vec(armDirection(order[a])).Dot(gp_Vec(viewDir));
+                    const double facingB =
+                        -gp_Vec(armDirection(order[b])).Dot(gp_Vec(viewDir));
+                    if (facingB > facingA) std::swap(order[a], order[b]);
+                }
+            }
+
+            // Clear of the body the gizmo stands on, with room to spare, so
+            // the second body can be parked on the arm point in open air.
+            gp_Ax2 armFrame;
+            double armSize = 1.0;
+            view->manipulatorFrame(armFrame, armSize);
+            Bnd_Box clearOfBody;
+            BRepBndLib::Add(window.document().shapeOf(gizmoId), clearOfBody);
+            clearOfBody.Enlarge(0.15 * armSize);
+
+            QPoint armAt;
+            gp_Pnt armWorld;
+            int armAxis = -1;
+            for (int i = 0; i < 3 && armAxis < 0; ++i) {
+                if (findHandle(1, order[i], armDirection(order[i]), armAt, armWorld,
+                               &clearOfBody))
+                    armAxis = order[i];
+            }
+            check(armAxis >= 0,
+                  "an arm of the gizmo is findable clear of the body it stands on");
+
+            if (armAxis >= 0 && helperId > 0 && helperId != gizmoId) {
+                // Park the second body exactly on that arm point, through the
+                // same commit path a drag uses.
+                GProp_GProps helperProps;
+                BRepGProp::VolumeProperties(window.document().shapeOf(helperId),
+                                            helperProps);
+                gp_Trsf park;
+                park.SetTranslation(gp_Vec(helperProps.CentreOfMass(), armWorld));
+                check(window.transformBody(helperId, park),
+                      "the second body can be parked on that arm");
+
+                // Non-vacuity, and it has to come first: with no gizmo in the
+                // way, a plain click at that pixel really does find the parked
+                // body. Without this the Shift-click check below would pass
+                // just as well against a pixel with nothing behind it.
+                view->clearSelection();
+                settle(200);
+                check(!view->hasManipulator(),
+                      "the gizmo is down for the non-vacuity click");
+                clickAt(view, QPointF(armAt));
+                settle(150);
+                std::vector<int> got = view->selectedSolidIds();
+                const bool plainFoundHelper =
+                    std::find(got.begin(), got.end(), helperId) != got.end();
+                check(plainFoundHelper,
+                      QStringLiteral("a plain click at the arm's pixel finds the parked "
+                                     "body, so that pixel really is over it (%1 selected)")
+                          .arg(got.size()));
+
+                view->setSelectedSolids({gizmoId});
+                settle(200);
+                check(view->hasManipulator(), "the gizmo is back on the first body");
+                hover(armAt);
+                check(view->manipulatorActiveMode() != 0,
+                      "and one of its arms genuinely crosses that same pixel - so the "
+                      "Shift-click below is aimed at the collision, not beside it");
+
+                // The gesture itself, through the mouse handler.
+                clickAt(view, QPointF(armAt), Qt::ShiftModifier);
+                settle(250);
+                got = view->selectedSolidIds();
+                const bool haveFirst =
+                    std::find(got.begin(), got.end(), gizmoId) != got.end();
+                const bool haveSecond =
+                    std::find(got.begin(), got.end(), helperId) != got.end();
+                check(haveFirst && haveSecond,
+                      QStringLiteral("a Shift-click at a pixel a gizmo arm crosses still "
+                                     "adds the body underneath (%1 selected)")
+                          .arg(got.size()));
+                check(!view->hasManipulator(),
+                      "and two bodies selected retires the gizmo, as the predicate says");
+            }
+
+            // The parked body was built for this probe, so it goes rather than
+            // being moved back - the block's own "leaves the document as it
+            // found it" check at the end is what this is keeping true.
+            if (helperId > 0) {
+                view->setSelectedSolids({helperId});
+                settle(150);
+                trigger(window, QStringLiteral("Delete Selected"));
+                settle(200);
+            }
+            check(static_cast<int>(window.document().count()) == helperBefore,
+                  "and the probe's own second body is cleared away after it");
+            view->setSelectedSolids({gizmoId});
+            settle(200);
         }
 
         // --- Step 5's evidence: the gizmo at the body ----------------------
