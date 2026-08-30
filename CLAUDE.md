@@ -615,6 +615,19 @@ whole toast during its 160 ms dismiss fade - permitted because it is transient a
 motion-token-driven rather than a resting translucent surface, and because gui_smoke runs
 with animations off, so the opacity/colour sweeps never actually see a blended pixel.
 
+**A floating card's logical size must cover whole device pixels**, through
+`Theme::wholeDevicePixels()` at its `setFixedSize`. Widget geometry is logical and the
+backing store is device-sized, so a card 93 logical rows tall at 150% scaling occupies
+139.5 device rows: Qt flushes 140 and the paint event's clip - logical too - stops the
+widget's own painter at 139. Nothing the widget paints can cross its own clip and the
+viewport cannot paint underneath a child, so `paintSurface()` cannot save it and the size
+is the only cure. The leftover row is the corner-nub failure one scale down, and it is
+exactly as black: the bevel chip's first magnified capture carried a 264-device-pixel
+`0,0,0` hairline along its bottom edge. Rounding to a multiple of four is whole at every
+quarter-step Windows scale, so it does not read `devicePixelRatioF()` - a size that is only
+right on the monitor it was written on is the same bug with a longer fuse. Existing cards
+were not audited; a black hairline along any card's edge is this.
+
 **Verify appearance with measured pixels, never by eyeballing a crop.** This phase's worst
 finding was a commit message claiming a magnified crop confirmed a 3px gap while the real
 gap was 12px - `QBoxLayout` silently ignores negative spacing, and no crop was ever checked
@@ -622,7 +635,13 @@ against a number. The suite now measures: gap rows counted between adjacent rail
 borders, corner pixels sampled for exact token colours at alpha 255, whole-perimeter
 sweeps with non-vacuity assertions (a sweep that runs zero iterations must fail, not
 pass). A probe guarded by a condition that can quietly skip is how five shadow checks
-went silent instead of red when the behaviour under them changed.
+went silent instead of red when the behaviour under them changed. The black-hairline sweep
+above is the same discipline one step further out: it measures the whole **composited**
+`PrintWindow` capture rather than one widget rendered on its own, because `renderExact()`
+draws a widget at 1:1 into an image of exactly its logical size, where the offending pixel
+cannot exist - and because mapping a widget's rect into a capture that includes Windows 11's
+invisible resize frame needs a scale *and* an offset, and a region a few pixels out reports
+clean exactly as loudly as a clean window does.
 
 ### CMake note
 

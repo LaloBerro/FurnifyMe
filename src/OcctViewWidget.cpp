@@ -203,6 +203,7 @@ void OcctViewWidget::initializeViewer()
     myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane());
     myDimension.attach(myContext);
     myPullArrow.attach(myContext);
+    myBevelArrow.attach(myContext);
 
     // Perspective projection: the turntable model is distance-based, and OCCT's
     // default orthographic camera zooms by scale, which would make
@@ -271,6 +272,7 @@ void OcctViewWidget::removeSolid(int id)
     // goes with it for the same reason the dimension below does.
     clearModelingPreview();
     clearPullArrow();
+    clearBevelArrow();
     // Same reason: the gizmo is attached to the presentation about to go.
     if (myManipulatorSolid == id) detachManipulator();
 
@@ -292,6 +294,7 @@ void OcctViewWidget::clearSolids()
 
     clearModelingPreview();   // same reasoning as removeSolid(), before the bodies go
     clearPullArrow();
+    clearBevelArrow();
     detachManipulator();
 
     for (auto& entry : mySolids) myContext->Remove(entry.second, Standard_False);
@@ -453,7 +456,7 @@ void OcctViewWidget::showPullArrow(const gp_Pnt& centre, const gp_Dir& outward)
 void OcctViewWidget::clearPullArrow()
 {
     myPullArrow.clear();
-    myPullDragActive = false;
+    myPullDrag.active = false;
 }
 
 bool OcctViewWidget::pullArrowHead(gp_Pnt& out) const
@@ -463,13 +466,49 @@ bool OcctViewWidget::pullArrowHead(gp_Pnt& out) const
     return true;
 }
 
-bool OcctViewWidget::pullArrowHit(const QPoint& point) const
+void OcctViewWidget::showBevelArrow(const gp_Pnt& centre, const gp_Dir& outward)
 {
-    if (!myPullArrow.isShowing()) return false;
+    initializeViewer();
+    if (myView.IsNull()) return;
+    // No viewer update of its own while a camera change is being applied - the
+    // same rule showPullArrow() keeps, and for the same measured reason.
+    myBevelArrow.show(centre, outward, myView->Camera()->Direction(), worldPerPixel(),
+                      /*updateViewer=*/!myApplyingCamera);
+}
+
+void OcctViewWidget::clearBevelArrow()
+{
+    myBevelArrow.clear();
+    myBevelDrag.active = false;
+}
+
+bool OcctViewWidget::bevelArrowHead(gp_Pnt& out) const
+{
+    if (!myBevelArrow.isShowing()) return false;
+    out = myBevelArrow.head();
+    return true;
+}
+
+void OcctViewWidget::setEdgeDimensionSuppressed(bool suppressed)
+{
+    if (myEdgeDimensionSuppressed == suppressed) return;
+    myEdgeDimensionSuppressed = suppressed;
+    // Re-derive rather than only clear: turning it back off has to put the
+    // annotation back if a hover or a selection still calls for one, which is
+    // exactly what updateEdgeDimension() decides. A one-way clear here would
+    // be a state that only one direction maintains - the rule this file's
+    // sibling-visibility comments already record twice.
+    updateEdgeDimension();
+    if (!myView.IsNull()) myView->Redraw();
+}
+
+bool OcctViewWidget::arrowHit(const PullArrowRenderer& arrow, const QPoint& point) const
+{
+    if (!arrow.isShowing()) return false;
 
     QPoint tail, head;
-    if (!projectToScreen(myPullArrow.tail(), tail)) return false;
-    if (!projectToScreen(myPullArrow.head(), head)) return false;
+    if (!projectToScreen(arrow.tail(), tail)) return false;
+    if (!projectToScreen(arrow.head(), head)) return false;
 
     // Distance from the point to the projected shaft, in pixels. A generous
     // 14 px: the arrow is a hairline, and a target the user has to hit
@@ -485,6 +524,51 @@ bool OcctViewWidget::pullArrowHit(const QPoint& point) const
     const double nx = tail.x() + dx * t - point.x();
     const double ny = tail.y() + dy * t - point.y();
     return std::sqrt(nx * nx + ny * ny) <= 14.0;
+}
+
+void OcctViewWidget::beginAxisDrag(AxisDrag& drag, const gp_Lin& axis, const QPoint& at)
+{
+    drag.active = true;
+    drag.moved = false;
+    drag.value = 0.0;
+    gp_Lin ray;
+    drag.hasPressParam = rayThroughPixel(at.x(), at.y(), ray) &&
+                         CameraController::axisParameterForRay(ray, axis, drag.pressParam);
+}
+
+bool OcctViewWidget::advanceAxisDrag(AxisDrag& drag, const gp_Lin& axis, const QPoint& at)
+{
+    // Where the cursor now points along the arrow's axis, minus where it
+    // pointed at the press. A ray too close to parallel with the axis resolves
+    // to nothing and the last value simply stands - see
+    // CameraController::axisParameterForRay().
+    gp_Lin ray;
+    double parameter = 0.0;
+    if (!rayThroughPixel(at.x(), at.y(), ray) ||
+        !CameraController::axisParameterForRay(ray, axis, parameter))
+        return false;
+
+    if (!drag.hasPressParam) {
+        // The press itself could not be measured (see beginAxisDrag). Anchor
+        // here instead, the first moment it can be anchored at all: the drag
+        // contributes nothing until the angle improves and then starts from
+        // zero, rather than jumping by whatever the unmeasurable press would
+        // have implied.
+        drag.pressParam = parameter;
+        drag.hasPressParam = true;
+        return false;
+    }
+
+    double value = parameter - drag.pressParam;
+    // The same grid the outline points snap to, applied to the dragged
+    // distance rather than to a position.
+    if (mySnapEnabled && mySnapStep > 0.0)
+        value = std::round(value / mySnapStep) * mySnapStep;
+    if (std::fabs(value - drag.value) <= 1.0e-9) return false;
+
+    drag.value = value;
+    if (std::fabs(value) > 1.0e-9) drag.moved = true;
+    return true;
 }
 
 void OcctViewWidget::attachManipulator(int solidId)
@@ -974,7 +1058,12 @@ TopoDS_Edge OcctViewWidget::selectedEdge() const
 
 void OcctViewWidget::updateEdgeDimension()
 {
-    if (mySelectionMode != SelectionMode::Edge || myContext.IsNull() || myView.IsNull()) {
+    // Suppressed while the bevel arrow's value chip is up: two annotations on
+    // one edge is noise, and the chip is the more specific of the two. See
+    // setEdgeDimensionSuppressed(), which MainWindow drives off the same
+    // predicate that raises the arrow.
+    if (myEdgeDimensionSuppressed || mySelectionMode != SelectionMode::Edge ||
+        myContext.IsNull() || myView.IsNull()) {
         myDimension.clear();
         return;
     }
@@ -1279,8 +1368,7 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
     // The pull arrow owns LEFT drags that start on it, and nothing else -
     // RMB orbit and MMB pan pass straight through above, so grabbing the
     // arrow never costs the user the camera.
-    if (event->button() == Qt::LeftButton && !mySketchMode && myPullArrow.isShowing() &&
-        pullArrowHit(myLastPos)) {
+    if (event->button() == Qt::LeftButton && !mySketchMode && arrowHit(myPullArrow, myLastPos)) {
         // The press CLAIMS the gesture whether or not the drag maths can
         // measure it yet. It used to claim it only when
         // axisParameterForRay() resolved - so with the arrow near edge-on to
@@ -1290,13 +1378,16 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
         // just grabbed was silently deselected and its arrow dismissed. A
         // grab has to be a grab; an unmeasurable angle is a reason to
         // contribute nothing, not a reason to hand the gesture back.
-        myPullDragActive = true;
-        myPullDragMoved = false;
-        myPullDistance = 0.0;
-        gp_Lin ray;
-        myHasPullPressParam =
-            rayThroughPixel(myLastPos.x(), myLastPos.y(), ray) &&
-            CameraController::axisParameterForRay(ray, myPullArrow.axis(), myPullPressParam);
+        beginAxisDrag(myPullDrag, myPullArrow.axis(), myLastPos);
+        return;
+    }
+
+    // The bevel arrow, on exactly the same terms - including claiming the
+    // gesture at an angle the maths refuses. The two arrows are never up at
+    // once (face mode against edge mode), so the order of these two blocks is
+    // not load-bearing.
+    if (event->button() == Qt::LeftButton && !mySketchMode && arrowHit(myBevelArrow, myLastPos)) {
+        beginAxisDrag(myBevelDrag, myBevelArrow.axis(), myLastPos);
         return;
     }
 
@@ -1342,9 +1433,18 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
     // the same class of bug WA_NoMousePropagation closes for the Qt overlays,
     // one layer down, where the culprit is this widget's own handler rather
     // than a propagating child event.
-    if (myPullDragActive && event->button() == Qt::LeftButton) {
-        myPullDragActive = false;
-        emit pullReleased(myPullDragMoved);
+    if (myPullDrag.active && event->button() == Qt::LeftButton) {
+        myPullDrag.active = false;
+        emit pullReleased(myPullDrag.moved);
+        return;
+    }
+
+    // The end of a bevel drag, swallowed for exactly the same reason: the
+    // press was aimed at the arrow, and re-picking here would replace the edge
+    // selection that raised it.
+    if (myBevelDrag.active && event->button() == Qt::LeftButton) {
+        myBevelDrag.active = false;
+        emit bevelReleased(myBevelDrag.moved);
         return;
     }
 
@@ -1441,38 +1541,12 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
                 myView->Redraw();
             }
         }
-    } else if (myPullDragActive) {
-        // Where the cursor now points along the arrow's axis, minus where it
-        // pointed at the press. A ray too close to parallel with the axis
-        // resolves to nothing and the last value simply stands - see
-        // CameraController::axisParameterForRay().
-        gp_Lin ray;
-        double parameter = 0.0;
-        if (rayThroughPixel(pos.x(), pos.y(), ray) &&
-            CameraController::axisParameterForRay(ray, myPullArrow.axis(), parameter)) {
-            if (!myHasPullPressParam) {
-                // The press itself could not be measured (see
-                // mousePressEvent). Anchor here instead, the first moment it
-                // can be anchored at all: the drag contributes nothing until
-                // the angle improves and then starts from zero, rather than
-                // jumping by whatever the unmeasurable press would have
-                // implied.
-                myPullPressParam = parameter;
-                myHasPullPressParam = true;
-                myLastPos = pos;   // the invariant this handler's tail keeps
-                return;
-            }
-            double distance = parameter - myPullPressParam;
-            // The same grid the outline points snap to, applied to the pull
-            // distance rather than to a position.
-            if (mySnapEnabled && mySnapStep > 0.0)
-                distance = std::round(distance / mySnapStep) * mySnapStep;
-            if (std::fabs(distance - myPullDistance) > 1.0e-9) {
-                myPullDistance = distance;
-                if (std::fabs(distance) > 1.0e-9) myPullDragMoved = true;
-                emit pullDragged(distance);
-            }
-        }
+    } else if (myPullDrag.active) {
+        if (advanceAxisDrag(myPullDrag, myPullArrow.axis(), pos))
+            emit pullDragged(myPullDrag.value);
+    } else if (myBevelDrag.active) {
+        if (advanceAxisDrag(myBevelDrag, myBevelArrow.axis(), pos))
+            emit bevelDragged(myBevelDrag.value);
     } else if (myOrbiting) {
         const QPoint delta = pos - myLastPos;
         // Dragging right swings the scene right: azimuth decreases; dragging up
@@ -1535,9 +1609,9 @@ void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
     if (event->button() != Qt::LeftButton || mySketchMode || myContext.IsNull()) return;
 
     const QPoint pos = event->position().toPoint();
-    // A second click on the arrow is another pull, not a request to frame the
-    // body or lock the face underneath it.
-    if (pullArrowHit(pos)) return;
+    // A second click on either arrow is another drag, not a request to frame
+    // the body or lock the face underneath it.
+    if (arrowHit(myPullArrow, pos) || arrowHit(myBevelArrow, pos)) return;
     const QPoint device = toDevicePixels(pos);
     myContext->MoveTo(device.x(), device.y(), myView, Standard_False);
     if (!myContext->HasDetected()) return;

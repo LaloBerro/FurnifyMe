@@ -1,6 +1,9 @@
 #pragma once
 // OCCT first (Handle() macro vs. Windows headers pulled in by Qt).
+#include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
+#include <gp_Dir.hxx>
+#include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
 
 #include <QMainWindow>
@@ -11,6 +14,7 @@
 #include "UserProgress.h"
 
 class AppBar;
+class BevelArrow;
 class ExtrudePreview;
 class OcctViewWidget;
 class PullArrow;
@@ -111,6 +115,37 @@ public:
     // a rebuild (CLAUDE.md's topological-naming warning), so a cached
     // face-to-body mapping is a bug waiting for the user's next boolean.
     int bodyIdForFace(const TopoDS_Face& face) const;
+    // The same, for an edge, and derived the same way for the same reason.
+    int bodyIdForEdge(const TopoDS_Edge& edge) const;
+
+    // THE predicate behind the bevel arrow, and everything the gizmo needs to
+    // stand itself up: exactly one STRAIGHT edge selected, in edge selection
+    // mode, on one document body, with two adjacent faces that define an
+    // outward bisector - and no sketch in progress and no outline waiting.
+    //
+    // One function, used to show the arrow, to hide it, and to write the
+    // status label, so the three can never disagree. The mode check is what
+    // keeps this exclusive with the face pull (face mode) and the transform
+    // gizmo (body mode); the sketch and pending-face halves are
+    // canPullSelectedFace()'s, and they are what keep it exclusive with
+    // ExtrudePreview - and so keep the two application-wide Enter/Escape
+    // claims from ever being installed at once.
+    //
+    // Outputs are left untouched when it returns false.
+    bool bevelTarget(TopoDS_Edge& edge, int& bodyId, gp_Pnt& centre, gp_Dir& outward) const;
+    bool canBevelSelectedEdge() const;
+
+    // Rounds `edge` with radius `size` (fillet == true) or flattens it with
+    // distance `size` (fillet == false), through ModelingOps, replacing the
+    // body the edge belongs to. The one commit path for the bevel gizmo: it
+    // takes the undo checkpoint, resyncs the viewport, records progress and
+    // reports the outcome, so BevelArrow never touches DocumentModel.
+    //
+    // False, with a Failure toast in cause-and-fix form and the body left
+    // exactly as it was, whenever the kernel refuses - which it legitimately
+    // does whenever the radius or the flat would eat a neighbouring face. The
+    // kernel's own error string is logged, never shown.
+    bool bevelEdgeBy(const TopoDS_Edge& edge, double size, bool fillet);
 
     bool lockToFace(const TopoDS_Face& face);
     // Back to the ground plane. The ground plane is the default and is never
@@ -231,6 +266,13 @@ private:
     // and moves AIS objects only, so it cannot recurse back into
     // updateActions().
     void refreshTransformGizmo();
+    // Holds the edge-length annotation back for as long as the bevel arrow is
+    // up, and lets it come back when the arrow goes. A slot on
+    // appStateChanged, derived from the SAME predicate that raises the arrow -
+    // BevelArrow does not reach into DimensionRenderer, and DimensionRenderer
+    // knows nothing about bevels. Reads state and moves AIS objects only, so
+    // it cannot recurse back into updateActions().
+    void refreshEdgeAnnotation();
     void runBoolean(int kind);   // ModelingOps::BooleanKind as int, to keep it out of the header
     // The one place "the camera was moved to a named direction" is recorded.
     // Every route to that - the four View menu entries and a click on the
@@ -288,4 +330,5 @@ private:
     ToastHost* myToasts = nullptr;
     ExtrudePreview* myExtrudePreview = nullptr;
     PullArrow* myPullArrow = nullptr;
+    BevelArrow* myBevelArrow = nullptr;
 };

@@ -149,6 +149,23 @@ void paintSurface(QPainter& p, const QRect& rect, int radius, const QColor& grou
     drawCrispBorder(p, QRectF(rect), border(), radius);
 }
 
+int wholeDevicePixels(int logical)
+{
+    // Up to the next multiple of four - whole at every quarter-step display
+    // scale Windows offers, and therefore not a function of the ratio this
+    // machine happens to run. See Theme.h for what the leftover row does over
+    // the GL surface, and why nothing paintSurface() can do reaches it.
+    constexpr int kStep = 4;
+    if (logical <= 0) return logical;
+    const int remainder = logical % kStep;
+    return remainder == 0 ? logical : logical + (kStep - remainder);
+}
+
+QSize wholeDevicePixels(const QSize& logical)
+{
+    return QSize(wholeDevicePixels(logical.width()), wholeDevicePixels(logical.height()));
+}
+
 void apply(QApplication& app)
 {
     // DM Sans, compiled in as a Qt resource. If it cannot be loaded we keep the

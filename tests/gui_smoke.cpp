@@ -47,6 +47,7 @@
 #include "SketchController.h"
 #include "AppBar.h"
 #include "AxisGizmo.h"
+#include "BevelArrow.h"
 #include "ShortcutSheet.h"
 #include "Theme.h"
 #include "Toast.h"
@@ -81,8 +82,10 @@
 #include <QStatusBar>
 #include <QString>
 
+#include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepGProp.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
@@ -92,6 +95,7 @@
 #include <TopAbs_Orientation.hxx>
 #include <GProp_GProps.hxx>
 #include <TopAbs_ShapeEnum.hxx>
+#include <TopAbs_State.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
@@ -105,6 +109,7 @@
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
 #include <gp_XYZ.hxx>
+#include <GeomAbs_CurveType.hxx>
 #include <GeomAbs_SurfaceType.hxx>
 
 #include <algorithm>
@@ -316,10 +321,14 @@ void sketchQuad(MainWindow& window, double x0, double y0, double x1, double y1)
 // literal list would be a vocabulary that drifts from itself.
 QStringList bannedWords()
 {
+    // "bevel" joined the list in Milestone 2: it is the CODE's word for the
+    // pair of operations (BevelArrow, BevelAxis) and it must never reach the
+    // user, who is offered a Fillet that rounds an edge or a Chamfer that
+    // flattens one - two operations with two names, not one vague one.
     return {QStringLiteral("Fuse"),  QStringLiteral("Solid"),
             QStringLiteral("OCCT"),  QStringLiteral("mm3"),
             QStringLiteral("(s)"),   QStringLiteral("Merge"),
-            QStringLiteral("Join")};
+            QStringLiteral("Join"),  QStringLiteral("bevel")};
 }
 
 bool buildBody(MainWindow& window, double x0, double y0, double x1, double y1, double height)
@@ -352,6 +361,62 @@ QImage renderExact(QWidget* widget)
     QPainter painter(&image);
     widget->render(&painter);
     return image;
+}
+
+// The same render, at a FRACTIONAL device-pixel ratio, onto a sentinel so an
+// unpainted pixel has a name.
+//
+// renderExact() above is deliberately 1:1, which is what makes its pixel
+// coordinates environment-independent - and which also makes it structurally
+// blind to one whole class of defect. At 1:1 a widget's logical rect and its
+// backing store are the same rectangle, so a pixel outside the logical rect
+// cannot exist. At 150% - what this machine actually runs - a card 93 logical
+// rows tall needs 139.5 device rows, Qt allocates 140, and QPainter's logical
+// fill reaches 139 of them. Over OCCT's GL surface the leftover row is not
+// transparent but whatever the driver left, and it measured as an exact
+// 0,0,0 line the full width of the round/flatten chip in a magnified
+// PrintWindow capture. Ceil, not round: the store is never SHORTER than the
+// logical rect, and a probe that cut the row off would be measuring nothing.
+// The longest horizontal run of PURE BLACK inside a PrintWindow capture,
+// ignoring `inset` pixels of frame on every side. Writes where it starts.
+//
+// Nothing this app paints is 0,0,0 - the darkest token is chrome() at
+// #1b1b1d, and the viewport clears to viewport() - so a black run across the
+// composited window is a run of pixels NOTHING painted: a widget's backing
+// store where its own painter never reached, with OCCT's on-screen GL surface
+// unable to show through a Qt child sitting on top of it. That is the exact
+// failure the floating-surface family exists to prevent, and CLAUDE.md has
+// already paid for it twice (the drawer's corner nubs, the rail's black band).
+//
+// Measured over the whole window rather than one card's footprint, which is
+// both stronger and more honest: mapping a widget's logical rect into a
+// PrintWindow capture needs a scale AND an offset, since Windows 11 includes
+// the invisible resize frame in what it hands back, and a probe whose region
+// is a few pixels out reports zero exactly as loudly as a clean window does.
+// The inset drops that frame and the uncaptured strip along the bottom, both
+// of which are legitimately black and belong to no widget.
+//
+// renderExact() is structurally blind to this class of defect: it renders one
+// widget at 1:1 into an image of precisely that widget's logical size, where a
+// pixel outside the logical rect cannot exist.
+int longestBlackRun(const QImage& image, int inset, QPoint& startsAt)
+{
+    int best = 0;
+    for (int y = inset; y < image.height() - inset; ++y) {
+        int run = 0;
+        for (int x = inset; x < image.width() - inset; ++x) {
+            if (qGray(image.pixel(x, y)) == 0) {
+                ++run;
+                if (run > best) {
+                    best = run;
+                    startsAt = QPoint(x - run + 1, y);
+                }
+            } else {
+                run = 0;
+            }
+        }
+    }
+    return best;
 }
 
 // The ONE capture that shows the app as the user sees it: Qt's overlay
@@ -2430,26 +2495,45 @@ int main(int argc, char* argv[])
             const std::string expected =
                 Measure::formatLength(BRep_Tool::Pnt(v1).Distance(BRep_Tool::Pnt(v2)));
 
-            check(view->dimension().isShowing(), "selecting an edge shows its length");
-            check(view->dimension().labelText() == expected,
-                  QStringLiteral("which reads the true length (\"%1\" against \"%2\")")
-                      .arg(QString::fromStdString(view->dimension().labelText()),
-                           QString::fromStdString(expected)));
+            // Milestone 2 Task 4 changed what SELECTING a straight edge means:
+            // it now raises the round/flatten arrow, whose value chip labels
+            // that same edge. Two annotations on one edge is noise, so the
+            // length stands down for as long as the arrow is up. The Phase 4
+            // rules this used to check here - that the annotation follows the
+            // SELECTION as well as the hover, survives the cursor leaving, and
+            // never outlives the body it measures - are not dropped: they moved
+            // to the bevel block, onto a CURVED edge, where no arrow appears
+            // and the selection half is still the only thing holding the
+            // annotation up. That also covers the arrow's straight-only rule in
+            // the same breath.
+            check(!view->dimension().isShowing(),
+                  "selecting a straight edge stands its length annotation down - the "
+                  "gizmo's own value chip is the more specific of the two labels");
+            check(view->edgeDimensionSuppressed(),
+                  "and it is the window that stood it down, from the same predicate "
+                  "that raised the arrow");
+            check(view->hasBevelArrow(),
+                  "which is up on that edge, so the chip really is there to replace it");
 
-            // The defect: the cursor leaving a SELECTED edge used to clear it.
-            moveTo(view, QPointF(8, 8));
-            check(view->dimension().isShowing(),
-                  "and it survives the cursor moving off the edge, because the edge "
-                  "is still selected");
-            check(view->dimension().labelText() == expected,
-                  "still reading the same length rather than some other edge's");
-
+            // Non-vacuity for the three above: the annotation is not simply
+            // broken in edge mode. The pick left the cursor's DETECTION on that
+            // same edge, so the moment the arrow goes the hover half takes over
+            // and the length is back - with no mouse movement at all, which is
+            // what setEdgeDimensionSuppressed() re-deriving rather than merely
+            // clearing is for.
             view->clearSelection();
             settle(120);
+            check(!view->edgeDimensionSuppressed(),
+                  "letting go of the edge lets the annotation come back");
+            check(view->dimension().isShowing() &&
+                      view->dimension().labelText() == expected,
+                  "and the cursor still resting on it annotates it again immediately");
+            moveTo(view, QPointF(8, 8));
             check(!view->dimension().isShowing(),
-                  "letting go of the edge is what clears it");
+                  "moving the cursor off it is then what clears it");
 
-            // The hover half, with nothing selected to fall back on.
+            // The hover half, with nothing selected to fall back on - unchanged
+            // by Task 4, because a hover raises no gizmo.
             moveTo(view, QPointF(screen));
             check(view->dimension().isShowing(), "hovering an edge shows its length");
             check(view->dimension().labelText() == expected,
@@ -2457,20 +2541,18 @@ int main(int argc, char* argv[])
             moveTo(view, QPointF(8, 8));
             check(!view->dimension().isShowing(), "and leaving it clears the dimension");
 
-            // An annotation must not outlive what it measures: Delete and Undo
-            // both go through removeSolid()/clearSolids(), which left it
-            // hanging in empty space until the next mouse move.
             clickAt(view, QPointF(screen));
             settle(100);
-            check(view->dimension().isShowing(), "the edge is annotated again");
+            check(view->hasBevelArrow(), "clicking it again raises the arrow again");
             check(view->selectedSolidIds().size() == 1,
                   "and selecting an edge selects the body it belongs to");
             const std::size_t bodiesBefore = window.document().count();
             trigger(window, QStringLiteral("Delete Selected"));
             settle(150);
             check(window.document().count() == bodiesBefore - 1, "deleting removes the body");
-            check(!view->dimension().isShowing(),
-                  "and its dimension goes with it rather than floating where it was");
+            check(!view->hasBevelArrow() && !view->dimension().isShowing(),
+                  "and the arrow and the annotation both go with it rather than "
+                  "floating where the body was");
 
             trigger(window, QStringLiteral("Undo"));
             settle(150);
@@ -4705,6 +4787,475 @@ int main(int argc, char* argv[])
         settle(150);
     }
 
+    // --- one edge, one axis, two operations -----------------------------------
+    // Select an edge, drag one way to round it and the other way to flatten it.
+    // Everything is derived from projected geometry, and both outcomes are
+    // asserted as EXACT volume deltas from the closed forms a fillet and a
+    // chamfer of a straight edge have - (1 - pi/4)r^2 L and d^2 L / 2 - rather
+    // than "something got smaller", which both operations would satisfy in
+    // either direction.
+    {
+        const CameraState bevelCameraBefore = view->camera().state();
+        QAction* snap = action(window, QStringLiteral("Snap to Grid"));
+        check(snap != nullptr, "there is a Snap to Grid action for the bevel probes");
+        if (snap && !snap->isChecked()) { snap->trigger(); settle(120); }
+
+        const int bevelBodiesBefore = static_cast<int>(window.document().count());
+        check(buildBody(window, 0.34, 0.30, 0.72, 0.62, 40.0),
+              "a fresh box to round and flatten an edge of");
+        check(static_cast<int>(window.document().count()) == bevelBodiesBefore + 1,
+              "and it reached the document");
+        const int bevelId = window.document().solids().empty()
+                                ? -1
+                                : window.document().solids().back().id;
+        view->fitAll();
+        settle(250);
+        trigger(window, QStringLiteral("Select Edges"));
+        settle(150);
+
+        auto bodyShape = [&window, bevelId] { return window.document().shapeOf(bevelId); };
+        auto bodyVolume = [&] { return ModelingOps::volume(bodyShape()); };
+        auto faceCount = [&] {
+            int faces = 0;
+            for (TopExp_Explorer it(bodyShape(), TopAbs_FACE); it.More(); it.Next()) ++faces;
+            return faces;
+        };
+        // Press and move without releasing: every assertion about the kind, the
+        // label and the live preview has to be made while the gesture is still
+        // live, because committing it retires the chip that carries them.
+        auto pressAndDrag = [&](const QPoint& from, const QPoint& to) {
+            const QPointF start(from);
+            QMouseEvent down(QEvent::MouseButtonPress, start, view->mapToGlobal(start),
+                             Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QCoreApplication::sendEvent(view, &down);
+            for (int i = 1; i <= 8; ++i) {
+                const QPointF p = start + (QPointF(to) - start) * (double(i) / 8.0);
+                QMouseEvent move(QEvent::MouseMove, p, view->mapToGlobal(p),
+                                 Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+                QCoreApplication::sendEvent(view, &move);
+            }
+            settle(200);
+        };
+        auto releaseAt = [&](const QPoint& at) {
+            const QPointF p(at);
+            QMouseEvent up(QEvent::MouseButtonRelease, p, view->mapToGlobal(p),
+                           Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QCoreApplication::sendEvent(view, &up);
+            settle(300);
+        };
+
+        // The dragged size, in millimetres. 20 is a multiple of the 10 mm snap
+        // step (so the snap cannot round the assertion out from under it) and
+        // is comfortably inside the 40 mm the box is thick, which is what the
+        // neighbouring side face has to give up.
+        constexpr double kSize = 20.0;
+
+        // A LONG, TOP edge: the vertical ones are only as tall as the box, and
+        // the whole point of a bevel is that it runs along something. The axis
+        // is asked of BevelAxis::derive itself, so this probe aims at the
+        // gizmo's own geometry rather than guessing where the arrow will be.
+        TopoDS_Edge target;
+        QPoint edgeAt;
+        QPoint inwardAt;
+        QPoint outwardAt;
+        gp_Pnt edgeCentre;
+        gp_Dir edgeOutward;
+        double edgeLength = 0.0;
+        for (TopExp_Explorer it(bodyShape(), TopAbs_EDGE); it.More() && target.IsNull();
+             it.Next()) {
+            const TopoDS_Edge candidate = TopoDS::Edge(it.Current());
+            gp_Pnt centre;
+            gp_Dir outward;
+            if (!BevelAxis::derive(bodyShape(), candidate, centre, outward)) continue;
+            if (outward.Z() < 0.3) continue;   // a top edge, so both its faces are reachable
+
+            const double facing =
+                gp_Vec(outward).Dot(gp_Vec(view->camera().viewDirection()));
+            if (facing >= -0.25) continue;   // turned away from the camera
+            if (facing < -0.95) continue;    // looking down the arrow: unmeasurable
+
+            TopoDS_Vertex v1, v2;
+            TopExp::Vertices(candidate, v1, v2);
+            if (v1.IsNull() || v2.IsNull()) continue;
+            const double length = BRep_Tool::Pnt(v1).Distance(BRep_Tool::Pnt(v2));
+            if (length < 100.0) continue;
+
+            QPoint at, inAt, outAt;
+            if (!view->projectToScreen(centre, at)) continue;
+            if (!view->projectToScreen(centre.Translated(gp_Vec(outward) * -kSize), inAt))
+                continue;
+            if (!view->projectToScreen(centre.Translated(gp_Vec(outward) * kSize), outAt))
+                continue;
+            if (!view->rect().adjusted(60, 60, -60, -60).contains(at)) continue;
+            if (!view->rect().contains(inAt) || !view->rect().contains(outAt)) continue;
+
+            clickAt(view, QPointF(at));
+            settle(150);
+            const TopoDS_Edge got = view->selectedEdge();
+            if (got.IsNull() || !got.IsSame(candidate)) continue;   // occluded, or missed
+            target = candidate;
+            edgeAt = at;
+            inwardAt = inAt;
+            outwardAt = outAt;
+            edgeCentre = centre;
+            edgeOutward = outward;
+            edgeLength = length;
+        }
+        check(!target.IsNull(),
+              "clicking a projected edge midpoint selects a long top edge of the new body");
+
+        // The sign convention's GROUND TRUTH, and not optional. Every other
+        // check in this block measures the drag against the very axis
+        // BevelAxis::derive hands back, so a bisector built from un-flipped
+        // REVERSED normals - which points INTO the body, the Phase 4 lesson -
+        // would send the gesture the opposite physical way and every one of
+        // them would still pass, consistently wrong. BRepClass3d_SolidClassifier
+        // is the same independent oracle Phase 4 used to pin lockToFace's flip:
+        // a step ALONG the axis has to leave the body and a step against it has
+        // to stay inside it.
+        if (!target.IsNull()) {
+            BRepClass3d_SolidClassifier classifier(bodyShape());
+            classifier.Perform(edgeCentre.Translated(gp_Vec(edgeOutward) * 2.0), 1.0e-7);
+            const bool leavesTheBody = classifier.State() == TopAbs_OUT;
+            classifier.Perform(edgeCentre.Translated(gp_Vec(edgeOutward) * -2.0), 1.0e-7);
+            const bool entersTheBody = classifier.State() == TopAbs_IN;
+            check(leavesTheBody && entersTheBody,
+                  QStringLiteral("the drag axis really points out of the body, so "
+                                 "\"inward rounds\" means inward (out: %1, in: %2)")
+                      .arg(leavesTheBody).arg(entersTheBody));
+        }
+
+        BevelArrow* bevel = window.findChild<BevelArrow*>();
+        check(bevel != nullptr, "the window has a round/flatten gizmo");
+        check(bevel != nullptr && bevel->isVisible(),
+              "one straight edge selected raises it");
+        check(view->hasBevelArrow(),
+              "and the arrow itself is drawn in the 3D scene, not painted over it");
+        check(stateLabelText(window).contains(QStringLiteral("drag to round or flatten")),
+              QStringLiteral("the state label teaches the gesture (\"%1\")")
+                  .arg(stateLabelText(window)));
+        check(!view->dimension().isShowing() && view->edgeDimensionSuppressed(),
+              "and the edge-length annotation stands down while it is up");
+
+        // The value chip's field is a real, reachable control. childAt
+        // identity, not an attribute flag - CLAUDE.md's rule, learned twice.
+        // Pinned non-null first, so the checks guarded by it cannot vanish
+        // quietly.
+        check(bevel != nullptr && bevel->field() != nullptr,
+              "the gizmo and its value field exist before the reachability probe");
+        if (bevel && bevel->field()) {
+            check(view->childAt(bevel->field()->geometry().center()) == bevel->field(),
+                  "a real click at the value field's centre finds the field itself");
+            // The field is where the two operations are TAUGHT, and the
+            // tooltip follows the kind rather than describing both - a
+            // tooltip that named the operation the chip is not about to
+            // perform would be worse than none. Checked on both sides: the
+            // flattening half is asserted after the outward drag below.
+            check(bevel->field()->toolTip().contains(QStringLiteral("rounds the edge")),
+                  QStringLiteral("and the field teaches what the rounding half does "
+                                 "(\"%1\")").arg(bevel->field()->toolTip()));
+            // The em dash, by codepoint. This file is UTF-8 with no BOM, the
+            // way every other source here is, and the first version of it
+            // carried a BOM and a double-encoded dash that compiled, passed
+            // the banned-word sweep, and rendered as mojibake. A separator
+            // nothing asserts is a separator nothing notices.
+            check(bevel->field()->toolTip().contains(QChar(0x2014)),
+                  "joined by a real em dash rather than a mis-encoded one");
+        }
+
+        const double startVolume = bodyVolume();
+        const int startFaces = faceCount();
+
+        // --- inward rounds ------------------------------------------------
+        if (bevel && !target.IsNull()) {
+            pressAndDrag(edgeAt, inwardAt);
+            check(bevel->isFillet(),
+                  "dragging INTO the body, against the bisector, chooses the rounding half");
+            check(bevel->valueText().startsWith(QLatin1Char('R')),
+                  QStringLiteral("so the value reads as a radius (\"%1\")")
+                      .arg(bevel->valueText()));
+            check(bevel->kindText() == QStringLiteral("Fillet"),
+                  QStringLiteral("and the chip names the operation in words (\"%1\")")
+                      .arg(bevel->kindText()));
+            check(std::fabs(bevel->size() - kSize) < 1.0e-6,
+                  QStringLiteral("the size snapped to the 10 mm step at exactly the "
+                                 "dragged distance (%1 vs %2)")
+                      .arg(bevel->size()).arg(kSize));
+            check(view->hasModelingPreview(),
+                  "a live preview is up on the dedicated channel");
+            check(!view->hasPreview(),
+                  "and never on the sketch/extrude slot two features already collided over");
+
+            // Step 5's evidence for the rounding half, taken at the one moment
+            // the arrow, the chip and the preview are all live.
+            const QImage roundShot =
+                printWindowCapture(&window, outDir + QStringLiteral("/bevel-fillet.png"));
+            check(!roundShot.isNull(), "the mid-drag rounding capture came back with pixels");
+
+            // --- measured, not eyeballed --------------------------------
+            // The whole composited window swept for a black run, taken at
+            // the one moment three overlay widgets, an in-scene arrow and a
+            // live preview are all up over the GL surface.
+            //
+            // It really was here, and only a measurement found it: the
+            // first capture of this gesture carried a 264-device-pixel
+            // 0,0,0 hairline along the value chip's bottom edge - the row
+            // Qt flushes for a card 93 logical rows tall at 150% scaling
+            // and the widget's own logical clip stops it from painting.
+            // Both magnified crops read as clean to the eye. This phase's
+            // worst finding was a commit message claiming a crop confirmed
+            // a 3px gap that measured 12, so the crop is evidence and the
+            // sweep is the check.
+            if (!roundShot.isNull()) {
+                constexpr int kFrame = 24;   // the invisible resize frame
+                QPoint blackAt;
+                const int run = longestBlackRun(roundShot, kFrame, blackAt);
+                // Non-vacuity: an image too small to sweep, or one the
+                // capture handed back empty, reports zero exactly as
+                // loudly as a clean window does.
+                check(roundShot.width() > kFrame * 4 && roundShot.height() > kFrame * 4,
+                      QStringLiteral("the capture is a real window to sweep (%1x%2)")
+                          .arg(roundShot.width()).arg(roundShot.height()));
+                check(run < 24,
+                      QStringLiteral("and no widget over the 3D area leaves an unpainted "
+                                     "black line across it (%1)")
+                          .arg(run < 24 ? QStringLiteral("longest run %1 px").arg(run)
+                                        : QStringLiteral("%1 px starting at %2,%3")
+                                              .arg(run).arg(blackAt.x()).arg(blackAt.y())));
+            }
+
+            if (!roundShot.isNull()) {
+                QRect focus(bevel->geometry());
+                focus = focus.united(QRect(edgeAt, QSize(1, 1)));
+                focus.adjust(-70, -70, 70, 70);
+                focus.translate(view->mapTo(&window, QPoint(0, 0)));
+                const double sx = double(roundShot.width()) / std::max(1, window.width());
+                const double sy = double(roundShot.height()) / std::max(1, window.height());
+                const QRect scaled(int(focus.left() * sx), int(focus.top() * sy),
+                                   int(focus.width() * sx), int(focus.height() * sy));
+                const QImage crop = roundShot.copy(scaled.intersected(roundShot.rect()));
+                if (!crop.isNull())
+                    crop.scaled(crop.width() * 3, crop.height() * 3, Qt::KeepAspectRatio,
+                                Qt::SmoothTransformation)
+                        .save(outDir + QStringLiteral("/bevel-fillet-crop.png"));
+            }
+            view->saveSnapshot(outDir + QStringLiteral("/bevel-fillet-viewport.png"));
+
+            releaseAt(inwardAt);
+            const double removed = startVolume - bodyVolume();
+            constexpr double kPi = 3.14159265358979323846;
+            const double expected = (1.0 - kPi / 4.0) * kSize * kSize * edgeLength;
+            check(std::fabs(removed - expected) < std::max(1.0, expected * 0.02),
+                  QStringLiteral("releasing rounds it by exactly (1 - pi/4) r^2 L "
+                                 "(%1 vs %2 over a %3 mm edge)")
+                      .arg(removed).arg(expected).arg(edgeLength));
+            check(faceCount() > startFaces,
+                  QStringLiteral("and the result carries the rounded strip as a new face "
+                                 "(%1 -> %2)").arg(startFaces).arg(faceCount()));
+
+            ToastHost* toasts = window.findChild<ToastHost*>();
+            check(toasts != nullptr && toasts->isShowing() && toasts->toast() != nullptr &&
+                      toasts->toast()->hasUndo(),
+                  "it is reported through a toast that offers Undo");
+
+            // --- the Phase 4 annotation rules, on a CURVED edge -----------
+            // Moved here from the edge-dimension block: selecting a STRAIGHT
+            // edge now raises this gizmo instead of an annotation, so the
+            // "follows the selection, survives the cursor leaving, never
+            // outlives its body" rules are checked on the one kind of edge
+            // that still has no gizmo - which is also the check that the
+            // arrow's straight-only rule is real.
+            TopoDS_Edge arc;
+            for (TopExp_Explorer it(bodyShape(), TopAbs_EDGE); it.More() && arc.IsNull();
+                 it.Next()) {
+                const TopoDS_Edge candidate = TopoDS::Edge(it.Current());
+                BRepAdaptor_Curve curve(candidate);
+                if (curve.GetType() == GeomAbs_Line) continue;
+                const gp_Pnt mid = curve.Value(
+                    0.5 * (curve.FirstParameter() + curve.LastParameter()));
+                QPoint at;
+                if (!view->projectToScreen(mid, at)) continue;
+                if (!view->rect().adjusted(30, 30, -30, -30).contains(at)) continue;
+                clickAt(view, QPointF(at));
+                settle(140);
+                const TopoDS_Edge got = view->selectedEdge();
+                if (got.IsNull() || !got.IsSame(candidate)) continue;
+                arc = got;
+            }
+            check(!arc.IsNull(),
+                  "one of the rounded body's curved edges can be selected");
+            if (!arc.IsNull()) {
+                check(!view->hasBevelArrow(),
+                      "a curved edge raises no arrow - one drag axis needs one "
+                      "perpendicular, and a bending edge has none");
+                check(view->dimension().isShowing(),
+                      "so its length annotation is the one label on it, and SELECTING it "
+                      "is what put it there");
+                TopoDS_Vertex a1, a2;
+                TopExp::Vertices(arc, a1, a2);
+                const std::string arcExpected =
+                    Measure::formatLength(BRep_Tool::Pnt(a1).Distance(BRep_Tool::Pnt(a2)));
+                check(view->dimension().labelText() == arcExpected,
+                      QStringLiteral("reading the true span between its ends (\"%1\" "
+                                     "against \"%2\")")
+                          .arg(QString::fromStdString(view->dimension().labelText()),
+                               QString::fromStdString(arcExpected)));
+                moveTo(view, QPointF(8, 8));
+                check(view->dimension().isShowing() &&
+                          view->dimension().labelText() == arcExpected,
+                      "and it survives the cursor moving off, because the edge is still "
+                      "selected - Phase 4's rule, still enforced");
+
+                const std::size_t bodiesHere = window.document().count();
+                trigger(window, QStringLiteral("Delete Selected"));
+                settle(200);
+                check(window.document().count() == bodiesHere - 1,
+                      "deleting the body the annotation measures removes it");
+                check(!view->dimension().isShowing(),
+                      "and takes the annotation with it rather than leaving it in "
+                      "empty space");
+                trigger(window, QStringLiteral("Undo"));
+                settle(250);
+                check(window.document().count() == bodiesHere,
+                      "and Undo brings the rounded body back");
+            }
+
+            trigger(window, QStringLiteral("Undo"));
+            settle(250);
+            check(std::fabs(bodyVolume() - startVolume) < 1.0 && faceCount() == startFaces,
+                  "Undo puts the sharp edge back, faces and all");
+        }
+
+        // --- outward flattens ---------------------------------------------
+        if (bevel && !target.IsNull()) {
+            clickAt(view, QPointF(edgeAt));
+            settle(150);
+            check(!view->selectedEdge().IsNull() && view->selectedEdge().IsSame(target) &&
+                      view->hasBevelArrow(),
+                  "the same edge selects again after the undo, and the arrow comes back");
+
+            pressAndDrag(edgeAt, outwardAt);
+            check(!bevel->isFillet(),
+                  "dragging OUT along the bisector chooses the flattening half instead");
+            check(bevel->valueText().startsWith(QLatin1Char('C')),
+                  QStringLiteral("so the value reads as a chamfer size (\"%1\")")
+                      .arg(bevel->valueText()));
+            check(bevel->kindText() == QStringLiteral("Chamfer"),
+                  QStringLiteral("and the chip renames itself in words (\"%1\")")
+                      .arg(bevel->kindText()));
+            check(std::fabs(bevel->size() - kSize) < 1.0e-6,
+                  QStringLiteral("at the same snapped size as the drag the other way "
+                                 "(%1)").arg(bevel->size()));
+            // The other half of the tooltip rule pinned above: it follows the
+            // kind, so crossing zero has to have rewritten it.
+            check(bevel->field() != nullptr &&
+                      bevel->field()->toolTip().contains(QStringLiteral("flattens the edge")),
+                  QStringLiteral("and the field now teaches flattening instead (\"%1\")")
+                      .arg(bevel->field() ? bevel->field()->toolTip() : QString()));
+
+            const QImage flatShot =
+                printWindowCapture(&window, outDir + QStringLiteral("/bevel-chamfer.png"));
+            check(!flatShot.isNull(), "the mid-drag flattening capture came back with pixels");
+            if (!flatShot.isNull()) {
+                QRect focus(bevel->geometry());
+                focus = focus.united(QRect(edgeAt, QSize(1, 1)));
+                focus.adjust(-70, -70, 70, 70);
+                focus.translate(view->mapTo(&window, QPoint(0, 0)));
+                const double sx = double(flatShot.width()) / std::max(1, window.width());
+                const double sy = double(flatShot.height()) / std::max(1, window.height());
+                const QRect scaled(int(focus.left() * sx), int(focus.top() * sy),
+                                   int(focus.width() * sx), int(focus.height() * sy));
+                const QImage crop = flatShot.copy(scaled.intersected(flatShot.rect()));
+                if (!crop.isNull())
+                    crop.scaled(crop.width() * 3, crop.height() * 3, Qt::KeepAspectRatio,
+                                Qt::SmoothTransformation)
+                        .save(outDir + QStringLiteral("/bevel-chamfer-crop.png"));
+            }
+            view->saveSnapshot(outDir + QStringLiteral("/bevel-chamfer-viewport.png"));
+
+            releaseAt(outwardAt);
+            const double removed = startVolume - bodyVolume();
+            const double expected = 0.5 * kSize * kSize * edgeLength;
+            check(std::fabs(removed - expected) < std::max(1.0, expected * 0.02),
+                  QStringLiteral("releasing flattens it by exactly d^2 L / 2 - a bigger "
+                                 "bite than the same drag inward took (%1 vs %2)")
+                      .arg(removed).arg(expected));
+            trigger(window, QStringLiteral("Undo"));
+            settle(250);
+            check(std::fabs(bodyVolume() - startVolume) < 1.0 && faceCount() == startFaces,
+                  "which Undo puts back like any other");
+        }
+
+        // --- a typed size the kernel refuses ------------------------------
+        clickAt(view, QPointF(edgeAt));
+        settle(150);
+        bevel = window.findChild<BevelArrow*>();
+        check(bevel != nullptr && bevel->isVisible() && bevel->field() != nullptr,
+              "the gizmo is up again with its field, so the six checks below cannot "
+              "vanish quietly");
+        ToastHost* toasts = window.findChild<ToastHost*>();
+        if (bevel && bevel->isVisible() && bevel->field()) {
+            const double steadyVolume = bodyVolume();
+            const int steadyFaces = faceCount();
+            // Far larger than the box is thick: the rounded strip would have to
+            // eat the whole side face and then some. OCCT refuses this, and
+            // refusing it is the contract.
+            bevel->field()->setText(QStringLiteral("999"));
+            settle(300);
+            check(!bevel->hasPreview(),
+                  "a radius the body cannot take previews nothing");
+            check(!view->hasModelingPreview(),
+                  "and leaves the last good preview - here, none - exactly as it was");
+
+            sendKeyTo(&window, Qt::Key_Return);
+            settle(300);
+            check(std::fabs(bodyVolume() - steadyVolume) < 1.0e-6 &&
+                      faceCount() == steadyFaces,
+                  "committing it leaves the body untouched, volume and faces both");
+            check(toasts != nullptr && toasts->isShowing() &&
+                      toasts->currentText().contains(
+                          QStringLiteral("can't take a fillet that big")),
+                  QStringLiteral("and it is reported as a failure in cause-and-fix form "
+                                 "(\"%1\")").arg(toasts ? toasts->currentText() : QString()));
+
+            // --- Escape clears the dedicated preview channel --------------
+            bevel->field()->setText(QStringLiteral("10"));
+            settle(300);
+            check(view->hasModelingPreview() && bevel->hasPreview(),
+                  "a size the body can take previews through the dedicated channel");
+            sendKeyTo(&window, Qt::Key_Escape);
+            settle(250);
+            check(!view->hasModelingPreview(), "Escape clears the modeling preview");
+            check(std::fabs(bodyVolume() - steadyVolume) < 1.0e-6,
+                  "and commits nothing on the way out");
+            check(view->hasBevelArrow(),
+                  "leaving the arrow and the selection alone, so the user can simply "
+                  "drag again");
+        }
+
+        // The arrow goes the moment its predicate stops holding - one function
+        // decides both directions.
+        trigger(window, QStringLiteral("Select Bodies"));
+        settle(200);
+        check(!view->hasBevelArrow(), "leaving edge selection retires the arrow");
+        BevelArrow* retired = window.findChild<BevelArrow*>();
+        check(retired == nullptr || !retired->isVisible(),
+              "and its value chip goes with it");
+        check(!view->edgeDimensionSuppressed(),
+              "and the edge-length annotation is free again");
+
+        // Leave the document as this block found it.
+        view->setSelectedSolids({bevelId});
+        settle(150);
+        trigger(window, QStringLiteral("Delete Selected"));
+        settle(200);
+        check(static_cast<int>(window.document().count()) == bevelBodiesBefore,
+              "the bevel probe leaves the document as it found it");
+        view->clearSelection();
+        view->animateTo(bevelCameraBefore);   // animations are off: immediate
+        settle(200);
+    }
+
     // --- the whole app reads in one unit --------------------------------------
     {
         QAction* mm = action(window, QStringLiteral("Millimetres"));
@@ -5400,6 +5951,31 @@ int main(int argc, char* argv[])
                   .arg(pullArrowOffenders.isEmpty()
                            ? QStringLiteral("none")
                            : pullArrowOffenders.join(QStringLiteral(", "))));
+
+        // And the round/flatten chip, which is the one place the newly banned
+        // word could most easily have leaked: the class is called BevelArrow
+        // and every string it paints has to say Fillet or Chamfer instead.
+        QStringList bevelOffenders;
+        for (BevelArrow* arrow : window.findChildren<BevelArrow*>()) {
+            for (const QString& text : arrow->paintedTexts()) {
+                for (const QString& word : banned) {
+                    if (text.contains(word, Qt::CaseInsensitive))
+                        bevelOffenders
+                            << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
+                }
+            }
+        }
+        check(bevelOffenders.isEmpty(),
+              QStringLiteral("no round/flatten chip text uses a banned word (%1)")
+                  .arg(bevelOffenders.isEmpty()
+                           ? QStringLiteral("none")
+                           : bevelOffenders.join(QStringLiteral(", "))));
+        // Non-vacuity: the sweep above passes just as well over an empty list.
+        BevelArrow* sweptBevel = window.findChild<BevelArrow*>();
+        check(sweptBevel != nullptr && sweptBevel->paintedTexts().size() == 4,
+              QStringLiteral("and it really swept that chip's four painted strings (%1)")
+                  .arg(sweptBevel ? sweptBevel->paintedTexts().join(QStringLiteral(" / "))
+                                  : QString()));
 
         // The state label is the app's most-updated string; it must obey the
         // vocabulary too. It is a permanent widget on the status bar.
@@ -6488,6 +7064,10 @@ int main(int argc, char* argv[])
         assertScale(hiddenArrow, QStringLiteral("PullArrow"));
         assertScale(hiddenArrow ? hiddenArrow->field() : nullptr,
                     QStringLiteral("PullArrow field"));
+        BevelArrow* hiddenBevel = window.findChild<BevelArrow*>();
+        assertScale(hiddenBevel, QStringLiteral("BevelArrow"));
+        assertScale(hiddenBevel ? hiddenBevel->field() : nullptr,
+                    QStringLiteral("BevelArrow field"));
         check(exempt.isEmpty(),
               QStringLiteral("the widgets hidden when that sweep runs use the type "
                              "scale too (%1)")

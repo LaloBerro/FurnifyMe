@@ -6,6 +6,7 @@
 
 #include "AppBar.h"
 #include "AxisGizmo.h"
+#include "BevelArrow.h"
 #include "ExtrudePreview.h"
 #include "HintBalloon.h"
 #include "IconSet.h"
@@ -19,8 +20,10 @@
 #include "ViewportOverlay.h"
 #include "WalkthroughPanel.h"
 
+#include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <ElSLib.hxx>
+#include <GeomAbs_CurveType.hxx>
 #include <GeomAbs_SurfaceType.hxx>
 #include <TopAbs_Orientation.hxx>
 #include <TopExp_Explorer.hxx>
@@ -140,6 +143,12 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     // to make it true. Only reads state and attaches or detaches an AIS
     // object, so it cannot recurse back into updateActions().
     connect(this, &MainWindow::appStateChanged, this, &MainWindow::refreshTransformGizmo);
+
+    // And the edge annotation's, from the bevel arrow's predicate - two
+    // annotations on one edge is noise, so the length label stands down for as
+    // long as the arrow's own value chip is up. Only reads state and moves AIS
+    // objects, so it cannot recurse back into updateActions().
+    connect(this, &MainWindow::appStateChanged, this, &MainWindow::refreshEdgeAnnotation);
 
     // Selection syncs both ways.
     connect(myItemsPanel, &ItemsPanel::solidActivated, this,
@@ -637,6 +646,12 @@ void MainWindow::buildOverlay()
     // appStateChanged; nothing here shows or hides it.
     myPullArrow = new PullArrow(this, myView);
 
+    // The bevel gizmo, on exactly the same terms: it parents itself to the
+    // viewport, places itself beside its arrow's projected head, and decides
+    // its own visibility from MainWindow::bevelTarget() on every
+    // appStateChanged. Nothing here shows or hides it.
+    myBevelArrow = new BevelArrow(this, myView);
+
     // Always built, even for a user who has already learned this - it
     // decides its own visibility in its constructor (see WalkthroughPanel's
     // refresh()) and hides itself immediately in that case. Gating
@@ -673,6 +688,7 @@ void MainWindow::buildOverlay()
     connect(myOverlay, &ViewportOverlay::laidOut, hints, &HintBalloon::reposition);
     connect(myOverlay, &ViewportOverlay::laidOut, myExtrudePreview, &ExtrudePreview::replace);
     connect(myOverlay, &ViewportOverlay::laidOut, myPullArrow, &PullArrow::replace);
+    connect(myOverlay, &ViewportOverlay::laidOut, myBevelArrow, &BevelArrow::replace);
 }
 
 void MainWindow::updateActions()
@@ -817,6 +833,11 @@ void MainWindow::updateStateLabel()
         // arrow itself does, so the label cannot describe a gizmo that is not
         // there (or stay quiet about one that is).
         state = tr("Face selected — drag the arrow to pull, or type a distance");
+    } else if (canBevelSelectedEdge()) {
+        // Same rule as the line above: the gizmo is on screen, one axis does
+        // two different things, and an arrow cannot say that by itself. Reads
+        // the same predicate the arrow does.
+        state = tr("Edge selected — drag to round or flatten it, or type a size");
     } else {
         const std::size_t selected = myView->selectedSolidIds().size();
         const std::size_t bodies = myDocument.count();
@@ -1160,6 +1181,112 @@ bool MainWindow::pullFaceBy(const TopoDS_Face& face, double distance)
     return true;
 }
 
+int MainWindow::bodyIdForEdge(const TopoDS_Edge& edge) const
+{
+    if (edge.IsNull()) return 0;
+    for (const DocumentModel::Solid& solid : myDocument.solids()) {
+        for (TopExp_Explorer it(solid.shape, TopAbs_EDGE); it.More(); it.Next()) {
+            if (it.Current().IsSame(edge)) return solid.id;
+        }
+    }
+    return 0;
+}
+
+bool MainWindow::bevelTarget(TopoDS_Edge& edge, int& bodyId, gp_Pnt& centre,
+                             gp_Dir& outward) const
+{
+    // The same two halves canPullSelectedFace() opens with, for the same
+    // reasons - see its comment and the header.
+    if (mySketching || !myPendingFace.IsNull()) return false;
+
+    // Edge mode explicitly, so this cannot be true at the same time as the
+    // face pull's predicate or the transform gizmo's.
+    if (myView->selectionMode() != OcctViewWidget::SelectionMode::Edge) return false;
+
+    // "The ONE selected edge", never the first of several - selectedEdge()'s
+    // own rule, so a bevel can never be a coin toss between two highlighted
+    // edges.
+    const TopoDS_Edge selected = myView->selectedEdge();
+    if (selected.IsNull()) return false;
+
+    const int id = bodyIdForEdge(selected);
+    const TopoDS_Shape body = myDocument.shapeOf(id);
+    if (id <= 0 || body.IsNull()) return false;
+
+    // Straightness, the two adjacent faces and the outward bisector are all
+    // BevelAxis::derive()'s to decide, and it decides them once for the
+    // predicate and the gizmo both.
+    gp_Pnt at;
+    gp_Dir axis;
+    if (!BevelAxis::derive(body, selected, at, axis)) return false;
+
+    edge = selected;
+    bodyId = id;
+    centre = at;
+    outward = axis;
+    return true;
+}
+
+bool MainWindow::canBevelSelectedEdge() const
+{
+    TopoDS_Edge edge;
+    int bodyId = 0;
+    gp_Pnt centre;
+    gp_Dir outward;
+    return bevelTarget(edge, bodyId, centre, outward);
+}
+
+bool MainWindow::bevelEdgeBy(const TopoDS_Edge& edge, double size, bool fillet)
+{
+    if (edge.IsNull() || size <= 0.0) return false;
+
+    const int id = bodyIdForEdge(edge);
+    const TopoDS_Shape body = myDocument.shapeOf(id);
+    if (id <= 0 || body.IsNull()) return false;
+
+    const ModelingOps::BooleanResult result =
+        fillet ? ModelingOps::filletEdge(body, edge, size)
+               : ModelingOps::chamferEdge(body, edge, size);
+    if (!result.ok) {
+        // Never present a failed kernel operation as a success, and never show
+        // its error text: it is written for this file, not for the user. A
+        // fillet failing on hard geometry is normal, not exceptional - see
+        // ModelingOps::filletEdge - so the sentence names the cause and the fix
+        // rather than apologising.
+        qWarning("Bevel failed: %s", result.error.c_str());
+        myToasts->show(fillet ? tr("This edge can't take a fillet that big — the curve "
+                                   "would eat a neighbouring face. Try a smaller size.")
+                              : tr("This edge can't take a chamfer that big — the flat "
+                                   "would eat a neighbouring face. Try a smaller size."),
+                       Toast::Kind::Failure, false);
+        statusBar()->showMessage(fillet ? tr("Fillet refused — nothing was changed")
+                                        : tr("Chamfer refused — nothing was changed"));
+        return false;
+    }
+
+    myDocument.checkpoint();
+    myDocument.replaceSolid(id, result.shape);
+    // The preview, the arrow and the selection all describe the edge that is
+    // about to stop existing. All three go before the body is redisplayed, in
+    // that order, so nothing is left pointing at topology from before the
+    // rebuild - the face pull's rule, one gizmo over.
+    myView->clearModelingPreview();
+    myView->clearBevelArrow();
+    myView->clearSelection();
+    myView->displaySolid(id, result.shape);
+    recordProgress("bevel.completed");
+
+    updateActions();
+    emit documentChanged();
+    const QString message =
+        (fillet ? tr("%1 rounded — %2") : tr("%1 flattened — %2"))
+            .arg(QString::fromStdString(myDocument.nameOf(id)),
+                 QString::fromStdString(Measure::formatDimensions(result.shape)));
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    return true;
+}
+
 int MainWindow::transformableBodyId() const
 {
     // The same two halves canPullSelectedFace() opens with, for the same
@@ -1182,6 +1309,14 @@ void MainWindow::refreshTransformGizmo()
     const int id = transformableBodyId();
     if (id > 0) myView->attachManipulator(id);
     else        myView->detachManipulator();
+}
+
+void MainWindow::refreshEdgeAnnotation()
+{
+    // Derived from the arrow's own predicate, not from the arrow's visibility
+    // and not from the event that happened to raise it - the rule this file
+    // keeps for every other surface over the viewport.
+    myView->setEdgeDimensionSuppressed(canBevelSelectedEdge());
 }
 
 void MainWindow::onGizmoReleased(int solidId, const gp_Trsf& delta)

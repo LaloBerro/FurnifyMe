@@ -6,6 +6,7 @@
 #include <QEasingCurve>
 #include <QFont>
 #include <QRect>
+#include <QSize>
 #include <QString>
 
 class QApplication;
@@ -111,6 +112,11 @@ void drawCrispRule(QPainter& p, const QPointF& from, const QPointF& to, const QC
 // No such caller exists today: AppBar's own buttons paint their own body
 // directly (see BarButton::paintEvent()) rather than routing through this.
 //
+// A card whose logical size does not land on a whole number of DEVICE pixels
+// cannot be saved by anything this function does - see wholeDevicePixels()
+// below, which is the other half of the same rule and belongs at the caller's
+// setFixedSize(), not here.
+//
 // It still paints NO shadow, and that is a rule rather than a simplification.
 // CLAUDE.md's probe result is that Qt composites plain OPAQUE children over
 // OCCT's GL surface correctly on Windows and that translucency is the
@@ -120,6 +126,35 @@ void drawCrispRule(QPainter& p, const QPointF& from, const QPointF& to, const QC
 // what the mockup's near-invisible rgba-on-dark shadows amounted to.
 void paintSurface(QPainter& p, const QRect& rect, int radius = 8,
                   const QColor& ground = Theme::viewport());
+
+// Rounds a floating card's logical size UP to one that covers a WHOLE number
+// of device pixels at every display scale Windows offers.
+//
+// paintSurface() above fills the card's whole rect and still cannot reach
+// every pixel Qt flushes for it. Widget geometry is logical and the backing
+// store is device-sized, so a card 93 logical rows tall at 150% scaling
+// occupies 139.5 device rows; Qt flushes 140 and the paint event's clip -
+// logical too - stops the widget's own painter at 139. Nothing the widget
+// paints can cross its own clip and the parent cannot paint underneath a
+// child, so the leftover row keeps whatever the backing store held. Over
+// OCCT's GL surface that is not transparent: the round/flatten chip's first
+// magnified capture carried an exact 0,0,0 hairline 264 device pixels wide
+// along its bottom edge, which is the corner-nub failure one scale down.
+//
+// The only cure is to not have a fractional row, so a card asks for its size
+// through this. Windows scales in quarter steps (100/125/150/175/200/225/250%)
+// and a multiple of four is whole at every one of them, which is why this is
+// display-ratio-INDEPENDENT: reading devicePixelRatioF() at construction would
+// go stale the moment the window moved to another monitor, and a size that is
+// only right on the machine it was written on is the shape of bug this rule
+// exists to end. It grows a card by at most three pixels per side.
+//
+// EXISTING cards were not audited against this - PullArrow's 176x80 happens to
+// be whole, and the rest size themselves from content and from layouts. A
+// magnified capture that shows a black hairline along any card's edge is this,
+// and this is the fix.
+int wholeDevicePixels(int logical);
+QSize wholeDevicePixels(const QSize& logical);
 
 // Zero. Kept as a function rather than deleted so every caller's
 // grow-by-this-much / inset-by-this-much arithmetic, and the sibling-geometry

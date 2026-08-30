@@ -33,6 +33,14 @@ class QShowEvent;
 // zoom (DimensionRenderer's rule), and rebuilt on cameraChanged so its
 // arrowheads stay square to the eye.
 //
+// It is SHARED, not copied: the bevel gesture (Task 4) wants exactly this
+// shape - a double-headed drag arrow at a point, along a direction, sized in
+// screen pixels - so OcctViewWidget holds a second instance of this class for
+// it rather than a second copy of the class. The name is the face pull's
+// because that is where it was first needed; everything it does is generic,
+// and the early-out below is a measured 33.3 ms -> 0.17 ms fix that must not
+// exist in two places to be maintained in two places.
+//
 // PullArrow is the Qt half - the value chip beside the arrow's outward head.
 // A field drawn in 3D cannot take focus or a keystroke, so the number the
 // user types has to be a real QLineEdit. Its entire contract is

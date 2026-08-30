@@ -100,7 +100,31 @@ public:
     // True between the press that grabbed the arrow and the release that ends
     // the pull. While it is true this widget picks nothing on release - see
     // mouseReleaseEvent().
-    bool pullDragActive() const { return myPullDragActive; }
+    bool pullDragActive() const { return myPullDrag.active; }
+
+    // The bevel arrow: the same double-headed arrow, perpendicular to a
+    // selected edge along the bisector of its two faces' outward normals. See
+    // BevelArrow.h for the split between this presentation and the Qt value
+    // chip, and PullArrow.h for why the renderer itself is shared rather than
+    // copied. The two arrows are never up at once - their predicates need
+    // different selection modes - but nothing here depends on that.
+    void showBevelArrow(const gp_Pnt& centre, const gp_Dir& outward);
+    void clearBevelArrow();
+    bool hasBevelArrow() const { return myBevelArrow.isShowing(); }
+    // The outward tip in world space, for placing the value chip. False when
+    // no arrow is up.
+    bool bevelArrowHead(gp_Pnt& out) const;
+    bool bevelDragActive() const { return myBevelDrag.active; }
+
+    // Holds the edge-length annotation back while something else is already
+    // saying something about that edge. Two annotations on one edge is noise,
+    // and the bevel arrow's own value chip is the more specific of the two -
+    // so MainWindow raises this for as long as the arrow is up rather than
+    // anything reaching into DimensionRenderer directly. Setting it either way
+    // re-derives what should be on screen right now, so the annotation comes
+    // back on its own when the arrow goes.
+    void setEdgeDimensionSuppressed(bool suppressed);
+    bool edgeDimensionSuppressed() const { return myEdgeDimensionSuppressed; }
 
     // The transform gizmo. AIS_Manipulator is OCCT's own: it draws the three
     // arrows, the three rings and the three scale cubes, and it owns the drag
@@ -308,6 +332,16 @@ signals:
     // that never moved - a click on the arrow, which is not a pull.
     void pullReleased(bool dragged);
 
+    // A live bevel drag. `size` is signed along the edge's outward bisector
+    // and measured from the press, already snapped to the grid step when Snap
+    // to Grid is on. NEGATIVE means the drag went inward, into the body, which
+    // is the rounding half of this gesture; positive means outward, which
+    // flattens. The sign is the whole reason this signal carries one and the
+    // chip does not: one axis, two operations.
+    void bevelDragged(double size);
+    // The end of that gesture, on the same terms as pullReleased().
+    void bevelReleased(bool dragged);
+
     // The end of a transform-gizmo drag. `delta` is the whole accumulated
     // transform of the gesture, ALREADY SNAPPED when Snap to Grid is on -
     // this widget owns the snap state, so snapping here keeps the rule in one
@@ -328,6 +362,25 @@ protected:
     void mouseDoubleClickEvent(QMouseEvent* event) override;
 
 private:
+    // The live state of a drag measured along a scene arrow's axis. Two
+    // gizmos have one - the face pull and the bevel - and the maths is
+    // identical, so it is written once here rather than as two sets of five
+    // parallel members that would have to be fixed twice.
+    //
+    // `hasPressParam` is false when the press landed at an angle
+    // CameraController::axisParameterForRay refuses (within ~1.8 degrees of
+    // looking straight down the arrow). The gesture is still CLAIMED in that
+    // case - see mousePressEvent - and the first move that does resolve
+    // anchors it, so the drag contributes nothing until then instead of
+    // jumping by whatever the unmeasurable press would have implied.
+    struct AxisDrag {
+        bool active = false;
+        bool moved = false;
+        bool hasPressParam = false;
+        double pressParam = 0.0;
+        double value = 0.0;
+    };
+
     void initializeViewer();
     // The work plane, nudged a hair toward the eye. Locking a face makes the
     // grid exactly coplanar with a shaded face, and two coplanar surfaces are
@@ -364,11 +417,21 @@ private:
     bool rayThroughPixel(int px, int py, gp_Lin& out) const;
     bool pointOnSketchPlane(int px, int py, gp_Pnt& out) const;
     bool pickWorldPoint(int px, int py, gp_Pnt& out) const;
-    // Whether `point` lands on the pull arrow, tested in SCREEN space against
-    // the arrow's own projected endpoints rather than through AIS - see the
-    // comment on PullArrowLines in PullArrow.cpp for why the arrow must not
-    // be an AIS-pickable object.
-    bool pullArrowHit(const QPoint& point) const;
+    // Whether `point` lands on `arrow`, tested in SCREEN space against the
+    // arrow's own projected endpoints rather than through AIS - see the
+    // comment on PullArrowLines in PullArrow.cpp for why these arrows must not
+    // be AIS-pickable objects. Takes the renderer rather than reading a member,
+    // because two gizmos are hit-tested exactly this way.
+    bool arrowHit(const PullArrowRenderer& arrow, const QPoint& point) const;
+    // Anchors `drag` at the press, and advances it on a move - the ONE
+    // implementation of "turn a cursor position into a signed distance along a
+    // scene arrow's axis, snapped". advanceAxisDrag() returns true when the
+    // value actually changed, which is the caller's cue to emit. Both drag
+    // gizmos go through these, so the near-parallel refusal, the late anchor
+    // and the snap step cannot be remembered in one gesture and forgotten in
+    // the other.
+    void beginAxisDrag(AxisDrag& drag, const gp_Lin& axis, const QPoint& at);
+    bool advanceAxisDrag(AxisDrag& drag, const gp_Lin& axis, const QPoint& at);
     // Whether the context's LAST detection landed on the manipulator. The
     // caller is responsible for the MoveTo that produced it, so the question
     // and the answer belong to the same event.
@@ -420,6 +483,8 @@ private:
     GridRenderer myGridRenderer;
     DimensionRenderer myDimension;
     PullArrowRenderer myPullArrow;
+    // The same renderer class, a second instance - see PullArrow.h.
+    PullArrowRenderer myBevelArrow;
 
     std::map<int, Handle(AIS_Shape)> mySolids;
 
@@ -439,11 +504,6 @@ private:
     bool myOrbiting = false;
     bool myPanningDrag = false;
 
-    // The live pull gesture. myPullPressParam is where along the arrow's axis
-    // the cursor pointed when the drag started, so every later position is
-    // reported relative to it; myPullDistance is the last value emitted, kept
-    // so a near-parallel ray (which resolves to nothing) simply holds instead
-    // of jumping.
     // True only for the duration of applyCameraState()'s cameraChanged()
     // emission, so a slot that changes the scene can skip its own viewer
     // update and let that function's redraw carry it - see showPullArrow().
@@ -462,16 +522,13 @@ private:
     gp_Trsf myGizmoDelta;
     gp_Ax2 myGizmoStartPosition;
 
-    bool myPullDragActive = false;
-    bool myPullDragMoved = false;
-    // Whether myPullPressParam holds anything. False when the press landed at
-    // an angle axisParameterForRay() refuses - the gesture is still claimed
-    // (see mousePressEvent), and the first mouse move that DOES resolve
-    // anchors it, so the drag contributes nothing until then instead of
-    // jumping.
-    bool myHasPullPressParam = false;
-    double myPullPressParam = 0.0;
-    double myPullDistance = 0.0;
+    // The two axis drags, one per arrow. See AxisDrag above.
+    AxisDrag myPullDrag;
+    AxisDrag myBevelDrag;
+
+    // While true, updateEdgeDimension() draws nothing - see
+    // setEdgeDimensionSuppressed().
+    bool myEdgeDimensionSuppressed = false;
 
     class QVariantAnimation* myCameraAnimation = nullptr;
     bool myAnimationsEnabled = true;
