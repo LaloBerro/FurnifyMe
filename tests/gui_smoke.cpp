@@ -397,10 +397,13 @@ void checkFamilySurface(QWidget* widget, const QPoint& edgePoint, const QRect& i
           QStringLiteral("%1's edge reads closer to its border colour than its "
                          "panel() interior does").arg(label));
 
-    // Fully opaque out to the edge. The four corners are excluded by the
-    // radius: a rounded card genuinely does not cover them, which is a
-    // property of the corner radius rather than of translucency.
-    const int corner = 12;
+    // Fully opaque out to the edge - the WHOLE perimeter now, corners
+    // included. Corners used to be excluded here: a rounded card's fill does
+    // not cover the small triangle outside the rounded shape and inside the
+    // widget rect at each corner, and that area used to be left unpainted.
+    // Theme::paintSurface() now fills the widget's full rect with an opaque
+    // ground before the rounded panel (this task's fix - see Theme.h), so
+    // that triangle is covered too and the sweep no longer has to dodge it.
     int seeThrough = 0;
     int visited = 0;
     QPoint firstSeeThrough;
@@ -411,22 +414,18 @@ void checkFamilySurface(QWidget* widget, const QPoint& edgePoint, const QRect& i
         if (seeThrough == 0) firstSeeThrough = QPoint(x, y);
         ++seeThrough;
     };
-    for (int x = corner; x < img.width() - corner; ++x) {
+    for (int x = 0; x < img.width(); ++x) {
         sweep(x, 0);
         sweep(x, img.height() - 1);
     }
-    for (int y = corner; y < img.height() - corner; ++y) {
+    for (int y = 0; y < img.height(); ++y) {
         sweep(0, y);
         sweep(img.width() - 1, y);
     }
     // Non-vacuity, and not a formality: `seeThrough == 0` is exactly as true
-    // of a card whose perimeter was never sampled at all. Both loops start at
-    // `corner` and stop `corner` short, so a widget 24px or smaller in either
-    // direction contributes nothing on that pair of edges, and a widget small
-    // in BOTH contributes nothing whatsoever - the opacity assertion below
-    // would then pass against a card painting no pixels at all. Rendering can
-    // also hand back a null image (a zero-sized widget), which is the other
-    // way to sweep nothing.
+    // of a card whose perimeter was never sampled at all. Rendering can hand
+    // back a null image (a zero-sized widget), which is one way to sweep
+    // nothing; `visited > 0` catches that regardless of width or height.
     check(visited > 0,
           QStringLiteral("%1's perimeter sweep actually visited pixels, so the "
                          "opacity check below is not vacuous (%2 sampled, card "
@@ -632,12 +631,20 @@ int main(int argc, char* argv[])
                                gizmo->rect().adjusted(2, 2, -2, -2), Theme::border(),
                                QStringLiteral("AxisGizmo"));
 
-            // ...and specifically its CORNERS, which the sweep above excludes
-            // by design. The flat fill this card replaced covered every pixel
-            // the widget owned; a rounded card would not, and four black nubs
-            // where there had been none would be a punch-list item that
-            // introduced the defect the punch list was clearing. Radius 0 is
-            // what makes this pass, and this is what says so.
+            // ...and specifically its CORNERS, now that the gizmo carries the
+            // family's full radius 8 rather than the radius-0 stopgap. A
+            // rounded card's fill does not reach the small triangle outside
+            // the rounded shape and inside the widget rect at each corner;
+            // Theme::paintSurface() now covers that triangle by filling the
+            // widget's FULL rect with an opaque ground - viewport() by
+            // default, the ground this card genuinely sits on - before the
+            // rounded panel goes on top (this task's fix, see Theme.h). So
+            // the right answer at each corner is opaque viewport(), not
+            // merely "opaque": the old radius-0 stopgap was opaque too, by
+            // covering the corners with panel() fill instead of leaving them
+            // to the driver's black, and that would still pass an alpha-only
+            // check. Each corner is compared against BOTH wrong answers -
+            // it must read closer to viewport() than to panel().
             const QImage gizmoImg = renderExact(gizmo);
             QStringList gizmoNubs;
             const QPoint gizmoCorners[4] = {
@@ -646,14 +653,21 @@ int main(int argc, char* argv[])
                 QPoint(gizmoImg.width() - 1, gizmoImg.height() - 1)};
             for (const QPoint& c : gizmoCorners) {
                 if (!gizmoImg.rect().contains(c)) continue;
-                if (qAlpha(gizmoImg.pixel(c)) != 255)
-                    gizmoNubs << QStringLiteral("%1,%2 alpha %3")
-                                     .arg(c.x()).arg(c.y()).arg(qAlpha(gizmoImg.pixel(c)));
+                const QRgb px = gizmoImg.pixel(c);
+                const QColor colour(px);
+                const bool opaque = qAlpha(px) == 255;
+                const bool readsAsViewport =
+                    colorDistance(colour, Theme::viewport()) <
+                        colorDistance(colour, Theme::panel()) &&
+                    colorDistance(colour, Theme::viewport()) < 20.0;
+                if (!opaque || !readsAsViewport)
+                    gizmoNubs << QStringLiteral("%1,%2 alpha %3 colour %4")
+                                     .arg(c.x()).arg(c.y()).arg(qAlpha(px)).arg(colour.name());
             }
             check(!gizmoImg.isNull() && gizmoNubs.isEmpty(),
-                  QStringLiteral("and its card covers all four corners, so joining the "
-                                 "family cost it no uncovered pixels (%1)")
-                      .arg(gizmoNubs.isEmpty() ? QStringLiteral("all four solid")
+                  QStringLiteral("and its corners read as opaque viewport() ground at "
+                                 "radius 8 - not black, not panel() (%1)")
+                      .arg(gizmoNubs.isEmpty() ? QStringLiteral("all four solid viewport()")
                                                : gizmoNubs.join(QStringLiteral("; "))));
         }
     }
@@ -1553,6 +1567,46 @@ int main(int argc, char* argv[])
             checkFamilySurface(drawer, QPoint(0, drawer->height() / 2),
                                drawer->rect().adjusted(6, 6, -6, -6), Theme::border(),
                                QStringLiteral("ItemsPanel (the drawer)"));
+
+            // ...and specifically its CORNERS - the card the nubs were worst
+            // on: it floats widest of the family, and its rounded corners at
+            // radius 10 used to sit squarely on the GL surface with nothing
+            // behind them, reading as black. Theme::paintSurface() now fills
+            // the drawer's full rect with an opaque ground - viewport() by
+            // default, the ground this card genuinely sits on - before the
+            // rounded panel goes on top, so the right answer at each corner
+            // is opaque viewport(), not merely opaque: a corner filled with
+            // panel() instead (the wrong fix - covering the triangle with the
+            // card's own fill rather than the ground behind it) would still
+            // pass an alpha-only check, so this is compared against both
+            // wrong answers, black and panel().
+            const QImage drawerImg = renderExact(drawer);
+            QStringList drawerNubs;
+            const QPoint drawerCorners[4] = {
+                QPoint(0, 0), QPoint(drawerImg.width() - 1, 0),
+                QPoint(0, drawerImg.height() - 1),
+                QPoint(drawerImg.width() - 1, drawerImg.height() - 1)};
+            for (const QPoint& c : drawerCorners) {
+                if (!drawerImg.rect().contains(c)) continue;
+                const QRgb px = drawerImg.pixel(c);
+                const QColor colour(px);
+                const bool opaque = qAlpha(px) == 255;
+                const bool notBlack = colorDistance(colour, QColor(Qt::black)) > 20.0;
+                const bool readsAsViewport =
+                    colorDistance(colour, Theme::viewport()) <
+                        colorDistance(colour, Theme::panel()) &&
+                    colorDistance(colour, Theme::viewport()) < 20.0;
+                if (!opaque || !notBlack || !readsAsViewport)
+                    drawerNubs << QStringLiteral("%1,%2 alpha %3 colour %4")
+                                      .arg(c.x()).arg(c.y()).arg(qAlpha(px)).arg(colour.name());
+            }
+            check(!drawerImg.isNull() && drawerNubs.isEmpty(),
+                  QStringLiteral("and the drawer's corners - where the nubs were worst - "
+                                 "read as opaque viewport() ground, not black and not "
+                                 "panel() (%1)")
+                      .arg(drawerNubs.isEmpty() ? QStringLiteral("all four solid viewport()")
+                                                : drawerNubs.join(QStringLiteral("; "))));
+
             // Saved to disk for the same reason the toast is: the empty-state
             // drawer is what a PrintWindow capture of a freshly launched app
             // shows, and a populated one - rows, dimension readouts, eyes -

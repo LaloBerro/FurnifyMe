@@ -79,10 +79,12 @@ void drawCrispBorder(QPainter& p, const QRectF& rect, const QColor& colour,
 void drawCrispRule(QPainter& p, const QPointF& from, const QPointF& to, const QColor& colour);
 
 // The one implementation of the floating-surface family: fills `rect` with
-// panel(), then strokes a crisp 1px border() around it, corners rounded to
-// `radius`. Every floating card in the shell (WalkthroughPanel, HintBalloon,
-// Toast, ShortcutSheet, ExtrudePreview, ToolCluster's rail) calls this for
-// its background instead of hand-rolling its own; a chip's body counts too,
+// `ground` FIRST - opaque, covering the widget's full rect, corners included -
+// then fills a rounded panel() rect on top and strokes a crisp 1px border()
+// around it, corners rounded to `radius`. Every floating card in the shell
+// (WalkthroughPanel, HintBalloon, Toast, ShortcutSheet, ExtrudePreview,
+// ToolCluster's rail, ItemsPanel's drawer, AxisGizmo) calls this for its
+// background instead of hand-rolling its own; a chip's body counts too,
 // painted over before its state colour and content. Three cards each keep
 // one thing of their own painted on TOP of this shared base rather than
 // folding it in here: WalkthroughPanel's unconditional accent() outline,
@@ -91,18 +93,31 @@ void drawCrispRule(QPainter& p, const QPointF& from, const QPointF& to, const QC
 // not something every floating surface needs, so it stays out of the one
 // shared implementation.
 //
-// It paints NO shadow, and that is a rule rather than a simplification.
+// The `ground` fill is what a rounded card's corners rest on. A rounded rect
+// does not cover the area outside itself and inside the widget's rect - the
+// four small triangles at each corner - and every other call this file makes
+// paints only the rounded shape, never that corner area. Over an ordinary
+// widget that is fine, because whatever sits behind (a parent's background)
+// shows through. Over OCCT's on-screen GL surface there IS nothing behind a
+// Qt child in its own backing store, so an unpainted pixel there is not
+// transparent but whatever the driver left, which is black - the drawer
+// showed it worst, and the gizmo dodged the whole question at radius 0 as a
+// stopgap. Filling `rect` with an opaque ground before the rounded panel
+// settles it family-wide: the default is viewport(), near-invisible against
+// the real viewport behind every card that floats directly over the GL
+// surface; a card that instead sits on the chrome bar (AppBar's buttons, if
+// they ever route through this rather than painting their own body) passes
+// chrome() so its corners do not read as a viewport-grey nub on chrome.
+//
+// It still paints NO shadow, and that is a rule rather than a simplification.
 // CLAUDE.md's probe result is that Qt composites plain OPAQUE children over
 // OCCT's GL surface correctly on Windows and that translucency is the
 // unreliable variant. A drop shadow is translucent pixels by definition, and
-// over the GL surface there is nothing behind them in the widget's backing
-// store to blend with - the alpha lands on whatever the driver left there,
-// which is black. That was invisible while the shadow only ever occupied a
-// 3px ring around a small chip; the tool rail, spanning the viewport's whole
-// height, rendered it as a black band down the left of the application. On
+// the ground fill above does not change that - it is opaque, not blended. On
 // this ground the family is carried by the 1px border() anyway, which is
 // what the mockup's near-invisible rgba-on-dark shadows amounted to.
-void paintSurface(QPainter& p, const QRect& rect, int radius = 8);
+void paintSurface(QPainter& p, const QRect& rect, int radius = 8,
+                  const QColor& ground = Theme::viewport());
 
 // Zero. Kept as a function rather than deleted so every caller's
 // grow-by-this-much / inset-by-this-much arithmetic, and the sibling-geometry

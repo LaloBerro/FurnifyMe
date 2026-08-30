@@ -124,13 +124,21 @@ void drawCrispRule(QPainter& p, const QPointF& from, const QPointF& to, const QC
     p.restore();
 }
 
-void paintSurface(QPainter& p, const QRect& rect, int radius)
+void paintSurface(QPainter& p, const QRect& rect, int radius, const QColor& ground)
 {
-    // Opaque, and no shadow - see the header for why translucent pixels
-    // cannot be painted over OCCT's GL surface. The fill covers `rect`
-    // entirely; the border is then stroked crisply along its outer edge, so
-    // the outermost row and column of a card ARE its border rather than a
-    // half-covered blend of border and fill.
+    // `ground` first, filling `rect` in full - the area a rounded panel does
+    // not reach, at each of its four corners, included. See the header for
+    // why that area cannot be left unpainted over OCCT's GL surface: nothing
+    // behind a Qt child's backing store there means an unpainted pixel reads
+    // as black, not as transparent.
+    p.fillRect(rect, ground);
+
+    // The rounded panel on top - opaque, and no shadow - see the header for
+    // why translucent pixels cannot be painted over OCCT's GL surface either.
+    // The border is then stroked crisply along the panel's outer edge, so the
+    // outermost row and column of the ROUNDED shape are its border rather
+    // than a half-covered blend of border and fill; outside that shape,
+    // within `rect`, is the ground fill above.
     p.save();
     p.setRenderHint(QPainter::Antialiasing, true);
     QPainterPath surface;

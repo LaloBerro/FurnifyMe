@@ -97,9 +97,11 @@ void ToolCluster::paintEvent(QPaintEvent* /*event*/)
     // Every pixel of this widget is the card: fill and border, both opaque,
     // no reserved margin and no shadow. Theme::paintSurface() is now the
     // whole of that - it owns the crisp-border alignment this file used to
-    // do for itself with a local half-pixel translate. The rounded corners
-    // still leave four small unpainted nubs; every rounded card over this
-    // viewport has those.
+    // do for itself with a local half-pixel translate, and now fills the
+    // widget's full rect with an opaque ground (viewport() by default, this
+    // rail's own ground) before the rounded panel, so the corners the
+    // rounded shape does not reach read as flat viewport() grey rather than
+    // the black an unpainted pixel would read as over the GL surface.
     Theme::paintSurface(painter, rect(), kCardRadius);
 }
 
