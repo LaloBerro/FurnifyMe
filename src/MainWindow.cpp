@@ -1214,11 +1214,11 @@ bool MainWindow::bevelTarget(TopoDS_Edge& edge, int& bodyId, gp_Pnt& centre,
     if (id <= 0 || body.IsNull()) return false;
 
     // Straightness, the two adjacent faces and the outward bisector are all
-    // BevelAxis::derive()'s to decide, and it decides them once for the
+    // ModelingOps::bevelAxis()'s to decide, and it decides them once for the
     // predicate and the gizmo both.
     gp_Pnt at;
     gp_Dir axis;
-    if (!BevelAxis::derive(body, selected, at, axis)) return false;
+    if (!ModelingOps::bevelAxis(body, selected, at, axis)) return false;
 
     edge = selected;
     bodyId = id;

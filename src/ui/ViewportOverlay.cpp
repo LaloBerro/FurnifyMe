@@ -134,6 +134,25 @@ void ViewportOverlay::relayout()
         if (entry.widget->isHidden()) continue;
         QWidget* placed = entry.widget;
         placed->adjustSize();
+        // Grown to a whole number of DEVICE pixels before anything is
+        // positioned against it - see Theme.h.
+        //
+        // A card's size comes from its layout and lands wherever the content
+        // put it, so at a fractional display scale its far edge falls between
+        // device rows: Qt flushes the row the card's own logical clip cannot
+        // reach, and over the GL surface that row is black rather than
+        // transparent. MEASURED, not theorised - the whole-window black-run
+        // sweep in gui_smoke found a 113-device-pixel 0,0,0 line along the
+        // RAIL's bottom edge at 225% scaling, which is the same defect the
+        // round/flatten chip found at its own size and the drawer's corner
+        // nubs were one scale down.
+        //
+        // Applied to every anchored entry rather than to the rail alone: the
+        // rail is simply the one that was measured, and a card added later
+        // would rediscover this. The growth is at most three pixels of slack
+        // inside a card whose contents are top-aligned, so nothing inside
+        // moves; the positions below then follow the grown size.
+        placed->resize(Theme::wholeDevicePixels(placed->size()));
         const int cw = placed->width();
         const int ch = placed->height();
 
@@ -183,7 +202,13 @@ void ViewportOverlay::relayout()
                 // than an assert, because this class is not the one that
                 // enforces that invariant and must not assume a caller
                 // always will.
-                placed->resize(cw, std::max(ch, h - kEdgeMargin * 2));
+                // Through wholeDevicePixels() as well: this one is the ONLY
+                // anchored size not taken from a layout, and the viewport's
+                // height is as arbitrary a number as they come - which is
+                // exactly why the rail was the card the black-run sweep
+                // caught.
+                placed->resize(cw, Theme::wholeDevicePixels(
+                                       std::max(ch, h - kEdgeMargin * 2)));
                 break;
         }
         placed->raise();

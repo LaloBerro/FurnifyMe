@@ -156,6 +156,28 @@ void paintSurface(QPainter& p, const QRect& rect, int radius = 8,
 int wholeDevicePixels(int logical);
 QSize wholeDevicePixels(const QSize& logical);
 
+// The other half of the same rule: a card's POSITION.
+//
+// wholeDevicePixels() above makes a card's extent whole, which puts its far
+// edge on a whole device pixel only if its near edge already was. A card that
+// follows a projected 3D point does not - it is moved to whatever pixel the
+// projection returned - so `frac(top x dpr)` survives to the bottom edge and
+// the unpainted row comes straight back at a card whose size is beyond
+// reproach. `offsetToWindow` is the card's parent's own origin inside the
+// window, because the backing store is the WINDOW's and a viewport sitting at
+// a fractional offset under the app bar would otherwise put every child on a
+// fractional row however carefully the child was placed.
+//
+// Unlike the size rule this DOES read the live ratio, and the asymmetry is
+// deliberate: a size is fixed once at construction, where reading a ratio that
+// can change when the window moves to another monitor would go stale, while a
+// position is recomputed on every camera move and cannot. Reading it also buys
+// the finest legal step - 2 logical pixels at 150% rather than the 4 a
+// ratio-blind rule would have to assume everywhere - and a value chip that
+// tracks an arrow through an orbit in 4-pixel jumps is a visible cost for a
+// precision only the odd ratios need.
+int snapToDevicePixels(int value, int offsetToWindow, double devicePixelRatio);
+
 // Zero. Kept as a function rather than deleted so every caller's
 // grow-by-this-much / inset-by-this-much arithmetic, and the sibling-geometry
 // sync that hangs off it (WalkthroughPanel's skip pill, Toast's Undo pill,

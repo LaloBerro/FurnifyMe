@@ -297,6 +297,19 @@ void HintBalloon::reposition()
     const int rightLimit = std::max(leftFloor, parentWidget()->width() - width());
     x = std::max(leftFloor, std::min(x, rightLimit));
 
+
+    // Whole DEVICE pixels, in the window's own coordinates - the position half
+    // of Theme's rule. Snapped last, after every avoidance clamp above, and
+    // always downward, so it cannot push the balloon back over an obstacle
+    // the clamps just moved it off - and never below the left floor, which is
+    // the one clamp that must survive (see the paragraph above).
+    {
+        const QPoint origin = parentWidget()->mapTo(window(), QPoint(0, 0));
+        const double dpr = devicePixelRatioF();
+        x = std::max(leftFloor, Theme::snapToDevicePixels(x, origin.x(), dpr));
+        y = Theme::snapToDevicePixels(y, origin.y(), dpr);
+    }
+
     move(x, y);
     // Re-raised here as well as re-placed: this runs from
     // ViewportOverlay::laidOut(), immediately after the overlay has raise()d

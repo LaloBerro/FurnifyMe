@@ -53,9 +53,14 @@ ExtrudePreview::ExtrudePreview(MainWindow* window, OcctViewWidget* view)
     // WalkthroughPanel's sizeHint() and Toast's.
     {
         const int margin = Theme::surfaceShadowMargin();
-        setFixedSize(kWidth + margin * 2,
-                     kPad * 2 + kLabelHeight + kFieldHeight + kHintGap + kHintHeight +
-                         margin * 2);
+        // Through Theme::wholeDevicePixels(), the same as PullArrow and the
+        // round/flatten chip - see Theme.h. This card is anchored rather than
+        // tracking a projected point, so its position half is the overlay's
+        // business, but its size is its own.
+        setFixedSize(Theme::wholeDevicePixels(
+            QSize(kWidth + margin * 2,
+                  kPad * 2 + kLabelHeight + kFieldHeight + kHintGap + kHintHeight +
+                      margin * 2)));
     }
 
     myField = new QLineEdit(view);

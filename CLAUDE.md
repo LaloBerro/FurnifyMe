@@ -625,8 +625,17 @@ is the only cure. The leftover row is the corner-nub failure one scale down, and
 exactly as black: the bevel chip's first magnified capture carried a 264-device-pixel
 `0,0,0` hairline along its bottom edge. Rounding to a multiple of four is whole at every
 quarter-step Windows scale, so it does not read `devicePixelRatioF()` - a size that is only
-right on the monitor it was written on is the same bug with a longer fuse. Existing cards
-were not audited; a black hairline along any card's edge is this.
+right on the monitor it was written on is the same bug with a longer fuse.
+
+**A whole size only helps if the near edge is whole too**, so a card's POSITION goes through
+`Theme::snapToDevicePixels()`. `ViewportOverlay::relayout()` grows every anchored card and
+snaps the rail's stretched height; the two chips that follow a projected 3D point
+(`PullArrow`, `BevelArrow`) snap their own `move()`. That one reads the live ratio, unlike
+the size rule - a size is set once at construction where a live read goes stale, a position
+is recomputed on every camera move where it cannot, and reading it buys a 2-pixel step at
+150% instead of the 4 a ratio-blind rule must assume. Both halves were found by measurement,
+one card at a time: the rail's bottom edge carried a 113-device-pixel black line at 225%
+that no crop showed and no 1:1 render could.
 
 **Verify appearance with measured pixels, never by eyeballing a crop.** This phase's worst
 finding was a commit message claiming a magnified crop confirmed a 3px gap while the real

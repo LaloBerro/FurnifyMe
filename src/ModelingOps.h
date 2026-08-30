@@ -91,6 +91,50 @@ BooleanResult filletEdge(const TopoDS_Shape& body, const TopoDS_Edge& edge,
 BooleanResult chamferEdge(const TopoDS_Shape& body, const TopoDS_Edge& edge,
                           double distance);
 
+// Where a round-or-flatten gesture on `edge` is measured, and which way is
+// "out of the body" there: the edge's midpoint, and the bisector of its two
+// adjacent faces' OUTWARD normals, with the component along the edge removed.
+//
+// It lives HERE, in the Qt-free library, and not beside the widget that drives
+// it, for the reason the whole library exists: this is the piece a volume
+// check cannot verify and an end-to-end drag can only test at whatever single
+// edge the camera happened to make reachable. `tests/direct_modeling.cpp`
+// walks all twelve edges of a box against a BRepClass3d_SolidClassifier
+// oracle, deterministically and with no window - which is not something a
+// function sitting in src/ui can be asked to do.
+//
+// Both halves of the derivation are earned:
+//
+//   - OUTWARD, derived properly. BRepAdaptor_Surface never applies
+//     TopAbs_Orientation, so on a REVERSED face the surface normal points
+//     INTO the body - three of six faces of a plain box are REVERSED. Get it
+//     wrong and the bisector points inward, so dragging away from the body
+//     rounds it and dragging into it flattens it: the gesture reads exactly
+//     backwards, and every check that measures the drag against this same
+//     axis passes anyway. That is Phase 4's lockToFace lesson and Task 2's
+//     PullArrow::begin lesson, applied a third time rather than assumed.
+//   - PERPENDICULAR. The two normals are perpendicular to the edge on a box,
+//     so their sum already is - but on a body whose faces meet the edge at an
+//     angle it is not, and an axis with a component ALONG the edge would slide
+//     the arrow off the edge it belongs to as the drag went on. The component
+//     along the edge is removed explicitly.
+//
+// NOTE ON CONCAVE EDGES. The axis is the outward bisector wherever the two
+// faces meet, so at an INSIDE corner it points out of the notch and the
+// mapping still reads "against the bisector rounds". A fillet there adds
+// material and bulges toward the notch - visually opposite the drag, and
+// correct CAD behaviour. The convex case is the common one in furniture and
+// is what the tests pin; the mapping is deliberately not flipped per-edge,
+// because a gesture whose direction depends on which edge you grabbed is
+// worse than one that is occasionally counter-intuitive.
+//
+// False - leaving both outputs untouched - unless `edge` is straight, belongs
+// to `body`, has exactly two adjacent faces, and those faces' outward normals
+// actually define a bisector (opposed normals, which a seam edge or a
+// zero-thickness sliver gives, have none).
+bool bevelAxis(const TopoDS_Shape& body, const TopoDS_Edge& edge, gp_Pnt& centre,
+               gp_Dir& outward);
+
 // Bake a rigid transform (+ uniform scale) into the shape's geometry via
 // BRepBuilderAPI_Transform with copy = true. gp_Trsf carries
 // rotation/translation/uniform scale; refuses a null body or a transform

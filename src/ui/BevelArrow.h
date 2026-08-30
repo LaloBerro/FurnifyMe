@@ -18,39 +18,15 @@ class QMoveEvent;
 class QResizeEvent;
 class QShowEvent;
 
-// Where a bevel gesture is measured: the edge's midpoint, and the direction
-// "outward" means for that edge.
-//
-// The axis is PERPENDICULAR to the edge, along the bisector of the two
-// adjacent faces' OUTWARD normals. Both halves matter and both are earned:
-//
-//   - Outward, derived properly. BRepAdaptor_Surface never applies
-//     TopAbs_Orientation, so on a REVERSED face the surface normal points
-//     INTO the body - three of six faces of a plain box are REVERSED. Get it
-//     wrong and the bisector points inward, so dragging away from the body
-//     rounds it and dragging into it flattens it: the gesture reads exactly
-//     backwards. This is Phase 4's lesson (lockToFace) and Task 2's
-//     (PullArrow::begin), applied a third time rather than assumed.
-//   - Perpendicular. The two normals are perpendicular to the edge on a box,
-//     so their sum already is - but on a body whose faces meet the edge at an
-//     angle it is not, and an axis with a component ALONG the edge would slide
-//     the arrow off the edge it belongs to as the drag went on. The component
-//     along the edge is removed explicitly.
-//
-// Qt-free, and deliberately a free function rather than a member: MainWindow's
-// predicate and the widget both need the answer, and two copies of a
-// derivation whose sign convention is this easy to get backwards is exactly
-// how the two would drift.
-namespace BevelAxis {
-
-// False - leaving both outputs untouched - unless `edge` is straight, belongs
-// to `body`, has exactly two adjacent faces, and those two faces' outward
-// normals actually define a bisector (they are not opposed, which is what a
-// seam edge or a zero-thickness sliver would give).
-bool derive(const TopoDS_Shape& body, const TopoDS_Edge& edge,
-            gp_Pnt& centre, gp_Dir& outward);
-
-}   // namespace BevelAxis
+// The drag axis this gesture is measured along - the edge's midpoint and the
+// bisector of its two adjacent faces' outward normals - is NOT here. It is
+// `ModelingOps::bevelAxis`, in the Qt-free geometry library, and its header
+// carries the full account of the outward flip, the perpendicular projection
+// and the concave case. It lives there because it is the piece a volume check
+// cannot verify and an end-to-end drag can only test at whichever single edge
+// the camera made reachable: `tests/direct_modeling.cpp` walks all twelve
+// edges of a box against a solid-classifier oracle with no window at all.
+// MainWindow's predicate and this widget both read that one function.
 
 // The bevel gesture's value chip - the Qt half of "select an edge, drag one
 // way to round it, the other way to flatten it".

@@ -166,6 +166,29 @@ QSize wholeDevicePixels(const QSize& logical)
     return QSize(wholeDevicePixels(logical.width()), wholeDevicePixels(logical.height()));
 }
 
+int snapToDevicePixels(int value, int offsetToWindow, double devicePixelRatio)
+{
+    // The smallest step whose device extent is whole at this ratio. 1 covers
+    // every integer ratio, 2 covers 1.5 and 2.5, 4 covers the quarter steps -
+    // and 4 is the fallback for anything stranger, which is what
+    // wholeDevicePixels() assumes unconditionally.
+    int step = 4;
+    for (const int candidate : {1, 2}) {
+        const double device = candidate * devicePixelRatio;
+        if (std::fabs(device - std::round(device)) < 1.0e-9) {
+            step = candidate;
+            break;
+        }
+    }
+    if (step <= 1) return value;
+
+    // Snapped in WINDOW coordinates - see the header - and downward, so a card
+    // already clamped inside the viewport's edges cannot be pushed back out.
+    const int inWindow = value + offsetToWindow;
+    const int remainder = ((inWindow % step) + step) % step;   // never negative
+    return inWindow - remainder - offsetToWindow;
+}
+
 void apply(QApplication& app)
 {
     // DM Sans, compiled in as a Qt resource. If it cannot be loaded we keep the

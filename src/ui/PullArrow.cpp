@@ -252,9 +252,16 @@ PullArrow::PullArrow(MainWindow* window, OcctViewWidget* view)
     setAttribute(Qt::WA_TransparentForMouseEvents);
     {
         const int margin = Theme::surfaceShadowMargin();
-        setFixedSize(kWidth + margin * 2,
-                     kPad * 2 + kLabelHeight + kFieldHeight + kHintGap + kHintHeight +
-                         margin * 2);
+        // Through Theme::wholeDevicePixels() - see Theme.h. This card's 176x80
+        // happens to be whole at every quarter-step scale already, so today
+        // this changes nothing; it is here so that the day a line is added to
+        // it the card does not silently start painting a black hairline over
+        // the GL surface, which is exactly how the round/flatten chip found
+        // the rule.
+        setFixedSize(Theme::wholeDevicePixels(
+            QSize(kWidth + margin * 2,
+                  kPad * 2 + kLabelHeight + kFieldHeight + kHintGap + kHintHeight +
+                      margin * 2)));
     }
 
     myField = new QLineEdit(view);
@@ -573,6 +580,20 @@ void PullArrow::reposition()
 
     int y = at.y() - QWidget::height() / 2;
     y = std::clamp(y, kEdgeInset, std::max(kEdgeInset, myView->height() - QWidget::height() - kEdgeInset));
+
+    // Whole DEVICE pixels, in the window's own coordinates - the position half
+    // of Theme's rule (the size half is at the constructor). A card placed at
+    // whatever pixel a projection returned lands on a fractional device row
+    // half the time, and the row Qt flushes but the widget's logical clip
+    // cannot reach is black over the GL surface. Snapped last, after the
+    // clamps, and always downward, so it cannot push the card back outside the
+    // viewport edges the clamps just brought it inside.
+    {
+        const QPoint origin = myView->mapTo(myView->window(), QPoint(0, 0));
+        const double dpr = devicePixelRatioF();
+        x = Theme::snapToDevicePixels(x, origin.x(), dpr);
+        y = Theme::snapToDevicePixels(y, origin.y(), dpr);
+    }
 
     move(x, y);
 }

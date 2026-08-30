@@ -14,14 +14,19 @@
 #include <string>
 
 #include <BRep_Tool.hxx>
+#include <BRepAdaptor_Curve.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepGProp.hxx>
 #include <Bnd_Box.hxx>
+#include <GeomAbs_CurveType.hxx>
 #include <GProp_GProps.hxx>
 #include <TopAbs_Orientation.hxx>
+#include <TopAbs_State.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
@@ -259,6 +264,94 @@ int main()
         check(!foreignChamfer.ok,
               "chamfer on an edge foreign to the body is refused for the same reason");
         check(foreignChamfer.shape.IsNull(), "with a null shape likewise");
+    }
+
+    // --- bevelAxis: every edge of a box, against an independent oracle -------
+    //
+    // The drag axis for the round-or-flatten gesture, and the one piece of
+    // that gesture no volume check can verify: an axis built from un-flipped
+    // REVERSED normals points INTO the body, so "against the bisector rounds"
+    // sends the drag the opposite physical way - and every assertion that
+    // measures the drag against that same axis still passes, consistently
+    // wrong. Three of a plain box's six faces are REVERSED, which is exactly
+    // enough for the bug to be invisible on some edges and fatal on others.
+    //
+    // gui_smoke drives one edge end to end, but which edge depends on where
+    // the camera left the body, so it can only ever cover whichever one was
+    // reachable. This walks ALL TWELVE, deterministically, with no window:
+    // BRepClass3d_SolidClassifier says a step ALONG the axis leaves the body
+    // and a step against it stays inside, and the dot product against the
+    // edge's own direction says the axis is perpendicular. That pairing is
+    // Phase 4's six-face lockToFace probe, one operation over.
+    {
+        TopTools_IndexedMapOfShape edges;
+        TopExp::MapShapes(box, TopAbs_EDGE, edges);
+        check(edges.Extent() == 12, "the known box has twelve edges to walk");
+
+        BRepClass3d_SolidClassifier classifier(box);
+        int derived = 0;
+        int outwardCorrect = 0;
+        int perpendicular = 0;
+        // Well inside the 10 mm thickness, so a step either way lands in open
+        // material rather than on another face.
+        const double kStep = 1.0;
+        for (int i = 1; i <= edges.Extent(); ++i) {
+            const TopoDS_Edge edge = TopoDS::Edge(edges(i));
+            gp_Pnt centre;
+            gp_Dir outward;
+            if (!bevelAxis(box, edge, centre, outward)) continue;
+            ++derived;
+
+            classifier.Perform(centre.Translated(gp_Vec(outward) * kStep), 1.0e-7);
+            const bool leaves = classifier.State() == TopAbs_OUT;
+            classifier.Perform(centre.Translated(gp_Vec(outward) * -kStep), 1.0e-7);
+            const bool enters = classifier.State() == TopAbs_IN;
+            if (leaves && enters) ++outwardCorrect;
+
+            TopoDS_Vertex v1, v2;
+            TopExp::Vertices(edge, v1, v2);
+            const gp_Vec along(BRep_Tool::Pnt(v1), BRep_Tool::Pnt(v2));
+            if (along.Magnitude() > 1.0e-7 &&
+                std::fabs(gp_Vec(outward).Dot(gp_Vec(gp_Dir(along)))) < 1.0e-9)
+                ++perpendicular;
+        }
+        check(derived == 12, "an axis is derived for every one of them");
+        check(outwardCorrect == 12,
+              "and every axis points OUT of the body and into it the other way, so "
+              "\"drag inward rounds\" means inward on all twelve");
+        check(perpendicular == 12,
+              "with no component along the edge on any of them, so the arrow cannot "
+              "slide off the edge it belongs to");
+    }
+    {
+        // The refusals, so the twelve above are not the only shape this
+        // function is ever asked about.
+        gp_Pnt centre;
+        gp_Dir outward;
+        check(!bevelAxis(TopoDS_Shape(), TopoDS_Edge(), centre, outward),
+              "a null body and edge derive no axis");
+        TopExp_Explorer distantEdges(distantBox, TopAbs_EDGE);
+        check(distantEdges.More(), "the distant box has an edge to offer");
+        check(!bevelAxis(box, TopoDS::Edge(distantEdges.Current()), centre, outward),
+              "nor does an edge that belongs to some other body");
+
+        // A curved edge: one drag axis needs one perpendicular, and an edge
+        // whose direction changes along its length has none. The rounded body
+        // from the fillet block above is where one exists.
+        const BooleanResult rounded = filletEdge(box, longEdge, 3.0);
+        check(rounded.ok, "a rounded body for the curved-edge refusal");
+        if (rounded.ok) {
+            int curved = 0;
+            int curvedDerived = 0;
+            for (TopExp_Explorer it(rounded.shape, TopAbs_EDGE); it.More(); it.Next()) {
+                const TopoDS_Edge candidate = TopoDS::Edge(it.Current());
+                if (BRepAdaptor_Curve(candidate).GetType() == GeomAbs_Line) continue;
+                ++curved;
+                if (bevelAxis(rounded.shape, candidate, centre, outward)) ++curvedDerived;
+            }
+            check(curved > 0, "which really does carry curved edges to refuse");
+            check(curvedDerived == 0, "and not one of them derives an axis");
+        }
     }
 
     // --- pullFace on non-trivial topology ------------------------------------

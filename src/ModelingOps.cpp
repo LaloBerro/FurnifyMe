@@ -7,7 +7,9 @@
 
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepLProp_SLProps.hxx>
 #include <BRepAlgoAPI_BooleanOperation.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
@@ -23,6 +25,8 @@
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <GProp_GProps.hxx>
+#include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <GeomAbs_CurveType.hxx>
 #include <GeomAbs_SurfaceType.hxx>
 #include <Geom_Plane.hxx>
 #include <Geom_Surface.hxx>
@@ -32,8 +36,12 @@
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <Standard_Failure.hxx>
 #include <TopAbs_Orientation.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
+#include <TopoDS_Vertex.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <gp_Ax1.hxx>
 #include <gp_Ax3.hxx>
@@ -117,6 +125,42 @@ bool faceBelongsToBody(const TopoDS_Shape& body, const TopoDS_Face& face)
         if (it.Current().IsSame(face)) return true;
     }
     return false;
+}
+
+// The face's OUTWARD normal at (or nearest to) `at`. outwardPlane() above
+// answers the same question for a face that is known planar and is asked
+// about as a whole; this one answers it at a POINT, which is what an edge's
+// neighbour needs - the far side of an earlier fillet is a cylinder, and its
+// normal is a different direction at every point along it.
+//
+// The planar short-circuit is not an optimisation for its own sake: every
+// straight edge of a box-shaped body has two planar faces on it, and
+// bevelAxis() runs on every appStateChanged in the app that drives it.
+bool outwardNormalNear(const TopoDS_Face& face, const gp_Pnt& at, gp_Dir& out)
+{
+    if (face.IsNull()) return false;
+
+    BRepAdaptor_Surface surface(face);
+    gp_Dir normal;
+    if (surface.GetType() == GeomAbs_Plane) {
+        normal = surface.Plane().Axis().Direction();
+    } else {
+        const Handle(Geom_Surface) geometry = BRep_Tool::Surface(face);
+        if (geometry.IsNull()) return false;
+        GeomAPI_ProjectPointOnSurf projector(at, geometry);
+        if (!projector.IsDone() || projector.NbPoints() < 1) return false;
+        double u = 0.0;
+        double v = 0.0;
+        projector.LowerDistanceParameters(u, v);
+        BRepLProp_SLProps properties(surface, u, v, 1, 1.0e-7);
+        if (!properties.IsNormalDefined()) return false;
+        normal = properties.Normal();
+    }
+
+    // The flip, for the third time in this project - see bevelAxis()'s header.
+    if (face.Orientation() == TopAbs_REVERSED) normal.Reverse();
+    out = normal;
+    return true;
 }
 
 }  // namespace
@@ -352,6 +396,58 @@ BooleanResult chamferEdge(const TopoDS_Shape& body, const TopoDS_Edge& edge, dou
                      (e.GetMessageString() ? e.GetMessageString() : "unknown");
     }
     return out;
+}
+
+bool bevelAxis(const TopoDS_Shape& body, const TopoDS_Edge& edge, gp_Pnt& centre,
+               gp_Dir& outward)
+{
+    if (body.IsNull() || edge.IsNull()) return false;
+
+    // Straight only. BRepFilletAPI will round a curved edge perfectly well,
+    // but the gesture this drives measures a drag against ONE fixed axis, and
+    // an edge whose direction changes along its length has no single
+    // perpendicular for that axis to be.
+    if (BRepAdaptor_Curve(edge).GetType() != GeomAbs_Line) return false;
+
+    TopoDS_Vertex first, last;
+    TopExp::Vertices(edge, first, last);
+    if (first.IsNull() || last.IsNull()) return false;
+    const gp_Pnt a = BRep_Tool::Pnt(first);
+    const gp_Pnt b = BRep_Tool::Pnt(last);
+    const gp_Vec along(a, b);
+    if (along.Magnitude() < 1.0e-7) return false;
+    const gp_Pnt midpoint(0.5 * (a.X() + b.X()), 0.5 * (a.Y() + b.Y()),
+                          0.5 * (a.Z() + b.Z()));
+
+    TopTools_IndexedDataMapOfShapeListOfShape edgeToFaces;
+    TopExp::MapShapesAndAncestors(body, TopAbs_EDGE, TopAbs_FACE, edgeToFaces);
+    const int index = edgeToFaces.FindIndex(edge);
+    if (index <= 0) return false;   // not this body's edge at all
+    const TopTools_ListOfShape& faces = edgeToFaces.FindFromIndex(index);
+    // Exactly two. A seam or a free edge has one, and a non-manifold junction
+    // has more; neither has a bisector to drag along.
+    if (faces.Extent() != 2) return false;
+
+    gp_Vec bisector(0.0, 0.0, 0.0);
+    for (const TopoDS_Shape& neighbour : faces) {
+        gp_Dir normal;
+        if (!outwardNormalNear(TopoDS::Face(neighbour), midpoint, normal)) return false;
+        bisector += gp_Vec(normal);
+    }
+
+    // Perpendicular to the edge, by construction rather than by luck - see the
+    // header. On a box the subtraction removes nothing; on a body whose faces
+    // meet the edge at an angle it is what keeps the arrow on the edge.
+    // Braces, not parentheses: `gp_Vec direction(gp_Dir(along))` is a function
+    // declaration, not a variable - C++'s most vexing parse, and MSVC's error
+    // for it names the wrong line.
+    const gp_Vec direction{gp_Dir(along)};
+    bisector -= direction * bisector.Dot(direction);
+    if (bisector.Magnitude() < 1.0e-7) return false;   // opposed normals: no bisector
+
+    centre = midpoint;
+    outward = gp_Dir(bisector);
+    return true;
 }
 
 BooleanResult transformShape(const TopoDS_Shape& body, const gp_Trsf& trsf)
