@@ -3416,6 +3416,8 @@ int main(int argc, char* argv[])
         // The value chip's field is a real, reachable control. childAt
         // identity, not an attribute flag: asserting a flag passes against a
         // control no user can click (CLAUDE.md's rule, learned twice).
+        check(arrow != nullptr && arrow->field() != nullptr,
+              "the pull arrow and its value field exist before the reachability probe");
         if (arrow && arrow->field()) {
             check(view->childAt(arrow->field()->geometry().center()) == arrow->field(),
                   "a real click at the value field's centre finds the field itself");
