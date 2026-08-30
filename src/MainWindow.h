@@ -9,9 +9,11 @@
 #include "SketchController.h"
 #include "UserProgress.h"
 
+class AppBar;
 class ExtrudePreview;
 class OcctViewWidget;
 class QAction;
+class QMenuBar;
 class ToastHost;
 
 class MainWindow : public QMainWindow {
@@ -112,7 +114,15 @@ private slots:
 
 private:
     void buildActions();
-    void buildMenus();
+    // Builds the menus on a QMenuBar this window owns from the start, and
+    // hands it back for the app bar to adopt. Deliberately NOT
+    // QMainWindow::menuBar(): once the app bar is the menu widget, that
+    // accessor cannot find a QMenuBar in the slot and creates a fresh empty
+    // one, whose setMenuBar() then deletes the bar. See AppBar.h.
+    QMenuBar* buildMenus();
+    // Installs the app bar as the window's menu strip, with `menus` inside
+    // it. Must run after buildActions(), whose actions the bar mirrors.
+    void buildAppBar(QMenuBar* menus);
     void buildOverlay();
     void updateActions();
     // Persistent right-hand readout: what mode we are in and what is possible.
@@ -182,6 +192,7 @@ private:
     QAction* myLockFaceAction = nullptr;
     QAction* myUnlockFaceAction = nullptr;
 
+    AppBar* myAppBar = nullptr;
     class ViewportOverlay* myOverlay = nullptr;
     class QLabel* myStateLabel = nullptr;
     class ItemsPanel* myItemsPanel = nullptr;

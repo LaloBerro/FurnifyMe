@@ -175,6 +175,15 @@ public:
     static constexpr double kFovyDeg = 45.0;
 
     CameraController& camera() { return myCamera; }
+    const CameraController& camera() const { return myCamera; }
+
+    // "Top", "Front", ... when the camera is axis-aligned; "Persp" otherwise.
+    // The ONE source of that string. It used to live in AxisGizmo, which
+    // painted it on a chip below the axes; the chip moved into the app bar
+    // and the logic came here, beside the camera it reads, rather than being
+    // copied to its new consumer. Anything that needs the name of the current
+    // view asks this.
+    QString viewLabelText() const;
 
     void setWireframe(bool wireframe);
     bool isWireframe() const { return myWireframe; }

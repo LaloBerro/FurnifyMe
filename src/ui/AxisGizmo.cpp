@@ -23,11 +23,14 @@ constexpr double kRadius = 36.0;      // arm length in pixels
 constexpr double kConeSize = 9.0;     // positive-tip cone
 constexpr double kBallSize = 5.5;     // negative-tip hollow ball
 constexpr double kHitRadius = 11.0;   // click tolerance around a tip
-constexpr int kGizmoHeight = 118;     // area above the label chip
 
+// The widget's own centre. It used to be the centre of the area ABOVE the
+// label chip, which needed the chip's height repeated here; with the chip gone
+// the axes have the whole widget, so this reads the height rather than keeping
+// a second copy of the number AxisGizmo::kHeight already holds.
 QPointF hubCenter(const QWidget& w)
 {
-    return QPointF(w.width() / 2.0, kGizmoHeight / 2.0);
+    return QPointF(w.width() / 2.0, w.height() / 2.0);
 }
 
 }  // namespace
@@ -40,11 +43,12 @@ AxisGizmo::AxisGizmo(OcctViewWidget* view, QWidget* parent)
     setMouseTracking(true);
     setCursor(Qt::PointingHandCursor);
     setFixedSize(sizeHint());
-    // Baseline for this widget's own font() (what the sweep in gui_smoke
-    // checks): the view-name chip painted below is a chip label. A per-widget
-    // stylesheet wins over the app-wide one regardless of selector
-    // specificity, so this sticks reliably rather than fighting the cascade.
-    setStyleSheet(QStringLiteral("font-size: %1pt;").arg(Theme::labelFont().pointSizeF()));
+    // Baseline for this widget's own font() (what the type-scale sweep in
+    // gui_smoke checks): the only text it paints now is the axis letters,
+    // which are badge-sized. A per-widget stylesheet wins over the app-wide
+    // one regardless of selector specificity, so this sticks reliably rather
+    // than fighting the cascade.
+    setStyleSheet(QStringLiteral("font-size: %1pt;").arg(Theme::badgeFont().pointSizeF()));
 
     // Repaint whenever the camera moves, so the gizmo rotates with the scene.
     connect(myView, &OcctViewWidget::cameraChanged, this,
@@ -91,37 +95,6 @@ QPointF AxisGizmo::tipCenter(int axis, bool positive) const
     return hubCenter(*this);
 }
 
-QRectF AxisGizmo::labelRect() const
-{
-    return QRectF(10.0, kGizmoHeight, width() - 20.0, height() - kGizmoHeight - 4.0);
-}
-
-QPointF AxisGizmo::labelCenter() const
-{
-    return labelRect().center();
-}
-
-QString AxisGizmo::labelText() const
-{
-    const CameraState& s = myView->camera().state();
-    const double el = s.elevationDeg;
-    // Azimuth normalized to (-180, 180] for comparison.
-    double az = std::fmod(s.azimuthDeg, 360.0);
-    if (az > 180.0) az -= 360.0;
-    if (az <= -180.0) az += 360.0;
-
-    const double tolerance = 0.5;
-    if (el >= 87.5) return QStringLiteral("Top");
-    if (el <= -87.5) return QStringLiteral("Bottom");
-    if (std::fabs(el) < tolerance) {
-        if (std::fabs(az) < tolerance) return QStringLiteral("Front");
-        if (std::fabs(std::fabs(az) - 180.0) < tolerance) return QStringLiteral("Back");
-        if (std::fabs(az + 90.0) < tolerance) return QStringLiteral("Right");
-        if (std::fabs(az - 90.0) < tolerance) return QStringLiteral("Left");
-    }
-    return QStringLiteral("Persp");
-}
-
 void AxisGizmo::snapToAxis(int axis, bool positive)
 {
     // Clicking a tip views the scene from that axis: the eye moves onto it.
@@ -153,17 +126,6 @@ void AxisGizmo::mousePressEvent(QMouseEvent* event)
     }
 
     const QPointF pos = event->position();
-    if (labelRect().contains(pos)) {
-        CameraState goal = myView->camera().state();
-        goal.azimuthDeg = -45.0;
-        goal.elevationDeg = 30.0;
-        myView->animateTo(goal);
-        // The same pose the Axonometric entry applies, so it is the same
-        // event - a route that changes the view without recording it is how
-        // the gizmo's own hint came back forever.
-        emit viewSnapped();
-        return;
-    }
 
     Tip tips[6];
     computeTips(tips);
@@ -184,29 +146,24 @@ void AxisGizmo::mousePressEvent(QMouseEvent* event)
 void AxisGizmo::mouseMoveEvent(QMouseEvent* event)
 {
     const QPointF pos = event->position();
-    const bool overLabel = labelRect().contains(pos);
 
     int hoverAxis = -1;
     bool hoverPositive = true;
-    if (!overLabel) {
-        Tip tips[6];
-        computeTips(tips);
-        double bestScore = kHitRadius;
-        for (const Tip& tip : tips) {
-            const double d = QLineF(pos, tip.screen).length();
-            if (d < bestScore) {
-                hoverAxis = tip.axis;
-                hoverPositive = tip.positive;
-                bestScore = d;
-            }
+    Tip tips[6];
+    computeTips(tips);
+    double bestScore = kHitRadius;
+    for (const Tip& tip : tips) {
+        const double d = QLineF(pos, tip.screen).length();
+        if (d < bestScore) {
+            hoverAxis = tip.axis;
+            hoverPositive = tip.positive;
+            bestScore = d;
         }
     }
 
-    if (hoverAxis != myHoverAxis || hoverPositive != myHoverPositive ||
-        overLabel != myHoverLabel) {
+    if (hoverAxis != myHoverAxis || hoverPositive != myHoverPositive) {
         myHoverAxis = hoverAxis;
         myHoverPositive = hoverPositive;
-        myHoverLabel = overLabel;
         update();
     }
 }
@@ -214,7 +171,6 @@ void AxisGizmo::mouseMoveEvent(QMouseEvent* event)
 void AxisGizmo::leaveEvent(QEvent* /*event*/)
 {
     myHoverAxis = -1;
-    myHoverLabel = false;
     update();
 }
 
@@ -290,15 +246,4 @@ void AxisGizmo::paintEvent(QPaintEvent* /*event*/)
     painter.setPen(Qt::NoPen);
     painter.setBrush(QColor("#c8c8cc"));
     painter.drawEllipse(centre, 5.0, 5.0);
-
-    // Label chip.
-    const QRectF chip = labelRect();
-    QPainterPath chipPath;
-    chipPath.addRoundedRect(chip, 6.0, 6.0);
-    painter.setBrush(myHoverLabel ? Theme::chipHover() : Theme::chip());
-    painter.drawPath(chipPath);
-    painter.setPen(Theme::text());
-    painter.setFont(Theme::labelFont());
-    painter.drawText(chip, Qt::AlignCenter,
-                     QStringLiteral("≡ ") + labelText());
 }

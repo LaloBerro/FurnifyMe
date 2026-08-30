@@ -828,6 +828,27 @@ void OcctViewWidget::animateTo(const CameraState& goal)
     animation->start(QAbstractAnimation::DeleteWhenStopped);
 }
 
+QString OcctViewWidget::viewLabelText() const
+{
+    const CameraState& state = myCamera.state();
+    const double el = state.elevationDeg;
+    // Azimuth normalized to (-180, 180] for comparison.
+    double az = std::fmod(state.azimuthDeg, 360.0);
+    if (az > 180.0) az -= 360.0;
+    if (az <= -180.0) az += 360.0;
+
+    const double tolerance = 0.5;
+    if (el >= 87.5) return QStringLiteral("Top");
+    if (el <= -87.5) return QStringLiteral("Bottom");
+    if (std::fabs(el) < tolerance) {
+        if (std::fabs(az) < tolerance) return QStringLiteral("Front");
+        if (std::fabs(std::fabs(az) - 180.0) < tolerance) return QStringLiteral("Back");
+        if (std::fabs(az + 90.0) < tolerance) return QStringLiteral("Right");
+        if (std::fabs(az - 90.0) < tolerance) return QStringLiteral("Left");
+    }
+    return QStringLiteral("Persp");
+}
+
 void OcctViewWidget::setViewAxonometric()
 {
     CameraState s = myCamera.state();

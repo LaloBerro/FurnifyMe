@@ -4,6 +4,7 @@
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
 
+#include "AppBar.h"
 #include "AxisGizmo.h"
 #include "ExtrudePreview.h"
 #include "HintBalloon.h"
@@ -80,7 +81,7 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     connect(myView, &OcctViewWidget::faceDoubleClicked, this, &MainWindow::lockToFace);
 
     buildActions();
-    buildMenus();
+    buildAppBar(buildMenus());
     buildOverlay();
 
     myShortcutSheet = new ShortcutSheet(this);
@@ -288,15 +289,21 @@ void MainWindow::buildActions()
             [this] { setDisplayUnit(Measure::Unit::Centimetres); });
 }
 
-void MainWindow::buildMenus()
+QMenuBar* MainWindow::buildMenus()
 {
-    QMenu* fileMenu = menuBar()->addMenu(tr("&File"));
+    // Ours from the start, never the window's auto-created one - see the
+    // declaration in MainWindow.h and the trap at the top of AppBar.h. It is
+    // parented to the window only so it is never briefly a top-level widget;
+    // the app bar's layout adopts it a moment later.
+    auto* bar = new QMenuBar(this);
+
+    QMenu* fileMenu = bar->addMenu(tr("&File"));
     fileMenu->addAction(myExportStepAction);
     fileMenu->addAction(myScreenshotAction);
     fileMenu->addSeparator();
     fileMenu->addAction(tr("E&xit"), this, &QWidget::close);
 
-    QMenu* sketchMenu = menuBar()->addMenu(tr("&Sketch"));
+    QMenu* sketchMenu = bar->addMenu(tr("&Sketch"));
     sketchMenu->addAction(myStartSketchAction);
     sketchMenu->addAction(myFinishSketchAction);
     sketchMenu->addAction(myUndoPointAction);
@@ -305,20 +312,20 @@ void MainWindow::buildMenus()
     sketchMenu->addAction(myLockFaceAction);
     sketchMenu->addAction(myUnlockFaceAction);
 
-    QMenu* editMenu = menuBar()->addMenu(tr("&Edit"));
+    QMenu* editMenu = bar->addMenu(tr("&Edit"));
     editMenu->addAction(myUndoAction);
     editMenu->addAction(myRedoAction);
     editMenu->addSeparator();
     editMenu->addAction(myDeleteAction);
 
-    QMenu* modelMenu = menuBar()->addMenu(tr("&Model"));
+    QMenu* modelMenu = bar->addMenu(tr("&Model"));
     modelMenu->addAction(myExtrudeAction);
     modelMenu->addSeparator();
     modelMenu->addAction(myUnionAction);
     modelMenu->addAction(mySubtractAction);
     modelMenu->addAction(myIntersectAction);
 
-    QMenu* viewMenu = menuBar()->addMenu(tr("&View"));
+    QMenu* viewMenu = bar->addMenu(tr("&View"));
     viewMenu->addAction(myFitAction);
     viewMenu->addSeparator();
     viewMenu->addAction(tr("&Axonometric"), QKeySequence(Qt::Key_0), this, [this] {
@@ -349,7 +356,7 @@ void MainWindow::buildMenus()
     unitsMenu->addAction(myUnitsMillimetresAction);
     unitsMenu->addAction(myUnitsCentimetresAction);
 
-    QMenu* helpMenu = menuBar()->addMenu(tr("&Help"));
+    QMenu* helpMenu = bar->addMenu(tr("&Help"));
 
     myShortcutsAction = new QAction(tr("Keyboard Shortcuts"), this);
     // Both bindings the design calls for. F1 is what people reach for without
@@ -384,6 +391,52 @@ void MainWindow::buildMenus()
         // not, so a Show tips again under a live toast left the restored
         // guide sitting on top of it.
         if (myOverlay) myOverlay->relayout();
+    });
+
+    return bar;
+}
+
+void MainWindow::buildAppBar(QMenuBar* menus)
+{
+    myAppBar = new AppBar(menus, myDisplayModeAction, myFitAction);
+    // The window takes ownership. Nothing may call menuBar() from here on.
+    setMenuWidget(myAppBar);
+
+    myAppBar->setViewLabel(myView->viewLabelText());
+    myAppBar->setUnitLabel(QString::fromStdString(Measure::unitSuffix()));
+
+    connect(myView, &OcctViewWidget::cameraChanged, myAppBar,
+            [this] { myAppBar->setViewLabel(myView->viewLabelText()); });
+
+    // Exactly what the gizmo's label chip did: the pose the Axonometric entry
+    // applies, recorded as the same event through the same single route, so a
+    // user who only ever presses this button still retires the hint that
+    // teaches named views.
+    connect(myAppBar, &AppBar::viewLabelClicked, this, [this] {
+        CameraState goal = myView->camera().state();
+        goal.azimuthDeg = -45.0;
+        goal.elevationDeg = 30.0;
+        myView->animateTo(goal);
+        recordViewChanged();
+    });
+
+    // The button triggers the OTHER unit's existing action rather than
+    // writing the unit itself: persistence, the items panel, the status bar
+    // and the extrude field's own label then all follow the single path
+    // setDisplayUnit() already owns, and updateActions() stays the one place
+    // that decides anything.
+    connect(myAppBar, &AppBar::unitClicked, this, [this] {
+        if (Measure::displayUnit() == Measure::Unit::Millimetres)
+            myUnitsCentimetresAction->trigger();
+        else
+            myUnitsMillimetresAction->trigger();
+    });
+
+    // The readout follows the one signal every unit-following surface already
+    // refreshes on. It only reads and sets a string, so it cannot recurse
+    // back into updateActions().
+    connect(this, &MainWindow::appStateChanged, myAppBar, [this] {
+        myAppBar->setUnitLabel(QString::fromStdString(Measure::unitSuffix()));
     });
 }
 
@@ -422,13 +475,12 @@ void MainWindow::buildOverlay()
         {myRedoAction,       IconSet::Glyph::Redo},
     });
 
-    cluster(ViewportOverlay::Anchor::RightCenter, {
-        {myDisplayModeAction, IconSet::Glyph::DisplayMode},
-        {myScreenshotAction,  IconSet::Glyph::Screenshot},
-        {myFitAction,         IconSet::Glyph::Fit},
-    });
+    // No right-center cluster: Wireframe and Fit All are buttons in the app
+    // bar now, and Save Screenshot - the least used of the three, and absent
+    // from the design's bar - is reachable from the File menu.
 
-    // The orientation gizmo, then the unit readout beneath it.
+    // The orientation gizmo. Its own label chip and the unit readout that sat
+    // under it are in the app bar; only the axes stay over the viewport.
     auto* gizmo = new AxisGizmo(myView, myView);
     // Clicking an arm of the gizmo is the other way to look from a named
     // direction, and the hint that teaches the gizmo is retired by
@@ -439,25 +491,6 @@ void MainWindow::buildOverlay()
     // overlay a dependency on the whole application.
     connect(gizmo, &AxisGizmo::viewSnapped, this, &MainWindow::recordViewChanged);
     myOverlay->addWidget(gizmo, ViewportOverlay::Anchor::TopRight);
-
-    // Unit readout under the axis gizmo - follows View -> Units rather than
-    // stating a fixed unit. Refreshed from appStateChanged, same as every
-    // other surface this setting reaches (see setDisplayUnit()).
-    auto* units = new QLabel(QString::fromStdString(Measure::unitSuffix()), myView);
-    units->setAlignment(Qt::AlignCenter);
-    // A small chip-styled readout - Theme::labelFont(), the same size as a
-    // chip label.
-    units->setStyleSheet(QStringLiteral(
-                             "background-color: %1; color: %2;"
-                             "border-radius: 6px; padding: 6px 10px; font-size: %3pt;")
-                             .arg(Theme::chip().name(), Theme::textMuted().name())
-                             .arg(Theme::labelFont().pointSizeF()));
-    units->adjustSize();
-    connect(this, &MainWindow::appStateChanged, units, [units] {
-        units->setText(QString::fromStdString(Measure::unitSuffix()));
-        units->adjustSize();
-    });
-    myOverlay->addWidget(units, ViewportOverlay::Anchor::TopRight);
 
     // Every outcome the app reports - success or failure - goes through this
     // one host rather than a modal dialog. It parents itself (and its Toast)

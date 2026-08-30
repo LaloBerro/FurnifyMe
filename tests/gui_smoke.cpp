@@ -25,6 +25,7 @@
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
 #include "SketchController.h"
+#include "AppBar.h"
 #include "AxisGizmo.h"
 #include "ShortcutSheet.h"
 #include "Theme.h"
@@ -35,6 +36,7 @@
 #include "ViewportOverlay.h"
 #include "WalkthroughPanel.h"
 
+#include <QAbstractButton>
 #include <QAction>
 #include <QApplication>
 #include <QDialog>
@@ -45,6 +47,7 @@
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenuBar>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPointF>
@@ -483,6 +486,9 @@ int main(int argc, char* argv[])
     }
 
     // --- axis gizmo -----------------------------------------------------------
+    // The gizmo is axes and tips only now: its painted label chip moved into
+    // the app bar, and the string it showed has one source,
+    // OcctViewWidget::viewLabelText(), which both this block and the bar read.
     {
         AxisGizmo* gizmo = window.findChild<AxisGizmo*>();
         check(gizmo != nullptr, "the viewport has an axis gizmo");
@@ -492,8 +498,8 @@ int main(int argc, char* argv[])
             settle(150);
             check(std::fabs(view->camera().state().elevationDeg - 88.0) < 1e-3,
                   "clicking the +Z cone goes to Top");
-            check(gizmo->labelText().contains(QStringLiteral("Top")),
-                  "the label reads Top when aligned");
+            check(view->viewLabelText() == QStringLiteral("Top"),
+                  "the view label reads Top when aligned");
 
             // Clicking the -Y ball views from behind.
             clickAt(gizmo, gizmo->tipCenter(1, false));
@@ -502,15 +508,170 @@ int main(int argc, char* argv[])
                   std::fabs(view->camera().state().elevationDeg) < 1e-3,
                   "clicking the -Y ball goes to Back");
 
-            // Clicking the label chip returns home to the axonometric view.
-            clickAt(gizmo, gizmo->labelCenter());
+            // The label chip is gone, not merely hidden: the widget shrank to
+            // its axes, and a click on the strip the chip used to occupy is
+            // an ordinary miss now rather than a camera move. Height alone
+            // would pass against a chip still painted over the axes, and the
+            // click alone would pass against a widget that just grew a dead
+            // 30px strip - so both.
+            check(gizmo->height() <= 120,
+                  QStringLiteral("the gizmo shrank to its axes (%1px tall)")
+                      .arg(gizmo->height()));
+            const double azBefore = view->camera().state().azimuthDeg;
+            const double elBefore = view->camera().state().elevationDeg;
+            clickAt(gizmo, QPointF(gizmo->width() / 2.0, gizmo->height() - 1.0));
             settle(150);
-            check(std::fabs(view->camera().state().azimuthDeg - (-45.0)) < 1e-3 &&
-                  std::fabs(view->camera().state().elevationDeg - 30.0) < 1e-3,
-                  "clicking the label returns to the axonometric view");
-            check(gizmo->labelText().contains(QStringLiteral("Persp")),
-                  "the label reads Persp when not axis-aligned");
+            check(std::fabs(view->camera().state().azimuthDeg - azBefore) < 1e-9 &&
+                      std::fabs(view->camera().state().elevationDeg - elBefore) < 1e-9,
+                  "the gizmo no longer carries a label chip to click");
         }
+    }
+
+    // --- the app bar owns the menu strip --------------------------------------
+    // QMainWindow::setMenuWidget puts an arbitrary widget where the menu strip
+    // was, with the window's real QMenuBar living inside it. Two traps make
+    // this worth asserting by pointer identity rather than by class name.
+    //
+    // First, QMainWindow::menuBar() is qobject_cast<QMenuBar*>(the menu-widget
+    // slot) - which now holds an AppBar, so the cast fails and menuBar()
+    // CREATES a new, empty menu bar, whose setMenuBar() then deleteLater()s
+    // the app bar. Nothing in this block calls window.menuBar(); it asks
+    // window.menuWidget() instead, and counts the menu bars to prove no second
+    // one appeared.
+    //
+    // Second, ShortcutSheet enumerates every binding by walking
+    // parentWidget()->findChild<QMenuBar*>() from the window. Reparenting the
+    // bar into the app bar must leave that walk finding the same object; the
+    // sheet's own block later asserts the row count against the same
+    // enumeration, and this one asserts the group titles it can only produce
+    // by reaching the menus at all.
+    {
+        AppBar* bar = qobject_cast<AppBar*>(window.menuWidget());
+        check(bar != nullptr, "the window's menu strip is the app bar");
+
+        const QList<QMenuBar*> bars = window.findChildren<QMenuBar*>();
+        check(bars.size() == 1,
+              QStringLiteral("the window holds exactly one menu bar, not a second "
+                             "created behind the app bar (found %1)")
+                  .arg(bars.size()));
+        if (bar && bars.size() == 1) {
+            check(bars.first() == bar->menus(),
+                  "and it is the app bar's own menu bar, by pointer identity");
+            check(bar->menus()->parentWidget() == bar,
+                  "the menu bar is reparented INTO the bar, not left beside it");
+            check(bar->menus()->isVisible(), "and it is visible there");
+
+            QStringList titles;
+            for (QAction* top : bar->menus()->actions())
+                titles << top->text().remove(QLatin1Char('&'));
+            check(titles.contains(QStringLiteral("File")) &&
+                      titles.contains(QStringLiteral("View")) &&
+                      titles.contains(QStringLiteral("Help")),
+                  QStringLiteral("the menus survived the move (%1)")
+                      .arg(titles.join(QStringLiteral(", "))));
+        }
+
+        ShortcutSheet* sheet = window.findChild<ShortcutSheet*>();
+        check(sheet != nullptr, "the window has a shortcut sheet to enumerate with");
+        if (sheet) {
+            const QStringList painted = sheet->paintedTexts();
+            check(painted.contains(QStringLiteral("Sketch")) &&
+                      painted.contains(QStringLiteral("View")),
+                  "the shortcut sheet still finds the menu bar inside the app bar");
+            check(!painted.contains(QStringLiteral("Other")),
+                  "and no binding fell out of its menu group in the move");
+        }
+
+        QAbstractButton* viewButton =
+            bar ? qobject_cast<QAbstractButton*>(bar->viewLabelButton()) : nullptr;
+        check(viewButton != nullptr, "the bar carries a view label button");
+        if (bar && viewButton) {
+            trigger(window, QStringLiteral("Top"));
+            settle(250);
+            check(view->viewLabelText() == QStringLiteral("Top") &&
+                      viewButton->text() == QStringLiteral("Top"),
+                  QStringLiteral("the bar's view label follows the camera (\"%1\")")
+                      .arg(viewButton->text()));
+
+            // A real hit test, not an event aimed at the widget we hope is
+            // reachable: childAt() is the mechanism a user's click goes
+            // through, and it is what caught an unreachable control once
+            // already (see the walkthrough's skip control).
+            check(bar->childAt(viewButton->geometry().center()) == viewButton,
+                  "childAt() at the view label's centre finds the button itself");
+
+            const int before = window.progress().count("view.changed");
+            clickAt(viewButton, QPointF(viewButton->width() / 2.0,
+                                        viewButton->height() / 2.0));
+            settle(300);
+            check(std::fabs(view->camera().state().azimuthDeg - (-45.0)) < 1e-3 &&
+                      std::fabs(view->camera().state().elevationDeg - 30.0) < 1e-3,
+                  "clicking it returns to the axonometric pose the gizmo's label "
+                  "chip used to");
+            check(view->viewLabelText() == QStringLiteral("Persp") &&
+                      viewButton->text() == QStringLiteral("Persp"),
+                  "and the pose it lands on is labelled Persp");
+            check(window.progress().count("view.changed") == before + 1,
+                  QStringLiteral("...and records view.changed exactly once "
+                                 "(%1 then %2)")
+                      .arg(before)
+                      .arg(window.progress().count("view.changed")));
+        }
+
+        QAbstractButton* unitButton =
+            bar ? qobject_cast<QAbstractButton*>(bar->unitButton()) : nullptr;
+        check(unitButton != nullptr && unitButton->text() == QStringLiteral("mm"),
+              "the bar's unit button reads the display unit");
+        if (bar && unitButton) {
+            check(bar->childAt(unitButton->geometry().center()) == unitButton,
+                  "childAt() at the unit button's centre finds it too");
+        }
+
+        // Wireframe and Fit All left the viewport for the bar, and mirror
+        // their actions rather than storing anything of their own.
+        QAbstractButton* wireButton = nullptr;
+        QAbstractButton* fitButton = nullptr;
+        if (bar) {
+            for (QAbstractButton* candidate : bar->findChildren<QAbstractButton*>()) {
+                if (candidate->text() == QStringLiteral("Wireframe")) wireButton = candidate;
+                if (candidate->text() == QStringLiteral("Fit All")) fitButton = candidate;
+            }
+        }
+        check(wireButton != nullptr && fitButton != nullptr,
+              "Wireframe and Fit All are buttons in the bar");
+        QAction* wireAction = action(window, QStringLiteral("Wireframe"));
+        if (wireButton && wireAction) {
+            check(wireButton->isCheckable() && !wireButton->isChecked(),
+                  "the Wireframe button is a toggle and starts off");
+            wireAction->trigger();
+            settle(120);
+            check(wireButton->isChecked(),
+                  "it mirrors its action when the action is triggered elsewhere");
+            wireAction->trigger();
+            settle(120);
+            check(!wireButton->isChecked(), "and mirrors it back off");
+
+            clickAt(wireButton, QPointF(wireButton->width() / 2.0,
+                                        wireButton->height() / 2.0));
+            settle(150);
+            check(view->isWireframe() && wireButton->isChecked(),
+                  "clicking the button drives the action, not a private state");
+            clickAt(wireButton, QPointF(wireButton->width() / 2.0,
+                                        wireButton->height() / 2.0));
+            settle(150);
+            check(!view->isWireframe() && !wireButton->isChecked(),
+                  "and drives it back, leaving the viewport shaded");
+        }
+        if (fitButton) {
+            check(!fitButton->isCheckable(), "Fit All is not a toggle");
+            check(bar && bar->childAt(fitButton->geometry().center()) == fitButton,
+                  "childAt() at Fit All's centre finds the button");
+        }
+
+        // Save Screenshot is menu-only from here on: it kept no bar button,
+        // and the right-center chip cluster it shared went away with it.
+        check(action(window, QStringLiteral("Save Screenshot...")) != nullptr,
+              "Save Screenshot is still reachable as an action");
     }
 
     // --- above-horizon clicks are rejected, not mirrored behind the eye -------
@@ -1326,6 +1487,12 @@ int main(int argc, char* argv[])
         TopoDS_Face picked;
         TopoDS_Shape pickedBody;
         QPoint screen;
+        // Where the outline's four corners get clicked. Built as real points ON
+        // the candidate's plane and then projected - never as a pixel offset
+        // from the centre. See the comment where they are computed.
+        QPoint outlineCorners[4];
+        // A fifth point on the plane, for the cursor-readout probe.
+        QPoint hoverAt;
         // Projecting a centre of mass says where a face WOULD be if nothing
         // stood in front of it; several bodies exist by now and any of them
         // can occlude any other. So each candidate is clicked and the result
@@ -1357,12 +1524,58 @@ int main(int argc, char* argv[])
                     if (!view->projectToScreen(props.CentreOfMass(), at)) continue;
                     if (!view->rect().adjusted(20, 20, -20, -20).contains(at)) continue;
 
+                    // The points this block will later click, chosen as real
+                    // points ON the candidate's plane and then projected, never
+                    // as a fixed pixel offset from the projected centre.
+                    //
+                    // A vertical face can be almost edge-on to the axonometric
+                    // camera - every vertical face this model offers here is
+                    // within 8 degrees of edge-on - and on such a plane a fixed
+                    // pixel offset walks past the plane's own horizon. The ray
+                    // then meets the plane BEHIND the eye, pointOnSketchPlane()
+                    // rejects it (see the toHit.Dot(direction) <= 0 guard), and
+                    // the click places no point at all. Points built on the
+                    // plane round-trip through projectToScreen() by
+                    // construction, at any grazing angle.
+                    //
+                    // That pixel offsets ever worked here was luck, not design:
+                    // this model is itself built from earlier screen clicks, so
+                    // any change to the viewport's size reshapes it and re-rolls
+                    // that luck. Adding the app bar shortened the viewport by
+                    // 8px and turned the offsets into misses.
+                    const gp_Pln candidatePlane = BRepAdaptor_Surface(candidate).Plane();
+                    Standard_Real cu0 = 0.0, cv0 = 0.0;
+                    ElSLib::Parameters(candidatePlane, props.CentreOfMass(), cu0, cv0);
+                    // Comfortably wider than the snap grid, so the four corners
+                    // stay distinct once snapped.
+                    const double half = 20.0;
+                    const double du[4] = {-half,  half, half, -half};
+                    const double dv[4] = {-half, -half, half,  half};
+                    QPoint corners[4];
+                    bool cornersUsable = true;
+                    for (int c = 0; c < 4 && cornersUsable; ++c) {
+                        const gp_Pnt onPlane =
+                            ElSLib::Value(cu0 + du[c], cv0 + dv[c], candidatePlane);
+                        cornersUsable =
+                            view->projectToScreen(onPlane, corners[c]) &&
+                            view->rect().adjusted(8, 8, -8, -8).contains(corners[c]);
+                    }
+                    if (!cornersUsable) continue;
+                    QPoint hoverCandidate;
+                    if (!view->projectToScreen(
+                            ElSLib::Value(cu0 + half * 0.5, cv0 + half * 0.5, candidatePlane),
+                            hoverCandidate) ||
+                        !view->rect().adjusted(8, 8, -8, -8).contains(hoverCandidate))
+                        continue;
+
                     clickAt(view, QPointF(at));
                     settle(120);
                     const TopoDS_Face got = view->selectedFace();
                     if (!isVerticalPlane(got)) continue;   // occluded, or the pick missed
                     picked = got;
                     screen = at;
+                    std::copy(corners, corners + 4, outlineCorners);
+                    hoverAt = hoverCandidate;
                     break;
                 }
                 if (!picked.IsNull()) break;
@@ -1462,7 +1675,7 @@ int main(int argc, char* argv[])
                 // left the other meaningless in the plane the user is drawing
                 // in. ElSLib::Parameters is what snapToPlaneGrid already uses,
                 // so the two agree by construction.
-                moveTo(view, QPointF(screen + QPoint(30, -20)));
+                moveTo(view, QPointF(hoverAt));
                 settle(120);
                 gp_Pnt cursor;
                 check(view->lastHoverPoint(cursor),
@@ -1496,10 +1709,8 @@ int main(int argc, char* argv[])
                 // centre of mass ends up relative to the face it grew from.
                 trigger(window, QStringLiteral("Start Sketch"));
                 settle(120);
-                clickAt(view, QPointF(screen + QPoint(-60, -40)));
-                clickAt(view, QPointF(screen + QPoint(60, -40)));
-                clickAt(view, QPointF(screen + QPoint(60, 40)));
-                clickAt(view, QPointF(screen + QPoint(-60, 40)));
+                for (const QPoint& corner : outlineCorners)
+                    clickAt(view, QPointF(corner));
                 settle(120);
                 check(window.sketch().pointCount() == 4,
                       "four points land on the locked face");
@@ -1734,10 +1945,13 @@ int main(int argc, char* argv[])
                     check(window.lockToFace(picked),
                           "the face locks again once nothing is pending");
                     trigger(window, QStringLiteral("Start Sketch"));
-                    clickAt(view, QPointF(screen + QPoint(-60, -40)));
-                    clickAt(view, QPointF(screen + QPoint(60, -40)));
-                    clickAt(view, QPointF(screen + QPoint(60, 40)));
-                    clickAt(view, QPointF(screen + QPoint(-60, 40)));
+                    // The same plane-derived corners the first outline used,
+                    // and for the same reason - this face is nearly edge-on,
+                    // so a pixel offset from its centre is not reliably a
+                    // point on it. Nothing has moved the camera since they
+                    // were projected.
+                    for (const QPoint& corner : outlineCorners)
+                        clickAt(view, QPointF(corner));
                     trigger(window, QStringLiteral("Finish Sketch"));
                     settle(150);
                     check(window.hasPendingFace(),
@@ -2040,6 +2254,41 @@ int main(int argc, char* argv[])
         const QString beforeItems = items ? items->rowTextAt(0) : QString();
         check(beforeItems.contains(QStringLiteral("mm")),
               QStringLiteral("the panel reads in millimetres (\"%1\")").arg(beforeItems));
+
+        // The bar's unit button is not a second unit-writing path: it triggers
+        // the OTHER unit's existing QAction, so persistence, the items panel,
+        // the status bar and the extrude field's label all follow the one
+        // route Phase 4 built. Asserting the menu action's checked state after
+        // each click is what proves that - a private toggle inside the button
+        // would move the label and leave the menu behind.
+        AppBar* unitBar = qobject_cast<AppBar*>(window.menuWidget());
+        QAbstractButton* unitButton =
+            unitBar ? qobject_cast<QAbstractButton*>(unitBar->unitButton()) : nullptr;
+        check(unitButton != nullptr && unitButton->text() == QStringLiteral("mm"),
+              "the bar's unit button starts on millimetres");
+        if (unitButton && mm && cm) {
+            clickAt(unitButton, QPointF(unitButton->width() / 2.0,
+                                        unitButton->height() / 2.0));
+            settle(200);
+            check(unitButton->text() == QStringLiteral("cm"),
+                  QStringLiteral("clicking it switches to centimetres (\"%1\")")
+                      .arg(unitButton->text()));
+            check(cm->isChecked() && !mm->isChecked(),
+                  "and it went through the Units actions, not a private toggle");
+            check(items && items->rowTextAt(0).contains(QStringLiteral("cm")),
+                  QStringLiteral("the items panel follows the button (\"%1\")")
+                      .arg(items ? items->rowTextAt(0) : QString()));
+
+            clickAt(unitButton, QPointF(unitButton->width() / 2.0,
+                                        unitButton->height() / 2.0));
+            settle(200);
+            check(unitButton->text() == QStringLiteral("mm"),
+                  "clicking it again cycles back to millimetres");
+            check(mm->isChecked() && !cm->isChecked(),
+                  "the Units actions came back with it");
+            check(items && items->rowTextAt(0).contains(QStringLiteral("mm")),
+                  "and so did the items panel");
+        }
 
         if (cm) {
             cm->trigger();
@@ -2557,6 +2806,32 @@ int main(int argc, char* argv[])
                   .arg(tipOffenders.isEmpty() ? QStringLiteral("none")
                                               : tipOffenders.join(QStringLiteral(", "))));
 
+        // The app bar's wordmark and its buttons' labels are painted, and the
+        // two readouts carry no QAction of their own, so neither sweep above
+        // can see them.
+        AppBar* sweptBar = qobject_cast<AppBar*>(window.menuWidget());
+        check(sweptBar != nullptr, "the app bar is there to sweep");
+        if (sweptBar) {
+            const QStringList barTexts = sweptBar->paintedTexts();
+            check(barTexts.contains(sweptBar->wordmark()) && barTexts.size() >= 5,
+                  QStringLiteral("the bar exposes its painted copy - wordmark and "
+                                 "every button (%1)")
+                      .arg(barTexts.join(QStringLiteral(", "))));
+            QStringList barOffenders;
+            for (const QString& text : barTexts) {
+                for (const QString& word : banned) {
+                    if (text.contains(word, Qt::CaseInsensitive))
+                        barOffenders << (text + QStringLiteral(" [") + word +
+                                         QStringLiteral("]"));
+                }
+            }
+            check(barOffenders.isEmpty(),
+                  QStringLiteral("no app bar text uses a banned word (%1)")
+                      .arg(barOffenders.isEmpty()
+                               ? QStringLiteral("none")
+                               : barOffenders.join(QStringLiteral(", "))));
+        }
+
         // The walkthrough panel's text - title, skip control, and steps - is
         // all painted, not put on any action text or tooltip, so none of the
         // loops above ever see any of it. paintedTexts() is the full set, not
@@ -2758,8 +3033,8 @@ int main(int argc, char* argv[])
             // The pose the Axonometric view leaves behind is precisely the one
             // the gizmo calls "Persp", which is why the old pose-based
             // condition could never retire this hint from this route.
-            check(axoGizmo->labelText().contains(QStringLiteral("Persp")),
-                  "and the camera it leaves is still one the gizmo labels Persp");
+            check(axoProbe.view()->viewLabelText() == QStringLiteral("Persp"),
+                  "and the camera it leaves is still one the view label calls Persp");
             check(!axoHint->isVisible() && axoHint->currentHint().isEmpty(),
                   "the hint retires all the same - it reads the recorded event, "
                   "not the camera pose");
