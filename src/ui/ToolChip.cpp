@@ -15,12 +15,27 @@ constexpr int kPadY = 8;
 constexpr int kGap = 8;
 constexpr int kRadius = 6;
 constexpr double kFocusRingWidth = 2.0;
+// The IconOnly body, per the plan: a 34x34 square of painted card. The glyph
+// inside it stays kIcon, the same 16px every other chip and bar button draws -
+// IconSet renders exact pixmaps at 16/24/32/48, so 16 is a crisp rendering
+// rather than a scaled one, and the labelled chip's own body is 32px tall
+// around the same glyph, so the two read as the same control at two widths.
+constexpr int kIconOnlySide = 34;
 }  // namespace
 
-ToolChip::ToolChip(QAction* action, IconSet::Glyph glyph, QWidget* parent)
+ToolChip::ToolChip(QAction* action, IconSet::Glyph glyph, ChipMode mode, QWidget* parent)
     : QAbstractButton(parent)
     , myAction(action)
+    , myMode(mode)
 {
+    if (myMode == ChipMode::IconOnly) {
+        // The rail stretches to the viewport's full height and distributes
+        // the slack through one stretch item; a chip that let a QVBoxLayout
+        // squeeze or grow it would turn that slack into fourteen slightly
+        // different buttons instead. Fixed in both directions, so the square
+        // is a square whatever the container does.
+        setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    }
     setAttribute(Qt::WA_Hover, true);
     setCursor(Qt::PointingHandCursor);
     setIcon(IconSet::icon(glyph));
@@ -42,11 +57,26 @@ ToolChip::ToolChip(QAction* action, IconSet::Glyph glyph, QWidget* parent)
 
 void ToolChip::syncFromAction()
 {
-    setText(myAction->text().remove(QLatin1Char('&')));
+    const QString label = myAction->text().remove(QLatin1Char('&'));
+    setText(label);
     setEnabled(myAction->isEnabled());
     setCheckable(myAction->isCheckable());
     setChecked(myAction->isChecked());
-    setToolTip(myAction->toolTip());
+
+    QString tip = myAction->toolTip();
+    if (myMode == ChipMode::IconOnly) {
+        // An icon-only button paints no name, so the tooltip has to carry
+        // one. It is COMPOSED from the action's own two strings - its label
+        // and its existing tooltip, which is already where the shortcut
+        // lives - rather than written here: no new copy enters the app, and
+        // the vocabulary sweep still sees words it has always seen. The
+        // startsWith guard is what stops "Undo" being followed by "Undo the
+        // last change to your bodies (Ctrl+Z)"; several actions already open
+        // with their own name and do not need it twice.
+        if (tip.isEmpty())              tip = label;
+        else if (!tip.startsWith(label)) tip = label + QLatin1Char('\n') + tip;
+    }
+    setToolTip(tip);
 
     myShortcut = myAction->shortcut().toString(QKeySequence::NativeText);
     updateGeometry();
@@ -55,19 +85,51 @@ void ToolChip::syncFromAction()
 
 QSize ToolChip::sizeHint() const
 {
+    // Grown by Theme::surfaceShadowMargin() per side in both modes. That is
+    // zero - the family paints no shadow and reserves no room for one (see
+    // Theme.h) - so a chip's widget rect and its painted card coincide. The
+    // arithmetic stays rather than being folded away: it is the same
+    // compensation ToolCluster, AppBar and ViewportOverlay express, and
+    // collapsing it in one place would leave four call sites disagreeing
+    // about whether the scheme exists.
+    const int margin = Theme::surfaceShadowMargin();
+    if (myMode == ChipMode::IconOnly) {
+        // No text is measured because none is painted: the label and the
+        // shortcut are in the tooltip.
+        return QSize(kIconOnlySide + margin * 2, kIconOnlySide + margin * 2);
+    }
+
     // Measured with the same fonts paintEvent() actually draws with below -
     // the label at labelFont(), the shortcut badge at badgeFont().
     const QFontMetrics labelMetrics(Theme::labelFont());
     const QFontMetrics badgeMetrics(Theme::badgeFont());
     int width = kPadX + kIcon + kGap + labelMetrics.horizontalAdvance(text()) + kPadX;
     if (!myShortcut.isEmpty()) width += kGap + badgeMetrics.horizontalAdvance(myShortcut) + 8;
-    return QSize(width, kIcon + kPadY * 2);
+    return QSize(width + margin * 2, kIcon + kPadY * 2 + margin * 2);
 }
 
 void ToolChip::paintEvent(QPaintEvent* /*event*/)
 {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
+
+    // `body` is the visible card, inset from this widget's own bounds by
+    // Theme::surfaceShadowMargin() - the margin sizeHint() reserved above,
+    // which is zero, so the two are the same rectangle today. Every rect
+    // below is body-relative rather than rect()-relative anyway, so should
+    // that margin ever return, everything painted stays on the card while
+    // hit-testing the margin still lands on the chip.
+    const int margin = Theme::surfaceShadowMargin();
+    const QRect body = rect().adjusted(margin, margin, -margin, -margin);
+
+    // No Theme::paintSurface() call here, deliberately. It fills `body` with
+    // panel() and strokes border() around it - and the two statements below
+    // do exactly that again: the fill in this chip's own state colour over an
+    // identical rounded path, the border through the identical crisp-border
+    // idiom. Calling it first painted a panel() rectangle not one pixel of
+    // which survived. A chip belongs to the floating-surface family by
+    // wearing the family's fill, border and radius, not by routing through a
+    // call whose every effect it overwrites.
 
     QColor background = Theme::chip();
     if (!isEnabled())        background = Theme::chip().darker(115);
@@ -76,35 +138,60 @@ void ToolChip::paintEvent(QPaintEvent* /*event*/)
     else if (myHovered)      background = Theme::chipHover();
 
     QPainterPath path;
-    path.addRoundedRect(rect(), kRadius, kRadius);
+    path.addRoundedRect(body, kRadius, kRadius);
     painter.fillPath(path, background);
+    // 1px border(), always - not just when checked. Through Theme's one
+    // crisp-border idiom: stroked on the integer path this used to use, a chip's border painted
+    // two columns at half intensity, which was invisible until it sat inside
+    // the rail's own crisp card.
+    Theme::drawCrispBorder(painter, QRectF(body), Theme::border(), kRadius);
 
     if (isChecked()) {
-        painter.setPen(QPen(Theme::accent(), 1.5));
-        painter.drawPath(path);
+        // A second, inset ring - not a replacement for the border above.
+        // Checked reads as "bordered, plus marked", not "a differently
+        // coloured border instead of the usual one".
+        Theme::drawCrispBorder(painter, QRectF(body).adjusted(2, 2, -2, -2),
+                               Theme::accent(), kRadius - 2);
     }
 
-    const QRect iconRect(kPadX, (height() - kIcon) / 2, kIcon, kIcon);
+    // The glyph. Centred in the body when there is nothing beside it,
+    // left-padded when a label follows. It is the SAME QIcon and the same
+    // Normal/Disabled mode selection in both modes, so an icon-only chip's
+    // disabled state dims exactly as a labelled one's does - there is no
+    // second dimming rule to keep in step.
+    const QRect iconRect(myMode == ChipMode::IconOnly
+                             ? body.left() + (body.width() - kIcon) / 2
+                             : body.left() + kPadX,
+                         body.top() + (body.height() - kIcon) / 2, kIcon, kIcon);
     icon().paint(&painter, iconRect, Qt::AlignCenter,
                  isEnabled() ? QIcon::Normal : QIcon::Disabled);
 
-    painter.setFont(Theme::labelFont());
-    painter.setPen(isEnabled() ? Theme::text() : Theme::textDisabled());
-    const int textLeft = kPadX + kIcon + kGap;
-    painter.drawText(QRect(textLeft, 0, width() - textLeft - kPadX, height()),
-                     Qt::AlignVCenter | Qt::AlignLeft, text());
+    // An icon-only chip stops here: its label and shortcut are in the
+    // tooltip syncFromAction() composed, not on the card.
+    if (myMode == ChipMode::Labelled) {
+        painter.setFont(Theme::labelFont());
+        painter.setPen(isEnabled() ? Theme::text() : Theme::textDisabled());
+        const int textLeft = body.left() + kPadX + kIcon + kGap;
+        painter.drawText(
+            QRect(textLeft, body.top(), body.right() - kPadX - textLeft + 1, body.height()),
+            Qt::AlignVCenter | Qt::AlignLeft, text());
 
-    if (!myShortcut.isEmpty()) {
-        painter.setFont(Theme::badgeFont());
-        painter.setPen(Theme::textMuted());
-        painter.drawText(QRect(0, 0, width() - kPadX, height()),
-                         Qt::AlignVCenter | Qt::AlignRight, myShortcut);
+        if (!myShortcut.isEmpty()) {
+            painter.setFont(Theme::badgeFont());
+            // Dims with the label and the glyph when disabled - the three read
+            // as one unit going dark together, not two dimming while the badge
+            // stays lit.
+            painter.setPen(isEnabled() ? Theme::textMuted() : Theme::textDisabled());
+            painter.drawText(QRect(body.left(), body.top(), body.width() - kPadX, body.height()),
+                             Qt::AlignVCenter | Qt::AlignRight, myShortcut);
+        }
     }
 
     // Keyboard focus must be visible - a focus state nobody can see is an
-    // accessibility defect, not a polish item. Drawn last, inset from the
-    // checked-state border above rather than traced over it: a checked AND
-    // focused chip must show both rings, not just one overdrawing the other.
+    // accessibility defect, not a polish item. Drawn last, inset further
+    // than the checked-state ring above (4px vs. 2px, both from `body`)
+    // rather than traced over it: a checked AND focused chip must show both
+    // rings, not just one overdrawing the other.
     //
     // Deliberately window()->focusWidget() rather than hasFocus(): hasFocus()
     // (and QApplication::focusWidget()) answer for the whole application, and
@@ -128,11 +215,8 @@ void ToolChip::paintEvent(QPaintEvent* /*event*/)
         const bool active = window()->isActiveWindow();
         const QColor ringColor = active ? Theme::focusRing() : Theme::focusRingMuted();
         const double ringWidth = active ? kFocusRingWidth : kFocusRingWidth - 0.5;
-        QPainterPath ring;
-        ring.addRoundedRect(rect().adjusted(2, 2, -2, -2), kRadius - 2, kRadius - 2);
-        painter.setPen(QPen(ringColor, ringWidth));
-        painter.setBrush(Qt::NoBrush);
-        painter.drawPath(ring);
+        Theme::drawCrispBorder(painter, QRectF(body).adjusted(4, 4, -4, -4),
+                               ringColor, kRadius - 4, ringWidth);
     }
 }
 

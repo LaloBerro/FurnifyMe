@@ -6,19 +6,19 @@
 #include "Theme.h"
 #include "Toast.h"
 #include "UserProgress.h"
-#include "WalkthroughPanel.h"
+#include "ViewportOverlay.h"
 
 #include <algorithm>
+#include <vector>
 
 #include <QFontMetrics>
 #include <QMouseEvent>
 #include <QPainter>
-#include <QPainterPath>
 
 namespace {
 constexpr int kPad = 12;
 constexpr int kWidth = 250;
-constexpr int kClearance = 8;   // gap left when stepping around the guide
+constexpr int kClearance = 8;   // gap left when stepping around an obstacle
 
 const QString kBooleanEvent = QStringLiteral("boolean.completed");
 const QString kFaceModeEvent = QStringLiteral("faceMode.used");
@@ -103,8 +103,13 @@ QString HintBalloon::textForEvent(const QString& event) const
                   "out of the first, Intersect keeps only the overlap.");
     }
     if (event == kFaceModeEvent) {
-        return tr("Switch to Select Faces to pick one face at a time instead of a "
-                  "whole body.");
+        // Amended for the rail: the chip this used to name painted its own
+        // label ("Select Faces") right on the viewport. The rail is
+        // icon-only - the label moved into the chip's tooltip - so the old
+        // wording pointed at text that appears nowhere on screen. The fix is
+        // to locate the control instead of merely naming it.
+        return tr("Switch to Select Faces — on the rail at the left edge — to "
+                  "pick one face at a time instead of a whole body.");
     }
     if (event == kViewChangedEvent) {
         return tr("Click an arm of the gizmo, top right, to look from that direction. "
@@ -184,39 +189,113 @@ void HintBalloon::reposition()
     const QFontMetrics metrics(Theme::bodyFont());
     const QRect bounds = metrics.boundingRect(QRect(0, 0, kWidth - kPad * 2, 1000),
                                               Qt::TextWordWrap, myText);
-    resize(kWidth, bounds.height() + kPad * 2 + 22);
+    // Grown by Theme::surfaceShadowMargin() per side beyond the content size
+    // computed above. That margin is zero - the family paints no shadow and
+    // reserves no room for one (see Theme.h) - so this balloon's widget rect
+    // and its painted card are the same rectangle, and paintEvent() applies
+    // the same zero on the inside. No sibling control depends on this
+    // widget's geometry, unlike
+    // WalkthroughPanel's skip pill or Toast's Undo pill, so there is nothing
+    // else here to keep in step.
+    const int margin = Theme::surfaceShadowMargin();
+    resize(kWidth + margin * 2, bounds.height() + kPad * 2 + 22 + margin * 2);
 
     int x = (parentWidget()->width() - width()) / 2;
     int y = parentWidget()->height() - height() - 90;
 
-    // The walkthrough guide occupies the bottom-right corner of this same
-    // viewport, and below roughly 800 px of viewport width the centred
-    // balloon runs straight into it. That is reachable in practice, not a
-    // theoretical narrow-window case: Show tips again restores the guide
-    // while a hint is up. Overlap would be worse than it looks, because
-    // ViewportOverlay::relayout() raises the guide back above the balloon
-    // while the balloon is still the click target underneath it. So step
-    // aside - to the left of an obstacle when that fits, above it when it
-    // does not. A toast lands in the same bottom strip whenever an outcome
-    // is reported while a hint is already up, so it steps aside by the same
-    // rule rather than a second mechanism invented just for it.
+    // Everything the overlay has anchored - the walkthrough guide bottom
+    // right, the tool rail down the whole left edge, the axis gizmo top
+    // right - asked for as ViewportOverlay::occupiedRects() rather than by
+    // naming the widget classes this file happens to know about. It used to
+    // name WalkthroughPanel by type, which meant it could not see the rail
+    // at all: ToastHost was already asking the overlay, and the two now
+    // avoid the same set of obstacles by the same route, so a surface added
+    // later is stepped around for free instead of becoming the next
+    // collision to discover.
+    std::vector<QRect> obstacles;
+    if (const ViewportOverlay* overlay = parentWidget()->findChild<ViewportOverlay*>())
+        obstacles = overlay->occupiedRects();
+
+    // Anything pinned to the LEFT half raises a floor this balloon may not
+    // cross, exactly as ToastHost's band solver treats one. Stepping left is
+    // the wrong move for a left-edge obstacle and there is now a permanent
+    // one: the rail. Without the floor, "step left of the guide" put the
+    // balloon at x=8 - underneath the rail - at viewport widths around
+    // 585-640, which is reachable the moment Show tips again restores the
+    // guide on a narrow window.
+    //
+    // Only obstacles sharing this balloon's own horizontal BAND raise it, the
+    // same rule ToastHost's solver applies. Without that clause every
+    // left-hand card is treated as a full-height wall, and the items drawer
+    // is not one: it is a top-left card, the balloon lives at the bottom, and
+    // on any viewport tall enough for the two never to meet it was still
+    // shoving the balloon out to the drawer's right edge - far enough, on a
+    // narrow window, to hang it off the right of the viewport. The rail is a
+    // genuine spine and shares every band there is, so it is unaffected;
+    // that is the difference the band test is there to draw.
+    auto floorForBand = [&](int bandTop) {
+        int floorX = 0;
+        for (const QRect& obstacle : obstacles) {
+            if (obstacle.bottom() < bandTop || obstacle.top() > bandTop + height() - 1)
+                continue;
+            if (obstacle.center().x() < parentWidget()->width() / 2)
+                floorX = std::max(floorX, obstacle.right() + 1 + kClearance);
+        }
+        return floorX;
+    };
+
+    int leftFloor = floorForBand(y);
+    x = std::max(x, leftFloor);
+
+    // Overlap with what is left would be worse than it looks, because
+    // ViewportOverlay::relayout() raises every anchored widget back above
+    // this one while the balloon is still the click target underneath. So
+    // step aside - to the left of an obstacle when that fits without
+    // crossing the floor, above it when it does not.
     auto stepAside = [&](const QRect& obstacle) {
         if (!QRect(x, y, width(), height()).intersects(obstacle)) return;
         const int beside = obstacle.left() - kClearance - width();
-        if (beside >= kClearance) {
+        if (beside >= kClearance && beside >= leftFloor) {
             x = beside;
         } else {
             // Never above the top edge: on a viewport too short for both,
             // a balloon nudged off-screen teaches nobody anything.
             y = std::max(0, obstacle.top() - kClearance - height());
+            // The floor is a property of the band, so moving bands re-asks
+            // for it: the row this balloon has just climbed into can be
+            // occupied on the left by things the row below was not.
+            leftFloor = floorForBand(y);
+            x = std::max(x, leftFloor);
         }
     };
 
-    const WalkthroughPanel* guide = parentWidget()->findChild<WalkthroughPanel*>();
-    if (guide && guide->isVisible()) stepAside(guide->geometry());
+    for (const QRect& obstacle : obstacles) {
+        // Left-half obstacles are the floor's business, not the step's -
+        // stepping "to the left of" the rail is off the viewport.
+        if (obstacle.center().x() < parentWidget()->width() / 2) continue;
+        stepAside(obstacle);
+    }
 
+    // The toast places itself and is not an overlay entry, so it is still
+    // named here - it lands in this same bottom strip whenever an outcome is
+    // reported while a hint is up.
     const Toast* toast = parentWidget()->findChild<Toast*>();
     if (toast && toast->isVisible()) stepAside(toast->geometry());
+
+    // Never off either edge, whatever the floor and the steps above worked
+    // out between them - but clamped against the FLOOR, not against zero.
+    // Clamping to zero ran after the floor and could undo it: once the
+    // viewport is narrower than leftFloor + width(), the right-edge limit
+    // goes below the floor, the min() picks it, and the max(0, ...) parked
+    // the balloon at x=0 - underneath the rail, which relayout() then raises
+    // back on top of it. That is reachable below about 322px of viewport
+    // width with only the rail in the way, and much sooner than that with the
+    // items drawer open, since the drawer's right edge is the floor then.
+    // When the two genuinely cannot both be satisfied the floor wins: a
+    // balloon whose right end runs past the viewport edge is still readable
+    // and still clickable, while one under the rail is neither.
+    const int rightLimit = std::max(leftFloor, parentWidget()->width() - width());
+    x = std::max(leftFloor, std::min(x, rightLimit));
 
     move(x, y);
     // Re-raised here as well as re-placed: this runs from
@@ -259,20 +338,21 @@ void HintBalloon::paintEvent(QPaintEvent* /*event*/)
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
 
-    QPainterPath panel;
-    panel.addRoundedRect(rect().adjusted(0, 0, -1, -1), 8.0, 8.0);
-    painter.fillPath(panel, Theme::panel());
-    painter.setPen(QPen(Theme::accent(), 1.0));
-    painter.drawPath(panel);
+    // `body` is the visible card, inset from this widget's own bounds by
+    // Theme::surfaceShadowMargin() - see reposition() for the growth.
+    const int margin = Theme::surfaceShadowMargin();
+    const QRect body = rect().adjusted(margin, margin, -margin, -margin);
+    Theme::paintSurface(painter, body, 8);
 
     painter.setFont(Theme::bodyFont());
     painter.setPen(Theme::text());
-    painter.drawText(QRect(kPad, kPad, width() - kPad * 2, height() - kPad * 2 - 20),
+    painter.drawText(QRect(body.left() + kPad, body.top() + kPad, body.width() - kPad * 2,
+                           body.height() - kPad * 2 - 20),
                      Qt::TextWordWrap | Qt::AlignTop | Qt::AlignLeft, myText);
 
     painter.setFont(Theme::labelFont());
     painter.setPen(Theme::accent());
-    painter.drawText(QRect(kPad, height() - 26, width() - kPad * 2, 20),
+    painter.drawText(QRect(body.left() + kPad, height() - margin - 26, body.width() - kPad * 2, 20),
                      Qt::AlignRight | Qt::AlignVCenter, tr("got it"));
 }
 

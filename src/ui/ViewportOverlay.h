@@ -14,7 +14,32 @@ class ViewportOverlay : public QObject {
     Q_OBJECT
 
 public:
-    enum class Anchor { TopLeft, LeftCenter, BottomLeft, TopRight, RightCenter, BottomRight };
+    // The six corner/edge-centre anchors place a widget at its own natural
+    // size. LeftEdge is different in kind: it PINS its widget top to bottom
+    // against the viewport's left edge, so the tool rail is a spine the
+    // viewport is laid out beside rather than a tall card that happens to
+    // start near the top. The rail's own layout decides where the slack goes
+    // (a stretch between Select Edges and Undo puts history at the bottom);
+    // this anchor only decides how much slack there is.
+    //
+    // A visible LeftEdge entry also moves the three left-hand anchors -
+    // TopLeft, LeftCenter, BottomLeft - out past it, so a card anchored there
+    // (the items drawer) lands BESIDE the spine rather than underneath it.
+    // That is a property of the layout rather than of any one caller: it does
+    // not depend on the order entries were added, and it holds for whatever
+    // is anchored left next.
+    enum class Anchor { TopLeft, LeftCenter, BottomLeft, TopRight, RightCenter, BottomRight,
+                        LeftEdge };
+
+    // How far a LeftEdge entry (the rail) stands off the viewport's left,
+    // top and bottom edges - the plan's 14px, two pixels tighter than the
+    // corner/edge-centre anchors' own margin, because a rail pinned to an
+    // edge hugs it while a card floating in a corner stands off it. Public
+    // so a caller that needs to guarantee a LeftEdge entry actually fits -
+    // MainWindow derives the viewport's minimum height from the rail's own
+    // sizeHint() plus two of these - reads the real margin relayout() places
+    // against, rather than a second copy that could drift from it.
+    static constexpr int kEdgeMargin = 14;
 
     explicit ViewportOverlay(QWidget* viewport);
 

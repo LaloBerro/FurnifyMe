@@ -1,11 +1,30 @@
 #pragma once
 // Unity-style orientation gizmo: colored axis cones around a hub, projected
 // live from the camera, each one a button that snaps the view to its axis.
-// Painted with QPainter as an overlay child of the viewport - the OCCT view
-// cube it replaces could only ever look like a box.
+// Painted with QPainter as an overlay child of the viewport - the view cube it
+// replaces could only ever look like a box.
+//
+// It wears the floating-surface family's own card (Theme::paintSurface()),
+// like the rail, the drawer, the guide, the balloon and the toast - at the
+// family's default radius (8), the same rounding every other card in the
+// shell carries. It used to fill itself flat with Theme::viewport() instead,
+// on the theory that the panel would disappear against the sky - which it
+// did, right up until the viewport painted a ground grid over its own flat
+// background colour, after which the flat fill read as a lighter box pasted
+// onto the scene. Nothing over this surface is translucent (see Theme.h), so
+// an honest card is the only alternative to a fake one; paintSurface()'s
+// opaque ground fill is what lets this card round its corners without
+// leaving the small triangles outside the rounded shape and inside the
+// widget's own rect unpainted - the reason it no longer needs the radius-zero
+// stopgap it once carried. See AxisGizmo.cpp's paintEvent() for the whole
+// argument.
+//
+// Axes and tips, and nothing else. It used to carry a chip below them naming
+// the current view, and that chip's job - showing the name, and snapping back
+// to the angled view when clicked - moved into the app bar. The string itself
+// has one source, OcctViewWidget::viewLabelText(); this widget no longer
+// knows it exists.
 #include <QPointF>
-#include <QRectF>
-#include <QString>
 #include <QWidget>
 
 class OcctViewWidget;
@@ -19,10 +38,6 @@ public:
     // Screen-space centre of an axis tip: axis 0=X, 1=Y, 2=Z. Exposed so the
     // test suite can click exactly where a user would.
     QPointF tipCenter(int axis, bool positive) const;
-    QPointF labelCenter() const;
-
-    // "Top", "Front", ... when the camera is axis-aligned; "Persp" otherwise.
-    QString labelText() const;
 
 signals:
     // A tip was clicked and the camera is on its way to that axis. The gizmo
@@ -36,9 +51,12 @@ protected:
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void leaveEvent(QEvent* event) override;
-    QSize sizeHint() const override { return QSize(120, 148); }
+    QSize sizeHint() const override { return QSize(120, kHeight); }
 
 private:
+    // The whole widget now: the projected axes and nothing under them.
+    static constexpr int kHeight = 118;
+
     struct Tip {
         int axis = 0;        // 0=X 1=Y 2=Z
         bool positive = true;
@@ -48,11 +66,9 @@ private:
 
     // The six tips for the current camera pose, unsorted.
     void computeTips(Tip tips[6]) const;
-    QRectF labelRect() const;
     void snapToAxis(int axis, bool positive);
 
     OcctViewWidget* myView = nullptr;
     int myHoverAxis = -1;        // -1 none; else axis index
     bool myHoverPositive = true;
-    bool myHoverLabel = false;
 };

@@ -134,12 +134,29 @@ QSize Toast::sizeHint() const
     const QRect bounds = metrics.boundingRect(QRect(0, 0, std::max(textWidth, 1), 1000),
                                               Qt::TextWordWrap, myText);
     const int minHeight = myHasUndo ? kUndoHeight + kPad * 2 : 0;
-    return QSize(kWidth, std::max(bounds.height() + kPad * 2, minHeight));
+    // Grown by Theme::surfaceShadowMargin() per side beyond the content size
+    // computed above. That margin is zero - the family paints no shadow and
+    // reserves no room for one (see Theme.h) - so this card's widget rect and
+    // its painted card are the same rectangle; paintEvent() and undoRect()
+    // apply the same zero on the inside. Kept as arithmetic so every member
+    // of the family still reads as one scheme. ToastHost::reposition()
+    // resizes this widget straight from this return value, the same way
+    // WalkthroughPanel's constructor uses its own sizeHint() directly.
+    const int margin = Theme::surfaceShadowMargin();
+    return QSize(kWidth + margin * 2, std::max(bounds.height() + kPad * 2, minHeight) + margin * 2);
 }
 
 QRect Toast::undoRect() const
 {
-    return QRect(width() - kPad - kUndoWidth, (height() - kUndoHeight) / 2,
+    // Local coordinates within this (now grown) widget - kPad from the
+    // visible card's right edge and vertically centred within the card, not
+    // flush against this widget's own outer bounds. syncUndoGeometry() below
+    // still just translates this by pos(), unchanged - the margin lives
+    // entirely in this one formula, the same pattern as
+    // WalkthroughPanel::skipRect().
+    const int margin = Theme::surfaceShadowMargin();
+    return QRect(width() - margin - kPad - kUndoWidth,
+                margin + (height() - margin * 2 - kUndoHeight) / 2,
                 kUndoWidth, kUndoHeight);
 }
 
@@ -203,18 +220,54 @@ void Toast::paintEvent(QPaintEvent* /*event*/)
     // plain QPainter opacity rather than a QGraphicsEffect. Applies to
     // everything drawn below with this same QPainter: the panel, the
     // message, and the Undo pill alike.
+    //
+    // This is the SINGLE ruled exception to "no widget paints a translucent
+    // pixel over the GL surface" (CLAUDE.md's opaque-family section) - every
+    // other floating card is fully opaque, always. It survives review
+    // because it is not a static translucent surface sitting over the
+    // viewport, which is the case the project's own probe found unreliable:
+    // it is a 160 ms, Theme::motionMs()-driven transition that starts and
+    // ends fully opaque, so the window during which any blending is visible
+    // is transient rather than a resting state. It is also invisible to the
+    // suite's opacity/colour sweeps, which is exactly why it needed calling
+    // out here rather than being caught by them: every gui_smoke probe calls
+    // OcctViewWidget::setAnimationsEnabled(false), which makes
+    // ToastHost::fadeTo() skip straight to the end value instead of animating
+    // through it, so a probe never observes myOpacity at anything but 0 or 1.
     painter.setOpacity(myOpacity);
 
-    QPainterPath panel;
-    panel.addRoundedRect(rect().adjusted(0, 0, -1, -1), 8.0, 8.0);
-    painter.fillPath(panel, Theme::panel());
-    painter.setPen(QPen(myKind == Kind::Failure ? Theme::textMuted() : Theme::accent(), 1.0));
-    painter.drawPath(panel);
+    // `body` is the visible card, inset from this widget's own bounds by
+    // Theme::surfaceShadowMargin() - see sizeHint() for the growth and
+    // undoRect() for the sibling pill that also has to agree on where it
+    // landed.
+    const int margin = Theme::surfaceShadowMargin();
+    const QRect body = rect().adjusted(margin, margin, -margin, -margin);
+    Theme::paintSurface(painter, body, 8);
 
-    const int textWidth = width() - kPad * 2 - (myHasUndo ? kUndoWidth + kPad : 0);
+    // The kind-tinted left stripe - accent() for a Note, danger() for a
+    // Failure. The pre-Graphite border used textMuted() for failures, which
+    // read QUIETER than a routine note - backwards, and danger() documents
+    // itself as the failure colour. Painted
+    // over the shared base rather than replacing it, so the two kinds still
+    // read differently at a glance the way the original spec called for.
+    // Clipped to the card's own rounded outline so the stripe's outer
+    // corners follow paintSurface()'s radius instead of a hard square
+    // corner poking past it.
+    {
+        constexpr int kStripeWidth = 3;
+        QPainterPath cardPath;
+        cardPath.addRoundedRect(body, 8, 8);
+        painter.save();
+        painter.setClipPath(cardPath);
+        painter.fillRect(QRect(body.left(), body.top(), kStripeWidth, body.height()),
+                         myKind == Kind::Failure ? Theme::danger() : Theme::accent());
+        painter.restore();
+    }
+
+    const int textWidth = body.width() - kPad * 2 - (myHasUndo ? kUndoWidth + kPad : 0);
     painter.setFont(Theme::bodyFont());
     painter.setPen(Theme::text());
-    painter.drawText(QRect(kPad, 0, textWidth, height()),
+    painter.drawText(QRect(body.left() + kPad, body.top(), textWidth, body.height()),
                      Qt::TextWordWrap | Qt::AlignVCenter | Qt::AlignLeft, myText);
 
     // Painted here rather than by the sibling UndoControl - see that class's

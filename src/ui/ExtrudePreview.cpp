@@ -25,7 +25,13 @@ constexpr int kLabelHeight = 20;
 constexpr int kFieldHeight = 26;
 constexpr int kHintGap = 6;
 constexpr int kHintHeight = 16;
-constexpr int kMargin = 16;   // matches ViewportOverlay's own edge margin
+// The PAINTED offset from the viewport's top edge - matches what
+// ViewportOverlay's own kMargin targets for the widgets it anchors (see
+// ViewportOverlay.cpp). Both files subtract Theme::surfaceShadowMargin() from
+// it, and that is zero now, so painted edge and widget rect coincide; the
+// subtraction survives in both places as the record of what the number
+// actually measures.
+constexpr int kMargin = 16;
 }  // namespace
 
 ExtrudePreview::ExtrudePreview(MainWindow* window, OcctViewWidget* view)
@@ -39,8 +45,18 @@ ExtrudePreview::ExtrudePreview(MainWindow* window, OcctViewWidget* view)
     // means the field cannot be a child of this widget.
     setAttribute(Qt::WA_NoSystemBackground);
     setAttribute(Qt::WA_TransparentForMouseEvents);
-    setFixedSize(kWidth,
-                 kPad * 2 + kLabelHeight + kFieldHeight + kHintGap + kHintHeight);
+    // Grown by Theme::surfaceShadowMargin() per side beyond the content
+    // size. That margin is zero - the family paints no shadow and reserves no
+    // room for one (see Theme.h) - so this panel's widget rect and its
+    // painted card are the same rectangle; paintEvent(), fieldRect() and
+    // hintRect() apply the same zero on the inside, the same pattern as
+    // WalkthroughPanel's sizeHint() and Toast's.
+    {
+        const int margin = Theme::surfaceShadowMargin();
+        setFixedSize(kWidth + margin * 2,
+                     kPad * 2 + kLabelHeight + kFieldHeight + kHintGap + kHintHeight +
+                         margin * 2);
+    }
 
     myField = new QLineEdit(view);
     // Closes the same class of bug documented on HintBalloon's balloon and
@@ -225,18 +241,32 @@ void ExtrudePreview::reposition()
     // justified. Revisit if this app ever needs to run meaningfully
     // narrower than ~600px.
     const int x = (myView->width() - QWidget::width()) / 2;
-    move(x, kMargin);
+    // kMargin is the PAINTED offset from the viewport's top edge the mockup
+    // wants, but this widget's own bounding box is now bigger than what it
+    // paints (see the constructor) - its top-left sits
+    // Theme::surfaceShadowMargin() further up than the card it draws, so the
+    // widget itself is placed that much higher to keep the painted card at
+    // kMargin, the same compensation ViewportOverlay's own kMargin applies
+    // for the widgets it anchors.
+    move(x, kMargin - Theme::surfaceShadowMargin());
 }
 
 QRect ExtrudePreview::fieldRect() const
 {
-    return QRect(kPad, kPad + kLabelHeight, QWidget::width() - kPad * 2, kFieldHeight);
+    // Local coordinates within this (now grown) widget - margin in from the
+    // top and both sides, the same pattern as WalkthroughPanel::skipRect()
+    // and Toast::undoRect(). syncFieldGeometry() still just translates this
+    // by pos(), unchanged.
+    const int margin = Theme::surfaceShadowMargin();
+    return QRect(margin + kPad, margin + kPad + kLabelHeight,
+                QWidget::width() - margin * 2 - kPad * 2, kFieldHeight);
 }
 
 QRect ExtrudePreview::hintRect() const
 {
-    return QRect(kPad, kPad + kLabelHeight + kFieldHeight + kHintGap,
-                 QWidget::width() - kPad * 2, kHintHeight);
+    const int margin = Theme::surfaceShadowMargin();
+    return QRect(margin + kPad, margin + kPad + kLabelHeight + kFieldHeight + kHintGap,
+                QWidget::width() - margin * 2 - kPad * 2, kHintHeight);
 }
 
 QString ExtrudePreview::labelText() const
@@ -342,9 +372,21 @@ void ExtrudePreview::markInvalid(bool invalid)
     myInvalid = invalid;
     if (!myField) return;
     const QColor border = invalid ? Theme::danger() : Theme::accent();
+    // border-radius: 0, not 4. This field is a SIBLING parented straight to
+    // the viewport (see the header for why it cannot be a child of the panel
+    // it belongs to), so it sits directly on OCCT's on-screen GL surface with
+    // no card of its own underneath. A rounded corner is a corner the
+    // stylesheet does not paint, and over that surface an unpainted pixel is
+    // not transparent - it is whatever the driver left there, which reads as
+    // black. Four small black nubs, the same failure mode that showed up as a
+    // band down the rail before ToolCluster painted its whole rect. The other
+    // rounded cards get away with it because they paint their own opaque
+    // surface; this one has nothing behind it. Square corners on one 26px
+    // field are a smaller price than the nubs, and it is the only control in
+    // the shell in this position.
     myField->setStyleSheet(QStringLiteral(
                                "QLineEdit { background-color: %1; color: %2; "
-                               "border: 1px solid %3; border-radius: 4px; padding: 2px 6px; }")
+                               "border: 1px solid %3; border-radius: 0px; padding: 2px 6px; }")
                                .arg(Theme::chip().name(), Theme::text().name(), border.name()));
 }
 
@@ -358,15 +400,32 @@ void ExtrudePreview::paintEvent(QPaintEvent* /*event*/)
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
 
-    QPainterPath panel;
-    panel.addRoundedRect(rect().adjusted(0, 0, -1, -1), 8.0, 8.0);
-    painter.fillPath(panel, Theme::panel());
-    painter.setPen(QPen(Theme::accent(), 1.0));
-    painter.drawPath(panel);
+    // `body` is the visible card, inset from this widget's own bounds by
+    // Theme::surfaceShadowMargin() - see the constructor for the growth and
+    // fieldRect()/hintRect() for the sibling field that also has to agree
+    // on where it landed. Brings this panel into the same shared family
+    // WalkthroughPanel, HintBalloon, Toast and ShortcutSheet already use,
+    // dropping the unconditional accent() border this used to hand-roll.
+    const int margin = Theme::surfaceShadowMargin();
+    const QRect body = rect().adjusted(margin, margin, -margin, -margin);
+    Theme::paintSurface(painter, body, 8);
+
+    // The one thing this card keeps on top of the shared base: a danger()
+    // outline while the field's current text does not parse or would not
+    // extrude - the same pattern as the toast's kind-tinted stripe. The
+    // field's own border (see markInvalid()) already carries this signal;
+    // the card now echoes it rather than staying accent() regardless.
+    if (myInvalid) {
+        QPainterPath invalidOutline;
+        invalidOutline.addRoundedRect(body, 8, 8);
+        painter.setPen(QPen(Theme::danger(), 1.0));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawPath(invalidOutline);
+    }
 
     painter.setFont(Theme::labelFont());
     painter.setPen(Theme::text());
-    painter.drawText(QRect(kPad, kPad, QWidget::width() - kPad * 2, kLabelHeight),
+    painter.drawText(QRect(body.left() + kPad, body.top(), body.width() - kPad * 2, kLabelHeight),
                      Qt::AlignVCenter | Qt::AlignLeft, labelText());
 
     painter.setFont(Theme::badgeFont());

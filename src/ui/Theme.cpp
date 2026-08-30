@@ -3,7 +3,11 @@
 #include <QApplication>
 #include <QFont>
 #include <QFontDatabase>
+#include <QPainter>
+#include <QPainterPath>
 #include <QPalette>
+
+#include <cmath>
 
 // Deliberately at global scope. Q_INIT_RESOURCE declares the initialiser as an
 // extern at block scope, which binds to the innermost enclosing namespace - so
@@ -21,7 +25,7 @@ namespace Theme {
 
 QColor chrome()       { return QColor("#1b1b1d"); }
 QColor panel()        { return QColor("#232326"); }
-QColor chip()         { return QColor("#2b2b2e"); }
+QColor chip()         { return QColor("#2c2c31"); }
 QColor chipHover()    { return QColor("#34343a"); }
 QColor chipActive()   { return QColor("#3d3d45"); }
 QColor accent()       { return QColor("#3d7eff"); }
@@ -30,8 +34,8 @@ QColor textMuted()    { return QColor("#9a9aa2"); }
 QColor textDisabled() { return QColor("#5c5c64"); }
 QColor border()       { return QColor("#3a3a40"); }
 QColor viewport()     { return QColor("#45454b"); }
-QColor gridMinor()    { return QColor("#3a3a40"); }
-QColor gridMajor()    { return QColor("#4a4a52"); }
+QColor gridMinor()    { return QColor("#3e3e44"); }
+QColor gridMajor()    { return QColor("#4d4d55"); }
 QColor axisX()        { return QColor("#7a4a4a"); }   // muted red
 QColor axisY()        { return QColor("#4a7a4a"); }   // muted green
 QColor sketchPointMarker() { return QColor("#ff4fc3"); } // magenta - unclaimed
@@ -72,6 +76,78 @@ QFont badgeFont() { return scaledFont(kBadgePt, /*bold=*/false); }
 
 int motionMs() { return 160; }
 QEasingCurve motionCurve() { return QEasingCurve(QEasingCurve::OutCubic); }
+
+int surfaceShadowMargin() { return 0; }
+
+void drawCrispBorder(QPainter& p, const QRectF& rect, const QColor& colour,
+                     double radius, double width)
+{
+    // Half the pen width inward, so the stroke's OUTER edge lands on the
+    // outer edge of `rect` and the stroke itself covers whole pixels. The
+    // radius follows the path in, or the corners would bulge by the same
+    // half-pixel the sides just lost.
+    const double inset = width / 2.0;
+    const double r = radius > inset ? radius - inset : 0.0;
+
+    QPainterPath path;
+    path.addRoundedRect(rect.adjusted(inset, inset, -inset, -inset), r, r);
+
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setPen(QPen(colour, width));
+    p.setBrush(Qt::NoBrush);
+    p.drawPath(path);
+    p.restore();
+}
+
+void drawCrispRule(QPainter& p, const QPointF& from, const QPointF& to, const QColor& colour)
+{
+    QPointF a = from;
+    QPointF b = to;
+    // Only the constant coordinate can be snapped: snapping the other one
+    // would shorten the rule by half a pixel at each end for no benefit.
+    if (std::abs(from.y() - to.y()) < 0.001) {
+        const double y = std::floor(from.y()) + 0.5;
+        a.setY(y);
+        b.setY(y);
+    }
+    if (std::abs(from.x() - to.x()) < 0.001) {
+        const double x = std::floor(from.x()) + 0.5;
+        a.setX(x);
+        b.setX(x);
+    }
+
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setPen(QPen(colour, 1.0));
+    p.drawLine(a, b);
+    p.restore();
+}
+
+void paintSurface(QPainter& p, const QRect& rect, int radius, const QColor& ground)
+{
+    // `ground` first, filling `rect` in full - the area a rounded panel does
+    // not reach, at each of its four corners, included. See the header for
+    // why that area cannot be left unpainted over OCCT's GL surface: nothing
+    // behind a Qt child's backing store there means an unpainted pixel reads
+    // as black, not as transparent.
+    p.fillRect(rect, ground);
+
+    // The rounded panel on top - opaque, and no shadow - see the header for
+    // why translucent pixels cannot be painted over OCCT's GL surface either.
+    // The border is then stroked crisply along the panel's outer edge, so the
+    // outermost row and column of the ROUNDED shape are its border rather
+    // than a half-covered blend of border and fill; outside that shape,
+    // within `rect`, is the ground fill above.
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing, true);
+    QPainterPath surface;
+    surface.addRoundedRect(rect, radius, radius);
+    p.fillPath(surface, panel());
+    p.restore();
+
+    drawCrispBorder(p, QRectF(rect), border(), radius);
+}
 
 void apply(QApplication& app)
 {

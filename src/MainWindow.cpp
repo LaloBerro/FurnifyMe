@@ -4,6 +4,7 @@
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
 
+#include "AppBar.h"
 #include "AxisGizmo.h"
 #include "ExtrudePreview.h"
 #include "HintBalloon.h"
@@ -32,7 +33,6 @@
 #include <QLabel>
 #include <QMenuBar>
 #include <QSettings>
-#include <QSplitter>
 #include <QStatusBar>
 #include <QtGlobal>
 
@@ -60,15 +60,16 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     }
 
     myView = new OcctViewWidget(this);
+    // Full bleed: the central widget is the viewport and nothing else. The
+    // items panel used to take a splitter pane out of the window's width;
+    // it is a floating drawer over the viewport now (see buildOverlay()),
+    // which is why there is no longer anything to split.
+    setCentralWidget(myView);
 
-    myItemsPanel = new ItemsPanel(&myDocument, myView, this);
-
-    auto* splitter = new QSplitter(Qt::Horizontal, this);
-    splitter->addWidget(myItemsPanel);
-    splitter->addWidget(myView);
-    splitter->setStretchFactor(1, 1);
-    splitter->setSizes({240, 1000});
-    setCentralWidget(splitter);
+    // Parented to the viewport from birth - buildOverlay() anchors it, and
+    // ViewportOverlay would reparent it anyway, but a card that is a child of
+    // the window until then would flash in the wrong place on the first show.
+    myItemsPanel = new ItemsPanel(&myDocument, myView, myView);
 
     connect(myView, &OcctViewWidget::sketchPointPicked, this, &MainWindow::onSketchPointPicked);
     connect(myView, &OcctViewWidget::sketchCursorMoved, this, &MainWindow::onSketchCursorMoved);
@@ -80,7 +81,7 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     connect(myView, &OcctViewWidget::faceDoubleClicked, this, &MainWindow::lockToFace);
 
     buildActions();
-    buildMenus();
+    buildAppBar(buildMenus());
     buildOverlay();
 
     myShortcutSheet = new ShortcutSheet(this);
@@ -94,6 +95,27 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     // touches no document but still has to reread every dimension the panel
     // shows (see setDisplayUnit()).
     connect(this, &MainWindow::appStateChanged, myItemsPanel, &ItemsPanel::refresh);
+
+    // Connected AFTER the refresh above, so it runs after it: a row added or
+    // removed changes the drawer's height, and the drawer's rectangle is one
+    // of the obstacles the toast, the balloon and the guide place themselves
+    // against - re-laying out here is what keeps that set current between
+    // resizes.
+    //
+    // Its visibility is re-DERIVED from the action here rather than only
+    // being set when the action is toggled. CLAUDE.md's rule, learned twice
+    // already on this viewport (WalkthroughPanel's skip control, Toast's undo
+    // pill): a one-shot hide is not a state, and anything that shows a
+    // widget's siblings wholesale - QWidget::showChildren() on the window's
+    // first show, for one - will happily undo it. Reading it off the action
+    // on every state change means the two cannot drift.
+    //
+    // Only reads state and moves geometry, so it cannot recurse back into
+    // updateActions().
+    connect(this, &MainWindow::appStateChanged, this, [this] {
+        myItemsPanel->setVisible(myItemsPanelAction->isChecked());
+        if (myOverlay) myOverlay->relayout();
+    });
 
     // A dimension label reads through Measure too, so it has to follow a unit
     // switch the way the items panel and the status bar do. DimensionRenderer
@@ -112,8 +134,29 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     connect(myView, &OcctViewWidget::selectionChanged, this,
             [this] { myItemsPanel->showSelection(myView->selectedSolidIds()); });
 
-    // The Items chip and menu entry collapse the panel.
-    connect(myItemsPanelAction, &QAction::toggled, myItemsPanel, &QWidget::setVisible);
+    // The Items rail button, the menu entry and Ctrl+Alt+S all drive the one
+    // action, and the drawer's shown state is read off that action rather
+    // than stored - exactly as every chip mirrors an action rather than
+    // remembering a mode.
+    //
+    // One other thing does call setVisible() on it: ViewportOverlay::addWidget()
+    // show()s whatever it anchors, which is right for every other entry it
+    // takes. The derivation wins rather than the initial show, because the
+    // appStateChanged slot below re-reads the action on every state change -
+    // so an overlay that shows a drawer whose action is unchecked is
+    // corrected before the window is ever on screen. That is the point of
+    // deriving it repeatedly instead of only on toggle.
+    //
+    // Opening or closing it also re-lays the overlay out, because the drawer
+    // is one of the rectangles ViewportOverlay::occupiedRects() reports and
+    // the toast, the balloon and the guide place themselves against that set.
+    // Without this, opening the drawer would leave a live toast sitting
+    // underneath it until the next resize. relayout() only reads and moves
+    // geometry, so it cannot recurse back into updateActions().
+    connect(myItemsPanelAction, &QAction::toggled, this, [this](bool shown) {
+        myItemsPanel->setVisible(shown);
+        if (myOverlay) myOverlay->relayout();
+    });
 
     updateActions();
 
@@ -288,15 +331,21 @@ void MainWindow::buildActions()
             [this] { setDisplayUnit(Measure::Unit::Centimetres); });
 }
 
-void MainWindow::buildMenus()
+QMenuBar* MainWindow::buildMenus()
 {
-    QMenu* fileMenu = menuBar()->addMenu(tr("&File"));
+    // Ours from the start, never the window's auto-created one - see the
+    // declaration in MainWindow.h and the trap at the top of AppBar.h. It is
+    // parented to the window only so it is never briefly a top-level widget;
+    // the app bar's layout adopts it a moment later.
+    auto* bar = new QMenuBar(this);
+
+    QMenu* fileMenu = bar->addMenu(tr("&File"));
     fileMenu->addAction(myExportStepAction);
     fileMenu->addAction(myScreenshotAction);
     fileMenu->addSeparator();
     fileMenu->addAction(tr("E&xit"), this, &QWidget::close);
 
-    QMenu* sketchMenu = menuBar()->addMenu(tr("&Sketch"));
+    QMenu* sketchMenu = bar->addMenu(tr("&Sketch"));
     sketchMenu->addAction(myStartSketchAction);
     sketchMenu->addAction(myFinishSketchAction);
     sketchMenu->addAction(myUndoPointAction);
@@ -305,26 +354,24 @@ void MainWindow::buildMenus()
     sketchMenu->addAction(myLockFaceAction);
     sketchMenu->addAction(myUnlockFaceAction);
 
-    QMenu* editMenu = menuBar()->addMenu(tr("&Edit"));
+    QMenu* editMenu = bar->addMenu(tr("&Edit"));
     editMenu->addAction(myUndoAction);
     editMenu->addAction(myRedoAction);
     editMenu->addSeparator();
     editMenu->addAction(myDeleteAction);
 
-    QMenu* modelMenu = menuBar()->addMenu(tr("&Model"));
+    QMenu* modelMenu = bar->addMenu(tr("&Model"));
     modelMenu->addAction(myExtrudeAction);
     modelMenu->addSeparator();
     modelMenu->addAction(myUnionAction);
     modelMenu->addAction(mySubtractAction);
     modelMenu->addAction(myIntersectAction);
 
-    QMenu* viewMenu = menuBar()->addMenu(tr("&View"));
+    QMenu* viewMenu = bar->addMenu(tr("&View"));
     viewMenu->addAction(myFitAction);
     viewMenu->addSeparator();
-    viewMenu->addAction(tr("&Axonometric"), QKeySequence(Qt::Key_0), this, [this] {
-        myView->setViewAxonometric();
-        recordViewChanged();
-    });
+    viewMenu->addAction(tr("&Axonometric"), QKeySequence(Qt::Key_0), this,
+                        &MainWindow::goAxonometric);
     viewMenu->addAction(tr("&Top"), QKeySequence(Qt::Key_1), this, [this] {
         myView->setViewTop();
         recordViewChanged();
@@ -349,7 +396,7 @@ void MainWindow::buildMenus()
     unitsMenu->addAction(myUnitsMillimetresAction);
     unitsMenu->addAction(myUnitsCentimetresAction);
 
-    QMenu* helpMenu = menuBar()->addMenu(tr("&Help"));
+    QMenu* helpMenu = bar->addMenu(tr("&Help"));
 
     myShortcutsAction = new QAction(tr("Keyboard Shortcuts"), this);
     // Both bindings the design calls for. F1 is what people reach for without
@@ -385,50 +432,133 @@ void MainWindow::buildMenus()
         // guide sitting on top of it.
         if (myOverlay) myOverlay->relayout();
     });
+
+    return bar;
+}
+
+void MainWindow::goAxonometric()
+{
+    // The one way back to the angled view. Both entry points - the View menu
+    // (and its 0 shortcut) and the app bar's view label button - call this,
+    // so the pose and the recorded event cannot drift apart the way they
+    // would if each site re-derived the camera state for itself.
+    myView->setViewAxonometric();
+    recordViewChanged();
+}
+
+void MainWindow::buildAppBar(QMenuBar* menus)
+{
+    myAppBar = new AppBar(menus, myDisplayModeAction, myFitAction);
+    // The window takes ownership. Nothing may call menuBar() from here on.
+    setMenuWidget(myAppBar);
+
+    myAppBar->setViewLabel(myView->viewLabelText());
+    myAppBar->setUnitLabel(QString::fromStdString(Measure::unitSuffix()));
+
+    connect(myView, &OcctViewWidget::cameraChanged, myAppBar,
+            [this] { myAppBar->setViewLabel(myView->viewLabelText()); });
+
+    // Exactly what the gizmo's label chip did - and it is the View menu's
+    // Axonometric entry, not a second copy of the pose it applies. The button
+    // and the menu entry are the same route, so a user who only ever presses
+    // this button still retires the hint that teaches named views.
+    connect(myAppBar, &AppBar::viewLabelClicked, this, &MainWindow::goAxonometric);
+
+    // The button triggers the OTHER unit's existing action rather than
+    // writing the unit itself: persistence, the items panel, the status bar
+    // and the extrude field's own label then all follow the single path
+    // setDisplayUnit() already owns, and updateActions() stays the one place
+    // that decides anything.
+    connect(myAppBar, &AppBar::unitClicked, this, [this] {
+        if (Measure::displayUnit() == Measure::Unit::Millimetres)
+            myUnitsCentimetresAction->trigger();
+        else
+            myUnitsMillimetresAction->trigger();
+    });
+
+    // The readout follows the one signal every unit-following surface already
+    // refreshes on. It only reads and sets a string, so it cannot recurse
+    // back into updateActions().
+    connect(this, &MainWindow::appStateChanged, myAppBar, [this] {
+        myAppBar->setUnitLabel(QString::fromStdString(Measure::unitSuffix()));
+    });
 }
 
 void MainWindow::buildOverlay()
 {
     myOverlay = new ViewportOverlay(myView);
 
-    auto cluster = [this](ViewportOverlay::Anchor anchor,
-                          std::initializer_list<std::pair<QAction*, IconSet::Glyph>> chips) {
-        auto* group = new ToolCluster(myView);
-        for (const auto& entry : chips) {
-            group->addChip(new ToolChip(entry.first, entry.second));
-        }
-        myOverlay->addWidget(group, anchor);
+    // ONE rail, pinned to the viewport's left edge, in place of the four
+    // chip clusters that used to float in three corners and one edge centre.
+    // Every button is an existing QAction rendered icon-only; nothing here
+    // creates an action, and nothing here decides whether a button is
+    // enabled or checked - updateActions() remains the single place that
+    // does. The groups read top to bottom as the order of work: what to look
+    // at, what to draw, what to build, what to pick, and - pushed to the
+    // bottom by the stretch - what to take back.
+    //
+    // ViewportOverlay::relayout()'s LeftEdge case deliberately keeps every
+    // button its designed size on a too-short viewport and lets the last one
+    // run off the bottom edge - Redo first, then Undo - rather than squeezing
+    // fixed-size buttons into a space they do not fit, which Qt resolves by
+    // overlapping them. See that comment for why the clip is legible rather
+    // than fixed there. It is fixed HERE instead, a few lines down, by never
+    // letting the viewport get that short in the first place - the minimum
+    // height is DERIVED from the rail's own sizeHint() rather than a measured
+    // literal, so it cannot go stale the day a fourteenth button is added
+    // (see CLAUDE.md's warning that the rail wants a rework well before a
+    // screen's own height becomes the real ceiling this derivation cannot
+    // push past).
+    auto* rail = new ToolCluster(myView);
+    auto tool = [rail](QAction* action, IconSet::Glyph glyph) {
+        rail->addChip(new ToolChip(action, glyph, ToolChip::ChipMode::IconOnly));
     };
 
-    cluster(ViewportOverlay::Anchor::LeftCenter, {
-        {myStartSketchAction, IconSet::Glyph::Sketch},
-        {myExtrudeAction,     IconSet::Glyph::Extrude},
-        {myUnionAction,       IconSet::Glyph::Fuse},
-        {mySubtractAction,    IconSet::Glyph::Cut},
-        {myIntersectAction,   IconSet::Glyph::Intersect},
-        {myDeleteAction,      IconSet::Glyph::Delete},
-    });
+    tool(myItemsPanelAction, IconSet::Glyph::Items);
+    rail->addSeparator();
+    tool(myStartSketchAction, IconSet::Glyph::Sketch);
+    tool(myExtrudeAction,     IconSet::Glyph::Extrude);
+    rail->addSeparator();
+    tool(myUnionAction,       IconSet::Glyph::Fuse);
+    tool(mySubtractAction,    IconSet::Glyph::Cut);
+    tool(myIntersectAction,   IconSet::Glyph::Intersect);
+    tool(myDeleteAction,      IconSet::Glyph::Delete);
+    rail->addSeparator();
+    tool(mySnapAction,        IconSet::Glyph::Snap);
+    tool(mySolidSelectAction, IconSet::Glyph::SelectSolid);
+    tool(myFaceSelectAction,  IconSet::Glyph::SelectFace);
+    tool(myEdgeSelectAction,  IconSet::Glyph::SelectEdge);
+    rail->addStretch();
+    tool(myUndoAction,        IconSet::Glyph::Undo);
+    tool(myRedoAction,        IconSet::Glyph::Redo);
 
-    cluster(ViewportOverlay::Anchor::BottomLeft, {
-        {mySnapAction,         IconSet::Glyph::Snap},
-        {mySolidSelectAction,  IconSet::Glyph::SelectSolid},
-        {myFaceSelectAction,   IconSet::Glyph::SelectFace},
-        {myEdgeSelectAction,   IconSet::Glyph::SelectEdge},
-    });
+    // The viewport must never be able to shrink shorter than the rail needs.
+    // rail->sizeHint() is the rail's own natural stack height - every chip,
+    // separator and gap, plus the card's own top/bottom padding - with the
+    // stretch between Select Edges and Undo contributing nothing, the same
+    // number ViewportOverlay::relayout() calls `ch` for a LeftEdge entry.
+    // ViewportOverlay pins that entry kEdgeMargin px off BOTH the top and the
+    // bottom of the viewport (see relayout()'s LeftEdge case), so the
+    // viewport needs at least the rail's height plus twice that margin.
+    // Read from ViewportOverlay itself rather than repeated here, so the two
+    // cannot silently disagree about what the rail is pinned against.
+    myView->setMinimumHeight(rail->sizeHint().height() + 2 * ViewportOverlay::kEdgeMargin);
 
-    cluster(ViewportOverlay::Anchor::TopLeft, {
-        {myItemsPanelAction, IconSet::Glyph::Items},
-        {myUndoAction,       IconSet::Glyph::Undo},
-        {myRedoAction,       IconSet::Glyph::Redo},
-    });
+    myOverlay->addWidget(rail, ViewportOverlay::Anchor::LeftEdge);
 
-    cluster(ViewportOverlay::Anchor::RightCenter, {
-        {myDisplayModeAction, IconSet::Glyph::DisplayMode},
-        {myScreenshotAction,  IconSet::Glyph::Screenshot},
-        {myFitAction,         IconSet::Glyph::Fit},
-    });
+    // The items drawer, beside the rail rather than under it - see
+    // ViewportOverlay's Anchor comment for why that is the layout's business
+    // and not a hard-coded offset here. Anchoring it is also the whole of
+    // what puts it in occupiedRects(), so the toast, the balloon and the
+    // guide step around it without any of them naming this widget.
+    myOverlay->addWidget(myItemsPanel, ViewportOverlay::Anchor::TopLeft);
 
-    // The orientation gizmo, then the unit readout beneath it.
+    // Wireframe and Fit All are buttons in the app bar, and Save Screenshot -
+    // the least used of the three, and absent from the design's bar and rail
+    // alike - is reachable from the File menu.
+
+    // The orientation gizmo. Its own label chip and the unit readout that sat
+    // under it are in the app bar; only the axes stay over the viewport.
     auto* gizmo = new AxisGizmo(myView, myView);
     // Clicking an arm of the gizmo is the other way to look from a named
     // direction, and the hint that teaches the gizmo is retired by
@@ -439,25 +569,6 @@ void MainWindow::buildOverlay()
     // overlay a dependency on the whole application.
     connect(gizmo, &AxisGizmo::viewSnapped, this, &MainWindow::recordViewChanged);
     myOverlay->addWidget(gizmo, ViewportOverlay::Anchor::TopRight);
-
-    // Unit readout under the axis gizmo - follows View -> Units rather than
-    // stating a fixed unit. Refreshed from appStateChanged, same as every
-    // other surface this setting reaches (see setDisplayUnit()).
-    auto* units = new QLabel(QString::fromStdString(Measure::unitSuffix()), myView);
-    units->setAlignment(Qt::AlignCenter);
-    // A small chip-styled readout - Theme::labelFont(), the same size as a
-    // chip label.
-    units->setStyleSheet(QStringLiteral(
-                             "background-color: %1; color: %2;"
-                             "border-radius: 6px; padding: 6px 10px; font-size: %3pt;")
-                             .arg(Theme::chip().name(), Theme::textMuted().name())
-                             .arg(Theme::labelFont().pointSizeF()));
-    units->adjustSize();
-    connect(this, &MainWindow::appStateChanged, units, [units] {
-        units->setText(QString::fromStdString(Measure::unitSuffix()));
-        units->adjustSize();
-    });
-    myOverlay->addWidget(units, ViewportOverlay::Anchor::TopRight);
 
     // Every outcome the app reports - success or failure - goes through this
     // one host rather than a modal dialog. It parents itself (and its Toast)
@@ -486,9 +597,19 @@ void MainWindow::buildOverlay()
     // A guide can appear UNDERNEATH a toast that is already up (Show tips
     // again does exactly that), and nothing told the toast to step aside
     // when it did - HintBalloon::reconsider() already handled that case for
-    // itself. appStateChanged is when it happens; replace() only reads
-    // geometry, so it cannot recurse back into updateActions().
-    connect(this, &MainWindow::appStateChanged, myToasts, &ToastHost::replace);
+    // itself. appStateChanged is when it happens - but the connection that
+    // used to sit here, straight from appStateChanged to replace(), was
+    // REDUNDANT with the one below on ViewportOverlay::laidOut(), not a
+    // second necessary route: the lambda a few lines up
+    // (myItemsPanel->setVisible(...)) already calls myOverlay->relayout() on
+    // every appStateChanged, and relayout() itself emits laidOut() once every
+    // anchored widget is at its final rectangle - so replace() was already
+    // running once, in the right order, before this line ran it a second
+    // time. Removed rather than kept as a belt-and-braces call: two
+    // connections that fire from the same event and do the same thing is the
+    // sort of drift this file's own rule against a second refresh path warns
+    // about, and the survivor is the one ordered correctly - see the comment
+    // on the laidOut() connection below.
 
     // Replaces the old QInputDialog::getDouble() for extrude height. Parents
     // itself to the viewport and positions itself (top-center, clear of the
@@ -523,6 +644,11 @@ void MainWindow::buildOverlay()
     // relayout() raised the top-left cluster back over it. Ordering off the
     // signal makes "after the anchored widgets have moved" a property of the
     // code rather than an accident of construction order.
+    //
+    // This is myToasts's ONE connection to replace() - appStateChanged
+    // reaches it too, but only by relaying through relayout()'s own laidOut()
+    // emission (see the comment further up, where a second direct connection
+    // to appStateChanged used to sit and double-call this).
     connect(myOverlay, &ViewportOverlay::laidOut, myToasts, &ToastHost::replace);
     connect(myOverlay, &ViewportOverlay::laidOut, hints, &HintBalloon::reposition);
     connect(myOverlay, &ViewportOverlay::laidOut, myExtrudePreview, &ExtrudePreview::replace);

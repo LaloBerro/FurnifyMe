@@ -25,6 +25,7 @@
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
 #include "SketchController.h"
+#include "AppBar.h"
 #include "AxisGizmo.h"
 #include "ShortcutSheet.h"
 #include "Theme.h"
@@ -35,19 +36,28 @@
 #include "ViewportOverlay.h"
 #include "WalkthroughPanel.h"
 
+#include <QAbstractButton>
 #include <QAction>
 #include <QApplication>
 #include <QDialog>
 #include <QDir>
+#include <QDockWidget>
 #include <QElapsedTimer>
+#include <QEnterEvent>
 #include <QImage>
 #include <QKeyEvent>
+#include <QKeySequence>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenuBar>
 #include <QMouseEvent>
+#include <QPainter>
 #include <QPointF>
+#include <QPointer>
+#include <QPushButton>
 #include <QSet>
 #include <QSettings>
+#include <QSplitter>
 #include <QStatusBar>
 #include <QString>
 
@@ -70,6 +80,7 @@
 #include <gp_Vec.hxx>
 #include <GeomAbs_SurfaceType.hxx>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
@@ -274,6 +285,162 @@ bool buildBody(MainWindow& window, double x0, double y0, double x1, double y1, d
     return window.extrudePendingFace(height);
 }
 
+// --- Graphite fix-round-1 pixel probes --------------------------------------
+// The image-diff pattern above ("does the whole widget's pixmap change at
+// all") already passed against the PRE-fix-round chip, which painted a
+// checked border, a hover fill and a dimmed disabled state of its own - none
+// of it in the specific shape the anatomy contract calls for. These probes
+// sample specific pixels instead, so a plausible-but-wrong revert (dropping
+// the always-on border, swapping the inset ring back for a border colour
+// change, un-dimming just the badge) fails loudly rather than passing
+// because SOMETHING else still repainted.
+
+// Renders a widget at its own logical size, DPI-neutral - QWidget::grab()
+// scales by the screen's devicePixelRatio, which would make a pixel-exact
+// probe's coordinates environment-dependent. Works on a hidden widget too
+// (render() does not require the widget to be shown), which the isolated
+// probe chip relies on.
+QImage renderExact(QWidget* widget)
+{
+    QImage image(widget->size(), QImage::Format_ARGB32);
+    image.fill(Qt::transparent);
+    QPainter painter(&image);
+    widget->render(&painter);
+    return image;
+}
+
+// Straight-line RGB distance - used to say "this pixel reads as X, not Y"
+// without demanding bit-exact equality, which a 1px antialiased stroke can
+// never guarantee at the exact pixel a naive test would pick.
+double colorDistance(const QColor& a, const QColor& b)
+{
+    const double dr = a.red() - b.red();
+    const double dg = a.green() - b.green();
+    const double db = a.blue() - b.blue();
+    return std::sqrt(dr * dr + dg * dg + db * db);
+}
+
+// Mean of R+G+B/3 over a rectangular region - used where the signal is
+// "this region got darker", not any one pixel's exact colour, since a
+// right-aligned run of glyphs is mostly background between the letterforms.
+double averageLuminance(const QImage& image, const QRect& region)
+{
+    double sum = 0.0;
+    int count = 0;
+    for (int y = region.top(); y <= region.bottom(); ++y) {
+        for (int x = region.left(); x <= region.right(); ++x) {
+            if (x < 0 || y < 0 || x >= image.width() || y >= image.height()) continue;
+            const QColor c = image.pixelColor(x, y);
+            sum += (c.red() + c.green() + c.blue()) / 3.0;
+            ++count;
+        }
+    }
+    return count > 0 ? sum / count : 0.0;
+}
+
+// Confirms a floating card genuinely goes through Theme::paintSurface():
+// panel() fill well inside the card, and `edgeColour` - the family's plain
+// border() for a card that adds no accent of its own at the sampled edge,
+// or the card's own override colour (WalkthroughPanel's accent() outline,
+// which replaces the family border everywhere) - measured closer at the
+// edge than the interior reads.
+//
+// The third check used to be "a shadow is genuinely present just outside the
+// card, in the margin surfaceShadowMargin() reserves". That margin is gone
+// and so is the shadow: fix round 1's ruling is that NOTHING paints
+// translucent pixels over the GL surface, because there is nothing behind
+// them in the widget's backing store to blend with and the alpha lands on
+// black. So the check is inverted rather than dropped - the card must be
+// fully OPAQUE right out to its own edge, which is the property the ruling
+// actually cares about and which a returning shadow would fail on its first
+// row. Swept around the whole perimeter, not sampled at one point, because a
+// shadow reintroduced on one side only is exactly the shape this regresses
+// in.
+//
+// `edgePoint` and `interiorSearch` are supplied by the caller, in the
+// widget's own local coordinates, rather than derived here - which edge is
+// safe to sample (clear of a stripe, a pill, a skip control) is a per-card
+// decision, not a general one.
+void checkFamilySurface(QWidget* widget, const QPoint& edgePoint, const QRect& interiorSearch,
+                        const QColor& edgeColour, const QString& label)
+{
+    const QImage img = renderExact(widget);
+    if (!img.rect().contains(edgePoint)) {
+        check(false, QStringLiteral("%1: the edge probe point falls inside the "
+                                    "rendered image").arg(label));
+        return;
+    }
+
+    // The card's own content - a title, a message, a list of rows - can sit
+    // almost anywhere in its interior, so this searches the whole region for
+    // whichever pixel reads closest to panel() rather than trusting one
+    // hand-picked point to have dodged every card's text. Real background
+    // is common even in a text-heavy card (between glyphs, between rows), so
+    // the best match found is expected to land very close to the token
+    // itself, not just closer than some other colour.
+    double bestPanelDist = 1e9;
+    QColor bestPanelColor = Theme::panel();
+    for (int y = interiorSearch.top(); y <= interiorSearch.bottom(); y += 2) {
+        for (int x = interiorSearch.left(); x <= interiorSearch.right(); x += 2) {
+            if (!img.rect().contains(x, y)) continue;
+            const QColor c = img.pixelColor(x, y);
+            const double d = colorDistance(c, Theme::panel());
+            if (d < bestPanelDist) { bestPanelDist = d; bestPanelColor = c; }
+        }
+    }
+    check(bestPanelDist < 12.0,
+          QStringLiteral("%1's interior contains genuine panel() fill somewhere "
+                         "clear of its own painted content").arg(label));
+
+    const QColor edge = img.pixelColor(edgePoint);
+    check(colorDistance(edge, edgeColour) < colorDistance(bestPanelColor, edgeColour),
+          QStringLiteral("%1's edge reads closer to its border colour than its "
+                         "panel() interior does").arg(label));
+
+    // Fully opaque out to the edge - the WHOLE perimeter now, corners
+    // included. Corners used to be excluded here: a rounded card's fill does
+    // not cover the small triangle outside the rounded shape and inside the
+    // widget rect at each corner, and that area used to be left unpainted.
+    // Theme::paintSurface() now fills the widget's full rect with an opaque
+    // ground before the rounded panel (this task's fix - see Theme.h), so
+    // that triangle is covered too and the sweep no longer has to dodge it.
+    int seeThrough = 0;
+    int visited = 0;
+    QPoint firstSeeThrough;
+    auto sweep = [&](int x, int y) {
+        if (!img.rect().contains(x, y)) return;
+        ++visited;
+        if (qAlpha(img.pixel(x, y)) == 255) return;
+        if (seeThrough == 0) firstSeeThrough = QPoint(x, y);
+        ++seeThrough;
+    };
+    for (int x = 0; x < img.width(); ++x) {
+        sweep(x, 0);
+        sweep(x, img.height() - 1);
+    }
+    for (int y = 0; y < img.height(); ++y) {
+        sweep(0, y);
+        sweep(img.width() - 1, y);
+    }
+    // Non-vacuity, and not a formality: `seeThrough == 0` is exactly as true
+    // of a card whose perimeter was never sampled at all. Rendering can hand
+    // back a null image (a zero-sized widget), which is one way to sweep
+    // nothing; `visited > 0` catches that regardless of width or height.
+    check(visited > 0,
+          QStringLiteral("%1's perimeter sweep actually visited pixels, so the "
+                         "opacity check below is not vacuous (%2 sampled, card "
+                         "%3x%4)")
+              .arg(label).arg(visited).arg(img.width()).arg(img.height()));
+    check(seeThrough == 0,
+          QStringLiteral("%1 is opaque right out to its own edge - no translucent "
+                         "pixels over the GL surface (%2)")
+              .arg(label)
+              .arg(seeThrough == 0
+                       ? QStringLiteral("every edge pixel solid")
+                       : QStringLiteral("%1 see-through, first at %2,%3")
+                             .arg(seeThrough).arg(firstSeeThrough.x()).arg(firstSeeThrough.y())));
+}
+
 }  // namespace
 
 int main(int argc, char* argv[])
@@ -299,6 +466,48 @@ int main(int argc, char* argv[])
     window.show();
     settle(900);
     window.view()->setAnimationsEnabled(false);   // deterministic camera for the suite
+
+    // --- the shell is laid out correctly BEFORE anybody touches it ------------
+    // First thing after the window appears, ahead of every trigger(), click
+    // and resize below - because the defect this catches repaired itself on
+    // the first of any of them. The only relayout the application performs
+    // between construction and the user's first action runs inside the
+    // window's own show sequence, where QMainWindow sizes the viewport before
+    // showChildren() marks the rail visible; a left-edge computation guarded
+    // on isVisible() therefore saw no rail, and the drawer opened on top of
+    // it with the rail's top six buttons underneath. Every check further down
+    // this file was green while that was true.
+    {
+        OcctViewWidget* v = window.view();
+        ItemsPanel* drawer = window.itemsPanel();
+        ToolCluster* startupRail = v ? v->findChild<ToolCluster*>() : nullptr;
+        check(drawer != nullptr && startupRail != nullptr,
+              "the shell has a drawer and a rail as soon as it is on screen");
+        if (drawer && startupRail) {
+            check(!drawer->geometry().intersects(startupRail->geometry()),
+                  QStringLiteral("and the drawer is clear of the rail on the very first "
+                                 "frame, before any action has re-laid anything out "
+                                 "(drawer %1,%2 %3x%4 - rail %5,%6 %7x%8)")
+                      .arg(drawer->x()).arg(drawer->y())
+                      .arg(drawer->width()).arg(drawer->height())
+                      .arg(startupRail->x()).arg(startupRail->y())
+                      .arg(startupRail->width()).arg(startupRail->height()));
+            // The rail's own buttons are reachable, not buried under it -
+            // the symptom a geometry check alone could miss if the two ever
+            // merely touched.
+            const QVector<ToolChip*> startupChips = startupRail->chips();
+            QStringList buried;
+            for (ToolChip* chip : startupChips) {
+                const QPoint c = chip->mapTo(v, QPoint(chip->width() / 2, chip->height() / 2));
+                if (v->childAt(c) != chip) buried << chip->text();
+            }
+            check(buried.isEmpty(),
+                  QStringLiteral("and every rail button is clickable from the first "
+                                 "frame (%1)")
+                      .arg(buried.isEmpty() ? QStringLiteral("all are")
+                                            : buried.join(QStringLiteral(", "))));
+        }
+    }
 
     // --- the walkthrough appears for a newcomer -------------------------------
     {
@@ -373,6 +582,9 @@ int main(int argc, char* argv[])
     }
 
     // --- axis gizmo -----------------------------------------------------------
+    // The gizmo is axes and tips only now: its painted label chip moved into
+    // the app bar, and the string it showed has one source,
+    // OcctViewWidget::viewLabelText(), which both this block and the bar read.
     {
         AxisGizmo* gizmo = window.findChild<AxisGizmo*>();
         check(gizmo != nullptr, "the viewport has an axis gizmo");
@@ -382,8 +594,8 @@ int main(int argc, char* argv[])
             settle(150);
             check(std::fabs(view->camera().state().elevationDeg - 88.0) < 1e-3,
                   "clicking the +Z cone goes to Top");
-            check(gizmo->labelText().contains(QStringLiteral("Top")),
-                  "the label reads Top when aligned");
+            check(view->viewLabelText() == QStringLiteral("Top"),
+                  "the view label reads Top when aligned");
 
             // Clicking the -Y ball views from behind.
             clickAt(gizmo, gizmo->tipCenter(1, false));
@@ -392,15 +604,734 @@ int main(int argc, char* argv[])
                   std::fabs(view->camera().state().elevationDeg) < 1e-3,
                   "clicking the -Y ball goes to Back");
 
-            // Clicking the label chip returns home to the axonometric view.
-            clickAt(gizmo, gizmo->labelCenter());
+            // The label chip is gone, not merely hidden: the widget shrank to
+            // its axes, and a click on the strip the chip used to occupy is
+            // an ordinary miss now rather than a camera move. Height alone
+            // would pass against a chip still painted over the axes, and the
+            // click alone would pass against a widget that just grew a dead
+            // 30px strip - so both.
+            check(gizmo->height() <= 120,
+                  QStringLiteral("the gizmo shrank to its axes (%1px tall)")
+                      .arg(gizmo->height()));
+            const double azBefore = view->camera().state().azimuthDeg;
+            const double elBefore = view->camera().state().elevationDeg;
+            clickAt(gizmo, QPointF(gizmo->width() / 2.0, gizmo->height() - 1.0));
             settle(150);
-            check(std::fabs(view->camera().state().azimuthDeg - (-45.0)) < 1e-3 &&
-                  std::fabs(view->camera().state().elevationDeg - 30.0) < 1e-3,
-                  "clicking the label returns to the axonometric view");
-            check(gizmo->labelText().contains(QStringLiteral("Persp")),
-                  "the label reads Persp when not axis-aligned");
+            check(std::fabs(view->camera().state().azimuthDeg - azBefore) < 1e-9 &&
+                      std::fabs(view->camera().state().elevationDeg - elBefore) < 1e-9,
+                  "the gizmo no longer carries a label chip to click");
+
+            // The gizmo wears the floating-surface family's card now, in
+            // place of the flat Theme::viewport() fill that read as a lighter
+            // box against the real gradient. It had no check of its own while
+            // it was that flat fill, which is how it could change ground
+            // without anything noticing - so it joins the same sweep every
+            // other card in the family carries.
+            checkFamilySurface(gizmo, QPoint(0, gizmo->height() / 2),
+                               gizmo->rect().adjusted(2, 2, -2, -2), Theme::border(),
+                               QStringLiteral("AxisGizmo"));
+
+            // ...and specifically its CORNERS, now that the gizmo carries the
+            // family's full radius 8 rather than the radius-0 stopgap. A
+            // rounded card's fill does not reach the small triangle outside
+            // the rounded shape and inside the widget rect at each corner;
+            // Theme::paintSurface() now covers that triangle by filling the
+            // widget's FULL rect with an opaque ground - viewport() by
+            // default, the ground this card genuinely sits on - before the
+            // rounded panel goes on top (this task's fix, see Theme.h). So
+            // the right answer at each corner is opaque viewport(), not
+            // merely "opaque": the old radius-0 stopgap was opaque too, by
+            // covering the corners with panel() fill instead of leaving them
+            // to the driver's black, and that would still pass an alpha-only
+            // check. Each corner is compared against BOTH wrong answers -
+            // it must read closer to viewport() than to panel().
+            const QImage gizmoImg = renderExact(gizmo);
+            QStringList gizmoNubs;
+            const QPoint gizmoCorners[4] = {
+                QPoint(0, 0), QPoint(gizmoImg.width() - 1, 0),
+                QPoint(0, gizmoImg.height() - 1),
+                QPoint(gizmoImg.width() - 1, gizmoImg.height() - 1)};
+            for (const QPoint& c : gizmoCorners) {
+                if (!gizmoImg.rect().contains(c)) continue;
+                const QRgb px = gizmoImg.pixel(c);
+                const QColor colour(px);
+                const bool opaque = qAlpha(px) == 255;
+                const bool readsAsViewport =
+                    colorDistance(colour, Theme::viewport()) <
+                        colorDistance(colour, Theme::panel()) &&
+                    colorDistance(colour, Theme::viewport()) < 20.0;
+                if (!opaque || !readsAsViewport)
+                    gizmoNubs << QStringLiteral("%1,%2 alpha %3 colour %4")
+                                     .arg(c.x()).arg(c.y()).arg(qAlpha(px)).arg(colour.name());
+            }
+            check(!gizmoImg.isNull() && gizmoNubs.isEmpty(),
+                  QStringLiteral("and its corners read as opaque viewport() ground at "
+                                 "radius 8 - not black, not panel() (%1)")
+                      .arg(gizmoNubs.isEmpty() ? QStringLiteral("all four solid viewport()")
+                                               : gizmoNubs.join(QStringLiteral("; "))));
         }
+    }
+
+    // --- the app bar owns the menu strip --------------------------------------
+    // QMainWindow::setMenuWidget puts an arbitrary widget where the menu strip
+    // was, with the window's real QMenuBar living inside it. Two traps make
+    // this worth asserting by pointer identity rather than by class name.
+    //
+    // First, QMainWindow::menuBar() is qobject_cast<QMenuBar*>(the menu-widget
+    // slot) - which now holds an AppBar, so the cast fails and menuBar()
+    // CREATES a new, empty menu bar, whose setMenuBar() then deleteLater()s
+    // the app bar. Nothing in this block calls window.menuBar(); it asks
+    // window.menuWidget() instead, and counts the menu bars to prove no second
+    // one appeared.
+    //
+    // Second, ShortcutSheet enumerates every binding by walking
+    // parentWidget()->findChild<QMenuBar*>() from the window. Reparenting the
+    // bar into the app bar must leave that walk finding the same object; the
+    // sheet's own block later asserts the row count against the same
+    // enumeration, and this one asserts the group titles it can only produce
+    // by reaching the menus at all.
+    {
+        AppBar* bar = qobject_cast<AppBar*>(window.menuWidget());
+        check(bar != nullptr, "the window's menu strip is the app bar");
+
+        const QList<QMenuBar*> bars = window.findChildren<QMenuBar*>();
+        check(bars.size() == 1,
+              QStringLiteral("the window holds exactly one menu bar, not a second "
+                             "created behind the app bar (found %1)")
+                  .arg(bars.size()));
+        if (bar && bars.size() == 1) {
+            check(bars.first() == bar->menus(),
+                  "and it is the app bar's own menu bar, by pointer identity");
+            check(bar->menus()->parentWidget() == bar,
+                  "the menu bar is reparented INTO the bar, not left beside it");
+            check(bar->menus()->isVisible(), "and it is visible there");
+
+            QStringList titles;
+            for (QAction* top : bar->menus()->actions())
+                titles << top->text().remove(QLatin1Char('&'));
+            check(titles.contains(QStringLiteral("File")) &&
+                      titles.contains(QStringLiteral("View")) &&
+                      titles.contains(QStringLiteral("Help")),
+                  QStringLiteral("the menus survived the move (%1)")
+                      .arg(titles.join(QStringLiteral(", "))));
+        }
+
+        ShortcutSheet* sheet = window.findChild<ShortcutSheet*>();
+        check(sheet != nullptr, "the window has a shortcut sheet to enumerate with");
+        if (sheet) {
+            const QStringList painted = sheet->paintedTexts();
+            check(painted.contains(QStringLiteral("Sketch")) &&
+                      painted.contains(QStringLiteral("View")),
+                  "the shortcut sheet still finds the menu bar inside the app bar");
+            check(!painted.contains(QStringLiteral("Other")),
+                  "and no binding fell out of its menu group in the move");
+        }
+
+        QAbstractButton* viewButton =
+            bar ? qobject_cast<QAbstractButton*>(bar->viewLabelButton()) : nullptr;
+        check(viewButton != nullptr, "the bar carries a view label button");
+        if (bar && viewButton) {
+            trigger(window, QStringLiteral("Top"));
+            settle(250);
+            check(view->viewLabelText() == QStringLiteral("Top") &&
+                      viewButton->text() == QStringLiteral("Top"),
+                  QStringLiteral("the bar's view label follows the camera (\"%1\")")
+                      .arg(viewButton->text()));
+
+            // A real hit test, not an event aimed at the widget we hope is
+            // reachable: childAt() is the mechanism a user's click goes
+            // through, and it is what caught an unreachable control once
+            // already (see the walkthrough's skip control).
+            check(bar->childAt(viewButton->geometry().center()) == viewButton,
+                  "childAt() at the view label's centre finds the button itself");
+
+            const int before = window.progress().count("view.changed");
+            clickAt(viewButton, QPointF(viewButton->width() / 2.0,
+                                        viewButton->height() / 2.0));
+            settle(300);
+            check(std::fabs(view->camera().state().azimuthDeg - (-45.0)) < 1e-3 &&
+                      std::fabs(view->camera().state().elevationDeg - 30.0) < 1e-3,
+                  "clicking it returns to the axonometric pose the gizmo's label "
+                  "chip used to");
+            check(view->viewLabelText() == QStringLiteral("Persp") &&
+                      viewButton->text() == QStringLiteral("Persp"),
+                  "and the pose it lands on is labelled Persp");
+            check(window.progress().count("view.changed") == before + 1,
+                  QStringLiteral("...and records view.changed exactly once "
+                                 "(%1 then %2)")
+                      .arg(before)
+                      .arg(window.progress().count("view.changed")));
+        }
+
+        QAbstractButton* unitButton =
+            bar ? qobject_cast<QAbstractButton*>(bar->unitButton()) : nullptr;
+        check(unitButton != nullptr && unitButton->text() == QStringLiteral("mm"),
+              "the bar's unit button reads the display unit");
+        if (bar && unitButton) {
+            check(bar->childAt(unitButton->geometry().center()) == unitButton,
+                  "childAt() at the unit button's centre finds it too");
+        }
+
+        // Wireframe and Fit All left the viewport for the bar, and mirror
+        // their actions rather than storing anything of their own.
+        QAbstractButton* wireButton = nullptr;
+        QAbstractButton* fitButton = nullptr;
+        if (bar) {
+            for (QAbstractButton* candidate : bar->findChildren<QAbstractButton*>()) {
+                if (candidate->text() == QStringLiteral("Wireframe")) wireButton = candidate;
+                if (candidate->text() == QStringLiteral("Fit All")) fitButton = candidate;
+            }
+        }
+        check(wireButton != nullptr && fitButton != nullptr,
+              "Wireframe and Fit All are buttons in the bar");
+        QAction* wireAction = action(window, QStringLiteral("Wireframe"));
+        if (wireButton && wireAction) {
+            check(wireButton->isCheckable() && !wireButton->isChecked(),
+                  "the Wireframe button is a toggle and starts off");
+            wireAction->trigger();
+            settle(120);
+            check(wireButton->isChecked(),
+                  "it mirrors its action when the action is triggered elsewhere");
+            wireAction->trigger();
+            settle(120);
+            check(!wireButton->isChecked(), "and mirrors it back off");
+
+            clickAt(wireButton, QPointF(wireButton->width() / 2.0,
+                                        wireButton->height() / 2.0));
+            settle(150);
+            check(view->isWireframe() && wireButton->isChecked(),
+                  "clicking the button drives the action, not a private state");
+            clickAt(wireButton, QPointF(wireButton->width() / 2.0,
+                                        wireButton->height() / 2.0));
+            settle(150);
+            check(!view->isWireframe() && !wireButton->isChecked(),
+                  "and drives it back, leaving the viewport shaded");
+        }
+        if (fitButton) {
+            check(!fitButton->isCheckable(), "Fit All is not a toggle");
+            check(bar && bar->childAt(fitButton->geometry().center()) == fitButton,
+                  "childAt() at Fit All's centre finds the button");
+
+            // And it actually does something. Deliberately knock the camera
+            // off-centre first, so "the camera moved" cannot be satisfied by
+            // a button that does nothing to an already-fitted view. Through
+            // animateTo(), which is how every other route moves this camera -
+            // poking CameraController directly would leave the OCCT view
+            // holding the old pose and make the fit measure the wrong thing.
+            CameraState nudged = view->camera().state();
+            nudged.target = gp_Pnt(nudged.target.X() + 400.0,
+                                   nudged.target.Y() + 260.0, nudged.target.Z());
+            nudged.distance *= 0.35;
+            view->animateTo(nudged);
+            settle(400);
+            const CameraState before = view->camera().state();
+            clickAt(fitButton, QPointF(fitButton->width() / 2.0,
+                                       fitButton->height() / 2.0));
+            settle(400);   // the fit animates
+            const CameraState after = view->camera().state();
+            const double moved =
+                gp_Vec(before.target, after.target).Magnitude() +
+                std::fabs(before.distance - after.distance);
+            check(moved > 1.0e-6,
+                  QStringLiteral("clicking Fit All reframes the viewport (camera "
+                                 "moved %1)")
+                      .arg(moved));
+        }
+
+        // Save Screenshot is menu-only from here on: it kept no bar button,
+        // and the right-center chip cluster it shared went away with it.
+        check(action(window, QStringLiteral("Save Screenshot...")) != nullptr,
+              "Save Screenshot is still reachable as an action");
+
+        // ...and the cluster really is GONE, not merely missing a chip. The
+        // action existing proves nothing about the cluster, and the bar-button
+        // search above runs inside the bar, so a stub that left the old
+        // cluster floating over the viewport would satisfy every check above
+        // this one.
+        //
+        // This asserted exactly three while Task 2's interim arrangement was
+        // in force (top-left, left-center, bottom-left, with the right-center
+        // one gone to the bar). Task 3 folded all three into ONE icon rail
+        // pinned to the left edge, so the count is now one - still the exact
+        // count rather than "no right-hand cluster", for the same reason:
+        // that is what makes this fail loudly the next time the shell's
+        // composition changes instead of silently passing against one cluster
+        // or five. What that single cluster actually contains is asserted in
+        // the rail block that follows.
+        const QList<ToolCluster*> clusters = view->findChildren<ToolCluster*>();
+        check(clusters.size() == 1,
+              QStringLiteral("exactly one chip cluster floats over the viewport - "
+                             "the rail, with the other three folded into it "
+                             "(found %1)")
+                  .arg(clusters.size()));
+        QStringList onTheRight;
+        for (ToolCluster* cluster : clusters) {
+            if (cluster->geometry().center().x() > view->width() / 2)
+                onTheRight << QStringLiteral("%1,%2")
+                                  .arg(cluster->geometry().center().x())
+                                  .arg(cluster->geometry().center().y());
+        }
+        check(onTheRight.isEmpty(),
+              QStringLiteral("and none of them sits on the viewport's right half "
+                             "(%1)")
+                  .arg(onTheRight.isEmpty() ? QStringLiteral("none")
+                                            : onTheRight.join(QStringLiteral("; "))));
+
+        // A hit test where the cluster actually sat, for the same reason every
+        // other control here is probed with childAt: a geometry assertion can
+        // pass against a widget that is still there and still clickable.
+        // Swept across the right margin because the exact inset is the
+        // overlay's business, not this check's.
+        QWidget* lurking = nullptr;
+        for (int inset = 4; inset < 90 && !lurking; inset += 4) {
+            QWidget* hit = view->childAt(view->width() - inset, view->height() / 2);
+            for (QWidget* w = hit; w; w = w->parentWidget()) {
+                if (qobject_cast<ToolCluster*>(w)) { lurking = w; break; }
+                if (w == view) break;
+            }
+        }
+        check(lurking == nullptr,
+              "and nothing is clickable where the right-center cluster used to be");
+    }
+
+    // --- the rail -------------------------------------------------------------
+    // One icon-only cluster pinned to the viewport's left edge, carrying every
+    // command the four old floating clusters carried. The count check above
+    // proves there is exactly one cluster; this block proves it is the right
+    // one, in the right order, reachable, and rendering its actions' states.
+    {
+        const QList<ToolCluster*> found = view->findChildren<ToolCluster*>();
+        ToolCluster* rail = found.isEmpty() ? nullptr : found.first();
+        check(rail != nullptr && rail->isVisible(), "the rail is up over the viewport");
+
+        if (rail) {
+            // Pinned to the LEFT edge and spanning the viewport top to
+            // bottom - the two halves of what Anchor::LeftEdge means. The
+            // height is the part a plain corner anchor could not produce:
+            // it is what puts Undo and Redo at the bottom of the viewport
+            // rather than directly under Select Edges.
+            check(rail->x() >= 0 && rail->x() <= 20,
+                  QStringLiteral("the rail hugs the viewport's left edge (x=%1)")
+                      .arg(rail->x()));
+            const int bottomGap = view->height() - (rail->y() + rail->height());
+            check(rail->y() >= 0 && rail->y() <= 20 && bottomGap >= -1 && bottomGap <= 20,
+                  QStringLiteral("and spans it top to bottom (y=%1, %2px of viewport "
+                                 "left below it, viewport %3px tall, rail %4px)")
+                      .arg(rail->y()).arg(bottomGap)
+                      .arg(view->height()).arg(rail->height()));
+
+            // The exact order, by QAction POINTER. Comparing visible text
+            // would pass against the right buttons in the wrong order as
+            // easily as against the wrong buttons, and would break the next
+            // time a label is reworded for reasons that have nothing to do
+            // with the rail.
+            const QVector<QString> wanted = {
+                QStringLiteral("Items"),
+                QStringLiteral("Start Sketch"),  QStringLiteral("Extrude..."),
+                QStringLiteral("Union"),         QStringLiteral("Subtract"),
+                QStringLiteral("Intersect"),     QStringLiteral("Delete Selected"),
+                QStringLiteral("Snap to Grid"),  QStringLiteral("Select Bodies"),
+                QStringLiteral("Select Faces"),  QStringLiteral("Select Edges"),
+                QStringLiteral("Undo"),          QStringLiteral("Redo"),
+            };
+            const QVector<ToolChip*> chips = rail->chips();
+            check(chips.size() == wanted.size(),
+                  QStringLiteral("the rail carries %1 buttons (found %2)")
+                      .arg(wanted.size()).arg(chips.size()));
+
+            QStringList wrong;
+            for (int i = 0; i < wanted.size() && i < chips.size(); ++i) {
+                QAction* expected = action(window, wanted[i]);
+                if (!expected || chips[i]->action() != expected) {
+                    wrong << QStringLiteral("%1: wanted %2, got '%3'")
+                                 .arg(i).arg(wanted[i])
+                                 .arg(chips[i]->action()
+                                          ? chips[i]->action()->text().remove(QLatin1Char('&'))
+                                          : QStringLiteral("nothing"));
+                }
+            }
+            check(wrong.isEmpty(),
+                  QStringLiteral("and they are the window's own actions in the "
+                                 "designed order (%1)")
+                      .arg(wrong.isEmpty() ? QStringLiteral("all thirteen match")
+                                           : wrong.join(QStringLiteral("; "))));
+
+            // No labelled chip floats over the viewport any more - the old
+            // clusters are gone in substance, not merely reparented. A rail
+            // that had quietly kept one labelled button would satisfy the
+            // cluster count and the order check above and still be wrong.
+            QStringList labelled;
+            for (ToolChip* chip : view->findChildren<ToolChip*>()) {
+                if (chip->mode() != ToolChip::ChipMode::IconOnly)
+                    labelled << chip->text();
+            }
+            check(labelled.isEmpty(),
+                  QStringLiteral("every chip over the viewport is icon-only (%1)")
+                      .arg(labelled.isEmpty() ? QStringLiteral("all are")
+                                              : labelled.join(QStringLiteral(", "))));
+
+            QStringList mis_sized;
+            const int side = 34 + Theme::surfaceShadowMargin() * 2;
+            for (ToolChip* chip : chips) {
+                if (chip->width() != side || chip->height() != side)
+                    mis_sized << QStringLiteral("%1 %2x%3")
+                                     .arg(chip->text()).arg(chip->width()).arg(chip->height());
+            }
+            check(mis_sized.isEmpty(),
+                  QStringLiteral("each is a %1x%1 square of painted card (%2)")
+                      .arg(side)
+                      .arg(mis_sized.isEmpty() ? QStringLiteral("all are")
+                                               : mis_sized.join(QStringLiteral(", "))));
+
+            // --- the painted gap, MEASURED --------------------------------
+            // Task 1's source claimed a 3px painted gap between chip bodies
+            // and a magnified crop confirming it. Neither was true:
+            // QLayout::spacing() silently ignored the negative value it was
+            // given and ran at the style's 6px, so the gap was 12px for two
+            // whole tasks and no check could tell. This counts the actual
+            // rows of card background between two adjacent buttons' painted
+            // borders in a rendered image of the rail - so the number in the
+            // source and the number on screen cannot diverge again.
+            //
+            // Deliberately two chips inside one GROUP (Union and Subtract),
+            // not a pair with a separator between them: the separator's own
+            // band is a different measurement.
+            if (chips.size() >= 6) {
+                ToolChip* first = chips[3];    // Union
+                ToolChip* second = chips[4];   // Subtract
+                const QImage railImg = renderExact(rail);
+                const int column = first->x() + first->width() / 2;
+                int background = 0;
+                QStringList rowColours;
+                for (int y = first->y() + first->height(); y < second->y(); ++y) {
+                    const QColor c = railImg.pixelColor(column, y);
+                    rowColours << c.name();
+                    if (colorDistance(c, Theme::panel()) < 12.0) ++background;
+                }
+                check(second->y() - (first->y() + first->height()) == 3 && background == 3,
+                      QStringLiteral("exactly 3 rows of card background separate two "
+                                     "adjacent rail buttons - the painted gap the source "
+                                     "claims, counted in pixels (%1 rows, %2 of them "
+                                     "background: %3)")
+                          .arg(second->y() - (first->y() + first->height()))
+                          .arg(background)
+                          .arg(rowColours.join(QStringLiteral(" "))));
+            }
+
+            // Three group dividers - drawer | sketch | model | select - as
+            // separate widgets between the chips, not gaps that merely look
+            // like dividers.
+            QList<QWidget*> separators;
+            for (QWidget* child :
+                 rail->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly)) {
+                if (!qobject_cast<ToolChip*>(child)) separators << child;
+            }
+            check(separators.size() == 3,
+                  QStringLiteral("three separators divide the rail's four groups "
+                                 "(found %1)").arg(separators.size()));
+            if (!separators.isEmpty()) {
+                // The rule is really painted, in border(), on the middle row.
+                // "A separator widget exists" would pass against one that
+                // draws nothing at all.
+                QWidget* sep = separators.first();
+                const QImage img = renderExact(sep);
+                const QColor rule = img.pixelColor(sep->width() / 2, sep->height() / 2);
+                const QColor air = img.pixelColor(sep->width() / 2, 0);
+                check(colorDistance(rule, Theme::border()) < colorDistance(air, Theme::border()),
+                      QStringLiteral("and each paints a border() rule on its middle row, "
+                                     "not just empty space (rule %1, air above it %2)")
+                          .arg(rule.name()).arg(air.name()));
+            }
+
+            // The rail paints the floating-surface family's own card behind
+            // its buttons. This is not decoration: over OCCT's on-screen GL
+            // surface an unpainted region of a child widget shows whatever
+            // the driver left there, and the rail - stretched to the whole
+            // viewport height with slack between the select group and
+            // history - is mostly such region. Sampled in the middle of that
+            // slack, where nothing but the card is painted.
+            if (chips.size() >= 3) {
+                ToolChip* selectEdges = chips[chips.size() - 3];
+                ToolChip* undo = chips[chips.size() - 2];
+                const int slackY = (selectEdges->y() + selectEdges->height() + undo->y()) / 2;
+                const QImage railImg = renderExact(rail);
+                const QColor back = railImg.pixelColor(rail->width() / 2, slackY);
+                check(colorDistance(back, Theme::panel()) < 12.0,
+                      QStringLiteral("the rail paints panel() behind its buttons rather "
+                                     "than leaving the GL surface showing through "
+                                     "(sampled %1 at y=%2)")
+                          .arg(back.name()).arg(slackY));
+
+                // ...and the card's own 1px border() lands on ONE column,
+                // not smeared at half intensity across two - the same
+                // antialiasing trap the app bar's bottom rule fell into.
+                // Compared against the card's fill, since an absolute match
+                // would be hostage to a single antialiased pixel.
+                const QColor edge = railImg.pixelColor(0, slackY);
+                check(colorDistance(edge, Theme::border()) < 10.0,
+                      QStringLiteral("and its outermost column is a crisp border() "
+                                     "(sampled %1, wanted %2)")
+                          .arg(edge.name()).arg(Theme::border().name()));
+
+                // ...and the WHOLE perimeter, not the one pixel above. The
+                // rail is the card whose unpainted slack produced the black
+                // band down the viewport in the first place, and it was the
+                // only member of the family still checked by a single probe -
+                // a shadow, or a gap, reintroduced on the top, bottom or
+                // right edge alone would have sailed through. The interior
+                // sample is deliberately the slack region between Select
+                // Edges and Undo: the one part of this card that is nothing
+                // but card.
+                const QRect slack(4, selectEdges->y() + selectEdges->height() + 4,
+                                  rail->width() - 8,
+                                  std::max(4, undo->y() - 4 -
+                                                  (selectEdges->y() + selectEdges->height() + 4)));
+                checkFamilySurface(rail, QPoint(0, slackY), slack, Theme::border(),
+                                   QStringLiteral("ToolCluster (the rail)"));
+            }
+
+            // Undo and Redo are pushed to the BOTTOM by the rail's stretch,
+            // not left sitting under Select Edges. Asserted against the
+            // rail's own height so it holds at any viewport size.
+            if (chips.size() >= 2) {
+                ToolChip* redo = chips.last();
+                const int fromBottom = rail->height() - (redo->y() + redo->height());
+                check(fromBottom >= 0 && fromBottom <= 14,
+                      QStringLiteral("the stretch puts Redo at the rail's bottom, one "
+                                     "card padding up (%1px below it, rail %2px tall)")
+                          .arg(fromBottom).arg(rail->height()));
+                ToolChip* selectEdges = chips[chips.size() - 3];
+                check(redo->y() - selectEdges->y() > 100,
+                      QStringLiteral("with real slack between the select group and "
+                                     "history (%1px)").arg(redo->y() - selectEdges->y()));
+            }
+
+            // Every button is a real hit-test target, compared against the
+            // actual chip pointer - CLAUDE.md's rule, and the one that has
+            // caught a control no user could click while every attribute
+            // assertion passed.
+            QStringList unreachable;
+            for (ToolChip* chip : chips) {
+                const QPoint centre =
+                    chip->mapTo(view, QPoint(chip->width() / 2, chip->height() / 2));
+                QWidget* hit = view->childAt(centre);
+                if (hit != chip)
+                    unreachable << QStringLiteral("%1 -> %2")
+                                       .arg(chip->text())
+                                       .arg(hit ? QString::fromLatin1(hit->metaObject()->className())
+                                                : QStringLiteral("nothing"));
+            }
+            check(unreachable.isEmpty(),
+                  QStringLiteral("a real click at each button's centre finds that "
+                                 "button (%1)")
+                      .arg(unreachable.isEmpty() ? QStringLiteral("all thirteen")
+                                                 : unreachable.join(QStringLiteral("; "))));
+
+            // ...and a real click on one drives its action, which is the
+            // whole point of an action-driven shell. Select Faces is the
+            // safe probe: it is a checkable mode with a sibling to switch
+            // back to, and the mode block later re-exercises both.
+            QAction* facesAction = action(window, QStringLiteral("Select Faces"));
+            QAction* bodiesAction = action(window, QStringLiteral("Select Bodies"));
+            ToolChip* facesButton = nullptr;
+            for (ToolChip* chip : chips) {
+                if (chip->action() == facesAction) facesButton = chip;
+            }
+            if (facesButton && facesAction && bodiesAction) {
+                check(!facesAction->isChecked(),
+                      "Select Faces is off before the rail button is clicked");
+                clickAt(facesButton, QPointF(facesButton->width() / 2.0,
+                                             facesButton->height() / 2.0));
+                settle(120);
+                check(facesAction->isChecked() && facesButton->isChecked(),
+                      "clicking the rail's Select Faces button checks the action, and "
+                      "the button follows the action rather than itself");
+                bodiesAction->trigger();
+                settle(120);
+                check(bodiesAction->isChecked() && !facesButton->isChecked(),
+                      "and switching back through the action alone un-checks the "
+                      "button, which stores no state of its own");
+            }
+
+            // The label and the shortcut did not vanish with the text - they
+            // moved into the tooltip, which is the only thing naming an
+            // icon-only button. Items is the honest probe: its action's own
+            // tooltip does NOT contain the word "Items", so a chip that just
+            // forwarded the action's tooltip unchanged fails this.
+            ToolChip* items = chips.isEmpty() ? nullptr : chips.first();
+            check(items != nullptr &&
+                      items->toolTip().contains(QStringLiteral("Items")) &&
+                      items->toolTip().contains(QStringLiteral("Ctrl+Alt+S")),
+                  QStringLiteral("an icon-only button's tooltip carries its label and "
+                                 "its shortcut (\"%1\")")
+                      .arg(items ? items->toolTip().replace(QLatin1Char('\n'),
+                                                            QStringLiteral(" / "))
+                                 : QString()));
+
+            // ...and it is RECOMPOSED whenever the action changes, not
+            // captured once at construction. Items' tooltip never varies, so
+            // the check above passes against a capture-once implementation.
+            // Snap to Grid's does: updateActions() rebuilds it from
+            // snapTooltipText(), which formats the grid step through Measure
+            // and therefore reads differently in every display unit. Driven
+            // through the real Units actions - the same path the app bar's
+            // unit chip uses - and put back, so the units blocks further down
+            // still start from millimetres.
+            ToolChip* snapButton = nullptr;
+            for (ToolChip* chip : chips) {
+                if (chip->action() == action(window, QStringLiteral("Snap to Grid")))
+                    snapButton = chip;
+            }
+            QAction* toCentimetres = action(window, QStringLiteral("Centimetres"));
+            QAction* toMillimetres = action(window, QStringLiteral("Millimetres"));
+            if (snapButton && toCentimetres && toMillimetres) {
+                const QString before = snapButton->toolTip();
+                check(before.contains(QStringLiteral("Snap to Grid")) &&
+                          before.contains(QStringLiteral("10 mm")),
+                      QStringLiteral("the Snap button's tooltip names its command and "
+                                     "the grid step in millimetres (\"%1\")")
+                          .arg(QString(before).replace(QLatin1Char('\n'),
+                                                       QStringLiteral(" / "))));
+                toCentimetres->trigger();
+                settle(150);
+                const QString after = snapButton->toolTip();
+                check(after != before && after.contains(QStringLiteral("1 cm")) &&
+                          after.contains(QStringLiteral("Snap to Grid")),
+                      QStringLiteral("and it follows the action when the unit changes "
+                                     "rather than being captured once (\"%1\")")
+                          .arg(QString(after).replace(QLatin1Char('\n'),
+                                                      QStringLiteral(" / "))));
+                toMillimetres->trigger();
+                settle(150);
+                check(snapButton->toolTip() == before,
+                      "and back again when the unit is put back");
+            }
+
+            // --- state rendering, at the glyph -----------------------------
+            // Disabled: the SAME chip, rendered either way, sampled over the
+            // 16x16 glyph box alone. A whole-image compare would pass on any
+            // repaint at all, and comparing two DIFFERENT rail buttons would
+            // compare two glyphs with different ink coverage rather than one
+            // glyph in two states.
+            if (items && items->action()) {
+                const int m = Theme::surfaceShadowMargin();
+                const QRect body = items->rect().adjusted(m, m, -m, -m);
+                const QRect glyph(body.center().x() - 7, body.center().y() - 7, 15, 15);
+
+                QAction* itemsAction = items->action();
+                const bool wasEnabled = itemsAction->isEnabled();
+                const QImage enabledImg = renderExact(items);
+                itemsAction->setEnabled(false);
+                settle(50);
+                const QImage disabledImg = renderExact(items);
+                const double enabledLum = averageLuminance(enabledImg, glyph);
+                const double disabledLum = averageLuminance(disabledImg, glyph);
+                check(disabledLum < enabledLum - 1.0,
+                      QStringLiteral("a disabled rail button's glyph itself dims "
+                                     "(enabled avg %1, disabled avg %2)")
+                          .arg(enabledLum, 0, 'f', 1).arg(disabledLum, 0, 'f', 1));
+                itemsAction->setEnabled(wasEnabled);
+                settle(50);
+            }
+
+            // Checked: the inset accent() ring, sampled 2px in from the left
+            // edge of the body - clear of the glyph box - on Select Bodies
+            // (checked at startup) against Select Faces (not). Two chips of
+            // identical size and shape whose only difference at that pixel
+            // is the ring, which is what makes the relative comparison fair.
+            ToolChip* bodiesChip = nullptr;
+            ToolChip* facesChip = nullptr;
+            for (ToolChip* chip : chips) {
+                if (chip->action() == action(window, QStringLiteral("Select Bodies")))
+                    bodiesChip = chip;
+                if (chip->action() == action(window, QStringLiteral("Select Faces")))
+                    facesChip = chip;
+            }
+            check(bodiesChip != nullptr && facesChip != nullptr &&
+                      bodiesChip->isChecked() && !facesChip->isChecked(),
+                  "the rail's Select Bodies button is checked and Select Faces is not, "
+                  "so the ring probe has both states to compare");
+            if (bodiesChip && facesChip && bodiesChip->isChecked() && !facesChip->isChecked()) {
+                const int m = Theme::surfaceShadowMargin();
+                const QPoint inset(m + 2, bodiesChip->height() / 2);
+                const QColor checkedInset = renderExact(bodiesChip).pixelColor(inset);
+                const QColor uncheckedInset = renderExact(facesChip).pixelColor(inset);
+                check(colorDistance(checkedInset, Theme::accent()) <
+                          colorDistance(uncheckedInset, Theme::accent()),
+                      QStringLiteral("and its ring-inset pixel reads far closer to "
+                                     "accent() than the unchecked button's does "
+                                     "(%1 vs %2)")
+                          .arg(checkedInset.name()).arg(uncheckedInset.name()));
+            }
+        }
+    }
+
+    // --- the viewport enforces a minimum height the rail actually fits in ----
+    // Regression: ViewportOverlay::relayout()'s LeftEdge case deliberately
+    // keeps the rail at its natural size on a too-short viewport and lets
+    // the last button run off the bottom edge - Redo first, then Undo - see
+    // that function's own comment. Nothing used to stop the window from
+    // actually being shrunk that far: at gui_smoke's own 800x500 probe (see
+    // "nothing in the bottom strip lands on top of anything else" further
+    // down) the rail measured 50x524 and Redo had 4px left on screen.
+    // MainWindow::buildOverlay() now derives the viewport's own minimum
+    // height from the rail's sizeHint(), so resizing a window down to ITS
+    // minimum - the shortest this probe can ever legally be - must still
+    // leave the whole rail, Redo included, inside the viewport and reachable
+    // by a real click.
+    {
+        MainWindow minWin(nullptr, /*persistProgress=*/false);
+        minWin.setAttribute(Qt::WA_ShowWithoutActivating);
+        minWin.show();
+        settle(300);
+        minWin.view()->setAnimationsEnabled(false);
+
+        // Straight to the window's own computed minimum, not an iterative
+        // shrink toward a guessed target - this probe wants exactly what
+        // the layout considers the smallest legal size, whatever that
+        // number is today.
+        minWin.resize(minWin.minimumSizeHint());
+        settle(250);
+
+        OcctViewWidget* mv = minWin.view();
+        ToolCluster* minRail = mv ? mv->findChild<ToolCluster*>() : nullptr;
+        check(minRail != nullptr, "the minimum-size probe still has a rail");
+        if (minRail) {
+            const QVector<ToolChip*> minChips = minRail->chips();
+            check(!minChips.isEmpty(), "and the rail still carries its buttons");
+            if (!minChips.isEmpty()) {
+                // Redo is the LAST chip added in MainWindow::buildOverlay() -
+                // the one the old clip claimed first - so it is what this
+                // probe has to find intact, not merely "some chip or other".
+                ToolChip* lastButton = minChips.last();
+                check(lastButton->text() == QStringLiteral("Redo"),
+                      QStringLiteral("and the rail's last button really is Redo, so this "
+                                     "probes the actual regression (got '%1')")
+                          .arg(lastButton->text()));
+
+                const QRect lastInViewport(lastButton->mapTo(mv, QPoint(0, 0)),
+                                           lastButton->size());
+                check(mv->rect().contains(lastInViewport),
+                      QStringLiteral("Redo sits fully inside the viewport at the "
+                                     "window's own minimum size (viewport %1x%2, Redo "
+                                     "%3,%4 %5x%6)")
+                          .arg(mv->width()).arg(mv->height())
+                          .arg(lastInViewport.x()).arg(lastInViewport.y())
+                          .arg(lastInViewport.width()).arg(lastInViewport.height()));
+
+                // childAt(), not a geometry check alone - CLAUDE.md's rule:
+                // a control can sit at the right coordinates and still be
+                // unreachable by a real click if something else is on top of
+                // it, and a geometry-only assertion is exactly the kind of
+                // check that stayed green while the old clip shipped.
+                const QPoint centre = lastButton->mapTo(
+                    mv, QPoint(lastButton->width() / 2, lastButton->height() / 2));
+                check(mv->childAt(centre) == lastButton,
+                      "and a real click at its centre finds Redo itself, not a "
+                      "clipped edge or whatever is behind it");
+            }
+        }
+        minWin.close();
     }
 
     // --- above-horizon clicks are rejected, not mirrored behind the eye -------
@@ -515,6 +1446,243 @@ int main(int argc, char* argv[])
     check(window.itemsPanel() != nullptr, "the window has an items panel");
     check(window.itemsPanel()->rowCount() == 1, "panel shows one row for one solid");
     settle(300);
+
+    // --- the items drawer -----------------------------------------------------
+    // The panel stopped docking: it is a floating card over the viewport now,
+    // beside the rail, toggled by the same Items action and Ctrl+Alt+S it has
+    // always had. The first three checks assert the OLD arrangement is gone
+    // rather than that the new one exists - a drawer added while the dock
+    // stayed behind would satisfy every check after them.
+    {
+        check(window.findChildren<QDockWidget*>().isEmpty(),
+              QStringLiteral("no dock widget is left in the window (found %1)")
+                  .arg(window.findChildren<QDockWidget*>().size()));
+        check(window.findChildren<QSplitter*>().isEmpty(),
+              QStringLiteral("and no splitter either (found %1)")
+                  .arg(window.findChildren<QSplitter*>().size()));
+        check(window.centralWidget() == view,
+              "the central widget is the viewport alone - full bleed");
+
+        ItemsPanel* drawer = window.itemsPanel();
+        check(drawer != nullptr && drawer->parentWidget() == view,
+              "the drawer is a child of the viewport, not of a dock area");
+        check(drawer != nullptr && drawer->isVisible(), "and it is up");
+
+        ToolCluster* rail = view->findChild<ToolCluster*>();
+        check(rail != nullptr && drawer != nullptr &&
+                  drawer->x() > rail->geometry().right(),
+              QStringLiteral("it is anchored BESIDE the rail rather than under it "
+                             "(drawer x=%1, rail right=%2)")
+                  .arg(drawer ? drawer->x() : -1)
+                  .arg(rail ? rail->geometry().right() : -1));
+        // Its top edge, derived rather than allowed a corridor. The overlay's
+        // own margin is private to ViewportOverlay.cpp, so this reads it off
+        // the widget anchored to the OPPOSITE top corner - the axis gizmo,
+        // whose TopRight placement uses the very same constant. Two cards on
+        // one top edge that disagree about where that edge is would be
+        // visible at a glance, and a "0 to 24" corridor would not have said
+        // so.
+        AxisGizmo* topRight = view->findChild<AxisGizmo*>();
+        check(drawer != nullptr && topRight != nullptr && drawer->y() == topRight->y(),
+              QStringLiteral("and its top edge is the overlay's own margin, the same one "
+                             "the gizmo hangs from across the top edge (drawer y=%1, "
+                             "gizmo y=%2)")
+                  .arg(drawer ? drawer->y() : -1).arg(topRight ? topRight->y() : -1));
+        check(drawer != nullptr && view->rect().contains(drawer->geometry()),
+              "and lies entirely inside the viewport");
+
+        // The drawer is one of the rectangles the toast and the balloon step
+        // around - which it gets for free from being an overlay entry, and
+        // which nothing else in the suite would notice if it stopped being
+        // one.
+        ViewportOverlay* overlay = view->findChild<ViewportOverlay*>();
+        bool anchored = false;
+        if (overlay && drawer) {
+            for (const QRect& r : overlay->occupiedRects())
+                if (r == drawer->geometry()) anchored = true;
+        }
+        check(anchored, "the drawer is one of the overlay's occupied rectangles");
+
+        // Rows are real hit-test targets. A docked pane never had to satisfy
+        // this; a card over OCCT's GL surface does, and CLAUDE.md's rule is
+        // that it is checked with childAt() against the actual control
+        // pointer rather than by asserting an attribute.
+        auto firstEye = [&]() -> QPushButton* {
+            return drawer ? drawer->findChild<QPushButton*>() : nullptr;
+        };
+        QPushButton* eye = firstEye();
+        check(eye != nullptr, "the row carries a visibility toggle");
+        if (eye && drawer) {
+            const QPoint centre =
+                eye->mapTo(view, QPoint(eye->width() / 2, eye->height() / 2));
+            QWidget* hit = view->childAt(centre);
+            check(hit == eye,
+                  QStringLiteral("a real click at its centre finds that toggle, not "
+                                 "the viewport behind it (found %1)")
+                      .arg(hit ? QString::fromLatin1(hit->metaObject()->className())
+                               : QStringLiteral("nothing")));
+
+            const int id = window.document().solids().front().id;
+            check(view->isSolidVisible(id), "the body starts visible");
+            clickAt(eye, QPointF(eye->width() / 2.0, eye->height() / 2.0));
+            settle(150);
+            check(!view->isSolidVisible(id),
+                  "and clicking the eye really hides it - the row is wired, not "
+                  "merely reachable");
+            // refresh() rebuilds every row wholesale, so the button that was
+            // just clicked is on its way to deleteLater(); the second click
+            // has to find the NEW one.
+            QPushButton* again = firstEye();
+            if (again) clickAt(again, QPointF(again->width() / 2.0, again->height() / 2.0));
+            settle(150);
+            check(view->isSolidVisible(id), "clicking it again brings the body back");
+        }
+
+        // A rebuild leaves nothing of the previous list on screen. refresh()
+        // deleteLater()s the old rows, which keeps them alive, parented and
+        // VISIBLE until control reaches the event loop - so the card painted
+        // the empty state's "No bodies yet" underneath the first real row,
+        // and that stale text was a live hit-test target while it lasted.
+        // Found in a magnified render of the drawer, not by any check that
+        // existed.
+        QStringList stale;
+        if (drawer) {
+            for (QLabel* label : drawer->findChildren<QLabel*>()) {
+                if (label->isVisible() &&
+                    label->text().contains(QStringLiteral("No bodies yet")))
+                    stale << label->text().left(24);
+            }
+        }
+        check(stale.isEmpty(),
+              QStringLiteral("no leftover empty-state text is still showing behind the "
+                             "rows (%1)")
+                  .arg(stale.isEmpty() ? QStringLiteral("clean")
+                                       : stale.join(QStringLiteral(" | "))));
+
+        // The text sweep above catches the empty state and nothing else - a
+        // replaced BODY row carries text that legitimately reappears on the
+        // new row, so only the widget's own state can distinguish "gone" from
+        // "still there". Held by pointer across a rebuild: settle() runs a
+        // nested event loop, which does not deliver DeferredDelete, so the
+        // old row is still alive here and its visibility is the whole
+        // question.
+        if (drawer && drawer->rowCount() > 0) {
+            QPointer<QWidget> deadRow = drawer->findChild<QWidget*>(QStringLiteral("itemsRow"));
+            check(deadRow != nullptr && deadRow->isVisible(),
+                  "a live row is visible before the rebuild that replaces it");
+            drawer->refresh();
+            settle(60);
+            check(deadRow.isNull() || !deadRow->isVisible(),
+                  QStringLiteral("and the row a rebuild replaced is hidden the instant it "
+                                 "is replaced, not merely on its way to deleteLater() "
+                                 "(%1)")
+                      .arg(deadRow.isNull() ? QStringLiteral("already destroyed")
+                                            : QStringLiteral("still alive, hidden")));
+            check(drawer->rowCount() == static_cast<int>(window.document().solids().size()),
+                  "and the rebuild left exactly one row per body");
+        }
+
+        // Content unchanged: the row still carries name and dimensions.
+        check(drawer != nullptr &&
+                  drawer->rowTextAt(0).contains(QString::fromUtf8("\xC3\x97")) &&
+                  drawer->rowTextAt(0).contains(QStringLiteral("mm")),
+              QStringLiteral("rowTextAt(0) still carries the body's dimensions "
+                             "(\"%1\")")
+                  .arg(drawer ? drawer->rowTextAt(0) : QString()));
+
+        // Toggled by the EXISTING action and its existing shortcut - no new
+        // action, no new state. Both directions, and the rail's own button
+        // follows the action rather than storing anything of its own.
+        QAction* items = action(window, QStringLiteral("Items"));
+        check(items != nullptr &&
+                  items->shortcut() == QKeySequence(QStringLiteral("Ctrl+Alt+S")),
+              "the drawer still answers to Ctrl+Alt+S on the same action");
+        ToolChip* itemsChip = nullptr;
+        if (rail) {
+            for (ToolChip* chip : rail->chips())
+                if (chip->action() == items) itemsChip = chip;
+        }
+        check(itemsChip != nullptr, "the rail carries the Items button");
+        if (items && drawer && itemsChip) {
+            check(items->isChecked() && drawer->isVisible() && itemsChip->isChecked(),
+                  "action, drawer and rail button all start in agreement");
+            items->trigger();
+            settle(200);
+            check(!drawer->isVisible(),
+                  "triggering Items closes the drawer");
+            check(!items->isChecked() && !itemsChip->isChecked(),
+                  "and the rail button follows the action down");
+            bool stillAnchored = false;
+            if (overlay) {
+                for (const QRect& r : overlay->occupiedRects())
+                    if (r == drawer->geometry()) stillAnchored = true;
+            }
+            check(!stillAnchored,
+                  "a closed drawer stops being an obstacle the others avoid");
+
+            items->trigger();
+            settle(200);
+            check(drawer->isVisible(), "triggering it again reopens the drawer");
+            check(items->isChecked() && itemsChip->isChecked(),
+                  "and the rail button comes back up with it");
+        }
+
+        // The family surface, swept the whole way round - the drawer paints
+        // its ENTIRE rect opaquely, which is the property that stops an
+        // unpainted slack region rendering as a black band over the GL
+        // surface (see ToolCluster.cpp for the capture that found it).
+        if (drawer && drawer->isVisible()) {
+            checkFamilySurface(drawer, QPoint(0, drawer->height() / 2),
+                               drawer->rect().adjusted(6, 6, -6, -6), Theme::border(),
+                               QStringLiteral("ItemsPanel (the drawer)"));
+
+            // ...and specifically its CORNERS - the card the nubs were worst
+            // on: it floats widest of the family, and its rounded corners at
+            // radius 10 used to sit squarely on the GL surface with nothing
+            // behind them, reading as black. Theme::paintSurface() now fills
+            // the drawer's full rect with an opaque ground - viewport() by
+            // default, the ground this card genuinely sits on - before the
+            // rounded panel goes on top, so the right answer at each corner
+            // is opaque viewport(), not merely opaque: a corner filled with
+            // panel() instead (the wrong fix - covering the triangle with the
+            // card's own fill rather than the ground behind it) would still
+            // pass an alpha-only check, so this is compared against both
+            // wrong answers, black and panel().
+            const QImage drawerImg = renderExact(drawer);
+            QStringList drawerNubs;
+            const QPoint drawerCorners[4] = {
+                QPoint(0, 0), QPoint(drawerImg.width() - 1, 0),
+                QPoint(0, drawerImg.height() - 1),
+                QPoint(drawerImg.width() - 1, drawerImg.height() - 1)};
+            for (const QPoint& c : drawerCorners) {
+                if (!drawerImg.rect().contains(c)) continue;
+                const QRgb px = drawerImg.pixel(c);
+                const QColor colour(px);
+                const bool opaque = qAlpha(px) == 255;
+                const bool notBlack = colorDistance(colour, QColor(Qt::black)) > 20.0;
+                const bool readsAsViewport =
+                    colorDistance(colour, Theme::viewport()) <
+                        colorDistance(colour, Theme::panel()) &&
+                    colorDistance(colour, Theme::viewport()) < 20.0;
+                if (!opaque || !notBlack || !readsAsViewport)
+                    drawerNubs << QStringLiteral("%1,%2 alpha %3 colour %4")
+                                      .arg(c.x()).arg(c.y()).arg(qAlpha(px)).arg(colour.name());
+            }
+            check(!drawerImg.isNull() && drawerNubs.isEmpty(),
+                  QStringLiteral("and the drawer's corners - where the nubs were worst - "
+                                 "read as opaque viewport() ground, not black and not "
+                                 "panel() (%1)")
+                      .arg(drawerNubs.isEmpty() ? QStringLiteral("all four solid viewport()")
+                                                : drawerNubs.join(QStringLiteral("; "))));
+
+            // Saved to disk for the same reason the toast is: the empty-state
+            // drawer is what a PrintWindow capture of a freshly launched app
+            // shows, and a populated one - rows, dimension readouts, eyes -
+            // only exists once a body does. QWidget::render(), the same
+            // in-process mechanism every check here uses, never OS input.
+            renderExact(drawer).save(outDir + QStringLiteral("/drawer_rows.png"));
+        }
+    }
 
     const double volumeA = ModelingOps::volume(window.document().solids().front().shape);
     check(volumeA > 0.0, QStringLiteral("solid has positive volume (%1)").arg(volumeA, 0, 'f', 1));
@@ -1216,6 +2384,12 @@ int main(int argc, char* argv[])
         TopoDS_Face picked;
         TopoDS_Shape pickedBody;
         QPoint screen;
+        // Where the outline's four corners get clicked. Built as real points ON
+        // the candidate's plane and then projected - never as a pixel offset
+        // from the centre. See the comment where they are computed.
+        QPoint outlineCorners[4];
+        // A fifth point on the plane, for the cursor-readout probe.
+        QPoint hoverAt;
         // Projecting a centre of mass says where a face WOULD be if nothing
         // stood in front of it; several bodies exist by now and any of them
         // can occlude any other. So each candidate is clicked and the result
@@ -1247,12 +2421,58 @@ int main(int argc, char* argv[])
                     if (!view->projectToScreen(props.CentreOfMass(), at)) continue;
                     if (!view->rect().adjusted(20, 20, -20, -20).contains(at)) continue;
 
+                    // The points this block will later click, chosen as real
+                    // points ON the candidate's plane and then projected, never
+                    // as a fixed pixel offset from the projected centre.
+                    //
+                    // A vertical face can be almost edge-on to the axonometric
+                    // camera - every vertical face this model offers here is
+                    // within 8 degrees of edge-on - and on such a plane a fixed
+                    // pixel offset walks past the plane's own horizon. The ray
+                    // then meets the plane BEHIND the eye, pointOnSketchPlane()
+                    // rejects it (see the toHit.Dot(direction) <= 0 guard), and
+                    // the click places no point at all. Points built on the
+                    // plane round-trip through projectToScreen() by
+                    // construction, at any grazing angle.
+                    //
+                    // That pixel offsets ever worked here was luck, not design:
+                    // this model is itself built from earlier screen clicks, so
+                    // any change to the viewport's size reshapes it and re-rolls
+                    // that luck. Adding the app bar shortened the viewport by
+                    // 8px and turned the offsets into misses.
+                    const gp_Pln candidatePlane = BRepAdaptor_Surface(candidate).Plane();
+                    Standard_Real cu0 = 0.0, cv0 = 0.0;
+                    ElSLib::Parameters(candidatePlane, props.CentreOfMass(), cu0, cv0);
+                    // Comfortably wider than the snap grid, so the four corners
+                    // stay distinct once snapped.
+                    const double half = 20.0;
+                    const double du[4] = {-half,  half, half, -half};
+                    const double dv[4] = {-half, -half, half,  half};
+                    QPoint corners[4];
+                    bool cornersUsable = true;
+                    for (int c = 0; c < 4 && cornersUsable; ++c) {
+                        const gp_Pnt onPlane =
+                            ElSLib::Value(cu0 + du[c], cv0 + dv[c], candidatePlane);
+                        cornersUsable =
+                            view->projectToScreen(onPlane, corners[c]) &&
+                            view->rect().adjusted(8, 8, -8, -8).contains(corners[c]);
+                    }
+                    if (!cornersUsable) continue;
+                    QPoint hoverCandidate;
+                    if (!view->projectToScreen(
+                            ElSLib::Value(cu0 + half * 0.5, cv0 + half * 0.5, candidatePlane),
+                            hoverCandidate) ||
+                        !view->rect().adjusted(8, 8, -8, -8).contains(hoverCandidate))
+                        continue;
+
                     clickAt(view, QPointF(at));
                     settle(120);
                     const TopoDS_Face got = view->selectedFace();
                     if (!isVerticalPlane(got)) continue;   // occluded, or the pick missed
                     picked = got;
                     screen = at;
+                    std::copy(corners, corners + 4, outlineCorners);
+                    hoverAt = hoverCandidate;
                     break;
                 }
                 if (!picked.IsNull()) break;
@@ -1352,7 +2572,7 @@ int main(int argc, char* argv[])
                 // left the other meaningless in the plane the user is drawing
                 // in. ElSLib::Parameters is what snapToPlaneGrid already uses,
                 // so the two agree by construction.
-                moveTo(view, QPointF(screen + QPoint(30, -20)));
+                moveTo(view, QPointF(hoverAt));
                 settle(120);
                 gp_Pnt cursor;
                 check(view->lastHoverPoint(cursor),
@@ -1386,10 +2606,8 @@ int main(int argc, char* argv[])
                 // centre of mass ends up relative to the face it grew from.
                 trigger(window, QStringLiteral("Start Sketch"));
                 settle(120);
-                clickAt(view, QPointF(screen + QPoint(-60, -40)));
-                clickAt(view, QPointF(screen + QPoint(60, -40)));
-                clickAt(view, QPointF(screen + QPoint(60, 40)));
-                clickAt(view, QPointF(screen + QPoint(-60, 40)));
+                for (const QPoint& corner : outlineCorners)
+                    clickAt(view, QPointF(corner));
                 settle(120);
                 check(window.sketch().pointCount() == 4,
                       "four points land on the locked face");
@@ -1624,10 +2842,13 @@ int main(int argc, char* argv[])
                     check(window.lockToFace(picked),
                           "the face locks again once nothing is pending");
                     trigger(window, QStringLiteral("Start Sketch"));
-                    clickAt(view, QPointF(screen + QPoint(-60, -40)));
-                    clickAt(view, QPointF(screen + QPoint(60, -40)));
-                    clickAt(view, QPointF(screen + QPoint(60, 40)));
-                    clickAt(view, QPointF(screen + QPoint(-60, 40)));
+                    // The same plane-derived corners the first outline used,
+                    // and for the same reason - this face is nearly edge-on,
+                    // so a pixel offset from its centre is not reliably a
+                    // point on it. Nothing has moved the camera since they
+                    // were projected.
+                    for (const QPoint& corner : outlineCorners)
+                        clickAt(view, QPointF(corner));
                     trigger(window, QStringLiteral("Finish Sketch"));
                     settle(150);
                     check(window.hasPendingFace(),
@@ -1931,6 +3152,41 @@ int main(int argc, char* argv[])
         check(beforeItems.contains(QStringLiteral("mm")),
               QStringLiteral("the panel reads in millimetres (\"%1\")").arg(beforeItems));
 
+        // The bar's unit button is not a second unit-writing path: it triggers
+        // the OTHER unit's existing QAction, so persistence, the items panel,
+        // the status bar and the extrude field's label all follow the one
+        // route Phase 4 built. Asserting the menu action's checked state after
+        // each click is what proves that - a private toggle inside the button
+        // would move the label and leave the menu behind.
+        AppBar* unitBar = qobject_cast<AppBar*>(window.menuWidget());
+        QAbstractButton* unitButton =
+            unitBar ? qobject_cast<QAbstractButton*>(unitBar->unitButton()) : nullptr;
+        check(unitButton != nullptr && unitButton->text() == QStringLiteral("mm"),
+              "the bar's unit button starts on millimetres");
+        if (unitButton && mm && cm) {
+            clickAt(unitButton, QPointF(unitButton->width() / 2.0,
+                                        unitButton->height() / 2.0));
+            settle(200);
+            check(unitButton->text() == QStringLiteral("cm"),
+                  QStringLiteral("clicking it switches to centimetres (\"%1\")")
+                      .arg(unitButton->text()));
+            check(cm->isChecked() && !mm->isChecked(),
+                  "and it went through the Units actions, not a private toggle");
+            check(items && items->rowTextAt(0).contains(QStringLiteral("cm")),
+                  QStringLiteral("the items panel follows the button (\"%1\")")
+                      .arg(items ? items->rowTextAt(0) : QString()));
+
+            clickAt(unitButton, QPointF(unitButton->width() / 2.0,
+                                        unitButton->height() / 2.0));
+            settle(200);
+            check(unitButton->text() == QStringLiteral("mm"),
+                  "clicking it again cycles back to millimetres");
+            check(mm->isChecked() && !cm->isChecked(),
+                  "the Units actions came back with it");
+            check(items && items->rowTextAt(0).contains(QStringLiteral("mm")),
+                  "and so did the items panel");
+        }
+
         if (cm) {
             cm->trigger();
             settle(150);
@@ -2102,6 +3358,11 @@ int main(int argc, char* argv[])
 
     // --- icons ----------------------------------------------------------------
     {
+        // DisplayMode, Screenshot and Fit are gone - Task 3 folded Wireframe
+        // and Fit All into the app bar as text buttons and left Save
+        // Screenshot menu-only, so the rail never needed those three icons
+        // and IconSet dropped them rather than keeping dead glyphs (see
+        // IconSet.h).
         const IconSet::Glyph all[] = {
             IconSet::Glyph::Sketch,      IconSet::Glyph::Extrude,
             IconSet::Glyph::Fuse,        IconSet::Glyph::Cut,
@@ -2109,8 +3370,6 @@ int main(int argc, char* argv[])
             IconSet::Glyph::Undo,        IconSet::Glyph::Redo,
             IconSet::Glyph::Items,       IconSet::Glyph::Snap,
             IconSet::Glyph::SelectSolid, IconSet::Glyph::SelectFace,
-            IconSet::Glyph::DisplayMode, IconSet::Glyph::Screenshot,
-            IconSet::Glyph::Fit,
         };
         bool allDrawn = true;
         for (IconSet::Glyph glyph : all) {
@@ -2159,16 +3418,19 @@ int main(int argc, char* argv[])
 
     // --- overlay anchoring ----------------------------------------------------
     {
+        // Glyph::Fit no longer exists (Task 3 folded Fit All into the app bar
+        // as a text button; Minor 8 removed the now-dead icon) - any glyph
+        // does for this probe, which only cares that a chip is a chip.
         QAction probe(QStringLiteral("Probe"));
         auto* cluster = new ToolCluster(view);
-        cluster->addChip(new ToolChip(&probe, IconSet::Glyph::Fit));
+        cluster->addChip(new ToolChip(&probe, IconSet::Glyph::Sketch));
 
         // A second, independent cluster that outlives the first - the real
         // post-condition for "relayout survives a destroyed cluster" is that
         // this one is still laid out correctly afterwards.
         QAction probe2(QStringLiteral("Probe2"));
         auto* survivor = new ToolCluster(view);
-        survivor->addChip(new ToolChip(&probe2, IconSet::Glyph::Fit));
+        survivor->addChip(new ToolChip(&probe2, IconSet::Glyph::Sketch));
 
         ViewportOverlay overlay(view);
         overlay.addWidget(cluster, ViewportOverlay::Anchor::BottomLeft);
@@ -2447,6 +3709,32 @@ int main(int argc, char* argv[])
                   .arg(tipOffenders.isEmpty() ? QStringLiteral("none")
                                               : tipOffenders.join(QStringLiteral(", "))));
 
+        // The app bar's wordmark and its buttons' labels are painted, and the
+        // two readouts carry no QAction of their own, so neither sweep above
+        // can see them.
+        AppBar* sweptBar = qobject_cast<AppBar*>(window.menuWidget());
+        check(sweptBar != nullptr, "the app bar is there to sweep");
+        if (sweptBar) {
+            const QStringList barTexts = sweptBar->paintedTexts();
+            check(barTexts.contains(sweptBar->wordmark()) && barTexts.size() >= 5,
+                  QStringLiteral("the bar exposes its painted copy - wordmark and "
+                                 "every button (%1)")
+                      .arg(barTexts.join(QStringLiteral(", "))));
+            QStringList barOffenders;
+            for (const QString& text : barTexts) {
+                for (const QString& word : banned) {
+                    if (text.contains(word, Qt::CaseInsensitive))
+                        barOffenders << (text + QStringLiteral(" [") + word +
+                                         QStringLiteral("]"));
+                }
+            }
+            check(barOffenders.isEmpty(),
+                  QStringLiteral("no app bar text uses a banned word (%1)")
+                      .arg(barOffenders.isEmpty()
+                               ? QStringLiteral("none")
+                               : barOffenders.join(QStringLiteral(", "))));
+        }
+
         // The walkthrough panel's text - title, skip control, and steps - is
         // all painted, not put on any action text or tooltip, so none of the
         // loops above ever see any of it. paintedTexts() is the full set, not
@@ -2648,8 +3936,8 @@ int main(int argc, char* argv[])
             // The pose the Axonometric view leaves behind is precisely the one
             // the gizmo calls "Persp", which is why the old pose-based
             // condition could never retire this hint from this route.
-            check(axoGizmo->labelText().contains(QStringLiteral("Persp")),
-                  "and the camera it leaves is still one the gizmo labels Persp");
+            check(axoProbe.view()->viewLabelText() == QStringLiteral("Persp"),
+                  "and the camera it leaves is still one the view label calls Persp");
             check(!axoHint->isVisible() && axoHint->currentHint().isEmpty(),
                   "the hint retires all the same - it reads the recorded event, "
                   "not the camera pose");
@@ -2939,12 +4227,17 @@ int main(int argc, char* argv[])
             OcctViewWidget* secondView = second.view();
 
             // skipRect()'s formula, in the panel's own local coordinates:
-            // width() - 14 - 34, 8, 34, 18 (see WalkthroughPanel.cpp). Its
+            // width() - margin - 14 - 34, margin + 8, 34, 18 (see
+            // WalkthroughPanel.cpp) - margin being
+            // Theme::surfaceShadowMargin(), the room the panel now reserves
+            // around its visible card for paintSurface()'s shadow. Its
             // centre, translated into the shared parent's coordinates the
             // way syncSkipGeometry() does, is what a real click on it would
             // land on.
+            const int shadowMargin = Theme::surfaceShadowMargin();
             const QPoint skipCentre =
-                secondGuide->pos() + QPoint(secondGuide->width() - 31, 17);
+                secondGuide->pos() +
+                QPoint(secondGuide->width() - shadowMargin - 31, shadowMargin + 17);
             QWidget* hitSkip = secondView->childAt(skipCentre);
             // "not the panel" alone is the check that let an AxisGizmo
             // mis-hit through once already (see the fix-round report) - it
@@ -3060,11 +4353,26 @@ int main(int argc, char* argv[])
             check(toast != nullptr && toast->isVisible(),
                   "a failure message is up alongside the guide");
 
-            // The shrink, to the exact 800x500 viewport the defect names.
-            resizeViewport(800, 500);
-            check(nv->width() == 800 && nv->height() == 500,
-                  QStringLiteral("the probe really is at the 800x500 viewport under "
-                                 "test (got %1x%2)").arg(nv->width()).arg(nv->height()));
+            // The shrink, to the 800-wide viewport the defect names, at the
+            // shortest height this window can actually reach.
+            //
+            // Regression: the defect this block guards against was found at
+            // a LITERAL 800x500, but 500 is no longer a height this window
+            // can be shrunk to - MainWindow::buildOverlay() now derives the
+            // viewport's minimum height from the rail's own sizeHint(), and
+            // that floor (nv->minimumHeight()) is taller than 500. Aiming
+            // past a real floor does not skip the collision-avoidance case
+            // this test exists for, it just means the shortest viewport
+            // really is the floor now - which is also the single most
+            // cramped case left to test, so reading the floor here rather
+            // than hard-coding 500 keeps this check meaningful instead of
+            // quietly aiming at an unreachable size forever.
+            const int floorHeight = nv->minimumHeight();
+            resizeViewport(800, floorHeight);
+            check(nv->width() == 800 && nv->height() == floorHeight,
+                  QStringLiteral("the probe really is at the 800-wide viewport's own "
+                                 "floor height under test (got %1x%2, floor %3)")
+                      .arg(nv->width()).arg(nv->height()).arg(floorHeight));
 
             if (toast) {
                 check(!toast->geometry().intersects(guide->geometry()),
@@ -3095,6 +4403,28 @@ int main(int argc, char* argv[])
                                                     : collisions.join(QStringLiteral("; "))));
                 check(nv->rect().contains(toast->geometry()),
                       "and still entirely inside the viewport");
+
+                // Non-vacuity for the loop above, now that the bottom-left
+                // Snap/Select cluster it was written against has become a
+                // rail spanning the WHOLE left edge. The rail is in every
+                // horizontal band there is, so the band solver has to raise
+                // the toast's floor past it at this width rather than
+                // happening to miss it - which is only interesting if the
+                // rail really does share the toast's rows.
+                if (ToolCluster* rail = nv->findChild<ToolCluster*>()) {
+                    const bool sharesTheBand = rail->geometry().top() <= toast->geometry().bottom() &&
+                                               rail->geometry().bottom() >= toast->geometry().top();
+                    check(sharesTheBand,
+                          QStringLiteral("the rail really is in the toast's band, so "
+                                         "stepping around it was not a no-op (rail "
+                                         "%1,%2 %3x%4)")
+                              .arg(rail->x()).arg(rail->y())
+                              .arg(rail->width()).arg(rail->height()));
+                    check(toast->geometry().left() > rail->geometry().right(),
+                          QStringLiteral("and the toast sits clear to its right "
+                                         "(toast left %1, rail right %2)")
+                              .arg(toast->geometry().left()).arg(rail->geometry().right()));
+                }
             }
 
             // The other half: a guide that appears UNDERNEATH a toast already
@@ -3129,6 +4459,73 @@ int main(int argc, char* argv[])
                           .arg(guide->width()).arg(guide->height()));
             }
 
+            // The hint balloon has the same obstacle problem as the toast and
+            // used to solve it from a shorter list: it named WalkthroughPanel
+            // and Toast by type, so it could not see the rail at all. Its
+            // step-aside is "go to the LEFT of the obstacle", and to the left
+            // of the bottom-right guide at these widths is underneath a rail
+            // that now spans the whole left edge - x=8, behind it, with
+            // relayout() raising the rail back on top. 600px is inside the
+            // 585-640 band where that lands.
+            {
+                // Same floor-height reasoning as the 800-wide probe above:
+                // 500 is no longer reachable, so use the real floor.
+                resizeViewport(600, nv->minimumHeight());
+                check(buildBody(narrow, 0.30, 0.30, 0.50, 0.50, 10.0),
+                      "a second body on the narrow probe, so a hint has a reason to "
+                      "be up");
+                // The guide is what the balloon steps around, and building
+                // that body completed it. Restoring it AFTER the build is
+                // what puts both surfaces on screen at once - which is the
+                // whole collision, and is exactly the sequence a real user
+                // hits when Show tips again lands on a narrow window.
+                if (QAction* restore = action(narrow, QStringLiteral("Show tips again"))) {
+                    restore->trigger();
+                    settle(250);
+                }
+                const auto narrowSolids = narrow.document().solids();
+                HintBalloon* balloon = narrow.findChild<HintBalloon*>();
+                ToolCluster* rail = nv->findChild<ToolCluster*>();
+                WalkthroughPanel* narrowGuide = narrow.findChild<WalkthroughPanel*>();
+                check(balloon != nullptr && rail != nullptr && narrowSolids.size() >= 2 &&
+                          narrowGuide != nullptr && narrowGuide->isVisible(),
+                      "the narrow probe has a balloon, a rail, a visible guide and two "
+                      "bodies");
+                if (balloon && rail && narrowGuide && narrowSolids.size() >= 2) {
+                    nv->setSelectedSolids({narrowSolids[0].id, narrowSolids[1].id});
+                    settle(250);
+                    check(balloon->isVisible(),
+                          "selecting two bodies raises the boolean hint on the narrow "
+                          "viewport");
+                    check(balloon->isVisible() &&
+                              balloon->geometry().intersects(
+                                  QRect(0, balloon->y(), narrowGuide->geometry().right(),
+                                        balloon->height())) &&
+                              narrowGuide->isVisible(),
+                          QStringLiteral("and the guide really is in its way, so stepping "
+                                         "aside is not a no-op (guide %1,%2 %3x%4)")
+                              .arg(narrowGuide->x()).arg(narrowGuide->y())
+                              .arg(narrowGuide->width()).arg(narrowGuide->height()));
+                    if (balloon->isVisible()) {
+                        check(!balloon->geometry().intersects(rail->geometry()),
+                              QStringLiteral("and the balloon steps clear of the rail "
+                                             "rather than under it (viewport %1 wide - "
+                                             "balloon %2,%3 %4x%5 - rail %6,%7 %8x%9)")
+                                  .arg(nv->width())
+                                  .arg(balloon->x()).arg(balloon->y())
+                                  .arg(balloon->width()).arg(balloon->height())
+                                  .arg(rail->x()).arg(rail->y())
+                                  .arg(rail->width()).arg(rail->height()));
+                        check(!balloon->geometry().intersects(narrowGuide->geometry()),
+                              "and still clear of the guide it was already avoiding");
+                        check(nv->rect().contains(balloon->geometry()),
+                              "and entirely inside the viewport");
+                    }
+                    nv->setSelectedSolids({});
+                    settle(150);
+                }
+            }
+
             // ExtrudePreview has the mirror problem at the top edge: it is
             // raised once, at begin(), and relayout() then raises the
             // top-left Items/Undo/Redo cluster back over it, so its field
@@ -3141,23 +4538,42 @@ int main(int argc, char* argv[])
             trigger(narrow, QStringLiteral("Extrude..."));
             settle(200);
             // A resize AFTER the panel opened is what used to bury it.
-            resizeViewport(500, 500);
+            //
+            // This drove the viewport to 500 while the top-left
+            // Items/Undo/Redo cluster was the obstacle the centred panel ran
+            // into. The rail replaced it and is only ~40px wide at the far
+            // left, so the panel now clears it at every width this window can
+            // reach; the obstacle still in the panel's row is the axis gizmo
+            // top-right - the very collision ExtrudePreview::reposition()'s
+            // own comment names ("the two overlap once viewportWidth drops
+            // below 472px"). 440 is a width that produces it, and the check
+            // below names whichever anchored widget actually collided rather
+            // than assuming, so the probe cannot quietly become vacuous
+            // again.
+            resizeViewport(440, 500);
 
             ExtrudePreview* panel = narrow.findChild<ExtrudePreview*>();
             check(panel != nullptr && panel->isVisible() && panel->field() != nullptr,
                   "the extrude panel is open on the narrow viewport");
             if (panel && panel->field()) {
                 QWidget* field = panel->field();
-                bool overlapped = false;
+                QStringList overlaps;
                 for (ToolCluster* cluster : nv->findChildren<ToolCluster*>()) {
                     if (cluster->isVisible() &&
                         cluster->geometry().intersects(panel->geometry()))
-                        overlapped = true;
+                        overlaps << QStringLiteral("the rail");
                 }
-                check(overlapped,
-                      QStringLiteral("the panel really does collide with a chip cluster "
-                                     "at this width, so this check is exercising "
-                                     "something (viewport %1 wide)").arg(nv->width()));
+                if (AxisGizmo* gizmo = nv->findChild<AxisGizmo*>()) {
+                    if (gizmo->isVisible() && gizmo->geometry().intersects(panel->geometry()))
+                        overlaps << QStringLiteral("the axis gizmo");
+                }
+                check(!overlaps.isEmpty(),
+                      QStringLiteral("the panel really does collide with an anchored "
+                                     "widget at this width, so this check is exercising "
+                                     "something (viewport %1 wide; hits: %2)")
+                          .arg(nv->width())
+                          .arg(overlaps.isEmpty() ? QStringLiteral("none")
+                                                  : overlaps.join(QStringLiteral(", "))));
                 const QPoint centre =
                     field->mapTo(nv, QPoint(field->width() / 2, field->height() / 2));
                 QWidget* hit = nv->childAt(centre);
@@ -3171,6 +4587,277 @@ int main(int argc, char* argv[])
             settle(150);
         }
         narrow.close();
+    }
+
+    // --- the drawer is an obstacle like any other -----------------------------
+    // The toast and the balloon both step around whatever ViewportOverlay has
+    // anchored, so a floating drawer joins that set for free. "For free" is
+    // exactly the kind of claim that is true right up until it is not, and
+    // both surfaces are checked here NON-VACUOUSLY: the toast is driven into
+    // the drawer's own horizontal band, and the balloon is measured with the
+    // drawer open AND closed, so the assertion cannot pass because the drawer
+    // happened to be nowhere near it.
+    {
+        MainWindow probe(nullptr, /*persistProgress=*/false);
+        probe.setAttribute(Qt::WA_ShowWithoutActivating);
+        probe.resize(900, 640);
+        probe.show();
+        settle(400);
+        probe.view()->setAnimationsEnabled(false);
+        OcctViewWidget* pv = probe.view();
+
+        auto resizeViewport = [&](int w, int h) {
+            for (int i = 0; i < 6; ++i) {
+                const int dw = w - pv->width();
+                const int dh = h - pv->height();
+                if (dw == 0 && dh == 0) break;
+                probe.resize(probe.width() + dw, probe.height() + dh);
+                settle(220);
+            }
+        };
+
+        // The guide shares the bottom strip and would be a second obstacle in
+        // every band measured below, which would make the numbers unreadable
+        // and the failures ambiguous. Skipping it the way a real user does -
+        // a click on its own skip control - leaves the rail and the drawer as
+        // the only left-hand obstacles.
+        WalkthroughPanel* guide = probe.findChild<WalkthroughPanel*>();
+        if (guide && guide->skipControl()) {
+            QWidget* skip = guide->skipControl();
+            clickAt(skip, QPointF(skip->width() / 2.0, skip->height() / 2.0));
+            settle(250);
+        }
+        check(guide != nullptr && !guide->isVisible(),
+              "the guide is skipped, so the drawer and the rail are the only "
+              "left-hand obstacles in this probe");
+
+        ItemsPanel* drawer = probe.itemsPanel();
+        check(drawer != nullptr, "the obstacle probe has a drawer");
+
+        ToolCluster* rail = pv->findChild<ToolCluster*>();
+        ToastHost* toasts = probe.findChild<ToastHost*>();
+        HintBalloon* balloon = probe.findChild<HintBalloon*>();
+        QAction* items = action(probe, QStringLiteral("Items"));
+        check(drawer != nullptr && drawer->isVisible() && rail != nullptr &&
+                  toasts != nullptr && balloon != nullptr && items != nullptr,
+              "the obstacle probe has a drawer, a rail, a toast host and a balloon");
+
+        if (drawer && rail && toasts && balloon && items) {
+            // Regression: MainWindow::buildOverlay() now sets the viewport's
+            // own minimum height from the rail's sizeHint(), so "the
+            // shortest viewport this window can be shrunk to" is a real
+            // floor (pv->minimumHeight()) rather than an arbitrary number
+            // this probe used to be able to aim past. Reaching that floor
+            // FIRST - before the toast is shown and before the drawer is
+            // grown - is what lets everything measured below (the toast's
+            // row, how tall the drawer has to get to reach it) be read at
+            // the actual worst case instead of at a height that turned out
+            // to be unreachable once the rail raised the floor.
+            resizeViewport(760, pv->minimumHeight());
+            settle(200);
+            check(pv->width() == 760 && pv->height() == pv->minimumHeight(),
+                  QStringLiteral("the probe reaches its shortest reachable viewport "
+                                 "(got %1x%2, floor %3)")
+                      .arg(pv->width()).arg(pv->height()).arg(pv->minimumHeight()));
+
+            // Failure, not Note, purely for its longer life: the growth loop
+            // below takes over a second and a four-second message could
+            // retire mid-probe.
+            toasts->show(QStringLiteral("Graphite drawer probe"),
+                         Toast::Kind::Failure, false);
+            settle(180);
+            Toast* toast = probe.findChild<Toast*>();
+            check(toast != nullptr && toast->isVisible(),
+                  "a message is up for the obstacle probe");
+
+            if (toast) {
+                // Bodies until the drawer is tall enough to reach the
+                // toast's own band on the shortest viewport this window can
+                // actually be shrunk to. Driven off the toast's live
+                // geometry rather than a fixed drawer height, so this cannot
+                // quietly go vacuous the day either widget's size changes -
+                // exactly what happened to the fixed 240px threshold this
+                // replaced once the rail's own minimum-height floor pushed
+                // the toast further down than 240px could reach.
+                int built = 0;
+                for (int i = 0; i < 14 &&
+                                drawer->geometry().bottom() < toast->geometry().top(); ++i) {
+                    const double y0 = 0.10 + i * 0.065;
+                    if (buildBody(probe, 0.55, y0, 0.70, y0 + 0.05, 10.0)) ++built;
+                    settle(60);
+                }
+                check(built >= 2 && drawer->geometry().bottom() >= toast->geometry().top(),
+                      QStringLiteral("enough bodies to make the drawer reach the toast's "
+                                     "band (%1 bodies, %2 rows, drawer bottom %3, toast "
+                                     "top %4, hint %5)")
+                          .arg(built)
+                          .arg(drawer->rowCount())
+                          .arg(drawer->geometry().bottom())
+                          .arg(toast->geometry().top())
+                          .arg(static_cast<QWidget*>(drawer)->sizeHint().height()));
+                // The card measures the rows it actually holds. It used to
+                // report a sizeHint of 325 while sitting at its 176px
+                // empty-state floor with eight bodies listed in it, because
+                // a row is hidden until the event loop shows it and
+                // QWidgetItem::isEmpty() is isHidden() - so the layout
+                // measured the list as empty. Height and hint agreeing is
+                // the property that was actually broken.
+                check(drawer->height() ==
+                          static_cast<QWidget*>(drawer)->sizeHint().height(),
+                      "and the card's height is the height its own contents ask for");
+
+                // Drive the toast INTO the drawer's band. The drawer is a
+                // top-left card and the toast a bottom-centre one, so on any
+                // roomy viewport they never meet and "the toast steps around
+                // the drawer" is a check that cannot fail - the resize and
+                // growth above are what make it non-vacuous.
+                check(pv->width() == 760 && pv->height() == pv->minimumHeight(),
+                      QStringLiteral("the probe is still at the width and floor height "
+                                     "under test (got %1x%2)")
+                          .arg(pv->width()).arg(pv->height()));
+
+                const QRect drawerRect = drawer->geometry();
+                const QRect toastRect = toast->geometry();
+                check(drawerRect.top() <= toastRect.bottom() &&
+                          drawerRect.bottom() >= toastRect.top(),
+                      QStringLiteral("the drawer really does share the toast's band, "
+                                     "so stepping around it is not a no-op (viewport "
+                                     "%1x%2 - drawer %3,%4 %5x%6 - toast %7,%8 %9x%10)")
+                          .arg(pv->width()).arg(pv->height())
+                          .arg(drawerRect.x()).arg(drawerRect.y())
+                          .arg(drawerRect.width()).arg(drawerRect.height())
+                          .arg(toastRect.x()).arg(toastRect.y())
+                          .arg(toastRect.width()).arg(toastRect.height()));
+                check(!toastRect.intersects(drawerRect),
+                      "and the toast is clear of it");
+                check(toastRect.left() > drawerRect.right(),
+                      QStringLiteral("having been pushed past the drawer's right edge, "
+                                     "not merely past the rail's (toast left %1, drawer "
+                                     "right %2, rail right %3)")
+                          .arg(toastRect.left()).arg(drawerRect.right())
+                          .arg(rail->geometry().right()));
+                check(pv->rect().contains(toastRect),
+                      "and still entirely inside the viewport");
+            }
+            // The message is left up on purpose rather than dismissed: it
+            // sits in the bottom band and the balloon rides 90px above it, so
+            // it is one more thing the balloon has to be clear of while the
+            // readings below are taken.
+
+            // The balloon raises a floor for left-hand obstacles that share
+            // its own horizontal band - ToastHost's rule, and now this
+            // widget's. Measured three ways, because only the set of three
+            // says what the rule is: with the drawer IN the band (it moves
+            // the balloon), with the drawer closed (it stops), and on a
+            // viewport tall enough that the drawer is nowhere near the
+            // balloon's row (it must not move it at all).
+            const auto probeSolids = probe.document().solids();
+            if (probeSolids.size() >= 2) {
+                pv->setSelectedSolids({probeSolids[0].id, probeSolids[1].id});
+                settle(250);
+            }
+            check(balloon->isVisible(), "a hint is up for the obstacle probe");
+            if (balloon->isVisible()) {
+                const QRect drawerRect = drawer->geometry();
+                // Non-vacuity for the whole open/closed comparison below: on
+                // this short viewport the drawer genuinely reaches down into
+                // the balloon's row, which is the only circumstance in which
+                // a band-aware floor lets it move anything.
+                check(drawerRect.top() <= balloon->geometry().bottom() &&
+                          drawerRect.bottom() >= balloon->geometry().top(),
+                      QStringLiteral("the drawer really does share the balloon's band here "
+                                     "(drawer %1..%2, balloon %3..%4)")
+                          .arg(drawerRect.top()).arg(drawerRect.bottom())
+                          .arg(balloon->geometry().top()).arg(balloon->geometry().bottom()));
+                check(balloon->x() > drawerRect.right(),
+                      QStringLiteral("the balloon clears the open drawer (balloon x=%1, "
+                                     "drawer right=%2)")
+                          .arg(balloon->x()).arg(drawerRect.right()));
+                check(!balloon->geometry().intersects(drawerRect),
+                      "and does not overlap it at all");
+                check(pv->rect().contains(balloon->geometry()),
+                      "and stays inside the viewport");
+
+                const int openX = balloon->x();
+                items->trigger();               // close the drawer
+                settle(250);
+                check(!drawer->isVisible(), "the drawer closed for the second reading");
+                check(balloon->x() < openX && balloon->x() < drawerRect.right(),
+                      QStringLiteral("and the balloon comes back left once it does - so "
+                                     "the drawer, not the rail, was what moved it "
+                                     "(open x=%1, closed x=%2, rail right=%3)")
+                          .arg(openX).arg(balloon->x()).arg(rail->geometry().right()));
+                check(balloon->x() > rail->geometry().right(),
+                      "though never back under the rail");
+
+                items->trigger();               // and back open
+                settle(250);
+                check(drawer->isVisible() && balloon->x() == openX,
+                      "reopening it puts the balloon back where it was");
+
+                // The third reading, and the one that says the floor is a
+                // BAND rule rather than a wall. A taller viewport moves the
+                // balloon's row well below the drawer's bottom edge; a
+                // top-left card the balloon can never touch must then stop
+                // constraining it entirely, and the balloon returns to
+                // centre. Treating every left-hand card as full-height did
+                // the opposite: it held the balloon out at the drawer's right
+                // edge at any height, which on a narrow window pushed it off
+                // the right of the viewport - the case the two neighbouring
+                // readings above check with rect().contains() and this one
+                // therefore checks too.
+                //
+                // The target height used to be a flat 560 - a comfortable
+                // margin above whatever short floor the window could reach
+                // before the rail set a real one. With the drawer now grown
+                // tall enough to reach the toast at THAT floor
+                // (pv->minimumHeight()), a flat 560 can be only a few
+                // pixels above it and no longer comfortable at all. Derived
+                // instead from the drawer's own bottom and the balloon's own
+                // height, the same way the toast's target further up is, so
+                // this reading keeps real clearance rather than sitting on a
+                // knife's edge the day either widget's size changes.
+                const int clearH = drawerRect.bottom() + balloon->height() + 130;
+                resizeViewport(540, clearH);
+                settle(300);
+                const QRect tallDrawer = drawer->geometry();
+                check(pv->width() == 540 && pv->height() == clearH,
+                      QStringLiteral("the probe reached the taller viewport "
+                                     "(got %1x%2, wanted 540x%3)")
+                          .arg(pv->width()).arg(pv->height()).arg(clearH));
+                check(tallDrawer.bottom() < balloon->geometry().top(),
+                      QStringLiteral("where the drawer is clear of the balloon's band, so "
+                                     "a band-aware floor has to ignore it (drawer bottom "
+                                     "%1, balloon top %2)")
+                          .arg(tallDrawer.bottom()).arg(balloon->geometry().top()));
+                check(balloon->x() < tallDrawer.right(),
+                      QStringLiteral("so it no longer holds the balloon out past its right "
+                                     "edge (balloon x=%1, drawer right=%2)")
+                          .arg(balloon->x()).arg(tallDrawer.right()));
+                check(balloon->x() > rail->geometry().right(),
+                      QStringLiteral("while the rail - a genuine full-height spine, in "
+                                     "every band there is - still holds its floor "
+                                     "(balloon x=%1, rail right=%2)")
+                          .arg(balloon->x()).arg(rail->geometry().right()));
+                check(pv->rect().contains(balloon->geometry()),
+                      QStringLiteral("and the balloon is entirely inside the viewport "
+                                     "(balloon %1,%2 %3x%4 in %5x%6)")
+                          .arg(balloon->x()).arg(balloon->y())
+                          .arg(balloon->width()).arg(balloon->height())
+                          .arg(pv->width()).arg(pv->height()));
+
+                // Saved for the visual check the numbers above stand in for.
+                // QWidget::grab() on the window renders the widget tree; the
+                // viewport itself paints nothing into it (paintEngine() is
+                // null, by design - see CLAUDE.md), but every card floating
+                // over it does, at its real position. That is exactly the
+                // layout evidence this case needs, and it comes from the
+                // same in-process rendering the rest of this file uses
+                // rather than from OS-level capture.
+                probe.grab().save(outDir + QStringLiteral("/balloon_540_band.png"));
+            }
+        }
+        probe.close();
     }
 
     // --- one type scale, and focus you can see --------------------------------
@@ -3244,6 +4931,331 @@ int main(int argc, char* argv[])
         }
     }
 
+    // --- Graphite: exact tokens, chip anatomy, and the shared surface ---------
+    {
+        // A drive-by "cleanup" of the palette must fail loudly - these are
+        // the exact Phase 5 values, not incidental ones a refactor could
+        // silently drift.
+        check(Theme::chip() == QColor(QStringLiteral("#2c2c31")),
+              "chip() is the Graphite token");
+        check(Theme::gridMinor() == QColor(QStringLiteral("#3e3e44")),
+              "gridMinor() is the Graphite token");
+        check(Theme::gridMajor() == QColor(QStringLiteral("#4d4d55")),
+              "gridMajor() is the Graphite token");
+        // Was 3, for a soft shadow ring paintSurface() painted around every
+        // card. Fix round 1 removed the shadow entirely: translucent pixels
+        // over OCCT's GL surface have nothing behind them in the widget's
+        // backing store, so the alpha lands on black - a 3px halo on a chip,
+        // and a black band down the viewport once the tool rail was the card.
+        // The function stays, returning zero, so every caller's
+        // grow-by-this-much arithmetic and the sibling-geometry sync built on
+        // it still read as one scheme. Pinned at 0 for the same reason it was
+        // pinned at 3: a drive-by "restore the shadow" must fail loudly.
+        check(Theme::surfaceShadowMargin() == 0,
+              "surfaceShadowMargin() is 0 - the family paints no shadow, so a "
+              "card's widget rect and its painted card are the same rectangle");
+
+        // A standalone chip driven by its own QAction, exactly like "chips
+        // mirror their action" above - not one of MainWindow's real chips.
+        // A real chip's enabled/checked state is policy that
+        // MainWindow::updateActions() can recompute at any appStateChanged,
+        // which would fight a test that pokes the action directly and could
+        // silently overwrite it back before the next grab(). The probe is
+        // driven by nothing but this block.
+        QAction probe(QStringLiteral("Probe chip"));
+        probe.setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+P")));
+        ToolChip probeChip(&probe, IconSet::Glyph::Sketch);
+        probeChip.resize(probeChip.sizeHint());
+        const int chipMargin = Theme::surfaceShadowMargin();
+        const QRect chipBody =
+            probeChip.rect().adjusted(chipMargin, chipMargin, -chipMargin, -chipMargin);
+
+        // normal vs hovered - a real Enter/Leave delivered the way Qt's own
+        // hit-testing would, not myHovered flipped by hand. A coarse
+        // whole-image sanity net; the pixel probes below are what actually
+        // pin each state's specific anatomy.
+        const QImage normal = probeChip.grab().toImage();
+        const QPointF centre(probeChip.width() / 2.0, probeChip.height() / 2.0);
+        QEnterEvent enter(centre, centre, probeChip.mapToGlobal(centre.toPoint()));
+        QCoreApplication::sendEvent(&probeChip, &enter);
+        settle(50);
+        const QImage hovered = probeChip.grab().toImage();
+        check(hovered != normal, "hovering a chip repaints it distinctly (chipHover())");
+        QEvent leave(QEvent::Leave);
+        QCoreApplication::sendEvent(&probeChip, &leave);
+        settle(50);
+
+        // Pin the border: fix round 1, Important 1. An unchecked, enabled
+        // chip's edge pixel must read closer to border() than the chip's
+        // own interior fill does. This is what actually catches "dropped
+        // the always-on border" - the whole-image diffs above were already
+        // green against a chip with no border at all, since hover/disabled/
+        // checked all repainted the fill regardless.
+        {
+            const QImage img = renderExact(&probeChip);
+            const QColor edge = img.pixelColor(chipBody.left(), chipBody.center().y());
+            const QColor interior = img.pixelColor(chipBody.center());
+            check(colorDistance(edge, Theme::border()) < colorDistance(interior, Theme::border()),
+                  "an unchecked, enabled chip's edge pixel reads closer to "
+                  "border() than its own interior fill does");
+        }
+
+        // enabled vs disabled - glyph, label and the shortcut badge (the
+        // probe carries one, so it is actually on screen to compare) all dim
+        // to textDisabled() together.
+        const QImage enabledImg = probeChip.grab().toImage();
+        const QImage enabledExact = renderExact(&probeChip);
+        probe.setEnabled(false);
+        settle(50);
+        const QImage disabledImg = probeChip.grab().toImage();
+        const QImage disabledExact = renderExact(&probeChip);
+        check(disabledImg != enabledImg,
+              "a disabled chip repaints distinctly (glyph, label and badge all "
+              "dim to textDisabled())");
+
+        // Pin the badge specifically: fix round 1, Important 1. Sampled as
+        // an average over the right quarter of the body, not one pixel - a
+        // right-aligned shortcut string is mostly background between the
+        // letterforms. This is what catches "un-dimmed just the badge",
+        // which the whole-chip diff above cannot: the glyph and label
+        // dimming alone is enough to make the two images differ.
+        {
+            const QRect badgeRegion(chipBody.left() + chipBody.width() * 3 / 4,
+                                    chipBody.top() + 2, chipBody.width() / 4 - 4,
+                                    chipBody.height() - 4);
+            const double enabledLum = averageLuminance(enabledExact, badgeRegion);
+            const double disabledLum = averageLuminance(disabledExact, badgeRegion);
+            check(disabledLum < enabledLum - 3.0,
+                  QStringLiteral("the shortcut badge itself dims when the chip "
+                                 "disables (enabled avg %1, disabled avg %2)")
+                      .arg(enabledLum, 0, 'f', 1)
+                      .arg(disabledLum, 0, 'f', 1));
+        }
+        probe.setEnabled(true);
+        settle(50);
+
+        // checked vs unchecked - the inset accent() ring on top of the
+        // border() every chip now always carries, not a swapped border.
+        probe.setCheckable(true);
+        probe.setChecked(false);
+        settle(50);
+        const QImage uncheckedImg = probeChip.grab().toImage();
+        const QImage uncheckedExact = renderExact(&probeChip);
+        probe.setChecked(true);
+        settle(50);
+        const QImage checkedImg = probeChip.grab().toImage();
+        const QImage checkedExact = renderExact(&probeChip);
+        check(checkedImg != uncheckedImg,
+              "a checked chip repaints distinctly (chipActive() fill plus an "
+              "inset accent() ring)");
+
+        // Pin the ring itself: fix round 1, Important 1. Sampled 2px in from
+        // the left edge - where ToolChip::paintEvent() draws the inset
+        // accent() ring - and compared relatively (checked's inset vs
+        // unchecked's inset), not against an absolute token: a single
+        // antialiased pixel sits too close to a coverage tie to trust in
+        // isolation, but the unchecked sample is unambiguously pure fill
+        // with zero accent() contribution, which is exactly the baseline
+        // this needs.
+        {
+            const QPoint insetPoint(chipBody.left() + 2, chipBody.center().y());
+            const QColor uncheckedInset = uncheckedExact.pixelColor(insetPoint);
+            const QColor checkedInset = checkedExact.pixelColor(insetPoint);
+            check(colorDistance(checkedInset, Theme::accent()) <
+                      colorDistance(uncheckedInset, Theme::accent()),
+                  "the checked chip's ring-inset pixel reads far closer to "
+                  "accent() than the same inset on an unchecked chip");
+        }
+        probe.setChecked(false);
+        settle(50);
+
+        // --- fix round 1, Important 2 + the mockup regression: pin every
+        // card to Theme::paintSurface(), and confirm the two cards that keep
+        // their own accent on top of it still show it. ---------------------
+
+        // The guide: its own accent() outline, unconditional, replacing the
+        // family's plain border() everywhere on its edge - not merely "the
+        // guide is visible", which reverting to the old hand-rolled
+        // background would still be.
+        QAction* showTipsAgain = action(window, QStringLiteral("Show tips again"));
+        check(showTipsAgain != nullptr, "Show tips again exists for the family-surface probes");
+        if (showTipsAgain) {
+            showTipsAgain->trigger();
+            settle(150);
+        }
+        WalkthroughPanel* guide = window.findChild<WalkthroughPanel*>();
+        check(guide != nullptr && guide->isVisible(),
+              "the guide is up for the family-surface probe");
+        if (guide && guide->isVisible()) {
+            const int m = Theme::surfaceShadowMargin();
+            const QRect body = guide->rect().adjusted(m, m, -m, -m);
+            checkFamilySurface(guide, QPoint(body.left(), body.center().y()),
+                               body.adjusted(4, 4, -4, -4), Theme::accent(),
+                               QStringLiteral("WalkthroughPanel"));
+        }
+
+        // The hint balloon: plain family, no accent of its own. Selecting
+        // exactly two bodies raises the boolean-operations hint
+        // deterministically - the same trigger HintBalloon::conditionHolds()
+        // uses elsewhere in this suite.
+        HintBalloon* hint = window.findChild<HintBalloon*>();
+        const auto solidsForHint = window.document().solids();
+        if (hint && solidsForHint.size() >= 2) {
+            view->setSelectedSolids({solidsForHint[0].id, solidsForHint[1].id});
+            settle(150);
+            check(hint->isVisible() && !hint->currentHint().isEmpty(),
+                  "a hint is up for the family-surface probe");
+            if (hint->isVisible()) {
+                const int m = Theme::surfaceShadowMargin();
+                const QRect body = hint->rect().adjusted(m, m, -m, -m);
+                checkFamilySurface(hint, QPoint(body.left(), body.center().y()),
+                                   body.adjusted(4, 4, -4, -4), Theme::border(),
+                                   QStringLiteral("HintBalloon"));
+            }
+        }
+
+        // The shortcut sheet: plain family too.
+        ShortcutSheet* sheet = window.findChild<ShortcutSheet*>();
+        check(sheet != nullptr, "there is a shortcut sheet for the family-surface probe");
+        if (sheet) {
+            sheet->showSheet();
+            settle(100);
+            check(sheet->isVisible(), "the probe sheet is up");
+            if (sheet->isVisible()) {
+                const int m = Theme::surfaceShadowMargin();
+                const QRect body = sheet->rect().adjusted(m, m, -m, -m);
+                checkFamilySurface(sheet, QPoint(body.left(), body.center().y()),
+                                   body.adjusted(4, 4, -4, -4), Theme::border(),
+                                   QStringLiteral("ShortcutSheet"));
+            }
+            sheet->hide();
+        }
+
+        // The toast: plain family border on the edges away from its own
+        // stripe, plus the stripe itself, kind-tinted, restoring the
+        // Note/Failure distinction the mockup regression flattened. Sampled
+        // at the TOP edge for the family-surface pin, not the left - the
+        // left edge carries the stripe on purpose and would read as neither
+        // a plain border() nor a coverage bug, just a different accent.
+        ToastHost* toasts = window.findChild<ToastHost*>();
+        check(toasts != nullptr, "there is a toast host for the family-surface probe");
+        if (toasts) {
+            toasts->show(QStringLiteral("Graphite family probe - note"), Toast::Kind::Note, false);
+            settle(120);
+            Toast* toastWidget = toasts->toast();
+            check(toastWidget != nullptr && toastWidget->isVisible(),
+                  "the probe Note toast is up");
+            if (toastWidget) {
+                const int m = Theme::surfaceShadowMargin();
+                const QRect body = toastWidget->rect().adjusted(m, m, -m, -m);
+                checkFamilySurface(toastWidget, QPoint(body.center().x(), body.top()),
+                                   body.adjusted(4, 4, -4, -4),
+                                   Theme::border(), QStringLiteral("Toast"));
+
+                // Also saved to disk - the coordinator asked for a magnified
+                // capture of the toast alongside the chip cluster, and a
+                // toast only exists once real state (an outcome to report)
+                // puts it there, unlike the chip clusters which are always
+                // on screen. QWidget::render(), the same in-process
+                // mechanism every check in this file already uses to drive
+                // and inspect the app - never OS-level synthetic input.
+                renderExact(toastWidget).save(outDir + QStringLiteral("/toast_note.png"));
+
+                const QImage noteImg = renderExact(toastWidget);
+                const QPoint stripePoint(body.left() + 1, body.center().y());
+                const QColor noteStripe = noteImg.pixelColor(stripePoint);
+
+                toasts->show(QStringLiteral("Graphite family probe - failure"),
+                            Toast::Kind::Failure, false);
+                settle(120);
+                const QImage failureImg = renderExact(toastWidget);
+                failureImg.save(outDir + QStringLiteral("/toast_failure.png"));
+                const QColor failureStripe = failureImg.pixelColor(stripePoint);
+
+                check(colorDistance(noteStripe, failureStripe) > 15.0,
+                      "a Failure toast's stripe reads as a different colour "
+                      "than a Note's");
+                check(colorDistance(noteStripe, Theme::accent()) <
+                          colorDistance(noteStripe, Theme::textMuted()),
+                      "the Note toast's stripe reads closer to accent()");
+                check(colorDistance(failureStripe, Theme::danger()) <
+                          colorDistance(failureStripe, Theme::accent()),
+                      "the Failure toast's stripe reads closer to danger()");
+            }
+        }
+
+        // ExtrudePreview: fix round 1, Minor. Brought into the family too -
+        // plain border() while valid, and its own danger() outline over the
+        // shared base while the field's text does not parse, the same
+        // pattern as the toast's stripe.
+        trigger(window, QStringLiteral("Start Sketch"));
+        sketchQuad(window, 0.30, 0.58, 0.42, 0.68);
+        trigger(window, QStringLiteral("Finish Sketch"));
+        trigger(window, QStringLiteral("Extrude..."));
+        settle(150);
+        ExtrudePreview* extrudePreview = window.findChild<ExtrudePreview*>();
+        check(extrudePreview != nullptr && extrudePreview->isVisible(),
+              "a preview is open for the family-surface probe");
+        if (extrudePreview && extrudePreview->isVisible()) {
+            const int m = Theme::surfaceShadowMargin();
+            const QRect body = extrudePreview->rect().adjusted(m, m, -m, -m);
+            checkFamilySurface(extrudePreview, QPoint(body.left(), body.center().y()),
+                               body.adjusted(4, 4, -4, -4),
+                               Theme::border(), QStringLiteral("ExtrudePreview (valid)"));
+
+            // The height field is a SIBLING parented straight to the
+            // viewport (see ExtrudePreview.h for why it cannot be a child),
+            // so it is invisible to every renderExact() sweep of the panel
+            // above - and it sits directly on OCCT's GL surface, where an
+            // unpainted pixel is not transparent but whatever the driver
+            // left there. It carried `border-radius: 4px`, which leaves
+            // exactly four such corners: the black-nub failure mode, on the
+            // one control in this shell that had it and no card underneath.
+            if (extrudePreview->field()) {
+                const QImage fieldImg = renderExact(extrudePreview->field());
+                QStringList seeThroughCorners;
+                const QPoint corners[4] = {
+                    QPoint(0, 0), QPoint(fieldImg.width() - 1, 0),
+                    QPoint(0, fieldImg.height() - 1),
+                    QPoint(fieldImg.width() - 1, fieldImg.height() - 1)};
+                for (const QPoint& c : corners) {
+                    if (!fieldImg.rect().contains(c)) continue;
+                    if (qAlpha(fieldImg.pixel(c)) != 255)
+                        seeThroughCorners << QStringLiteral("%1,%2 alpha %3")
+                                                 .arg(c.x()).arg(c.y())
+                                                 .arg(qAlpha(fieldImg.pixel(c)));
+                }
+                check(!fieldImg.isNull() && seeThroughCorners.isEmpty(),
+                      QStringLiteral("the extrude field is opaque in all four "
+                                     "corners - no rounded nub straight onto the "
+                                     "GL surface (%1)")
+                          .arg(seeThroughCorners.isEmpty()
+                                   ? QStringLiteral("all four solid")
+                                   : seeThroughCorners.join(QStringLiteral("; "))));
+            }
+
+            if (extrudePreview->field()) {
+                extrudePreview->field()->setText(QStringLiteral("abc"));
+                settle(150);
+                const QImage invalidImg = renderExact(extrudePreview);
+                const QColor invalidEdge =
+                    invalidImg.pixelColor(body.left(), body.center().y());
+                const QColor invalidInterior = invalidImg.pixelColor(body.center());
+                check(colorDistance(invalidEdge, Theme::danger()) <
+                          colorDistance(invalidInterior, Theme::danger()),
+                      "an invalid ExtrudePreview's edge reads closer to "
+                      "danger() than its interior does - the overlay painted "
+                      "on top of the shared base");
+
+                extrudePreview->field()->setText(QStringLiteral("25"));
+                settle(100);
+                QKeyEvent commit(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+                QCoreApplication::sendEvent(extrudePreview->field(), &commit);
+                settle(200);
+            }
+        }
+    }
+
     // --- Show tips again restores the walkthrough for a returning user too ---
     {
         // Every walkthrough check above uses persistProgress=false, so
@@ -3305,10 +5317,24 @@ int main(int argc, char* argv[])
         const QPoint stale = returningGuide && returningGuide->skipControl()
                                   ? returningGuide->skipControl()->geometry().center()
                                   : QPoint();
+        // "childAt finds NOTHING there" is no longer the right question: the
+        // items drawer is a floating card anchored at the viewport's top left
+        // now, which is exactly the region the skip control's constructor-time
+        // rectangle falls in, and something legitimately answering a click
+        // there is the correct arrangement rather than the bug. The question
+        // that still matters - and the one the defect was actually about - is
+        // whether the SKIP CONTROL is reachable there, so that is what is
+        // asked, walking up from the hit the way the cluster probes do rather
+        // than comparing one pointer.
         QWidget* hitStale = returningView->childAt(stale);
-        check(hitStale == nullptr,
-              QStringLiteral("nothing lurks at the skip control's stale "
-                             "constructor rectangle (found %1)")
+        bool skipLurks = false;
+        for (QWidget* w = hitStale; w; w = w->parentWidget()) {
+            if (returningGuide && w == returningGuide->skipControl()) skipLurks = true;
+            if (w == returningView) break;
+        }
+        check(!skipLurks,
+              QStringLiteral("the skip control does not lurk at its stale "
+                             "constructor rectangle (found %1 there)")
                   .arg(hitStale ? QString::fromLatin1(hitStale->metaObject()->className())
                                 : QStringLiteral("nothing")));
 
@@ -3328,8 +5354,12 @@ int main(int argc, char* argv[])
                       returningGuide->skipControl()->isVisible(),
                   "the restored panel's skip control is visible again");
             if (returningGuide && returningGuide->skipControl()) {
+                // Same margin-adjusted formula as the earlier skip-control
+                // check above - see the comment there.
+                const int shadowMargin = Theme::surfaceShadowMargin();
                 const QPoint skipCentre =
-                    returningGuide->pos() + QPoint(returningGuide->width() - 31, 17);
+                    returningGuide->pos() +
+                    QPoint(returningGuide->width() - shadowMargin - 31, shadowMargin + 17);
                 check(returningView->childAt(skipCentre) == returningGuide->skipControl(),
                       "and a real click at its centre finds the skip control itself");
             }

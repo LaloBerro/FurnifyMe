@@ -9,7 +9,6 @@
 #include <AIS_SelectionScheme.hxx>
 #include <Aspect_DisplayConnection.hxx>
 #include <Aspect_TypeOfMarker.hxx>
-#include <Aspect_TypeOfTriedronPosition.hxx>
 #include <Bnd_Box.hxx>
 #include <BRepBndLib.hxx>
 #include <Graphic3d_ArrayOfPoints.hxx>
@@ -134,6 +133,11 @@ OcctViewWidget::OcctViewWidget(QWidget* parent)
     setAutoFillBackground(false);
     setMouseTracking(true);          // hover highlight needs move events with no button down
     setFocusPolicy(Qt::StrongFocus);
+    // A bare floor - this class knows nothing about the rail or any other
+    // overlay content that gets pinned to it later. MainWindow::buildOverlay()
+    // raises the height component once the rail exists, to whatever height
+    // guarantees the rail itself fits; see that call for why 300 alone is not
+    // enough to keep the rail's own buttons on screen.
     setMinimumSize(400, 300);
 }
 
@@ -164,8 +168,9 @@ void OcctViewWidget::initializeViewer()
     const QColor bg = Theme::viewport();
     myView->SetBackgroundColor(Quantity_Color(bg.redF(), bg.greenF(), bg.blueF(),
                                               Quantity_TOC_sRGB));
-    myView->TriedronDisplay(Aspect_TOTP_LEFT_LOWER, Quantity_Color(Quantity_NOC_WHITE),
-                            0.08, V3d_ZBUFFER);
+    // No corner trihedron: AxisGizmo (top right) is the orientation surface,
+    // and since the rail took the left edge the trihedron sat behind it with
+    // one axis tip peeking out - redundant at best, a visual defect at worst.
 
     // OCCT's default highlight barely reads against a shaded solid. Make hover
     // and selection unmistakable - not being able to tell what is selected was
@@ -826,6 +831,46 @@ void OcctViewWidget::animateTo(const CameraState& goal)
     });
     myCameraAnimation = animation;
     animation->start(QAbstractAnimation::DeleteWhenStopped);
+}
+
+namespace {
+// Positions in OcctViewWidget::viewLabelNames(). Naming them keeps
+// viewLabelText() readable while it returns entries OF that list rather than
+// its own copies of the same seven literals.
+enum ViewName { NamePersp = 0, NameTop, NameBottom, NameFront, NameBack, NameRight, NameLeft };
+}  // namespace
+
+const QStringList& OcctViewWidget::viewLabelNames()
+{
+    // Built once. viewLabelText() runs on every camera frame, so this must not
+    // allocate a seven-string list per orbit step.
+    static const QStringList names = {
+        QStringLiteral("Persp"),  QStringLiteral("Top"),   QStringLiteral("Bottom"),
+        QStringLiteral("Front"),  QStringLiteral("Back"),  QStringLiteral("Right"),
+        QStringLiteral("Left")};
+    return names;
+}
+
+QString OcctViewWidget::viewLabelText() const
+{
+    const QStringList& names = viewLabelNames();
+    const CameraState& state = myCamera.state();
+    const double el = state.elevationDeg;
+    // Azimuth normalized to (-180, 180] for comparison.
+    double az = std::fmod(state.azimuthDeg, 360.0);
+    if (az > 180.0) az -= 360.0;
+    if (az <= -180.0) az += 360.0;
+
+    const double tolerance = 0.5;
+    if (el >= 87.5) return names.at(NameTop);
+    if (el <= -87.5) return names.at(NameBottom);
+    if (std::fabs(el) < tolerance) {
+        if (std::fabs(az) < tolerance) return names.at(NameFront);
+        if (std::fabs(std::fabs(az) - 180.0) < tolerance) return names.at(NameBack);
+        if (std::fabs(az + 90.0) < tolerance) return names.at(NameRight);
+        if (std::fabs(az - 90.0) < tolerance) return names.at(NameLeft);
+    }
+    return names.at(NamePersp);
 }
 
 void OcctViewWidget::setViewAxonometric()

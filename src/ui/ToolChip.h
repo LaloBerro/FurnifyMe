@@ -13,9 +13,28 @@ class ToolChip : public QAbstractButton {
     Q_OBJECT
 
 public:
-    ToolChip(QAction* action, IconSet::Glyph glyph, QWidget* parent = nullptr);
+    // How a chip presents itself.
+    //
+    // Labelled is the original and the default: glyph, label and a shortcut
+    // badge on one row, sized to its own text.
+    //
+    // IconOnly is the rail's form - a 34x34 square (plus
+    // Theme::surfaceShadowMargin() per side, which is now zero, so 34x34 of
+    // painted card) carrying nothing but the glyph. The label and
+    // the shortcut do not disappear, they move into the tooltip: a rail that
+    // spelled its commands out would be a toolbar, and the menus keep every
+    // command labelled and discoverable regardless. Everything else about a
+    // chip - that it mirrors a QAction and stores nothing, the border, the
+    // inset checked ring, the disabled dimming, the focus ring - is identical
+    // in both modes, because they are one control with two widths, not two
+    // controls.
+    enum class ChipMode { Labelled, IconOnly };
+
+    ToolChip(QAction* action, IconSet::Glyph glyph,
+             ChipMode mode = ChipMode::Labelled, QWidget* parent = nullptr);
 
     QAction* action() const { return myAction; }
+    ChipMode mode() const { return myMode; }
     QSize sizeHint() const override;
 
 protected:
@@ -46,6 +65,7 @@ private:
     void syncFromAction();
 
     QAction* myAction = nullptr;
+    ChipMode myMode = ChipMode::Labelled;
     QString myShortcut;
     bool myHovered = false;
 };
