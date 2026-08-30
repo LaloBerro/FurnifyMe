@@ -18,6 +18,7 @@
 
 #include <QPoint>
 #include <QString>
+#include <QStringList>
 #include <QWidget>
 
 #include <map>
@@ -184,6 +185,13 @@ public:
     // copied to its new consumer. Anything that needs the name of the current
     // view asks this.
     QString viewLabelText() const;
+
+    // Every string viewLabelText() can return. A consumer that must not
+    // resize as the camera turns - the app bar's view button reserves its
+    // width - sizes itself against this rather than repeating the seven
+    // names, so adding a named view cannot leave a second list behind.
+    // viewLabelText() returns entries OF this list, so the two cannot drift.
+    static const QStringList& viewLabelNames();
 
     void setWireframe(bool wireframe);
     bool isWireframe() const { return myWireframe; }

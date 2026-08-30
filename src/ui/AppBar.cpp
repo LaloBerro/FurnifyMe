@@ -1,5 +1,9 @@
 #include "AppBar.h"
 
+// For viewLabelNames() alone - the seven strings the view button reserves its
+// width against, read from the one place that produces them rather than
+// copied here.
+#include "OcctViewWidget.h"
 #include "Theme.h"
 
 #include <QAction>
@@ -203,13 +207,12 @@ AppBar::AppBar(QMenuBar* menuBar, QAction* wireframe, QAction* fitAll, QWidget* 
     row->addStretch(1);
 
     myViewLabel = new BarButton(nullptr, this);
-    myViewLabel->setText(QStringLiteral("Persp"));
-    // Every string viewLabelText() can produce, so the button never resizes
-    // as the camera turns.
-    myViewLabel->reserveWidthFor({QStringLiteral("Persp"), QStringLiteral("Top"),
-                                  QStringLiteral("Bottom"), QStringLiteral("Front"),
-                                  QStringLiteral("Back"), QStringLiteral("Left"),
-                                  QStringLiteral("Right")});
+    // Every string viewLabelText() can produce, asked for rather than
+    // repeated, so the button never resizes as the camera turns and a named
+    // view added later cannot leave a stale second list here.
+    const QStringList& viewNames = OcctViewWidget::viewLabelNames();
+    myViewLabel->setText(viewNames.first());
+    myViewLabel->reserveWidthFor(viewNames);
     myViewLabel->setToolTip(tr("Which way the camera is looking — click to go "
                                "back to the angled view"));
     connect(myViewLabel, &QAbstractButton::clicked, this, &AppBar::viewLabelClicked);
@@ -237,12 +240,21 @@ QString AppBar::wordmark() const
 
 void AppBar::setViewLabel(const QString& text)
 {
-    if (myViewLabel) myViewLabel->setText(text);
+    // cameraChanged fires on every frame of an orbit, so this runs per frame
+    // and almost always with the string already showing. The guard is ours,
+    // deliberately: QAbstractButton::setText happens to early-out on an equal
+    // string today, but relying on that leaves a repaint-per-frame one Qt
+    // release away, with nothing here saying it ever mattered.
+    if (!myViewLabel || myViewLabel->text() == text) return;
+    myViewLabel->setText(text);
 }
 
 void AppBar::setUnitLabel(const QString& text)
 {
-    if (myUnit) myUnit->setText(text);
+    // Same guard, same reason: this hangs off appStateChanged, which fires at
+    // the end of every updateActions().
+    if (!myUnit || myUnit->text() == text) return;
+    myUnit->setText(text);
 }
 
 QWidget* AppBar::viewLabelButton() const { return myViewLabel; }

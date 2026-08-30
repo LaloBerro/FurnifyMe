@@ -328,10 +328,8 @@ QMenuBar* MainWindow::buildMenus()
     QMenu* viewMenu = bar->addMenu(tr("&View"));
     viewMenu->addAction(myFitAction);
     viewMenu->addSeparator();
-    viewMenu->addAction(tr("&Axonometric"), QKeySequence(Qt::Key_0), this, [this] {
-        myView->setViewAxonometric();
-        recordViewChanged();
-    });
+    viewMenu->addAction(tr("&Axonometric"), QKeySequence(Qt::Key_0), this,
+                        &MainWindow::goAxonometric);
     viewMenu->addAction(tr("&Top"), QKeySequence(Qt::Key_1), this, [this] {
         myView->setViewTop();
         recordViewChanged();
@@ -396,6 +394,16 @@ QMenuBar* MainWindow::buildMenus()
     return bar;
 }
 
+void MainWindow::goAxonometric()
+{
+    // The one way back to the angled view. Both entry points - the View menu
+    // (and its 0 shortcut) and the app bar's view label button - call this,
+    // so the pose and the recorded event cannot drift apart the way they
+    // would if each site re-derived the camera state for itself.
+    myView->setViewAxonometric();
+    recordViewChanged();
+}
+
 void MainWindow::buildAppBar(QMenuBar* menus)
 {
     myAppBar = new AppBar(menus, myDisplayModeAction, myFitAction);
@@ -408,17 +416,11 @@ void MainWindow::buildAppBar(QMenuBar* menus)
     connect(myView, &OcctViewWidget::cameraChanged, myAppBar,
             [this] { myAppBar->setViewLabel(myView->viewLabelText()); });
 
-    // Exactly what the gizmo's label chip did: the pose the Axonometric entry
-    // applies, recorded as the same event through the same single route, so a
-    // user who only ever presses this button still retires the hint that
-    // teaches named views.
-    connect(myAppBar, &AppBar::viewLabelClicked, this, [this] {
-        CameraState goal = myView->camera().state();
-        goal.azimuthDeg = -45.0;
-        goal.elevationDeg = 30.0;
-        myView->animateTo(goal);
-        recordViewChanged();
-    });
+    // Exactly what the gizmo's label chip did - and it is the View menu's
+    // Axonometric entry, not a second copy of the pose it applies. The button
+    // and the menu entry are the same route, so a user who only ever presses
+    // this button still retires the hint that teaches named views.
+    connect(myAppBar, &AppBar::viewLabelClicked, this, &MainWindow::goAxonometric);
 
     // The button triggers the OTHER unit's existing action rather than
     // writing the unit itself: persistence, the items panel, the status bar

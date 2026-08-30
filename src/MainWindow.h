@@ -123,6 +123,10 @@ private:
     // Installs the app bar as the window's menu strip, with `menus` inside
     // it. Must run after buildActions(), whose actions the bar mirrors.
     void buildAppBar(QMenuBar* menus);
+    // Back to the angled view, and record it. The View menu's Axonometric
+    // entry and the app bar's view label button are both this, so neither
+    // carries its own copy of the pose.
+    void goAxonometric();
     void buildOverlay();
     void updateActions();
     // Persistent right-hand readout: what mode we are in and what is possible.

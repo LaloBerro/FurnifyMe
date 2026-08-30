@@ -75,6 +75,7 @@
 #include <gp_Vec.hxx>
 #include <GeomAbs_SurfaceType.hxx>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
@@ -666,12 +667,82 @@ int main(int argc, char* argv[])
             check(!fitButton->isCheckable(), "Fit All is not a toggle");
             check(bar && bar->childAt(fitButton->geometry().center()) == fitButton,
                   "childAt() at Fit All's centre finds the button");
+
+            // And it actually does something. Deliberately knock the camera
+            // off-centre first, so "the camera moved" cannot be satisfied by
+            // a button that does nothing to an already-fitted view. Through
+            // animateTo(), which is how every other route moves this camera -
+            // poking CameraController directly would leave the OCCT view
+            // holding the old pose and make the fit measure the wrong thing.
+            CameraState nudged = view->camera().state();
+            nudged.target = gp_Pnt(nudged.target.X() + 400.0,
+                                   nudged.target.Y() + 260.0, nudged.target.Z());
+            nudged.distance *= 0.35;
+            view->animateTo(nudged);
+            settle(400);
+            const CameraState before = view->camera().state();
+            clickAt(fitButton, QPointF(fitButton->width() / 2.0,
+                                       fitButton->height() / 2.0));
+            settle(400);   // the fit animates
+            const CameraState after = view->camera().state();
+            const double moved =
+                gp_Vec(before.target, after.target).Magnitude() +
+                std::fabs(before.distance - after.distance);
+            check(moved > 1.0e-6,
+                  QStringLiteral("clicking Fit All reframes the viewport (camera "
+                                 "moved %1)")
+                      .arg(moved));
         }
 
         // Save Screenshot is menu-only from here on: it kept no bar button,
         // and the right-center chip cluster it shared went away with it.
         check(action(window, QStringLiteral("Save Screenshot...")) != nullptr,
               "Save Screenshot is still reachable as an action");
+
+        // ...and the cluster really is GONE, not merely missing a chip. The
+        // action existing proves nothing about the cluster, and the bar-button
+        // search above runs inside the bar, so a stub that left the old
+        // cluster floating over the viewport would satisfy every check above
+        // this one.
+        //
+        // Three clusters remain - top-left, left-center, bottom-left - until
+        // Task 3 folds them into the rail. Asserting the exact count, rather
+        // than "no right-hand cluster", is what makes this fail loudly when
+        // that task lands instead of silently passing against one cluster or
+        // five.
+        const QList<ToolCluster*> clusters = view->findChildren<ToolCluster*>();
+        check(clusters.size() == 3,
+              QStringLiteral("exactly three chip clusters still float over the "
+                             "viewport - the right-center one is gone (found %1)")
+                  .arg(clusters.size()));
+        QStringList onTheRight;
+        for (ToolCluster* cluster : clusters) {
+            if (cluster->geometry().center().x() > view->width() / 2)
+                onTheRight << QStringLiteral("%1,%2")
+                                  .arg(cluster->geometry().center().x())
+                                  .arg(cluster->geometry().center().y());
+        }
+        check(onTheRight.isEmpty(),
+              QStringLiteral("and none of them sits on the viewport's right half "
+                             "(%1)")
+                  .arg(onTheRight.isEmpty() ? QStringLiteral("none")
+                                            : onTheRight.join(QStringLiteral("; "))));
+
+        // A hit test where the cluster actually sat, for the same reason every
+        // other control here is probed with childAt: a geometry assertion can
+        // pass against a widget that is still there and still clickable.
+        // Swept across the right margin because the exact inset is the
+        // overlay's business, not this check's.
+        QWidget* lurking = nullptr;
+        for (int inset = 4; inset < 90 && !lurking; inset += 4) {
+            QWidget* hit = view->childAt(view->width() - inset, view->height() / 2);
+            for (QWidget* w = hit; w; w = w->parentWidget()) {
+                if (qobject_cast<ToolCluster*>(w)) { lurking = w; break; }
+                if (w == view) break;
+            }
+        }
+        check(lurking == nullptr,
+              "and nothing is clickable where the right-center cluster used to be");
     }
 
     // --- above-horizon clicks are rejected, not mirrored behind the eye -------

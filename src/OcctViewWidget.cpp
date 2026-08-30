@@ -828,8 +828,27 @@ void OcctViewWidget::animateTo(const CameraState& goal)
     animation->start(QAbstractAnimation::DeleteWhenStopped);
 }
 
+namespace {
+// Positions in OcctViewWidget::viewLabelNames(). Naming them keeps
+// viewLabelText() readable while it returns entries OF that list rather than
+// its own copies of the same seven literals.
+enum ViewName { NamePersp = 0, NameTop, NameBottom, NameFront, NameBack, NameRight, NameLeft };
+}  // namespace
+
+const QStringList& OcctViewWidget::viewLabelNames()
+{
+    // Built once. viewLabelText() runs on every camera frame, so this must not
+    // allocate a seven-string list per orbit step.
+    static const QStringList names = {
+        QStringLiteral("Persp"),  QStringLiteral("Top"),   QStringLiteral("Bottom"),
+        QStringLiteral("Front"),  QStringLiteral("Back"),  QStringLiteral("Right"),
+        QStringLiteral("Left")};
+    return names;
+}
+
 QString OcctViewWidget::viewLabelText() const
 {
+    const QStringList& names = viewLabelNames();
     const CameraState& state = myCamera.state();
     const double el = state.elevationDeg;
     // Azimuth normalized to (-180, 180] for comparison.
@@ -838,15 +857,15 @@ QString OcctViewWidget::viewLabelText() const
     if (az <= -180.0) az += 360.0;
 
     const double tolerance = 0.5;
-    if (el >= 87.5) return QStringLiteral("Top");
-    if (el <= -87.5) return QStringLiteral("Bottom");
+    if (el >= 87.5) return names.at(NameTop);
+    if (el <= -87.5) return names.at(NameBottom);
     if (std::fabs(el) < tolerance) {
-        if (std::fabs(az) < tolerance) return QStringLiteral("Front");
-        if (std::fabs(std::fabs(az) - 180.0) < tolerance) return QStringLiteral("Back");
-        if (std::fabs(az + 90.0) < tolerance) return QStringLiteral("Right");
-        if (std::fabs(az - 90.0) < tolerance) return QStringLiteral("Left");
+        if (std::fabs(az) < tolerance) return names.at(NameFront);
+        if (std::fabs(std::fabs(az) - 180.0) < tolerance) return names.at(NameBack);
+        if (std::fabs(az + 90.0) < tolerance) return names.at(NameRight);
+        if (std::fabs(az - 90.0) < tolerance) return names.at(NameLeft);
     }
-    return QStringLiteral("Persp");
+    return names.at(NamePersp);
 }
 
 void OcctViewWidget::setViewAxonometric()
