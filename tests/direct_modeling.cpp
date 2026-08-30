@@ -187,6 +187,8 @@ int main()
         check(!foreign.ok,
               "pull with a face that does not belong to the body is refused, not silently "
               "fused/cut into two disconnected solids");
+        check(foreign.shape.IsNull(),
+              "and the refusal carries a null shape, per BooleanResult's contract");
     }
 
     // --- filletEdge / chamferEdge ------------------------------------------
@@ -225,6 +227,8 @@ int main()
         const BooleanResult tooBig = filletEdge(box, longEdge, 20.0);
         check(!tooBig.ok,
               "fillet r=20 on the 10mm-thick box is refused, not surfaced as a success");
+        check(tooBig.shape.IsNull(),
+              "and the refusal carries a null shape, per BooleanResult's contract");
         checkNear(volume(box), boxVolume, 1.0e-9, "body volume untouched after the refusal");
         check(countFaces(box) == 6, "body face count untouched after the refusal");
     }
@@ -245,11 +249,15 @@ int main()
         check(edgeIt.More(), "distant box has at least one edge");
         const TopoDS_Edge foreignEdge = TopoDS::Edge(edgeIt.Current());
 
-        check(!filletEdge(box, foreignEdge, 2.0).ok,
+        const BooleanResult foreignFillet = filletEdge(box, foreignEdge, 2.0);
+        check(!foreignFillet.ok,
               "fillet on an edge foreign to the body is refused, not an uncaught "
               "Standard_Failure");
-        check(!chamferEdge(box, foreignEdge, 2.0).ok,
+        check(foreignFillet.shape.IsNull(), "the caught throw still yields a null shape");
+        const BooleanResult foreignChamfer = chamferEdge(box, foreignEdge, 2.0);
+        check(!foreignChamfer.ok,
               "chamfer on an edge foreign to the body is refused for the same reason");
+        check(foreignChamfer.shape.IsNull(), "with a null shape likewise");
     }
 
     // --- pullFace on non-trivial topology ------------------------------------
