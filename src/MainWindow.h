@@ -186,7 +186,37 @@ public:
     // Read-only state, for assertions.
     const DocumentModel& document() const { return myDocument; }
     const SketchController& sketch() const { return mySketch; }
-    bool hasPendingFace() const { return !myPendingFace.IsNull(); }
+
+    // THE outline Extrude would consume: the one selected in the Items drawer
+    // if that selection still names a live outline, otherwise the most recent
+    // one. 0 when there is none.
+    //
+    // Since Phase 7 the "pending face" is not a member any more - it is this
+    // derived view over DocumentModel's outline items, and hasPendingFace()
+    // below is exactly `pendingOutlineId() != 0`. Every gizmo predicate,
+    // ExtrudePreview, canChangeSketchPlane() and the Enter/Escape exclusivity
+    // ruling gate on that function, and its truth table is unchanged for the
+    // flow they were all written against: close an outline and it is true,
+    // extrude and it is false.
+    //
+    // What DID change is that starting or cancelling another sketch no longer
+    // makes it false. An outline is a document item now: discarding one as a
+    // side effect of picking up the pencil again would delete something the
+    // drawer lists and the undo stack owns. Undo is how an outline goes away
+    // without becoming a body.
+    int pendingOutlineId() const;
+    TopoDS_Face pendingFace() const;
+    // The direction extrudePendingFace() would sweep the pending outline
+    // along: that outline's OWN stored plane normal, falling back to the live
+    // sketch plane when nothing is pending. Exposed so ExtrudePreview builds
+    // its preview along the direction the commit will actually use rather
+    // than re-deriving one from state that may have moved since.
+    gp_Dir pendingSweepDirection() const;
+    bool hasPendingFace() const { return pendingOutlineId() != 0; }
+    // Makes `id` the outline Extrude will consume - the Items drawer's row
+    // click, and the only route to it. A no-op for an id that is not a live
+    // outline.
+    void selectOutline(int id);
     bool isSketching() const { return mySketching; }
     OcctViewWidget* view() const { return myView; }
     class ItemsPanel* itemsPanel() const { return myItemsPanel; }
@@ -397,8 +427,14 @@ private:
     DocumentModel myDocument;
     SketchController mySketch;
 
-    // Face produced by the last committed sketch, waiting to be extruded.
-    TopoDS_Face myPendingFace;
+    // Which outline item Extrude would consume, when the user has chosen one
+    // from the drawer. Not the pending face itself and not a cursor into the
+    // outline list: it is a document id, checked against the live list on
+    // every read (see pendingOutlineId()), so an undo that removes the outline
+    // it names silently falls back to the newest rather than resolving to
+    // something else. 0 means "whichever is newest", which is what the
+    // single-outline flow always wants.
+    int mySelectedOutlineId = 0;
     bool mySketching = false;
     // Derivable from the sketch plane, but named because two actions' enabled
     // state reads it and "is this plane the ground one" is a floating-point

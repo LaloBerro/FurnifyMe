@@ -124,6 +124,10 @@ private:
     MainWindow* myWindow = nullptr;
     OcctViewWidget* myView = nullptr;
     TopoDS_Face myFace;
+    // The document id of the outline item begin() opened on, or 0. See
+    // onAppStateChanged(): outlines accumulate, so "a face is pending" no
+    // longer means "the same face this panel is describing".
+    int myOutlineId = 0;
     bool myHasPreview = false;
     bool myInvalid = false;
     double myHeight = 10.0;   // last successfully previewed height

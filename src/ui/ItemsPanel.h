@@ -56,6 +56,12 @@ public:
 
 signals:
     void solidActivated(int id);
+    // An outline row was clicked. A separate signal rather than one id
+    // channel with a kind flag: the two do genuinely different things -
+    // a body row changes the viewport selection, an outline row changes which
+    // outline Extrude will consume - and a receiver that had to branch on a
+    // flag could get the branch wrong in a way the compiler could not see.
+    void outlineActivated(int id);
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -94,6 +100,12 @@ private:
         class QLabel* size = nullptr;
         class QPushButton* eye = nullptr;
         int id = 0;
+        // Outline rows come first and are not part of the viewport selection -
+        // showSelection() must not highlight one, and the eye toggles a
+        // different channel. Carried on the row rather than derived by asking
+        // the document again, so a row can never be styled as one kind and
+        // toggled as the other.
+        bool isOutline = false;
         QString text;      // what rowTextAt() reports
     };
 
@@ -102,7 +114,9 @@ private:
     class QLabel* myTitle = nullptr;
     QVBoxLayout* myOuter = nullptr;
     QVBoxLayout* myRows = nullptr;
-    std::vector<Row> myRowList;   // parallel to the document's solids
+    // The document's outlines first, then its bodies - the order the rows are
+    // built in, which is what rowTextAt(index) reports against.
+    std::vector<Row> myRowList;
     // What the rows currently say, so refresh() can tell a call that would
     // rebuild them identically from one that would not. See refresh().
     QString myRowSignature;

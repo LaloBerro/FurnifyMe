@@ -150,7 +150,7 @@ int g_checks = 0;
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 1071;
+constexpr int kCheckFloor = 1129;
 
 void check(bool condition, const QString& what)
 {
@@ -2222,8 +2222,21 @@ int main(int argc, char* argv[])
         // this; a card over OCCT's GL surface does, and CLAUDE.md's rule is
         // that it is checked with childAt() against the actual control
         // pointer rather than by asserting an attribute.
+        // The first VISIBLE toggle, not the first QPushButton in the subtree.
+        // refresh() rebuilds rows wholesale and deleteLater()s the old ones,
+        // and settle() runs a nested event loop, which does not deliver
+        // DeferredDelete - so a dead row's button is still a child, still
+        // older than the live one, and findChild<QPushButton*>() hands it
+        // back first. That made this probe compare the live row's geometry
+        // against a hidden corpse's pointer the moment anything increased the
+        // number of rebuilds between here and the last one (outlines becoming
+        // document items did exactly that). isVisible() is also the honest
+        // question: the toggle under test is the one a user could click.
         auto firstEye = [&]() -> QPushButton* {
-            return drawer ? drawer->findChild<QPushButton*>() : nullptr;
+            if (!drawer) return nullptr;
+            for (QPushButton* button : drawer->findChildren<QPushButton*>())
+                if (button->isVisible()) return button;
+            return nullptr;
         };
         QPushButton* eye = firstEye();
         check(eye != nullptr, "the row carries a visibility toggle");
@@ -2282,7 +2295,13 @@ int main(int argc, char* argv[])
         // old row is still alive here and its visibility is the whole
         // question.
         if (drawer && drawer->rowCount() > 0) {
-            QPointer<QWidget> deadRow = drawer->findChild<QWidget*>(QStringLiteral("itemsRow"));
+            // The first LIVE row, for the reason firstEye() above spells out:
+            // a corpse from an earlier rebuild is an older child than the row
+            // on screen, so an unqualified findChild starts this probe on a
+            // widget that is already hidden and makes it vacuously true.
+            QPointer<QWidget> deadRow;
+            for (QWidget* row : drawer->findChildren<QWidget*>(QStringLiteral("itemsRow")))
+                if (row->isVisible()) { deadRow = row; break; }
             check(deadRow != nullptr && deadRow->isVisible(),
                   "a live row is visible before the rebuild that replaces it");
             drawer->refresh();
@@ -2950,12 +2969,16 @@ int main(int argc, char* argv[])
                   "so a Shift-click on the first point still closes the outline - the "
                   "click does what the cursor was promising");
 
-            // The pending face is this block's litter, not the suite's state.
-            trigger(window, QStringLiteral("Start Sketch"));
-            trigger(window, QStringLiteral("Cancel Sketch"));
+            // The outline is this block's litter, not the suite's state - and
+            // Undo is how it goes, which is itself the Phase-7 change. It used
+            // to be enough to start a sketch and cancel it, because a pending
+            // face was a bare member that starting a sketch nulled; an outline
+            // is a document item now and the app will not throw one away as a
+            // side effect of picking up the pencil.
+            trigger(window, QStringLiteral("Undo"));
             settle(120);
             check(!window.hasPendingFace() && !window.isSketching(),
-                  "and the probe leaves neither a sketch nor a face behind it");
+                  "and the probe leaves neither a sketch nor an outline behind it");
         }
 
         // Everything after this block inherits the camera, so put it back
@@ -4149,11 +4172,24 @@ int main(int argc, char* argv[])
                               1.0e-6,
                       "the face stays locked after extruding on it");
 
-                // Put the document back where the rest of the suite expects it.
+                // Put the document back where the rest of the suite expects
+                // it. TWO undos, and that is the Phase-7 lifecycle rather
+                // than defensive extra clicking: extruding is a CONVERSION
+                // under one checkpoint, so the first undo removes the body
+                // and hands the outline back, and the second takes the
+                // outline away. Asserting the intermediate state here as
+                // well, because "two undos ends up empty" would pass just as
+                // happily if the first one had thrown the outline away.
                 trigger(window, QStringLiteral("Undo"));
                 settle(150);
                 check(window.document().count() == bodiesBefore,
                       "the shelf is undone, leaving the document as it was");
+                check(window.hasPendingFace(),
+                      "and the outline it was made from is back, waiting again");
+                trigger(window, QStringLiteral("Undo"));
+                settle(150);
+                check(!window.hasPendingFace(),
+                      "and a second undo takes that outline away too");
 
                 // A curved face has no single plane to draw on, and the
                 // refusal has to say so rather than silently doing nothing.
@@ -4346,10 +4382,16 @@ int main(int argc, char* argv[])
                               ModelingOps::volume(
                                   window.document().solids().back().shape) > 1.0,
                           "into a body with real volume, not a flat one");
+                    // Two undos again - the conversion, then the outline. See
+                    // the shelf block above.
                     trigger(window, QStringLiteral("Undo"));
                     settle(150);
                     check(window.document().count() == bodiesNow,
                           "which is undone again for the checks that follow");
+                    trigger(window, QStringLiteral("Undo"));
+                    settle(150);
+                    check(!window.hasPendingFace(),
+                          "and the outline it came back as is taken away too");
 
                     // The same refusal the other way round: locked, with an
                     // outline pending on the locked face, unlocking would
@@ -4380,13 +4422,15 @@ int main(int argc, char* argv[])
                     check(window.isFaceLocked(),
                           "and calling it directly leaves the face locked");
 
-                    // Starting another outline is the way out, and it brings
-                    // both actions back.
-                    trigger(window, QStringLiteral("Start Sketch"));
-                    trigger(window, QStringLiteral("Cancel Sketch"));
+                    // Undo is the way out, and it brings both actions back.
+                    // Phase 7 moved this: starting a fresh outline used to
+                    // drop the one that was waiting, and an outline that the
+                    // document owns is not something the next sketch may
+                    // silently delete.
+                    trigger(window, QStringLiteral("Undo"));
                     settle(120);
                     check(!window.hasPendingFace(),
-                          "starting a fresh outline drops the one that was waiting");
+                          "taking the waiting outline back with Undo clears it");
                     check(unlockAgain != nullptr && unlockAgain->isEnabled(),
                           "and Unlock Face is available again");
                     window.unlockFace();
@@ -4563,19 +4607,25 @@ int main(int argc, char* argv[])
               "and that cancel created no body");
         check(window.hasPendingFace(),
               "the pending face survives a cancel from the viewport too");
-        trigger(window, QStringLiteral("Start Sketch"));
-        trigger(window, QStringLiteral("Cancel Sketch"));
+        trigger(window, QStringLiteral("Undo"));
         settle(120);
     }
 
     // --- starting a new sketch closes an open extrude preview -----------------
-    // Fix round 1, Important 1: onStartSketch() nulls the pending face and
-    // resets the view's preview slot to empty, but that alone used to leave
+    // Fix round 1, Important 1: onStartSketch() nulled the pending face and
+    // reset the view's preview slot to empty, but that alone used to leave
     // the panel itself open and still believing it had a good preview - the
     // next keystroke redisplayed a body-shaped shape over the new outline,
     // and Enter reached commit(), where extrudePendingFace() silently failed
     // on the now-null pending face, so hide() never ran and the shape stayed
     // on screen: a body visible in the viewport that exists in no document.
+    //
+    // Phase 7 changed the MECHANISM and kept the requirement, which is the
+    // whole point of leaving this check where it is: starting a sketch no
+    // longer nulls anything, so a panel that closed only when the pending
+    // face went away would now stay open over a fresh outline. It closes on
+    // "the outline I was opened for is not the one Extrude would consume any
+    // more" instead - see ExtrudePreview::onAppStateChanged().
     {
         trigger(window, QStringLiteral("Start Sketch"));
         clickAt(view, QPointF(300, 300)); clickAt(view, QPointF(420, 300));
@@ -4597,8 +4647,14 @@ int main(int argc, char* argv[])
               "starting a new sketch closes the open extrude preview");
         check(!view->hasPreview(),
               "and leaves no ghost preview shape behind in the viewport");
+        // The outline the closed preview belonged to is STILL a document item
+        // - the new sketch closed the panel, it did not delete the user's
+        // outline - so it has to be taken back deliberately.
+        check(window.hasPendingFace(),
+              "the outline the preview was built from survives the new sketch");
 
         trigger(window, QStringLiteral("Cancel Sketch"));
+        trigger(window, QStringLiteral("Undo"));
         settle(150);
     }
 
@@ -4626,25 +4682,32 @@ int main(int argc, char* argv[])
         ExtrudePreview* afterEscape = window.findChild<ExtrudePreview*>();
         check(afterEscape == nullptr || !afterEscape->isVisible(),
               "Escape closes the preview");
-        // This check used to assert the OPPOSITE - that the viewport was left
-        // empty - which enshrined the bug rather than catching it.
-        // MainWindow::onFinishSketch() shows the closed face through the
-        // viewport's single preview slot; ExtrudePreview overwrites that same
-        // slot with the body it would build. Clearing it on cancel therefore
-        // erased the face, leaving an intact pending face, an enabled Extrude
-        // action and a status bar still saying "Outline closed" above an
-        // empty viewport - against Milestone 1's own criterion that closing an
-        // outline produces a VISIBLE filled face.
-        check(view->hasPreview(),
-              "Escape puts the closed face back on screen rather than clearing it");
-        // And it is the FACE, not the body the cancelled preview was showing:
-        // hasPreview() alone cannot tell the two apart, which is how one
-        // feature silently overwriting another's slot went unnoticed.
-        const TopoDS_Shape restored = view->previewShape();
+        // The REQUIREMENT here has never changed - Milestone 1's criterion is
+        // that a closed outline produces a VISIBLE filled face, and backing
+        // out of a height must not delete it - but Phase 7 moved where that
+        // face lives. It used to be shown through the viewport's single
+        // preview slot, which ExtrudePreview overwrote with the body it would
+        // build, so clearing that slot on cancel erased the face and left an
+        // intact pending face above an empty viewport; the fix then was to
+        // restore the face into the slot. A closed outline is a DOCUMENT ITEM
+        // now, on its own channel, so this asserts the state that replaced
+        // that arrangement: the preview slot is empty and the outline is still
+        // on screen as an item. Both halves, because "the slot is empty" alone
+        // is exactly what the original bug looked like.
+        check(!view->hasPreview(),
+              "Escape empties the preview slot - the body it was showing is gone");
+        check(view->outlineCount() == 1,
+              QStringLiteral("and the closed outline is still on screen as a document "
+                             "item rather than having been erased with it (%1)")
+                  .arg(view->outlineCount()));
+        check(window.pendingOutlineId() != 0 &&
+                  view->hasOutline(window.pendingOutlineId()),
+              "and it is the outline Extrude would still consume");
+        const TopoDS_Shape restored = window.pendingFace();
         check(!restored.IsNull() &&
                   !TopExp_Explorer(restored, TopAbs_SOLID).More() &&
                   TopExp_Explorer(restored, TopAbs_FACE).More(),
-              "and what is on screen is the face, not the body it would have built");
+              "which is a face, not the body the cancelled preview would have built");
         check(window.hasPendingFace(),
               "Escape leaves the pending face intact, so the user can retry");
 
@@ -4660,6 +4723,314 @@ int main(int argc, char* argv[])
         }
         check(static_cast<int>(window.document().solids().size()) == before + 1,
               "the pending face left behind by Escape can still be extruded");
+    }
+
+    // --- a closed outline is a document item ---------------------------------
+    // Phase 7, items 4 and 6b. The pending face stopped being a member of
+    // MainWindow and became something the document owns: it is listed in the
+    // drawer with its own name and its plane-local size, it is drawn in the
+    // viewport on its own eye-toggleable channel, extruding CONVERTS it under
+    // a single checkpoint, and undo/redo walk the whole lifecycle.
+    //
+    // This block restores the exact document it found: everything it builds it
+    // takes back, so the blocks after it are unaffected.
+    {
+        ItemsPanel* drawer = window.itemsPanel();
+        ToastHost* toasts = window.findChild<ToastHost*>();
+        check(drawer != nullptr && toasts != nullptr,
+              "the outline-item block has a drawer and a toast host");
+
+        trigger(window, QStringLiteral("Select Bodies"));
+        view->clearSelection();
+        settle(120);
+        const int bodiesAtStart = static_cast<int>(window.document().count());
+        const int rowsAtStart = drawer ? drawer->rowCount() : 0;
+        check(!window.hasPendingFace(),
+              "and it starts with no outline waiting, so its counts mean something");
+
+        // --- closing a sketch creates the item ---------------------------
+        trigger(window, QStringLiteral("Start Sketch"));
+        sketchQuad(window, 0.30, 0.30, 0.46, 0.46);
+        trigger(window, QStringLiteral("Finish Sketch"));
+        settle(200);
+
+        check(window.document().outlineCount() == 1,
+              "closing an outline puts ONE outline item in the document");
+        check(static_cast<int>(window.document().count()) == bodiesAtStart,
+              "and no body - an outline is not a body");
+        const int outlineId = window.pendingOutlineId();
+        check(outlineId != 0 && window.document().containsOutline(outlineId),
+              "the pending face IS that item");
+        check(window.hasPendingFace() &&
+                  !window.document().outlineFace(outlineId).IsNull(),
+              "so hasPendingFace() still answers exactly as it always has");
+
+        // The drawer lists it, ABOVE the bodies, with the vocabulary's name
+        // and its own plane-local size.
+        check(drawer && drawer->rowCount() == rowsAtStart + 1,
+              QStringLiteral("the drawer grows one row for it (%1, was %2)")
+                  .arg(drawer ? drawer->rowCount() : -1).arg(rowsAtStart));
+        const QString outlineRow = drawer ? drawer->rowTextAt(0) : QString();
+        check(outlineRow.contains(QStringLiteral("Outline ")),
+              QStringLiteral("and the FIRST row is the outline, above the bodies "
+                             "(\"%1\")").arg(outlineRow));
+        check(outlineRow.contains(QString::fromUtf8("\xC3\x97")) &&
+                  outlineRow.contains(QStringLiteral("mm")),
+              QStringLiteral("carrying its size the way a body row does (\"%1\")")
+                  .arg(outlineRow));
+        // Two numbers, not three: an outline is flat, and a row reading
+        // "340 x 220 x 0 mm" would be the world-axis box this deliberately
+        // does not use.
+        check(outlineRow.count(QString::fromUtf8("\xC3\x97")) == 1,
+              QStringLiteral("as TWO dimensions, not a body's three (\"%1\")")
+                  .arg(outlineRow));
+        check(!outlineRow.contains(QStringLiteral("Body")),
+              "and the outline row is not named as a body");
+
+        // It reports itself the way every other document change does: a Note
+        // that offers Undo, naming the item and its size.
+        check(toasts && toasts->isShowing() &&
+                  toasts->currentText().contains(QStringLiteral("Outline ")),
+              QStringLiteral("closing it raises a Note naming the outline (\"%1\")")
+                  .arg(toasts ? toasts->currentText() : QString()));
+        check(toasts && toasts->undoControl() && toasts->undoControl()->isVisible(),
+              "with an Undo control, like every other change to the document");
+
+        // --- and it is on screen, on its own channel ---------------------
+        check(view->hasOutline(outlineId) && view->outlineCount() == 1,
+              "the outline is displayed in the viewport as an item");
+        check(!view->hasPreview(),
+              "and NOT through the preview slot as well - one way to show one face");
+        check(view->isOutlineVisible(outlineId), "it starts visible");
+        // Not pickable: the drawer row is its handle this phase, and an
+        // outline that could be selected would make every gizmo predicate
+        // (which all read the viewport's selection) describe something the
+        // user cannot act on.
+        check(view->selectedSolidIds().empty(),
+              "and it is not in the viewport's selection");
+
+        // --- the eye really hides it, measured in pixels -----------------
+        {
+            const QString shown = outDir + QStringLiteral("/l-outline-visible.png");
+            const QString hidden = outDir + QStringLiteral("/l-outline-hidden.png");
+            view->saveSnapshot(shown);
+            const QImage shownShot(shown);
+            const double scale =
+                shownShot.isNull() ? 0.0
+                                   : double(shownShot.width()) / std::max(1, view->width());
+
+            // The outline's own centre, projected - never a hardcoded pixel,
+            // which stops meaning what it meant the moment the camera moves.
+            const Measure::Extents box =
+                Measure::extentsOf(window.document().outlineFace(outlineId));
+            Bnd_Box bounds;
+            BRepBndLib::Add(window.document().outlineFace(outlineId), bounds);
+            double xmin = 0, ymin = 0, zmin = 0, xmax = 0, ymax = 0, zmax = 0;
+            bounds.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+            const gp_Pnt centre(0.5 * (xmin + xmax), 0.5 * (ymin + ymax),
+                                0.5 * (zmin + zmax));
+            QPoint logical;
+            QPoint sample;
+            const bool projects = view->projectToScreen(centre, logical);
+            if (projects && scale > 0.5)
+                sample = QPoint(int(std::lround(logical.x() * scale)),
+                                int(std::lround(logical.y() * scale)));
+            const bool probeLands =
+                projects && scale > 0.5 && !shownShot.isNull() &&
+                shownShot.rect().contains(sample) && box.x > 1.0 && box.y > 1.0;
+            check(probeLands,
+                  QStringLiteral("the outline's own centre projects into the dump, so "
+                                 "the pixel probe has somewhere to look (%1 px per "
+                                 "logical px)").arg(scale));
+
+            if (probeLands) {
+                const QColor lit = shownShot.pixelColor(sample);
+                check(colorDistance(lit, QColor(Qt::yellow)) < 60.0,
+                      QStringLiteral("and the outline is actually painted there "
+                                     "(%1 from yellow)")
+                          .arg(colorDistance(lit, QColor(Qt::yellow))));
+
+                // The eye on its row, found the same way the body rows' is -
+                // the first VISIBLE toggle, which is the outline's because
+                // outline rows come first.
+                QPushButton* outlineEye = nullptr;
+                for (QPushButton* b : drawer->findChildren<QPushButton*>())
+                    if (b->isVisible()) { outlineEye = b; break; }
+                check(outlineEye != nullptr, "the outline row carries a visibility toggle");
+                if (outlineEye) {
+                    const QPoint at =
+                        outlineEye->mapTo(view, QPoint(outlineEye->width() / 2,
+                                                       outlineEye->height() / 2));
+                    check(view->childAt(at) == outlineEye,
+                          "which a real click at its centre actually finds");
+                    clickAt(outlineEye, QPointF(outlineEye->width() / 2.0,
+                                                outlineEye->height() / 2.0));
+                    settle(200);
+                    check(!view->isOutlineVisible(outlineId),
+                          "and clicking it hides the outline");
+
+                    view->saveSnapshot(hidden);
+                    const QImage hiddenShot(hidden);
+                    check(!hiddenShot.isNull() && hiddenShot.size() == shownShot.size(),
+                          "the two dumps are the same size, so the same pixel means the "
+                          "same place");
+                    if (!hiddenShot.isNull() && hiddenShot.size() == shownShot.size()) {
+                        const QColor gone = hiddenShot.pixelColor(sample);
+                        check(colorDistance(gone, QColor(Qt::yellow)) > 60.0,
+                              QStringLiteral("and the pixel it filled is no longer the "
+                                             "outline's colour (%1 from yellow)")
+                                  .arg(colorDistance(gone, QColor(Qt::yellow))));
+                    }
+
+                    // Back on, so the rest of this block sees it.
+                    QPushButton* again = nullptr;
+                    for (QPushButton* b : drawer->findChildren<QPushButton*>())
+                        if (b->isVisible()) { again = b; break; }
+                    if (again)
+                        clickAt(again, QPointF(again->width() / 2.0, again->height() / 2.0));
+                    settle(200);
+                    check(view->isOutlineVisible(outlineId),
+                          "and clicking it again brings the outline back");
+                }
+            }
+        }
+
+        // The capture: the whole window, so the drawer's outline row above
+        // its body rows and the yellow outline in the viewport are in one
+        // frame. A V3d_View dump would show the viewport alone and could not
+        // prove the drawer lists it.
+        check(bodiesAtStart > 0,
+              "there is at least one body, so the capture really does show an "
+              "outline row ABOVE a body row rather than an outline alone");
+        printWindowCapture(&window, outDir + QStringLiteral("/l-outline-item.png"));
+
+        // --- a second outline accumulates, and the drawer chooses ---------
+        // Starting another sketch no longer throws the first one away: it is
+        // in the document and on the undo stack, and only Extrude or Ctrl+Z
+        // may remove it.
+        trigger(window, QStringLiteral("Start Sketch"));
+        sketchQuad(window, 0.60, 0.30, 0.74, 0.44);
+        trigger(window, QStringLiteral("Finish Sketch"));
+        settle(200);
+        check(window.document().outlineCount() == 2,
+              "a second closed outline accumulates rather than replacing the first");
+        const int secondId = window.pendingOutlineId();
+        check(secondId != 0 && secondId != outlineId,
+              "and the NEWEST is what Extrude would consume by default");
+        check(drawer && drawer->rowCount() == rowsAtStart + 2,
+              "the drawer lists both");
+
+        // Clicking the first outline's row makes it the pending one again -
+        // the drawer row IS the outline's handle.
+        {
+            QWidget* firstRow = nullptr;
+            int seen = 0;
+            for (QWidget* row : drawer->findChildren<QWidget*>(QStringLiteral("itemsRow"))) {
+                if (!row->isVisible()) continue;
+                if (seen++ == 0) firstRow = row;
+            }
+            check(firstRow != nullptr &&
+                      firstRow->property("outlineId").toInt() == outlineId,
+                  "the first live row is the first outline's");
+            if (firstRow) {
+                clickAt(firstRow, QPointF(6.0, firstRow->height() / 2.0));
+                settle(150);
+                check(window.pendingOutlineId() == outlineId,
+                      "clicking its row makes it the outline Extrude will consume");
+                check(window.hasPendingFace(),
+                      "and a face is still pending either way");
+            }
+        }
+
+        // --- extruding CONVERTS the selected outline ----------------------
+        const int revisionBeforeExtrude = window.document().revision();
+        check(window.extrudePendingFace(12.0),
+              "the outline chosen in the drawer extrudes");
+        settle(200);
+        check(window.document().outlineCount() == 1,
+              "the extruded outline is consumed, not left behind");
+        check(!window.document().containsOutline(outlineId),
+              "and it is the one that was selected that went");
+        check(window.document().containsOutline(secondId),
+              "the other outline is untouched");
+        check(static_cast<int>(window.document().count()) == bodiesAtStart + 1,
+              "and one body arrived in its place");
+        check(!view->hasOutline(outlineId) && view->outlineCount() == 1,
+              "the viewport followed - the outline's presentation went with it");
+        check(window.document().revision() == revisionBeforeExtrude + 1,
+              "the conversion counted as ONE change, so a toast naming it is "
+              "dismissed by it exactly once");
+
+        // --- undo walks the lifecycle backwards --------------------------
+        trigger(window, QStringLiteral("Undo"));
+        settle(200);
+        check(window.document().outlineCount() == 2 &&
+                  static_cast<int>(window.document().count()) == bodiesAtStart,
+              "ONE undo puts the outline back AND removes the body");
+        check(window.document().containsOutline(outlineId),
+              "and it is the same outline, by id");
+        check(view->hasOutline(outlineId) && view->outlineCount() == 2,
+              "with the viewport back in step - resyncView carries outlines too");
+
+        trigger(window, QStringLiteral("Undo"));
+        settle(200);
+        check(window.document().outlineCount() == 1,
+              "the next undo takes the second outline away");
+        trigger(window, QStringLiteral("Undo"));
+        settle(200);
+        check(window.document().outlineCount() == 0 && !window.hasPendingFace(),
+              "and the next takes the first, leaving nothing pending");
+        check(view->outlineCount() == 0,
+              "and nothing of either on screen");
+
+        // --- redo walks it forwards again --------------------------------
+        trigger(window, QStringLiteral("Redo"));
+        trigger(window, QStringLiteral("Redo"));
+        settle(200);
+        check(window.document().outlineCount() == 2,
+              "two redos restore both outlines");
+        trigger(window, QStringLiteral("Redo"));
+        settle(200);
+        check(window.document().outlineCount() == 1 &&
+                  static_cast<int>(window.document().count()) == bodiesAtStart + 1,
+              "and the third re-runs the conversion in one step");
+        check(view->outlineCount() == 1 &&
+                  view->hasOutline(window.document().outlines().front().id),
+              "with the viewport in step again");
+
+        // --- a toast must not outlive the change it names ----------------
+        // The revision stamp, on the outline half of the document. Close an
+        // outline (Note + Undo), then undo by hand: the toast that offered to
+        // undo THAT has to go, rather than staying armed over a stack that
+        // has moved.
+        trigger(window, QStringLiteral("Start Sketch"));
+        sketchQuad(window, 0.62, 0.52, 0.72, 0.62);
+        trigger(window, QStringLiteral("Finish Sketch"));
+        settle(200);
+        check(toasts && toasts->isShowing() &&
+                  toasts->currentText().contains(QStringLiteral("Outline ")),
+              "closing another outline raises its own armed Note");
+        trigger(window, QStringLiteral("Undo"));
+        settle(250);
+        check(toasts && !toasts->isShowing(),
+              "and undoing that close dismisses it - the revision moved, so the "
+              "message stopped describing the document");
+
+        // --- put the document back exactly as this block found it ---------
+        while (window.document().outlineCount() > 0 ||
+               static_cast<int>(window.document().count()) > bodiesAtStart) {
+            if (!window.document().canUndo()) break;
+            trigger(window, QStringLiteral("Undo"));
+        }
+        settle(200);
+        check(static_cast<int>(window.document().count()) == bodiesAtStart &&
+                  window.document().outlineCount() == 0 && !window.hasPendingFace(),
+              "and the outline-item block leaves the document exactly as it found it");
+        check(drawer && drawer->rowCount() == rowsAtStart,
+              QStringLiteral("with the drawer back to its own row count (%1, expected %2)")
+                  .arg(drawer ? drawer->rowCount() : -1).arg(rowsAtStart));
+        view->clearSelection();
+        settle(120);
     }
 
     // --- pull a face: the headline direct-modeling gesture --------------------

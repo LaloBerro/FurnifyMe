@@ -192,6 +192,13 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     // Selection syncs both ways.
     connect(myItemsPanel, &ItemsPanel::solidActivated, this,
             [this](int id) { myView->setSelectedSolids({id}); });
+    // An outline row is the outline's only handle - it is not pickable in the
+    // viewport - so clicking one is what chooses which outline Extrude
+    // consumes. Routed through MainWindow rather than the panel writing the
+    // state itself: selectOutline() calls updateActions(), which is the single
+    // place that decides what is available.
+    connect(myItemsPanel, &ItemsPanel::outlineActivated, this,
+            [this](int id) { selectOutline(id); });
     connect(myView, &OcctViewWidget::selectionChanged, this,
             [this] { myItemsPanel->showSelection(myView->selectedSolidIds()); });
 
@@ -832,7 +839,7 @@ void MainWindow::updateActions()
     myUndoPointAction->setEnabled(mySketching && mySketch.pointCount() > 0);
     myCancelSketchAction->setEnabled(mySketching);
 
-    myExtrudeAction->setEnabled(!mySketching && !myPendingFace.IsNull());
+    myExtrudeAction->setEnabled(!mySketching && hasPendingFace());
 
     // Exactly one face, and a flat one: an outline needs a single plane to
     // live on, and a cylinder's side has no such plane. Both halves are
@@ -845,7 +852,7 @@ void MainWindow::updateActions()
     // canChangeSketchPlane() for what moving the plane out from under it does.
     // That is exactly canPullSelectedFace()'s rule too, so the two read the
     // same function rather than each carrying a copy of it.
-    const bool planeCanMove = !mySketching && myPendingFace.IsNull();
+    const bool planeCanMove = !mySketching && !hasPendingFace();
     const bool flatFaceSelected = canPullSelectedFace();
     myLockFaceAction->setEnabled(flatFaceSelected);
     myUnlockFaceAction->setEnabled(myFaceLocked && planeCanMove);
@@ -855,9 +862,9 @@ void MainWindow::updateActions()
     const QString pendingReason =
         tr("Unavailable while an outline is waiting — press E to extrude it, "
            "or Ctrl+K to start a new one");
-    myLockFaceAction->setToolTip(myPendingFace.IsNull() ? lockTooltipText() : pendingReason);
-    myUnlockFaceAction->setToolTip(myPendingFace.IsNull() ? unlockTooltipText()
-                                                          : pendingReason);
+    myLockFaceAction->setToolTip(!hasPendingFace() ? lockTooltipText() : pendingReason);
+    myUnlockFaceAction->setToolTip(!hasPendingFace() ? unlockTooltipText()
+                                                     : pendingReason);
 
     myUnionAction->setEnabled(booleanReady);
     mySubtractAction->setEnabled(booleanReady);
@@ -1108,7 +1115,7 @@ void MainWindow::updateStateLabel()
         } else {
             state = tr("Sketching — 2 points, 1 more to close");
         }
-    } else if (!myPendingFace.IsNull()) {
+    } else if (hasPendingFace()) {
         state = tr("Face ready — press E to extrude");
     } else if (canPullSelectedFace()) {
         // The gizmo is on screen and it is not obvious what to do with it -
@@ -1164,10 +1171,24 @@ void MainWindow::resyncView()
     for (const DocumentModel::Solid& solid : myDocument.solids()) {
         myView->displaySolid(solid.id, solid.shape);
     }
+    // Outlines are document items, so undo and redo have to move them on
+    // screen exactly as they move bodies. Rebuilt wholesale for the same
+    // reason the bodies are: tracking the difference is more code than it
+    // saves, and this is the only way to be sure the two agree.
+    myView->clearOutlines();
+    for (const DocumentModel::Outline& outline : myDocument.outlines()) {
+        myView->displayOutline(outline.id, outline.face);
+    }
 }
 
 void MainWindow::onDeleteSelected()
 {
+    // BODIES only, deliberately. Outlines are document items now, but they are
+    // not pickable viewport geometry this phase - the drawer row is their
+    // handle - so there is no gesture that could put one in this selection.
+    // An outline leaves the document by being extruded or by Ctrl+Z, and
+    // giving Delete a second, drawer-only meaning is a separate decision from
+    // the one this phase made.
     const std::vector<int> ids = myView->selectedSolidIds();
     if (ids.empty()) return;
 
@@ -1289,7 +1310,12 @@ void MainWindow::onSketchCursorMoved(const gp_Pnt& point)
 void MainWindow::onStartSketch()
 {
     mySketch.reset();
-    myPendingFace.Nullify();
+    // A waiting outline is NOT discarded here any more. It used to be, when
+    // it was a bare member and starting a sketch was the only way to be rid
+    // of it; it is a document item now, listed in the drawer and owned by the
+    // undo stack, and deleting one as a side effect of picking up the pencil
+    // would be the app throwing away work the user never asked it to. They
+    // accumulate; Extrude consumes the selected one and Ctrl+Z removes it.
     mySketching = true;
 
     // The ground plane by default, a locked face's own plane while one is
@@ -1367,11 +1393,44 @@ void MainWindow::onCancelSketch()
 {
     mySketching = false;
     mySketch.reset();
-    myPendingFace.Nullify();
+    // Cancels THIS sketch, not the outline items already in the document -
+    // same reasoning as onStartSketch().
     myView->setSketchMode(false, mySketch.plane());
     myView->clearPreview();
+    syncSketchConstraints();
     updateActions();
     statusBar()->showMessage(tr("Sketch cancelled"));
+}
+
+int MainWindow::pendingOutlineId() const
+{
+    const std::vector<DocumentModel::Outline>& outlines = myDocument.outlines();
+    if (outlines.empty()) return 0;
+    // Checked against the live list rather than trusted: an undo can remove
+    // the outline the drawer last selected, and a stale id must fall back to
+    // the newest instead of leaving Extrude pointing at nothing.
+    if (mySelectedOutlineId != 0 && myDocument.containsOutline(mySelectedOutlineId))
+        return mySelectedOutlineId;
+    return outlines.back().id;
+}
+
+TopoDS_Face MainWindow::pendingFace() const
+{
+    return myDocument.outlineFace(pendingOutlineId());
+}
+
+gp_Dir MainWindow::pendingSweepDirection() const
+{
+    gp_Pln plane = mySketch.plane();
+    myDocument.outlinePlane(pendingOutlineId(), plane);
+    return plane.Axis().Direction();
+}
+
+void MainWindow::selectOutline(int id)
+{
+    if (!myDocument.containsOutline(id)) return;
+    mySelectedOutlineId = id;
+    updateActions();
 }
 
 void MainWindow::onFinishSketch()
@@ -1385,32 +1444,67 @@ void MainWindow::onFinishSketch()
         return;
     }
 
-    myPendingFace = face;
+    // A closed outline is a DOCUMENT ITEM now, not a preview - so it takes a
+    // checkpoint like every other change to the document, appears in the
+    // drawer, and can be taken back with Ctrl+Z rather than only by being
+    // extruded or silently dropped by the next sketch.
+    myDocument.checkpoint();
+    const int id = myDocument.addOutline(face, mySketch.plane());
+    // The newest is what Extrude consumes by default, and saying so
+    // explicitly rather than leaning on pendingOutlineId()'s fallback means
+    // the drawer's highlight and the commit target agree from the first frame.
+    mySelectedOutlineId = id;
+
     recordProgress("sketch.completed");
     mySketching = false;
     myView->setSketchMode(false, mySketch.plane());
-    myView->setPreview(face, /*shaded=*/true);
+    // The in-progress polyline's channel, emptied - the closed outline is on
+    // screen through its own item now. There is exactly one way to display a
+    // closed outline, which is the whole point of the item replacing the
+    // pending-face preview rather than joining it.
+    myView->setPreview(TopoDS_Shape());
+    myView->displayOutline(id, face);
+    // The sketch's points have become an item; leaving them in the controller
+    // would let a second Finish Sketch close the same outline twice.
+    mySketch.reset();
+    syncSketchConstraints();
+
     updateActions();
-    statusBar()->showMessage(tr("Outline closed — press E to extrude it into a body"));
+    emit documentChanged();
+    const QString message =
+        tr("%1 created — %2")
+            .arg(QString::fromStdString(myDocument.outlineNameOf(id)),
+                 QString::fromStdString(Measure::formatFaceExtents(face, mySketch.plane())));
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
 }
 
 void MainWindow::onExtrude()
 {
-    if (myPendingFace.IsNull()) return;
+    const TopoDS_Face face = pendingFace();
+    if (face.IsNull()) return;
 
     // Opens a live preview over the viewport instead of a modal dialog - see
     // ExtrudePreview. It calls extrudePendingFace() itself once the user
-    // commits (Enter) or leaves the pending face alone if they back out
+    // commits (Enter) or leaves the pending outline alone if they back out
     // (Escape).
-    myExtrudePreview->begin(myPendingFace);
+    myExtrudePreview->begin(face);
 }
 
 bool MainWindow::extrudePendingFace(double height)
 {
-    if (myPendingFace.IsNull() || height == 0.0) return false;
+    const int outlineId = pendingOutlineId();
+    const TopoDS_Face face = myDocument.outlineFace(outlineId);
+    if (face.IsNull() || height == 0.0) return false;
 
-    const TopoDS_Shape solid =
-        ModelingOps::extrude(myPendingFace, mySketch.plane().Axis().Direction(), height);
+    // The OUTLINE'S OWN plane, not the sketch controller's current one.
+    // CLAUDE.md's rule is that a closed outline pins the plane it was drawn
+    // on; storing that plane on the item is what finally makes it true by
+    // construction rather than by refusing to move the plane in the meantime.
+    gp_Pln plane = mySketch.plane();
+    myDocument.outlinePlane(outlineId, plane);
+
+    const TopoDS_Shape solid = ModelingOps::extrude(face, plane.Axis().Direction(), height);
     if (solid.IsNull()) {
         myToasts->show(tr("This face couldn't be extruded into a body — "
                           "The outline may cross itself or be too small to have an "
@@ -1422,14 +1516,19 @@ bool MainWindow::extrudePendingFace(double height)
     // Frame the very first solid; after that leave the camera where the user
     // put it rather than yanking the view on every extrude.
     const bool wasEmpty = myDocument.count() == 0;
+    // ONE checkpoint around the whole conversion - the outline going and the
+    // body arriving are one change, so one Ctrl+Z puts the outline back and
+    // takes the body away. Two checkpoints would make the user press it twice
+    // and leave a document holding both in between.
     myDocument.checkpoint();
-    const int id = myDocument.addSolid(solid);
+    const int id = myDocument.convertOutlineToBody(outlineId, solid);
     recordProgress("extrude.completed");
     myView->clearPreview();
+    myView->removeOutline(outlineId);
     myView->displaySolid(id, solid);
     if (wasEmpty) myView->fitAll();
 
-    myPendingFace.Nullify();
+    mySelectedOutlineId = 0;
     mySketch.reset();
     updateActions();
     emit documentChanged();
@@ -1446,7 +1545,7 @@ bool MainWindow::canPullSelectedFace() const
     // No sketch in progress, and no closed outline waiting - see
     // canChangeSketchPlane() and the header for both halves. The pending-face
     // half is what keeps this and ExtrudePreview mutually exclusive.
-    if (mySketching || !myPendingFace.IsNull()) return false;
+    if (mySketching || hasPendingFace()) return false;
 
     // selectedFace() is deliberately "the ONE selected face", never the first
     // of several, so this cannot be a coin toss between two highlighted
@@ -1529,7 +1628,7 @@ bool MainWindow::bevelTarget(TopoDS_Edge& edge, int& bodyId, gp_Pnt& centre,
 {
     // The same two halves canPullSelectedFace() opens with, for the same
     // reasons - see its comment and the header.
-    if (mySketching || !myPendingFace.IsNull()) return false;
+    if (mySketching || hasPendingFace()) return false;
 
     // Edge mode explicitly, so this cannot be true at the same time as the
     // face pull's predicate or the transform gizmo's.
@@ -1672,7 +1771,7 @@ int MainWindow::transformableBodyId() const
     // The same two halves canPullSelectedFace() opens with, for the same
     // reasons: an outline in progress lives on a plane, and a body that moved
     // under it would take the plane's meaning with it.
-    if (mySketching || !myPendingFace.IsNull()) return 0;
+    if (mySketching || hasPendingFace()) return 0;
 
     // Body mode explicitly. selectedSolidIds() reports the owning body of a
     // selected FACE too, so without this the gizmo would appear over a face
@@ -1923,7 +2022,7 @@ bool MainWindow::canChangeSketchPlane()
     //
     // Discarding the pending outline instead was the alternative, and it is
     // worse: it throws away work the user did without being asked.
-    if (myPendingFace.IsNull()) return true;
+    if (!hasPendingFace()) return true;
 
     myToasts->show(tr("There's an outline waiting to be extruded, and it belongs to the "
                       "plane it was drawn on. Press E to turn it into a body, or Ctrl+K "

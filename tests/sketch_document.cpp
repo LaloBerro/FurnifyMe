@@ -376,6 +376,170 @@ int main()
               "whose volume is the outline's area times the height");
     }
 
+    // --- outlines are document items -----------------------------------------
+    // Phase 7, item 4. A closed outline stops being a bare member of
+    // MainWindow and becomes something the document owns, names, numbers and
+    // rolls back - which is the whole reason these checks live down here in
+    // the Qt-free suite rather than only in gui_smoke.
+    {
+        DocumentModel doc;
+        const gp_Pln ground(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
+
+        SketchController sketch;
+        sketch.addPoint(gp_Pnt(0.0, 0.0, 0.0));
+        sketch.addPoint(gp_Pnt(340.0, 0.0, 0.0));
+        sketch.addPoint(gp_Pnt(340.0, 220.0, 0.0));
+        sketch.addPoint(gp_Pnt(0.0, 220.0, 0.0));
+        const TopoDS_Face face = sketch.closedFace();
+        check(!face.IsNull(), "the fixture outline closes into a face");
+
+        check(doc.addOutline(TopoDS_Face(), ground) == 0,
+              "a null face makes no outline");
+        check(doc.outlineCount() == 0, "and leaves the list empty");
+
+        const int firstOutline = doc.addOutline(face, ground);
+        check(firstOutline != 0, "a closed face becomes an outline item");
+        check(doc.outlineCount() == 1, "which the document lists");
+        check(doc.count() == 0, "and which is not counted as a body");
+        check(doc.outlineNameOf(firstOutline) == "Outline 01",
+              "named with the vocabulary's word and the bodies' numbering");
+        check(doc.containsOutline(firstOutline), "and found by id");
+        check(!doc.contains(firstOutline),
+              "while contains() - the BODY lookup - does not claim it");
+
+        gp_Pln stored;
+        check(doc.outlinePlane(firstOutline, stored) &&
+                  stored.Axis().Direction().IsEqual(ground.Axis().Direction(), 1.0e-9),
+              "the plane it was drawn on is stored with it");
+        gp_Pln untouched(gp_Pnt(1.0, 2.0, 3.0), gp_Dir(1.0, 0.0, 0.0));
+        check(!doc.outlinePlane(firstOutline + 999, untouched) &&
+                  std::fabs(untouched.Location().X() - 1.0) < 1.0e-12,
+              "an unknown id reports failure and leaves the output alone");
+
+        // Numbering continues across a second outline, and the two ids come
+        // out of the same counter the bodies use - so an outline id can never
+        // be mistaken for a body id.
+        const int secondOutline = doc.addOutline(face, ground);
+        check(doc.outlineNameOf(secondOutline) == "Outline 02", "the second is Outline 02");
+        const int bodyId = doc.addSolid(
+            ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 10.0, 10.0, 10.0));
+        check(bodyId != firstOutline && bodyId != secondOutline,
+              "a body's id never collides with an outline's");
+        check(doc.nameOf(bodyId) == "Body 01",
+              "and the two kinds number independently");
+
+        check(doc.removeOutline(secondOutline), "an outline can be removed by id");
+        check(!doc.removeOutline(secondOutline), "and removing it twice reports failure");
+        check(doc.outlineCount() == 1, "leaving the other one alone");
+
+        // The revision has to move on an outline change, or a toast naming
+        // one would survive the change that replaced it - the exact defect
+        // ToastHost's revision stamp exists to end.
+        const int beforeAdd = doc.revision();
+        const int third = doc.addOutline(face, ground);
+        check(doc.revision() > beforeAdd, "adding an outline bumps the revision");
+        const int beforeRemove = doc.revision();
+        doc.removeOutline(third);
+        check(doc.revision() > beforeRemove, "and so does removing one");
+    }
+
+    // --- the extrude conversion is ONE change --------------------------------
+    {
+        DocumentModel doc;
+        const gp_Pln ground(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
+        SketchController sketch;
+        sketch.addPoint(gp_Pnt(0.0, 0.0, 0.0));
+        sketch.addPoint(gp_Pnt(40.0, 0.0, 0.0));
+        sketch.addPoint(gp_Pnt(40.0, 20.0, 0.0));
+        sketch.addPoint(gp_Pnt(0.0, 20.0, 0.0));
+        const TopoDS_Face face = sketch.closedFace();
+        const TopoDS_Shape body = ModelingOps::extrude(face, gp_Dir(0.0, 0.0, 1.0), 18.0);
+        check(!body.IsNull(), "the fixture outline extrudes into a body");
+
+        const int outlineId = doc.addOutline(face, ground);
+        check(doc.convertOutlineToBody(outlineId, TopoDS_Shape()) == 0,
+              "a null body refuses the conversion");
+        check(doc.outlineCount() == 1,
+              "and leaves the outline exactly where it was - a refused conversion "
+              "must not destroy the work it was given");
+        check(doc.convertOutlineToBody(outlineId + 999, body) == 0,
+              "an unknown outline refuses the conversion too");
+        check(doc.count() == 0, "adding no body in the process");
+
+        const int beforeRevision = doc.revision();
+        // The commit idiom: the CALLER checkpoints, once, around the whole
+        // conversion.
+        doc.checkpoint();
+        const int newBody = doc.convertOutlineToBody(outlineId, body);
+        check(newBody != 0, "the conversion reports the new body's id");
+        check(doc.outlineCount() == 0 && doc.count() == 1,
+              "the outline is gone and the body is there");
+        check(doc.revision() == beforeRevision + 1,
+              "and the pair counted as ONE revision, not two");
+
+        // The whole point of the single checkpoint: one undo walks both halves.
+        check(doc.undo(), "one undo");
+        check(doc.outlineCount() == 1 && doc.count() == 0,
+              "puts the outline back AND removes the body");
+        check(doc.outlineNameOf(doc.outlines().front().id) == "Outline 01",
+              "with its name intact");
+        gp_Pln restored;
+        check(doc.outlinePlane(doc.outlines().front().id, restored) &&
+                  restored.Axis().Direction().IsEqual(gp_Dir(0.0, 0.0, 1.0), 1.0e-9),
+              "and its plane intact, so it still extrudes the same way");
+
+        check(doc.redo(), "one redo");
+        check(doc.outlineCount() == 0 && doc.count() == 1,
+              "converts it again in a single step");
+    }
+
+    // --- the whole lifecycle, undone and redone ------------------------------
+    // Points are not in the document at all; closing puts an outline in it;
+    // extruding converts it; two undos walk back out; two redos walk back in.
+    {
+        DocumentModel doc;
+        const gp_Pln ground(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
+        SketchController sketch;
+        sketch.addPoint(gp_Pnt(0.0, 0.0, 0.0));
+        sketch.addPoint(gp_Pnt(30.0, 0.0, 0.0));
+        sketch.addPoint(gp_Pnt(30.0, 30.0, 0.0));
+        check(doc.outlineCount() == 0 && doc.count() == 0 && !doc.canUndo(),
+              "placing points puts nothing in the document and nothing on the stack");
+
+        sketch.addPoint(gp_Pnt(0.0, 30.0, 0.0));
+        const TopoDS_Face face = sketch.closedFace();
+        doc.checkpoint();
+        doc.addOutline(face, ground);
+        check(doc.outlineCount() == 1 && doc.count() == 0,
+              "closing the outline makes it an item");
+
+        doc.checkpoint();
+        doc.convertOutlineToBody(doc.outlines().front().id,
+                                 ModelingOps::extrude(face, gp_Dir(0.0, 0.0, 1.0), 12.0));
+        check(doc.outlineCount() == 0 && doc.count() == 1, "extruding converts it");
+
+        doc.undo();
+        check(doc.outlineCount() == 1 && doc.count() == 0,
+              "the first undo restores the outline and removes the body");
+        doc.undo();
+        check(doc.outlineCount() == 0 && doc.count() == 0,
+              "the second undo takes the outline away too");
+        check(!doc.canUndo(), "and there is nothing left to undo");
+
+        doc.redo();
+        check(doc.outlineCount() == 1 && doc.count() == 0, "the first redo brings it back");
+        doc.redo();
+        check(doc.outlineCount() == 0 && doc.count() == 1, "and the second re-extrudes it");
+        check(!doc.canRedo(), "with nothing left to redo");
+
+        // clear() has to take both lists, or an outline would outlive the
+        // document it belonged to.
+        doc.checkpoint();
+        doc.addOutline(face, ground);
+        doc.clear();
+        check(doc.outlineCount() == 0 && doc.count() == 0, "clear() empties both lists");
+    }
+
     // --- compound for STEP export -------------------------------------------
     {
         const TopoDS_Shape one = ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 1.0, 1.0, 1.0);

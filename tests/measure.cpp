@@ -5,6 +5,7 @@
 //
 #include "Measure.h"
 #include "ModelingOps.h"
+#include "SketchController.h"
 
 #include <cstdio>
 #include <string>
@@ -139,6 +140,67 @@ int main()
     Measure::setDisplayUnit(Measure::Unit::Millimetres);
     check(Measure::parseLength("4", mm) && mm == 4.0, "4 mm parses to 4 mm");
     check(Measure::formatLength(340.0) == "340 mm", "switching back restores exactly");
+
+    // --- a flat outline is measured in its OWN plane -------------------------
+    // What the Items drawer paints beside "Outline 01". The world-axis box
+    // this replaces reports one of a vertical outline's two real dimensions
+    // as a zero, which is why formatDimensions() is the wrong tool here.
+    {
+        const char* times = "\xC3\x97";
+        const std::string expected = std::string("340 ") + times + " 220 mm";
+
+        // On the ground, (u, v) is (X, Y) and the answer is the obvious one.
+        const gp_Pln ground(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
+        SketchController flatSketch;
+        flatSketch.addPoint(gp_Pnt(0.0, 0.0, 0.0));
+        flatSketch.addPoint(gp_Pnt(340.0, 0.0, 0.0));
+        flatSketch.addPoint(gp_Pnt(340.0, 220.0, 0.0));
+        flatSketch.addPoint(gp_Pnt(0.0, 220.0, 0.0));
+        const TopoDS_Face flat = flatSketch.closedFace();
+        check(!flat.IsNull(), "the ground fixture closes");
+        checkEq(Measure::formatFaceExtents(flat, ground), expected,
+                "a ground outline reads as its own width and depth");
+
+        // The same outline stood up on a vertical plane: the numbers must not
+        // change, and this is the case a world-axis bounding box gets wrong.
+        const gp_Pln wall(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, -1.0, 0.0));
+        SketchController wallSketch;
+        wallSketch.setPlane(wall);
+        wallSketch.addPoint(gp_Pnt(0.0, 0.0, 0.0));
+        wallSketch.addPoint(gp_Pnt(340.0, 0.0, 0.0));
+        wallSketch.addPoint(gp_Pnt(340.0, 0.0, 220.0));
+        wallSketch.addPoint(gp_Pnt(0.0, 0.0, 220.0));
+        const TopoDS_Face vertical = wallSketch.closedFace();
+        check(!vertical.IsNull(), "the wall fixture closes");
+        // The SAME two numbers, and both of them real - which is the whole
+        // claim. Their ORDER is the plane's own (u, v), not the world's, and
+        // that is deliberate rather than incidental: it is the frame
+        // ElSLib::Parameters gives, which is the frame snapToPlaneGrid snaps
+        // in and the frame the cursor readout reports while the outline is
+        // being drawn. A drawer that re-ordered them to look more like the
+        // world would disagree with the status bar the user just read.
+        const std::string onWall = Measure::formatFaceExtents(vertical, wall);
+        checkEq(onWall, std::string("220 ") + times + " 340 mm",
+                "a wall outline reads both real dimensions, in the plane's own u, v");
+        check(onWall.find("340") != std::string::npos &&
+                  onWall.find("220") != std::string::npos,
+              "so neither of the two dimensions is lost");
+        // The comparison that makes the point: the world-axis reading has a
+        // zero in it, so this is not a distinction without a difference.
+        check(Measure::formatDimensions(vertical).find(" 0 ") != std::string::npos ||
+                  Measure::formatDimensions(vertical).find("0 mm") != std::string::npos,
+              "while the world-axis reading of it carries a zero");
+
+        check(Measure::formatFaceExtents(TopoDS_Shape(), ground).empty(),
+              "a null shape formats as nothing");
+
+        // It follows the display unit like every other length.
+        Measure::setDisplayUnit(Measure::Unit::Centimetres);
+        checkEq(Measure::formatFaceExtents(flat, ground),
+                std::string("34 ") + times + " 22 cm",
+                "and it reads in the display unit");
+        Measure::setDisplayUnit(Measure::Unit::Millimetres);
+    }
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL",
                 g_failures, g_failures == 1 ? "" : "s");

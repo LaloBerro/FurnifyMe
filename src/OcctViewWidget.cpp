@@ -376,6 +376,84 @@ bool OcctViewWidget::isSolidVisible(int id) const
     return myContext->IsDisplayed(it->second);
 }
 
+void OcctViewWidget::displayOutline(int id, const TopoDS_Face& face)
+{
+    initializeViewer();
+    if (myContext.IsNull() || face.IsNull()) return;
+
+    removeOutline(id);
+
+    ModelingOps::tessellate(face, 0.1);
+
+    Handle(AIS_Shape) presentation = new AIS_Shape(face);
+    // The same yellow every piece of sketch work wears - setPreview() and
+    // setModelingPreview() both use it. An outline is a document item, but it
+    // is a FLAT one that is not a body yet, and giving it the bodies' grey
+    // would say it was one.
+    presentation->SetColor(Quantity_Color(Quantity_NOC_YELLOW));
+    presentation->SetWidth(2.0);
+    // Above the work-plane grid it lies exactly on top of - see sketchZLayer().
+    markInSketchLayer(presentation);
+    // Selection mode -1: never pickable. Outlines are handled from the drawer
+    // this phase, and a shape the user can select but cannot Union, Pull or
+    // bevel would be a selection that makes every gizmo predicate lie.
+    myContext->Display(presentation, AIS_Shaded, -1, Standard_False);
+    myOutlines[id] = presentation;
+
+    myContext->UpdateCurrentViewer();
+}
+
+void OcctViewWidget::removeOutline(int id)
+{
+    const auto it = myOutlines.find(id);
+    if (it == myOutlines.end() || myContext.IsNull()) return;
+
+    myContext->Remove(it->second, Standard_False);
+    myOutlines.erase(it);
+    myContext->UpdateCurrentViewer();
+}
+
+void OcctViewWidget::clearOutlines()
+{
+    if (myContext.IsNull()) return;
+
+    for (auto& entry : myOutlines) myContext->Remove(entry.second, Standard_False);
+    myOutlines.clear();
+    myContext->UpdateCurrentViewer();
+}
+
+bool OcctViewWidget::hasOutline(int id) const
+{
+    return myOutlines.find(id) != myOutlines.end();
+}
+
+void OcctViewWidget::setOutlineVisible(int id, bool visible)
+{
+    const auto it = myOutlines.find(id);
+    if (it == myOutlines.end() || myContext.IsNull()) return;
+
+    if (visible) {
+        // The same mode and the same -1 it was displayed with, not
+        // Display(obj, false), which would fall back to the object's default
+        // wireframe mode and silently change how a hidden-then-shown outline
+        // looks.
+        myContext->Display(it->second, AIS_Shaded, -1, Standard_False);
+    } else {
+        myContext->Erase(it->second, Standard_False);
+    }
+    // No selectionChanged() either way, unlike setSolidVisible(): an outline is
+    // not selectable, so hiding one cannot have dropped anything from the
+    // selection.
+    myContext->UpdateCurrentViewer();
+}
+
+bool OcctViewWidget::isOutlineVisible(int id) const
+{
+    const auto it = myOutlines.find(id);
+    if (it == myOutlines.end() || myContext.IsNull()) return false;
+    return myContext->IsDisplayed(it->second);
+}
+
 std::vector<Graphic3d_ZLayerId> OcctViewWidget::zLayerOrder() const
 {
     std::vector<Graphic3d_ZLayerId> order;

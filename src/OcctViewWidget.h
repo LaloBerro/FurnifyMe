@@ -53,6 +53,28 @@ public:
     void setSolidVisible(int id, bool visible);
     bool isSolidVisible(int id) const;
 
+    // A closed outline that is a DOCUMENT ITEM (DocumentModel::Outline), not a
+    // preview - Phase 7, item 4. It gets a channel of its own for the reason
+    // setPreview()'s comment gives one paragraph down: that slot already has
+    // writers, and an item that survives sketches, undo and redo cannot share
+    // a slot with feedback that is wiped by the next gesture. The pending face
+    // used to be shown THROUGH setPreview, and this replaces that entirely -
+    // there is exactly one way to put a closed outline on screen.
+    //
+    // Displayed with selection mode -1: outlines are not pickable geometry
+    // this phase (the drawer row is their handle), so nothing in the viewport
+    // can hover, select or bevel one. They render in the sketch Z-layer, above
+    // the work-plane grid they lie flat on.
+    void displayOutline(int id, const TopoDS_Face& face);
+    void removeOutline(int id);
+    void clearOutlines();
+    bool hasOutline(int id) const;
+    int outlineCount() const { return static_cast<int>(myOutlines.size()); }
+    // Presentation state, exactly as setSolidVisible() is, and not captured by
+    // undo for the same reason.
+    void setOutlineVisible(int id, bool visible);
+    bool isOutlineVisible(int id) const;
+
     // Temporary, non-selectable feedback shape (the in-progress sketch).
     void setPreview(const TopoDS_Shape& shape, bool shaded = false);
     void clearPreview();
@@ -614,6 +636,11 @@ private:
     PullArrowRenderer myBevelArrow;
 
     std::map<int, Handle(AIS_Shape)> mySolids;
+    // The outline items - see displayOutline(). Keyed by the same document id
+    // space bodies use, and deliberately a SEPARATE map: nothing that walks
+    // mySolids (selection, the manipulator, the wireframe toggle, the
+    // selection-mode activation) should ever find an outline in it.
+    std::map<int, Handle(AIS_Shape)> myOutlines;
 
     bool myWireframe = false;
 
