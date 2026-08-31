@@ -6,10 +6,12 @@
 #include <Graphic3d_ArrayOfSegments.hxx>
 #include <Graphic3d_AspectLine3d.hxx>
 #include <Graphic3d_Group.hxx>
+#include <Graphic3d_ZLayerSettings.hxx>
 #include <Prs3d_Presentation.hxx>
 #include <PrsMgr_PresentationManager.hxx>
 #include <Quantity_Color.hxx>
 #include <SelectMgr_Selection.hxx>
+#include <V3d_Viewer.hxx>
 
 #include <algorithm>
 #include <cmath>
@@ -90,6 +92,29 @@ double GridRenderer::firstLineAtOrBelow(double limit, double step)
 void GridRenderer::attach(const Handle(AIS_InteractiveContext)& context)
 {
     myContext = context;
+    if (myContext.IsNull()) return;
+
+    const Handle(V3d_Viewer) viewer = myContext->CurrentViewer();
+    if (viewer.IsNull()) return;
+
+    // The grid's own layer - see zLayer() in the header for the full argument.
+    // In short: rendered AFTER the bodies so a locked face cannot paint over
+    // it, writing NO depth so it can never reject the sketch work that is
+    // rendered after it, and depth TESTING so a body genuinely in front of
+    // the ground grid still hides it.
+    //
+    // A layer of ours rather than a stock one: Graphic3d_ZLayerId_Top sits in
+    // the right place but its settings are shared with anything else that
+    // wants an overlay, and AddZLayer()'s implicit "before Top" placement is
+    // a position this file would then be relying on without saying so.
+    Graphic3d_ZLayerSettings settings;
+    settings.SetName("FurnifyMe work-plane grid");
+    settings.SetEnableDepthTest(Standard_True);
+    settings.SetEnableDepthWrite(Standard_False);
+    settings.SetClearDepth(Standard_False);
+    Graphic3d_ZLayerId layer = Graphic3d_ZLayerId_UNKNOWN;
+    if (viewer->InsertLayerAfter(layer, settings, Graphic3d_ZLayerId_Default))
+        myLayer = layer;
 }
 
 void GridRenderer::invalidate()
@@ -249,6 +274,14 @@ void GridRenderer::rebuild(double minorStep, double centerU, double centerV,
 
     if (!myGrid.IsNull()) myContext->Remove(myGrid, Standard_False);
     myGrid = grid;
+    // The layer is set BEFORE the display, so the presentation is never
+    // computed into the default layer and moved afterwards - a rebuild happens
+    // on every camera octave, and a one-frame flash of grid over the outline
+    // would be exactly the defect this layer exists to remove. Setting it on
+    // the object rather than through the context is what makes that possible:
+    // AIS_InteractiveObject::SetZLayer stores it on the drawer, and Display
+    // reads the drawer.
+    if (myLayer != Graphic3d_ZLayerId_UNKNOWN) myGrid->SetZLayer(myLayer);
     myContext->Display(myGrid, 0, -1, Standard_False);   // mode -1: not selectable
     myContext->UpdateCurrentViewer();
 }

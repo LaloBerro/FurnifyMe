@@ -19,6 +19,8 @@
 #include <Graphic3d_NameOfMaterial.hxx>
 #include <Graphic3d_TransformPers.hxx>
 #include <Graphic3d_Vec2.hxx>
+#include <Graphic3d_ZLayerSettings.hxx>
+#include <NCollection_HArray1.hxx>
 #include <OpenGl_GraphicDriver.hxx>
 #include <Prs3d_Drawer.hxx>
 #include <Prs3d_LineAspect.hxx>
@@ -129,6 +131,37 @@ Handle(SketchPointMarker) makeMarker(const gp_Pnt& point, Aspect_TypeOfMarker ty
     marker->aspect = new Graphic3d_AspectMarker3d(type, colour, scale);
     return marker;
 }
+
+// The first point's marker: a FILLED square, which no Aspect_TypeOfMarker
+// offers. Every stock type is a dot, a ring or a stroke glyph, so the square
+// has to come from Graphic3d_AspectMarker3d's bitmap constructor - a
+// monochrome stamp, sized in pixels and tinted by the colour argument, so it
+// stays a Theme token exactly like the dots and the ring.
+//
+// The bitmap is glBitmap's classic layout: one bit per pixel, rows padded to
+// whole bytes. Seven pixels wide fits inside one byte per row, and every bit
+// is set, so whether the driver reads the row most- or least-significant-bit
+// first the result is the same solid square - which matters here, because
+// this file has twice found a primitive that was "obviously" fine drawing
+// nothing at all (Aspect_TOM_POINT, Graphic3d_ArrayOfTriangles). The suite
+// samples the middle of this square for the fill colour rather than trusting
+// that it renders.
+constexpr int kStartMarkerPx = 7;
+
+Handle(SketchPointMarker) makeFilledSquareMarker(const gp_Pnt& point,
+                                                 const Quantity_Color& colour)
+{
+    Handle(SketchPointMarker) marker = new SketchPointMarker();
+    marker->point = point;
+
+    Handle(NCollection_HArray1<uint8_t>) bits =
+        new NCollection_HArray1<uint8_t>(0, kStartMarkerPx - 1);
+    for (int row = 0; row < kStartMarkerPx; ++row) bits->SetValue(row, 0xFF);
+
+    marker->aspect =
+        new Graphic3d_AspectMarker3d(colour, kStartMarkerPx, kStartMarkerPx, bits);
+    return marker;
+}
 }  // namespace
 
 OcctViewWidget::OcctViewWidget(QWidget* parent)
@@ -186,8 +219,30 @@ void OcctViewWidget::initializeViewer()
     applyTheme();
 
     myGridRenderer.attach(myContext);
+    // The third layer of the three - see sketchZLayer() in the header. It has
+    // to be created AFTER the grid's, because it is positioned relative to it:
+    // bodies (default) -> grid -> sketch work. If the grid renderer could not
+    // make its own layer, this one goes straight after the default layer, so
+    // sketch work is still drawn after the grid rather than silently losing
+    // the ordering along with it.
+    {
+        Graphic3d_ZLayerSettings settings;
+        settings.SetName("FurnifyMe sketch work");
+        settings.SetEnableDepthTest(Standard_True);
+        settings.SetEnableDepthWrite(Standard_True);
+        // Emphatically NOT SetClearDepth(true): that is what
+        // Graphic3d_ZLayerId_Topmost does, and it would let the outline draw
+        // straight through a body standing in front of it.
+        settings.SetClearDepth(Standard_False);
+        const Graphic3d_ZLayerId after = myGridRenderer.zLayer() != Graphic3d_ZLayerId_UNKNOWN
+                                             ? myGridRenderer.zLayer()
+                                             : Graphic3d_ZLayerId_Default;
+        Graphic3d_ZLayerId layer = Graphic3d_ZLayerId_UNKNOWN;
+        if (myViewer->InsertLayerAfter(layer, settings, after)) mySketchLayer = layer;
+    }
     myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane());
     myDimension.attach(myContext);
+    myDimension.setZLayer(mySketchLayer);
     myPullArrow.attach(myContext);
     myBevelArrow.attach(myContext);
 
@@ -321,6 +376,30 @@ bool OcctViewWidget::isSolidVisible(int id) const
     return myContext->IsDisplayed(it->second);
 }
 
+std::vector<Graphic3d_ZLayerId> OcctViewWidget::zLayerOrder() const
+{
+    std::vector<Graphic3d_ZLayerId> order;
+    if (myViewer.IsNull()) return order;
+
+    NCollection_Sequence<int> layers;
+    myViewer->GetAllZLayers(layers);
+    for (int i = layers.Lower(); i <= layers.Upper(); ++i) order.push_back(layers.Value(i));
+    return order;
+}
+
+Graphic3d_ZLayerSettings OcctViewWidget::zLayerSettings(Graphic3d_ZLayerId layer) const
+{
+    if (myViewer.IsNull() || layer == Graphic3d_ZLayerId_UNKNOWN)
+        return Graphic3d_ZLayerSettings();
+    return myViewer->ZLayerSettings(layer);
+}
+
+void OcctViewWidget::markInSketchLayer(const Handle(AIS_InteractiveObject)& object) const
+{
+    if (object.IsNull() || mySketchLayer == Graphic3d_ZLayerId_UNKNOWN) return;
+    object->SetZLayer(mySketchLayer);
+}
+
 void OcctViewWidget::setPreview(const TopoDS_Shape& shape, bool shaded)
 {
     initializeViewer();
@@ -334,6 +413,9 @@ void OcctViewWidget::setPreview(const TopoDS_Shape& shape, bool shaded)
     myPreview = new AIS_Shape(shape);
     myPreview->SetColor(Quantity_Color(Quantity_NOC_YELLOW));
     myPreview->SetWidth(2.0);
+    // The in-progress outline and the closed face are drawn above the
+    // work-plane grid they sit exactly on top of - see sketchZLayer().
+    markInSketchLayer(myPreview);
     // Selection mode -1: feedback only, never pickable.
     myContext->Display(myPreview, shaded ? AIS_Shaded : AIS_WireFrame, -1, Standard_False);
     myContext->UpdateCurrentViewer();
@@ -377,6 +459,11 @@ void OcctViewWidget::setModelingPreview(const TopoDS_Shape& shape, int replacesS
     // it was pulling.
     myModelingPreview->SetColor(Quantity_Color(Quantity_NOC_YELLOW));
     myModelingPreview->SetWidth(2.0);
+    // In the sketch-work layer with the rest of the feedback: a pull or a
+    // bevel preview carving a body sitting on the ground grid is exactly the
+    // shape the grid must not paint over. Depth testing is on in that layer,
+    // so it still hides behind whatever is genuinely in front of it.
+    markInSketchLayer(myModelingPreview);
     // Selection mode -1: feedback only, never pickable - the same rule the
     // sketch preview and every marker follows. A shape the user can select
     // that exists in no document is the worst thing a preview can produce.
@@ -756,26 +843,29 @@ void OcctViewWidget::setSketchPointMarkers(const std::vector<gp_Pnt>& points)
     for (const gp_Pnt& p : points) {
         Handle(SketchPointMarker) dot =
             makeMarker(p, Aspect_TOM_BALL, toOcctColor(Theme::sketchPointMarker()), 1.5);
+        markInSketchLayer(dot);
         myContext->Display(dot, 0, -1, Standard_False);
         myPlacedMarkers.push_back(dot);
     }
 
-    // The first point additionally gets a ring around its dot - "a ring, or
-    // a larger dot" - because clicking it back is what closes the outline,
-    // and that has to be visibly true, not just structurally true: a first
-    // pass used the same colour as the ordinary dots and only a modest
-    // scale bump (2.2 against 1.5), and pixel-sampling the two side by side
-    // showed IDENTICAL marker geometry - whatever this driver does with the
-    // scale argument at these small deltas, it was not visible. Scale 4.0
-    // against 1.5 does clear that threshold (confirmed by the same
-    // pixel-sampling, and it is dramatically bigger - see the crop
-    // comparison in the branch's report), but Theme::focusRing() (amber, a
-    // hue no other placed-point marker or the cursor dot carries) is the
-    // difference this does not have to hope survives a rendering quirk.
-    Handle(SketchPointMarker) ring =
-        makeMarker(points.front(), Aspect_TOM_RING1, toOcctColor(Theme::focusRing()), 4.0);
-    myContext->Display(ring, 0, -1, Standard_False);
-    myFirstPointMarker = ring;
+    // The first point additionally gets a small FILLED SQUARE on top of its
+    // dot, because clicking it back is what closes the outline and that has
+    // to be visibly true, not just structurally true.
+    //
+    // The square replaced an amber ring, and the change is a shape change as
+    // much as a colour one - which is the point. The three sketch marks are
+    // now told apart by SHAPE first: a square starts the outline, a dot is a
+    // placed point, a ring is where the cursor is. That matters because this
+    // file has already been burned once by leaning on size alone (scale 2.2
+    // against 1.5 pixel-sampled IDENTICAL on this driver), and once more by
+    // assuming a primitive draws at all. Theme::accent() is the app's own
+    // "this is the interactive thing" colour and no other sketch mark wears
+    // it, so colour still carries the distinction independently.
+    Handle(SketchPointMarker) square =
+        makeFilledSquareMarker(points.front(), toOcctColor(Theme::accent()));
+    markInSketchLayer(square);
+    myContext->Display(square, 0, -1, Standard_False);
+    myFirstPointMarker = square;
 
     myContext->UpdateCurrentViewer();
 }
@@ -807,13 +897,19 @@ void OcctViewWidget::setSketchCursorMarker(const gp_Pnt& point)
     if (myContext.IsNull()) return;
 
     clearSketchCursorMarker();
-    // Same marker family as the placed dots (Aspect_TOM_BALL, proven above
-    // to actually render), but larger and in Theme::accent() - already the
-    // viewport's own colour for "here's the interactive thing", via
-    // DimensionRenderer's annotation lines - so the live cursor is never
-    // mistaken for a point already committed.
+    // A RING, and a big one - the third of the three shapes, against the
+    // first point's filled square and the placed points' dots. Its violet is
+    // Theme::sketchPointMarker(), the palette's own sketch hue, which the
+    // small placed dots also wear: the cursor is told apart from them by
+    // being an open ring four times the size, the one size delta this file
+    // has actually measured to be visible (1.5 against 4.0 - see
+    // setSketchPointMarkers()). Sharing the hue is deliberate rather than
+    // conceded: the live cursor is the same KIND of thing as the points it is
+    // about to become, while the square that closes the outline is not, and
+    // that is the distinction accent() is spent on.
     Handle(SketchPointMarker) cursor =
-        makeMarker(point, Aspect_TOM_BALL, toOcctColor(Theme::accent()), 2.0);
+        makeMarker(point, Aspect_TOM_RING1, toOcctColor(Theme::sketchPointMarker()), 4.0);
+    markInSketchLayer(cursor);
     myContext->Display(cursor, 0, -1, Standard_False);
     myCursorMarker = cursor;
     myContext->UpdateCurrentViewer();
@@ -829,6 +925,18 @@ void OcctViewWidget::clearSketchCursorMarker()
 bool OcctViewWidget::hasSketchCursorMarker() const
 {
     return !myCursorMarker.IsNull();
+}
+
+void OcctViewWidget::setSketchStraightAnchor(const gp_Pnt& prev, const gp_Dir& dir)
+{
+    myStraightPrev = prev;
+    myStraightDir = dir;
+    myHasStraightAnchor = true;
+}
+
+void OcctViewWidget::clearSketchStraightAnchor()
+{
+    myHasStraightAnchor = false;
 }
 
 void OcctViewWidget::applySelectionMode(const Handle(AIS_Shape)& shape)
@@ -936,6 +1044,9 @@ void OcctViewWidget::setSketchMode(bool enabled, const gp_Pln& plane)
     // entry, so nothing from a previous sketch can survive into this one.
     clearSketchPointMarkers();
     clearSketchCursorMarker();
+    // And the same rule for the straight-continuation anchor: it names a
+    // point in the sketch that is ending or has not started yet.
+    clearSketchStraightAnchor();
 }
 
 gp_Pln OcctViewWidget::gridPlane() const
@@ -944,6 +1055,14 @@ gp_Pln OcctViewWidget::gridPlane() const
     // shaded face, and two coplanar surfaces are a depth-buffer tie: the grid
     // stipples through the face and flickers as the camera moves. So the grid
     // is displaced a hair toward whichever side of the plane the eye is on.
+    //
+    // The grid's Z-layer does NOT replace this, and the two solve different
+    // halves of the same picture: the layer settles draw ORDER (the grid is
+    // rendered after the bodies and before the sketch work, and writes no
+    // depth), while this nudge settles the DEPTH TIE that decides whether the
+    // locked face or the grid drawn on it wins. Drop the nudge and the
+    // locked-face grid stipples again; drop the layer and the nudge makes the
+    // grid win against the outline too. See GridRenderer::zLayer().
     //
     // Not Graphic3d_ZLayerId_Topmost: that layer draws with the depth buffer
     // cleared, so the GROUND grid would then paint over every body standing
@@ -989,7 +1108,7 @@ bool OcctViewWidget::rayThroughPixel(int px, int py, gp_Lin& out) const
     return true;
 }
 
-bool OcctViewWidget::pointOnSketchPlane(int px, int py, gp_Pnt& out) const
+bool OcctViewWidget::pointOnSketchPlane(int px, int py, gp_Pnt& out, bool straight) const
 {
     gp_Lin ray;
     if (!rayThroughPixel(px, py, ray)) return false;
@@ -1010,6 +1129,28 @@ bool OcctViewWidget::pointOnSketchPlane(int px, int py, gp_Pnt& out) const
     if (!myCamera.effectiveOrtho()) {
         const gp_Vec toHit(ray.Location(), out);
         if (toHit.Dot(gp_Vec(ray.Direction())) <= 0.0) return false;
+    }
+
+    // Shift's straight continuation, and how it composes with Snap to Grid.
+    //
+    // The composition is: SHIFT WINS THE DIRECTION, then the grid snaps the
+    // distance ALONG that direction. Snapping to the plane grid first and
+    // projecting afterwards would land off the grid; projecting first and
+    // then snapping to the plane grid would land off the line. Only one of
+    // the two constraints can be exact, and the direction is the one the user
+    // is holding a key down to get - a segment that is 3 mm off straight is
+    // the failure Shift exists to prevent, while a length of 47 mm instead of
+    // 50 is not. Rounding the line parameter keeps both whenever the anchor
+    // itself is on the grid and the direction is axis-aligned, which is the
+    // ordinary case.
+    if (straight && myHasStraightAnchor) {
+        out = SketchController::snapToDirection(myStraightPrev, myStraightDir, out);
+        if (mySnapEnabled && mySnapStep > 0.0) {
+            const gp_Vec along(myStraightDir);
+            const double t = gp_Vec(myStraightPrev, out).Dot(along);
+            out = myStraightPrev.Translated(along * (std::round(t / mySnapStep) * mySnapStep));
+        }
+        return true;
     }
 
     if (mySnapEnabled) {
@@ -1596,8 +1737,12 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
     const QPoint pos = event->position().toPoint();
 
     if (mySketchMode) {
+        // Shift here means "continue the last segment straight", not the
+        // additive-selection Shift below: nothing is selectable while
+        // sketching, so the two can never be asked for at once.
+        const bool straight = (event->modifiers() & Qt::ShiftModifier) != 0;
         gp_Pnt hit;
-        if (pointOnSketchPlane(pos.x(), pos.y(), hit)) emit sketchPointPicked(hit);
+        if (pointOnSketchPlane(pos.x(), pos.y(), hit, straight)) emit sketchPointPicked(hit);
         return;   // no selection while sketching
     }
 
@@ -1698,8 +1843,12 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
     } else if (mySketchMode) {
         // Report where the next point would land, so the rubber band and the
         // coordinate readout track the cursor before anything is committed.
+        // The SAME straight-continuation rule the click uses, from the same
+        // function, so the marker cannot promise one point and the click
+        // place another.
+        const bool straight = (event->modifiers() & Qt::ShiftModifier) != 0;
         gp_Pnt onPlane;
-        if (pointOnSketchPlane(pos.x(), pos.y(), onPlane)) {
+        if (pointOnSketchPlane(pos.x(), pos.y(), onPlane, straight)) {
             myLastHoverPoint = onPlane;
             myHasLastHoverPoint = true;
             emit sketchCursorMoved(onPlane);

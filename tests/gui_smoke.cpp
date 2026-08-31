@@ -150,7 +150,7 @@ int g_checks = 0;
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 1005;
+constexpr int kCheckFloor = 1054;
 
 void check(bool condition, const QString& what)
 {
@@ -1910,6 +1910,106 @@ int main(int argc, char* argv[])
         // fourth corner - what "look at it" asks for.
         view->saveSnapshot(outDir + "/i-sketch-markers.png");
 
+        // --- and the three marks are told apart by SHAPE, in pixels ------
+        //
+        // The count and childAt checks above prove three marker OBJECTS
+        // exist; they cannot tell a filled square from a ring from nothing
+        // at all, and this file has twice shipped a marker primitive that
+        // drew nothing (Aspect_TOM_POINT, Graphic3d_ArrayOfTriangles). So
+        // the styles are sampled off the OCCT dump: a filled accent square
+        // on the first point, a violet ring at the cursor with a hollow
+        // middle, and neither colour where the other one lives.
+        {
+            const QImage shot(outDir + "/i-sketch-markers.png");
+            const double scale =
+                shot.isNull() ? 0.0 : double(shot.width()) / std::max(1, view->width());
+            check(!shot.isNull() && scale > 0.5,
+                  QStringLiteral("the marker snapshot can be sampled (%1x%2, %3 px per "
+                                 "logical px)")
+                      .arg(shot.width()).arg(shot.height()).arg(scale));
+
+            // Logical viewport point -> pixel in the dump. The dump is in
+            // DEVICE pixels and projectToScreen answers in logical ones -
+            // CLAUDE.md's own rule that everything outside the two
+            // conversion helpers is logical - so the ratio is applied here
+            // rather than assumed to be 1. That is also what keeps this
+            // probe honest at 1.25x and 1.75x, where the markers stay the
+            // same number of DEVICE pixels and would look like they had
+            // shrunk if measured in logical ones.
+            auto toShot = [&](const gp_Pnt& world, QPoint& out) {
+                QPoint logical;
+                if (!view->projectToScreen(world, logical)) return false;
+                out = QPoint(int(std::lround(logical.x() * scale)),
+                             int(std::lround(logical.y() * scale)));
+                return shot.rect().adjusted(12, 12, -12, -12).contains(out);
+            };
+
+            // Pixels within `half` of `centre` that match `colour`, and the
+            // bounding box they occupy - enough to say "a filled patch about
+            // seven pixels across" rather than "some pixels were blue".
+            auto patch = [&](const QPoint& centre, const QColor& colour, int half,
+                             int& hits, int& boxW, int& boxH) {
+                hits = 0;
+                int minX = shot.width(), maxX = -1, minY = shot.height(), maxY = -1;
+                for (int dy = -half; dy <= half; ++dy) {
+                    for (int dx = -half; dx <= half; ++dx) {
+                        const QPoint p = centre + QPoint(dx, dy);
+                        if (!shot.rect().contains(p)) continue;
+                        if (colorDistance(shot.pixelColor(p), colour) > 42.0) continue;
+                        ++hits;
+                        minX = std::min(minX, p.x()); maxX = std::max(maxX, p.x());
+                        minY = std::min(minY, p.y()); maxY = std::max(maxY, p.y());
+                    }
+                }
+                boxW = maxX >= minX ? maxX - minX + 1 : 0;
+                boxH = maxY >= minY ? maxY - minY + 1 : 0;
+            };
+
+            const std::vector<gp_Pnt>& placed = window.sketch().points();
+            gp_Pnt cursorPoint;
+            QPoint firstAt, secondAt, cursorAt;
+            const bool haveAll = placed.size() >= 2 && view->lastHoverPoint(cursorPoint) &&
+                                 toShot(placed.front(), firstAt) &&
+                                 toShot(placed[1], secondAt) && toShot(cursorPoint, cursorAt);
+            check(haveAll,
+                  "the first point, a later point and the live cursor all project "
+                  "inside the dump, so the six style checks below cannot vanish quietly");
+            if (haveAll) {
+                int hits = 0, boxW = 0, boxH = 0;
+                patch(firstAt, Theme::accent(), 9, hits, boxW, boxH);
+                // A FILLED square: sampled INSIDE it, not on a ring's rim.
+                // The yellow outline leaves the point through the middle of
+                // the square, so a single centre pixel is the one sample
+                // that could legitimately not be accent - hence a count.
+                check(hits >= 12,
+                      QStringLiteral("the first point is a filled accent patch, not an "
+                                     "outline (%1 accent px)").arg(hits));
+                check(boxW >= 4 && boxW <= 12 && boxH >= 4 && boxH <= 12,
+                      QStringLiteral("and it is a small square about seven pixels across "
+                                     "(%1x%2 px)").arg(boxW).arg(boxH));
+
+                patch(secondAt, Theme::accent(), 9, hits, boxW, boxH);
+                check(hits == 0,
+                      QStringLiteral("a LATER placed point wears none of that accent - the "
+                                     "square marks the start, not every point (%1 px)")
+                          .arg(hits));
+                patch(secondAt, Theme::sketchPointMarker(), 9, hits, boxW, boxH);
+                check(hits > 0,
+                      QStringLiteral("a later placed point is an ordinary sketch-coloured "
+                                     "dot (%1 px)").arg(hits));
+
+                patch(cursorAt, Theme::sketchPointMarker(), 12, hits, boxW, boxH);
+                check(hits >= 20 && boxW > 8,
+                      QStringLiteral("the live cursor is a much larger violet mark "
+                                     "(%1 px, %2 wide)").arg(hits).arg(boxW));
+                // A RING, not a dot: the middle is not the ring's colour.
+                // This is the check that would fail if the cursor quietly
+                // went back to being a filled ball.
+                check(colorDistance(shot.pixelColor(cursorAt), Theme::sketchPointMarker()) > 42.0,
+                      "and it is a ring - its middle is not filled with its own colour");
+            }
+        }
+
         trigger(window, QStringLiteral("Undo Last Point"));
         check(view->sketchPointMarkerCount() == 2, "undoing a point drops its marker");
         check(view->hasSketchStartMarker(), "the start marker survives an undo above it");
@@ -2300,6 +2400,426 @@ int main(int argc, char* argv[])
     trigger(window, QStringLiteral("Undo"));
     check(window.document().count() == 1, "Undo again, back to one solid");
     settle(200);
+
+    // --- sketch work draws above the grid, and under the bodies ---------------
+    //
+    // Three Z-layers, in this order: the default layer (bodies), the grid's
+    // own, and the sketch work's. The structural half of the contract is
+    // asserted first - ids, order and settings - because a pixel probe that
+    // passed for the wrong reason would look identical to one that passed for
+    // the right one. See GridRenderer::zLayer() for the argument.
+    {
+        const Graphic3d_ZLayerId gridLayer = view->gridZLayer();
+        const Graphic3d_ZLayerId sketchLayer = view->sketchZLayer();
+        check(gridLayer != Graphic3d_ZLayerId_UNKNOWN &&
+                  gridLayer != Graphic3d_ZLayerId_Default,
+              QStringLiteral("the grid has a Z-layer of its own (%1)").arg(gridLayer));
+        check(sketchLayer != Graphic3d_ZLayerId_UNKNOWN &&
+                  sketchLayer != Graphic3d_ZLayerId_Default && sketchLayer != gridLayer,
+              QStringLiteral("and the sketch work has a second one, distinct from both "
+                             "(%1)").arg(sketchLayer));
+        // The refusal, as a check rather than a comment: Topmost renders with
+        // the depth buffer cleared, so an outline in it would draw straight
+        // through a body standing in front of it.
+        check(sketchLayer != Graphic3d_ZLayerId_Topmost &&
+                  !view->zLayerSettings(sketchLayer).ToClearDepth() &&
+                  view->zLayerSettings(sketchLayer).ToEnableDepthTest(),
+              "the sketch layer depth-tests and does not clear depth - it is not Topmost");
+        check(!view->zLayerSettings(gridLayer).ToEnableDepthWrite() &&
+                  view->zLayerSettings(gridLayer).ToEnableDepthTest(),
+              "the grid layer writes no depth, so it can never reject a sketch pixel, "
+              "and still depth-tests, so a body in front of it still hides it");
+
+        const std::vector<Graphic3d_ZLayerId> order = view->zLayerOrder();
+        auto indexOf = [&order](Graphic3d_ZLayerId id) {
+            for (std::size_t i = 0; i < order.size(); ++i)
+                if (order[i] == id) return static_cast<int>(i);
+            return -1;
+        };
+        const int iDefault = indexOf(Graphic3d_ZLayerId_Default);
+        const int iGrid = indexOf(gridLayer);
+        const int iSketch = indexOf(sketchLayer);
+        check(iDefault >= 0 && iGrid >= 0 && iSketch >= 0,
+              QStringLiteral("all three layers are in the viewer's render order "
+                             "(%1 layers)").arg(order.size()));
+        // Two ids being different says nothing about which is drawn first,
+        // and draw order is the whole contract.
+        check(iDefault < iGrid && iGrid < iSketch,
+              QStringLiteral("and the order really is bodies -> grid -> sketch work "
+                             "(%1, %2, %3)").arg(iDefault).arg(iGrid).arg(iSketch));
+    }
+
+    // The pixel half. One body, one sketch segment drawn straight through its
+    // footprint on the ground plane, and two dumps of the SAME camera - one
+    // with the sketch up, one after cancelling it. Sampling the same pixels in
+    // both is what makes each claim non-vacuous: a probe pixel that turns out
+    // not to have a body behind it, or a control pixel that turns out not to
+    // be clear of one, fails loudly here instead of quietly agreeing.
+    const CameraState savedCamera = view->camera().state();
+    if (window.document().count() == 1) {
+        trigger(window, QStringLiteral("Axonometric"));
+        settle(300);
+
+        GProp_GProps bodyProps;
+        const TopoDS_Shape probeBody = window.document().solids().front().shape;
+        BRepGProp::VolumeProperties(probeBody, bodyProps);
+        const gp_Pnt centre = bodyProps.CentreOfMass();
+        // The body's own extent decides where the segment runs and which
+        // stretch of it is clear ground. Guessing a margin instead is how the
+        // first pass of this probe sampled the stretch that was BEHIND the
+        // body and reported the body's grey as a missing outline.
+        Bnd_Box probeBox;
+        BRepBndLib::Add(probeBody, probeBox);
+        double bx0 = 0.0, by0 = 0.0, bz0 = 0.0, bx1 = 0.0, by1 = 0.0, bz1 = 0.0;
+        probeBox.Get(bx0, by0, bz0, bx1, by1, bz1);
+
+        // Everything below is built on the SNAP grid the clicks will land on,
+        // so a click aimed at a projected point comes back as that point
+        // rather than up to half a step away from it.
+        auto onGrid = [&](double v) { return std::round(v / view->snapStep()) * view->snapStep(); };
+        const double cy = onGrid(centre.Y());
+        // A segment along X through the ground point under the body's own
+        // centre of mass, starting well clear of the body and ending past it.
+        const gp_Pnt endA(onGrid(bx0 - 400.0), cy, 0.0);
+        const gp_Pnt endB(onGrid(bx1 + 120.0), cy, 0.0);
+
+        QPoint atA, atB;
+        const bool ends = view->projectToScreen(endA, atA) &&
+                          view->projectToScreen(endB, atB) &&
+                          view->rect().adjusted(20, 20, -20, -20).contains(atA) &&
+                          view->rect().adjusted(20, 20, -20, -20).contains(atB);
+        check(ends,
+              "both ends of the probe segment project inside the viewport, so the "
+              "layering checks below cannot vanish quietly");
+
+        if (ends) {
+            trigger(window, QStringLiteral("Start Sketch"));
+            clickAt(view, QPointF(atA));
+            clickAt(view, QPointF(atB));
+            // The cursor parked well off the segment, so neither the rubber
+            // band out to it nor its dimension annotation can reach the
+            // pixels being sampled.
+            QPoint parkAt;
+            if (view->projectToScreen(gp_Pnt(0.5 * (bx0 + bx1), cy - 500.0, 0.0), parkAt) &&
+                view->rect().contains(parkAt)) {
+                moveTo(view, QPointF(parkAt));
+            }
+            settle(200);
+            check(window.sketch().pointCount() == 2,
+                  "the probe segment is two placed points on the ground plane");
+
+            // Sampled off the points ACTUALLY placed, never off the ones
+            // aimed at: the snap grid, a rounded pixel and the unprojection
+            // each get a say, and a probe that samples where it hoped the
+            // line went is a probe that can miss the line and say nothing.
+            const std::vector<gp_Pnt> segment = window.sketch().points();
+            const QString afterPath = outDir + QStringLiteral("/k-sketch-above-grid.png");
+            const QString beforePath = outDir + QStringLiteral("/k-grid-without-sketch.png");
+            view->saveSnapshot(afterPath);
+            const QImage afterShot(afterPath);
+            const double scale = afterShot.isNull()
+                                     ? 0.0
+                                     : double(afterShot.width()) / std::max(1, view->width());
+
+            auto toShot = [&](const gp_Pnt& world, QPoint& out) {
+                QPoint logical;
+                if (!view->projectToScreen(world, logical)) return false;
+                out = QPoint(int(std::lround(logical.x() * scale)),
+                             int(std::lround(logical.y() * scale)));
+                return afterShot.rect().contains(out);
+            };
+            // A world X on the segment. The two placed points share a Y, so
+            // the drawn line IS the set of these - which is why this samples
+            // the points actually placed rather than the ones aimed at.
+            const double lineY = segment.size() == 2 ? segment.front().Y() : 0.0;
+            auto atX = [&](double x) { return gp_Pnt(x, lineY, 0.0); };
+            check(segment.size() == 2 &&
+                      std::fabs(segment.front().Y() - segment.back().Y()) < 1.0e-9 &&
+                      segment.front().X() < bx0 - 100.0 && segment.back().X() > bx1,
+                  "the placed segment runs along X, starts clear of the body and ends "
+                  "past it, so both halves of this probe have somewhere to look");
+
+            QPoint underAt, controlAt;
+            const bool probesLand = segment.size() == 2 && scale > 0.5 &&
+                                    toShot(atX(0.5 * (bx0 + bx1)), underAt) &&
+                                    toShot(atX(bx0 - 200.0), controlAt);
+            check(probesLand,
+                  QStringLiteral("the probe pixels land inside the dump (%1 px per logical "
+                                 "px)").arg(scale));
+
+            // Same camera, sketch gone - the reference for "was that pixel
+            // the body all along".
+            trigger(window, QStringLiteral("Cancel Sketch"));
+            settle(200);
+            view->saveSnapshot(beforePath);
+            const QImage beforeShot(beforePath);
+
+            const bool comparable = probesLand && !beforeShot.isNull() &&
+                                    beforeShot.size() == afterShot.size();
+            check(comparable,
+                  "the two dumps are the same size, so the same pixel means the same place");
+
+            if (comparable) {
+                const QColor outline(Qt::yellow);   // OcctViewWidget's preview colour
+                // A grid line, and NOT merely a dark pixel. The two are
+                // closer than they look: gridMinor (#3e3e44) is 12 away from
+                // the viewport ground (#45454b), because the grid is drawn to
+                // fade into it - so the generous tolerance this probe started
+                // with matched the empty background too and counted plain
+                // ground as grid. 8 excludes it.
+                auto isGridColour = [](const QColor& c) {
+                    return colorDistance(c, Theme::gridMinor()) < 8.0;
+                };
+                // Ground of any kind - the background or a grid line on it.
+                auto isGround = [](const QColor& c) {
+                    return colorDistance(c, Theme::viewport()) < 25.0;
+                };
+                const QColor bareUnder = beforeShot.pixelColor(underAt);
+                const QColor bareControl = beforeShot.pixelColor(controlAt);
+
+                // Non-vacuity, both directions, with no sketch on screen at
+                // all: the probe pixel must really have a body behind it and
+                // the control pixel must really not.
+                check(!isGround(bareUnder),
+                      QStringLiteral("the probe pixel has the body behind it (%1)")
+                          .arg(bareUnder.name()));
+                check(isGround(bareControl) && colorDistance(bareControl, bareUnder) > 60.0,
+                      QStringLiteral("and the control pixel is bare ground, nowhere near "
+                                     "the body's grey (%1 against %2)")
+                          .arg(bareControl.name(), bareUnder.name()));
+
+                // 1. The body still occludes the sketch line. THIS is the
+                //    check that forbids Graphic3d_ZLayerId_Topmost: in that
+                //    layer the outline would paint straight over the body.
+                const QColor drawnUnder = afterShot.pixelColor(underAt);
+                check(colorDistance(drawnUnder, outline) > 90.0,
+                      QStringLiteral("a body in front of a sketch line still occludes it "
+                                     "(%1)").arg(drawnUnder.name()));
+                check(colorDistance(drawnUnder, bareUnder) < 14.0,
+                      "and that pixel is untouched by the sketch - it is the body, not a "
+                      "line drawn through it");
+
+                // 2. The outline is UNBROKEN along the stretch of ground it
+                //    crosses, grid lines and coloured axis lines and all.
+                //    That is the whole of item 2: before the layer existed,
+                //    the grid - nudged a hair toward the eye, so it wins any
+                //    depth tie with the outline drawn on the same plane -
+                //    painted over the outline at every crossing and left it
+                //    stitched.
+                //
+                //    Scanned PERPENDICULAR to the line rather than sampled at
+                //    one pixel: projectToScreen answers in whole logical
+                //    pixels, so a sample can sit a pixel off a two-pixel line
+                //    and report a break that is really a rounding error. A
+                //    perpendicular scan cannot hide a real break, because a
+                //    grid line painting over the outline removes it in a band
+                //    ACROSS the line, which is exactly the direction this
+                //    scan looks in.
+                QPoint screenA, screenB;
+                const bool haveEnds = toShot(segment.front(), screenA) &&
+                                      toShot(segment.back(), screenB);
+                double perpX = 0.0, perpY = 0.0;
+                if (haveEnds) {
+                    const double dx = screenB.x() - screenA.x();
+                    const double dy = screenB.y() - screenA.y();
+                    const double len = std::sqrt(dx * dx + dy * dy);
+                    if (len > 1.0) { perpX = -dy / len; perpY = dx / len; }
+                }
+                check(haveEnds && (perpX != 0.0 || perpY != 0.0),
+                      "the segment has a screen direction to scan across");
+
+                int samples = 0, unbroken = 0;
+                // Only the stretch that is genuinely clear of the body - from
+                // just past the first placed point to just short of the
+                // body's near edge - so a break can only mean the grid won,
+                // never that the body did.
+                const double sweepFrom = segment.front().X() + 40.0;
+                const double sweepTo = bx0 - 40.0;
+                for (int i = 0; i <= 60 && haveEnds; ++i) {
+                    const double x = sweepFrom + (sweepTo - sweepFrom) * (i / 60.0);
+                    QPoint at;
+                    if (!toShot(atX(x), at)) continue;
+                    ++samples;
+                    bool found = false;
+                    for (int k = -3; k <= 3 && !found; ++k) {
+                        const QPoint p(at.x() + int(std::lround(perpX * k)),
+                                       at.y() + int(std::lround(perpY * k)));
+                        if (!afterShot.rect().contains(p)) continue;
+                        if (colorDistance(afterShot.pixelColor(p), outline) < 90.0) found = true;
+                    }
+                    if (found) ++unbroken;
+                }
+                check(samples >= 40,
+                      QStringLiteral("the outline was sampled along its length (%1 samples)")
+                          .arg(samples));
+                check(samples > 0 && unbroken == samples,
+                      QStringLiteral("and the outline is drawn at every one of them - the "
+                                     "grid never paints over it (%1 of %2)")
+                          .arg(unbroken).arg(samples));
+
+                // Non-vacuity for the grid half: the grid IS on screen in
+                // that same dump, and it crosses the stretch just sampled.
+                // Without this, a grid that had stopped drawing at all would
+                // turn the check above green.
+                int gridPixels = 0;
+                for (int y = 0; y < afterShot.height(); y += 3) {
+                    for (int x = 0; x < afterShot.width(); x += 3) {
+                        if (isGridColour(afterShot.pixelColor(x, y))) ++gridPixels;
+                    }
+                }
+                check(gridPixels > 400,
+                      QStringLiteral("the grid really is on screen in that same dump "
+                                     "(%1 sampled px)").arg(gridPixels));
+                int crossings = 0;
+                if (haveEnds) {
+                    for (int i = 0; i <= 60; ++i) {
+                        const double x = sweepFrom + (sweepTo - sweepFrom) * (i / 60.0);
+                        QPoint at;
+                        if (!toShot(atX(x), at)) continue;
+                        // Just off the line, where the grid is undisturbed.
+                        const QPoint p(at.x() + int(std::lround(perpX * 6)),
+                                       at.y() + int(std::lround(perpY * 6)));
+                        if (afterShot.rect().contains(p) &&
+                            isGridColour(afterShot.pixelColor(p))) ++crossings;
+                    }
+                }
+                check(crossings > 0,
+                      QStringLiteral("and it crosses the very stretch that was sampled, so "
+                                     "the unbroken outline is a result and not a stretch "
+                                     "of empty ground (%1 samples beside grid)")
+                          .arg(crossings));
+            }
+        }
+    }
+
+    // --- Shift continues the last segment straight ---------------------------
+    //
+    // SketchController::snapToDirection is proven headless; this is the wiring
+    // - that the modifier reaches the unprojection, that the point REPORTED
+    // (which is what the cursor marker, the status readout and the live
+    // dimension all draw) is the snapped one, and that a click places that
+    // same point rather than a second, differently-derived one.
+    {
+        trigger(window, QStringLiteral("Start Sketch"));
+        check(window.isSketching(), "sketch mode for the straight-continuation checks");
+        check(!view->hasSketchStraightAnchor(),
+              "a fresh sketch has nothing for Shift to continue");
+
+        const double w = view->width();
+        const double h = view->height();
+        trigger(window, QStringLiteral("Top"));
+        settle(300);
+
+        clickAt(view, QPointF(0.32 * w, 0.62 * h));
+        check(!view->hasSketchStraightAnchor(),
+              "and one point is still not a segment - Shift needs two");
+        clickAt(view, QPointF(0.62 * w, 0.62 * h));
+        check(view->hasSketchStraightAnchor(),
+              "two points give Shift a segment to continue");
+
+        auto collinearity = [&](const gp_Pnt& p) {
+            const std::vector<gp_Pnt>& pts = window.sketch().points();
+            const gp_Vec run(pts[pts.size() - 2], pts.back());
+            const gp_Vec out(pts.back(), p);
+            if (run.Magnitude() < 1.0e-9 || out.Magnitude() < 1.0e-9) return -1.0;
+            // Distance of `p` from the line, in millimetres - the honest
+            // reading of "collinear", and one a report can quote.
+            return run.Crossed(out).Magnitude() / run.Magnitude();
+        };
+
+        // A pixel a long way off the line the last segment runs along.
+        const QPointF offLine(0.80 * w, 0.30 * h);
+
+        moveTo(view, offLine);
+        gp_Pnt plain;
+        const bool havePlain = view->lastHoverPoint(plain);
+        check(havePlain && collinearity(plain) > 20.0,
+              QStringLiteral("without Shift that cursor is nowhere near the line "
+                             "(%1 mm off)").arg(havePlain ? collinearity(plain) : -1.0));
+
+        moveTo(view, offLine, Qt::ShiftModifier);
+        gp_Pnt held;
+        const bool haveHeld = view->lastHoverPoint(held);
+        check(haveHeld && collinearity(held) < 1.0e-6,
+              QStringLiteral("with Shift held the REPORTED cursor - the marker, the "
+                             "readout and the dimension all draw this one point - is on "
+                             "the line (%1 mm off)").arg(haveHeld ? collinearity(held) : -1.0));
+
+        // Shift wins the direction; Snap to Grid then rounds the distance
+        // ALONG it. Both constraints cannot be exact at once and the one the
+        // user is holding a key down for is the direction.
+        if (haveHeld) {
+            const std::vector<gp_Pnt>& pts = window.sketch().points();
+            const double along = pts.back().Distance(held);
+            check(view->snapEnabled() &&
+                      std::fabs(along - std::round(along / view->snapStep()) *
+                                            view->snapStep()) < 1.0e-6,
+                  QStringLiteral("and the distance along that line is a whole grid step, "
+                                 "so Shift composes with Snap to Grid rather than "
+                                 "replacing it (%1 mm)").arg(along));
+        }
+
+        clickAt(view, offLine, Qt::ShiftModifier);
+        check(window.sketch().pointCount() == 3, "a Shift-click places a point like any other");
+        if (window.sketch().pointCount() == 3) {
+            const std::vector<gp_Pnt>& pts = window.sketch().points();
+            const gp_Vec run(pts[0], pts[1]);
+            const gp_Vec seg(pts[1], pts[2]);
+            const double off = run.Crossed(seg).Magnitude() / std::max(1.0e-9, run.Magnitude());
+            check(off < 1.0e-6,
+                  QStringLiteral("and the point it places continues the previous segment "
+                                 "dead straight (%1 mm off)").arg(off));
+            check(haveHeld && pts.back().Distance(held) < 1.0e-6,
+                  "which is the very point the cursor was already promising");
+        }
+
+        // --- mid-sketch Undo (Ctrl+Z) ---------------------------------------
+        //
+        // One implementation, two triggers: Backspace and the Undo action both
+        // remove the last placed point while a sketch is open. The document
+        // must not move an inch while that happens.
+        {
+            QAction* undo = action(window, QStringLiteral("Undo"));
+            QAction* redo = action(window, QStringLiteral("Redo"));
+            const int bodies = window.document().count();
+            check(undo != nullptr && undo->text().remove(QLatin1Char('&')) ==
+                                         QStringLiteral("Undo"),
+                  "the menu entry is still called Undo mid-sketch, not renamed per mode");
+            check(undo != nullptr && undo->isEnabled(),
+                  "Undo is available mid-sketch, with points placed");
+            check(redo != nullptr && !redo->isEnabled(),
+                  "Redo is not - a removed point is gone, not parked on a stack");
+
+            const int markersBefore = view->sketchPointMarkerCount();
+            trigger(window, QStringLiteral("Undo"));
+            check(window.sketch().pointCount() == 2,
+                  "Undo mid-sketch removes the last placed point");
+            check(view->sketchPointMarkerCount() == markersBefore - 1,
+                  "and its marker goes with it");
+            check(window.document().count() == bodies,
+                  "while the document does not move - Undo did not reach past the sketch");
+            check(window.isSketching(), "and the sketch is still open");
+
+            trigger(window, QStringLiteral("Undo"));
+            trigger(window, QStringLiteral("Undo"));
+            check(window.sketch().pointCount() == 0, "it walks the points back to none");
+            check(undo != nullptr && !undo->isEnabled(),
+                  "and then disables itself - there is no point left to take back");
+            check(window.document().count() == bodies,
+                  "still without touching the document");
+
+            trigger(window, QStringLiteral("Cancel Sketch"));
+            settle(150);
+            check(undo != nullptr && undo->isEnabled() && window.document().canUndo(),
+                  "out of the sketch, Undo goes back to meaning the document");
+        }
+
+        // Everything after this block inherits the camera, so put it back
+        // where these probes found it rather than leaving the suite in a top
+        // view that only this section wanted.
+        view->animateTo(savedCamera);
+        settle(250);
+    }
 
     // --- outcomes are reported without stopping the user ----------------------
     {

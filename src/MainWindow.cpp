@@ -733,6 +733,14 @@ void MainWindow::buildOverlay()
     // pushes that same enabled state onto the toast (see setUndoEnabled), so
     // the pill is dimmed and out of hit-testing rather than merely inert.
     connect(myToasts, &ToastHost::undoRequested, this, [this] {
+        // Two guards saying two different things. The first is scope: a toast
+        // names a change to the DOCUMENT, and since Ctrl+Z gained its
+        // mid-sketch meaning the action would otherwise take back a point
+        // under a message about a body. The second is availability, which
+        // updateActions() owns. The pill is already dimmed and out of
+        // hit-testing in both cases; this is the backstop for an event
+        // delivered straight at it.
+        if (mySketching) return;
         if (myUndoAction->isEnabled()) myUndoAction->trigger();
     });
     // A toast that offers to undo one operation must not survive that
@@ -857,11 +865,32 @@ void MainWindow::updateActions()
 
     myExportStepAction->setEnabled(myDocument.count() > 0);
     myDeleteAction->setEnabled(!mySketching && selectedCount > 0);
-    myUndoAction->setEnabled(!mySketching && myDocument.canUndo());
-    // The toast's Undo pill is the same route as the action, so it obeys the
-    // same enabled state - decided here, in the one place that decides what
-    // is available, and pushed out rather than re-derived at the toast.
-    if (myToasts) myToasts->setUndoEnabled(myUndoAction->isEnabled());
+    // Mid-sketch, Undo removes the last placed point (onUndo() reroutes to
+    // onUndoSketchPoint); outside a sketch it undoes a document change. The
+    // menu text stays "Undo" either way - the user's word for "take that
+    // back" does not change with the mode, and a menu entry whose label moved
+    // under them would be worse than one whose scope did.
+    //
+    // Redo has no mid-sketch counterpart - a removed point is gone, not
+    // parked on a stack - so it stays disabled while sketching. That
+    // asymmetry is deliberate: it is better than a Redo that silently means
+    // "redo a document change" while the user is looking at an outline.
+    myUndoAction->setEnabled(mySketching ? mySketch.pointCount() > 0
+                                         : myDocument.canUndo());
+    myUndoAction->setToolTip(mySketching
+                                 ? tr("Take back the last point you placed (Ctrl+Z)")
+                                 : tr("Undo the last change to your bodies (Ctrl+Z)"));
+    // The toast's Undo pill still triggers the action, but its availability
+    // is the DOCUMENT half of that predicate, not the action's whole enabled
+    // state. Until the reroute above the two were the same expression and
+    // this line could just read the action; they are not any more, and the
+    // pill has to keep the narrower one. A pill under "Deleted Body 02" that
+    // quietly took back a sketch point instead would be the label describing
+    // one change while the control performed another - the exact defect the
+    // revision guard in ToastHost was added to end. Still decided here, in
+    // the one place that decides what is available, and still pushed out
+    // rather than re-derived at the toast.
+    if (myToasts) myToasts->setUndoEnabled(!mySketching && myDocument.canUndo());
     myRedoAction->setEnabled(!mySketching && myDocument.canRedo());
 
     // Not a slot on appStateChanged - part of updateActions() itself, same
@@ -1164,6 +1193,21 @@ void MainWindow::onDeleteSelected()
 
 void MainWindow::onUndo()
 {
+    // Mid-sketch, Undo means the last POINT. One implementation with two
+    // triggers, not a second remove-last-point path: Backspace and Ctrl+Z
+    // both land in onUndoSketchPoint(), so the two can never drift.
+    //
+    // Rerouting rather than adding a branch to updateActions() alone: the
+    // enabled state (mySketching ? points > 0 : canUndo()) and the behaviour
+    // have to agree, and updateActions() stays the single place that decides
+    // availability. Everything that goes through myUndoAction follows for
+    // free - the menu entry, the rail chip, Ctrl+Z, and the toast's Undo
+    // pill, which triggers the action rather than calling this.
+    if (mySketching) {
+        onUndoSketchPoint();
+        return;
+    }
+
     if (!myDocument.undo()) return;
     recordProgress("undo.used");
 
@@ -1274,6 +1318,7 @@ void MainWindow::onSketchPointPicked(const gp_Pnt& point)
     mySketch.addPoint(point);
     myView->setPreview(mySketch.previewShape());
     myView->setSketchPointMarkers(mySketch.points());
+    syncSketchStraightAnchor();
     updateActions();
     statusBar()->showMessage(
         mySketch.pointCount() == 1
@@ -1286,7 +1331,17 @@ void MainWindow::onUndoSketchPoint()
     mySketch.removeLastPoint();
     myView->setPreview(mySketch.previewShape());
     myView->setSketchPointMarkers(mySketch.points());
+    syncSketchStraightAnchor();
     updateActions();
+}
+
+void MainWindow::syncSketchStraightAnchor()
+{
+    gp_Dir dir;
+    if (mySketching && mySketch.lastSegmentDirection(dir))
+        myView->setSketchStraightAnchor(mySketch.points().back(), dir);
+    else
+        myView->clearSketchStraightAnchor();
 }
 
 void MainWindow::onCancelSketch()

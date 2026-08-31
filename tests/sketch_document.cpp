@@ -121,6 +121,62 @@ int main()
         checkPoint(snapped, 10.0, 30.0, 50.0, "snapped point stays on its own plane");
     }
 
+    // --- straight continuation (Shift) ---------------------------------------
+    {
+        const gp_Pnt prev(50.0, 0.0, 0.0);
+        const gp_Dir alongX(1.0, 0.0, 0.0);
+
+        // A candidate already on the line is its own projection.
+        checkPoint(SketchController::snapToDirection(prev, alongX, gp_Pnt(120.0, 0.0, 0.0)),
+                   120.0, 0.0, 0.0, "a point already on the line is unchanged");
+
+        // An off-line candidate lands on the line, at the foot of the
+        // perpendicular - not at the nearest placed point.
+        const gp_Pnt off =
+            SketchController::snapToDirection(prev, alongX, gp_Pnt(120.0, 37.0, 0.0));
+        checkPoint(off, 120.0, 0.0, 0.0, "an off-line point projects onto the line");
+        check(gp_Vec(prev, off).Crossed(gp_Vec(alongX)).Magnitude() < 1.0e-9,
+              "and is collinear with the direction it was snapped to (cross product ~ 0)");
+
+        // The line extends BOTH ways: a cursor dragged back past `prev` still
+        // continues the same straight run.
+        checkPoint(SketchController::snapToDirection(prev, alongX, gp_Pnt(-30.0, 12.0, 0.0)),
+                   -30.0, 0.0, 0.0, "the constraint is a line, not a ray - it extends backwards");
+
+        // A direction that is not a world axis, on a plane that is not the
+        // ground: the snapped point must stay ON the sketch plane.
+        const gp_Pln vertical(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 1.0, 0.0));
+        const gp_Pnt vPrev(10.0, 0.0, 10.0);
+        const gp_Dir diagonal(1.0, 0.0, 1.0);
+        const gp_Pnt vSnapped =
+            SketchController::snapToDirection(vPrev, diagonal, gp_Pnt(60.0, 0.0, 20.0));
+        check(vertical.Distance(vSnapped) < 1.0e-9,
+              "a snapped point on a locked vertical plane stays on that plane");
+        check(gp_Vec(vPrev, vSnapped).Crossed(gp_Vec(diagonal)).Magnitude() < 1.0e-9,
+              "and lies on the diagonal it was snapped to");
+        checkPoint(vSnapped, 40.0, 0.0, 40.0,
+                   "at the foot of the perpendicular from the candidate");
+
+        // The direction itself: fewer than two points means Shift has nothing
+        // to continue, and two coincident points are the one way a
+        // zero-length direction could reach gp_Dir's raising constructor.
+        SketchController sketch;
+        gp_Dir dir;
+        check(!sketch.lastSegmentDirection(dir), "an empty sketch has no segment to continue");
+        sketch.addPoint(gp_Pnt(0.0, 0.0, 0.0));
+        check(!sketch.lastSegmentDirection(dir), "nor does a sketch with one point");
+        sketch.addPoint(gp_Pnt(0.0, 0.0, 0.0));
+        check(!sketch.lastSegmentDirection(dir),
+              "two coincident points give no direction rather than a raised construction");
+        sketch.addPoint(gp_Pnt(0.0, 80.0, 0.0));
+        check(sketch.lastSegmentDirection(dir) && dir.IsEqual(gp_Dir(0.0, 1.0, 0.0), 1.0e-9),
+              "two distinct points give the direction of the segment between them");
+        // It follows the LAST segment, not the first.
+        sketch.addPoint(gp_Pnt(60.0, 80.0, 0.0));
+        check(sketch.lastSegmentDirection(dir) && dir.IsEqual(gp_Dir(1.0, 0.0, 0.0), 1.0e-9),
+              "and it follows the most recent segment, not the first one drawn");
+    }
+
     // --- closing the sketch by clicking the first point ----------------------
     {
         SketchController sketch;

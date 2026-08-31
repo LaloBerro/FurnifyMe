@@ -6,6 +6,7 @@
 #include <AIS_Manipulator.hxx>
 #include <AIS_ManipulatorMode.hxx>
 #include <AIS_Shape.hxx>
+#include <Graphic3d_ZLayerSettings.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
@@ -208,6 +209,45 @@ public:
     // the user starts drawing on it.
     void setWorkPlane(const gp_Pln& plane);
     const gp_Pln& workPlane() const { return mySketchPlane; }
+
+    // The straight-continuation anchor: the last placed point and the
+    // direction of the segment that led into it. While Shift is held, a
+    // reported sketch point - the hover that drives the cursor marker, the
+    // status readout and the live dimension, and the click that places the
+    // next point - is projected onto that line, so all four agree by
+    // construction rather than by four call sites each remembering to snap.
+    //
+    // MainWindow owns the point list and so owns this: it sets the anchor from
+    // SketchController::lastSegmentDirection() whenever the list changes, and
+    // clears it when there is nothing to continue. Fewer than two points, or
+    // two coincident ones, means no anchor and Shift does nothing at all.
+    void setSketchStraightAnchor(const gp_Pnt& prev, const gp_Dir& dir);
+    void clearSketchStraightAnchor();
+    bool hasSketchStraightAnchor() const { return myHasStraightAnchor; }
+
+    // The Z-layer every piece of sketch work is displayed in - the in-progress
+    // outline and the pending face (setPreview), the direct-modeling preview,
+    // the point markers, the cursor marker and the dimension annotation.
+    //
+    // It is inserted immediately after GridRenderer::zLayer(), which is itself
+    // immediately after Graphic3d_ZLayerId_Default, giving the render order
+    // bodies -> grid -> sketch work. Depth testing stays ON and depth is NOT
+    // cleared, so a body in front of a sketch line still occludes it; the only
+    // thing the layer buys is that the grid, which writes no depth, can never
+    // reject a sketch pixel. See GridRenderer::zLayer() for the whole argument
+    // and for why Graphic3d_ZLayerId_Topmost is the wrong tool here.
+    Graphic3d_ZLayerId sketchZLayer() const { return mySketchLayer; }
+    // The grid's layer, forwarded so a test can assert the order of the three
+    // without reaching through to the renderer.
+    Graphic3d_ZLayerId gridZLayer() const { return myGridRenderer.zLayer(); }
+    // The viewer's layers in RENDER ORDER, lowest first. Exposed because two
+    // ids being different says nothing about which is drawn first, and draw
+    // order is the entire contract here. Empty before the viewer exists.
+    std::vector<Graphic3d_ZLayerId> zLayerOrder() const;
+    // What a layer actually promises - the grid's depth write off, the sketch
+    // layer's depth NOT cleared. Asserting the settings rather than the ids
+    // is what makes the Topmost refusal a check instead of a comment.
+    Graphic3d_ZLayerSettings zLayerSettings(Graphic3d_ZLayerId layer) const;
 
     // The single selected face, or a null face when the selection is not
     // exactly one face. Deliberately not "the first selected face": Lock to
@@ -466,8 +506,19 @@ private:
     // Both the sketch unprojection and the pull-drag mapping start here, so
     // "where is the cursor pointing" cannot be answered two different ways.
     bool rayThroughPixel(int px, int py, gp_Lin& out) const;
-    bool pointOnSketchPlane(int px, int py, gp_Pnt& out) const;
+    // `straight` is Shift's straight-continuation request - see
+    // setSketchStraightAnchor(). It is a parameter rather than a member read
+    // because the modifier belongs to the event that asked, and the two
+    // callers (the sketch click, the sketch hover) each have one in hand;
+    // reading QGuiApplication::keyboardModifiers() instead would answer from
+    // the real keyboard, which no synthetic-event suite can drive.
+    bool pointOnSketchPlane(int px, int py, gp_Pnt& out, bool straight = false) const;
     bool pickWorldPoint(int px, int py, gp_Pnt& out) const;
+    // Puts `object` in mySketchLayer, if there is one. Called BEFORE Display,
+    // never after: SetZLayer stores the id on the object's drawer and Display
+    // reads it, so setting it first means the presentation is never computed
+    // into the default layer and moved a frame later.
+    void markInSketchLayer(const Handle(AIS_InteractiveObject)& object) const;
     // Whether `point` lands on `arrow`, tested in SCREEN space against the
     // arrow's own projected endpoints rather than through AIS - see the
     // comment on PullArrowLines in PullArrow.cpp for why these arrows must not
@@ -513,6 +564,10 @@ private:
     Handle(V3d_Viewer) myViewer;
     Handle(V3d_View) myView;
     Handle(AIS_InteractiveContext) myContext;
+    // See sketchZLayer(). Graphic3d_ZLayerId_UNKNOWN until the viewer exists,
+    // and if the viewer ever refuses the layer everything below simply
+    // displays into the default layer as it did before.
+    Graphic3d_ZLayerId mySketchLayer = Graphic3d_ZLayerId_UNKNOWN;
     Handle(AIS_Shape) myPreview;
     // The direct-modeling channel, kept strictly apart from myPreview above.
     Handle(AIS_Shape) myModelingPreview;
@@ -547,6 +602,11 @@ private:
     gp_Pln mySketchPlane;
     bool mySnapEnabled = true;
     double mySnapStep = 10.0;      // matches the drawn grid
+
+    // The straight-continuation anchor - see setSketchStraightAnchor().
+    bool myHasStraightAnchor = false;
+    gp_Pnt myStraightPrev{0.0, 0.0, 0.0};
+    gp_Dir myStraightDir{1.0, 0.0, 0.0};
 
     gp_Pnt myLastHoverPoint{0.0, 0.0, 0.0};
     bool myHasLastHoverPoint = false;

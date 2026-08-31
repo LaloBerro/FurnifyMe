@@ -283,6 +283,15 @@ private:
     void goAxonometric();
     void buildOverlay();
     void updateActions();
+
+    // Pushes the straight-continuation anchor onto the viewport from the
+    // sketch's own points - the last placed point and the direction of the
+    // segment that led into it, or nothing at all when there are fewer than
+    // two points. Called from every route that changes the point list, for
+    // the same reason updateEdgeDimension() is: an anchor only some of them
+    // refresh is an anchor that is sometimes a lie about which line Shift
+    // will hold the next point on.
+    void syncSketchStraightAnchor();
     // Persistent right-hand readout: what mode we are in and what is possible.
     void updateStateLabel();
     // The grid-step length, through Measure, so the snap tooltip never goes
