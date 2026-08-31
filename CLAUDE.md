@@ -223,12 +223,23 @@ tooltip contains a banned word, so this table is executable, not aspirational.
 | Combining two bodies | Union | fuse, merge, join, add |
 | Removing one body from another | Subtract | cut, difference, boolean cut |
 | Keeping the shared volume | Intersect | common, overlap, boolean common |
-| Turning a face into a body | Extrude | pull, push, prism |
+| Turning a closed outline into a body | Extrude | prism, raise-up |
+| Moving a face of an existing body | Pull, `Pull distance` | push/pull, offset, drag-face, extrude |
 | The 3D area | viewport | scene, canvas, view |
-| Rounding an edge | Fillet, `R 20 mm` | bevel, round-over |
-| Flattening an edge | Chamfer, `C 20 mm` | bevel, break |
+| Rounding an edge | Fillet, `R 20 mm` | bevel, round-over, round |
+| Flattening an edge | Chamfer, `C 20 mm` | bevel, break, flatten |
 | Repositioning a body | Move / Rotate / Scale | transform, translate |
 | The colours-and-fonts panel | Appearance | theme, settings, preferences |
+
+Extrude and Pull are two rows, not one, and the Extrude row no longer bans "pull":
+Milestone 2 made face pull an operation in its own right, so "pull" became a word
+this app owns rather than one it avoids. The two must not borrow each other's verb
+— Extrude raises a **closed outline** that is not yet a body, Pull moves a **face of
+a body that already exists** — which is why `Extrude`'s tooltip says "Raise the face
+into a body" and only the pull arrow and its refusals say Pull. Fillet and Chamfer
+own "round" and "flatten" the same way: the two operations may be *described* as
+rounding and flattening in prose, but no painted string names them that way, because
+a user who reads "Body 03 rounded" has no word to look for in the interface.
 
 `ModelingOps::BooleanKind::Fuse` and `::Cut` keep their kernel-facing names — the
 user never sees them, and renaming them would churn the geometry library and its

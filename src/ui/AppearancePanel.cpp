@@ -138,7 +138,10 @@ QString AppearancePanel::nameForToken(const QString& id)
         {QStringLiteral("textMuted"), QObject::tr("Quieter text")},
         {QStringLiteral("textDisabled"), QObject::tr("Unavailable text")},
         {QStringLiteral("accent"), QObject::tr("Accent")},
-        {QStringLiteral("danger"), QObject::tr("Warnings")},
+        // Failures, not warnings: this token marks a refusal that already
+        // happened - a Failure toast's stripe and an unparseable field's
+        // outline - and the app has nothing it would call a warning.
+        {QStringLiteral("danger"), QObject::tr("Failures")},
         {QStringLiteral("focusRing"), QObject::tr("Keyboard focus ring")},
         {QStringLiteral("focusRingMuted"), QObject::tr("Focus ring — window inactive")},
     };

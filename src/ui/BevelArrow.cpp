@@ -391,7 +391,12 @@ QString BevelArrow::hintText(int line) const
     // has no buttons either, so both the gesture and both keys are on it in
     // words - and the gesture needs saying most of all, because one drag axis
     // doing two different things is not something an arrow can show.
-    return line == 0 ? tr("Drag in to round, out to flatten")
+    // Named with the vocabulary table's own words rather than with what the
+    // two operations do to the edge. "round"/"flatten" describe the result
+    // correctly and are still the wrong copy: the chip's own title row, the
+    // field's tooltip and every refusal say Fillet and Chamfer, so a hint that
+    // says something else is a second name for the same thing.
+    return line == 0 ? tr("Drag in to Fillet, out to Chamfer")
                      : tr("Enter applies, Esc cancels");
 }
 

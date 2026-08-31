@@ -229,6 +229,7 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     myStateLabel = new QLabel(this);
     statusBar()->addPermanentWidget(myStateLabel);
     updateStateLabel();
+    syncChromeHeights();
 
     setWindowTitle(tr("FurnifyMe"));
     resize(1280, 800);
@@ -357,7 +358,11 @@ void MainWindow::buildActions()
                                        "Click to place points; close it to make a face."));
     myFinishSketchAction->setToolTip(tr("Close the outline into a face (Enter)\n"
                                         "Needs at least three points."));
-    myExtrudeAction->setToolTip(tr("Pull the face up into a body (E)\n"
+    // NOT "pull the face up": Pull is the face-dragging operation's own name
+    // now (see CLAUDE.md's vocabulary table), and one word for two operations
+    // is the thing that table exists to stop. Extrude raises a closed outline;
+    // Pull moves a face of a body that already exists.
+    myExtrudeAction->setToolTip(tr("Raise the face into a body (E)\n"
                                    "The outline's shape becomes the body's footprint."));
     myUnionAction->setToolTip(tr("Combine two bodies into one\n"
                                  "Overlapping material is kept once, not twice."));
@@ -843,6 +848,10 @@ void MainWindow::onThemeChanged()
     // this covers a plain QStatusBar with no matching rule. An explicitly set
     // font does not follow QApplication::setFont, so it has to be put back.
     statusBar()->setFont(Theme::labelFont());
+    // The font just changed, so both chrome strips just changed height - and
+    // that is exactly what moves the viewport's edges onto a fractional device
+    // row. See syncChromeHeights().
+    syncChromeHeights();
 
     // The OCCT side of the bridge: a clear colour, two highlight drawers and
     // a grid whose colours are baked into its vertices. None of it is painted
@@ -880,15 +889,59 @@ void MainWindow::persistAppearance()
         myAppearanceWrite = new QTimer(this);
         myAppearanceWrite->setSingleShot(true);
         myAppearanceWrite->setInterval(kAppearanceWriteMs);
-        connect(myAppearanceWrite, &QTimer::timeout, this, [this] {
-            QSettings settings;
-            settings.setValue(QStringLiteral("appearance"), Theme::serializeSpec());
-        });
+        connect(myAppearanceWrite, &QTimer::timeout, this,
+                &MainWindow::writeAppearanceNow);
     }
     // start() on a running single-shot timer RESTARTS it, which is the whole
     // debounce: a drag through the colour wheel keeps pushing the deadline
     // out and lands exactly one write once the user stops.
     myAppearanceWrite->start();
+}
+
+void MainWindow::syncChromeHeights()
+{
+    // The viewport's top and bottom edges ARE the app bar's bottom edge and
+    // the status bar's top edge, and both have to land on a whole device row.
+    //
+    // Widget geometry is logical; the surface OCCT paints into is sized in
+    // device pixels. A chrome strip whose logical height does not multiply up
+    // to a whole number of device rows leaves the seam between it and the
+    // viewport on a fraction - Qt flushes the row, neither side's painter
+    // reaches it, and over the GL surface an unpainted row is not transparent
+    // but whatever the driver left, which measures as an exact 0,0,0 line.
+    // Measured at 175% with an edited type scale: a 2068-device-pixel black
+    // line the full width of the window, exactly where the status bar meets
+    // the viewport. It is the floating-card rule (Theme::wholeDevicePixels,
+    // see Theme.h) applied to the two cards that span the window, and neither
+    // paintSurface() nor anything else either widget paints can reach a row
+    // that is inside NEITHER widget's logical rect.
+    //
+    // It only appeared once the Appearance panel shipped because the default
+    // type scale happens to give both strips a whole height. The base size is
+    // a number the user edits now, so "happens to" stopped being a rule.
+    //
+    // The constraints are lifted before the hint is read, so this is
+    // idempotent whatever a strip's sizeHint() does with its own fixed size:
+    // re-running it can never ratchet a strip taller.
+    auto whole = [](QWidget* strip) {
+        if (!strip) return;
+        strip->setMinimumHeight(0);
+        strip->setMaximumHeight(QWIDGETSIZE_MAX);
+        strip->setFixedHeight(Theme::wholeDevicePixels(strip->sizeHint().height()));
+    };
+    whole(menuWidget());
+    whole(statusBar());
+}
+
+void MainWindow::writeAppearanceNow()
+{
+    // The ONE place the spec reaches QSettings. Two routes want it - the
+    // debounce timer's timeout and the flush in closeEvent() - and they used
+    // to carry a copy of the write each, which is two places to keep in step
+    // with the key name and with whatever else a stored appearance ever needs
+    // to include.
+    QSettings settings;
+    settings.setValue(QStringLiteral("appearance"), Theme::serializeSpec());
 }
 
 void MainWindow::closeEvent(QCloseEvent* event)
@@ -898,8 +951,7 @@ void MainWindow::closeEvent(QCloseEvent* event)
     // to be destroyed with this window.
     if (myAppearanceWrite && myAppearanceWrite->isActive()) {
         myAppearanceWrite->stop();
-        QSettings settings;
-        settings.setValue(QStringLiteral("appearance"), Theme::serializeSpec());
+        writeAppearanceNow();
     }
     QMainWindow::closeEvent(event);
 }
@@ -962,7 +1014,11 @@ void MainWindow::updateStateLabel()
         // Same rule as the line above: the gizmo is on screen, one axis does
         // two different things, and an arrow cannot say that by itself. Reads
         // the same predicate the arrow does.
-        state = tr("Edge selected — drag to round or flatten it, or type a size");
+        // The table's words, the same two the chip, the tooltips and the
+        // refusals use. Saying "round or flatten" here and "Fillet"/"Chamfer"
+        // everywhere else is two vocabularies for one pair of operations.
+        state = tr("Edge selected — drag in for a Fillet, out for a Chamfer, "
+                   "or type a size");
     } else {
         const std::size_t selected = myView->selectedSolidIds().size();
         const std::size_t bodies = myDocument.count();
@@ -1361,6 +1417,55 @@ bool MainWindow::canBevelSelectedEdge() const
     return bevelTarget(edge, bodyId, centre, outward);
 }
 
+QString MainWindow::bevelRefusalText(bool fillet)
+{
+    // No trailing period: the app's failure sentences end without one (see the
+    // pull's and the transform's), and this pair was the exception.
+    return fillet ? tr("This edge can't take a fillet that big — the curve "
+                       "would eat a neighbouring face. Try a smaller size")
+                  : tr("This edge can't take a chamfer that big — the flat "
+                       "would eat a neighbouring face. Try a smaller size");
+}
+
+QString MainWindow::transformOperationName(const gp_Trsf& delta)
+{
+    return transformIsScale(delta)      ? tr("Scale")
+           : transformIsRotation(delta) ? tr("Rotate")
+                                        : tr("Move");
+}
+
+QString MainWindow::transformPastVerb(const gp_Trsf& delta)
+{
+    return transformIsScale(delta)      ? tr("scaled")
+           : transformIsRotation(delta) ? tr("rotated")
+                                        : tr("moved");
+}
+
+QString MainWindow::transformRefusalText(const gp_Trsf& delta)
+{
+    // "refused" would carry `fuse` as a substring, and the banned-word sweep
+    // matches bare substrings case-insensitively (CLAUDE.md says so). The
+    // sentence this replaced said "the geometry engine refused the change" and
+    // sailed through every run only because nothing ever triggered it - which
+    // is exactly why the suite now shows this copy through a probe.
+    return tr("This body couldn't be %1 — the geometry engine turned that "
+              "change down. Try a smaller drag, or a different handle")
+        .arg(transformPastVerb(delta));
+}
+
+bool MainWindow::transformIsScale(const gp_Trsf& delta)
+{
+    return std::fabs(delta.ScaleFactor() - 1.0) > 1.0e-9;
+}
+
+bool MainWindow::transformIsRotation(const gp_Trsf& delta)
+{
+    gp_Vec axis;
+    Standard_Real angle = 0.0;
+    delta.GetRotation().GetVectorAndAngle(axis, angle);
+    return std::fabs(angle) > 1.0e-9;
+}
+
 bool MainWindow::bevelEdgeBy(const TopoDS_Edge& edge, double size, bool fillet)
 {
     if (edge.IsNull() || size <= 0.0) return false;
@@ -1379,11 +1484,7 @@ bool MainWindow::bevelEdgeBy(const TopoDS_Edge& edge, double size, bool fillet)
         // ModelingOps::filletEdge - so the sentence names the cause and the fix
         // rather than apologising.
         qWarning("Bevel failed: %s", result.error.c_str());
-        myToasts->show(fillet ? tr("This edge can't take a fillet that big — the curve "
-                                   "would eat a neighbouring face. Try a smaller size.")
-                              : tr("This edge can't take a chamfer that big — the flat "
-                                   "would eat a neighbouring face. Try a smaller size."),
-                       Toast::Kind::Failure, false);
+        myToasts->show(bevelRefusalText(fillet), Toast::Kind::Failure, false);
         statusBar()->showMessage(fillet ? tr("Fillet refused — nothing was changed")
                                         : tr("Chamfer refused — nothing was changed"));
         return false;
@@ -1403,8 +1504,11 @@ bool MainWindow::bevelEdgeBy(const TopoDS_Edge& edge, double size, bool fillet)
 
     updateActions();
     emit documentChanged();
+    // Led by the operation's own name. "Body 03 rounded" describes the result
+    // in a word that appears nowhere else in the app - the chip, the tooltips,
+    // the state label and the refusal all say Fillet or Chamfer.
     const QString message =
-        (fillet ? tr("%1 rounded — %2") : tr("%1 flattened — %2"))
+        (fillet ? tr("Fillet added to %1 — %2") : tr("Chamfer added to %1 — %2"))
             .arg(QString::fromStdString(myDocument.nameOf(id)),
                  QString::fromStdString(Measure::formatDimensions(result.shape)));
     statusBar()->showMessage(message);
@@ -1470,13 +1574,22 @@ bool MainWindow::transformBody(int id, const gp_Trsf& delta)
     // SAME gesture commit or be refused depending on a toggle that is supposed
     // to change where a drag lands, not whether it is allowed at all.
     const double scale = delta.ScaleFactor();
+
+    // Which of the three this gesture is, read off the transform itself and
+    // derived ONCE, ABOVE the two refusal branches. It used to be derived only
+    // on the success path, so a rotate or a scale the kernel turned down was
+    // announced as a failed Move - a refusal that names the wrong operation is
+    // worse than one that names none, because the user goes looking for a move
+    // they never made.
+    const QString operation = transformOperationName(delta);
+
     if (scale <= kMinScale || scale >= kMaxScale) {
         myToasts->show(tr("That's too big a change of size to make at once — anything "
                           "under a twentieth or over twenty times leaves a body you "
                           "can't see or can't fit on screen. Drag the handle back "
                           "toward the body and scale it in smaller steps"),
                       Toast::Kind::Failure, false);
-        statusBar()->showMessage(tr("Scale refused — nothing was changed"));
+        statusBar()->showMessage(tr("%1 refused — nothing was changed").arg(operation));
         return false;
     }
 
@@ -1485,11 +1598,8 @@ bool MainWindow::transformBody(int id, const gp_Trsf& delta)
         // Never present a failed kernel operation as a success, and never show
         // its error text - it is written for this file, not for the user.
         qWarning("Transform failed: %s", result.error.c_str());
-        myToasts->show(tr("This body couldn't be moved there — the geometry engine "
-                          "refused the change. Try a smaller move, or a different "
-                          "handle"),
-                      Toast::Kind::Failure, false);
-        statusBar()->showMessage(tr("Move refused — nothing was changed"));
+        myToasts->show(transformRefusalText(delta), Toast::Kind::Failure, false);
+        statusBar()->showMessage(tr("%1 refused — nothing was changed").arg(operation));
         return false;
     }
 
@@ -1507,18 +1617,12 @@ bool MainWindow::transformBody(int id, const gp_Trsf& delta)
     updateActions();
     emit documentChanged();
 
-    // Which of the three it was, read off the transform itself rather than
-    // remembered from the handle that was grabbed - one source, and it stays
-    // right if a gesture ever combines two of them.
-    gp_Vec axis;
-    Standard_Real angle = 0.0;
-    delta.GetRotation().GetVectorAndAngle(axis, angle);
-    const QString verb = std::fabs(scale - 1.0) > 1.0e-9 ? tr("scaled")
-                         : std::fabs(angle) > 1.0e-9     ? tr("rotated")
-                                                         : tr("moved");
+    // The same derivation the refusals above use - one source for all three
+    // outcomes, and it stays right if a gesture ever combines two of them.
     const QString message =
         tr("%1 %2 — %3")
-            .arg(QString::fromStdString(myDocument.nameOf(id)), verb,
+            .arg(QString::fromStdString(myDocument.nameOf(id)),
+                 transformPastVerb(delta),
                  QString::fromStdString(Measure::formatDimensions(result.shape)));
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());

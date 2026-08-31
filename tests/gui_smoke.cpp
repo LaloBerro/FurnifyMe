@@ -124,8 +124,36 @@ namespace {
 
 int g_failures = 0;
 
+// Every check() EXECUTION this run, printed on the PASS line and asserted
+// against kCheckFloor at the end.
+//
+// A suite that counts only its failures cannot tell a green run from a run
+// that quietly stopped asking. Every `if (something) { check(...); }` in this
+// file - and there are dozens, each of them deliberate, because a probe whose
+// setup failed must not go on to dereference a null - is a place where a
+// changed behaviour silently takes its checks with it. That has happened here
+// before: five shadow checks went silent instead of red when the behaviour
+// under them changed. The individual fix is to pin each guard with a check of
+// its own; the systemic one is this counter, which notices a drop wherever it
+// happens and whether or not anybody remembered to pin it.
+int g_checks = 0;
+
+// The floor a full run must reach.
+//
+// HOW TO UPDATE IT: add your checks, run the suite at native scale, read the
+// "checks" figure off the PASS line, and put that number here. It is a FLOOR,
+// not an equality, so a probe that legitimately runs a variable number of
+// times (checkNoBlackLine over however many captures a run takes) cannot make
+// it brittle.
+//
+// Never lower it to make a run pass. A count that has gone DOWN means a guard
+// stopped letting its checks run, which is the one thing this constant exists
+// to catch; find the guard, not a smaller number.
+constexpr int kCheckFloor = 965;
+
 void check(bool condition, const QString& what)
 {
+    ++g_checks;
     std::printf("%-6s %s\n", condition ? "[ ok ]" : "[FAIL]", qPrintable(what));
     if (!condition) ++g_failures;
 }
@@ -568,11 +596,19 @@ void checkFamilySurface(QWidget* widget, const QPoint& edgePoint, const QRect& i
                         const QColor& edgeColour, const QString& label)
 {
     const QImage img = renderExact(widget);
-    if (!img.rect().contains(edgePoint)) {
-        check(false, QStringLiteral("%1: the edge probe point falls inside the "
-                                    "rendered image").arg(label));
-        return;
-    }
+    // Asserted unconditionally rather than as an `if (bad) check(false)`
+    // bail-out. In that shape it was the ONE check() in this file that never
+    // executed in a run - measured, by instrumenting check() with __LINE__ and
+    // differencing the executed set against every call site - so a caller
+    // handing it a probe point outside the widget would have reported nothing
+    // at all rather than one loud failure. Its message was inverted too: it
+    // fired when the point fell OUTSIDE and said "inside". As an assertion the
+    // sentence is right and it always runs.
+    const bool probeInside = img.rect().contains(edgePoint);
+    check(probeInside,
+          QStringLiteral("%1: the edge probe point falls inside the rendered image")
+              .arg(label));
+    if (!probeInside) return;
 
     // The card's own content - a title, a message, a list of rows - can sit
     // almost anywhere in its interior, so this searches the whole region for
@@ -3227,6 +3263,14 @@ int main(int argc, char* argv[])
         check(static_cast<int>(window.document().solids().size()) == before,
               "previewing creates no body");
 
+        // Pinned before it is used as a guard. SEVEN checks hang off this
+        // condition - five inside the block and the two after it, which only
+        // mean anything because the Enter at the end of the block was sent -
+        // and a preview that came up without a field would take all seven with
+        // it in silence.
+        check(preview != nullptr && preview->field() != nullptr,
+              "the preview carries its height field, so the seven checks that "
+              "depend on it cannot vanish quietly");
         if (preview && preview->field()) {
             preview->field()->setText(QStringLiteral("25"));
             settle(150);
@@ -5300,6 +5344,114 @@ int main(int argc, char* argv[])
         check(!target.IsNull(),
               "clicking a projected edge midpoint selects a long top edge of the new body");
 
+        // --- dolly until the 20 mm drag spans enough PIXELS to aim with ----
+        //
+        // The transform gizmo's probe already invented this (see the Move
+        // handle's framing loop) and the bevel drags needed it just as badly.
+        // fitAll() frames the whole document, which left about 1.8 mm to the
+        // logical pixel at 100% - so the 20 mm this gesture drags spanned only
+        // eleven pixels, and at 125% it spanned nine. The press point and the
+        // release point are both rounded to whole pixels and the axis is
+        // oblique to the screen, so the error those two roundings put into the
+        // parameter along the arrow is a large fraction of a 10 mm snap step:
+        // measured, the flattening drag at 125% snapped to 30 mm instead of
+        // 20 and the released volume then missed its closed form by more than
+        // 2x. Both were parked as "display-scale sensitivity"; neither was the
+        // product's.
+        //
+        // A pure dolly, exactly as the gizmo probe does it, and for the same
+        // reason: moving the camera TARGET would slide the edge's projection
+        // across the screen and the pick could land on a different edge.
+        //
+        // Each pass is kept only while all three drag points still project
+        // comfortably inside the viewport AND the edge still selects at the
+        // new pixel - a pass that loses either is rolled back and the loop
+        // stops, so this trades precision for correctness rather than zooming
+        // until the probe aims at nothing. bevelCameraBefore is restored at
+        // the end of this block, so nothing after it inherits the framing.
+        // A pass is kept only while all three drag points still project inside
+        // the viewport - a probe that zooms until it is aiming at nothing has
+        // traded correctness for precision, which is the wrong way round.
+        auto projectDrag = [&](QPoint& at, QPoint& inAt, QPoint& outAt) {
+            return view->projectToScreen(edgeCentre, at) &&
+                   view->projectToScreen(edgeCentre.Translated(gp_Vec(edgeOutward) * -kSize),
+                                         inAt) &&
+                   view->projectToScreen(edgeCentre.Translated(gp_Vec(edgeOutward) * kSize),
+                                         outAt) &&
+                   view->rect().adjusted(30, 30, -30, -30).contains(at) &&
+                   view->rect().contains(inAt) && view->rect().contains(outAt);
+        };
+        // Called before EACH of the two drags, not once: the curved-edge probe
+        // between them re-frames the whole document on purpose (its arcs live
+        // at the far ends of a 1,100 mm edge and are off screen at any framing
+        // tight enough to aim a 20 mm drag), so the second drag's three points
+        // would otherwise be stale.
+        //
+        // Returns the pixel span the 20 mm drag ends up with, and how it
+        // stopped, so the check that reads it can say which.
+        auto aimTheDrag = [&](QString& why) {
+            // 20 mm over 32 px is under 0.7 mm to the pixel: the two endpoint
+            // roundings, amplified by however oblique the arrow is to the
+            // screen, then stay well inside half a 10 mm snap step.
+            constexpr double kWantedSpan = 32.0;
+            why = QStringLiteral("already wide enough");
+            for (int pass = 0; pass < 5; ++pass) {
+                QPoint at, inAt, outAt;
+                if (!projectDrag(at, inAt, outAt)) {
+                    why = QStringLiteral("a drag point left the viewport");
+                    break;
+                }
+                const double span = std::hypot(double(outAt.x() - at.x()),
+                                               double(outAt.y() - at.y()));
+                if (span >= kWantedSpan) break;
+                const CameraState beforePass = view->camera().state();
+                CameraState closer = beforePass;
+                // Bounded per pass, the same 0.6 the gizmo probe uses, so the
+                // camera walks in rather than jumping inside the body.
+                closer.distance *= std::max(0.6, span / kWantedSpan);
+                view->animateTo(closer);   // animations are off: immediate
+                settle(180);
+                QPoint a2, i2, o2;
+                if (!projectDrag(a2, i2, o2)) {
+                    view->animateTo(beforePass);
+                    settle(180);
+                    why = QStringLiteral("one pass further pushed a drag point off screen");
+                    break;
+                }
+                why = QStringLiteral("dollied in");
+            }
+            // Re-projected at whatever framing the loop settled on - the three
+            // points found before it are stale the moment the camera moves.
+            projectDrag(edgeAt, inwardAt, outwardAt);
+            return std::hypot(double(outwardAt.x() - edgeAt.x()),
+                              double(outwardAt.y() - edgeAt.y()));
+        };
+
+        if (!target.IsNull()) {
+            QString why;
+            const double dragSpan = aimTheDrag(why);
+            // The selection is re-taken at the new pixel, with the previous one
+            // cleared first: with the arrow up, a press within 14 px of its
+            // shaft begins a DRAG rather than a pick (OcctViewWidget::arrowHit),
+            // and edgeAt is the arrow's own tail - so a click there would
+            // validate nothing at all.
+            view->clearSelection();
+            settle(150);
+            clickAt(view, QPointF(edgeAt));
+            settle(150);
+            check(!view->selectedEdge().IsNull() && view->selectedEdge().IsSame(target),
+                  "the same edge still selects at the framing the drags are aimed from");
+            // The precision the framing was for, asserted rather than assumed -
+            // and the check that would have shown the two 125% failures as an
+            // aiming problem instead of leaving them looking like product bugs.
+            check(dragSpan >= 16.0,
+                  QStringLiteral("and the %1 mm drag spans enough pixels to aim with "
+                                 "(%2 px, %3 mm per pixel, %4)")
+                      .arg(kSize).arg(dragSpan)
+                      .arg(dragSpan > 0.0 ? kSize / dragSpan : 0.0)
+                      .arg(why));
+        }
+
         // The sign convention's GROUND TRUTH, and not optional. Every other
         // check in this block measures the drag against the very axis
         // ModelingOps::bevelAxis hands back, so a bisector built from un-flipped
@@ -5327,8 +5479,12 @@ int main(int argc, char* argv[])
               "one straight edge selected raises it");
         check(view->hasBevelArrow(),
               "and the arrow itself is drawn in the 3D scene, not painted over it");
-        check(stateLabelText(window).contains(QStringLiteral("drag to round or flatten")),
-              QStringLiteral("the state label teaches the gesture (\"%1\")")
+        // The table's words, not "round or flatten": one operation, one name,
+        // across the chip, the tooltips, this label and both refusals.
+        check(stateLabelText(window).contains(
+                  QStringLiteral("drag in for a Fillet, out for a Chamfer")),
+              QStringLiteral("the state label teaches the gesture in the operations' "
+                             "own names (\"%1\")")
                   .arg(stateLabelText(window)));
         check(!view->dimension().isShowing() && view->edgeDimensionSuppressed(),
               "and the edge-length annotation stands down while it is up");
@@ -5422,14 +5578,20 @@ int main(int argc, char* argv[])
             }
             view->saveSnapshot(outDir + QStringLiteral("/bevel-fillet-viewport.png"));
 
+            // The radius the chip is about to commit, read back rather than
+            // assumed from kSize - see the same readback on the flattening
+            // side for why a closed form must be evaluated at the size that
+            // was actually committed.
+            const double committedRadius = bevel->size();
             releaseAt(inwardAt);
             const double removed = startVolume - bodyVolume();
             constexpr double kPi = 3.14159265358979323846;
-            const double expected = (1.0 - kPi / 4.0) * kSize * kSize * edgeLength;
+            const double expected =
+                (1.0 - kPi / 4.0) * committedRadius * committedRadius * edgeLength;
             check(std::fabs(removed - expected) < std::max(1.0, expected * 0.02),
                   QStringLiteral("releasing rounds it by exactly (1 - pi/4) r^2 L "
-                                 "(%1 vs %2 over a %3 mm edge)")
-                      .arg(removed).arg(expected).arg(edgeLength));
+                                 "(%1 vs %2 at r = %3 mm over a %4 mm edge)")
+                      .arg(removed).arg(expected).arg(committedRadius).arg(edgeLength));
             check(faceCount() > startFaces,
                   QStringLiteral("and the result carries the rounded strip as a new face "
                                  "(%1 -> %2)").arg(startFaces).arg(faceCount()));
@@ -5446,6 +5608,15 @@ int main(int argc, char* argv[])
             // outlives its body" rules are checked on the one kind of edge
             // that still has no gizmo - which is also the check that the
             // arrow's straight-only rule is real.
+            //
+            // Re-framed on the whole document first, and deliberately: the
+            // only curved edges a filleted box has are the two end arcs of the
+            // rounded strip, which sit at the far ends of an 1,100 mm edge and
+            // are off screen at any framing tight enough to aim a 20 mm drag
+            // (see aimTheDrag). The drags re-aim themselves, so widening here
+            // costs them nothing.
+            view->fitAll();
+            settle(250);
             TopoDS_Edge arc;
             for (TopExp_Explorer it(bodyShape(), TopAbs_EDGE); it.More() && arc.IsNull();
                  it.Next()) {
@@ -5512,11 +5683,22 @@ int main(int argc, char* argv[])
 
         // --- outward flattens ---------------------------------------------
         if (bevel && !target.IsNull()) {
+            // Re-aimed, because the curved-edge probe above widened the
+            // framing back out to the whole document on purpose. Done with
+            // nothing selected, so the click below is a real pick.
+            view->clearSelection();
+            settle(150);
+            QString whyOut;
+            const double outSpan = aimTheDrag(whyOut);
             clickAt(view, QPointF(edgeAt));
             settle(150);
             check(!view->selectedEdge().IsNull() && view->selectedEdge().IsSame(target) &&
                       view->hasBevelArrow(),
                   "the same edge selects again after the undo, and the arrow comes back");
+            check(outSpan >= 16.0,
+                  QStringLiteral("and the flattening drag is aimed just as widely "
+                                 "(%1 px, %2 mm per pixel, %3)")
+                      .arg(outSpan).arg(outSpan > 0.0 ? kSize / outSpan : 0.0).arg(whyOut));
 
             pressAndDrag(edgeAt, outwardAt);
             check(!bevel->isFillet(),
@@ -5565,13 +5747,22 @@ int main(int argc, char* argv[])
             }
             view->saveSnapshot(outDir + QStringLiteral("/bevel-chamfer-viewport.png"));
 
+            // The size the CHIP is about to commit, read back before the
+            // release, not the constant the drag aimed at. The two agree - the
+            // check above says so - and when they ever stop agreeing this
+            // should report the snap that missed, once, rather than reporting
+            // it a second time as a closed form that does not hold. Computing
+            // `expected` from kSize turned one failure into two, the second of
+            // which reads as "the formula for a chamfer is wrong".
+            const double committedSize = bevel->size();
             releaseAt(outwardAt);
             const double removed = startVolume - bodyVolume();
-            const double expected = 0.5 * kSize * kSize * edgeLength;
+            const double expected = 0.5 * committedSize * committedSize * edgeLength;
             check(std::fabs(removed - expected) < std::max(1.0, expected * 0.02),
                   QStringLiteral("releasing flattens it by exactly d^2 L / 2 - a bigger "
-                                 "bite than the same drag inward took (%1 vs %2)")
-                      .arg(removed).arg(expected));
+                                 "bite than the same drag inward took (%1 vs %2 at "
+                                 "d = %3 mm)")
+                      .arg(removed).arg(expected).arg(committedSize));
             trigger(window, QStringLiteral("Undo"));
             settle(250);
             check(std::fabs(bodyVolume() - startVolume) < 1.0 && faceCount() == startFaces,
@@ -5609,9 +5800,13 @@ int main(int argc, char* argv[])
             // the memorable clause passes just as well over a sentence whose
             // fix half has been dropped, whose em dash has decayed, or which
             // has grown an apology in front of the cause.
+            // No trailing period: the app's failure sentences end without one
+            // (the pull's and the transform's always did) and this pair was
+            // the exception. Pinned character for character here, which is why
+            // dropping it is a test change as well as a copy change.
             const QString expectedFailure = QStringLiteral(
                 "This edge can't take a fillet that big \xE2\x80\x94 the curve would eat "
-                "a neighbouring face. Try a smaller size.");
+                "a neighbouring face. Try a smaller size");
             check(toasts != nullptr && toasts->isShowing() &&
                       toasts->currentText() == expectedFailure,
                   QStringLiteral("and it is reported as a failure in the exact "
@@ -6327,9 +6522,79 @@ int main(int argc, char* argv[])
         // other three widgets it has no fixed set of strings to enumerate, so
         // it records every message it has been given this run and the sweep
         // covers all of them - it used to see only whichever one happened to
-        // be live, which made the sweep a coin toss. HONEST LIMIT, stated on
-        // Toast::paintedTexts() too: a message never actually triggered
-        // during a run is not covered by this.
+        // be live, which made the sweep a coin toss. That limit was HONEST but
+        // it was still a limit: a message never triggered during a run is a
+        // message the sweep never sees, and this branch shipped two of them.
+        //
+        // Both are refusals the kernel has to produce and a probe cannot make
+        // it produce: a chamfer big enough to be refused (only the fillet half
+        // of that pair is reachable - the box's geometry refuses one and
+        // accepts the other at every size the drag can reach) and a transform
+        // the kernel turns down (it accepts every gp_Trsf a gesture can build,
+        // which is why this layer clamps the scale itself).
+        //
+        // So they are shown here, once each, through the SAME accessors
+        // MainWindow's own refusal paths call - not through a second copy of
+        // the sentence that only the sweep would ever see, which would pin
+        // nothing at all. Each shown message lands in paintedTexts() and is
+        // swept below with the rest.
+        ToastHost* copyHost = window.findChild<ToastHost*>();
+        check(copyHost != nullptr, "there is a toast host to show the untriggered copy on");
+        if (copyHost) {
+            gp_Trsf rotated;
+            rotated.SetRotation(gp_Ax1(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0)), 0.4);
+            gp_Trsf scaled;
+            scaled.SetScale(gp_Pnt(0.0, 0.0, 0.0), 1.5);
+
+            // Important 3's fix, asserted on the derivation itself rather than
+            // on a string that happens to contain a word: the verb comes off
+            // the transform, so a refused rotate names Rotate. It used to be
+            // derived only on the SUCCESS path, with "Move" hard-coded above
+            // it, so every refused rotate and every refused scale reported a
+            // move the user never made.
+            check(MainWindow::transformOperationName(rotated) == QStringLiteral("Rotate") &&
+                      MainWindow::transformOperationName(scaled) == QStringLiteral("Scale") &&
+                      MainWindow::transformOperationName(gp_Trsf()) == QStringLiteral("Move"),
+                  QStringLiteral("a refusal names the operation the delta actually is "
+                                 "(%1 / %2 / %3)")
+                      .arg(MainWindow::transformOperationName(rotated),
+                           MainWindow::transformOperationName(scaled),
+                           MainWindow::transformOperationName(gp_Trsf())));
+            check(MainWindow::transformRefusalText(rotated).contains(
+                      QStringLiteral("rotated")) &&
+                      MainWindow::transformRefusalText(scaled).contains(
+                          QStringLiteral("scaled")),
+                  QStringLiteral("and its sentence says so too (\"%1\")")
+                      .arg(MainWindow::transformRefusalText(rotated)));
+
+            // Stamped, so the last of them can be dismissed the way a real
+            // one is - by telling the host the document moved past it - rather
+            // than left sitting over the viewport for its full eight seconds,
+            // where every later capture and layout probe would have to work
+            // around it.
+            constexpr int kCopyStamp = 1000000;
+            copyHost->show(MainWindow::bevelRefusalText(false), Toast::Kind::Failure, false,
+                           kCopyStamp);
+            settle(60);
+            copyHost->show(MainWindow::transformRefusalText(rotated), Toast::Kind::Failure,
+                           false, kCopyStamp);
+            settle(60);
+            copyHost->show(MainWindow::transformRefusalText(scaled), Toast::Kind::Failure,
+                           false, kCopyStamp);
+            settle(60);
+            copyHost->show(MainWindow::transformRefusalText(gp_Trsf()), Toast::Kind::Failure,
+                           false, kCopyStamp);
+            settle(60);
+            check(copyHost->currentText() ==
+                      MainWindow::transformRefusalText(gp_Trsf()),
+                  "the refusal copy really reached the toast, so paintedTexts() "
+                  "has it to sweep");
+            copyHost->documentMovedTo(kCopyStamp + 1);
+            settle(120);
+            check(!copyHost->isShowing(),
+                  "and the probe leaves no toast standing over the viewport");
+        }
+
         Toast* sweptToast = window.findChild<Toast*>();
         check(sweptToast != nullptr && sweptToast->paintedTexts().size() > 2,
               QStringLiteral("the toast sweep covers every message shown this run, "
@@ -6385,6 +6650,14 @@ int main(int argc, char* argv[])
                   .arg(pullArrowOffenders.isEmpty()
                            ? QStringLiteral("none")
                            : pullArrowOffenders.join(QStringLiteral(", "))));
+        // Non-vacuity - the partner the bevel chip's sweep below already has,
+        // and which this one was missing. findChildren() over no arrows at all
+        // reports "none" exactly as loudly as a clean arrow does.
+        PullArrow* sweptPull = window.findChild<PullArrow*>();
+        check(sweptPull != nullptr && sweptPull->paintedTexts().size() == 2,
+              QStringLiteral("and it really swept that arrow's two painted strings (%1)")
+                  .arg(sweptPull ? sweptPull->paintedTexts().join(QStringLiteral(" / "))
+                                 : QString()));
 
         // And the round/flatten chip, which is the one place the newly banned
         // word could most easily have leaked: the class is called BevelArrow
@@ -7828,6 +8101,11 @@ int main(int argc, char* argv[])
             // left there. It carried `border-radius: 4px`, which leaves
             // exactly four such corners: the black-nub failure mode, on the
             // one control in this shell that had it and no card underneath.
+            // Pinned, like every other guard in this file that stands between
+            // a probe and its checks: without it the corner sweep below simply
+            // does not run, and a sweep that does not run reports clean.
+            check(extrudePreview->field() != nullptr,
+                  "the preview's height field is there for the corner sweep");
             if (extrudePreview->field()) {
                 const QImage fieldImg = renderExact(extrudePreview->field());
                 QStringList seeThroughCorners;
@@ -7851,6 +8129,10 @@ int main(int argc, char* argv[])
                                    : seeThroughCorners.join(QStringLiteral("; "))));
             }
 
+            // And again for the invalid-state probe, which is a second guard
+            // on the same condition and would go quiet just as silently.
+            check(extrudePreview->field() != nullptr,
+                  "and still there for the invalid-input outline probe");
             if (extrudePreview->field()) {
                 extrudePreview->field()->setText(QStringLiteral("abc"));
                 settle(150);
@@ -8459,6 +8741,68 @@ int main(int argc, char* argv[])
             checkNoBlackLine(themed, QStringLiteral("edited-appearance"));
         }
 
+        // --- the same class, at the fractional scales this run is not at ----
+        //
+        // The capture above is the strongest evidence there is and it is
+        // evidence at exactly ONE display scale - whatever QT_SCALE_FACTOR
+        // this process was started with, which is fixed before QApplication
+        // exists and cannot be changed for a second window. The defect it
+        // caught proves why that is not enough: with the type scale edited,
+        // the status bar came out 26 logical rows tall, the viewport's bottom
+        // edge landed on device row 1354.5 at 175%, and a 2068-device-pixel
+        // 0,0,0 line ran the full width of the window between the two. At
+        // 150% the same 26 rows are a whole 39 and the capture is spotless.
+        // A suite that only ever ran here would have called it clean.
+        //
+        // So the ratio is forced in ARITHMETIC. The seam between the viewport
+        // and each chrome strip sits at the viewport's top and bottom edge in
+        // window coordinates; the device row it lands on is that edge times
+        // the ratio, and it has to be WHOLE at every quarter step Windows
+        // offers - or Qt flushes a row that is inside neither widget's logical
+        // rect, nothing paints it, and over the GL surface an unpainted row is
+        // black. Same property Theme::wholeDevicePixels() promises for a
+        // floating card; MainWindow::syncChromeHeights() is what now holds it
+        // for the two strips that span the window.
+        //
+        // Run HERE, on the edited spec, because the default type scale happens
+        // to give both strips a whole height - which is exactly how this
+        // shipped.
+        {
+            const QPoint viewportTopLeft = view->mapTo(&window, QPoint(0, 0));
+            const int seams[2] = {viewportTopLeft.y(),
+                                  viewportTopLeft.y() + view->height()};
+            const double ratios[] = {1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0};
+            QStringList fractional;
+            int probed = 0;
+            for (const double ratio : ratios) {
+                for (const int seam : seams) {
+                    ++probed;
+                    const double device = seam * ratio;
+                    if (std::fabs(device - std::round(device)) > 1.0e-9) {
+                        fractional << QStringLiteral("row %1 at %2x -> %3")
+                                          .arg(seam).arg(ratio).arg(device);
+                    }
+                }
+            }
+            // Non-vacuity first, the rule this file already keeps for every
+            // sweep: a loop that ran zero times reports clean exactly as
+            // loudly as a clean window does.
+            check(probed == 16,
+                  QStringLiteral("the themed seam sweep really ran at all eight "
+                                 "fractional scales, both edges (%1 probes)")
+                      .arg(probed));
+            check(fractional.isEmpty(),
+                  QStringLiteral("and with the type scale edited the viewport's top and "
+                                 "bottom edges land on whole device rows at every one of "
+                                 "them - no unpainted line between the chrome and the "
+                                 "3D area (top %1, bottom %2%3)")
+                      .arg(seams[0]).arg(seams[1])
+                      .arg(fractional.isEmpty()
+                               ? QString()
+                               : QStringLiteral("; ") +
+                                     fractional.join(QStringLiteral(", "))));
+        }
+
         // --- the picker opens without blocking -------------------------------
         if (panel) {
             // The FIRST token's swatch, not a hand-picked one: the rows live
@@ -8869,8 +9213,20 @@ int main(int argc, char* argv[])
         // out of scope here.
     }
 
-    std::printf("\n%s (%d failure%s)  volumes: A=%.1f B=%.1f\n",
+    // The coverage floor, asserted OUTSIDE check() on purpose: an assertion
+    // about how many checks ran must not be one of the checks it counts, or
+    // the number it reports and the number it tests are two different things.
+    // Reported the same way trigger()'s own failure is.
+    if (g_checks < kCheckFloor) {
+        std::printf("[FAIL] the run executed %d checks, below the floor of %d - "
+                    "a guard has stopped letting its checks run; find the guard, "
+                    "do not lower the floor\n",
+                    g_checks, kCheckFloor);
+        ++g_failures;
+    }
+
+    std::printf("\n%s (%d failure%s, %d checks, floor %d)  volumes: A=%.1f B=%.1f\n",
                 g_failures == 0 ? "PASS" : "FAIL", g_failures,
-                g_failures == 1 ? "" : "s", volumeA, volumeB);
+                g_failures == 1 ? "" : "s", g_checks, kCheckFloor, volumeA, volumeB);
     return g_failures == 0 ? 0 : 1;
 }

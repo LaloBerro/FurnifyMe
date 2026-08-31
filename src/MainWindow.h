@@ -154,6 +154,27 @@ public:
     // kernel's own error string is logged, never shown.
     bool bevelEdgeBy(const TopoDS_Edge& edge, double size, bool fillet);
 
+    // The refusal copy, one source each, so the production path and the
+    // banned-word sweep read the same sentence rather than a second copy only
+    // the sweep sees.
+    //
+    // Toast::paintedTexts() records every message shown this run - which means
+    // a Failure a run never triggers is not swept at all, and two of this
+    // branch's are exactly that: a chamfer the kernel refuses (only the fillet
+    // half is reachable from a probe) and a transform it refuses (the kernel
+    // accepts every gp_Trsf a gesture can build). The suite shows both once
+    // through these, which is the only honest way to cover them.
+    static QString bevelRefusalText(bool fillet);
+
+    // Which of Move / Rotate / Scale a delta is, in the two forms the copy
+    // needs - "Rotate" for a sentence that leads with the operation, "rotated"
+    // for one that reports it. Read off the transform itself rather than
+    // remembered from the handle that was grabbed, and used by the success
+    // path AND both refusal paths, so a refused rotate cannot report a Move.
+    static QString transformOperationName(const gp_Trsf& delta);
+    static QString transformPastVerb(const gp_Trsf& delta);
+    static QString transformRefusalText(const gp_Trsf& delta);
+
     bool lockToFace(const TopoDS_Face& face);
     // Back to the ground plane. The ground plane is the default and is never
     // itself "locked", so this is not a toggle of the same state. Refused,
@@ -317,6 +338,22 @@ private:
     // gesture to survive a crash. kAppearanceWriteMs after the last edit,
     // so one write per editing burst however long the drag was.
     void persistAppearance();
+    // The ONE place a spec reaches QSettings. Both routes that store one - the
+    // debounce timer and closeEvent()'s flush - call this rather than carrying
+    // a copy of the write each.
+    void writeAppearanceNow();
+    // Rounds the two chrome strips' heights up to whole device pixels, so the
+    // viewport's top and bottom edges cannot land on a fractional device row
+    // and leave an unpainted black line across the window. Called from the
+    // constructor and from every theme change, because the type scale is what
+    // moves those heights. See its definition for the measurement.
+    void syncChromeHeights();
+    // The two halves transformOperationName()/transformPastVerb() agree on.
+    // Scale is asked first: AIS_Manipulator leaves the rotation part identity
+    // during a scale, and a gesture that somehow carried both is a scale the
+    // user is watching happen.
+    static bool transformIsScale(const gp_Trsf& delta);
+    static bool transformIsRotation(const gp_Trsf& delta);
     void runBoolean(int kind);   // ModelingOps::BooleanKind as int, to keep it out of the header
     // The one place "the camera was moved to a named direction" is recorded.
     // Every route to that - the four View menu entries and a click on the
