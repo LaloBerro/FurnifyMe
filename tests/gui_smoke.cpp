@@ -150,7 +150,7 @@ int g_checks = 0;
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 1129;
+constexpr int kCheckFloor = 1149;
 
 void check(bool condition, const QString& what)
 {
@@ -4358,15 +4358,66 @@ int main(int argc, char* argv[])
                           QStringLiteral("and says why, rather than just looking broken "
                                          "(\"%1\")")
                               .arg(lockAgain ? lockAgain->toolTip() : QString()));
+                    // The REMEDIES, named. contains("outline") alone passed a
+                    // tooltip advising Ctrl+K - which used to unblock this and
+                    // stopped doing so the moment an outline became a document
+                    // item, because starting a sketch no longer discards the
+                    // waiting one. The user followed the advice and the action
+                    // stayed disabled. A copy check that cannot tell working
+                    // advice from stale advice is not checking the copy.
+                    const QString lockTip = lockAgain ? lockAgain->toolTip() : QString();
+                    check(lockTip.contains(QStringLiteral("E to extrude")) &&
+                              lockTip.contains(QStringLiteral("Ctrl+Z")),
+                          QStringLiteral("naming the two remedies that actually work - "
+                                         "extrude it, or take it back (\"%1\")")
+                              .arg(lockTip));
+                    check(!lockTip.contains(QStringLiteral("Ctrl+K")),
+                          QStringLiteral("and not the one that no longer does (\"%1\")")
+                              .arg(lockTip));
 
                     // The double-click route never consults that enabled
                     // state, so the refusal has to live in lockToFace() too.
                     check(!window.lockToFace(picked),
                           "and the call the double-click route uses refuses as well");
-                    check(toasts != nullptr &&
-                              toasts->currentText().contains(QStringLiteral("outline")),
-                          QStringLiteral("naming the cause and the fix (\"%1\")")
-                              .arg(toasts ? toasts->currentText() : QString()));
+                    const QString refusal =
+                        toasts ? toasts->currentText() : QString();
+                    check(refusal.contains(QStringLiteral("outline")),
+                          QStringLiteral("naming the cause (\"%1\")").arg(refusal));
+                    // The same pinning on the toast, which carried the same
+                    // stale Ctrl+K advice.
+                    check(refusal.contains(QStringLiteral("Press E")) &&
+                              refusal.contains(QStringLiteral("Ctrl+Z")),
+                          QStringLiteral("and the fixes that work (\"%1\")").arg(refusal));
+                    check(!refusal.contains(QStringLiteral("Ctrl+K")),
+                          QStringLiteral("rather than starting a new outline, which no "
+                                         "longer clears this one (\"%1\")").arg(refusal));
+
+                    // Important 2: mid-sketch, hasPendingFace() is TRUE - the
+                    // waiting outline survives the new sketch - so an
+                    // unguarded tooltip swap blamed the outline while the
+                    // sketch was the actual blocker, and told the user to
+                    // press E, which is disabled while drawing.
+                    trigger(window, QStringLiteral("Start Sketch"));
+                    settle(150);
+                    check(window.isSketching() && window.hasPendingFace(),
+                          "mid-sketch with an outline still waiting - both blockers "
+                          "hold at once, which is what makes the next check mean "
+                          "something");
+                    const QString midSketchTip =
+                        lockAgain ? lockAgain->toolTip() : QString();
+                    check(midSketchTip.contains(QStringLiteral("drawing")),
+                          QStringLiteral("the tooltip blames the sketch, which is the "
+                                         "blocker the user can act on first (\"%1\")")
+                              .arg(midSketchTip));
+                    check(!midSketchTip.contains(QStringLiteral("E to extrude")),
+                          QStringLiteral("and does not tell them to press a key that is "
+                                         "disabled while drawing (\"%1\")")
+                              .arg(midSketchTip));
+                    trigger(window, QStringLiteral("Cancel Sketch"));
+                    settle(150);
+                    check(lockAgain && lockAgain->toolTip().contains(
+                                           QStringLiteral("E to extrude")),
+                          "and the outline reason comes back once the sketch is gone");
                     check(!window.isFaceLocked() &&
                               window.sketch().plane().Axis().Direction().IsEqual(
                                   waitingPlane.Axis().Direction(), 1.0e-9),
@@ -4932,6 +4983,34 @@ int main(int argc, char* argv[])
             check(firstRow != nullptr &&
                       firstRow->property("outlineId").toInt() == outlineId,
                   "the first live row is the first outline's");
+            // Which one is pending has to be VISIBLE before the click as
+            // well as after it - with two outlines in the drawer and no mark
+            // on either, the choice E acts on is one the user cannot see.
+            // The newest is pending on arrival, so its row is the marked one
+            // now.
+            QWidget* secondRow = nullptr;
+            {
+                int seen = 0;
+                for (QWidget* row :
+                     drawer->findChildren<QWidget*>(QStringLiteral("itemsRow"))) {
+                    if (!row->isVisible()) continue;
+                    if (seen++ == 1) secondRow = row;
+                }
+            }
+            // The same accent fill a selected body row wears - asserted as
+            // the token, not as "the stylesheet is non-empty", so a mark in
+            // some other colour fails rather than passes.
+            const QString marked =
+                QStringLiteral("background-color: %1").arg(Theme::chipActive().name());
+            check(secondRow != nullptr &&
+                      secondRow->styleSheet().contains(marked),
+                  QStringLiteral("the newest outline's row carries the pending mark "
+                                 "before any click (\"%1\")")
+                      .arg(secondRow ? secondRow->styleSheet() : QString()));
+            check(firstRow != nullptr && !firstRow->styleSheet().contains(marked),
+                  "and the other outline's row does not - only one is pending");
+            check(window.findChild<QLabel*>() != nullptr, "the shell has labels to read");
+
             if (firstRow) {
                 clickAt(firstRow, QPointF(6.0, firstRow->height() / 2.0));
                 settle(150);
@@ -4939,6 +5018,27 @@ int main(int argc, char* argv[])
                       "clicking its row makes it the outline Extrude will consume");
                 check(window.hasPendingFace(),
                       "and a face is still pending either way");
+                // The mark FOLLOWS the click, both ways - a highlight that
+                // only ever arrived and never left would look right on this
+                // click and wrong on the next.
+                check(firstRow->styleSheet().contains(marked),
+                      QStringLiteral("the mark moves to the row that was clicked "
+                                     "(\"%1\")").arg(firstRow->styleSheet()));
+                check(secondRow != nullptr && !secondRow->styleSheet().contains(marked),
+                      "and leaves the row it was on");
+
+                // And the state label NAMES it, so the two halves of the
+                // answer agree. "Face ready" alone could not say which.
+                const QString expectedName =
+                    QString::fromStdString(window.document().outlineNameOf(outlineId));
+                QString stateText;
+                for (QLabel* label : window.findChildren<QLabel*>())
+                    if (label->text().contains(QStringLiteral("press E to extrude")))
+                        stateText = label->text();
+                check(!expectedName.isEmpty() && stateText.contains(expectedName),
+                      QStringLiteral("and the state label names the outline that was "
+                                     "clicked (\"%1\", expected \"%2\")")
+                          .arg(stateText, expectedName));
             }
         }
 
@@ -4971,6 +5071,28 @@ int main(int argc, char* argv[])
               "and it is the same outline, by id");
         check(view->hasOutline(outlineId) && view->outlineCount() == 2,
               "with the viewport back in step - resyncView carries outlines too");
+
+        // Minor 4: the outline the undo handed back is the one E acts on.
+        // pendingOutlineId()'s fallback is the LAST entry in the list, and an
+        // undo re-inserts a restored outline AT ITS ORIGINAL POSITION - so
+        // with a later outline still present, Ctrl+Z then E used to build a
+        // body from a different outline than the one that had just
+        // reappeared. Checked by CONVERTING, not just by reading the id: the
+        // id is what the fix sets, and asserting it alone would be asserting
+        // the fix against itself.
+        check(window.pendingOutlineId() == outlineId,
+              "the outline the undo handed back is the pending one, not the later "
+              "one that happens to sit last in the list");
+        check(window.extrudePendingFace(9.0),
+              "and pressing E converts it");
+        settle(200);
+        check(!window.document().containsOutline(outlineId) &&
+                  window.document().containsOutline(secondId),
+              "the SAME outline the undo restored - not the other one");
+        trigger(window, QStringLiteral("Undo"));
+        settle(200);
+        check(window.document().containsOutline(outlineId),
+              "and that conversion undoes back to where this probe started");
 
         trigger(window, QStringLiteral("Undo"));
         settle(200);
@@ -7994,6 +8116,43 @@ int main(int argc, char* argv[])
               QStringLiteral("no widget tooltip uses a banned word (%1)")
                   .arg(tipOffenders.isEmpty() ? QStringLiteral("none")
                                               : tipOffenders.join(QStringLiteral(", "))));
+
+        // The drawer's rows. Neither sweep above reaches them: a row is a
+        // plain QLabel pair with no QAction and no tooltip of its own, so
+        // every item name and every dimension string the user reads down the
+        // left-hand side of the app has been outside the vocabulary contract
+        // all along. It matters more now than it did - "Outline NN" is a
+        // vocabulary word this phase introduced, and it is generated in
+        // DocumentModel rather than typed into a .ui file where anyone would
+        // think to look.
+        //
+        // Swept through rowTextAt(), which is exactly what the rows paint,
+        // rather than by walking child labels - the same rule
+        // WalkthroughPanel::paintedTexts() follows, so the sweep can never be
+        // guarding a different copy from the one on screen. Vacuity is the
+        // real risk with a sweep over live content, so the row count is
+        // asserted non-zero first: a drawer that happened to be empty here
+        // would pass this in perfect silence.
+        ItemsPanel* sweptDrawer = window.itemsPanel();
+        check(sweptDrawer != nullptr && sweptDrawer->rowCount() > 0,
+              QStringLiteral("the drawer has rows to sweep, so this is not vacuous "
+                             "(%1)")
+                  .arg(sweptDrawer ? sweptDrawer->rowCount() : -1));
+        QStringList rowOffenders;
+        if (sweptDrawer) {
+            for (int i = 0; i < sweptDrawer->rowCount(); ++i) {
+                const QString rowText = sweptDrawer->rowTextAt(i);
+                for (const QString& word : banned) {
+                    if (rowText.contains(word, Qt::CaseInsensitive))
+                        rowOffenders << (rowText + QStringLiteral(" [") + word +
+                                         QStringLiteral("]"));
+                }
+            }
+        }
+        check(rowOffenders.isEmpty(),
+              QStringLiteral("no drawer row - outline or body - uses a banned word (%1)")
+                  .arg(rowOffenders.isEmpty() ? QStringLiteral("none")
+                                              : rowOffenders.join(QStringLiteral(", "))));
 
         // The app bar's wordmark and its buttons' labels are painted, and the
         // two readouts carry no QAction of their own, so neither sweep above

@@ -404,6 +404,16 @@ private:
     // the hint that teaches it.
     void recordViewChanged();
 
+    // The document ids of every outline right now, in list order. Taken
+    // before an undo or a redo so adoptRestoredOutline() can tell which one
+    // the move brought back.
+    std::vector<int> outlineIds() const;
+    // Makes an outline that has APPEARED since `before` the pending
+    // selection - the thing the user just took back, or put back. See its
+    // definition for why pendingOutlineId()'s "last in the list" fallback
+    // cannot answer this on its own.
+    void adoptRestoredOutline(const std::vector<int>& before);
+
     // The Persp/Ortho toggle's one implementation. Sets the camera's BASE
     // projection, persists it under the same guard as every other preference,
     // and refreshes the bar's readout through updateActions().

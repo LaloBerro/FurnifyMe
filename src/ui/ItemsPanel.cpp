@@ -407,18 +407,39 @@ bool ItemsPanel::eventFilter(QObject* watched, QEvent* event)
 
 void ItemsPanel::showSelection(const std::vector<int>& ids)
 {
+    mySelectedIds = ids;
+    restyleRows();
+}
+
+void ItemsPanel::showPendingOutline(int id)
+{
+    myPendingOutlineId = id;
+    restyleRows();
+}
+
+void ItemsPanel::restyleRows()
+{
     for (const Row& row : myRowList) {
-        // Never an outline: `ids` are viewport selection ids, and an outline
-        // is not selectable there. Ids come from one counter, so an outline's
-        // id can never collide with a body's - but styling a row from a list
-        // it is not a member of is the kind of coincidence worth refusing
-        // outright rather than relying on.
-        const bool selected =
-            !row.isOutline && std::find(ids.begin(), ids.end(), row.id) != ids.end();
+        // Two ways a row can be marked, and which one applies depends on
+        // which KIND of row it is - never on which list happens to contain
+        // the number. A body row is marked when the viewport has it selected;
+        // an outline row is marked when it is the one Extrude would consume.
+        // Ids come from a single counter, so the two can never collide - but
+        // styling a row from a list it is not a member of is the kind of
+        // coincidence worth refusing outright rather than relying on, which
+        // is why each kind asks only its own question.
+        const bool marked =
+            row.isOutline
+                ? (myPendingOutlineId != 0 && row.id == myPendingOutlineId)
+                : std::find(mySelectedIds.begin(), mySelectedIds.end(), row.id) !=
+                      mySelectedIds.end();
+        // The SAME fill a selected body row wears. One mark, one meaning -
+        // "this is the row the next thing you do will act on" - rather than a
+        // second visual language for the second kind of item.
         row.widget->setStyleSheet(
-            selected ? QStringLiteral("#itemsRow { background-color: %1; "
-                                      "border-radius: 4px; }")
-                           .arg(Theme::chipActive().name())
-                     : QStringLiteral("#itemsRow { background: transparent; }"));
+            marked ? QStringLiteral("#itemsRow { background-color: %1; "
+                                    "border-radius: 4px; }")
+                         .arg(Theme::chipActive().name())
+                   : QStringLiteral("#itemsRow { background: transparent; }"));
     }
 }

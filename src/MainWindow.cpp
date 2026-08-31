@@ -859,12 +859,29 @@ void MainWindow::updateActions()
     // A disabled control that does not say why is a control the user reads as
     // broken. Same idea as snapTooltipText(): recomputed here rather than
     // frozen at buildActions() time, so the reason is current.
+    //
+    // Two reasons, and they are asked in the order planeCanMove combines
+    // them. hasPendingFace() is TRUE THROUGHOUT A SKETCH now - the waiting
+    // outline is a document item and the new sketch does not discard it - so
+    // an unguarded swap blamed the waiting outline while the sketch in
+    // progress was the actual blocker, and told the user to press E, which is
+    // disabled mid-sketch. The sketch takes precedence because it is the
+    // condition the user can act on first, and because it is the one that is
+    // true even with no outline anywhere.
+    //
+    // The outline reason names the remedies that WORK. "Ctrl+K to start a new
+    // one" was one of them until this phase - see canChangeSketchPlane() for
+    // why it stopped being one and why advice that does nothing is worse than
+    // none.
+    const QString sketchReason =
+        tr("Unavailable while you're drawing — press Enter to close this outline, "
+           "or Esc to cancel it");
     const QString pendingReason =
         tr("Unavailable while an outline is waiting — press E to extrude it, "
-           "or Ctrl+K to start a new one");
-    myLockFaceAction->setToolTip(!hasPendingFace() ? lockTooltipText() : pendingReason);
-    myUnlockFaceAction->setToolTip(!hasPendingFace() ? unlockTooltipText()
-                                                     : pendingReason);
+           "or Ctrl+Z to take it back");
+    const QString planeReason = mySketching ? sketchReason : pendingReason;
+    myLockFaceAction->setToolTip(planeCanMove ? lockTooltipText() : planeReason);
+    myUnlockFaceAction->setToolTip(planeCanMove ? unlockTooltipText() : planeReason);
 
     myUnionAction->setEnabled(booleanReady);
     mySubtractAction->setEnabled(booleanReady);
@@ -898,6 +915,13 @@ void MainWindow::updateActions()
     // the one place that decides what is available, and still pushed out
     // rather than re-derived at the toast.
     if (myToasts) myToasts->setUndoEnabled(!mySketching && myDocument.canUndo());
+    // Which outline Extrude would consume, pushed onto the drawer the same
+    // way and for the same reason: this is the one place that decides it, and
+    // the drawer row is the only handle the user has on the choice, so a
+    // choice with no mark on it is a choice they cannot see. Refreshed here
+    // rather than at the click, so an undo or a redo that moves the pending
+    // outline moves the highlight with it.
+    if (myItemsPanel) myItemsPanel->showPendingOutline(pendingOutlineId());
     myRedoAction->setEnabled(!mySketching && myDocument.canRedo());
 
     // Not a slot on appStateChanged - part of updateActions() itself, same
@@ -1116,7 +1140,14 @@ void MainWindow::updateStateLabel()
             state = tr("Sketching — 2 points, 1 more to close");
         }
     } else if (hasPendingFace()) {
-        state = tr("Face ready — press E to extrude");
+        // NAMED, not just "Face ready". Outlines accumulate now, and with two
+        // in the drawer a label that says only that leaves the user with no
+        // way to tell which one E is aimed at - the drawer's highlight and
+        // this name are the two halves of that answer, and they read the same
+        // pendingOutlineId() so they cannot point at different outlines.
+        state = tr("%1 ready — press E to extrude")
+                    .arg(QString::fromStdString(
+                        myDocument.outlineNameOf(pendingOutlineId())));
     } else if (canPullSelectedFace()) {
         // The gizmo is on screen and it is not obvious what to do with it -
         // an arrow with no words is a guess. Reads the same predicate the
@@ -1229,9 +1260,13 @@ void MainWindow::onUndo()
         return;
     }
 
+    const std::vector<int> outlinesBefore = outlineIds();
     if (!myDocument.undo()) return;
     recordProgress("undo.used");
 
+    // An outline the undo handed back is the thing the user just took back,
+    // so it becomes the one Extrude will consume - see adoptRestoredOutline().
+    adoptRestoredOutline(outlinesBefore);
     myView->clearSelection();
     resyncView();
     updateActions();
@@ -1243,9 +1278,13 @@ void MainWindow::onUndo()
 
 void MainWindow::onRedo()
 {
+    const std::vector<int> outlinesBefore = outlineIds();
     if (!myDocument.redo()) return;
     recordProgress("undo.used");
 
+    // The same rule the other way: a redo that brings an outline back is the
+    // user putting it there, so it is the one they mean.
+    adoptRestoredOutline(outlinesBefore);
     myView->clearSelection();
     resyncView();
     updateActions();
@@ -1417,6 +1456,39 @@ int MainWindow::pendingOutlineId() const
 TopoDS_Face MainWindow::pendingFace() const
 {
     return myDocument.outlineFace(pendingOutlineId());
+}
+
+std::vector<int> MainWindow::outlineIds() const
+{
+    std::vector<int> ids;
+    ids.reserve(myDocument.outlines().size());
+    for (const DocumentModel::Outline& outline : myDocument.outlines()) ids.push_back(outline.id);
+    return ids;
+}
+
+void MainWindow::adoptRestoredOutline(const std::vector<int>& before)
+{
+    // pendingOutlineId()'s fallback is the LAST outline in the list, which is
+    // the newest one only while outlines are being appended. An undo restores
+    // a removed outline AT ITS ORIGINAL POSITION, so undoing an extrude in a
+    // document that already held a later outline handed the user back the one
+    // they asked for and left Extrude aimed at the other: Ctrl+Z then E built
+    // a body from a different outline than the one that had just reappeared.
+    //
+    // The fix is to name it rather than to reorder the list or to make the
+    // fallback cleverer. An outline that appears across an undo or a redo is
+    // the thing the user just acted on, and that is exactly what "pending"
+    // means. Exactly one appearing is the only case worth claiming - a
+    // multi-outline jump has no single thing the user meant, and leaving the
+    // existing selection alone is the honest answer there.
+    int appeared = 0;
+    int candidate = 0;
+    for (const DocumentModel::Outline& outline : myDocument.outlines()) {
+        if (std::find(before.begin(), before.end(), outline.id) != before.end()) continue;
+        ++appeared;
+        candidate = outline.id;
+    }
+    if (appeared == 1) mySelectedOutlineId = candidate;
 }
 
 gp_Dir MainWindow::pendingSweepDirection() const
@@ -2009,24 +2081,38 @@ void MainWindow::onSelectionModeChanged()
 
 bool MainWindow::canChangeSketchPlane()
 {
-    // A closed outline that has not been extruded yet still belongs to the
-    // plane it was drawn on, and both the commit (extrudePendingFace) and the
-    // live preview sweep it along whatever the sketch plane's normal happens
-    // to be AT THAT MOMENT. Move the plane in between and the outline is swept
-    // in a direction lying in its own plane: a body with no volume at all,
-    // which BRepPrimAPI_MakePrism reports as done. ModelingOps::extrude now
-    // refuses that sweep outright, so nothing degenerate can reach the
-    // document either way - but a refusal the user meets only after pressing E
-    // is not an explanation, so the plane simply does not move while an
-    // outline is waiting.
+    // This guard's ORIGINAL argument no longer holds, and saying so is worth
+    // more than quietly keeping the code. It used to be that both the commit
+    // and the live preview swept the outline along whatever the sketch
+    // plane's normal happened to be AT THAT MOMENT, so moving the plane in
+    // between swept it in a direction lying in its own plane - a body with no
+    // volume, which BRepPrimAPI_MakePrism reports as done. Phase 7 retired
+    // that whole class by construction: a DocumentModel::Outline stores the
+    // plane it was drawn on BY VALUE, and both extrudePendingFace() and
+    // ExtrudePreview sweep along THAT (see pendingSweepDirection()). Locking
+    // a face can no longer re-aim a waiting outline at all.
+    //
+    // What the guard protects now is narrower and still real: the sketch
+    // plane is where the NEXT outline lands, and moving it while one outline
+    // is already waiting leaves the user with two outlines on two planes and
+    // one status label describing whichever the app picked. Keeping the two
+    // in step - one waiting outline, one plane it was drawn on - is a
+    // legibility rule rather than a correctness one, and the toast says which
+    // ways out actually exist.
     //
     // Discarding the pending outline instead was the alternative, and it is
     // worse: it throws away work the user did without being asked.
     if (!hasPendingFace()) return true;
 
+    // The two remedies that WORK. "Ctrl+K to start a new outline" was one of
+    // them until this phase, and it stopped being one the moment an outline
+    // became a document item: starting a sketch no longer discards the
+    // waiting one, so following that advice left the action just as disabled
+    // as before. Advice that does nothing is worse than no advice - the user
+    // does the thing, nothing changes, and now they distrust the message too.
     myToasts->show(tr("There's an outline waiting to be extruded, and it belongs to the "
-                      "plane it was drawn on. Press E to turn it into a body, or Ctrl+K "
-                      "to start a new outline, before you change the face you draw on."),
+                      "plane it was drawn on. Press E to turn it into a body, or Ctrl+Z "
+                      "to take it back, before you change the face you draw on."),
                   Toast::Kind::Note, false);
     return false;
 }
