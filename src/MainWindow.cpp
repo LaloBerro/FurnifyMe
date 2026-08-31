@@ -23,6 +23,8 @@
 
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepBndLib.hxx>
+#include <Bnd_Box.hxx>
 #include <ElSLib.hxx>
 #include <GeomAbs_CurveType.hxx>
 #include <GeomAbs_SurfaceType.hxx>
@@ -68,6 +70,13 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
             QStringLiteral("cm"))
             Measure::setDisplayUnit(Measure::Unit::Centimetres);
 
+        // The base projection, on the same terms as the unit above: a
+        // preference, read once, under the same guard, so the suite can never
+        // see the developer's own choice. It cannot be applied here - the
+        // viewport does not exist yet - so it is held until it does.
+        myStartOrthographic = settings.value(QStringLiteral("projection")).toString() ==
+                              QStringLiteral("ortho");
+
         // Before a single widget exists, for the same reason as the unit
         // above: every card measures itself with the type scale in its own
         // constructor, so installing the spec afterwards would leave the
@@ -83,6 +92,14 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     }
 
     myView = new OcctViewWidget(this);
+    // Straight onto the camera rather than through setBaseProjection(): that
+    // one persists and calls updateActions(), and neither the settings store
+    // nor half the shell is ready to be asked anything yet. The viewport has
+    // not initialized its OCCT view either - it does that lazily on its first
+    // paint - and applyCameraState() reads this state then, so the very first
+    // frame is already drawn in the mode the user left.
+    if (myStartOrthographic)
+        myView->camera().setBaseProjection(CameraController::Projection::Orthographic);
     // Full bleed: the central widget is the viewport and nothing else. The
     // items panel used to take a splitter pane out of the window's width;
     // it is a floating drawer over the viewport now (see buildOverlay()),
@@ -329,6 +346,26 @@ void MainWindow::buildActions()
     myAppearanceAction->setToolTip(tr("Choose the app's colours and text size (Ctrl+Alt+A)\n"
                                       "Every change is applied as you make it."));
 
+    // The projection toggle. Checkable, because the mode is state the user
+    // chose and comes back next session; a QAction rather than a button that
+    // decides for itself, because the bar's readout, the View menu entry and
+    // the O shortcut all have to say the same thing - and because the
+    // generated shortcut sheet lists it for free the moment it carries a
+    // binding.
+    //
+    // Reads its initial state from the camera, which the constructor has
+    // already set from the stored preference, rather than from that
+    // preference a second time.
+    myOrthographicAction = new QAction(tr("&Orthographic"), this);
+    myOrthographicAction->setCheckable(true);
+    myOrthographicAction->setChecked(myView->camera().baseProjection() ==
+                                     CameraController::Projection::Orthographic);
+    myOrthographicAction->setShortcut(QKeySequence(Qt::Key_O));
+    myOrthographicAction->setToolTip(tr("Draw without perspective (O)\n"
+                                        "Parallel edges stay parallel, so a face seen "
+                                        "straight on reads at its true shape."));
+    connect(myOrthographicAction, &QAction::toggled, this, &MainWindow::setBaseProjection);
+
     myDisplayModeAction = new QAction(tr("Wireframe"), this);
     myDisplayModeAction->setCheckable(true);
     myDisplayModeAction->setToolTip(tr("Draw bodies as edges only\n"
@@ -458,6 +495,11 @@ QMenuBar* MainWindow::buildMenus()
         recordViewChanged();
     });
     viewMenu->addSeparator();
+    // Beside the named views, because it is the other half of "what am I
+    // looking at" - but below the separator, because it changes how the scene
+    // is drawn rather than where the camera stands.
+    viewMenu->addAction(myOrthographicAction);
+    viewMenu->addSeparator();
     viewMenu->addAction(mySnapAction);
     viewMenu->addSeparator();
     viewMenu->addAction(mySolidSelectAction);
@@ -512,10 +554,17 @@ QMenuBar* MainWindow::buildMenus()
 
 void MainWindow::goAxonometric()
 {
-    // The one way back to the angled view. Both entry points - the View menu
-    // (and its 0 shortcut) and the app bar's view label button - call this,
-    // so the pose and the recorded event cannot drift apart the way they
-    // would if each site re-derived the camera state for itself.
+    // The one way back to the angled view. Its entry points - the View menu
+    // and its 0 shortcut - call this, so the pose and the recorded event
+    // cannot drift apart the way they would if each site re-derived the
+    // camera state for itself. The app bar's button used to be a third; that
+    // seat is the projection toggle now.
+    //
+    // The angled view is the opposite of a face-on one, so it hands back any
+    // borrowed orthographic look rather than carrying it into a pose nothing
+    // squared up for. A user who CHOSE Ortho keeps it - this clears the loan,
+    // not the mode.
+    myView->camera().setTemporaryOrtho(false);
     myView->setViewAxonometric();
     recordViewChanged();
 }
@@ -526,17 +575,16 @@ void MainWindow::buildAppBar(QMenuBar* menus)
     // The window takes ownership. Nothing may call menuBar() from here on.
     setMenuWidget(myAppBar);
 
-    myAppBar->setViewLabel(myView->viewLabelText());
+    myAppBar->setOrthographic(myOrthographicAction->isChecked());
     myAppBar->setUnitLabel(QString::fromStdString(Measure::unitSuffix()));
 
-    connect(myView, &OcctViewWidget::cameraChanged, myAppBar,
-            [this] { myAppBar->setViewLabel(myView->viewLabelText()); });
-
-    // Exactly what the gizmo's label chip did - and it is the View menu's
-    // Axonometric entry, not a second copy of the pose it applies. The button
-    // and the menu entry are the same route, so a user who only ever presses
-    // this button still retires the hint that teaches named views.
-    connect(myAppBar, &AppBar::viewLabelClicked, this, &MainWindow::goAxonometric);
+    // The button triggers the action rather than flipping anything itself -
+    // the same contract the unit chip has, and the reason the menu entry, the
+    // O shortcut and this button can never disagree. It no longer snaps to
+    // the axonometric pose: that is the gizmo's job, and the View menu's, and
+    // this seat now belongs to the projection.
+    connect(myAppBar, &AppBar::projectionClicked, this,
+            [this] { myOrthographicAction->trigger(); });
 
     // The button triggers the OTHER unit's existing action rather than
     // writing the unit itself: persistence, the items panel, the status bar
@@ -555,6 +603,11 @@ void MainWindow::buildAppBar(QMenuBar* menus)
     // back into updateActions().
     connect(this, &MainWindow::appStateChanged, myAppBar, [this] {
         myAppBar->setUnitLabel(QString::fromStdString(Measure::unitSuffix()));
+        // The BASE mode, off the action that owns it - not the camera's
+        // effective one. A gizmo arm or a face lock borrows orthographic for
+        // one orbit, and a readout that followed the loan would tell the user
+        // they had changed a setting they never touched.
+        myAppBar->setOrthographic(myOrthographicAction->isChecked());
     });
 }
 
@@ -821,6 +874,22 @@ void MainWindow::recordViewChanged()
     // Without this the third press of 0 left a hint on screen for an action
     // the user had already learned. updateActions() touches nothing this
     // path depends on, so it cannot recurse back in here.
+    updateActions();
+}
+
+void MainWindow::setBaseProjection(bool orthographic)
+{
+    myView->setBaseProjection(orthographic ? CameraController::Projection::Orthographic
+                                           : CameraController::Projection::Perspective);
+    if (myPersistProgress) {
+        QSettings settings;
+        settings.setValue(QStringLiteral("projection"),
+                          orthographic ? QStringLiteral("ortho") : QStringLiteral("persp"));
+    }
+    // Not recordProgress(), and specifically not recordViewChanged() - see the
+    // declaration in MainWindow.h. updateActions() ends by emitting
+    // appStateChanged(), which is what the bar's readout follows; no second
+    // refresh path.
     updateActions();
 }
 
@@ -1832,12 +1901,43 @@ bool MainWindow::lockToFace(const TopoDS_Face& face)
     // One call sets both where clicks land and where the grid is drawn; they
     // are the same value inside the viewport, so they cannot disagree.
     myView->setWorkPlane(plane);
+    // Only now, past every refusal above: a lock that was declined must leave
+    // the camera exactly where it was, or the user is looking at a face they
+    // are not going to be drawing on.
+    flyOntoFace(face, plane);
     recordProgress("faceLock.used");
 
     updateActions();
     statusBar()->showMessage(tr("Locked to this face — outlines you draw now sit on it, "
                                 "and extrude square to it"));
     return true;
+}
+
+void MainWindow::flyOntoFace(const TopoDS_Face& face, const gp_Pln& plane)
+{
+    // `plane` is the OUTWARD-oriented plane lockToFace() has already derived -
+    // reversed where the face is TopAbs_REVERSED, which is three faces in six
+    // on a plain box. Re-deriving it from the face here would be a second copy
+    // of that rule, and the wrong half of it is what sends a prism through the
+    // body it stands on (see lockToFace).
+    Bnd_Box box;
+    BRepBndLib::Add(face, box);
+    if (box.IsVoid()) return;
+
+    // frame() gives the target (the face's own centre) and a distance that
+    // fits it - the same framing a double-click on a body uses, so a face-on
+    // look is no closer or further than the app's one idea of "framed".
+    CameraController scratch = myView->camera();
+    scratch.frame(box, OcctViewWidget::kFovyDeg);
+    // ...and then the direction, which frame() leaves alone.
+    scratch.lookFrom(plane.Axis().Direction());
+
+    // Ortho before the flight, for the same reason the gizmo sets it before
+    // its own: applyCameraState() runs on the first animation frame, and a
+    // look that only squares up once it lands would flash. The user's first
+    // orbit hands it back.
+    myView->camera().setTemporaryOrtho(true);
+    myView->animateTo(scratch.state());
 }
 
 void MainWindow::unlockFace()

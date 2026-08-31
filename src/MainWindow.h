@@ -277,8 +277,9 @@ private:
     // it. Must run after buildActions(), whose actions the bar mirrors.
     void buildAppBar(QMenuBar* menus);
     // Back to the angled view, and record it. The View menu's Axonometric
-    // entry and the app bar's view label button are both this, so neither
-    // carries its own copy of the pose.
+    // entry and its 0 shortcut are both this, so neither carries its own copy
+    // of the pose. Also drops any borrowed orthographic look - see the
+    // definition.
     void goAxonometric();
     void buildOverlay();
     void updateActions();
@@ -362,6 +363,25 @@ private:
     // the hint that teaches it.
     void recordViewChanged();
 
+    // The Persp/Ortho toggle's one implementation. Sets the camera's BASE
+    // projection, persists it under the same guard as every other preference,
+    // and refreshes the bar's readout through updateActions().
+    //
+    // It deliberately does NOT recordViewChanged(): a projection flip is not a
+    // look in a named direction, and the hint that teaches the axis gizmo
+    // retires on that event. Letting this record it would retire the hint for
+    // something the user has not done - the precise defect CLAUDE.md's
+    // "a hint retires when its own trigger stops holding" rule exists to stop.
+    void setBaseProjection(bool orthographic);
+
+    // Flies the camera square onto a face: the eye moves onto the face's
+    // OUTWARD normal, the target to the face's centre, the distance out far
+    // enough to frame it, orthographic for as long as the user does not orbit.
+    // Called by lockToFace() only, and only once the lock has been ACCEPTED -
+    // a refused lock must fly nowhere, or the camera would move to a face the
+    // user is not going to be drawing on.
+    void flyOntoFace(const TopoDS_Face& face, const gp_Pln& plane);
+
     OcctViewWidget* myView = nullptr;
     DocumentModel myDocument;
     SketchController mySketch;
@@ -409,6 +429,15 @@ private:
     QAction* myLockFaceAction = nullptr;
     QAction* myUnlockFaceAction = nullptr;
     QAction* myAppearanceAction = nullptr;
+    // Checkable, and the single source of the base projection's truth: the
+    // View menu entry, the O shortcut and the bar's readout button are all
+    // this one action, exactly as the unit chip is the Units entries.
+    QAction* myOrthographicAction = nullptr;
+    // What the stored setting said, read in the constructor before the
+    // viewport exists and applied the moment it does. A plain bool rather
+    // than a second read, because QSettings is touched once per preference
+    // and only under myPersistProgress.
+    bool myStartOrthographic = false;
 
     AppBar* myAppBar = nullptr;
     class ViewportOverlay* myOverlay = nullptr;

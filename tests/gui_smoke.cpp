@@ -85,6 +85,7 @@
 #include <QSplitter>
 #include <QStatusBar>
 #include <QString>
+#include <QWheelEvent>
 
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
@@ -149,7 +150,7 @@ int g_checks = 0;
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 965;
+constexpr int kCheckFloor = 997;
 
 void check(bool condition, const QString& what)
 {
@@ -829,8 +830,9 @@ int main(int argc, char* argv[])
 
     // --- axis gizmo -----------------------------------------------------------
     // The gizmo is axes and tips only now: its painted label chip moved into
-    // the app bar, and the string it showed has one source,
-    // OcctViewWidget::viewLabelText(), which both this block and the bar read.
+    // the app bar, which shows the projection rather than the direction. The
+    // direction name has one source, OcctViewWidget::viewDirectionName(),
+    // which this block reads as its oracle for "square onto a world axis".
     {
         AxisGizmo* gizmo = window.findChild<AxisGizmo*>();
         check(gizmo != nullptr, "the viewport has an axis gizmo");
@@ -840,8 +842,62 @@ int main(int argc, char* argv[])
             settle(150);
             check(std::fabs(view->camera().state().elevationDeg - 88.0) < 1e-3,
                   "clicking the +Z cone goes to Top");
-            check(view->viewLabelText() == QStringLiteral("Top"),
-                  "the view label reads Top when aligned");
+            check(view->viewDirectionName() == QStringLiteral("Top"),
+                  "the camera reads as square onto Top when aligned");
+
+            // An axis view is a face-on view, and a face-on view with
+            // perspective convergence is not one. The arm click borrows
+            // orthographic; the BASE mode is untouched, which is the whole
+            // distinction (see CameraController::Projection).
+            check(view->viewIsOrthographic(),
+                  "and clicking an arm lands the camera orthographic");
+            check(view->camera().baseProjection() ==
+                      CameraController::Projection::Perspective,
+                  "without changing the projection the user chose");
+            {
+                AppBar* projBar = qobject_cast<AppBar*>(window.menuWidget());
+                QAbstractButton* projButton =
+                    projBar ? qobject_cast<QAbstractButton*>(projBar->projectionButton())
+                            : nullptr;
+                check(projButton != nullptr &&
+                          projButton->text() == AppBar::projectionLabel(false),
+                      QStringLiteral("so the bar's readout still says Persp (\"%1\")")
+                          .arg(projButton ? projButton->text() : QStringLiteral("<none>")));
+            }
+
+            // ...and the first orbit hands it back. A right-button drag is the
+            // real route - the widget's own mouseMoveEvent, not a poke at
+            // CameraController - because the loan is cleared inside orbit()
+            // and pushed to the OCCT camera by applyCameraState(), and only
+            // the drag exercises both.
+            dragButton(view, QPointF(view->width() * 0.5, view->height() * 0.5),
+                       QPointF(view->width() * 0.5 + 40.0, view->height() * 0.5),
+                       Qt::RightButton);
+            settle(120);
+            check(!view->viewIsOrthographic(),
+                  "and the first orbit puts perspective back");
+
+            // Pan and zoom must NOT: panning across a face-on drawing is
+            // ordinary drafting. Back to Top first, since the orbit above
+            // spent the loan.
+            clickAt(gizmo, gizmo->tipCenter(2, true));
+            settle(150);
+            check(view->viewIsOrthographic(), "a second arm click borrows it again");
+            dragButton(view, QPointF(view->width() * 0.5, view->height() * 0.5),
+                       QPointF(view->width() * 0.5 + 40.0, view->height() * 0.5),
+                       Qt::MiddleButton);
+            settle(120);
+            check(view->viewIsOrthographic(), "and a pan keeps it");
+            {
+                QWheelEvent wheel(QPointF(view->width() * 0.5, view->height() * 0.5),
+                                  view->mapToGlobal(QPointF(view->width() * 0.5,
+                                                            view->height() * 0.5)),
+                                  QPoint(0, 0), QPoint(0, 120), Qt::NoButton,
+                                  Qt::NoModifier, Qt::NoScrollPhase, false);
+                QCoreApplication::sendEvent(view, &wheel);
+                settle(120);
+            }
+            check(view->viewIsOrthographic(), "and so does a wheel notch");
 
             // Clicking the -Y ball views from behind.
             clickAt(gizmo, gizmo->tipCenter(1, false));
@@ -916,6 +972,21 @@ int main(int argc, char* argv[])
                       .arg(gizmoNubs.isEmpty() ? QStringLiteral("all four solid viewport()")
                                                : gizmoNubs.join(QStringLiteral("; "))));
         }
+
+        // Restore the exact startup pose AND the projection, for the same
+        // reason the block above this one does: every later check clicks at
+        // fractions tuned for the startup camera, and this block has orbited,
+        // panned, zoomed and borrowed an orthographic look. The bar's view
+        // button used to put the pose back as a side effect of being clicked;
+        // it is the projection toggle now and snaps nothing, so the restore
+        // is explicit.
+        view->camera().setTemporaryOrtho(false);
+        view->camera().setState(CameraState{});
+        trigger(window, QStringLiteral("Axonometric"));
+        settle(200);
+        check(std::fabs(view->camera().state().azimuthDeg - (-45.0)) < 1e-3 &&
+                  !view->viewIsOrthographic(),
+              "camera and projection restored to the startup state after the gizmo block");
     }
 
     // --- the app bar owns the menu strip --------------------------------------
@@ -973,40 +1044,151 @@ int main(int argc, char* argv[])
                   "and no binding fell out of its menu group in the move");
         }
 
-        QAbstractButton* viewButton =
-            bar ? qobject_cast<QAbstractButton*>(bar->viewLabelButton()) : nullptr;
-        check(viewButton != nullptr, "the bar carries a view label button");
-        if (bar && viewButton) {
-            trigger(window, QStringLiteral("Top"));
-            settle(250);
-            check(view->viewLabelText() == QStringLiteral("Top") &&
-                      viewButton->text() == QStringLiteral("Top"),
-                  QStringLiteral("the bar's view label follows the camera (\"%1\")")
-                      .arg(viewButton->text()));
+        // The seat the view-direction readout used to hold is the Persp/Ortho
+        // toggle now. It no longer snaps to the axonometric pose (that lives
+        // on the gizmo, keys 0-3 and the View menu) and it deliberately does
+        // NOT record view.changed: a projection flip is not a look in a named
+        // direction, and the hint that teaches the gizmo retires on that
+        // event. Both halves of that are asserted here, because a control
+        // that quietly kept either behaviour would still show the right word.
+        QAbstractButton* projButton =
+            bar ? qobject_cast<QAbstractButton*>(bar->projectionButton()) : nullptr;
+        check(projButton != nullptr, "the bar carries a projection toggle");
+        if (bar && projButton) {
+            check(projButton->text() == AppBar::projectionLabel(false) &&
+                      !view->viewIsOrthographic(),
+                  QStringLiteral("it starts on the perspective the app ships with "
+                                 "(\"%1\")")
+                      .arg(projButton->text()));
 
             // A real hit test, not an event aimed at the widget we hope is
             // reachable: childAt() is the mechanism a user's click goes
             // through, and it is what caught an unreachable control once
             // already (see the walkthrough's skip control).
-            check(bar->childAt(viewButton->geometry().center()) == viewButton,
-                  "childAt() at the view label's centre finds the button itself");
+            check(bar->childAt(projButton->geometry().center()) == projButton,
+                  "childAt() at the toggle's centre finds the button itself");
 
             const int before = window.progress().count("view.changed");
-            clickAt(viewButton, QPointF(viewButton->width() / 2.0,
-                                        viewButton->height() / 2.0));
+            const double azBefore = view->camera().state().azimuthDeg;
+            const double elBefore = view->camera().state().elevationDeg;
+
+            clickAt(projButton, QPointF(projButton->width() / 2.0,
+                                        projButton->height() / 2.0));
             settle(300);
-            check(std::fabs(view->camera().state().azimuthDeg - (-45.0)) < 1e-3 &&
-                      std::fabs(view->camera().state().elevationDeg - 30.0) < 1e-3,
-                  "clicking it returns to the axonometric pose the gizmo's label "
-                  "chip used to");
-            check(view->viewLabelText() == QStringLiteral("Persp") &&
-                      viewButton->text() == QStringLiteral("Persp"),
-                  "and the pose it lands on is labelled Persp");
-            check(window.progress().count("view.changed") == before + 1,
-                  QStringLiteral("...and records view.changed exactly once "
-                                 "(%1 then %2)")
+            // The LIVE OCCT camera, not our own flag: the write site in
+            // applyCameraState() is the thing under test, and asking
+            // CameraController whether it had told OCCT something would be
+            // its own oracle.
+            check(view->viewIsOrthographic(),
+                  "clicking it flips the camera's actual projection to orthographic");
+            check(view->camera().baseProjection() ==
+                      CameraController::Projection::Orthographic,
+                  "and it is the BASE mode that moved, not a borrowed look");
+            check(projButton->text() == AppBar::projectionLabel(true),
+                  QStringLiteral("the button reads Ortho (\"%1\")")
+                      .arg(projButton->text()));
+            check(std::fabs(view->camera().state().azimuthDeg - azBefore) < 1e-9 &&
+                      std::fabs(view->camera().state().elevationDeg - elBefore) < 1e-9,
+                  "and the camera did not move - the toggle snaps to no pose");
+            check(window.progress().count("view.changed") == before,
+                  QStringLiteral("...and records no view.changed, so it cannot retire "
+                                 "the hint that teaches the gizmo (%1 then %2)")
                       .arg(before)
                       .arg(window.progress().count("view.changed")));
+
+            // The menu entry and the button are one action, so the menu must
+            // already show it checked - a second source of truth would show
+            // here first.
+            QAction* orthoAction = action(window, QStringLiteral("Orthographic"));
+            check(orthoAction != nullptr && orthoAction->isCheckable() &&
+                      orthoAction->isChecked(),
+                  "the View menu's Orthographic entry is the same state, already checked");
+
+            // Half of a side-by-side: the SAME camera pose, drawn both ways,
+            // which is the only comparison that shows what the mode does. The
+            // check above has just pinned that the toggle moved nothing but
+            // the projection, so the two frames differ in exactly one thing -
+            // and what the pair shows is the ground grid, which converges
+            // toward a horizon under perspective and is perfectly uniform
+            // under a parallel projection.
+            view->saveSnapshot(outDir + "/j-projection-ortho.png");
+
+            clickAt(projButton, QPointF(projButton->width() / 2.0,
+                                        projButton->height() / 2.0));
+            settle(300);
+            view->saveSnapshot(outDir + "/j-projection-persp.png");
+            check(!view->viewIsOrthographic() &&
+                      projButton->text() == AppBar::projectionLabel(false),
+                  "clicking again goes back to perspective");
+            check(orthoAction != nullptr && !orthoAction->isChecked(),
+                  "and the menu entry follows it back");
+
+            // --- the unprojection audit, proved rather than reasoned about ---
+            // Every pixel-to-world route in this app runs through
+            // OcctViewWidget::rayThroughPixel(), which asks
+            // V3d_View::ConvertWithProj for a ray. Under perspective that ray
+            // starts at the eye and fans out; under a parallel projection
+            // every ray is the view direction and the origin is the pixel
+            // itself. ConvertWithProj is documented to handle both, and this
+            // is the check that says so rather than the comment that assumes
+            // it - a wrong ray does not crash, it silently puts the point
+            // somewhere plausible and wrong.
+            //
+            // The proof is a ROUND TRIP: click a pixel, take the sketch point
+            // the app derived from it, project that point back, and land on
+            // the pixel that was clicked. A check that only asserted Z == 0
+            // would pass on any point of the ground plane, which is every
+            // wrong answer this could produce.
+            if (orthoAction) {
+                orthoAction->trigger();
+                settle(200);
+                check(view->viewIsOrthographic(), "in orthographic for the unprojection probe");
+
+                trigger(window, QStringLiteral("Start Sketch"));
+                const QPointF probes[3] = {
+                    QPointF(view->width() * 0.38, view->height() * 0.38),
+                    QPointF(view->width() * 0.61, view->height() * 0.40),
+                    QPointF(view->width() * 0.55, view->height() * 0.62)};
+                bool onPlane = true;
+                double worstPixel = 0.0;
+                for (int p = 0; p < 3; ++p) {
+                    clickAt(view, probes[p]);
+                    settle(40);
+                    if (window.sketch().pointCount() != static_cast<size_t>(p + 1)) {
+                        onPlane = false;
+                        break;
+                    }
+                    const gp_Pnt placed = window.sketch().points().back();
+                    // On the plane it was drawn on - the ground, since nothing
+                    // is locked here.
+                    onPlane = onPlane && std::fabs(placed.Z()) < 1.0e-6;
+                    QPoint back;
+                    onPlane = onPlane && view->projectToScreen(placed, back);
+                    // Snap to Grid is on by default, so the placed point is
+                    // rounded off the exact ray hit before it is stored; at
+                    // the startup framing one grid step is a handful of
+                    // pixels, which is the tolerance here. A projection that
+                    // did not understand parallel rays misses by a fraction of
+                    // the viewport, not by a grid step.
+                    worstPixel = std::max(
+                        worstPixel,
+                        std::hypot(back.x() - probes[p].x(), back.y() - probes[p].y()));
+                }
+                check(onPlane,
+                      "every point clicked in orthographic lands exactly on the "
+                      "sketch plane");
+                check(onPlane && worstPixel < 24.0,
+                      QStringLiteral("and projects back to the pixel it was clicked at, "
+                                     "so ConvertWithProj's parallel-projection ray is "
+                                     "right (worst miss %1 px)")
+                          .arg(worstPixel, 0, 'f', 1));
+
+                trigger(window, QStringLiteral("Cancel Sketch"));
+                orthoAction->trigger();
+                settle(200);
+                check(!view->viewIsOrthographic() && !window.isSketching(),
+                      "the probe leaves perspective and no sketch behind it");
+            }
         }
 
         QAbstractButton* unitButton =
@@ -2703,6 +2885,14 @@ int main(int argc, char* argv[])
         QPoint outlineCorners[4];
         // A fifth point on the plane, for the cursor-readout probe.
         QPoint hoverAt;
+        // The WORLD points those pixels came from, kept so they can be
+        // projected again. Locking a face now flies the camera square onto it
+        // (Phase 7's item 1), so every pixel computed before the lock is aimed
+        // at a camera that has since moved - and a stale pixel does not fail
+        // loudly, it clicks somewhere else and takes a plausible-looking wrong
+        // answer with it.
+        gp_Pnt outlineCornerPoints[4];
+        gp_Pnt hoverPoint;
         // Projecting a centre of mass says where a face WOULD be if nothing
         // stood in front of it; several bodies exist by now and any of them
         // can occlude any other. So each candidate is clicked and the result
@@ -2763,19 +2953,20 @@ int main(int argc, char* argv[])
                     const double du[4] = {-half,  half, half, -half};
                     const double dv[4] = {-half, -half, half,  half};
                     QPoint corners[4];
+                    gp_Pnt cornerPoints[4];
                     bool cornersUsable = true;
                     for (int c = 0; c < 4 && cornersUsable; ++c) {
-                        const gp_Pnt onPlane =
+                        cornerPoints[c] =
                             ElSLib::Value(cu0 + du[c], cv0 + dv[c], candidatePlane);
                         cornersUsable =
-                            view->projectToScreen(onPlane, corners[c]) &&
+                            view->projectToScreen(cornerPoints[c], corners[c]) &&
                             view->rect().adjusted(8, 8, -8, -8).contains(corners[c]);
                     }
                     if (!cornersUsable) continue;
                     QPoint hoverCandidate;
-                    if (!view->projectToScreen(
-                            ElSLib::Value(cu0 + half * 0.5, cv0 + half * 0.5, candidatePlane),
-                            hoverCandidate) ||
+                    const gp_Pnt hoverOnPlane =
+                        ElSLib::Value(cu0 + half * 0.5, cv0 + half * 0.5, candidatePlane);
+                    if (!view->projectToScreen(hoverOnPlane, hoverCandidate) ||
                         !view->rect().adjusted(8, 8, -8, -8).contains(hoverCandidate))
                         continue;
 
@@ -2796,7 +2987,9 @@ int main(int argc, char* argv[])
                     pickedCentre = props.CentreOfMass();
                     screen = at;
                     std::copy(corners, corners + 4, outlineCorners);
+                    std::copy(cornerPoints, cornerPoints + 4, outlineCornerPoints);
                     hoverAt = hoverCandidate;
+                    hoverPoint = hoverOnPlane;
                     break;
                 }
                 if (!picked.IsNull()) break;
@@ -2833,9 +3026,69 @@ int main(int argc, char* argv[])
 
             if (lock && lock->isEnabled()) {
                 const gp_Pln facePlane = BRepAdaptor_Surface(picked).Plane();
+                const gp_Dir faceOutward = outwardNormal(picked);
+                // The pose every pixel above was projected at. The lock flies
+                // the camera away from it (see below), and one probe further
+                // down draws on the GROUND while this face is unlocked -
+                // impossible from a camera squared onto a vertical face, where
+                // the ground plane is exactly edge-on and no ray meets it.
+                const CameraState poseBeforeLock = view->camera().state();
                 lock->trigger();
                 settle(200);
                 check(window.isFaceLocked(), "the face is locked");
+
+                // Phase 7 item 1: locking also FLIES the camera square onto
+                // the face, orthographic, so the face reads at its true shape
+                // before a single point is drawn on it. Asserted as the dot
+                // between the camera's view direction and the face's own
+                // outward normal - "square onto" is a direction, and a check
+                // that only compared azimuths would pass on a face whose
+                // normal happens to share one.
+                const double squareness =
+                    view->camera().viewDirection().Dot(faceOutward);
+                check(squareness < -0.999,
+                      QStringLiteral("the camera flies square onto the face - view "
+                                     "direction antiparallel to its outward normal "
+                                     "(dot %1)")
+                          .arg(squareness));
+                check(view->viewIsOrthographic(),
+                      "and lands orthographic, so nothing converges");
+                check(view->camera().baseProjection() ==
+                          CameraController::Projection::Perspective,
+                      "on loan - the mode the user chose is untouched");
+                check(view->camera().state().target.Distance(pickedCentre) < 1.0,
+                      QStringLiteral("aimed at the face's own centre (%1 mm off)")
+                          .arg(view->camera().state().target.Distance(pickedCentre)));
+
+                // Every pixel this block computed before the lock was aimed at
+                // the camera the lock has just moved. Projected again from the
+                // world points they came from, and checked to still be inside
+                // the viewport - a click that lands outside it does nothing at
+                // all, and "did nothing" is not distinguishable from "did the
+                // wrong thing" three checks later.
+                bool reprojected = view->projectToScreen(pickedCentre, screen) &&
+                                   view->rect().adjusted(8, 8, -8, -8).contains(screen);
+                for (int c = 0; c < 4; ++c) {
+                    reprojected = reprojected &&
+                                  view->projectToScreen(outlineCornerPoints[c],
+                                                        outlineCorners[c]) &&
+                                  view->rect().adjusted(8, 8, -8, -8).contains(
+                                      outlineCorners[c]);
+                }
+                reprojected = reprojected &&
+                              view->projectToScreen(hoverPoint, hoverAt) &&
+                              view->rect().adjusted(8, 8, -8, -8).contains(hoverAt);
+                check(reprojected,
+                      "and the points this block clicks re-project inside the "
+                      "viewport at the camera the flight left");
+
+                // The lock flight's own result, captured at the camera it
+                // left rather than at a pose arranged for a picture. The face
+                // this block locks is a vertical one on a thin slab, so seen
+                // dead on it IS a thin strip - unflattering, and honest; the
+                // elevation pair near the end of this file is the readable
+                // demonstration.
+                view->saveSnapshot(outDir + "/j-locked-face-orthographic.png");
 
                 // The sketch plane must BE the face's plane, not merely something.
                 const gp_Pln sketchPlane = window.sketch().plane();
@@ -3064,6 +3317,14 @@ int main(int argc, char* argv[])
                     check(!stateLabelText(window).contains(QStringLiteral("locked face")),
                           QStringLiteral("and the state label stops saying so (\"%1\")")
                               .arg(stateLabelText(window)));
+                    // The GROUND grid is what this picture is for, and the
+                    // lock flight left the camera square onto a vertical face,
+                    // where the ground is exactly edge-on. Angled for the
+                    // snapshot; put back below, with everything else the box
+                    // probe disturbs.
+                    view->camera().setTemporaryOrtho(false);
+                    view->animateTo(CameraState{});
+                    settle(120);
                     view->saveSnapshot(outDir + "/h-unlocked-ground-grid.png");
                 }
 
@@ -3118,6 +3379,28 @@ int main(int argc, char* argv[])
                 // outline along a direction lying in its own plane - a body
                 // with no volume that BRepPrimAPI_MakePrism calls done.
                 {
+                    // Back to the angled pose this block started from, and
+                    // re-projected onto it. This probe draws its outline on
+                    // the GROUND, which is edge-on to the face-on camera the
+                    // lock flight leaves behind - no ray meets a plane it is
+                    // parallel to, so not one point would land.
+                    view->camera().setTemporaryOrtho(false);
+                    view->animateTo(poseBeforeLock);
+                    settle(120);
+                    bool angledAgain =
+                        view->projectToScreen(pickedCentre, screen) &&
+                        view->rect().adjusted(8, 8, -8, -8).contains(screen);
+                    for (int c = 0; c < 4; ++c) {
+                        angledAgain = angledAgain &&
+                                      view->projectToScreen(outlineCornerPoints[c],
+                                                            outlineCorners[c]) &&
+                                      view->rect().adjusted(8, 8, -8, -8).contains(
+                                          outlineCorners[c]);
+                    }
+                    check(angledAgain && !view->viewIsOrthographic(),
+                          "the camera is angled again, in perspective, with this "
+                          "block's click points back inside the viewport");
+
                     // Selected again first, so "unavailable" below means the
                     // pending outline rather than merely an empty selection.
                     clickAt(view, QPointF(screen));
@@ -6803,8 +7086,8 @@ int main(int argc, char* argv[])
             // The pose the Axonometric view leaves behind is precisely the one
             // the gizmo calls "Persp", which is why the old pose-based
             // condition could never retire this hint from this route.
-            check(axoProbe.view()->viewLabelText() == QStringLiteral("Persp"),
-                  "and the camera it leaves is still one the view label calls Persp");
+            check(axoProbe.view()->viewDirectionName() == QStringLiteral("Persp"),
+                  "and the camera it leaves is still one no named direction fits");
             check(!axoHint->isVisible() && axoHint->currentHint().isEmpty(),
                   "the hint retires all the same - it reads the recorded event, "
                   "not the camera pose");
@@ -9098,6 +9381,126 @@ int main(int argc, char* argv[])
         settle(200);
         check(Theme::spec() == Theme::defaultSpec() && panel && !panel->isVisible(),
               "the appearance block leaves the app back at Graphite with the panel closed");
+    }
+
+    // --- the picture the whole item is for -----------------------------------
+    // A populated document seen dead on in a parallel projection: an
+    // ELEVATION, the drawing a furniture maker actually works from. The same
+    // scene is captured in perspective at the same pose immediately after, so
+    // the pair shows the one difference and nothing else.
+    //
+    // Front rather than the angled pose, because convergence is hardest to
+    // argue about when it is the vertical edges of a body that either stay
+    // parallel or do not - the ground grid tells the same story, but a body
+    // is what the user asked to see.
+    {
+        QAction* orthoForShot = action(window, QStringLiteral("Orthographic"));
+        check(!window.document().solids().empty(),
+              "the document still holds bodies for the elevation capture");
+        if (orthoForShot && !window.document().solids().empty()) {
+            view->setSelectedSolids({});
+            trigger(window, QStringLiteral("Front"));
+            settle(300);
+            trigger(window, QStringLiteral("Fit All"));
+            settle(300);
+
+            if (!orthoForShot->isChecked()) orthoForShot->trigger();
+            settle(250);
+            check(view->viewIsOrthographic(),
+                  "the elevation capture really is taken in a parallel projection");
+            view->saveSnapshot(outDir + "/j-elevation-ortho.png");
+
+            orthoForShot->trigger();
+            settle(250);
+            check(!view->viewIsOrthographic(),
+                  "and its perspective twin at the very same pose");
+            view->saveSnapshot(outDir + "/j-elevation-persp.png");
+
+            // Back to the startup pose for whatever follows, exactly as the
+            // gizmo block restores its own.
+            view->camera().setTemporaryOrtho(false);
+            trigger(window, QStringLiteral("Axonometric"));
+            settle(250);
+        }
+    }
+
+    // --- the base projection is a preference, and it comes back --------------
+    // On exactly the terms the display unit and the theme spec are on: written
+    // only under persistProgress, read once in the constructor, and applied
+    // before the first frame is drawn. Both halves are checked, because a
+    // preference that is stored and never read looks identical to one that was
+    // never stored, and the guard is only worth having if the write it
+    // suppresses actually happens without it.
+    {
+        ScopedTestSettings scopedSettings;
+        {
+            QSettings clean;
+            clean.remove(QStringLiteral("projection"));
+        }
+
+        // A window that must not write.
+        {
+            MainWindow quiet(nullptr, /*persistProgress=*/false);
+            quiet.setAttribute(Qt::WA_ShowWithoutActivating);
+            quiet.resize(900, 700);
+            quiet.show();
+            settle(250);
+            QAction* quietOrtho = action(quiet, QStringLiteral("Orthographic"));
+            check(quietOrtho != nullptr && !quietOrtho->isChecked(),
+                  "a fresh window starts in the perspective the app ships with");
+            if (quietOrtho) quietOrtho->trigger();
+            settle(200);
+            check(quietOrtho != nullptr && quietOrtho->isChecked(),
+                  "and a persistProgress=false window still applies the flip");
+            {
+                QSettings after;
+                check(!after.contains(QStringLiteral("projection")),
+                      QStringLiteral("but stores nothing (\"%1\")")
+                          .arg(after.value(QStringLiteral("projection")).toString()));
+            }
+            quiet.close();
+            settle(120);
+        }
+
+        // ...and one that must, so the check above is about the guard rather
+        // than about a write that never happens at all.
+        {
+            MainWindow persisting(nullptr, /*persistProgress=*/true);
+            persisting.setAttribute(Qt::WA_ShowWithoutActivating);
+            persisting.resize(900, 700);
+            persisting.show();
+            settle(250);
+            QAction* orthoAgain = action(persisting, QStringLiteral("Orthographic"));
+            if (orthoAgain) orthoAgain->trigger();
+            settle(200);
+            QSettings written;
+            check(written.value(QStringLiteral("projection")).toString() ==
+                      QStringLiteral("ortho"),
+                  QStringLiteral("a persisting window stores the base projection (\"%1\")")
+                      .arg(written.value(QStringLiteral("projection")).toString()));
+            persisting.close();
+            settle(120);
+        }
+
+        // The returning user: the stored mode is on the camera before the
+        // window has drawn anything, which is the half a write-only check
+        // cannot see. The LIVE camera is the oracle, not the action's tick -
+        // an action that came back checked over a perspective viewport is
+        // precisely the failure this reads for.
+        {
+            MainWindow returning(nullptr, /*persistProgress=*/true);
+            returning.setAttribute(Qt::WA_ShowWithoutActivating);
+            returning.resize(900, 700);
+            returning.show();
+            settle(300);
+            QAction* returnedOrtho = action(returning, QStringLiteral("Orthographic"));
+            check(returnedOrtho != nullptr && returnedOrtho->isChecked(),
+                  "a returning window comes back with Orthographic checked");
+            check(returning.view() != nullptr && returning.view()->viewIsOrthographic(),
+                  "and the camera is actually drawing that way, not merely ticked");
+            returning.close();
+            settle(120);
+        }
     }
 
     // --- Show tips again restores the walkthrough for a returning user too ---

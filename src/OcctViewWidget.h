@@ -285,20 +285,32 @@ public:
     CameraController& camera() { return myCamera; }
     const CameraController& camera() const { return myCamera; }
 
-    // "Top", "Front", ... when the camera is axis-aligned; "Persp" otherwise.
-    // The ONE source of that string. It used to live in AxisGizmo, which
-    // painted it on a chip below the axes; the chip moved into the app bar
-    // and the logic came here, beside the camera it reads, rather than being
-    // copied to its new consumer. Anything that needs the name of the current
-    // view asks this.
-    QString viewLabelText() const;
+    // The user's chosen projection - the bar's Persp/Ortho toggle, and the one
+    // route to it. Sets the base mode and pushes it straight onto the OCCT
+    // camera; it deliberately does NOT touch the temporary flag, so a toggle
+    // pressed while a face-on look is on loan changes what that look returns
+    // TO rather than ending it early.
+    void setBaseProjection(CameraController::Projection projection);
 
-    // Every string viewLabelText() can return. A consumer that must not
-    // resize as the camera turns - the app bar's view button reserves its
-    // width - sizes itself against this rather than repeating the seven
-    // names, so adding a named view cannot leave a second list behind.
-    // viewLabelText() returns entries OF this list, so the two cannot drift.
-    static const QStringList& viewLabelNames();
+    // Whether the camera is drawing orthographically RIGHT NOW - read off the
+    // live OCCT camera, not off CameraController's own flags. Exposed for
+    // gui_smoke for the same reason solidPresentationTransform() is: a check
+    // that asked our own state machine whether it had told OCCT something
+    // would be its own oracle, and the whole point of the write site in
+    // applyCameraState() is that the two agree.
+    bool viewIsOrthographic() const;
+
+    // "Top", "Front", ... when the camera is axis-aligned; "Persp" otherwise.
+    // The ONE source of that string.
+    //
+    // Nothing in the shell paints it any more - the bar's button showed it
+    // until the Persp/Ortho toggle took that seat, and the projection is what
+    // it reads now. It stays because it is the only place that answers "is the
+    // camera square onto a world axis, and which one", which is what the
+    // suite asserts a snap flight against; a check that recomputed that from
+    // azimuth and elevation itself would be a second copy of the tolerance.
+    // If a direction readout ever comes back, this is what it reads.
+    QString viewDirectionName() const;
 
     // Re-dresses everything on the OCCT side of the bridge from the current
     // Theme spec: the background the view clears to, the two highlight

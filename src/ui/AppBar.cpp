@@ -1,9 +1,5 @@
 #include "AppBar.h"
 
-// For viewLabelNames() alone - the seven strings the view button reserves its
-// width against, read from the one place that produces them rather than
-// copied here.
-#include "OcctViewWidget.h"
 #include "Theme.h"
 
 #include <QAction>
@@ -217,17 +213,20 @@ AppBar::AppBar(QMenuBar* menuBar, QAction* wireframe, QAction* fitAll, QWidget* 
 
     row->addStretch(1);
 
-    myViewLabel = new BarButton(nullptr, this);
-    // Every string viewLabelText() can produce, asked for rather than
-    // repeated, so the button never resizes as the camera turns and a named
-    // view added later cannot leave a stale second list here.
-    const QStringList& viewNames = OcctViewWidget::viewLabelNames();
-    myViewLabel->setText(viewNames.first());
-    myViewLabel->reserveWidthFor(viewNames);
-    myViewLabel->setToolTip(tr("Which way the camera is looking — click to go "
-                               "back to the angled view"));
-    connect(myViewLabel, &QAbstractButton::clicked, this, &AppBar::viewLabelClicked);
-    row->addWidget(myViewLabel);
+    myProjection = new BarButton(nullptr, this);
+    // Both strings it will ever show, so it never resizes when the mode
+    // changes. It reads the mode the user CHOSE, not the one being drawn this
+    // instant: a gizmo arm or a face lock borrows an orthographic look for one
+    // orbit, and a label that flickered to "Ortho" and back for a loan the
+    // user never asked for would be reporting the wrong thing.
+    myProjection->setText(projectionLabel(false));
+    myProjection->reserveWidthFor({projectionLabel(false), projectionLabel(true)});
+    myProjection->setToolTip(tr("How the viewport draws depth — click to swap "
+                                "between perspective and orthographic (O)\n"
+                                "Orthographic keeps parallel edges parallel, which "
+                                "is how you judge a size by eye."));
+    connect(myProjection, &QAbstractButton::clicked, this, &AppBar::projectionClicked);
+    row->addWidget(myProjection);
 
     myUnit = new BarButton(nullptr, this);
     myUnit->setText(QStringLiteral("mm"));
@@ -264,15 +263,25 @@ QString AppBar::wordmark() const
     return QStringLiteral("▰ FurnifyMe");
 }
 
-void AppBar::setViewLabel(const QString& text)
+QString AppBar::projectionLabel(bool orthographic)
 {
-    // cameraChanged fires on every frame of an orbit, so this runs per frame
-    // and almost always with the string already showing. The guard is ours,
-    // deliberately: QAbstractButton::setText happens to early-out on an equal
-    // string today, but relying on that leaves a repaint-per-frame one Qt
-    // release away, with nothing here saying it ever mattered.
-    if (!myViewLabel || myViewLabel->text() == text) return;
-    myViewLabel->setText(text);
+    // The two strings live here and only here - this bar is the only thing
+    // that paints them, and paintedTexts() is how the vocabulary sweep reaches
+    // them. A caller says which mode it means, never which word.
+    return orthographic ? QStringLiteral("Ortho") : QStringLiteral("Persp");
+}
+
+void AppBar::setOrthographic(bool orthographic)
+{
+    // Driven from appStateChanged, which fires at the end of every
+    // updateActions(), so this runs often and almost always with the string
+    // already showing. The guard is ours, deliberately:
+    // QAbstractButton::setText happens to early-out on an equal string today,
+    // but relying on that leaves a repaint-per-change one Qt release away,
+    // with nothing here saying it ever mattered.
+    const QString text = projectionLabel(orthographic);
+    if (!myProjection || myProjection->text() == text) return;
+    myProjection->setText(text);
 }
 
 void AppBar::setUnitLabel(const QString& text)
@@ -283,13 +292,13 @@ void AppBar::setUnitLabel(const QString& text)
     myUnit->setText(text);
 }
 
-QWidget* AppBar::viewLabelButton() const { return myViewLabel; }
+QWidget* AppBar::projectionButton() const { return myProjection; }
 QWidget* AppBar::unitButton() const { return myUnit; }
 
 QStringList AppBar::paintedTexts() const
 {
     QStringList texts{wordmark()};
-    for (const BarButton* button : {myViewLabel, myUnit, myWireframe, myFit}) {
+    for (const BarButton* button : {myProjection, myUnit, myWireframe, myFit}) {
         if (button) texts << button->text();
     }
     return texts;

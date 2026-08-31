@@ -18,9 +18,39 @@ void CameraController::setState(const CameraState& s)
 
 void CameraController::orbit(double dAzimuthDeg, double dElevationDeg)
 {
+    const double azBefore = myState.azimuthDeg;
+    const double elBefore = myState.elevationDeg;
+
     myState.azimuthDeg += dAzimuthDeg;
     myState.elevationDeg =
         std::clamp(myState.elevationDeg + dElevationDeg, kMinElevation, kMaxElevation);
+
+    // Measured against what the camera actually DID, not against the deltas it
+    // was handed. A drag that only pushes elevation further into the clamp
+    // turns nothing, and neither does a zero-delta move event - and a
+    // face-on view that snapped back to perspective because the mouse
+    // twitched inside the dead band would be the same defect as one that
+    // never returned at all.
+    if (myState.azimuthDeg != azBefore || myState.elevationDeg != elBefore)
+        myTemporaryOrtho = false;
+}
+
+void CameraController::lookFrom(const gp_Dir& towardEye)
+{
+    // The inverse of eyePosition(): with the eye at
+    //   target + distance * (-cos(el) sin(az), cos(el) cos(az), sin(el))
+    // a unit direction from the target to the eye gives elevation from its Z
+    // component and azimuth from the other two - the same atan2(-dx, dy) form
+    // setPivot() uses, and deliberately so: two derivations of one convention
+    // is one derivation too many.
+    myState.elevationDeg =
+        std::clamp(std::asin(std::clamp(towardEye.Z(), -1.0, 1.0)) / kDegToRad,
+                   kMinElevation, kMaxElevation);
+
+    const double horizontal = std::sqrt(towardEye.X() * towardEye.X() +
+                                        towardEye.Y() * towardEye.Y());
+    if (horizontal > 1e-9)
+        myState.azimuthDeg = std::atan2(-towardEye.X(), towardEye.Y()) / kDegToRad;
 }
 
 gp_Pnt CameraController::eyePosition() const

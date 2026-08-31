@@ -191,10 +191,11 @@ void OcctViewWidget::initializeViewer()
     myPullArrow.attach(myContext);
     myBevelArrow.attach(myContext);
 
-    // Perspective projection: the turntable model is distance-based, and OCCT's
-    // default orthographic camera zooms by scale, which would make
-    // zoom-toward-cursor meaningless.
-    myView->Camera()->SetProjectionType(Graphic3d_Camera::Projection_Perspective);
+    // The field of view is fixed for the life of the view; WHICH projection is
+    // drawn with it moves, so applyCameraState() owns that and this does not
+    // set it here as well. See applyCameraState() for how the orthographic
+    // scale is kept tied to the turntable's distance, which is what lets one
+    // distance-based camera model serve both projections.
     myView->Camera()->SetFOVy(kFovyDeg);
     applyCameraState();
     myView->MustBeResized();
@@ -986,11 +987,22 @@ bool OcctViewWidget::pointOnSketchPlane(int px, int py, gp_Pnt& out) const
     if (!rayThroughPixel(px, py, ray)) return false;
 
     if (!SketchController::intersectRayWithPlane(ray, mySketchPlane, out)) return false;
-    // A perspective camera has a horizon: an intersection with the sketch plane
+    // A PERSPECTIVE camera has a horizon: an intersection with the sketch plane
     // can lie BEHIND the eye when the cursor is above it. Such a hit is not a
     // point the user can see - reject it.
-    const gp_Vec toHit(ray.Location(), out);
-    if (toHit.Dot(gp_Vec(ray.Direction())) <= 0.0) return false;
+    //
+    // A parallel projection has no horizon. Every ray is the view direction, so
+    // either they all meet the plane or none of them do, and "behind" is only
+    // measured from wherever OCCT's near plane happens to sit - which auto
+    // z-fit moves with the scene. Applying the perspective rule there would
+    // refuse clicks that are perfectly visible, so the guard is skipped rather
+    // than trusted to be harmless. ConvertWithProj itself needs no branch: it
+    // unprojects the pixel at both depths and subtracts, which is projection
+    // agnostic.
+    if (!myCamera.effectiveOrtho()) {
+        const gp_Vec toHit(ray.Location(), out);
+        if (toHit.Dot(gp_Vec(ray.Direction())) <= 0.0) return false;
+    }
 
     if (mySnapEnabled) {
         out = SketchController::snapToPlaneGrid(out, mySketchPlane, mySnapStep);
@@ -1018,11 +1030,13 @@ bool OcctViewWidget::pickWorldPoint(int px, int py, gp_Pnt& out) const
     if (!rayThroughPixel(px, py, ray)) return false;
     const gp_Pln ground(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
     if (!SketchController::intersectRayWithPlane(ray, ground, out)) return false;
-    // A perspective camera has a horizon: an intersection with the ground can
-    // lie BEHIND the eye when the cursor is above it. Such a hit is not a
-    // point the user can see - reject it.
-    const gp_Vec toHit(ray.Location(), out);
-    if (toHit.Dot(gp_Vec(ray.Direction())) <= 0.0) return false;
+    // Same rule, and the same ortho exemption, as pointOnSketchPlane() above -
+    // see there. A wheel notch over the sky in ortho would otherwise fall back
+    // to a plain zoom rather than zooming toward the ground under the cursor.
+    if (!myCamera.effectiveOrtho()) {
+        const gp_Vec toHit(ray.Location(), out);
+        if (toHit.Dot(gp_Vec(ray.Direction())) <= 0.0) return false;
+    }
     return true;
 }
 
@@ -1035,8 +1049,18 @@ bool OcctViewWidget::lastHoverPoint(gp_Pnt& out) const
 
 double OcctViewWidget::worldPerPixel() const
 {
-    // World units per pixel at target depth, for a perspective camera - the
-    // same maths panning already used inline.
+    // World units per pixel at target depth - the same maths panning already
+    // used inline.
+    //
+    // ONE formula for both projections, and that is a property of how
+    // applyCameraState() builds the orthographic frustum rather than a
+    // coincidence. For perspective this is the visible height at the target's
+    // depth divided by the viewport's height. For orthographic the visible
+    // height is the camera's parallel Scale, at every depth - and
+    // applyCameraState() sets that Scale to exactly this height, so the two
+    // agree by construction. If that ever stops being true, every screen-sized
+    // piece of furniture in the scene (dimension arrowheads and gaps, both
+    // drag arrows) is wrong in ortho, and this is the single place to branch.
     return 2.0 * myCamera.state().distance *
            std::tan(0.5 * kFovyDeg * 3.14159265358979323846 / 180.0) /
            std::max(1, height());
@@ -1180,6 +1204,29 @@ void OcctViewWidget::applyCameraState()
     cam->SetEye(eye);
     cam->SetCenter(at);
     cam->SetUp(up);
+
+    // The projection, from the ONE piece of state that decides it. There is no
+    // second camera and no second turntable: the eye, the target and the up
+    // vector above are the same in both modes, and only how the frustum is
+    // built changes.
+    //
+    // The orthographic half needs its half-height set explicitly, because
+    // Graphic3d_Camera keeps `Scale` and `Distance` linked only for a
+    // perspective camera - switching the type alone would leave the parallel
+    // scale at whatever it last was (1000 by default) and the scene would jump
+    // in size. Tying it to 2*distance*tan(FOVy/2) is what makes the two modes
+    // frame the target identically, which in turn is what lets worldPerPixel()
+    // stay one formula for both (see there).
+    //
+    // ORDER MATTERS: SetScale() on a camera still marked perspective moves the
+    // DISTANCE instead, so the type is set first.
+    if (myCamera.effectiveOrtho()) {
+        cam->SetProjectionType(Graphic3d_Camera::Projection_Orthographic);
+        cam->SetScale(worldPerPixel() * std::max(1, height()));
+    } else {
+        cam->SetProjectionType(Graphic3d_Camera::Projection_Perspective);
+    }
+
     myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane());
     // Slots FIRST, redraw second. A slot on cameraChanged() that changes the
     // scene - PullArrow rebuilds its 3D arrow, which is sized in screen
@@ -1266,26 +1313,44 @@ void OcctViewWidget::animateTo(const CameraState& goal)
 }
 
 namespace {
-// Positions in OcctViewWidget::viewLabelNames(). Naming them keeps
-// viewLabelText() readable while it returns entries OF that list rather than
-// its own copies of the same seven literals.
+// Positions in viewDirectionNames(). Naming them keeps viewDirectionName()
+// readable while it returns entries OF that list rather than its own copies of
+// the same seven literals.
 enum ViewName { NamePersp = 0, NameTop, NameBottom, NameFront, NameBack, NameRight, NameLeft };
-}  // namespace
 
-const QStringList& OcctViewWidget::viewLabelNames()
+// File-local since the app bar's button stopped reserving its width against
+// these: the button shows the projection now, and the only remaining consumer
+// of the names is the function immediately below them.
+const QStringList& viewDirectionNames()
 {
-    // Built once. viewLabelText() runs on every camera frame, so this must not
-    // allocate a seven-string list per orbit step.
+    // Built once. viewDirectionName() can run on every camera frame, so this
+    // must not allocate a seven-string list per orbit step.
     static const QStringList names = {
         QStringLiteral("Persp"),  QStringLiteral("Top"),   QStringLiteral("Bottom"),
         QStringLiteral("Front"),  QStringLiteral("Back"),  QStringLiteral("Right"),
         QStringLiteral("Left")};
     return names;
 }
+}  // namespace
 
-QString OcctViewWidget::viewLabelText() const
+void OcctViewWidget::setBaseProjection(CameraController::Projection projection)
 {
-    const QStringList& names = viewLabelNames();
+    myCamera.setBaseProjection(projection);
+    // Straight onto the OCCT camera through the one write site, which also
+    // redraws and tells every camera-following overlay.
+    applyCameraState();
+}
+
+bool OcctViewWidget::viewIsOrthographic() const
+{
+    if (myView.IsNull()) return myCamera.effectiveOrtho();
+    return myView->Camera()->ProjectionType() ==
+           Graphic3d_Camera::Projection_Orthographic;
+}
+
+QString OcctViewWidget::viewDirectionName() const
+{
+    const QStringList& names = viewDirectionNames();
     const CameraState& state = myCamera.state();
     const double el = state.elevationDeg;
     // Azimuth normalized to (-180, 180] for comparison.
