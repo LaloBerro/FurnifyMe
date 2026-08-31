@@ -111,6 +111,12 @@ public:
     static constexpr double kMinScale = 0.05;
     static constexpr double kMaxScale = 20.0;
 
+    // How long after the last appearance edit the spec is written to
+    // QSettings - see persistAppearance() for why that write is debounced at
+    // all. Public so the suite waits on the real number rather than a second
+    // copy of it that could drift out of step with this one.
+    static constexpr int kAppearanceWriteMs = 400;
+
     // The document id of the body `face` belongs to, or 0. Derived by walking
     // the document rather than remembered: face indices are not stable across
     // a rebuild (CLAUDE.md's topological-naming warning), so a cached
@@ -205,6 +211,10 @@ signals:
     // MainWindow having to know any of them has one.
     void progressReset();
 
+protected:
+    // Flushes a pending appearance write - see myAppearanceWrite.
+    void closeEvent(QCloseEvent* event) override;
+
 private slots:
     void onStartSketch();
     void onFinishSketch();
@@ -297,6 +307,15 @@ private:
     void onThemeChanged();
     // Writes the live spec to QSettings under the same guard as the learning
     // progress and the display unit. A no-op for the suite's windows.
+    //
+    // DEBOUNCED, unlike recordProgress()'s write-through. A learning event
+    // happens once per user action; a theme edit happens once per mouse MOVE
+    // inside the colour picker's wheel, and each of those already costs a
+    // full stylesheet re-polish and a grid rebuild. Adding a registry write
+    // and a file sync to every frame of a drag is the one part of that cost
+    // that buys nothing: nobody needs the value from halfway through a
+    // gesture to survive a crash. kAppearanceWriteMs after the last edit,
+    // so one write per editing burst however long the drag was.
     void persistAppearance();
     void runBoolean(int kind);   // ModelingOps::BooleanKind as int, to keep it out of the header
     // The one place "the camera was moved to a named direction" is recorded.
@@ -320,6 +339,12 @@ private:
 
     UserProgress myProgress;
     bool myPersistProgress = true;
+    // The debounce behind persistAppearance(). Single-shot and restarted by
+    // every edit, so it fires once the user stops moving. closeEvent() flushes
+    // it, because a window shut inside the debounce window must not lose the
+    // colour the user just chose - a debounce that can drop the last write is
+    // not a debounce, it is a bug with a timer.
+    class QTimer* myAppearanceWrite = nullptr;
 
     QAction* myStartSketchAction = nullptr;
     QAction* myFinishSketchAction = nullptr;

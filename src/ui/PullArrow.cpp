@@ -115,6 +115,15 @@ void PullArrowRenderer::clear(bool updateViewer)
     myObjects.clear();
 }
 
+void PullArrowRenderer::reapplyTheme()
+{
+    // Nothing on screen, nothing to recolour - and re-showing here would make
+    // an arrow appear that no gesture asked for.
+    if (!isShowing()) return;
+    myForceRebuild = true;
+    show(myCentre, myOutward, myViewDirection, myWorldPerPixel);
+}
+
 gp_Pnt PullArrowRenderer::head() const
 {
     return myCentre.Translated(gp_Vec(myOutward) * myHalfLength);
@@ -161,13 +170,16 @@ void PullArrowRenderer::show(const gp_Pnt& centre, const gp_Dir& outward,
     // differently, and 1% of scale is below the point where the arrow's
     // pixel length changes at all.
     constexpr double kHalfDegree = 0.0087266;   // radians
-    if (isShowing() && centre.IsEqual(myCentre, 1.0e-9) &&
+    if (!myForceRebuild && isShowing() && centre.IsEqual(myCentre, 1.0e-9) &&
         outward.IsEqual(myOutward, 1.0e-9) &&
         viewDirection.IsEqual(myViewDirection, kHalfDegree) &&
         std::fabs(worldPerPixel - myWorldPerPixel) <=
             std::max(myWorldPerPixel, 1.0e-9) * 0.01) {
         return;
     }
+    // Consumed here, not at the end: every path below rebuilds, and a flag
+    // left set would defeat the cache for the next camera step too.
+    myForceRebuild = false;
 
     clear(/*updateViewer=*/false);
 

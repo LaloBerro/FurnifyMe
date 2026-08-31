@@ -7,6 +7,7 @@
 #include "Theme.h"
 
 #include <QEvent>
+#include <QFontMetrics>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPainter>
@@ -16,11 +17,16 @@
 #include <algorithm>
 
 namespace {
-// The card's own width. Fixed rather than min/preferred: this is a floating
-// drawer anchored beside a fixed-width rail, and a card that changed width
-// with the longest body name would move the viewport's usable area around
-// under the user.
-constexpr int kWidth = 240;
+// The card's width AT THE SHIPPED TYPE SCALE. Fixed rather than
+// min/preferred: this is a floating drawer anchored beside a fixed-width
+// rail, and a card that changed width with the longest body name would move
+// the viewport's usable area around under the user. cardWidth() grows it by
+// what a larger base size actually costs, and by nothing else.
+constexpr int kBaseWidth = 240;
+// What kBaseWidth was chosen to hold: a body name beside a comfortably large
+// dimension string. Specimens, not live content - see cardWidth().
+QString nameSpecimen() { return QStringLiteral("Body 88"); }
+QString sizeSpecimen() { return QStringLiteral("482.9 × 590 × 10 mm"); }
 // The same radius the rail wears (ToolCluster's kCardRadius), not the
 // family's default 8: the two cards sit side by side against the same top
 // edge, and a different corner between immediate neighbours reads as a
@@ -47,7 +53,7 @@ ItemsPanel::ItemsPanel(const DocumentModel* document, OcctViewWidget* view, QWid
     // splitter.
     setAttribute(Qt::WA_NoSystemBackground);
     setAttribute(Qt::WA_NoMousePropagation);
-    setFixedWidth(kWidth);
+    setFixedWidth(cardWidth());
 
     myOuter = new QVBoxLayout(this);
     myOuter->setContentsMargins(kPad, kPad, kPad, kPad);
@@ -63,46 +69,109 @@ ItemsPanel::ItemsPanel(const DocumentModel* document, OcctViewWidget* view, QWid
     myOuter->addLayout(myRows);
     myOuter->addStretch(1);
 
-    // LAST, and the order is load-bearing: applyTheme() ends in refresh(),
-    // which walks myRows, so it cannot run before that layout exists. The
-    // title's stylesheet bakes in two Theme values, so it is written there
-    // rather than here - and re-written on every Theme broadcast. The ROWS
-    // need no such hook: refresh() rebuilds them from Theme every time, and
-    // MainWindow already drives it from appStateChanged.
+    // refresh() FIRST and applyTheme() second, and the order is load-bearing
+    // both ways: refresh() builds the rows applyTheme() then restyles, and
+    // applyTheme() walks myRowList, which refresh() is what fills.
+    refresh();
     applyTheme();
     connect(Theme::notifier(), &Theme::Notifier::changed, this, &ItemsPanel::applyTheme);
 }
 
+int ItemsPanel::cardWidth()
+{
+    // The DIFFERENCE between what a specimen row measures now and what it
+    // measured under the shipped scale, added to the width that scale was
+    // designed around. At defaultSpec() the two measurements are identical
+    // and this returns exactly kBaseWidth, so opening the Appearance panel
+    // and closing it again cannot nudge the drawer; at 13pt it returns
+    // whatever the bigger type actually needs.
+    //
+    // Deriving from the ACTUAL longest body name instead would resize the
+    // drawer every time a body was made or deleted, which is the behaviour
+    // the fixed width exists to prevent. Specimens keep it stable.
+    const Theme::Spec shipped = Theme::defaultSpec();
+    auto measure = [](const QFont& name, const QFont& size) {
+        return QFontMetrics(name).horizontalAdvance(nameSpecimen()) +
+               QFontMetrics(size).horizontalAdvance(sizeSpecimen());
+    };
+    const int now = measure(Theme::bodyFont(), Theme::labelFont());
+    const int atShippedScale = measure(Theme::bodyFontFor(shipped), Theme::labelFontFor(shipped));
+    return std::max(kBaseWidth, kBaseWidth + now - atShippedScale);
+}
+
 void ItemsPanel::applyTheme()
 {
-    if (!myTitle) return;
-    // A per-widget stylesheet wins over the app-wide one regardless of
-    // selector specificity, so the size sticks reliably here - this is a
-    // panel title, Theme::titleFont(). `background: transparent` is not
-    // decoration: the app-wide sheet paints every QWidget chrome-black, and a
-    // label that stamps its own rectangle over this card would be a black bar
-    // across it.
-    myTitle->setStyleSheet(QStringLiteral("background: transparent; color: %1; "
-                                          "font-weight: 600; font-size: %2pt;")
-                               .arg(Theme::textMuted().name())
-                               .arg(Theme::titleFont().pointSizeF()));
-    // The card's height comes from its content, and the title just changed
-    // size - refresh() is the one path that re-measures this drawer, so it is
-    // the one used here rather than a second copy of that arithmetic.
-    refresh();
+    // Restyle in place - NOT refresh(). See the header: a theme edit arrives
+    // once per mouse move inside the colour picker, and rebuilding every row
+    // per frame is work that changes nothing about which bodies exist.
+    if (myTitle) {
+        // A per-widget stylesheet wins over the app-wide one regardless of
+        // selector specificity, so the size sticks reliably here - this is a
+        // panel title, Theme::titleFont(). `background: transparent` is not
+        // decoration: the app-wide sheet paints every QWidget chrome-black,
+        // and a label that stamps its own rectangle over this card would be a
+        // black bar across it.
+        myTitle->setStyleSheet(QStringLiteral("background: transparent; color: %1; "
+                                              "font-weight: 600; font-size: %2pt;")
+                                   .arg(Theme::textMuted().name())
+                                   .arg(Theme::titleFont().pointSizeF()));
+    }
+
+    for (const Row& row : myRowList) {
+        if (row.name)
+            row.name->setStyleSheet(QStringLiteral("background: transparent; color: %1;")
+                                        .arg(Theme::text().name()));
+        if (row.size)
+            row.size->setStyleSheet(QStringLiteral("background: transparent; color: %1; "
+                                                   "font-size: %2pt;")
+                                        .arg(Theme::textMuted().name())
+                                        .arg(Theme::labelFont().pointSizeF()));
+        // Rasterised out of text()/textDisabled() when it was built, so it is
+        // pixels rather than a description - the same cached-appearance value
+        // ToolChip::applyTheme() has to rebuild.
+        if (row.eye) row.eye->setIcon(IconSet::icon(IconSet::Glyph::SelectSolid));
+    }
+
+    // The empty state's message is a plain child of myRows with no entry in
+    // myRowList; it reads bodyFont() through its own stylesheet, so it is
+    // restyled by the same walk the rows would need. Found rather than
+    // stored: it exists only while the list is empty, and a pointer to it
+    // would be a fifth thing to keep in step.
+    if (myRowList.empty()) {
+        for (QLabel* empty : findChildren<QLabel*>()) {
+            if (empty == myTitle) continue;
+            empty->setStyleSheet(QStringLiteral("background: transparent; color: %1; "
+                                                "font-size: %2pt;")
+                                     .arg(Theme::textMuted().name())
+                                     .arg(Theme::bodyFont().pointSizeF()));
+        }
+    }
+
+    // The type scale moved, so both of this card's dimensions have to be
+    // re-derived: its width from cardWidth(), its height from the layout that
+    // has just been handed bigger labels.
+    setFixedWidth(cardWidth());
+    myRows->invalidate();
+    myOuter->invalidate();
+    myOuter->activate();
+    updateGeometry();
+    adjustSize();
+
+    if (myView) showSelection(myView->selectedSolidIds());
 }
 
 QSize ItemsPanel::sizeHint() const
 {
-    if (!myOuter) return QSize(kWidth, kMinHeight);
+    const int cw = width() > 0 ? width() : cardWidth();
+    if (!myOuter) return QSize(cw, kMinHeight);
     // heightForWidth, not totalSizeHint: the empty-state message word-wraps,
     // and a QBoxLayout's plain size hint asks a wrapping QLabel for a size it
     // can only guess at. Asking for the height AT this card's actual width is
     // the one question that has a right answer.
-    const int wrapped = myOuter->hasHeightForWidth() ? myOuter->heightForWidth(kWidth)
+    const int wrapped = myOuter->hasHeightForWidth() ? myOuter->heightForWidth(cw)
                                                      : myOuter->totalSizeHint().height();
-    return QSize(kWidth, std::max(std::max(wrapped, myOuter->totalMinimumSize().height()),
-                                  kMinHeight));
+    return QSize(cw, std::max(std::max(wrapped, myOuter->totalMinimumSize().height()),
+                              kMinHeight));
 }
 
 void ItemsPanel::paintEvent(QPaintEvent* /*event*/)
@@ -117,6 +186,47 @@ void ItemsPanel::paintEvent(QPaintEvent* /*event*/)
 
 void ItemsPanel::refresh()
 {
+    // What the rows would SAY if they were rebuilt right now: id, name,
+    // dimension text and the eye's state, for every body in order.
+    //
+    // This exists because refresh() is driven by appStateChanged, which fires
+    // at the end of every updateActions() - including the one a Theme edit
+    // ends with, and a colour picker emits one per mouse MOVE. Rebuilding the
+    // whole list per frame of a drag changes nothing the user can see.
+    // Moving the connection to documentChanged instead is NOT the fix:
+    // appStateChanged is deliberately what drives this, because a unit switch
+    // touches no document and still has to re-read every dimension shown here
+    // (see MainWindow's constructor). Comparing what the rows would say keeps
+    // that case working - a unit switch changes every dimension string, so it
+    // rebuilds - while a theme edit, which changes none of them, does not.
+    //
+    // Costs one formatDimensions() per body, which is exactly what the
+    // rebuild below already paid on every call.
+    QString signature;
+    if (myDocument) {
+        for (const DocumentModel::Solid& solid : myDocument->solids()) {
+            signature += QString::number(solid.id) + QLatin1Char('\x1f') +
+                         QString::fromStdString(solid.name) + QLatin1Char('\x1f') +
+                         QString::fromStdString(Measure::formatDimensions(solid.shape)) +
+                         QLatin1Char('\x1f') +
+                         ((myView && myView->isSolidVisible(solid.id)) ? QLatin1Char('1')
+                                                                       : QLatin1Char('0')) +
+                         QLatin1Char('\x1e');
+        }
+    }
+    // myRowsBuilt, not `signature.isEmpty()`: an empty document produces an
+    // empty signature, and the very first call has to build the empty state
+    // rather than mistake "nothing has been built" for "nothing changed".
+    if (myRowsBuilt && signature == myRowSignature) {
+        // Selection is NOT part of the signature - it changes far more often
+        // than the list does and is a stylesheet swap rather than a rebuild -
+        // so it is applied on this path too.
+        if (myView) showSelection(myView->selectedSolidIds());
+        return;
+    }
+    myRowSignature = signature;
+    myRowsBuilt = true;
+
     // Rebuild wholesale: the list is short, and diffing it would be more code
     // than it saves.
     while (QLayoutItem* item = myRows->takeAt(0)) {
@@ -137,9 +247,7 @@ void ItemsPanel::refresh()
         }
         delete item;
     }
-    myRowWidgets.clear();
-    myRowIds.clear();
-    myRowTexts.clear();
+    myRowList.clear();
     if (!myDocument) return;
 
     for (const DocumentModel::Solid& solid : myDocument->solids()) {
@@ -194,12 +302,11 @@ void ItemsPanel::refresh()
         // it. adjustSize() below has to see the real rows, now, not one event
         // loop turn from now.
         row->show();
-        myRowWidgets.push_back(row);
-        myRowIds.push_back(id);
-        myRowTexts.push_back(name->text() + QLatin1Char(' ') + size->text());
+        myRowList.push_back(
+            Row{row, name, size, eye, id, name->text() + QLatin1Char(' ') + size->text()});
     }
 
-    if (myRowWidgets.empty()) {
+    if (myRowList.empty()) {
         auto* empty = new QLabel(tr("No bodies yet.\n\nPress Ctrl+K and click points on "
                                     "the ground to draw your first outline."),
                                  this);
@@ -258,10 +365,9 @@ bool ItemsPanel::eventFilter(QObject* watched, QEvent* event)
 
 void ItemsPanel::showSelection(const std::vector<int>& ids)
 {
-    for (std::size_t i = 0; i < myRowWidgets.size(); ++i) {
-        const bool selected =
-            std::find(ids.begin(), ids.end(), myRowIds[i]) != ids.end();
-        myRowWidgets[i]->setStyleSheet(
+    for (const Row& row : myRowList) {
+        const bool selected = std::find(ids.begin(), ids.end(), row.id) != ids.end();
+        row.widget->setStyleSheet(
             selected ? QStringLiteral("#itemsRow { background-color: %1; "
                                       "border-radius: 4px; }")
                            .arg(Theme::chipActive().name())

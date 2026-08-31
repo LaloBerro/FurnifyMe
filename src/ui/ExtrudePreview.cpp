@@ -9,6 +9,7 @@
 
 #include <QCoreApplication>
 #include <QEvent>
+#include <QFontMetrics>
 #include <QHideEvent>
 #include <QKeyEvent>
 #include <QLineEdit>
@@ -17,6 +18,8 @@
 #include <QPainterPath>
 #include <QResizeEvent>
 #include <QShowEvent>
+
+#include <algorithm>
 
 namespace {
 constexpr int kPad = 12;
@@ -45,23 +48,6 @@ ExtrudePreview::ExtrudePreview(MainWindow* window, OcctViewWidget* view)
     // means the field cannot be a child of this widget.
     setAttribute(Qt::WA_NoSystemBackground);
     setAttribute(Qt::WA_TransparentForMouseEvents);
-    // Grown by Theme::surfaceShadowMargin() per side beyond the content
-    // size. That margin is zero - the family paints no shadow and reserves no
-    // room for one (see Theme.h) - so this panel's widget rect and its
-    // painted card are the same rectangle; paintEvent(), fieldRect() and
-    // hintRect() apply the same zero on the inside, the same pattern as
-    // WalkthroughPanel's sizeHint() and Toast's.
-    {
-        const int margin = Theme::surfaceShadowMargin();
-        // Through Theme::wholeDevicePixels(), the same as PullArrow and the
-        // round/flatten chip - see Theme.h. This card is anchored rather than
-        // tracking a projected point, so its position half is the overlay's
-        // business, but its size is its own.
-        setFixedSize(Theme::wholeDevicePixels(
-            QSize(kWidth + margin * 2,
-                  kPad * 2 + kLabelHeight + kFieldHeight + kHintGap + kHintHeight +
-                      margin * 2)));
-    }
 
     myField = new QLineEdit(view);
     // Closes the same class of bug documented on HintBalloon's balloon and
@@ -75,12 +61,10 @@ ExtrudePreview::ExtrudePreview(MainWindow* window, OcctViewWidget* view)
     // does NOT follow QApplication::setFont, which is exactly why the Theme
     // broadcast has to put it back: the type-scale sweep reads this widget's
     // own font, and a field left at the old base size is a fifth size in a
-    // four-size scale.
-    myField->setFont(Theme::bodyFont());
-    connect(Theme::notifier(), &Theme::Notifier::changed, this, [this] {
-        myField->setFont(Theme::bodyFont());
-        update();
-    });
+    // four-size scale. Set through applyTheme(), which also sizes the card.
+    applyTheme();
+    connect(Theme::notifier(), &Theme::Notifier::changed, this,
+            &ExtrudePreview::applyTheme);
     // Enter and Escape are NOT wired here any more - not to returnPressed,
     // not to a filter on the field. Both are claimed application-wide for as
     // long as this panel is visible; see eventFilter() for the whole story.
@@ -401,6 +385,42 @@ void ExtrudePreview::markInvalid(bool invalid)
                                "QLineEdit { background-color: %1; color: %2; "
                                "border: 1px solid %3; border-radius: 0px; padding: 2px 6px; }")
                                .arg(Theme::chip().name(), Theme::text().name(), border.name()));
+}
+
+void ExtrudePreview::applyTheme()
+{
+    // MEASURED with the fonts paintEvent() actually draws these two strings
+    // with, not assumed from kWidth alone. kWidth was chosen against the
+    // shipped 10pt scale and stays the floor, so the card is exactly the size
+    // it has always been at the default look - but at 13pt "Enter adds the
+    // body — Esc cancels" is wider than 230px and used to run off the card.
+    // BevelArrow::applyTheme() is the same measurement three files away.
+    const QFontMetrics label(Theme::labelFont());
+    const QFontMetrics badge(Theme::badgeFont());
+    const int content = std::max(label.horizontalAdvance(labelText()),
+                                 badge.horizontalAdvance(hintText()));
+
+    // Grown by Theme::surfaceShadowMargin() per side beyond the content
+    // size. That margin is zero - the family paints no shadow and reserves no
+    // room for one (see Theme.h) - so this panel's widget rect and its
+    // painted card are the same rectangle; paintEvent(), fieldRect() and
+    // hintRect() apply the same zero on the inside, the same pattern as
+    // WalkthroughPanel's sizeHint() and Toast's.
+    const int margin = Theme::surfaceShadowMargin();
+    // Through Theme::wholeDevicePixels(), the same as PullArrow and the
+    // round/flatten chip - see Theme.h. This card is anchored rather than
+    // tracking a projected point, so its position half is the overlay's
+    // business, but its size is its own.
+    setFixedSize(Theme::wholeDevicePixels(
+        QSize(std::max(kWidth, content + kPad * 2) + margin * 2,
+              kPad * 2 + kLabelHeight + kFieldHeight + kHintGap + kHintHeight +
+                  margin * 2)));
+
+    if (myField) myField->setFont(Theme::bodyFont());
+    // The field is a sibling positioned against this card's rectangle, which
+    // has just moved.
+    syncFieldGeometry();
+    update();
 }
 
 QStringList ExtrudePreview::paintedTexts() const

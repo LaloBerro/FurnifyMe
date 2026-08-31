@@ -23,10 +23,15 @@
 // installed at startup) shows up here through the same Theme::notifier()
 // broadcast every other widget listens to.
 //
-// The colour picker is MODELESS - QColorDialog::open(), never exec(). The
-// app's no-modal law is about never blocking the user to say something, and a
-// picker that froze the application would also make the live preview - the
-// entire point of picking a colour here - impossible to see.
+// The colour picker is MODELESS, and getting there takes show() rather than
+// either of the two calls that look right. exec() spins a nested event loop
+// and freezes the application outright; QDialog::open() returns immediately
+// but forces Qt::WindowModal on the way past, which still locks the rail, the
+// viewport and the toast's Undo pill while a colour is being chosen -
+// setModal(false) does not survive it. The app's no-modal law is that nothing
+// blocks, and a picker with a live preview has a second reason to obey it:
+// the whole point is that the user watches their model re-dress while they
+// choose, which they cannot do if they cannot orbit it.
 #include <QColor>
 #include <QString>
 #include <QStringList>

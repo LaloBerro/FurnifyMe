@@ -74,6 +74,16 @@ public:
     void clear(bool updateViewer = true);
     bool isShowing() const { return !myObjects.empty(); }
 
+    // Rebuilds whatever is on screen, from the parameters it was built with.
+    //
+    // Exists for exactly one caller: a Theme edit. The arrow's colour is
+    // Theme::accent() baked into the AIS object at build time, and show()
+    // early-outs on an unchanged pose - so a theme change alone left a live
+    // arrow wearing the old accent until the camera happened to move far
+    // enough to defeat the cache. A no-op when nothing is showing, so it
+    // cannot make an arrow appear.
+    void reapplyTheme();
+
     // The line a drag is measured against: the outward normal through the
     // face centre. Meaningful only while showing.
     gp_Lin axis() const { return gp_Lin(myCentre, myOutward); }
@@ -91,6 +101,10 @@ private:
     // call that changes nothing from one that does - see the early-out there.
     gp_Dir myViewDirection{0.0, 0.0, -1.0};
     double myWorldPerPixel = 0.0;
+    // Defeats show()'s pose cache for one call - the appearance changed, not
+    // the geometry, and the cache key knows nothing about appearance. Set by
+    // reapplyTheme() and cleared by the show() it drives.
+    bool myForceRebuild = false;
 };
 
 class PullArrow : public QWidget {

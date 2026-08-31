@@ -1369,6 +1369,15 @@ void OcctViewWidget::applyTheme()
     myGridRenderer.invalidate();
     myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane());
 
+    // The same problem one presentation over: both drag arrows bake
+    // Theme::accent() into the AIS object at build time and their show()
+    // early-outs on an unchanged pose, so a live arrow kept the old accent.
+    // Both are no-ops when nothing is showing. The edge-length annotation
+    // needs no call here - MainWindow already drives refreshDimension() from
+    // appStateChanged, which onThemeChanged() ends by emitting.
+    myPullArrow.reapplyTheme();
+    myBevelArrow.reapplyTheme();
+
     myContext->UpdateCurrentViewer();
     update();
 }

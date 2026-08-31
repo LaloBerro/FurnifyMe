@@ -94,6 +94,14 @@ void setSpec(const Spec& next);
 // unrecognised KEY is ignored rather than refused: that is the half a future
 // build needs in order to remove a token without stranding everyone's stored
 // appearance.
+//
+// A `family=` naming a font this machine does not have is neither refused nor
+// taken: it falls back to the default family. Refusing would throw away every
+// colour in the string over a font, and taking it would silently substitute
+// whatever Qt's matcher landed on while the panel's combo showed a family
+// that is not installed - a spec that reads back as something other than what
+// was stored. This is the one field where "the value is wrong" and "the
+// string is corrupt" are different things.
 QString serializeSpec();
 QString serializeSpec(const Spec& s);
 bool deserializeSpec(const QString& text, Spec& out);
@@ -180,6 +188,22 @@ QFont titleFont();      // panel and sheet titles
 QFont bodyFont();       // everything the user reads
 QFont labelFont();      // chip labels, status bar
 QFont badgeFont();      // shortcut badges
+
+// The same four, as they would be under an arbitrary spec.
+//
+// For the one thing a widget cannot do with the live fonts alone: measure how
+// much WIDER its content is than it was under the look the app shipped with.
+// A card whose fixed size was chosen against the default scale (the items
+// drawer's 240px is the case that needed this) reserves
+// `shipped + (measured now - measured at defaultSpec())`, which is exactly
+// the shipped number at the shipped scale and grows only by what the type
+// change actually costs. Deriving that at the call site would mean copying
+// the scale's offsets out of this file, which is the fifth copy the four-size
+// law exists to prevent.
+QFont titleFontFor(const Spec& s);
+QFont bodyFontFor(const Spec& s);
+QFont labelFontFor(const Spec& s);
+QFont badgeFontFor(const Spec& s);
 
 // Motion tokens for ordinary UI transitions - hover, focus, a panel
 // appearing. NOT for the viewport camera: OcctViewWidget::animateTo() keeps

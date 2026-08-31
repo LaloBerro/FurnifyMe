@@ -360,11 +360,17 @@ void AppearancePanel::openColourDialog(const QString& id)
     auto* dialog = new QColorDialog(current, this);
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->setWindowTitle(tr("%1 colour").arg(nameForToken(id)));
-    // MODELESS - open(), never exec(). exec() would spin a nested event loop
-    // and freeze the application while the user chose, which is both against
-    // the no-modal law and fatal to the live preview this panel exists for.
+    // GENUINELY modeless, and it is show() rather than open() that makes it
+    // so. Both return immediately - neither spins exec()'s nested event loop -
+    // but QDialog::open() FORCES Qt::WindowModal on the way past, which locks
+    // the rail, the viewport and the toast's Undo pill for as long as a
+    // colour is being chosen. That is a dialog blocking the user to ask a
+    // question, which is the thing this app does not do; and it is
+    // self-defeating besides, since the live preview exists precisely so the
+    // user can look at their model while they choose. setModal(false) alone
+    // does not survive open(), which is why this is a different call and not
+    // an extra line.
     dialog->setModal(false);
-    dialog->setOption(QColorDialog::NoButtons, false);
 
     // Live on every move inside the picker, not only on OK: this is the one
     // place in the app where a user judges a value by what it looks like.
@@ -379,7 +385,7 @@ void AppearancePanel::openColourDialog(const QString& id)
     });
 
     myDialog = dialog;
-    dialog->open();
+    dialog->show();
 }
 
 QWidget* AppearancePanel::swatchFor(const QString& id) const

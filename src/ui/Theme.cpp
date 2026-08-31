@@ -90,15 +90,16 @@ Spec& mutableSpec()
     return live;
 }
 
-QFont scaledFont(double offset, bool bold)
+QFont scaledFontFor(const Spec& s, double offset, bool bold)
 {
-    const Spec& s = spec();
     QFont f;
     if (!s.fontFamily.isEmpty()) f.setFamily(s.fontFamily);
     f.setPointSizeF(s.basePt + offset);
     f.setBold(bold);
     return f;
 }
+
+QFont scaledFont(double offset, bool bold) { return scaledFontFor(spec(), offset, bold); }
 
 // Palette + stylesheet + application font, from whatever spec() currently
 // holds. apply() runs it once at startup and setSpec() runs it again on every
@@ -294,7 +295,18 @@ bool deserializeSpec(const QString& text, Spec& out)
             // An empty family is legitimate - it means "the platform
             // default", which is what an app whose bundled font failed to
             // load has been using all along.
-            parsed.fontFamily = value;
+            //
+            // Anything else is checked against what this machine actually
+            // has. A family that was uninstalled, or a spec carried to
+            // another machine, otherwise sailed straight through: Qt's
+            // matcher would quietly substitute something, the app would be
+            // set in a font nobody chose, and the panel's combo would name a
+            // family that is not in its own list. Falling back is not the
+            // same as refusing - see the header: a missing font must not cost
+            // the user every colour in the string.
+            parsed.fontFamily = value.isEmpty() || QFontDatabase::families().contains(value)
+                                    ? value
+                                    : defaultSpec().fontFamily;
             sawSomething = true;
             continue;
         }
@@ -354,6 +366,11 @@ QFont titleFont() { return scaledFont(kTitleOffset, /*bold=*/true); }
 QFont bodyFont()  { return scaledFont(kBodyOffset, /*bold=*/false); }
 QFont labelFont() { return scaledFont(kLabelOffset, /*bold=*/false); }
 QFont badgeFont() { return scaledFont(kBadgeOffset, /*bold=*/false); }
+
+QFont titleFontFor(const Spec& s) { return scaledFontFor(s, kTitleOffset, /*bold=*/true); }
+QFont bodyFontFor(const Spec& s)  { return scaledFontFor(s, kBodyOffset, /*bold=*/false); }
+QFont labelFontFor(const Spec& s) { return scaledFontFor(s, kLabelOffset, /*bold=*/false); }
+QFont badgeFontFor(const Spec& s) { return scaledFontFor(s, kBadgeOffset, /*bold=*/false); }
 
 int motionMs() { return 160; }
 QEasingCurve motionCurve() { return QEasingCurve(QEasingCurve::OutCubic); }

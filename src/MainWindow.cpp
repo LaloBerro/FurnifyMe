@@ -39,8 +39,10 @@
 #include <QFileDialog>
 #include <QLabel>
 #include <QMenuBar>
+#include <QCloseEvent>
 #include <QSettings>
 #include <QStatusBar>
+#include <QTimer>
 #include <QtGlobal>
 
 #include <algorithm>
@@ -870,8 +872,36 @@ void MainWindow::onThemeChanged()
 void MainWindow::persistAppearance()
 {
     if (!myPersistProgress) return;
-    QSettings settings;
-    settings.setValue(QStringLiteral("appearance"), Theme::serializeSpec());
+
+    // Built on first use rather than in the constructor: a window that never
+    // sees a theme edit never creates one, and this is the only place that
+    // can say whether the guard above let us get this far.
+    if (!myAppearanceWrite) {
+        myAppearanceWrite = new QTimer(this);
+        myAppearanceWrite->setSingleShot(true);
+        myAppearanceWrite->setInterval(kAppearanceWriteMs);
+        connect(myAppearanceWrite, &QTimer::timeout, this, [this] {
+            QSettings settings;
+            settings.setValue(QStringLiteral("appearance"), Theme::serializeSpec());
+        });
+    }
+    // start() on a running single-shot timer RESTARTS it, which is the whole
+    // debounce: a drag through the colour wheel keeps pushing the deadline
+    // out and lands exactly one write once the user stops.
+    myAppearanceWrite->start();
+}
+
+void MainWindow::closeEvent(QCloseEvent* event)
+{
+    // A window closed inside the debounce window still has to store what the
+    // user chose. Fired by hand rather than left to the timer, which is about
+    // to be destroyed with this window.
+    if (myAppearanceWrite && myAppearanceWrite->isActive()) {
+        myAppearanceWrite->stop();
+        QSettings settings;
+        settings.setValue(QStringLiteral("appearance"), Theme::serializeSpec());
+    }
+    QMainWindow::closeEvent(event);
 }
 
 void MainWindow::recordProgress(const std::string& event)

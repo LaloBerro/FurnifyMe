@@ -7893,10 +7893,71 @@ int main(int argc, char* argv[])
         // the first check and fail the second.
         check(Theme::spec() == Theme::defaultSpec(),
               "an app nobody has themed is wearing exactly defaultSpec()");
-        check(Theme::defaultSpec().chrome == QColor(QStringLiteral("#1b1b1d")) &&
-                  Theme::defaultSpec().accent == QColor(QStringLiteral("#3d7eff")) &&
-                  Theme::defaultSpec().viewport == QColor(QStringLiteral("#45454b")),
-              "and defaultSpec() is Graphite byte for byte, not merely self-consistent");
+
+        // ALL of them, against literal hex. Three was not a pin: a uniform
+        // drift in any of the eighteen unlisted tokens passed both this check
+        // and the before/after-reset pixel comparison further down, since
+        // that one only proves the app is self-consistent WITHIN this build.
+        // Written out so the byte-identity claim survives without a reviewer
+        // re-deriving it from the pre-task file. The two highlight entries
+        // are OCCT's Quantity_NOC_CYAN1 and _ORANGE, which is what they were
+        // before they became tokens.
+        {
+            const QHash<QString, QString> shipped = {
+                {QStringLiteral("chrome"), QStringLiteral("#1b1b1d")},
+                {QStringLiteral("panel"), QStringLiteral("#232326")},
+                {QStringLiteral("chip"), QStringLiteral("#2c2c31")},
+                {QStringLiteral("chipHover"), QStringLiteral("#34343a")},
+                {QStringLiteral("chipActive"), QStringLiteral("#3d3d45")},
+                {QStringLiteral("accent"), QStringLiteral("#3d7eff")},
+                {QStringLiteral("text"), QStringLiteral("#f0f0f0")},
+                {QStringLiteral("textMuted"), QStringLiteral("#9a9aa2")},
+                {QStringLiteral("textDisabled"), QStringLiteral("#5c5c64")},
+                {QStringLiteral("border"), QStringLiteral("#3a3a40")},
+                {QStringLiteral("viewport"), QStringLiteral("#45454b")},
+                {QStringLiteral("gridMinor"), QStringLiteral("#3e3e44")},
+                {QStringLiteral("gridMajor"), QStringLiteral("#4d4d55")},
+                {QStringLiteral("axisX"), QStringLiteral("#7a4a4a")},
+                {QStringLiteral("axisY"), QStringLiteral("#4a7a4a")},
+                {QStringLiteral("sketchPointMarker"), QStringLiteral("#ff4fc3")},
+                {QStringLiteral("danger"), QStringLiteral("#e0564a")},
+                {QStringLiteral("focusRing"), QStringLiteral("#ffca4a")},
+                {QStringLiteral("focusRingMuted"), QStringLiteral("#9f7e2e")},
+                {QStringLiteral("highlightHover"), QStringLiteral("#00ffff")},
+                {QStringLiteral("highlightSelected"), QStringLiteral("#ffa500")},
+            };
+            const Theme::Spec shippedSpec = Theme::defaultSpec();
+            QStringList drifted;
+            int pinned = 0;
+            for (const Theme::ColourToken& token : Theme::colourTokens()) {
+                if (!shipped.contains(token.id)) {
+                    drifted << (token.id + QStringLiteral(" [no pinned value]"));
+                    continue;
+                }
+                ++pinned;
+                const QColor expected(shipped.value(token.id));
+                const QColor actual = shippedSpec.*(token.member);
+                if (actual != expected)
+                    drifted << QStringLiteral("%1 %2 != %3")
+                                   .arg(token.id, actual.name(), expected.name());
+            }
+            // Non-vacuity, and it is the half that makes this a pin rather
+            // than a list: every token must have been checked, so a token
+            // added to Spec without a line above fails here instead of
+            // slipping through unexamined.
+            check(pinned == Theme::colourTokens().size() &&
+                      shipped.size() == Theme::colourTokens().size(),
+                  QStringLiteral("every one of the %1 tokens has a pinned shipped value "
+                                 "(%2 pinned, %3 listed)")
+                      .arg(Theme::colourTokens().size()).arg(pinned).arg(shipped.size()));
+            check(drifted.isEmpty(),
+                  QStringLiteral("and defaultSpec() is Graphite byte for byte (%1)")
+                      .arg(drifted.isEmpty() ? QStringLiteral("all 21 exact")
+                                             : drifted.join(QStringLiteral(", "))));
+            check(std::fabs(shippedSpec.basePt - 10.0) < 1e-9,
+                  QStringLiteral("and the shipped base size is still 10pt (%1)")
+                      .arg(shippedSpec.basePt));
+        }
 
         // A CHECKED rail chip, so the inset accent() ring is actually painted.
         // Found by state rather than by index: which chip happens to be
@@ -8025,11 +8086,67 @@ int main(int argc, char* argv[])
                   "and it carries the tokens Theme currently reports");
         }
 
+        // --- a theme edit RESTYLES the drawer, it does not rebuild it -------
+        //
+        // ItemsPanel::applyTheme() used to call refresh(), which tears every
+        // row down with deleteLater() and constructs it again. A theme edit
+        // arrives once per mouse MOVE inside the colour picker, so that was a
+        // full teardown-and-rebuild of the body list per frame of a drag - and
+        // nothing about a colour changes WHICH bodies exist.
+        //
+        // Asserted on the row's VISIBILITY as well as its life, and the first
+        // half is the one that bites. A QPointer alone does not: refresh()
+        // retires a row with hide() + deleteLater(), and a DeferredDelete
+        // posted inside this suite's processEvents() loop is not necessarily
+        // collected by the time the next check runs - so the pointer can still
+        // be non-null after a genuine teardown. hide() is synchronous, and
+        // refresh() calls it FIRST and deliberately (see ItemsPanel::refresh),
+        // so a row that is still visible is a row that was never retired.
+        // Verified by stubbing applyTheme() back to a refresh(): the pointer
+        // check passed, this one failed.
+        QPointer<QWidget> survivingRow;
+        {
+            ItemsPanel* drawer = window.itemsPanel();
+            check(drawer != nullptr && drawer->isVisible() && drawer->rowCount() > 0,
+                  QStringLiteral("the items drawer is open with rows in it (%1)")
+                      .arg(drawer ? drawer->rowCount() : -1));
+            if (drawer) {
+                // The first VISIBLE row, not simply the first one found.
+                // refresh() retires a row with hide() + deleteLater(), and a
+                // DeferredDelete posted inside this suite's processEvents()
+                // loop is not reliably collected - so after the dozens of
+                // document edits above, findChildren() still returns hidden
+                // rows from earlier rebuilds. Capturing one of those made this
+                // probe read "hidden" no matter what the code did.
+                for (QWidget* row :
+                     drawer->findChildren<QWidget*>(QStringLiteral("itemsRow"))) {
+                    if (row->isVisible()) { survivingRow = row; break; }
+                }
+            }
+            check(!survivingRow.isNull(),
+                  "and a live row was captured to watch across the edit");
+        }
+        // The drawer's width is derived from the type scale now, so the
+        // shipped look has to come out at exactly the number it always was -
+        // opening the Appearance panel and resetting must not nudge a card
+        // the user never asked to move. Captured here at Graphite and checked
+        // again after the reset.
+        const int graphiteDrawerWidth =
+            window.itemsPanel() ? window.itemsPanel()->width() : -1;
+
         // --- the accent token repaints a rail chip's checked ring -----------
         const QColor probeAccent(QStringLiteral("#12d18e"));   // a green nothing else uses
         if (panel && checkedChip) {
             panel->setTokenColour(QStringLiteral("accent"), probeAccent);
             settle(200);
+            check(!survivingRow.isNull() && survivingRow->isVisible(),
+                  QStringLiteral("a theme edit restyled the drawer's rows in place - the "
+                                 "same row widget is still alive and on screen, not "
+                                 "retired and rebuilt (%1)")
+                      .arg(survivingRow.isNull() ? QStringLiteral("deleted")
+                                                 : (survivingRow->isVisible()
+                                                        ? QStringLiteral("intact")
+                                                        : QStringLiteral("hidden"))));
             check(Theme::accent() == probeAccent,
                   "setting the accent token through the panel moves Theme::accent()");
             const QImage themedChip = renderExact(checkedChip);
@@ -8161,6 +8278,106 @@ int main(int argc, char* argv[])
                                  "left at the cached one (%1 px)").arg(afterHits));
         }
 
+        // --- a LIVE drag arrow follows the accent too -----------------------
+        //
+        // PullArrowRenderer bakes Theme::accent() into the AIS object it
+        // builds, AND its show() early-outs on an unchanged pose - so an arrow
+        // already on screen kept the old accent until the camera happened to
+        // move far enough to defeat that cache.
+        //
+        // Raised through the REAL predicate - a face genuinely selected -
+        // rather than by calling showPullArrow() directly. The first version
+        // of this probe did call it directly, and the arrow vanished between
+        // the two snapshots: onThemeChanged() ends in updateActions(), whose
+        // appStateChanged() runs PullArrow::refresh(), which correctly tears
+        // down an arrow that no selection is holding up. A probe that has to
+        // dodge the feature's own derived visibility is testing something the
+        // app never does.
+        {
+            // A dedicated window with ONE body, so the face is unoccluded and
+            // the pick is deterministic - `window` has nine bodies in a camera
+            // pose thirty checks of other work have left it in.
+            MainWindow arrowProbe(nullptr, /*persistProgress=*/false);
+            arrowProbe.setAttribute(Qt::WA_ShowWithoutActivating);
+            arrowProbe.resize(1000, 760);
+            arrowProbe.show();
+            arrowProbe.view()->setAnimationsEnabled(false);
+            settle(400);
+            OcctViewWidget* probeView = arrowProbe.view();
+            check(buildBody(arrowProbe, 0.35, 0.35, 0.60, 0.60, 40.0),
+                  "a body is built for the arrow recolour probe");
+            trigger(arrowProbe, QStringLiteral("Select Faces"));
+            settle(150);
+
+            auto outward = [](const TopoDS_Face& face) {
+                gp_Dir n = BRepAdaptor_Surface(face).Plane().Axis().Direction();
+                if (face.Orientation() == TopAbs_REVERSED) n.Reverse();
+                return n;
+            };
+            const auto probeSolids = arrowProbe.document().solids();
+            if (!probeSolids.empty()) {
+                for (TopExp_Explorer it(arrowProbe.document().shapeOf(probeSolids.front().id),
+                                        TopAbs_FACE);
+                     it.More() && !probeView->hasPullArrow(); it.Next()) {
+                    const TopoDS_Face candidate = TopoDS::Face(it.Current());
+                    if (BRepAdaptor_Surface(candidate).GetType() != GeomAbs_Plane) continue;
+                    if (outward(candidate).Z() < 0.9) continue;   // the top face
+                    GProp_GProps props;
+                    BRepGProp::SurfaceProperties(candidate, props);
+                    QPoint at;
+                    if (!probeView->projectToScreen(props.CentreOfMass(), at)) continue;
+                    if (!probeView->rect().adjusted(40, 40, -40, -40).contains(at)) continue;
+                    clickAt(probeView, QPointF(at));
+                    settle(200);
+                }
+            }
+            check(probeView->hasPullArrow(),
+                  "selecting its top face raises a drag arrow for the recolour probe");
+
+            const QString before = outDir + QStringLiteral("/appearance_arrow_before.png");
+            const QString after = outDir + QStringLiteral("/appearance_arrow_after.png");
+            probeView->saveSnapshot(before);
+            const QImage beforeImg(before);
+
+            const QColor probeArrow(QStringLiteral("#aaff00"));   // a lime nothing else uses
+            if (panel) panel->setTokenColour(QStringLiteral("accent"), probeArrow);
+            settle(300);
+            probeView->saveSnapshot(after);
+            const QImage afterImg(after);
+
+            auto hits = [](const QImage& image, const QColor& colour) {
+                int found = 0;
+                for (int y = 0; y < image.height(); ++y) {
+                    for (int x = 0; x < image.width(); ++x) {
+                        if (colorDistance(image.pixelColor(x, y), colour) < 60.0) ++found;
+                    }
+                }
+                return found;
+            };
+            // Counted BOTH ways round, which is what makes this a recolour
+            // check rather than a "something is lime somewhere" check: the
+            // arrow has to be genuinely visible in the dump wearing the old
+            // accent first, and that old accent has to be GONE afterwards.
+            // Counting only the new colour would pass just as well against an
+            // arrow that was never drawn at all.
+            const int oldBefore = beforeImg.isNull() ? -1 : hits(beforeImg, probeAccent);
+            const int newBefore = beforeImg.isNull() ? -1 : hits(beforeImg, probeArrow);
+            const int oldAfter = afterImg.isNull() ? -1 : hits(afterImg, probeAccent);
+            const int newAfter = afterImg.isNull() ? -1 : hits(afterImg, probeArrow);
+            check(oldBefore > 60,
+                  QStringLiteral("the arrow is genuinely in the 3D dump, wearing the "
+                                 "accent it was built with (%1 px)").arg(oldBefore));
+            check(newBefore >= 0 && newBefore < 20,
+                  QStringLiteral("and nothing there was the new lime beforehand (%1 px)")
+                      .arg(newBefore));
+            check(newAfter > 60 && oldAfter < 20,
+                  QStringLiteral("and the live arrow was rebuilt in the new accent rather "
+                                 "than left at the one it was drawn with (lime %1 px, "
+                                 "old accent %2 px)").arg(newAfter).arg(oldAfter));
+            arrowProbe.close();
+            settle(200);
+        }
+
         // --- the type scale follows the base size ---------------------------
         {
             const double base = 13.0;
@@ -8272,25 +8489,58 @@ int main(int argc, char* argv[])
                 QColorDialog* picker = panel->activeColourDialog();
                 check(picker != nullptr, "clicking a swatch opens a colour picker");
 
-                // The property the no-modal law is actually about: nothing
-                // this app does spins a nested event loop and waits for an
-                // answer. QColorDialog::open() returns immediately, so the
-                // suite REACHES this line with the picker up; exec() would
-                // never have returned and the run would hang here rather than
-                // fail - which is the honest backstop CLAUDE.md already
-                // records for the outcome dialogs.
-                //
-                // isModal() is deliberately NOT what is asserted. open() sets
-                // Qt::WindowModal on the dialog, so a picker opened this way
-                // does hold the main window's input while it is up - what it
-                // does not do is stop the application, which is why the live
-                // preview keeps repainting behind it.
+                // Two properties, and the second is the one an earlier round
+                // got wrong. show() returns immediately, so the suite REACHES
+                // this line with the picker up - exec() would never have
+                // returned and the run would hang here rather than fail,
+                // which is the honest backstop CLAUDE.md already records for
+                // the outcome dialogs. And the picker is genuinely NOT MODAL:
+                // QDialog::open() forces Qt::WindowModal past setModal(false),
+                // which locked the rail and the viewport while a colour was
+                // being chosen, so this asserts isModal() outright rather
+                // than the weaker "not application-modal" that a window-modal
+                // dialog also satisfies.
                 check(picker != nullptr && picker->isVisible(),
-                      "and open() returned with it on screen rather than exec()'s "
+                      "and it returned with the picker on screen rather than exec()'s "
                       "nested loop swallowing this run");
-                check(picker != nullptr && picker->windowModality() != Qt::ApplicationModal,
-                      "and it is not application-modal - the rest of the app keeps "
-                      "living while a colour is chosen");
+                check(picker != nullptr && !picker->isModal() &&
+                          picker->windowModality() == Qt::NonModal,
+                      QStringLiteral("and it is genuinely modeless - nothing is blocked "
+                                     "while a colour is chosen (modality %1)")
+                          .arg(picker ? int(picker->windowModality()) : -1));
+
+                // The shell behind the picker is still there and still wired:
+                // hit-testable, and its action fires when an event reaches it.
+                //
+                // HONEST LIMIT, stated because the obvious reading is wrong:
+                // this does NOT prove the app is unblocked. Qt enforces
+                // modality inside QApplication::notify()'s spontaneous-event
+                // path, and this suite delivers events with sendEvent()
+                // straight to the widget - so these two pass against a
+                // window-modal picker as well (measured: they did). The
+                // isModal() assertion above is what carries that claim; this
+                // pair guards the wiring underneath it.
+                if (checkedChip && picker) {
+                    QAction* chipAction = checkedChip->action();
+                    const QPoint railPoint =
+                        checkedChip->mapTo(view, checkedChip->rect().center());
+                    check(view->childAt(railPoint) == checkedChip,
+                          "a rail chip is still hit-testable behind the open picker");
+                    if (chipAction && chipAction->isCheckable()) {
+                        const bool was = chipAction->isChecked();
+                        clickAt(checkedChip, checkedChip->rect().center());
+                        settle(150);
+                        check(chipAction->isChecked() != was,
+                              "and a click delivered to it still toggles its action - "
+                              "the shell behind the picker is wired, not torn down");
+                        // Put it back: the rest of this block, and every
+                        // block after it, expects the shell it found.
+                        clickAt(checkedChip, checkedChip->rect().center());
+                        settle(150);
+                        check(chipAction->isChecked() == was,
+                              "and it is restored to the state the suite found it in");
+                    }
+                }
                 if (picker) {
                     // Closed here, deliberately: the suite's "no dialog is
                     // ever constructed for an outcome" checks are only
@@ -8339,6 +8589,30 @@ int main(int argc, char* argv[])
                   "so is a base size outside the 8-14 pt band");
             check(sentinel == untouched,
                   "and every one of those refusals left the output untouched");
+
+            // A family this machine does not have FALLS BACK rather than
+            // being taken or refused - see Theme.h. Taken, Qt's matcher would
+            // silently substitute something and the panel's combo would name
+            // a family it does not list; refused, a spec carried from a
+            // machine with one extra font installed would cost the user every
+            // colour in it.
+            Theme::Spec missingFont;
+            check(Theme::deserializeSpec(
+                      QStringLiteral("accent=#ff0000;family=NoSuchFamily Ultra Expanded"),
+                      missingFont),
+                  "a spec naming an uninstalled font still reads back");
+            check(missingFont.fontFamily == Theme::defaultSpec().fontFamily,
+                  QStringLiteral("with the family fallen back to the shipped one (\"%1\")")
+                      .arg(missingFont.fontFamily));
+            check(missingFont.accent == QColor(QStringLiteral("#ff0000")),
+                  "and its colours intact - a missing font costs the font, not the spec");
+            // The installed case still round-trips, so the guard is a filter
+            // rather than a blanket.
+            Theme::Spec realFont;
+            check(Theme::deserializeSpec(
+                      QStringLiteral("family=") + Theme::defaultSpec().fontFamily, realFont) &&
+                      realFont.fontFamily == Theme::defaultSpec().fontFamily,
+                  "while a family that IS installed is taken as given");
         }
 
         // --- reset restores Graphite exactly ---------------------------------
@@ -8354,6 +8628,14 @@ int main(int argc, char* argv[])
             }
             check(Theme::spec() == Theme::defaultSpec(),
                   "Reset restores defaultSpec() exactly");
+            check(graphiteDrawerWidth > 0 && window.itemsPanel() &&
+                      window.itemsPanel()->width() == graphiteDrawerWidth,
+                  QStringLiteral("and the items drawer is back at exactly the width it "
+                                 "had before any of this - a type-derived width still "
+                                 "resolves to the shipped number at the shipped scale "
+                                 "(%1 vs %2)")
+                      .arg(window.itemsPanel() ? window.itemsPanel()->width() : -1)
+                      .arg(graphiteDrawerWidth));
             // The panel is a VIEW of the live spec, not a second copy of it -
             // so a reset it did not itself perform still leaves its own
             // controls showing what the app is actually wearing. Both
@@ -8412,32 +8694,53 @@ int main(int argc, char* argv[])
                 check(Theme::accent() == QColor(QStringLiteral("#ff00ff")),
                       "a persistProgress=false window still applies a theme edit");
             }
+            settle(MainWindow::kAppearanceWriteMs * 2);
             {
                 QSettings after;
                 check(!after.contains(QStringLiteral("appearance")),
-                      QStringLiteral("but writes nothing to the store (%1)")
+                      QStringLiteral("but writes nothing to the store, even well past "
+                                     "the debounce (%1)")
                           .arg(after.value(QStringLiteral("appearance")).toString()));
             }
 
             // And the persisting path DOES write - the check above is only
             // worth having if the guard is the reason nothing was stored,
-            // rather than the write never happening at all.
+            // rather than the write never happening at all. This is also
+            // where the DEBOUNCE is pinned: a colour picker emits
+            // currentColorChanged per mouse move, and a write-through would
+            // put a registry write and a file sync on every frame of a drag.
             {
                 MainWindow persisting(nullptr, /*persistProgress=*/true);
                 persisting.setAttribute(Qt::WA_ShowWithoutActivating);
                 persisting.resize(900, 700);
                 persisting.show();
                 settle(300);
-                if (persisting.appearancePanel())
-                    persisting.appearancePanel()->setTokenColour(
-                        QStringLiteral("accent"), QColor(QStringLiteral("#00c2ff")));
-                settle(200);
+
+                // A burst, the way a drag through the colour wheel arrives.
+                const QColor burst[3] = {QColor(QStringLiteral("#112233")),
+                                         QColor(QStringLiteral("#445566")),
+                                         QColor(QStringLiteral("#00c2ff"))};
+                for (const QColor& c : burst) {
+                    if (persisting.appearancePanel())
+                        persisting.appearancePanel()->setTokenColour(QStringLiteral("accent"), c);
+                    settle(60);
+                }
+                check(Theme::accent() == burst[2],
+                      "a burst of edits applies live, every one of them");
+                {
+                    QSettings midBurst;
+                    check(!midBurst.contains(QStringLiteral("appearance")),
+                          "and nothing has been written yet - the store is not touched "
+                          "once per edit");
+                }
+
+                settle(MainWindow::kAppearanceWriteMs * 2);
                 QSettings written;
                 Theme::Spec readBack;
                 check(Theme::deserializeSpec(
                           written.value(QStringLiteral("appearance")).toString(), readBack) &&
-                          readBack.accent == QColor(QStringLiteral("#00c2ff")),
-                      "while a persistProgress=true window stores the spec it just applied");
+                          readBack.accent == burst[2],
+                      "and once the edits stop, one write stores the spec that survived");
                 persisting.close();
             }
             quiet.close();
