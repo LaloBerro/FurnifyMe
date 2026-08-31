@@ -517,6 +517,51 @@ Enter/Escape claim can therefore exist at a time. Gizmo previews go through the
   toward the notch — correct CAD behaviour with an inverted-looking gesture, documented
   rather than special-cased. Curved edges raise no arrow.
 
+**A bevel is clipped to the edges you picked.** `BRepFilletAPI`'s `Add()` is *documented*
+to build a **contour by propagation**: "edges of the shape which are tangential to one
+another and which delimit two series of tangential faces". A fillet strip made by an
+earlier operation is exactly such a series, so rounding an edge that *ends on one* pulls
+the strip's far neighbour into the same contour and bevels an edge nobody picked —
+measured on a 100×80×10 box, one `Add` produced a contour of **three** edges and removed
+13.8% more than the single-edge formula. Nothing in OCCT turns it off: `SetContinuity` at
+every continuity and tolerance, `ChFi3d_FilletShape`, and `ShapeUpgrade_UnifySameDomain`
+first were each measured and none changed the contour; `ChFiDS_Spine` has no way to remove
+an edge and `BRepFilletAPI_MakeFillet` keeps its builder private. So `filletEdges` detects
+the spread (walk `NbContours`/`NbEdges`/`Edge` and compare against what was asked for) and
+**clips** it: restore the material outside the picked edges' own extents, each extent being
+the slab between the two planes perpendicular to that edge at its endpoints. Propagation
+*enters and leaves through those endpoints*, which is why that is containment and not an
+approximation — the volume removed comes back to the single-edge formula to six figures.
+The clip runs **only when a spread is detected**, so the ordinary case takes the plain
+kernel path. What it cannot remove is stated on the header: at a corner that is not a right
+angle, the part of the propagated strip on the picked edge's own side of the end plane
+survives as a patch a fraction of the bevel size across — cutting it would cut the picked
+edge's bevel short exactly where it should meet its neighbour. `gui_smoke` therefore counts
+only strips longer than four radii, which is the difference between a rounded edge and a
+corner.
+
+**Multi-edge bevels are one gesture, one build, one checkpoint, one toast.** Shift-click
+accumulates edges (`AIS_SelectionScheme_XOR`, the additive body pick's own path);
+`filletEdges`/`chamferEdges` take a `std::vector<TopoDS_Edge>` and the one-edge spellings
+delegate to them, so there is one implementation of every refusal. The refusal is
+**all-or-nothing** — one foreign, null or unbuildable edge refuses the whole call, because
+a partial bevel leaves the user working out which edges took. The arrow stands on the edge
+picked **last**, which `OcctViewWidget` has to *remember* (`myLastPickedEdge`, validated
+against the live selection on every read): OCCT's `InitSelected` order is the context's,
+not the user's. The chip names the count only when there is one — `Fillet — 3 edges`, with
+the value still `R 20 mm`, because a radius does not multiply — and the state label and the
+toast do the same, with the plural written out. The visibility predicate widened from
+"exactly one straight edge" to "one or more straight edges, **all on one body**": a
+selection spanning two bodies raises no arrow, since one gesture is one build on one shape.
+It still requires edge mode, so it stays disjoint from the face pull, the transform gizmo
+and `ExtrudePreview`, and the app-wide Enter/Escape claims still cannot collide.
+
+**A screen-space arrow hit test swallows a press before the picker sees it.** `arrowHit()`
+is a 14 px Qt-side test, not an AIS owner, so it does not *compete* for a pick — it takes
+the press outright. The bevel arrow stands on the last edge picked and the next edge is
+usually right beside it, so the press handler excludes Shift from the arrow branch. Same
+hazard the transform gizmo's `Deactivate` closes, one layer up and by a different mechanism.
+
 **`Theme` is spec-backed** since the Appearance panel: every colour accessor and the four
 derived fonts (badge = base−2, label = base−1, body = base, title = base+3 pt) read
 `Theme::Spec`; `defaultSpec()` is Graphite byte-for-byte and all 21 defaults are pinned to

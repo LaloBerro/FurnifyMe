@@ -79,13 +79,62 @@ TopoDS_Shape makeCompound(const std::vector<TopoDS_Shape>& shapes);
 BooleanResult pullFace(const TopoDS_Shape& body, const TopoDS_Face& face,
                        double distance);
 
-// Round one edge of `body` with radius r / flatten it with distance d.
-// Refuses a null body/edge, r/d <= 0, and any BRepFilletAPI failure
-// (IsDone false, null or empty/invalid result) - OCCT fillets legitimately
-// fail on hard geometry (e.g. a radius that would eat a neighbouring face)
-// and BRepFilletAPI can throw Standard_Failure rather than politely fail;
-// both are caught at this boundary and converted to ok == false, body
-// untouched.
+// Round the given edges of `body` with radius r / flatten them with distance
+// d, in ONE kernel build. Refuses a null body, an empty list, any null edge,
+// r/d <= 0, and any BRepFilletAPI failure (IsDone false, null or
+// empty/invalid result) - OCCT fillets legitimately fail on hard geometry
+// (e.g. a radius that would eat a neighbouring face) and BRepFilletAPI can
+// throw Standard_Failure rather than politely fail; both are caught at this
+// boundary and converted to ok == false, body untouched.
+//
+// The refusal is ALL-OR-NOTHING: one foreign, null or unbuildable edge
+// refuses the whole call. There is no partial bevel - a gesture the user
+// made over three edges either produces one body with three of them changed
+// or changes nothing at all, and the caller can rely on `!ok` implying
+// `shape.IsNull()`.
+//
+// CONTAINMENT - the fix for the spreading bevel. BRepFilletAPI's Add() is
+// documented to build a CONTOUR by propagation: "the contour is composed of
+// edges of the shape which are tangential to one another and which delimit
+// two series of tangential faces". A fillet strip made by an EARLIER
+// operation is exactly such a tangential series, so rounding an edge that
+// ends on one pulls that strip's far neighbour into the same contour and
+// bevels an edge the user never picked. Nothing in the OCCT API turns that
+// off (SetContinuity, ChFi3d_FilletShape and ShapeUpgrade_UnifySameDomain
+// were all measured against it and none changes the contour), so the spread
+// is CLIPPED here instead: a contour that carries an edge nobody asked for
+// is rebuilt with the material outside the picked edges' own extents put
+// back. Propagation enters and leaves through the picked edge's END points,
+// which is why clipping at the two planes perpendicular to it there is
+// exactly the containment and not an approximation - the volume removed
+// comes out at the single-edge formula to six figures.
+//
+// The clip only runs when propagation is actually detected, so the ordinary
+// case (a fresh box, or edges far apart) takes the plain kernel path with no
+// extra booleans and no extra risk. A picked edge that is not straight has
+// no such perpendicular pair, so if propagation is detected on one, the call
+// is REFUSED rather than answered with a shape that quietly bevels more than
+// was asked for.
+//
+// WHAT THE CLIP DOES NOT REMOVE, stated rather than hidden: at a corner where
+// the picked edge meets its neighbour at anything other than a right angle,
+// the part of the propagated strip lying on the picked edge's OWN side of
+// that end plane survives, as a patch a fraction of the bevel size across. It
+// cannot be cut away without cutting the picked edge's own bevel short at
+// exactly the corner where it should run right up to the neighbour, and a
+// bevel that stops short of its own corner is the worse of the two. What the
+// clip removes is the whole-edge case the bug was about - a neighbouring edge
+// rounded along its entire length. gui_smoke pins this by counting only
+// strips longer than four radii, which is the difference between a rounded
+// edge and a corner.
+BooleanResult filletEdges(const TopoDS_Shape& body,
+                          const std::vector<TopoDS_Edge>& edges, double radius);
+BooleanResult chamferEdges(const TopoDS_Shape& body,
+                           const std::vector<TopoDS_Edge>& edges, double distance);
+
+// The one-edge spellings, kept because most callers and most tests have
+// exactly one edge in hand. Both delegate to the list forms above, so the
+// containment rule and every refusal are the same code, not a second copy.
 BooleanResult filletEdge(const TopoDS_Shape& body, const TopoDS_Edge& edge,
                          double radius);
 BooleanResult chamferEdge(const TopoDS_Shape& body, const TopoDS_Edge& edge,

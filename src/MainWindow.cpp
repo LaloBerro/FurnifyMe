@@ -1161,8 +1161,16 @@ void MainWindow::updateStateLabel()
         // The table's words, the same two the chip, the tooltips and the
         // refusals use. Saying "round or flatten" here and "Fillet"/"Chamfer"
         // everywhere else is two vocabularies for one pair of operations.
-        state = tr("Edge selected — drag in for a Fillet, out for a Chamfer, "
-                   "or type a size");
+        //
+        // The plural is written out, not parenthesised - the label has to be
+        // able to say that a Shift-click added a second edge, and "Edge(s)"
+        // is the exact spelling the vocabulary rules forbid.
+        const std::size_t picked = myView->selectedEdges().size();
+        state = (picked > 1 ? tr("%1 edges selected — drag in for a Fillet, out for a "
+                                 "Chamfer, or type a size")
+                                  .arg(QString::number(static_cast<int>(picked)))
+                            : tr("Edge selected — drag in for a Fillet, out for a "
+                                 "Chamfer, or type a size"));
     } else {
         const std::size_t selected = myView->selectedSolidIds().size();
         const std::size_t bodies = myDocument.count();
@@ -1695,8 +1703,8 @@ int MainWindow::bodyIdForEdge(const TopoDS_Edge& edge) const
     return 0;
 }
 
-bool MainWindow::bevelTarget(TopoDS_Edge& edge, int& bodyId, gp_Pnt& centre,
-                             gp_Dir& outward) const
+bool MainWindow::bevelTarget(std::vector<TopoDS_Edge>& edges, TopoDS_Edge& edge, int& bodyId,
+                             gp_Pnt& centre, gp_Dir& outward) const
 {
     // The same two halves canPullSelectedFace() opens with, for the same
     // reasons - see its comment and the header.
@@ -1706,24 +1714,41 @@ bool MainWindow::bevelTarget(TopoDS_Edge& edge, int& bodyId, gp_Pnt& centre,
     // face pull's predicate or the transform gizmo's.
     if (myView->selectionMode() != OcctViewWidget::SelectionMode::Edge) return false;
 
-    // "The ONE selected edge", never the first of several - selectedEdge()'s
-    // own rule, so a bevel can never be a coin toss between two highlighted
-    // edges.
-    const TopoDS_Edge selected = myView->selectedEdge();
-    if (selected.IsNull()) return false;
+    const std::vector<TopoDS_Edge> selected = myView->selectedEdges();
+    if (selected.empty()) return false;
 
-    const int id = bodyIdForEdge(selected);
+    // ALL ON ONE BODY. Not "the body the first edge happens to belong to":
+    // one gesture is one kernel build on one shape, so a selection reaching
+    // across two bodies raises nothing at all rather than quietly bevelling
+    // whichever body won. The mixed case is a real one - Shift-click makes it
+    // in two clicks - and the honest answer to it is no arrow.
+    const int id = bodyIdForEdge(selected.front());
     const TopoDS_Shape body = myDocument.shapeOf(id);
     if (id <= 0 || body.IsNull()) return false;
+    for (const TopoDS_Edge& candidate : selected) {
+        if (bodyIdForEdge(candidate) != id) return false;
+    }
 
     // Straightness, the two adjacent faces and the outward bisector are all
     // ModelingOps::bevelAxis()'s to decide, and it decides them once for the
-    // predicate and the gizmo both.
+    // predicate and the gizmo both. EVERY edge has to pass, not just the one
+    // the arrow will stand on: the gesture commits all of them together, so a
+    // curved edge among them makes the whole selection unbevellable rather
+    // than silently dropping itself out of the build.
     gp_Pnt at;
     gp_Dir axis;
-    if (!ModelingOps::bevelAxis(body, selected, at, axis)) return false;
+    for (const TopoDS_Edge& candidate : selected) {
+        gp_Pnt ignoredPoint;
+        gp_Dir ignoredAxis;
+        if (!ModelingOps::bevelAxis(body, candidate, ignoredPoint, ignoredAxis)) return false;
+    }
 
-    edge = selected;
+    // The arrow stands on the edge picked LAST, which is where the hand is.
+    const TopoDS_Edge arrowEdge = myView->lastSelectedEdge();
+    if (arrowEdge.IsNull() || !ModelingOps::bevelAxis(body, arrowEdge, at, axis)) return false;
+
+    edges = selected;
+    edge = arrowEdge;
     bodyId = id;
     centre = at;
     outward = axis;
@@ -1732,11 +1757,12 @@ bool MainWindow::bevelTarget(TopoDS_Edge& edge, int& bodyId, gp_Pnt& centre,
 
 bool MainWindow::canBevelSelectedEdge() const
 {
+    std::vector<TopoDS_Edge> edges;
     TopoDS_Edge edge;
     int bodyId = 0;
     gp_Pnt centre;
     gp_Dir outward;
-    return bevelTarget(edge, bodyId, centre, outward);
+    return bevelTarget(edges, edge, bodyId, centre, outward);
 }
 
 QString MainWindow::bevelRefusalText(bool fillet)
@@ -1788,17 +1814,27 @@ bool MainWindow::transformIsRotation(const gp_Trsf& delta)
     return std::fabs(angle) > 1.0e-9;
 }
 
-bool MainWindow::bevelEdgeBy(const TopoDS_Edge& edge, double size, bool fillet)
+bool MainWindow::bevelEdgesBy(const std::vector<TopoDS_Edge>& edges, double size, bool fillet)
 {
-    if (edge.IsNull() || size <= 0.0) return false;
+    if (edges.empty() || size <= 0.0) return false;
+    for (const TopoDS_Edge& edge : edges) {
+        if (edge.IsNull()) return false;
+    }
 
-    const int id = bodyIdForEdge(edge);
+    const int id = bodyIdForEdge(edges.front());
     const TopoDS_Shape body = myDocument.shapeOf(id);
     if (id <= 0 || body.IsNull()) return false;
+    // bevelTarget() already refuses a selection spanning two bodies, but this
+    // is the commit and it does not get to assume its caller checked: one
+    // build replaces ONE body, and an edge belonging to another would be
+    // rounded on a shape it is not part of.
+    for (const TopoDS_Edge& edge : edges) {
+        if (bodyIdForEdge(edge) != id) return false;
+    }
 
     const ModelingOps::BooleanResult result =
-        fillet ? ModelingOps::filletEdge(body, edge, size)
-               : ModelingOps::chamferEdge(body, edge, size);
+        fillet ? ModelingOps::filletEdges(body, edges, size)
+               : ModelingOps::chamferEdges(body, edges, size);
     if (!result.ok) {
         // Never present a failed kernel operation as a success, and never show
         // its error text: it is written for this file, not for the user. A
@@ -1829,10 +1865,19 @@ bool MainWindow::bevelEdgeBy(const TopoDS_Edge& edge, double size, bool fillet)
     // Led by the operation's own name. "Body 03 rounded" describes the result
     // in a word that appears nowhere else in the app - the chip, the tooltips,
     // the state label and the refusal all say Fillet or Chamfer.
+    //
+    // The count only appears when there is one to report. A single-edge bevel
+    // reads exactly as it always did, and "1 edge" is a number nobody needs.
+    // Written out rather than through "(s)", per the vocabulary rules.
+    const QString name = QString::fromStdString(myDocument.nameOf(id));
+    const QString extent = QString::fromStdString(Measure::formatDimensions(result.shape));
     const QString message =
-        (fillet ? tr("Fillet added to %1 — %2") : tr("Chamfer added to %1 — %2"))
-            .arg(QString::fromStdString(myDocument.nameOf(id)),
-                 QString::fromStdString(Measure::formatDimensions(result.shape)));
+        edges.size() > 1
+            ? (fillet ? tr("Fillet added to %1 — %2 edges — %3")
+                      : tr("Chamfer added to %1 — %2 edges — %3"))
+                  .arg(name, QString::number(static_cast<int>(edges.size())), extent)
+            : (fillet ? tr("Fillet added to %1 — %2") : tr("Chamfer added to %1 — %2"))
+                  .arg(name, extent);
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
     return true;

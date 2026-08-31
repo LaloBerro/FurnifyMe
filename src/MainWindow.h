@@ -126,9 +126,15 @@ public:
     int bodyIdForEdge(const TopoDS_Edge& edge) const;
 
     // THE predicate behind the bevel arrow, and everything the gizmo needs to
-    // stand itself up: exactly one STRAIGHT edge selected, in edge selection
-    // mode, on one document body, with two adjacent faces that define an
-    // outward bisector - and no sketch in progress and no outline waiting.
+    // stand itself up: ONE OR MORE straight edges selected, in edge selection
+    // mode, ALL ON ONE document body, each with two adjacent faces that define
+    // an outward bisector - and no sketch in progress and no outline waiting.
+    //
+    // The widening from "exactly one" to "one or more on one body" is
+    // multi-edge bevels. A selection spanning two bodies raises no arrow: one
+    // gesture is one kernel build on one body, and there is no honest way to
+    // draw one arrow for two. `edges` comes back in selection order and
+    // `edge` is the one the arrow stands on - the last one picked.
     //
     // One function, used to show the arrow, to hide it, and to write the
     // status label, so the three can never disagree. The mode check is what
@@ -139,20 +145,26 @@ public:
     // claims from ever being installed at once.
     //
     // Outputs are left untouched when it returns false.
-    bool bevelTarget(TopoDS_Edge& edge, int& bodyId, gp_Pnt& centre, gp_Dir& outward) const;
+    bool bevelTarget(std::vector<TopoDS_Edge>& edges, TopoDS_Edge& edge, int& bodyId,
+                     gp_Pnt& centre, gp_Dir& outward) const;
     bool canBevelSelectedEdge() const;
 
-    // Rounds `edge` with radius `size` (fillet == true) or flattens it with
+    // Rounds `edges` with radius `size` (fillet == true) or flattens them with
     // distance `size` (fillet == false), through ModelingOps, replacing the
-    // body the edge belongs to. The one commit path for the bevel gizmo: it
-    // takes the undo checkpoint, resyncs the viewport, records progress and
-    // reports the outcome, so BevelArrow never touches DocumentModel.
+    // body they belong to. The one commit path for the bevel gizmo: it takes
+    // the undo checkpoint, resyncs the viewport, records progress and reports
+    // the outcome, so BevelArrow never touches DocumentModel.
+    //
+    // ONE checkpoint and ONE toast however many edges are named, because it is
+    // one gesture - and one kernel build, so the refusal is all-or-nothing
+    // (ModelingOps::filletEdges' contract). Every edge must belong to the same
+    // body; a list spanning two is refused before the kernel is asked.
     //
     // False, with a Failure toast in cause-and-fix form and the body left
     // exactly as it was, whenever the kernel refuses - which it legitimately
     // does whenever the radius or the flat would eat a neighbouring face. The
     // kernel's own error string is logged, never shown.
-    bool bevelEdgeBy(const TopoDS_Edge& edge, double size, bool fillet);
+    bool bevelEdgesBy(const std::vector<TopoDS_Edge>& edges, double size, bool fillet);
 
     // The refusal copy, one source each, so the production path and the
     // banned-word sweep read the same sentence rather than a second copy only

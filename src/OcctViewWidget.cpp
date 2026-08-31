@@ -1346,6 +1346,37 @@ TopoDS_Edge OcctViewWidget::selectedEdge() const
     return found;
 }
 
+std::vector<TopoDS_Edge> OcctViewWidget::selectedEdges() const
+{
+    std::vector<TopoDS_Edge> edges;
+    if (myContext.IsNull()) return edges;
+
+    for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
+        if (!myContext->HasSelectedShape()) continue;
+        const TopoDS_Shape shape = myContext->SelectedShape();
+        if (shape.IsNull() || shape.ShapeType() != TopAbs_EDGE) continue;
+        edges.push_back(TopoDS::Edge(shape));
+    }
+    return edges;
+}
+
+TopoDS_Edge OcctViewWidget::lastSelectedEdge() const
+{
+    const std::vector<TopoDS_Edge> edges = selectedEdges();
+    if (edges.empty()) return TopoDS_Edge();
+
+    // Remembered, but never trusted: a Shift-click that toggled it back off,
+    // or a rebuild that replaced the topology, leaves a stale edge here that
+    // is no longer part of the selection. Falling back to the last entry
+    // keeps the arrow on SOME selected edge rather than on none.
+    if (!myLastPickedEdge.IsNull()) {
+        for (const TopoDS_Edge& edge : edges) {
+            if (edge.IsSame(myLastPickedEdge)) return edge;
+        }
+    }
+    return edges.back();
+}
+
 void OcctViewWidget::updateEdgeDimension()
 {
     // Suppressed while the bevel arrow's value chip is up: two annotations on
@@ -1426,6 +1457,7 @@ void OcctViewWidget::clearSelection()
     if (myContext.IsNull()) return;
 
     myContext->ClearSelected(Standard_True);
+    myLastPickedEdge.Nullify();   // nothing is selected, so nothing was picked last
     updateEdgeDimension();   // nothing selected, so nothing left for it to fall back to
     emit selectionChanged();
 }
@@ -1776,7 +1808,18 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
     // gesture at an angle the maths refuses. The two arrows are never up at
     // once (face mode against edge mode), so the order of these two blocks is
     // not load-bearing.
-    if (event->button() == Qt::LeftButton && !mySketchMode && arrowHit(myBevelArrow, myLastPos)) {
+    //
+    // Shift is excluded, and that exclusion is the arrow's half of multi-edge
+    // selection. arrowHit() is a 14 px SCREEN-SPACE test, so the arrow does
+    // not compete for the pick the way AIS_ManipulatorOwner does - it does
+    // something worse: it silently swallows the press before the picker ever
+    // sees it. The arrow stands on the last edge picked and a second edge is
+    // usually right beside it, so without this a Shift-click meant to
+    // accumulate would start a drag on the edge already chosen instead. Same
+    // hazard the transform gizmo's Deactivate() closes below, one layer up.
+    const bool additivePress = (event->modifiers() & Qt::ShiftModifier) != 0;
+    if (event->button() == Qt::LeftButton && !mySketchMode && !additivePress &&
+        arrowHit(myBevelArrow, myLastPos)) {
         beginAxisDrag(myBevelDrag, myBevelArrow.axis(), myLastPos);
         return;
     }
@@ -1785,8 +1828,7 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
     // only those. RMB orbit and MMB pan returned above; a Shift-click is the
     // "add this body to the selection" gesture and must reach the picker even
     // when it lands on an arm of the gizmo standing on the first body.
-    const bool additive = (event->modifiers() & Qt::ShiftModifier) != 0;
-    if (event->button() == Qt::LeftButton && !mySketchMode && !additive &&
+    if (event->button() == Qt::LeftButton && !mySketchMode && !additivePress &&
         !myManipulator.IsNull() && !myContext.IsNull() && !myView.IsNull()) {
         // Detection is what arms a mode (SetModeActivationOnDetection), so the
         // press asks for it at its own pixel rather than trusting whatever the
@@ -1887,9 +1929,21 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
     // and the gizmo would erase itself. It cannot be detected at all on the
     // additive path above, which is the point of that branch.
     const bool onGizmo = detectedIsManipulator();
+    // Read BEFORE SelectDetected, because a Replace clears the detection's
+    // relationship to the selection and an XOR may have just removed it.
+    TopoDS_Edge justPicked;
+    if (!onGizmo && myContext->HasDetectedShape() &&
+        myContext->DetectedShape().ShapeType() == TopAbs_EDGE) {
+        justPicked = TopoDS::Edge(myContext->DetectedShape());
+    }
     if (!onGizmo) {
         myContext->SelectDetected(additive ? AIS_SelectionScheme_XOR
                                            : AIS_SelectionScheme_Replace);
+        // "The edge you picked last" - remembered here because it cannot be
+        // read back out of the selection afterwards (see lastSelectedEdge()).
+        // A click on nothing clears it, so the arrow cannot linger on an edge
+        // the user has just dropped.
+        myLastPickedEdge = justPicked;
     }
 
     // Straight back into the picker, before anything can return. Unconditional

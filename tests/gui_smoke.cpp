@@ -150,7 +150,7 @@ int g_checks = 0;
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 1149;
+constexpr int kCheckFloor = 1181;
 
 void check(bool condition, const QString& what)
 {
@@ -7544,6 +7544,473 @@ int main(int argc, char* argv[])
               "the bevel probe leaves the document as it found it");
         view->clearSelection();
         view->animateTo(bevelCameraBefore);   // animations are off: immediate
+        settle(200);
+    }
+
+    // --- multi-edge bevels, and the spread that used to come with them --------
+    //
+    // Two user-reported defects, checked on the same body because they are two
+    // halves of one behaviour: what a bevel does to the edges NEXT to the one
+    // it was asked about.
+    //
+    // Item 8: rounding an edge that ends on an earlier fillet's strip also
+    // rounded an edge nobody picked - BRepFilletAPI builds a CONTOUR by
+    // propagation along tangent-continuous edges, and a fillet strip makes its
+    // neighbours tangent. Driven here exactly as the user did it: fillet one
+    // edge through the interface, then fillet the adjacent one, and assert the
+    // first strip is still there and no third one appeared.
+    //
+    // Item 9: Shift-click accumulates edges and ONE gesture bevels all of
+    // them - one build, one checkpoint, one toast.
+    //
+    // Both commit by typing into the chip's field and pressing Enter rather
+    // than by dragging. The drag is covered above; what these two are about is
+    // which edges the KERNEL touches, and a probe whose aim can miss by a snap
+    // step would report a spread that was really a mis-aimed drag.
+    {
+        const CameraState multiCameraBefore = view->camera().state();
+        const int multiBodiesBefore = static_cast<int>(window.document().count());
+        check(buildBody(window, 0.30, 0.32, 0.70, 0.64, 40.0),
+              "a fresh box for the multi-edge and spread probes");
+        const int multiId = window.document().solids().empty()
+                                ? -1
+                                : window.document().solids().back().id;
+        auto multiShape = [&window, multiId] { return window.document().shapeOf(multiId); };
+
+        // Framed on THIS body, not on the document. fitAll() frames every body
+        // the run has built, which by now leaves the probe box small and
+        // nearly edge-on - fine for a pick, useless for a capture, and the
+        // captures are what a reader judges "the neighbouring edge is
+        // untouched" by. The target is the body's own centre and the distance
+        // its own diagonal, so it frames the same way whatever else exists.
+        {
+            Bnd_Box probeBounds;
+            BRepBndLib::Add(multiShape(), probeBounds);
+            double bx0, by0, bz0, bx1, by1, bz1;
+            probeBounds.Get(bx0, by0, bz0, bx1, by1, bz1);
+            CameraState framed = view->camera().state();
+            framed.target = gp_Pnt(0.5 * (bx0 + bx1), 0.5 * (by0 + by1), 0.5 * (bz0 + bz1));
+            framed.azimuthDeg = -45.0;
+            framed.elevationDeg = 32.0;
+            framed.distance = 1.35 * gp_Pnt(bx0, by0, bz0).Distance(gp_Pnt(bx1, by1, bz1));
+            view->animateTo(framed);   // animations are off: immediate
+            settle(250);
+        }
+        trigger(window, QStringLiteral("Select Edges"));
+        settle(150);
+
+        auto multiVolume = [&] { return ModelingOps::volume(multiShape()); };
+        // How long each of the body's rounded strips runs, one entry per
+        // cylindrical face. A fillet makes one cylinder per edge it rounds, so
+        // this says WHICH edges the kernel actually touched - the assertion a
+        // volume figure cannot make, because a spread removes a perfectly
+        // plausible amount of material and only the strips say where from.
+        //
+        // The span is the cylinder's own V parameter range, which for a
+        // cylinder IS the length along its axis. A bounding box cannot answer
+        // this: buildBody draws its rectangle in SCREEN space, so the body's
+        // edges run at arbitrary angles and a 1,230 mm strip has an 881 mm box.
+        auto stripSpans = [&] {
+            std::vector<double> spans;
+            for (TopExp_Explorer it(multiShape(), TopAbs_FACE); it.More(); it.Next()) {
+                const BRepAdaptor_Surface surface(TopoDS::Face(it.Current()));
+                if (surface.GetType() != GeomAbs_Cylinder) continue;
+                spans.push_back(surface.LastVParameter() - surface.FirstVParameter());
+            }
+            std::sort(spans.begin(), spans.end(), std::greater<double>());
+            return spans;
+        };
+        // Strips that run along an EDGE, as opposed to the small patch a
+        // kernel leaves in a corner where two rounded edges meet. Anything
+        // shorter than a few radii is corner work, not a rounded edge - and
+        // the spread this probe exists for rounded a whole 1,000 mm edge, not
+        // a corner.
+        auto longStrips = [&](double radius) {
+            int found = 0;
+            for (double span : stripSpans())
+                if (span > radius * 4.0) ++found;
+            return found;
+        };
+        auto endsOf = [](const TopoDS_Edge& edge, gp_Pnt& a, gp_Pnt& b) {
+            TopoDS_Vertex v1, v2;
+            TopExp::Vertices(edge, v1, v2);
+            if (v1.IsNull() || v2.IsNull()) return false;
+            a = BRep_Tool::Pnt(v1);
+            b = BRep_Tool::Pnt(v2);
+            return true;
+        };
+
+        // Every straight edge of this body that a real click actually selects,
+        // with the pixel that selected it. Built by clicking rather than by
+        // projecting alone: an edge behind the body projects to a perfectly
+        // reachable pixel and picks something else entirely.
+        struct Reachable { TopoDS_Edge edge; QPoint at; double length = 0.0; };
+        std::vector<Reachable> reachable;
+        for (TopExp_Explorer it(multiShape(), TopAbs_EDGE); it.More(); it.Next()) {
+            const TopoDS_Edge candidate = TopoDS::Edge(it.Current());
+            gp_Pnt centre;
+            gp_Dir outward;
+            if (!ModelingOps::bevelAxis(multiShape(), candidate, centre, outward)) continue;
+            // TOP edges only, which is the arrangement both probes want and
+            // the one the user reported the spread on. A bottom edge's strip
+            // is hidden under the body, and a vertical one is only as tall as
+            // the box - neither gives the "one fillet ends on another's strip"
+            // geometry item 8 is about.
+            if (outward.Z() < 0.3) continue;
+            gp_Pnt a, b;
+            if (!endsOf(candidate, a, b)) continue;
+            QPoint at;
+            if (!view->projectToScreen(centre, at)) continue;
+            if (!view->rect().adjusted(50, 50, -50, -50).contains(at)) continue;
+
+            view->clearSelection();
+            settle(60);
+            clickAt(view, QPointF(at));
+            settle(120);
+            const TopoDS_Edge got = view->selectedEdge();
+            if (got.IsNull() || !got.IsSame(candidate)) continue;
+            reachable.push_back({candidate, at, a.Distance(b)});
+        }
+        check(reachable.size() >= 2,
+              QStringLiteral("at least two of the box's edges can be picked with a real "
+                             "click (%1 found)").arg(int(reachable.size())));
+
+        // A pair that shares NO vertex, so the two fillets cannot interact and
+        // the removed volume is exactly twice one edge's own closed form. An
+        // adjacent pair would round a corner between them and the arithmetic
+        // would stop being a clean multiple - which is a different assertion,
+        // and a weaker one.
+        int farA = -1;
+        int farB = -1;
+        for (std::size_t i = 0; i < reachable.size() && farA < 0; ++i) {
+            for (std::size_t j = i + 1; j < reachable.size(); ++j) {
+                gp_Pnt a1, a2, b1, b2;
+                if (!endsOf(reachable[i].edge, a1, a2)) continue;
+                if (!endsOf(reachable[j].edge, b1, b2)) continue;
+                const double gap = std::min({a1.Distance(b1), a1.Distance(b2),
+                                             a2.Distance(b1), a2.Distance(b2)});
+                // Comfortably more than the 20 mm radius, so the two strips
+                // cannot reach each other even through the corner.
+                if (gap < 120.0) continue;
+                farA = int(i);
+                farB = int(j);
+                break;
+            }
+        }
+        check(farA >= 0,
+              "two pickable edges that share no vertex, so two fillets on them cannot "
+              "interact");
+
+        BevelArrow* multi = window.findChild<BevelArrow*>();
+        check(multi != nullptr, "the round/flatten gizmo is still the window's");
+
+        if (farA >= 0 && multi) {
+            constexpr double kMultiSize = 20.0;
+            constexpr double kPi = 3.14159265358979323846;
+            const double startVolume = multiVolume();
+
+            view->clearSelection();
+            settle(80);
+            clickAt(view, QPointF(reachable[farA].at));
+            settle(150);
+            check(view->selectedEdges().size() == 1,
+                  "a plain click selects exactly one edge");
+            check(multi->isVisible() && multi->kindText() == QStringLiteral("Fillet"),
+                  QStringLiteral("and the chip names the operation alone, with no count "
+                                 "for one edge (\"%1\")").arg(multi->kindText()));
+
+            // THE Shift-click. Asserted at the pick, not at the outcome: a
+            // Shift-click that lands on the arrow's own 14 px hit region would
+            // start a drag instead, which is exactly the trap the additive
+            // body pick already documents one gizmo over.
+            clickAt(view, QPointF(reachable[farB].at), Qt::ShiftModifier);
+            settle(200);
+            check(view->selectedEdges().size() == 2,
+                  QStringLiteral("Shift-clicking a second edge ACCUMULATES it rather than "
+                                 "replacing the first (%1 selected)")
+                      .arg(int(view->selectedEdges().size())));
+            check(!view->lastSelectedEdge().IsNull() &&
+                      view->lastSelectedEdge().IsSame(reachable[farB].edge),
+                  "and the arrow's edge is the one picked LAST, where the hand is");
+            check(view->hasBevelArrow() && multi->isVisible(),
+                  "the arrow stays up over a two-edge selection");
+            check(multi->kindText() == QStringLiteral("Fillet — 2 edges"),
+                  QStringLiteral("and the chip now names the count (\"%1\")")
+                      .arg(multi->kindText()));
+            check(!view->dimension().isShowing(),
+                  "with the edge-length annotation still cleared - two edges is no more "
+                  "measurable by one label than one edge under a chip was");
+            check(stateLabelText(window) ==
+                      QStringLiteral("2 edges selected — drag in for a Fillet, out for a "
+                                     "Chamfer, or type a size"),
+                  QStringLiteral("and the state label says how many, with the plural "
+                                 "written out (\"%1\")")
+                      .arg(stateLabelText(window)));
+
+            if (multi->field()) {
+                multi->field()->setText(QStringLiteral("20"));
+                settle(300);
+                check(multi->hasPreview() && view->hasModelingPreview(),
+                      "a typed size previews both edges through the dedicated channel");
+                check(multi->valueText() == QStringLiteral("R 20 mm"),
+                      QStringLiteral("and the value stays the radius, not a multiple of it "
+                                     "(\"%1\")").arg(multi->valueText()));
+
+                if (!outDir.isEmpty()) {
+                    printWindowCapture(&window,
+                                       outDir + QStringLiteral("/bevel-two-edges.png"));
+                    view->saveSnapshot(
+                        outDir + QStringLiteral("/bevel-two-edges-viewport.png"));
+                }
+
+                const std::size_t revisionBefore = window.document().count();
+                sendKeyTo(&window, Qt::Key_Return);
+                settle(400);
+                check(window.document().count() == revisionBefore,
+                      "committing replaces the body rather than adding one");
+
+                const double removed = startVolume - multiVolume();
+                const double expected = (1.0 - kPi / 4.0) * kMultiSize * kMultiSize *
+                                        (reachable[farA].length + reachable[farB].length);
+                check(std::fabs(removed - expected) < std::max(1.0, expected * 0.02),
+                      QStringLiteral("and removes exactly (1 - pi/4) r^2 over BOTH edges' "
+                                     "lengths (%1 vs %2)").arg(removed).arg(expected));
+                check(longStrips(kMultiSize) == 2,
+                      QStringLiteral("leaving exactly two rounded strips (%1)")
+                          .arg(longStrips(kMultiSize)));
+
+                ToastHost* multiToasts = window.findChild<ToastHost*>();
+                check(multiToasts != nullptr && multiToasts->isShowing() &&
+                          multiToasts->currentText().contains(QStringLiteral("2 edges")),
+                      QStringLiteral("reported by ONE toast that names the count (\"%1\")")
+                          .arg(multiToasts ? multiToasts->currentText() : QString()));
+                check(multiToasts != nullptr && multiToasts->toast() != nullptr &&
+                          multiToasts->toast()->hasUndo(),
+                      "which offers Undo, because it is one change");
+                if (!outDir.isEmpty())
+                    printWindowCapture(&window,
+                                       outDir + QStringLiteral("/bevel-two-edges-done.png"));
+
+                // ONE checkpoint for the whole gesture: a single Undo has to
+                // put BOTH edges back. Two checkpoints would leave the user
+                // pressing Ctrl+Z twice for one thing they did once.
+                trigger(window, QStringLiteral("Undo"));
+                settle(300);
+                check(std::fabs(multiVolume() - startVolume) < 1.0 &&
+                          stripSpans().empty(),
+                      QStringLiteral("and ONE Undo puts both edges back sharp (%1 strips "
+                                     "left)").arg(int(stripSpans().size())));
+            }
+
+            // --- item 8, through the interface -----------------------------
+            //
+            // Fillet one edge, then fillet the edge NEXT to it. Before the
+            // containment this rounded a third edge as well, shortened the
+            // first strip, and removed 13.8% more material than the second
+            // edge's own formula.
+            int firstIdx = -1;
+            int neighbourIdx = -1;
+            for (std::size_t i = 0; i < reachable.size() && firstIdx < 0; ++i) {
+                for (std::size_t j = 0; j < reachable.size(); ++j) {
+                    if (i == j) continue;
+                    gp_Pnt a1, a2, b1, b2;
+                    if (!endsOf(reachable[i].edge, a1, a2)) continue;
+                    if (!endsOf(reachable[j].edge, b1, b2)) continue;
+                    const double gap = std::min({a1.Distance(b1), a1.Distance(b2),
+                                                 a2.Distance(b1), a2.Distance(b2)});
+                    if (gap > 1.0e-6) continue;   // must actually share a corner
+                    firstIdx = int(i);
+                    neighbourIdx = int(j);
+                    break;
+                }
+            }
+            check(firstIdx >= 0,
+                  "two pickable edges that share a corner, which is the arrangement the "
+                  "spread needed");
+
+            if (firstIdx >= 0 && multi->field()) {
+                constexpr double kSpreadSize = 20.0;
+                constexpr double kPiHere = 3.14159265358979323846;
+
+                gp_Pnt f1, f2, n1, n2;
+                endsOf(reachable[firstIdx].edge, f1, f2);
+                endsOf(reachable[neighbourIdx].edge, n1, n2);
+                const gp_Dir neighbourWas(gp_Vec(n1, n2));
+
+                view->clearSelection();
+                settle(100);
+                clickAt(view, QPointF(reachable[firstIdx].at));
+                settle(150);
+                check(view->selectedEdges().size() == 1 && multi->isVisible() &&
+                          !view->selectedEdge().IsNull() &&
+                          view->selectedEdge().IsSame(reachable[firstIdx].edge),
+                      "the first of the two adjacent edges selects on its own - THAT edge, "
+                      "so what follows is filleted where this probe thinks it is");
+                multi->field()->setText(QStringLiteral("20"));
+                settle(300);
+                sendKeyTo(&window, Qt::Key_Return);
+                settle(400);
+                check(longStrips(kSpreadSize) == 1,
+                      QStringLiteral("filleting it leaves one strip (%1)")
+                          .arg(longStrips(kSpreadSize)));
+
+                const double afterFirst = multiVolume();
+
+                // The neighbour on the REBUILT body: the straight edge lying
+                // on the very line the neighbour occupied before, which is
+                // robust to the rebuild moving its endpoints. It is 20 mm
+                // shorter now, cut back by the strip it runs into - precisely
+                // the tangency the propagation used to walk through.
+                TopoDS_Edge neighbour;
+                double neighbourLength = 0.0;
+                gp_Pnt neighbourCentre;
+                for (TopExp_Explorer it(multiShape(), TopAbs_EDGE); it.More(); it.Next()) {
+                    const TopoDS_Edge candidate = TopoDS::Edge(it.Current());
+                    if (BRepAdaptor_Curve(candidate).GetType() != GeomAbs_Line) continue;
+                    gp_Pnt a, b;
+                    if (!endsOf(candidate, a, b)) continue;
+                    const gp_Vec now(a, b);
+                    if (now.Magnitude() < 1.0e-6) continue;
+                    if (std::fabs(std::fabs(gp_Dir(now).Dot(neighbourWas)) - 1.0) > 1.0e-6)
+                        continue;
+                    // On the same infinite line, not merely parallel to it.
+                    if (gp_Vec(n1, a).Crossed(gp_Vec(neighbourWas)).Magnitude() > 1.0e-4)
+                        continue;
+                    gp_Pnt centre;
+                    gp_Dir outward;
+                    if (!ModelingOps::bevelAxis(multiShape(), candidate, centre, outward))
+                        continue;
+                    if (a.Distance(b) <= neighbourLength) continue;
+                    neighbour = candidate;
+                    neighbourLength = a.Distance(b);
+                    neighbourCentre = centre;
+                }
+                check(!neighbour.IsNull(),
+                      "the neighbouring edge survives the first fillet, shortened by it");
+                // Shortened by about the radius. Not EXACTLY the radius: this
+                // body's corners are not right angles (buildBody draws its
+                // rectangle in screen space, so the ground-plane shape is a
+                // general quadrilateral), and how far a strip cuts a
+                // neighbour back depends on that angle. What matters is that
+                // the edge now ENDS on the new strip, which is the tangency
+                // the propagation used to walk through.
+                const double cutBack = reachable[neighbourIdx].length - neighbourLength;
+                check(cutBack > 1.0 && cutBack < kSpreadSize * 2.0,
+                      QStringLiteral("and really is cut back by roughly the radius - it "
+                                     "ENDS on the new strip now (%1 mm off a %2 mm edge)")
+                          .arg(cutBack).arg(reachable[neighbourIdx].length));
+
+                QPoint neighbourAt;
+                const bool aimed = !neighbour.IsNull() &&
+                                   view->projectToScreen(neighbourCentre, neighbourAt) &&
+                                   view->rect().adjusted(30, 30, -30, -30)
+                                       .contains(neighbourAt);
+                check(aimed, "and it projects somewhere a click can reach");
+                if (aimed) {
+                    view->clearSelection();
+                    settle(100);
+                    clickAt(view, QPointF(neighbourAt));
+                    settle(180);
+                    check(!view->selectedEdge().IsNull() &&
+                              view->selectedEdge().IsSame(neighbour),
+                          "clicking it selects that edge and no other");
+                    check(multi->isVisible(),
+                          "and raises the chip on it");
+
+                    multi->field()->setText(QStringLiteral("20"));
+                    settle(350);
+                    sendKeyTo(&window, Qt::Key_Return);
+                    settle(450);
+
+                    // The three assertions the spread failed, and it failed
+                    // all three: it removed 13.8% too much, it left THREE
+                    // strips, and it cut the first strip back.
+                    const double removedSecond = afterFirst - multiVolume();
+                    const double expectedSecond =
+                        (1.0 - kPiHere / 4.0) * kSpreadSize * kSpreadSize * neighbourLength;
+                    check(std::fabs(removedSecond - expectedSecond) <
+                              std::max(1.0, expectedSecond * 0.03),
+                          QStringLiteral("filleting it removes ONLY its own "
+                                         "(1 - pi/4) r^2 L - no neighbouring edge came "
+                                         "with it (%1 vs %2 over %3 mm)")
+                              .arg(removedSecond).arg(expectedSecond).arg(neighbourLength));
+                    check(longStrips(kSpreadSize) == 2,
+                          QStringLiteral("leaving exactly two rounded strips, not three "
+                                         "(%1) - the third was a whole 40 mm corner edge "
+                                         "rounded at r = 20 that nobody picked")
+                              .arg(longStrips(kSpreadSize)));
+
+                    // The FIRST strip, still the length it was built at. This
+                    // is the half a volume figure cannot report: the spread
+                    // cut this strip back by the second radius at the shared
+                    // corner while removing an amount of material that still
+                    // looked plausible. Measured through the cylinder's own V
+                    // range, never a bounding box - see stripSpans().
+                    //
+                    // A band, not an equality, and the band is one-sided on
+                    // purpose: the strip must not be SHORTER than the edge it
+                    // was built on (that is the defect), while running a
+                    // little past it into the corner blend is normal and
+                    // depends on the angle the two edges meet at.
+                    const std::vector<double> spans = stripSpans();
+                    auto spanNear = [&spans](double edgeLength, double radius) {
+                        for (double span : spans) {
+                            if (span >= edgeLength - 2.0 && span <= edgeLength + radius * 2.0)
+                                return true;
+                        }
+                        return false;
+                    };
+                    check(spanNear(reachable[firstIdx].length, kSpreadSize),
+                          QStringLiteral("and the FIRST strip still spans the whole edge "
+                                         "it was built on - %1 mm - rather than being cut "
+                                         "back at the shared corner (spans: %2)")
+                              .arg(reachable[firstIdx].length)
+                              .arg(spans.empty() ? 0.0 : spans.front()));
+                    // The SECOND strip is not asserted here: how far its own
+                    // fillet runs is already pinned, and pinned harder, by the
+                    // volume check above - which multiplies this edge's length
+                    // by the closed form and would move the moment the strip
+                    // did. A span check on it would be a second, weaker
+                    // measurement of the same fact.
+
+                    if (!outDir.isEmpty()) {
+                        printWindowCapture(
+                            &window, outDir + QStringLiteral("/bevel-adjacent-contained.png"));
+                        view->saveSnapshot(
+                            outDir +
+                            QStringLiteral("/bevel-adjacent-contained-viewport.png"));
+
+                        // And a close-up on the shared corner, which is where
+                        // the question actually is: a 20 mm radius on a
+                        // 1,400 mm body is a hairline at any framing that
+                        // shows the whole thing. Restored below with the rest
+                        // of the block's camera work.
+                        const gp_Pnt sharedCorner =
+                            std::min(n1.Distance(f1), n1.Distance(f2)) < 1.0e-6 ? n1 : n2;
+                        CameraState close = view->camera().state();
+                        close.target = sharedCorner;
+                        close.distance = kSpreadSize * 14.0;
+                        close.elevationDeg = 28.0;
+                        view->animateTo(close);
+                        settle(250);
+                        view->saveSnapshot(
+                            outDir + QStringLiteral("/bevel-adjacent-corner.png"));
+                    }
+                }
+            }
+        }
+
+        // Leave the document as this block found it.
+        trigger(window, QStringLiteral("Select Bodies"));
+        settle(150);
+        view->setSelectedSolids({multiId});
+        settle(150);
+        trigger(window, QStringLiteral("Delete Selected"));
+        settle(200);
+        check(static_cast<int>(window.document().count()) == multiBodiesBefore,
+              "the multi-edge probe leaves the document as it found it");
+        view->clearSelection();
+        view->animateTo(multiCameraBefore);
         settle(200);
     }
 

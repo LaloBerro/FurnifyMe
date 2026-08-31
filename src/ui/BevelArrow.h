@@ -10,6 +10,8 @@
 #include <QStringList>
 #include <QWidget>
 
+#include <vector>
+
 class MainWindow;
 class OcctViewWidget;
 class QHideEvent;
@@ -74,7 +76,11 @@ public:
     // Every string this chip paints, for gui_smoke's banned-word sweep.
     QStringList paintedTexts() const;
 
-    // "Fillet" or "Chamfer" - the kind, in the user's words.
+    // "Fillet" or "Chamfer" - the kind, in the user's words - and, when the
+    // gesture covers more than one edge, how many: `Fillet — 3 edges`. The
+    // count is on the KIND rather than on the value, because the value is a
+    // radius and a radius does not multiply: three edges rounded at 20 mm are
+    // still `R 20 mm`, and a chip that said `R 60 mm` would be lying.
     QString kindText() const;
     // "R 20 mm" or "C 2 cm" - the size the field currently holds, prefixed by
     // the kind's initial and formatted through Measure, so it follows the
@@ -106,8 +112,14 @@ private:
     // font ignores QApplication::setFont), so both are set here, at
     // construction and on every Theme broadcast.
     void applyTheme();
-    void begin(const TopoDS_Edge& edge, int bodyId, const gp_Pnt& centre,
-               const gp_Dir& outward);
+    void begin(const std::vector<TopoDS_Edge>& edges, const TopoDS_Edge& edge, int bodyId,
+               const gp_Pnt& centre, const gp_Dir& outward);
+    // True when `edges` names exactly the same edges, in the same order, as
+    // the gesture already up - which is what decides whether a refresh() is a
+    // repaint or a restart. A Shift-click that adds a second edge must
+    // RESTART: the arrow moves to it, the count changes, and a preview built
+    // for one edge is no longer what Enter would commit.
+    bool sameEdges(const std::vector<TopoDS_Edge>& edges) const;
     void end();
     QRect fieldRect() const;
     QRect hintRect(int line) const;
@@ -132,6 +144,9 @@ private:
     // trusted across a rebuild - edge indices are no more stable than face
     // indices (CLAUDE.md's topological-naming warning).
     TopoDS_Edge myEdge;
+    // Every edge the gesture will bevel, the arrow's own included. One
+    // kernel build, one checkpoint, one toast - see MainWindow::bevelEdgesBy.
+    std::vector<TopoDS_Edge> myEdges;
     int myBodyId = 0;
     gp_Pnt myCentre;
     gp_Dir myOutward{0.0, 0.0, 1.0};

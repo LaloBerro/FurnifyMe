@@ -300,8 +300,23 @@ public:
 
     // The single selected edge, or a null edge otherwise - the same rule as
     // selectedFace(), for the same reason. This is what the dimension falls
-    // back to when the cursor leaves an edge the user has selected.
+    // back to when the cursor leaves an edge the user has selected: a length
+    // annotation over two highlighted edges could only ever measure one of
+    // them, so it measures neither.
     TopoDS_Edge selectedEdge() const;
+
+    // EVERY selected edge, which a bevel - unlike the dimension - can act on
+    // all of at once. Shift-click accumulates them through the same
+    // AIS_SelectionScheme_XOR the additive body pick uses.
+    std::vector<TopoDS_Edge> selectedEdges() const;
+
+    // The one the bevel arrow stands on: the edge the user picked LAST, so a
+    // multi-edge gesture is measured where the hand last was rather than
+    // wherever OCCT happens to iterate first. Falls back to the last entry of
+    // selectedEdges() when the remembered edge is no longer selected (a
+    // Shift-click that toggled it back off, a rebuild), and is null when
+    // nothing is selected.
+    TopoDS_Edge lastSelectedEdge() const;
 
     // Redraws whatever dimension is on screen without changing which span it
     // measures - for a display-unit switch, which changes the label's text
@@ -691,6 +706,13 @@ private:
     // While true, updateEdgeDimension() draws nothing - see
     // setEdgeDimensionSuppressed().
     bool myEdgeDimensionSuppressed = false;
+
+    // The edge the last pick actually added to the selection. OCCT's
+    // InitSelected order is the context's, not the user's, so "the edge you
+    // picked last" cannot be read back out of the selection - it has to be
+    // remembered as it happens. Validated against the live selection on every
+    // read (see lastSelectedEdge()), never trusted across a rebuild.
+    TopoDS_Edge myLastPickedEdge;
 
     class QVariantAnimation* myCameraAnimation = nullptr;
     bool myAnimationsEnabled = true;

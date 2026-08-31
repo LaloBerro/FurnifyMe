@@ -104,8 +104,15 @@ void BevelArrow::applyTheme()
     int content = 0;
     for (int line = 0; line < 2; ++line)
         content = std::max(content, badge.horizontalAdvance(hintText(line)));
+    // The widest title row this chip can paint: the longer kind word, the
+    // count suffix a multi-edge gesture adds, and a comfortably large value
+    // beside it. Measured with the label font it is painted with - a title
+    // measured without the suffix and painted with one clips, which is
+    // exactly the failure CLAUDE.md's measure-with-the-font rule names.
     content = std::max(content,
-                       label.horizontalAdvance(tr("Chamfer")) + kKindGap +
+                       label.horizontalAdvance(tr("%1 — %2 edges")
+                                                   .arg(tr("Chamfer"), QStringLiteral("12"))) +
+                           kKindGap +
                            label.horizontalAdvance(QStringLiteral("C 1,200 mm")));
 
     const int margin = Theme::surfaceShadowMargin();
@@ -146,17 +153,18 @@ void BevelArrow::refresh()
     // edge-selection mode and while a face is pending, which is what keeps
     // this, the pull arrow, the transform gizmo and ExtrudePreview mutually
     // exclusive - and with them their application-wide Enter/Escape claims.
+    std::vector<TopoDS_Edge> edges;
     TopoDS_Edge edge;
     int bodyId = 0;
     gp_Pnt centre;
     gp_Dir outward;
-    if (!myWindow->bevelTarget(edge, bodyId, centre, outward)) {
+    if (!myWindow->bevelTarget(edges, edge, bodyId, centre, outward)) {
         end();
         return;
     }
 
-    if (myEdge.IsNull() || !myEdge.IsSame(edge) || bodyId != myBodyId) {
-        begin(edge, bodyId, centre, outward);
+    if (myEdge.IsNull() || !myEdge.IsSame(edge) || bodyId != myBodyId || !sameEdges(edges)) {
+        begin(edges, edge, bodyId, centre, outward);
         return;
     }
 
@@ -170,10 +178,20 @@ void BevelArrow::refresh()
     reposition();
 }
 
-void BevelArrow::begin(const TopoDS_Edge& edge, int bodyId, const gp_Pnt& centre,
-                       const gp_Dir& outward)
+bool BevelArrow::sameEdges(const std::vector<TopoDS_Edge>& edges) const
+{
+    if (edges.size() != myEdges.size()) return false;
+    for (std::size_t i = 0; i < edges.size(); ++i) {
+        if (!edges[i].IsSame(myEdges[i])) return false;
+    }
+    return true;
+}
+
+void BevelArrow::begin(const std::vector<TopoDS_Edge>& edges, const TopoDS_Edge& edge,
+                       int bodyId, const gp_Pnt& centre, const gp_Dir& outward)
 {
     myEdge = edge;
+    myEdges = edges;
     myBodyId = bodyId;
     myCentre = centre;
     myOutward = outward;
@@ -207,6 +225,7 @@ void BevelArrow::end()
         myView->clearBevelArrow();
     }
     myEdge.Nullify();
+    myEdges.clear();
     myBodyId = 0;
     mySize = 0.0;
     myHasPreview = false;
@@ -268,7 +287,7 @@ void BevelArrow::onReleased(bool dragged)
 
 void BevelArrow::updatePreview()
 {
-    if (!myField || !myView || !myWindow || myEdge.IsNull()) return;
+    if (!myField || !myView || !myWindow || myEdge.IsNull() || myEdges.empty()) return;
 
     // Through Measure::parseLength, never QString::toDouble: the chip's value
     // readout names the display unit, so the field has to be read back in that
@@ -292,13 +311,16 @@ void BevelArrow::updatePreview()
         return;
     }
 
-    // The SAME ModelingOps calls the commit uses. A preview built by a
-    // different path is a lie, and this is the one place a user judges a
-    // number by what it looks like.
+    // The SAME ModelingOps calls the commit uses - the LIST forms, over the
+    // same list, so a three-edge preview is built by the same single build
+    // that Enter will run. A preview built by a different path is a lie, and
+    // this is the one place a user judges a number by what it looks like;
+    // previewing one edge and committing three would be that lie at its
+    // largest.
     const TopoDS_Shape body = myWindow->document().shapeOf(myBodyId);
     const ModelingOps::BooleanResult result =
-        myFillet ? ModelingOps::filletEdge(body, myEdge, size)
-                 : ModelingOps::chamferEdge(body, myEdge, size);
+        myFillet ? ModelingOps::filletEdges(body, myEdges, size)
+                 : ModelingOps::chamferEdges(body, myEdges, size);
     if (!result.ok) {
         // A refusal MID-DRAG is not an error to report - at furniture scale a
         // radius that momentarily exceeds what the neighbouring face can give
@@ -325,7 +347,7 @@ void BevelArrow::updatePreview()
 
 void BevelArrow::commit()
 {
-    if (!myField || !myWindow || myEdge.IsNull()) return;
+    if (!myField || !myWindow || myEdge.IsNull() || myEdges.empty()) return;
 
     double size = 0.0;
     if (!Measure::parseLength(myField->text().toStdString(), size)) return;
@@ -339,8 +361,8 @@ void BevelArrow::commit()
     // Enter is indistinguishable from a broken one. bevelEdgeBy() owns both
     // outcomes: the Failure toast in cause-and-fix form, or the undo
     // checkpoint, the replaced body and the Note toast with Undo.
-    const TopoDS_Edge edge = myEdge;
-    if (!myWindow->bevelEdgeBy(edge, size, myFillet)) {
+    const std::vector<TopoDS_Edge> edges = myEdges;
+    if (!myWindow->bevelEdgesBy(edges, size, myFillet)) {
         markInvalid(true);
         return;
     }
@@ -368,7 +390,14 @@ QString BevelArrow::kindText() const
     // The vocabulary, in the user's words. Fillet rounds, Chamfer flattens -
     // and the word the code uses for the pair of them never reaches a painted
     // string.
-    return myFillet ? tr("Fillet") : tr("Chamfer");
+    const QString kind = myFillet ? tr("Fillet") : tr("Chamfer");
+    // Only when there is a count worth reporting. One edge reads exactly as
+    // it always did, and the plural is written out rather than parenthesised:
+    // this chip is only ever asked for the count when it is two or more, so
+    // "edges" is the only form it can need.
+    if (myEdges.size() < 2) return kind;
+    return tr("%1 — %2 edges")
+        .arg(kind, QString::number(static_cast<int>(myEdges.size())));
 }
 
 QString BevelArrow::valueText() const
