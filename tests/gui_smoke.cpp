@@ -150,7 +150,7 @@ int g_checks = 0;
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 997;
+constexpr int kCheckFloor = 1005;
 
 void check(bool condition, const QString& what)
 {
@@ -899,6 +899,41 @@ int main(int argc, char* argv[])
             }
             check(view->viewIsOrthographic(), "and so does a wheel notch");
 
+            // --- the toggle always changes what you see ----------------------
+            // A loan is live right now, which is the state that used to make
+            // the Persp/Ortho button do visibly nothing: with the loan kept,
+            // the first click moved the base to Ortho (no visual change, since
+            // ortho was already on screen) and the SECOND click moved it back
+            // to Persp while the loan held effectiveOrtho() true - so the user
+            // clicked twice, watched the label change twice, and saw the
+            // viewport change never.
+            //
+            // The toggle drops the loan now. Driven through the real action,
+            // and read off the LIVE OCCT camera, not our own flag.
+            {
+                QAction* orthoNow = action(window, QStringLiteral("Orthographic"));
+                check(orthoNow != nullptr && !orthoNow->isChecked() &&
+                          view->camera().temporaryOrtho(),
+                      "the loan is live and the chosen mode is still perspective");
+                if (orthoNow) {
+                    orthoNow->trigger();
+                    settle(200);
+                    check(orthoNow->isChecked() && !view->camera().temporaryOrtho(),
+                          "one click adopts Ortho as the base AND hands the loan back");
+                    check(view->viewIsOrthographic(),
+                          "the view is orthographic because that is now the mode, "
+                          "not because anything is borrowed");
+
+                    orthoNow->trigger();
+                    settle(200);
+                    check(!view->viewIsOrthographic(),
+                          "and the next click actually returns to perspective - with the "
+                          "loan kept, this is the one that used to do nothing");
+                    check(!orthoNow->isChecked() && !view->camera().temporaryOrtho(),
+                          "leaving neither a chosen ortho nor a borrowed one");
+                }
+            }
+
             // Clicking the -Y ball views from behind.
             clickAt(gizmo, gizmo->tipCenter(1, false));
             settle(150);
@@ -1071,6 +1106,21 @@ int main(int argc, char* argv[])
             const int before = window.progress().count("view.changed");
             const double azBefore = view->camera().state().azimuthDeg;
             const double elBefore = view->camera().state().elevationDeg;
+            // The scale invariant, sampled in perspective and compared in
+            // ortho below. Pinned on this side too, so the ortho comparison
+            // below is against a figure already known to be right rather than
+            // against whatever perspective happened to be doing.
+            const double wppBefore = view->worldPerPixel();
+            {
+                const double shown = view->cameraViewHeightAtTarget();
+                const double wanted = wppBefore * std::max(1, view->height());
+                check(wanted > 1.0e-6 &&
+                          std::fabs(shown - wanted) / wanted < 1.0e-6,
+                      QStringLiteral("the perspective camera shows the height "
+                                     "worldPerPixel() assumes (%1 mm against %2 mm)")
+                          .arg(shown, 0, 'f', 4)
+                          .arg(wanted, 0, 'f', 4));
+            }
 
             clickAt(projButton, QPointF(projButton->width() / 2.0,
                                         projButton->height() / 2.0));
@@ -1103,6 +1153,43 @@ int main(int argc, char* argv[])
             check(orthoAction != nullptr && orthoAction->isCheckable() &&
                       orthoAction->isChecked(),
                   "the View menu's Orthographic entry is the same state, already checked");
+
+            // --- the parallel-Scale invariant, asserted where it protects ----
+            // worldPerPixel() is ONE formula for both projections, and that
+            // holds only because applyCameraState() sets the orthographic
+            // camera's Scale to exactly the perspective visible height at
+            // target depth. Every screen-sized thing in the scene rides on it:
+            // the dimension arrowheads and gaps, and both drag arrows' mapping
+            // from pixels to millimetres.
+            //
+            // Nothing else in the suite can catch a mis-scaled ortho camera.
+            // The unprojection round trip cannot - it goes out and back
+            // through the same matrix, so a camera scaled 2x agrees with
+            // itself perfectly.
+            //
+            // And neither would comparing worldPerPixel() to itself across the
+            // flip: it is computed from the turntable's own distance and never
+            // reads the OCCT camera, so it is unchanged by arithmetic whatever
+            // OCCT was told. The oracle has to be what OCCT was ACTUALLY told,
+            // which is cameraViewHeightAtTarget() - the live
+            // Graphic3d_Camera::ViewDimensions(). Drop the SetScale line, or
+            // move it above the SetProjectionType that must precede it, and
+            // the parallel camera sits at its 1000 default and this fails.
+            const double wppAfter = view->worldPerPixel();
+            const double shownAfter = view->cameraViewHeightAtTarget();
+            const double wantedAfter = wppAfter * std::max(1, view->height());
+            check(std::fabs(wppAfter - wppBefore) < 1.0e-9,
+                  QStringLiteral("world-per-pixel is unchanged by the flip (%1 then %2 "
+                                 "mm/px)")
+                      .arg(wppBefore, 0, 'g', 12)
+                      .arg(wppAfter, 0, 'g', 12));
+            check(wantedAfter > 1.0e-6 &&
+                      std::fabs(shownAfter - wantedAfter) / wantedAfter < 1.0e-6,
+                  QStringLiteral("and the orthographic camera really shows that height - "
+                                 "its parallel scale is tied to the perspective framing, "
+                                 "not left at a default (shows %1 mm, wants %2 mm)")
+                      .arg(shownAfter, 0, 'f', 4)
+                      .arg(wantedAfter, 0, 'f', 4));
 
             // Half of a side-by-side: the SAME camera pose, drawn both ways,
             // which is the only comparison that shows what the mode does. The
@@ -3056,9 +3143,23 @@ int main(int argc, char* argv[])
                 check(view->camera().baseProjection() ==
                           CameraController::Projection::Perspective,
                       "on loan - the mode the user chose is untouched");
-                check(view->camera().state().target.Distance(pickedCentre) < 1.0,
-                      QStringLiteral("aimed at the face's own centre (%1 mm off)")
-                          .arg(view->camera().state().target.Distance(pickedCentre)));
+                // The BOUNDING BOX centre, which is what flyOntoFace() aims at
+                // (through CameraController::frame), not the centre of mass
+                // this block picked the face by. They coincide on a rectangle
+                // and separate on an L-shaped or tapered face, so deriving the
+                // oracle the way the code derives the target is what stops an
+                // asymmetric face reading as a targeting error - or, worse,
+                // hiding one behind a tolerance widened to accommodate it.
+                Bnd_Box faceBox;
+                BRepBndLib::Add(picked, faceBox);
+                Standard_Real bx0, by0, bz0, bx1, by1, bz1;
+                faceBox.Get(bx0, by0, bz0, bx1, by1, bz1);
+                const gp_Pnt faceBoxCentre((bx0 + bx1) / 2.0, (by0 + by1) / 2.0,
+                                           (bz0 + bz1) / 2.0);
+                check(view->camera().state().target.Distance(faceBoxCentre) < 1.0,
+                      QStringLiteral("aimed at the centre of the face's own extent "
+                                     "(%1 mm off)")
+                          .arg(view->camera().state().target.Distance(faceBoxCentre)));
 
                 // Every pixel this block computed before the lock was aimed at
                 // the camera the lock has just moved. Projected again from the

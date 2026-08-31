@@ -302,6 +302,25 @@ int main()
               "orbiting clears the loan but never the mode the user chose");
     }
 
+    // --- setBaseProjection is state; dropping the loan is the toggle's job ----
+    // The split is deliberate and worth pinning. CameraController's setter
+    // moves ONE field, so a caller restoring a stored preference does not have
+    // to think about a loan that cannot exist yet. The user-facing toggle -
+    // OcctViewWidget::setBaseProjection, which gui_smoke covers - drops the
+    // loan as well, because a control whose whole subject is the projection
+    // must never be outvoted by one. Both halves are tested; only their
+    // composition is the shell's.
+    {
+        CameraController cam;
+        cam.setTemporaryOrtho(true);
+        cam.setBaseProjection(CameraController::Projection::Perspective);
+        check(cam.temporaryOrtho(),
+              "the bare setter leaves the loan alone - it is one field, not a policy");
+        cam.setTemporaryOrtho(false);
+        check(!cam.effectiveOrtho(),
+              "and with the loan handed back, perspective is what resolves");
+    }
+
     // --- lookFrom aims the eye down a given direction -------------------------
     // The whole of the face-lock flight: hand it a face's OUTWARD normal and
     // the camera looks straight back along it.

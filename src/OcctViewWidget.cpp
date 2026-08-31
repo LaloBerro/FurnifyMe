@@ -902,6 +902,14 @@ QPoint OcctViewWidget::fromDevicePixels(int px, int py) const
                   static_cast<int>(std::lround(py / ratio)));
 }
 
+double OcctViewWidget::cameraViewHeightAtTarget() const
+{
+    if (myView.IsNull()) return 0.0;
+    // gp_XYZ of (width, height, depth) at the focal distance. Y is the height,
+    // which is the one worldPerPixel() divides by the viewport's own height.
+    return myView->Camera()->ViewDimensions().Y();
+}
+
 bool OcctViewWidget::projectToScreen(const gp_Pnt& world, QPoint& out) const
 {
     if (myView.IsNull()) return false;
@@ -1336,6 +1344,16 @@ const QStringList& viewDirectionNames()
 void OcctViewWidget::setBaseProjection(CameraController::Projection projection)
 {
     myCamera.setBaseProjection(projection);
+    // ...and the loan is handed back, so the toggle ALWAYS changes what is on
+    // screen. Without this, clicking it during a borrowed orthographic look -
+    // which is exactly the state a face lock or a gizmo arm leaves behind -
+    // flips the label Ortho->Persp while effectiveOrtho() stays true and the
+    // viewport does not move. Twice in a row, since the base was perspective
+    // to begin with. A control that visibly does nothing is broken to the
+    // person clicking it, whatever the state machine underneath believes; the
+    // loan is a convenience for gestures that did not ask about projection,
+    // and this is the one gesture that is entirely about it.
+    myCamera.setTemporaryOrtho(false);
     // Straight onto the OCCT camera through the one write site, which also
     // redraws and tells every camera-following overlay.
     applyCameraState();

@@ -482,6 +482,14 @@ QMenuBar* MainWindow::buildMenus()
     viewMenu->addSeparator();
     viewMenu->addAction(tr("&Axonometric"), QKeySequence(Qt::Key_0), this,
                         &MainWindow::goAxonometric);
+    // These three name a DIRECTION and nothing else: unlike a click on a gizmo
+    // tip, they deliberately do not borrow an orthographic look, so they leave
+    // the projection exactly as the user set it. The asymmetry is the brief's,
+    // and it is a real distinction rather than an oversight - the gizmo is a
+    // direct-manipulation gesture aimed at a face of a cube, where convergence
+    // is the thing being complained about, while these are a menu entry and a
+    // number key that mean "look from the top" and make no claim about how the
+    // scene should be drawn once you get there.
     viewMenu->addAction(tr("&Top"), QKeySequence(Qt::Key_1), this, [this] {
         myView->setViewTop();
         recordViewChanged();
@@ -1924,9 +1932,17 @@ void MainWindow::flyOntoFace(const TopoDS_Face& face, const gp_Pln& plane)
     BRepBndLib::Add(face, box);
     if (box.IsVoid()) return;
 
-    // frame() gives the target (the face's own centre) and a distance that
-    // fits it - the same framing a double-click on a body uses, so a face-on
-    // look is no closer or further than the app's one idea of "framed".
+    // frame() gives the target and a distance that fits it - the same framing
+    // a double-click on a body uses, so a face-on look is no closer or further
+    // than the app's one idea of "framed".
+    //
+    // The target is the BOUNDING BOX's centre, not the face's centre of mass.
+    // The two coincide on anything symmetric and separate on an L-shaped or
+    // tapered face, and the box centre is the right one here: the job is to
+    // put the whole face on screen, which is a question about its extent.
+    // Anything asserting where this lands must derive the box centre too -
+    // comparing against a centre of mass would be measuring a different point
+    // and calling the gap an error.
     CameraController scratch = myView->camera();
     scratch.frame(box, OcctViewWidget::kFovyDeg);
     // ...and then the direction, which frame() leaves alone.

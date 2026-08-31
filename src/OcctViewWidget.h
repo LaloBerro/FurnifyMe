@@ -256,6 +256,20 @@ public:
     // MainWindow, the hovered edge here) read this.
     double worldPerPixel() const;
 
+    // The height, in world units, that the LIVE OCCT camera actually shows at
+    // the target's depth - Graphic3d_Camera::ViewDimensions(), which answers
+    // correctly for both projections (perspective: the frustum's height at the
+    // focal distance; orthographic: the parallel Scale, at every depth).
+    //
+    // Exposed for one check, and it is the only oracle that can make that
+    // check mean anything. worldPerPixel() is computed from the turntable's
+    // own distance and never reads the OCCT camera, so comparing it to itself
+    // across a projection flip is true by arithmetic whatever OCCT was told.
+    // This reads what OCCT was actually told, so a dropped or mis-ordered
+    // SetScale() - which leaves the parallel camera at its 1000 default -
+    // shows up as the mismatch it is. Returns 0 before the view exists.
+    double cameraViewHeightAtTarget() const;
+
     // Document ids of the selected solids, deduplicated (face-mode selection can
     // hit several faces of one solid).
     std::vector<int> selectedSolidIds() const;
@@ -286,10 +300,16 @@ public:
     const CameraController& camera() const { return myCamera; }
 
     // The user's chosen projection - the bar's Persp/Ortho toggle, and the one
-    // route to it. Sets the base mode and pushes it straight onto the OCCT
-    // camera; it deliberately does NOT touch the temporary flag, so a toggle
-    // pressed while a face-on look is on loan changes what that look returns
-    // TO rather than ending it early.
+    // route to it. Sets the base mode, DROPS any borrowed orthographic look,
+    // and pushes both straight onto the OCCT camera.
+    //
+    // Dropping the loan is what makes the button always change what is on
+    // screen. It used to be kept, on the reasoning that the toggle should
+    // decide what a face-on look returns TO rather than end it early - which
+    // is coherent, and wrong at the only moment it matters: with a loan
+    // active, clicking Ortho->Persp left effectiveOrtho() true and the
+    // viewport unmoved, twice running. The loan exists for gestures that were
+    // not about projection; this gesture is nothing else.
     void setBaseProjection(CameraController::Projection projection);
 
     // Whether the camera is drawing orthographically RIGHT NOW - read off the

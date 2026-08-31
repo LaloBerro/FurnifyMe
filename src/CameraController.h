@@ -32,7 +32,10 @@ public:
     //     onto something - a gizmo arm, a locked face - because a face-on view
     //     with perspective convergence is not a face-on view. It is a loan,
     //     not a mode: the first orbit hands it back and the base projection
-    //     returns.
+    //     returns. So does the toggle itself (see
+    //     OcctViewWidget::setBaseProjection) - a control whose whole subject
+    //     is the projection must never be outvoted by a loan the user did not
+    //     ask for.
     //
     // effectiveOrtho() is what the renderer follows. A user in perspective who
     // clicks an arm gets one orthographic look and their perspective back the

@@ -637,10 +637,15 @@ The shell's composition, settled in Phase 5 against HTML mockups the user chose 
 - **The app bar** replaces the menu strip via `QMainWindow::setMenuWidget`. It holds the
   wordmark, the window's **real `QMenuBar`** (reparented in - menus, shortcuts, the
   generated sheet and the vocabulary sweep all keep working untouched), and the view
-  controls: the view label button (text from `OcctViewWidget::viewLabelText()`, the one
-  source; clicking goes through `MainWindow::goAxonometric()`, the one route), the unit
-  chip (triggers the *other* unit's existing action - it holds no state), Wireframe and
-  Fit All. `Save Screenshot` is menu-only.
+  controls: the **Persp/Ortho toggle** (Phase 7 - it triggers the checkable
+  `Orthographic` action and holds no state, exactly as the unit chip does; it does **not**
+  snap to Axonometric, which belongs to the gizmo, keys 0-3 and the View menu, and it
+  records no `view.changed`, because a projection flip is not a look in a named direction
+  and would otherwise retire the hint teaching the gizmo), the unit chip (triggers the
+  *other* unit's existing action - it holds no state), Wireframe and Fit All.
+  `Save Screenshot` is menu-only. `OcctViewWidget::viewDirectionName()` (once
+  `viewLabelText()`) still answers "which world axis is the camera square onto", and is
+  what the suite asserts snap flights against, but nothing paints it any more.
 - **The rail** is one `ToolCluster` in `ChipMode::IconOnly` at `Anchor::LeftEdge` -
   every tool as an icon button, labels and shortcuts in tooltips that auto-update from
   the actions. `MainWindow::buildOverlay()` sets the viewport's own minimum height from
@@ -736,7 +741,50 @@ Required `QWidget` setup — omitting any of these gives flicker or a black view
 `setAutoFillBackground(false)`, `setMouseTracking(true)` (needed for hover highlight), and
 `paintEngine()` overridden to return `nullptr`.
 
-Event wiring: `paintEvent`→`Redraw()`, `resizeEvent`→`MustBeResized()`, RMB drag→turntable orbit around the current view target (Unity-style, the user's explicit preference — no cursor-anchored pivoting), MMB drag→pan, wheel→zoomToward cursor; camera state lives in CameraController and is pushed via SetEye/SetCenter/SetUp; the projection is perspective (FOVy 45°).
+Event wiring: `paintEvent`→`Redraw()`, `resizeEvent`→`MustBeResized()`, RMB drag→turntable orbit around the current view target (Unity-style, the user's explicit preference — no cursor-anchored pivoting), MMB drag→pan, wheel→zoomToward cursor; camera state lives in CameraController and is pushed via SetEye/SetCenter/SetUp. FOVy is fixed at 45° for the life of the view; **which projection is drawn with it moves** — see below.
+
+#### Projection: a base mode and a loan
+
+`CameraController` holds **two** pieces of projection state. The **base** is what the user
+chose with the bar's toggle and is persisted; **temporary ortho** is a loan taken by a
+gesture that puts the camera square onto something (a gizmo arm, a locked face), because a
+face-on view with perspective convergence is not a face-on view. `effectiveOrtho()` —
+`temporary || base == Orthographic` — is what the renderer follows, written to the OCCT
+camera in the single site `applyCameraState()`.
+
+**Who hands the loan back:** `orbit()` does, but only when it actually *turned* the camera
+(measured before-against-after, so a drag pushing further into the elevation clamp, or a
+zero-delta move event, spends nothing). **The toggle does too** — a control whose entire
+subject is the projection must never be outvoted by a loan the user never asked for; keeping
+it made the button visibly do nothing twice in a row after a face lock. Pan, zoom,
+`setPivot`, `frame` and every `setState` route deliberately do **not**: panning across a
+face-on drawing is ordinary drafting, and snap flights land *through* `setState`, so
+clearing there would mean no flight was ever orthographic at all. Note the split — the bare
+`CameraController::setBaseProjection` moves one field; `OcctViewWidget::setBaseProjection`
+is the user-facing route that also drops the loan.
+
+**The `SetScale` order trap:** `SetScale()` on a camera still marked perspective moves the
+*distance* instead, so `applyCameraState()` sets `SetProjectionType` **first**, then the
+scale. And the orthographic half needs its scale set explicitly at all, because
+`Graphic3d_Camera` keeps `Scale` and `Distance` linked only for a perspective camera —
+switch the type alone and the parallel scale sits at its 1000 default and the scene jumps
+size.
+
+**The `worldPerPixel()` invariant:** one formula serves both projections, and that is
+*by construction*, not luck — `applyCameraState()` sets the parallel scale to exactly
+`2·distance·tan(FOVy/2)`, the perspective visible height at target depth. Every
+screen-sized thing in the scene rides on it: `DimensionRenderer`'s furniture and both drag
+arrows' pixels→millimetres mapping. If it is ever broken, this is the single place to
+branch. `OcctViewWidget::cameraViewHeightAtTarget()` exposes the live
+`Graphic3d_Camera::ViewDimensions()` so the suite can check what OCCT was *actually told*
+— comparing `worldPerPixel()` across a flip proves nothing, since it never reads the OCCT
+camera.
+
+One more ortho consequence: a parallel projection has **no horizon**, so
+`pointOnSketchPlane`/`pickWorldPoint` skip their behind-the-eye guard in ortho — every ray
+is the view direction, "behind" is only measured from wherever auto z-fit left the near
+plane, and the perspective rule would refuse perfectly visible clicks. `Convert` and
+`ConvertWithProj` themselves are projection-agnostic.
 
 ### Selection
 
