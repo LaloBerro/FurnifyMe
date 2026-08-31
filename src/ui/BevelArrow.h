@@ -100,6 +100,12 @@ protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
+    // This card's SIZE is measured with the fonts it paints with, and its
+    // field carries an explicitly set font - neither follows a Theme change
+    // on its own (setFixedSize() ignores a later resize(), and an explicit
+    // font ignores QApplication::setFont), so both are set here, at
+    // construction and on every Theme broadcast.
+    void applyTheme();
     void begin(const TopoDS_Edge& edge, int bodyId, const gp_Pnt& centre,
                const gp_Dir& outward);
     void end();

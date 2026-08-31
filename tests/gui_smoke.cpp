@@ -31,6 +31,7 @@
   #endif
 #endif
 
+#include "AppearancePanel.h"
 #include "CameraController.h"
 #include "DimensionRenderer.h"
 #include "DocumentModel.h"
@@ -60,8 +61,11 @@
 #include <QAbstractButton>
 #include <QAction>
 #include <QApplication>
+#include <QColorDialog>
+#include <QComboBox>
 #include <QDialog>
 #include <QDir>
+#include <QSpinBox>
 #include <QDockWidget>
 #include <QElapsedTimer>
 #include <QEnterEvent>
@@ -7867,6 +7871,586 @@ int main(int argc, char* argv[])
                 settle(200);
             }
         }
+    }
+
+    // --- the Appearance panel: every colour and the type scale, opened up ----
+    //
+    // Ordered LAST among the checks that drive `window`, and it restores
+    // Theme::defaultSpec() before it ends. Theme's spec is application-wide
+    // state, so a block that left it edited would hand every later check a
+    // differently coloured app - and the returning-user block below builds a
+    // whole second window.
+    {
+        QAction* appearance = action(window, QStringLiteral("Appearance..."));
+        check(appearance != nullptr, "there is an Appearance action");
+        check(appearance != nullptr && appearance->isCheckable(),
+              "and it is checkable, so the panel's visibility can be derived from it");
+
+        // The untouched app IS the shipped app. Both halves of that claim are
+        // pinned: the spec compares equal to the default one, and a pixel of
+        // real painted chrome is captured here to compare against after a
+        // reset - an accessor that quietly returned something else would pass
+        // the first check and fail the second.
+        check(Theme::spec() == Theme::defaultSpec(),
+              "an app nobody has themed is wearing exactly defaultSpec()");
+        check(Theme::defaultSpec().chrome == QColor(QStringLiteral("#1b1b1d")) &&
+                  Theme::defaultSpec().accent == QColor(QStringLiteral("#3d7eff")) &&
+                  Theme::defaultSpec().viewport == QColor(QStringLiteral("#45454b")),
+              "and defaultSpec() is Graphite byte for byte, not merely self-consistent");
+
+        // A CHECKED rail chip, so the inset accent() ring is actually painted.
+        // Found by state rather than by index: which chip happens to be
+        // checked is MainWindow::updateActions()'s business, not this
+        // block's, and an index would go stale the day the rail is reordered.
+        ToolChip* checkedChip = nullptr;
+        for (ToolChip* candidate : window.findChildren<ToolChip*>()) {
+            if (candidate->isChecked() && candidate->isVisible()) { checkedChip = candidate; break; }
+        }
+        check(checkedChip != nullptr,
+              "there is a checked rail chip to sample the accent ring on");
+
+        const QImage graphiteChip = checkedChip ? renderExact(checkedChip) : QImage();
+        // ToolChip::paintEvent() draws the inset ring 2px in from the card's
+        // left edge - the same point the Graphite anatomy probe samples.
+        const QPoint ringPoint(2, checkedChip ? checkedChip->height() / 2 : 0);
+
+        appearance->trigger();
+        settle(200);
+        AppearancePanel* panel = window.appearancePanel();
+        check(panel != nullptr && panel->isVisible(),
+              "triggering Appearance opens the panel");
+        check(appearance->isChecked(), "and leaves the action checked, which is what shows it");
+
+        if (panel && panel->isVisible()) {
+            // Real hit-testing, not an attribute or a pointer comparison:
+            // the panel is a child of the viewport, over OCCT's GL surface,
+            // and CLAUDE.md's rule is that a control there is only reachable
+            // if childAt() actually finds it. Walked up from the hit the way
+            // the cluster probes do, since the point lands on a row or a
+            // label inside the card rather than on the card itself.
+            const QPoint inside = panel->geometry().center();
+            QWidget* hit = view->childAt(inside);
+            bool reachesPanel = false;
+            for (QWidget* w = hit; w; w = w->parentWidget()) {
+                if (w == panel) { reachesPanel = true; break; }
+                if (w == view) break;
+            }
+            check(reachesPanel,
+                  QStringLiteral("and a real click inside it reaches the panel (found %1)")
+                      .arg(hit ? QString::fromLatin1(hit->metaObject()->className())
+                               : QStringLiteral("nothing")));
+
+            // It is an overlay occupant like every other anchored card, which
+            // is the whole of what makes the toast, the balloon and the guide
+            // step around it - so its rectangle has to be IN that set.
+            bool anchored = false;
+            for (const QRect& r : window.findChild<ViewportOverlay*>()->occupiedRects()) {
+                if (r == panel->geometry()) anchored = true;
+            }
+            check(anchored,
+                  "and its rectangle is one of ViewportOverlay::occupiedRects(), so "
+                  "everything that avoids the anchored cards avoids it too");
+
+            // A member of the floating-surface family, painted opaquely right
+            // out to its own edge.
+            const QRect body = panel->rect().adjusted(Theme::surfaceShadowMargin(),
+                                                      Theme::surfaceShadowMargin(),
+                                                      -Theme::surfaceShadowMargin(),
+                                                      -Theme::surfaceShadowMargin());
+            checkFamilySurface(panel, QPoint(body.left(), body.center().y()),
+                               body.adjusted(4, 4, -4, -4), Theme::border(),
+                               QStringLiteral("AppearancePanel"));
+        }
+
+        // --- one row per token, in the user's words -------------------------
+        if (panel) {
+            check(panel->colourRowCount() == Theme::colourTokens().size(),
+                  QStringLiteral("every editable colour token has a row (%1 rows, %2 tokens)")
+                      .arg(panel->colourRowCount()).arg(Theme::colourTokens().size()));
+            QStringList nameless;
+            for (const Theme::ColourToken& token : Theme::colourTokens()) {
+                if (AppearancePanel::nameForToken(token.id).isEmpty()) nameless << token.id;
+                if (!panel->swatchFor(token.id)) nameless << token.id + QStringLiteral(" (no swatch)");
+            }
+            check(nameless.isEmpty(),
+                  QStringLiteral("and each one has a user-facing name and a swatch (%1)")
+                      .arg(nameless.isEmpty() ? QStringLiteral("all do")
+                                              : nameless.join(QStringLiteral(", "))));
+
+            // The panel's copy is QLabel and button text, which neither the
+            // action sweep nor the tooltip sweep can see - so it joins the
+            // vocabulary check through paintedTexts() like every other
+            // painted surface in the shell.
+            const QStringList painted = panel->paintedTexts();
+            check(painted.size() >= Theme::colourTokens().size() + 3,
+                  QStringLiteral("the panel exposes all of its own copy for the sweep "
+                                 "(%1 strings)").arg(painted.size()));
+            QStringList offenders;
+            for (const QString& text : painted) {
+                for (const QString& word : bannedWords()) {
+                    if (text.contains(word, Qt::CaseInsensitive))
+                        offenders << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
+                }
+                // Code names must not leak either - the whole point of
+                // nameForToken() is that `gridMinor` is not what a user is
+                // choosing.
+                for (const Theme::ColourToken& token : Theme::colourTokens()) {
+                    if (text == token.id) offenders << (text + QStringLiteral(" [code name]"));
+                }
+            }
+            check(offenders.isEmpty(),
+                  QStringLiteral("no Appearance panel text uses a banned or code word (%1)")
+                      .arg(offenders.isEmpty() ? QStringLiteral("none")
+                                               : offenders.join(QStringLiteral(", "))));
+        }
+
+        // --- the application stylesheet is built from the spec, not frozen --
+        //
+        // The sheet used to carry every colour as a hex literal, which made it
+        // the one place a token's value was written twice. It is substituted
+        // from the live spec now, and both halves of that are pinned: no
+        // placeholder survives into the installed sheet (a new @token with no
+        // substitution entry would otherwise ship as a colour name Qt silently
+        // ignores), and the values in it are the ones Theme currently reports.
+        {
+            const QString sheet = qApp->styleSheet();
+            const int leftover = sheet.indexOf(QLatin1Char('@'));
+            check(!sheet.isEmpty() && leftover < 0,
+                  QStringLiteral("every stylesheet placeholder was substituted (%1)")
+                      .arg(leftover >= 0 ? sheet.mid(leftover, 24)
+                                         : QStringLiteral("none left")));
+            check(sheet.contains(Theme::chrome().name()) &&
+                      sheet.contains(Theme::border().name()) &&
+                      sheet.contains(Theme::panel().name()),
+                  "and it carries the tokens Theme currently reports");
+        }
+
+        // --- the accent token repaints a rail chip's checked ring -----------
+        const QColor probeAccent(QStringLiteral("#12d18e"));   // a green nothing else uses
+        if (panel && checkedChip) {
+            panel->setTokenColour(QStringLiteral("accent"), probeAccent);
+            settle(200);
+            check(Theme::accent() == probeAccent,
+                  "setting the accent token through the panel moves Theme::accent()");
+            const QImage themedChip = renderExact(checkedChip);
+            const QColor before = graphiteChip.pixelColor(ringPoint);
+            const QColor after = themedChip.pixelColor(ringPoint);
+            check(colorDistance(after, probeAccent) < colorDistance(before, probeAccent),
+                  QStringLiteral("and the checked chip's ring pixel now reads as the new "
+                                 "accent rather than the old one (was %1, now %2)")
+                      .arg(before.name(), after.name()));
+            check(colorDistance(after, probeAccent) < 40.0,
+                  QStringLiteral("- close enough to be that colour and not merely "
+                                 "different (distance %1)")
+                      .arg(colorDistance(after, probeAccent), 0, 'f', 1));
+        }
+
+        // --- and the one thing on that chip that is genuinely CACHED --------
+        //
+        // The ring above is painted from Theme inside paintEvent(), so it
+        // would follow a spec change even if nothing subscribed to the
+        // broadcast at all. The chip's GLYPH would not: IconSet rasterises it
+        // into a QPixmap out of text() and textDisabled() once, and a QIcon
+        // is pixels rather than a description. This is the check that fails
+        // if ToolChip stops re-rasterising it - the shape of "no widget
+        // caches a colour across the broadcast" that a repaint cannot fix.
+        if (panel && checkedChip) {
+            auto nearestTo = [](const QImage& image, const QColor& colour) {
+                double best = 1e9;
+                for (int y = 0; y < image.height(); ++y) {
+                    for (int x = 0; x < image.width(); ++x)
+                        best = std::min(best, colorDistance(image.pixelColor(x, y), colour));
+                }
+                return best;
+            };
+            const QColor probeText(QStringLiteral("#ff2d55"));   // a red no token carries
+            const double beforeGlyph = nearestTo(renderExact(checkedChip), probeText);
+            panel->setTokenColour(QStringLiteral("text"), probeText);
+            settle(250);
+            const double afterGlyph = nearestTo(renderExact(checkedChip), probeText);
+            check(beforeGlyph > 60.0,
+                  QStringLiteral("nothing on the chip was that red beforehand, so the "
+                                 "check below is not vacuous (nearest %1)")
+                      .arg(beforeGlyph, 0, 'f', 1));
+            check(afterGlyph < 24.0,
+                  QStringLiteral("and the chip's rasterised glyph was rebuilt in the new "
+                                 "text colour, not left at the cached one (nearest %1)")
+                      .arg(afterGlyph, 0, 'f', 1));
+        }
+
+        // --- the viewport token reaches OCCT's own clear colour -------------
+        //
+        // Sampled from V3d_View::Dump, not from a Qt render: the background
+        // is a driver clear colour that no Qt paint event ever touches, so a
+        // widget-tree grab could not tell whether it had moved at all.
+        {
+            const QString before = outDir + QStringLiteral("/appearance_viewport_before.png");
+            const QString after = outDir + QStringLiteral("/appearance_viewport_after.png");
+            check(view->saveSnapshot(before), "the viewport can be snapshotted before the edit");
+            const QImage beforeImg(before);
+
+            const QColor probeViewport(QStringLiteral("#3a0d5c"));   // a deep violet
+            if (panel) panel->setTokenColour(QStringLiteral("viewport"), probeViewport);
+            settle(300);
+            check(view->saveSnapshot(after), "and after it");
+            const QImage afterImg(after);
+
+            auto share = [](const QImage& image, const QColor& colour) {
+                if (image.isNull()) return -1.0;
+                int hits = 0, total = 0;
+                for (int y = 0; y < image.height(); y += 3) {
+                    for (int x = 0; x < image.width(); x += 3) {
+                        ++total;
+                        if (colorDistance(image.pixelColor(x, y), colour) < 8.0) ++hits;
+                    }
+                }
+                return total > 0 ? double(hits) / total : -1.0;
+            };
+            const double beforeShare = share(beforeImg, probeViewport);
+            const double afterShare = share(afterImg, probeViewport);
+            // Non-vacuity first: a null image samples nothing and reports
+            // zero exactly as loudly as a viewport that never changed.
+            check(!beforeImg.isNull() && !afterImg.isNull() &&
+                      beforeImg.width() > 100 && beforeImg.height() > 100,
+                  QStringLiteral("both viewport snapshots are real images to sample "
+                                 "(%1x%2)").arg(beforeImg.width()).arg(beforeImg.height()));
+            check(beforeShare >= 0.0 && beforeShare < 0.01,
+                  QStringLiteral("nothing in the viewport was that violet before the edit "
+                                 "(%1%)").arg(beforeShare * 100.0, 0, 'f', 2));
+            check(afterShare > 0.30,
+                  QStringLiteral("and the 3D area is cleared to it afterwards (%1% of "
+                                 "sampled pixels)").arg(afterShare * 100.0, 0, 'f', 1));
+        }
+
+        // --- the grid is REBUILT, not merely repainted ----------------------
+        //
+        // GridRenderer bakes its colours into the vertices it builds and
+        // caches on the geometry it built them for, so a theme change that
+        // did not invalidate that cache would leave the old palette on screen
+        // until the camera crossed a level boundary. Asserted on the OCCT
+        // dump, and non-vacuously: "the images differ" alone would pass on a
+        // grid that had merely moved.
+        {
+            const QString before = outDir + QStringLiteral("/appearance_grid_before.png");
+            const QString after = outDir + QStringLiteral("/appearance_grid_after.png");
+            view->saveSnapshot(before);
+            const QImage beforeImg(before);
+
+            const QColor probeGrid(QStringLiteral("#ffd400"));   // a yellow nothing else uses
+            if (panel) panel->setTokenColour(QStringLiteral("gridMajor"), probeGrid);
+            settle(300);
+            view->saveSnapshot(after);
+            const QImage afterImg(after);
+
+            auto hits = [](const QImage& image, const QColor& colour) {
+                int found = 0;
+                for (int y = 0; y < image.height(); ++y) {
+                    for (int x = 0; x < image.width(); ++x) {
+                        if (colorDistance(image.pixelColor(x, y), colour) < 24.0) ++found;
+                    }
+                }
+                return found;
+            };
+            const int beforeHits = beforeImg.isNull() ? -1 : hits(beforeImg, probeGrid);
+            const int afterHits = afterImg.isNull() ? -1 : hits(afterImg, probeGrid);
+            check(beforeHits >= 0 && beforeHits < 50,
+                  QStringLiteral("no grid line was that yellow before the edit (%1 px)")
+                      .arg(beforeHits));
+            check(afterHits > 200,
+                  QStringLiteral("and the ground grid is rebuilt in the new colour, not "
+                                 "left at the cached one (%1 px)").arg(afterHits));
+        }
+
+        // --- the type scale follows the base size ---------------------------
+        {
+            const double base = 13.0;
+            if (panel) panel->setBaseSize(base);
+            settle(200);
+            check(std::fabs(Theme::bodyFont().pointSizeF() - base) < 1e-9,
+                  QStringLiteral("bodyFont() follows the base size (%1)")
+                      .arg(Theme::bodyFont().pointSizeF()));
+            check(std::fabs(Theme::badgeFont().pointSizeF() - (base - 2.0)) < 1e-9 &&
+                      std::fabs(Theme::labelFont().pointSizeF() - (base - 1.0)) < 1e-9 &&
+                      std::fabs(Theme::titleFont().pointSizeF() - (base + 3.0)) < 1e-9,
+                  QStringLiteral("and all four derive at their fixed offsets "
+                                 "(%1 / %2 / %3 / %4)")
+                      .arg(Theme::badgeFont().pointSizeF())
+                      .arg(Theme::labelFont().pointSizeF())
+                      .arg(Theme::bodyFont().pointSizeF())
+                      .arg(Theme::titleFont().pointSizeF()));
+            QSet<double> moved;
+            for (const QFont& f : {Theme::titleFont(), Theme::bodyFont(),
+                                   Theme::labelFont(), Theme::badgeFont()})
+                moved.insert(f.pointSizeF());
+            check(moved.size() == 4, "and the four are still four distinct sizes");
+
+            // The type-scale LAW, re-run at a base size nobody shipped. The
+            // sweep further up runs at 10pt, where a widget that had frozen
+            // its font at construction would still be inside the scale by
+            // accident - which is precisely the failure this task could
+            // introduce and that sweep could not see.
+            QStringList strays;
+            for (QWidget* w : window.findChildren<QWidget*>()) {
+                if (!w->isVisible()) continue;
+                if (!moved.contains(w->font().pointSizeF()))
+                    strays << (w->metaObject()->className() +
+                               QStringLiteral(" @ %1").arg(w->font().pointSizeF()));
+            }
+            check(strays.isEmpty(),
+                  QStringLiteral("every visible widget still uses the type scale at a "
+                                 "non-default base size (%1)")
+                      .arg(strays.isEmpty() ? QStringLiteral("all do")
+                                            : strays.join(QStringLiteral(", "))));
+
+            // The hidden four the main sweep is structurally blind to, at the
+            // new size too - each of them sets its field's font explicitly,
+            // and an explicit font does not follow QApplication::setFont.
+            QStringList hidden;
+            auto assertMoved = [&](QWidget* w, const QString& name) {
+                if (!w) { hidden << name + QStringLiteral(" (missing)"); return; }
+                if (!moved.contains(w->font().pointSizeF()))
+                    hidden << name + QStringLiteral(" @ %1").arg(w->font().pointSizeF());
+            };
+            ExtrudePreview* themedPreview = window.findChild<ExtrudePreview*>();
+            PullArrow* themedPull = window.findChild<PullArrow*>();
+            BevelArrow* themedBevel = window.findChild<BevelArrow*>();
+            assertMoved(themedPreview ? themedPreview->field() : nullptr,
+                        QStringLiteral("ExtrudePreview field"));
+            assertMoved(themedPull ? themedPull->field() : nullptr,
+                        QStringLiteral("PullArrow field"));
+            assertMoved(themedBevel ? themedBevel->field() : nullptr,
+                        QStringLiteral("BevelArrow field"));
+            check(hidden.isEmpty(),
+                  QStringLiteral("and the hidden fields that set their own font followed "
+                                 "it too (%1)")
+                      .arg(hidden.isEmpty() ? QStringLiteral("all did")
+                                            : hidden.join(QStringLiteral(", "))));
+        }
+
+        // --- a capture of the app actually wearing an edited spec -----------
+        //
+        // Taken here rather than after the reset, and it is the evidence the
+        // numeric checks above stand in for: by this point the accent, the
+        // text colour, the viewport, the grid and the base size have all been
+        // moved, so a shell that had NOT re-dressed would be obvious in it.
+        // Swept for unpainted black rows like every other capture - a
+        // resized-by-the-type-scale card is exactly the sort that starts
+        // landing on a fractional device row.
+        if (panel && panel->isVisible()) {
+            const QImage themed = printWindowCapture(
+                &window, outDir + QStringLiteral("/appearance_themed.png"));
+            checkNoBlackLine(themed, QStringLiteral("edited-appearance"));
+        }
+
+        // --- the picker opens without blocking -------------------------------
+        if (panel) {
+            // The FIRST token's swatch, not a hand-picked one: the rows live
+            // in a scroll area, and a swatch far enough down the list is
+            // genuinely clipped out of the card - childAt() finds nothing
+            // there, correctly, because a user cannot click it either without
+            // scrolling first. Read from the same table that orders the rows,
+            // so this cannot go stale when the order changes.
+            const QString topId = Theme::colourTokens().first().id;
+            QWidget* swatch = panel->swatchFor(topId);
+            check(swatch != nullptr && swatch->isVisible(),
+                  QStringLiteral("the %1 swatch is on screen")
+                      .arg(AppearancePanel::nameForToken(topId)));
+            if (swatch) {
+                // Reached the way a user reaches it - through the viewport's
+                // own hit-testing - rather than by sending an event straight
+                // at the pointer this block happens to hold. CLAUDE.md's rule
+                // for anything interactive over the GL surface.
+                const QPoint inView = swatch->mapTo(view, swatch->rect().center());
+                QWidget* hit = view->childAt(inView);
+                check(hit == swatch,
+                      QStringLiteral("and a real click at its centre finds the swatch "
+                                     "itself (found %1)")
+                          .arg(hit ? QString::fromLatin1(hit->metaObject()->className())
+                                   : QStringLiteral("nothing")));
+                clickAt(swatch, swatch->rect().center());
+                settle(200);
+                QColorDialog* picker = panel->activeColourDialog();
+                check(picker != nullptr, "clicking a swatch opens a colour picker");
+
+                // The property the no-modal law is actually about: nothing
+                // this app does spins a nested event loop and waits for an
+                // answer. QColorDialog::open() returns immediately, so the
+                // suite REACHES this line with the picker up; exec() would
+                // never have returned and the run would hang here rather than
+                // fail - which is the honest backstop CLAUDE.md already
+                // records for the outcome dialogs.
+                //
+                // isModal() is deliberately NOT what is asserted. open() sets
+                // Qt::WindowModal on the dialog, so a picker opened this way
+                // does hold the main window's input while it is up - what it
+                // does not do is stop the application, which is why the live
+                // preview keeps repainting behind it.
+                check(picker != nullptr && picker->isVisible(),
+                      "and open() returned with it on screen rather than exec()'s "
+                      "nested loop swallowing this run");
+                check(picker != nullptr && picker->windowModality() != Qt::ApplicationModal,
+                      "and it is not application-modal - the rest of the app keeps "
+                      "living while a colour is chosen");
+                if (picker) {
+                    // Closed here, deliberately: the suite's "no dialog is
+                    // ever constructed for an outcome" checks are only
+                    // meaningful while nothing leaves one lying around.
+                    picker->close();
+                    settle(200);
+                }
+                check(window.findChildren<QDialog*>().isEmpty(),
+                      "and closing it leaves no dialog behind");
+            }
+        }
+
+        // --- serialise, and refuse garbage ----------------------------------
+        {
+            const QString stored = Theme::serializeSpec();
+            Theme::Spec round;
+            check(Theme::deserializeSpec(stored, round),
+                  "a serialised spec reads back");
+            check(round == Theme::spec(),
+                  "and round-trips to exactly the spec it came from");
+
+            // Tolerant on an unknown KEY - that is how a token can be removed
+            // in a later build without stranding everyone's stored appearance.
+            Theme::Spec tolerant;
+            check(Theme::deserializeSpec(
+                      QStringLiteral("accent=#ff0000;somethingElse=#00ff00;base=11"), tolerant) &&
+                      tolerant.accent == QColor(QStringLiteral("#ff0000")) &&
+                      std::fabs(tolerant.basePt - 11.0) < 1e-9,
+                  "an unrecognised token is ignored rather than refused");
+            check(tolerant.viewport == Theme::defaultSpec().viewport,
+                  "and a token the string never mentions comes back at its default");
+
+            // Garbage is refused, and `out` is left ALONE - a deserialize that
+            // half-filled its output on the way to failing would be worse than
+            // one that failed loudly.
+            Theme::Spec sentinel;
+            sentinel.accent = QColor(QStringLiteral("#010203"));
+            const Theme::Spec untouched = sentinel;
+            check(!Theme::deserializeSpec(QStringLiteral(""), sentinel),
+                  "an empty string is refused");
+            check(!Theme::deserializeSpec(QStringLiteral("not a spec at all"), sentinel),
+                  "so is a string with no key=value fragment");
+            check(!Theme::deserializeSpec(QStringLiteral("accent=notacolour"), sentinel),
+                  "so is a colour QColor cannot parse");
+            check(!Theme::deserializeSpec(QStringLiteral("base=40"), sentinel),
+                  "so is a base size outside the 8-14 pt band");
+            check(sentinel == untouched,
+                  "and every one of those refusals left the output untouched");
+        }
+
+        // --- reset restores Graphite exactly ---------------------------------
+        if (panel) {
+            check(Theme::spec() != Theme::defaultSpec(),
+                  "the app is genuinely themed before the reset, so the check below "
+                  "is not vacuous");
+            QWidget* reset = panel->resetButton();
+            check(reset != nullptr && reset->isVisible(), "the reset control is on screen");
+            if (reset) {
+                clickAt(reset, reset->rect().center());
+                settle(250);
+            }
+            check(Theme::spec() == Theme::defaultSpec(),
+                  "Reset restores defaultSpec() exactly");
+            // The panel is a VIEW of the live spec, not a second copy of it -
+            // so a reset it did not itself perform still leaves its own
+            // controls showing what the app is actually wearing. Both
+            // directions of that binding are asserted: the size the panel had
+            // pushed out is back at the default, and the family combo names
+            // the family Theme reports.
+            check(panel->sizeControl() != nullptr &&
+                      std::fabs(panel->sizeControl()->value() - Theme::spec().basePt) < 1e-9,
+                  QStringLiteral("and the panel's own size control followed it back "
+                                 "(showing %1)")
+                      .arg(panel->sizeControl() ? panel->sizeControl()->value() : -1));
+            check(panel->familyControl() != nullptr &&
+                      panel->familyControl()->currentText() == Theme::spec().fontFamily,
+                  QStringLiteral("and its family control names the family Theme reports "
+                                 "(\"%1\" vs \"%2\")")
+                      .arg(panel->familyControl() ? panel->familyControl()->currentText()
+                                                  : QString(),
+                           Theme::spec().fontFamily));
+            if (checkedChip) {
+                const QImage restored = renderExact(checkedChip);
+                check(!graphiteChip.isNull() && restored == graphiteChip,
+                      "and the rail chip renders pixel-identically to the way it did "
+                      "before a single token was touched");
+            }
+        }
+
+        // --- a capture of the panel, and the black-hairline sweep -----------
+        if (panel && panel->isVisible()) {
+            const QImage shot = printWindowCapture(
+                &window, outDir + QStringLiteral("/appearance_panel.png"));
+            checkNoBlackLine(shot, QStringLiteral("Appearance panel"));
+        }
+
+        // --- persistProgress=false writes nothing ---------------------------
+        {
+            // Under a scoped, file-backed QSettings identity, so this probe
+            // can look at what was written without ever reading or touching
+            // the developer's real store.
+            ScopedTestSettings scopedSettings;
+            {
+                QSettings clean;
+                clean.remove(QStringLiteral("appearance"));
+            }
+
+            MainWindow quiet(nullptr, /*persistProgress=*/false);
+            quiet.setAttribute(Qt::WA_ShowWithoutActivating);
+            quiet.resize(900, 700);
+            quiet.show();
+            settle(300);
+            AppearancePanel* quietPanel = quiet.appearancePanel();
+            check(quietPanel != nullptr, "the probe window has an Appearance panel too");
+            if (quietPanel) {
+                quietPanel->setTokenColour(QStringLiteral("accent"),
+                                           QColor(QStringLiteral("#ff00ff")));
+                settle(200);
+                check(Theme::accent() == QColor(QStringLiteral("#ff00ff")),
+                      "a persistProgress=false window still applies a theme edit");
+            }
+            {
+                QSettings after;
+                check(!after.contains(QStringLiteral("appearance")),
+                      QStringLiteral("but writes nothing to the store (%1)")
+                          .arg(after.value(QStringLiteral("appearance")).toString()));
+            }
+
+            // And the persisting path DOES write - the check above is only
+            // worth having if the guard is the reason nothing was stored,
+            // rather than the write never happening at all.
+            {
+                MainWindow persisting(nullptr, /*persistProgress=*/true);
+                persisting.setAttribute(Qt::WA_ShowWithoutActivating);
+                persisting.resize(900, 700);
+                persisting.show();
+                settle(300);
+                if (persisting.appearancePanel())
+                    persisting.appearancePanel()->setTokenColour(
+                        QStringLiteral("accent"), QColor(QStringLiteral("#00c2ff")));
+                settle(200);
+                QSettings written;
+                Theme::Spec readBack;
+                check(Theme::deserializeSpec(
+                          written.value(QStringLiteral("appearance")).toString(), readBack) &&
+                          readBack.accent == QColor(QStringLiteral("#00c2ff")),
+                      "while a persistProgress=true window stores the spec it just applied");
+                persisting.close();
+            }
+            quiet.close();
+            settle(150);
+        }
+
+        // Back to Graphite for everything that follows, and the action back to
+        // unchecked so the shell is as the next block expects to find it.
+        Theme::setSpec(Theme::defaultSpec());
+        if (appearance && appearance->isChecked()) appearance->trigger();
+        settle(200);
+        check(Theme::spec() == Theme::defaultSpec() && panel && !panel->isVisible(),
+              "the appearance block leaves the app back at Graphite with the panel closed");
     }
 
     // --- Show tips again restores the walkthrough for a returning user too ---

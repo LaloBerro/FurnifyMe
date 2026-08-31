@@ -58,41 +58,15 @@ BevelArrow::BevelArrow(MainWindow* window, OcctViewWidget* view)
     // hit-testing.
     setAttribute(Qt::WA_NoSystemBackground);
     setAttribute(Qt::WA_TransparentForMouseEvents);
-    {
-        // Measured with the fonts these strings are actually painted with, not
-        // assumed from a character count - CLAUDE.md's rule, which exists
-        // because a title measured non-bold and painted bold clips. The two
-        // hint lines are the long ones; the title row reserves room for the
-        // widest kind word beside a comfortably large value.
-        const QFontMetrics badge(Theme::badgeFont());
-        const QFontMetrics label(Theme::labelFont());
-        int content = 0;
-        for (int line = 0; line < 2; ++line)
-            content = std::max(content, badge.horizontalAdvance(hintText(line)));
-        content = std::max(content,
-                           label.horizontalAdvance(tr("Chamfer")) + kKindGap +
-                               label.horizontalAdvance(QStringLiteral("C 1,200 mm")));
-
-        const int margin = Theme::surfaceShadowMargin();
-        // Through Theme::wholeDevicePixels(), not straight to setFixedSize().
-        // The measured height here is 93, and 93 logical rows at this
-        // machine's 150% scaling is 139.5 DEVICE rows: Qt flushes 140 and the
-        // paint event's logical clip stops this widget's own painter at 139,
-        // so the last row keeps whatever the backing store held. Over the GL
-        // surface that is not transparent - the first magnified capture of
-        // this chip carried an exact 0,0,0 hairline 264 device pixels wide
-        // along its bottom edge. paintSurface() cannot reach outside the clip
-        // and the viewport cannot paint underneath a child, so the size is
-        // where this is fixed. See Theme.h.
-        setFixedSize(Theme::wholeDevicePixels(
-            QSize(std::max(kMinWidth, content + kPad * 2) + margin * 2,
-                  kPad * 2 + kLabelHeight + kFieldHeight + kHintGap +
-                      kHintHeight * 2 + kHintLineGap + margin * 2)));
-    }
 
     myField = new QLineEdit(view);
     myField->setAttribute(Qt::WA_NoMousePropagation);
-    myField->setFont(Theme::bodyFont());
+    // Both this card's SIZE (measured with the fonts it paints with) and the
+    // field's explicit font move when the type scale does, and neither can be
+    // re-derived inside paintEvent() - so both are set through applyTheme(),
+    // once here and again on every Theme broadcast.
+    applyTheme();
+    connect(Theme::notifier(), &Theme::Notifier::changed, this, &BevelArrow::applyTheme);
     connect(myField, &QLineEdit::textChanged, this,
             [this](const QString&) { updatePreview(); });
     syncFieldTooltip();
@@ -116,6 +90,47 @@ BevelArrow::~BevelArrow()
     // this panel alone is destroyed, and QPointer makes the delete a safe
     // no-op when the shared parent tears both down instead.
     delete myField;
+}
+
+void BevelArrow::applyTheme()
+{
+    // Measured with the fonts these strings are actually painted with, not
+    // assumed from a character count - CLAUDE.md's rule, which exists
+    // because a title measured non-bold and painted bold clips. The two
+    // hint lines are the long ones; the title row reserves room for the
+    // widest kind word beside a comfortably large value.
+    const QFontMetrics badge(Theme::badgeFont());
+    const QFontMetrics label(Theme::labelFont());
+    int content = 0;
+    for (int line = 0; line < 2; ++line)
+        content = std::max(content, badge.horizontalAdvance(hintText(line)));
+    content = std::max(content,
+                       label.horizontalAdvance(tr("Chamfer")) + kKindGap +
+                           label.horizontalAdvance(QStringLiteral("C 1,200 mm")));
+
+    const int margin = Theme::surfaceShadowMargin();
+    // Through Theme::wholeDevicePixels(), not straight to setFixedSize().
+    // The measured height here is 93, and 93 logical rows at this
+    // machine's 150% scaling is 139.5 DEVICE rows: Qt flushes 140 and the
+    // paint event's logical clip stops this widget's own painter at 139,
+    // so the last row keeps whatever the backing store held. Over the GL
+    // surface that is not transparent - the first magnified capture of
+    // this chip carried an exact 0,0,0 hairline 264 device pixels wide
+    // along its bottom edge. paintSurface() cannot reach outside the clip
+    // and the viewport cannot paint underneath a child, so the size is
+    // where this is fixed. See Theme.h.
+    setFixedSize(Theme::wholeDevicePixels(
+        QSize(std::max(kMinWidth, content + kPad * 2) + margin * 2,
+              kPad * 2 + kLabelHeight + kFieldHeight + kHintGap +
+                  kHintHeight * 2 + kHintLineGap + margin * 2)));
+
+    // An explicitly set font does not follow QApplication::setFont - see
+    // ExtrudePreview's constructor.
+    if (myField) myField->setFont(Theme::bodyFont());
+    // The field is a sibling positioned against this card's rectangle, which
+    // has just moved.
+    syncFieldGeometry();
+    update();
 }
 
 QLineEdit* BevelArrow::field() const

@@ -71,8 +71,16 @@ ExtrudePreview::ExtrudePreview(MainWindow* window, OcctViewWidget* view)
     myField->setAttribute(Qt::WA_NoMousePropagation);
     // The height the user types is body text, same as everything else they
     // read - set explicitly rather than left to inherit, since it is the one
-    // widget on this panel the user actually types into.
+    // widget on this panel the user actually types into. An explicit font
+    // does NOT follow QApplication::setFont, which is exactly why the Theme
+    // broadcast has to put it back: the type-scale sweep reads this widget's
+    // own font, and a field left at the old base size is a fifth size in a
+    // four-size scale.
     myField->setFont(Theme::bodyFont());
+    connect(Theme::notifier(), &Theme::Notifier::changed, this, [this] {
+        myField->setFont(Theme::bodyFont());
+        update();
+    });
     // Enter and Escape are NOT wired here any more - not to returnPressed,
     // not to a filter on the field. Both are claimed application-wide for as
     // long as this panel is visible; see eventFilter() for the whole story.

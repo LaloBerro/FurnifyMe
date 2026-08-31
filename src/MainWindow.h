@@ -14,6 +14,7 @@
 #include "UserProgress.h"
 
 class AppBar;
+class AppearancePanel;
 class BevelArrow;
 class ExtrudePreview;
 class OcctViewWidget;
@@ -162,6 +163,7 @@ public:
     bool isSketching() const { return mySketching; }
     OcctViewWidget* view() const { return myView; }
     class ItemsPanel* itemsPanel() const { return myItemsPanel; }
+    AppearancePanel* appearancePanel() const { return myAppearancePanel; }
 
     UserProgress& progress() { return myProgress; }
     const UserProgress& progress() const { return myProgress; }
@@ -185,6 +187,14 @@ signals:
     // Slots must only read state and update themselves - calling back into
     // updateActions() from here would recurse.
     void appStateChanged();
+
+    // Emitted after Theme::setSpec() has installed a new appearance and this
+    // window has re-dressed everything that cannot re-derive its own colours
+    // at paint time. Purely an announcement for anything outside this window
+    // that wants to follow the look; the window's own relay - the viewport's
+    // background and grid, the status bar's font, updateActions() - has
+    // already run by the time this fires.
+    void themeChanged();
 
     // Emitted by Help -> Show tips again, immediately before the
     // appStateChanged() that follows it. Clearing the store is not enough on
@@ -273,6 +283,21 @@ private:
     // knows nothing about bevels. Reads state and moves AIS objects only, so
     // it cannot recurse back into updateActions().
     void refreshEdgeAnnotation();
+    // The relay from Theme's broadcast into this window. Re-dresses the three
+    // things a repaint cannot reach - the viewport (a driver clear colour,
+    // two Prs3d drawers and a grid built out of coloured vertices), the
+    // status bar's explicitly set font, and the live sketch markers, whose
+    // colours are baked into AIS objects built when the point was placed -
+    // then persists the spec and calls updateActions(), whose
+    // appStateChanged() is what repaints every painted widget in the shell.
+    //
+    // The sketch markers are re-issued from mySketch rather than from a copy
+    // OcctViewWidget would otherwise have to keep, which is why this lives
+    // here and not there: this window owns the gesture's state.
+    void onThemeChanged();
+    // Writes the live spec to QSettings under the same guard as the learning
+    // progress and the display unit. A no-op for the suite's windows.
+    void persistAppearance();
     void runBoolean(int kind);   // ModelingOps::BooleanKind as int, to keep it out of the header
     // The one place "the camera was moved to a named direction" is recorded.
     // Every route to that - the four View menu entries and a click on the
@@ -321,11 +346,13 @@ private:
     QAction* myUnitsCentimetresAction = nullptr;
     QAction* myLockFaceAction = nullptr;
     QAction* myUnlockFaceAction = nullptr;
+    QAction* myAppearanceAction = nullptr;
 
     AppBar* myAppBar = nullptr;
     class ViewportOverlay* myOverlay = nullptr;
     class QLabel* myStateLabel = nullptr;
     class ItemsPanel* myItemsPanel = nullptr;
+    AppearancePanel* myAppearancePanel = nullptr;
     class ShortcutSheet* myShortcutSheet = nullptr;
     ToastHost* myToasts = nullptr;
     ExtrudePreview* myExtrudePreview = nullptr;

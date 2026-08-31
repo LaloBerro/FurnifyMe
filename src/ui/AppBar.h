@@ -65,6 +65,11 @@ protected:
 
 private:
     void syncFromAction();
+    // The one appearance value a bar button cannot re-derive inside
+    // paintEvent(): the per-widget stylesheet that pins its font to
+    // labelFont(). See ToolChip::applyTheme(), which is the same rule one
+    // control over.
+    void applyTheme();
 
     QAction* myAction = nullptr;
     int myReservedTextWidth = 0;
@@ -106,7 +111,16 @@ protected:
     void paintEvent(QPaintEvent* event) override;
 
 private:
+    // The wordmark is PAINTED, not a child widget, so the layout only holds
+    // an empty spacer wide enough to keep its space clear - and that width is
+    // measured with wordmarkFont(), which moves when the base type size does.
+    // A spacer is not a widget and gets no repaint, so it is re-measured
+    // here; without it a larger base size painted the wordmark straight
+    // through the menu bar.
+    void applyTheme();
+
     QMenuBar* myMenus = nullptr;
+    class QSpacerItem* myWordmarkSpace = nullptr;
     BarButton* myViewLabel = nullptr;
     BarButton* myUnit = nullptr;
     BarButton* myWireframe = nullptr;

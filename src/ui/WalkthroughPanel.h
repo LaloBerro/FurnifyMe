@@ -66,6 +66,13 @@ private:
     void finish();
     QRect skipRect() const;
     void syncSkipGeometry();
+    // This card pins itself with setFixedSize(), which is the one thing it
+    // cannot re-derive at paint time: sizeHint() measures the step strings
+    // with titleFont() and bodyFont(), so a base-size change moves it, and
+    // resize() on a fixed-size widget is a silent no-op that leaves
+    // ViewportOverlay's own rounding unable to help (see Theme.h). Everything
+    // else this panel paints is read from Theme inside paintEvent().
+    void applyTheme();
 
     MainWindow* myWindow = nullptr;
     int myCompleted = 0;

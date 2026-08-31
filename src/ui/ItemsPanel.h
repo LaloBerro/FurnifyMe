@@ -66,8 +66,15 @@ protected:
     QSize sizeHint() const override;
 
 private:
+    // Rewrites the title's per-widget stylesheet, which bakes in textMuted()
+    // and titleFont(), and re-measures the card. The rows need no equivalent:
+    // refresh() builds them from Theme every time, and it is already driven
+    // by MainWindow's appStateChanged.
+    void applyTheme();
+
     const DocumentModel* myDocument = nullptr;
     OcctViewWidget* myView = nullptr;
+    class QLabel* myTitle = nullptr;
     QVBoxLayout* myOuter = nullptr;
     QVBoxLayout* myRows = nullptr;
     std::vector<QWidget*> myRowWidgets;   // parallel to the document's solids

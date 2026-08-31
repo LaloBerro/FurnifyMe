@@ -5,6 +5,7 @@
 #include "OcctViewWidget.h"
 
 #include "AppBar.h"
+#include "AppearancePanel.h"
 #include "AxisGizmo.h"
 #include "BevelArrow.h"
 #include "ExtrudePreview.h"
@@ -64,6 +65,19 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
         if (settings.value(QStringLiteral("displayUnit")).toString() ==
             QStringLiteral("cm"))
             Measure::setDisplayUnit(Measure::Unit::Centimetres);
+
+        // Before a single widget exists, for the same reason as the unit
+        // above: every card measures itself with the type scale in its own
+        // constructor, so installing the spec afterwards would leave the
+        // shell laid out for a size it is no longer wearing. Theme::apply()
+        // has already installed defaultSpec() by now (main.cpp calls it
+        // before this window is built), so a garbage or absent setting simply
+        // leaves the app at its shipped appearance - deserializeSpec()
+        // guarantees `stored` is untouched when it refuses.
+        Theme::Spec stored;
+        if (Theme::deserializeSpec(
+                settings.value(QStringLiteral("appearance")).toString(), stored))
+            Theme::setSpec(stored);
     }
 
     myView = new OcctViewWidget(this);
@@ -124,6 +138,12 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     // updateActions().
     connect(this, &MainWindow::appStateChanged, this, [this] {
         myItemsPanel->setVisible(myItemsPanelAction->isChecked());
+        // Derived on every state change from the action, exactly as the
+        // drawer above is and for exactly the same reason - a one-shot hide
+        // is not a state, and QWidget::showChildren() on the window's first
+        // show will happily undo one.
+        if (myAppearancePanel)
+            myAppearancePanel->setVisible(myAppearanceAction->isChecked());
         if (myOverlay) myOverlay->relayout();
     });
 
@@ -179,6 +199,19 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
         myItemsPanel->setVisible(shown);
         if (myOverlay) myOverlay->relayout();
     });
+
+    // The Appearance card on the same terms - see the drawer's toggle above.
+    connect(myAppearanceAction, &QAction::toggled, this, [this](bool shown) {
+        if (myAppearancePanel) myAppearancePanel->setVisible(shown);
+        if (myOverlay) myOverlay->relayout();
+    });
+
+    // Theme's broadcast, relayed into this window. Connected to the
+    // application-wide notifier rather than to the panel: a spec can also be
+    // installed with no panel involved (the persisted one at startup, or a
+    // reset), and a relay hung off the panel would miss both.
+    connect(Theme::notifier(), &Theme::Notifier::changed, this,
+            &MainWindow::onThemeChanged);
 
     updateActions();
 
@@ -281,6 +314,17 @@ void MainWindow::buildActions()
     myItemsPanelAction->setChecked(true);
     myItemsPanelAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Alt+S")));
     myItemsPanelAction->setToolTip(tr("Show or hide the list of bodies (Ctrl+Alt+S)"));
+
+    // Menu only, and deliberately: the rail stays at thirteen tools. Choosing
+    // colours is not a modelling tool and does not belong in the spine the
+    // user's hand lives on. Checkable, because the panel's visibility is
+    // DERIVED from it in both directions - the same contract the items drawer
+    // has, and the reason nothing else in this file shows or hides the panel.
+    myAppearanceAction = new QAction(tr("Appearance..."), this);
+    myAppearanceAction->setCheckable(true);
+    myAppearanceAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Alt+A")));
+    myAppearanceAction->setToolTip(tr("Choose the app's colours and text size (Ctrl+Alt+A)\n"
+                                      "Every change is applied as you make it."));
 
     myDisplayModeAction = new QAction(tr("Wireframe"), this);
     myDisplayModeAction->setCheckable(true);
@@ -417,6 +461,7 @@ QMenuBar* MainWindow::buildMenus()
     QMenu* unitsMenu = viewMenu->addMenu(tr("Units"));
     unitsMenu->addAction(myUnitsMillimetresAction);
     unitsMenu->addAction(myUnitsCentimetresAction);
+    viewMenu->addAction(myAppearanceAction);
 
     QMenu* helpMenu = bar->addMenu(tr("&Help"));
 
@@ -591,6 +636,16 @@ void MainWindow::buildOverlay()
     // overlay a dependency on the whole application.
     connect(gizmo, &AxisGizmo::viewSnapped, this, &MainWindow::recordViewChanged);
     myOverlay->addWidget(gizmo, ViewportOverlay::Anchor::TopRight);
+
+    // The Appearance card, anchored at the same corner so relayout() stacks
+    // it one gap under the gizmo - see AppearancePanel.h for why TopRight and
+    // not RightCenter. Hidden BEFORE it is added: ViewportOverlay::addWidget()
+    // shows whatever it anchors unless the widget has already made an
+    // explicit hide decision of its own, and this card's visibility belongs to
+    // myAppearanceAction alone.
+    myAppearancePanel = new AppearancePanel(myView);
+    myAppearancePanel->hide();
+    myOverlay->addWidget(myAppearancePanel, ViewportOverlay::Anchor::TopRight);
 
     // Every outcome the app reports - success or failure - goes through this
     // one host rather than a modal dialog. It parents itself (and its Toast)
@@ -777,6 +832,46 @@ void MainWindow::setDisplayUnit(Measure::Unit unit)
     // readout and the status bar all already refresh from - no second
     // refresh path needed.
     updateActions();
+}
+
+void MainWindow::onThemeChanged()
+{
+    // The status bar's font is SET, not inherited: Theme.cpp's stylesheet
+    // reaches QStatusBar's own internal message label through a selector, and
+    // this covers a plain QStatusBar with no matching rule. An explicitly set
+    // font does not follow QApplication::setFont, so it has to be put back.
+    statusBar()->setFont(Theme::labelFont());
+
+    // The OCCT side of the bridge: a clear colour, two highlight drawers and
+    // a grid whose colours are baked into its vertices. None of it is painted
+    // by Qt, so none of it is reached by a repaint.
+    if (myView) myView->applyTheme();
+
+    // The live sketch markers are AIS objects coloured when they were built.
+    // Re-issued from the sketch this window owns rather than from a copy the
+    // viewport would have to keep - and only while there is a sketch, so this
+    // cannot make a marker appear.
+    if (mySketching && myView) {
+        if (!mySketch.points().empty()) myView->setSketchPointMarkers(mySketch.points());
+    }
+
+    persistAppearance();
+
+    emit themeChanged();
+
+    // Last, and it is what actually repaints the shell: every widget in it
+    // reads its colours from Theme inside paintEvent(), and appStateChanged()
+    // - which updateActions() ends by emitting - is the signal they already
+    // refresh on. No second refresh path.
+    updateActions();
+    if (myOverlay) myOverlay->relayout();
+}
+
+void MainWindow::persistAppearance()
+{
+    if (!myPersistProgress) return;
+    QSettings settings;
+    settings.setValue(QStringLiteral("appearance"), Theme::serializeSpec());
 }
 
 void MainWindow::recordProgress(const std::string& event)

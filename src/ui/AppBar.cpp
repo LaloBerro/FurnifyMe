@@ -9,6 +9,7 @@
 #include <QAction>
 #include <QFontMetrics>
 #include <QHBoxLayout>
+#include <QLayoutItem>
 #include <QMenuBar>
 #include <QPainter>
 #include <QPainterPath>
@@ -52,17 +53,27 @@ BarButton::BarButton(QAction* action, QWidget* parent)
     // Keyboard-reachable like every chip, and for the same reason: a focus
     // ring that can never receive focus would be dead code.
     setFocusPolicy(Qt::StrongFocus);
-    // Baseline for this widget's own font() (what the type-scale sweep in
-    // gui_smoke reads): a bar button's text is a chip label. A per-widget
-    // stylesheet wins over the app-wide one regardless of selector
-    // specificity, so this sticks rather than fighting the cascade.
-    setStyleSheet(QStringLiteral("font-size: %1pt;").arg(Theme::labelFont().pointSizeF()));
+    applyTheme();
+    connect(Theme::notifier(), &Theme::Notifier::changed, this, &BarButton::applyTheme);
 
     if (myAction) {
         connect(this, &QAbstractButton::clicked, myAction, &QAction::trigger);
         connect(myAction, &QAction::changed, this, &BarButton::syncFromAction);
         syncFromAction();
     }
+}
+
+void BarButton::applyTheme()
+{
+    // Baseline for this widget's own font() (what the type-scale sweep in
+    // gui_smoke reads): a bar button's text is a chip label. A per-widget
+    // stylesheet wins over the app-wide one regardless of selector
+    // specificity, so this sticks rather than fighting the cascade.
+    setStyleSheet(QStringLiteral("font-size: %1pt;").arg(Theme::labelFont().pointSizeF()));
+    // sizeHint() measures with labelFont(), so the button has to be re-laid
+    // out, not merely repainted.
+    updateGeometry();
+    update();
 }
 
 void BarButton::syncFromAction()
@@ -184,9 +195,10 @@ AppBar::AppBar(QMenuBar* menuBar, QAction* wireframe, QAction* fitAll, QWidget* 
     row->setSpacing(kButtonGap - margin * 2);
 
     // The wordmark is painted, not a child widget, so the layout only has to
-    // keep its space clear.
-    const QFontMetrics wordmarkMetrics(wordmarkFont());
-    row->addSpacing(wordmarkMetrics.horizontalAdvance(wordmark()) + kWordmarkGap);
+    // keep its space clear. Kept as a pointer rather than added and forgotten:
+    // applyTheme() re-measures it when the type scale moves.
+    row->addSpacing(0);
+    myWordmarkSpace = row->itemAt(row->count() - 1)->spacerItem();
 
     if (myMenus) {
         // Reparented in. Its own bottom border and background come from the
@@ -230,6 +242,21 @@ AppBar::AppBar(QMenuBar* menuBar, QAction* wireframe, QAction* fitAll, QWidget* 
 
     myFit = new BarButton(fitAll, this);
     row->addWidget(myFit);
+
+    applyTheme();
+    connect(Theme::notifier(), &Theme::Notifier::changed, this, &AppBar::applyTheme);
+}
+
+void AppBar::applyTheme()
+{
+    if (!myWordmarkSpace) return;
+    // Measured with the font paintEvent() actually draws the wordmark in -
+    // bold, and bold is wider than regular.
+    const QFontMetrics metrics(wordmarkFont());
+    myWordmarkSpace->changeSize(metrics.horizontalAdvance(wordmark()) + kWordmarkGap, 0,
+                                QSizePolicy::Fixed, QSizePolicy::Minimum);
+    if (layout()) layout()->invalidate();
+    update();
 }
 
 QString AppBar::wordmark() const

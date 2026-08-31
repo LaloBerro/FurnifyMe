@@ -47,6 +47,21 @@ AxisGizmo::AxisGizmo(OcctViewWidget* view, QWidget* parent)
     // this itself rather than leaving it to ViewportOverlay: resize() on a
     // fixed-size widget is a silent no-op. This one measured 147.5 device
     // pixels tall at 125% scaling.
+    applyTheme();
+    connect(Theme::notifier(), &Theme::Notifier::changed, this, &AxisGizmo::applyTheme);
+
+    // Repaint whenever the camera moves, so the gizmo rotates with the scene.
+    connect(myView, &OcctViewWidget::cameraChanged, this,
+            static_cast<void (QWidget::*)()>(&QWidget::update));
+}
+
+void AxisGizmo::applyTheme()
+{
+    // Through Theme::wholeDevicePixels() - see Theme.h, and see
+    // WalkthroughPanel's constructor for why a setFixedSize() card has to do
+    // this itself rather than leaving it to ViewportOverlay: resize() on a
+    // fixed-size widget is a silent no-op. This one measured 147.5 device
+    // pixels tall at 125% scaling.
     setFixedSize(Theme::wholeDevicePixels(sizeHint()));
     // Baseline for this widget's own font() (what the type-scale sweep in
     // gui_smoke checks): the only text it paints now is the axis letters,
@@ -54,10 +69,7 @@ AxisGizmo::AxisGizmo(OcctViewWidget* view, QWidget* parent)
     // one regardless of selector specificity, so this sticks reliably rather
     // than fighting the cascade.
     setStyleSheet(QStringLiteral("font-size: %1pt;").arg(Theme::badgeFont().pointSizeF()));
-
-    // Repaint whenever the camera moves, so the gizmo rotates with the scene.
-    connect(myView, &OcctViewWidget::cameraChanged, this,
-            static_cast<void (QWidget::*)()>(&QWidget::update));
+    update();
 }
 
 void AxisGizmo::computeTips(Tip tips[6]) const

@@ -5,14 +5,134 @@
 #include <QColor>
 #include <QEasingCurve>
 #include <QFont>
+#include <QObject>
 #include <QRect>
 #include <QSize>
 #include <QString>
+#include <QVector>
 
 class QApplication;
 class QPainter;
 
 namespace Theme {
+
+// --- the editable state behind every token -----------------------------------
+//
+// Since Milestone 2 the accessors below are not constants: each one reads a
+// slot of THIS structure, and the Appearance panel writes it. Nothing else
+// changed for a caller - Theme::accent() is still the only way to ask for the
+// accent colour, and hex still lives nowhere else - but a colour is now a
+// value that can move under a widget between two paints, which is why no
+// widget may cache one across setSpec(). See notifier() below.
+//
+// defaultSpec() is today's Graphite palette byte for byte, so an app whose
+// user has never opened the panel renders exactly as it did before.
+struct Spec {
+    QColor chrome;
+    QColor panel;
+    QColor chip;
+    QColor chipHover;
+    QColor chipActive;
+    QColor accent;
+    QColor text;
+    QColor textMuted;
+    QColor textDisabled;
+    QColor border;
+    QColor viewport;
+    QColor gridMinor;
+    QColor gridMajor;
+    QColor axisX;
+    QColor axisY;
+    QColor sketchPointMarker;
+    QColor danger;
+    QColor focusRing;
+    QColor focusRingMuted;
+    // The two viewport highlight colours. They were OCCT's own named
+    // constants until this task (Quantity_NOC_CYAN1 and Quantity_NOC_ORANGE)
+    // rather than Theme tokens - which meant the two colours a user looks at
+    // most while modelling were the two they could not change. Their defaults
+    // are those constants' exact sRGB values, so nothing on screen moved when
+    // they became editable.
+    QColor highlightHover;
+    QColor highlightSelected;
+
+    // Empty means "whatever apply() managed to load", which is the bundled DM
+    // Sans when the resource is present and the platform default when it is
+    // not. defaultSpec() fills it in with the real family name once apply()
+    // has run, so spec() == defaultSpec() holds at startup.
+    QString fontFamily;
+    // The BODY size. The other three are derived from it and are not stored -
+    // a stored derived value is a second source of truth, and the four-size
+    // law is only a law while the four cannot drift apart.
+    double basePt = 10.0;
+};
+
+bool operator==(const Spec& a, const Spec& b);
+inline bool operator!=(const Spec& a, const Spec& b) { return !(a == b); }
+
+// The band the base size may be set to. The derived scale runs from
+// basePt - 2 to basePt + 3, so this is 6pt..17pt of actual type.
+constexpr double kMinBasePt = 8.0;
+constexpr double kMaxBasePt = 14.0;
+
+const Spec& spec();
+Spec defaultSpec();
+
+// Installs `next` as the live spec: re-applies the palette, the application
+// stylesheet and the application font, then announces the change through
+// notifier(). A no-op when `next` is already what spec() returns, so a slider
+// dragged across a value it already holds does not re-polish every widget in
+// the application.
+void setSpec(const Spec& next);
+
+// One string for QSettings, and its tolerant inverse. deserializeSpec()
+// starts from defaultSpec() and overwrites only the tokens the string names,
+// so a spec written by an older build gains this build's new tokens at their
+// defaults instead of failing. It returns false - leaving `out` UNTOUCHED -
+// for an empty string, for a fragment with no `=`, for a colour that QColor
+// cannot parse and for a base size outside kMinBasePt..kMaxBasePt. An
+// unrecognised KEY is ignored rather than refused: that is the half a future
+// build needs in order to remove a token without stranding everyone's stored
+// appearance.
+QString serializeSpec();
+QString serializeSpec(const Spec& s);
+bool deserializeSpec(const QString& text, Spec& out);
+
+// The editable colour tokens, in the order the panel lists them. `id` is the
+// serialisation key and is NOT user-facing copy - AppearancePanel owns the
+// user's words for each token, because those are copy and copy lives in the
+// UI layer where the vocabulary sweep can reach it. The member pointer is
+// what makes both the panel and the persistence loop data-driven: a token
+// added to Spec and to this table is editable and persisted with no third
+// place to remember.
+struct ColourToken {
+    QString id;
+    QColor Spec::*member;
+};
+const QVector<ColourToken>& colourTokens();
+
+// The broadcast setSpec() makes.
+//
+// Almost nothing needs it: every widget in this shell asks Theme for its
+// colours inside paintEvent(), so `update()` is all a repaint takes and
+// MainWindow's own updateActions()/appStateChanged() already reaches every
+// one of them. The subscribers are the handful of places that genuinely
+// CANNOT re-derive at paint time - a QIcon rasterised once at construction, a
+// per-widget stylesheet's font-size, a card pinned with setFixedSize(), a
+// layout's reserved spacing. Each of those is a cached appearance value, and
+// this signal is how it stops being stale.
+class Notifier : public QObject {
+    Q_OBJECT
+
+public:
+    // setSpec() calls this. Nothing else should.
+    void announce() { emit changed(); }
+
+signals:
+    void changed();
+};
+
+Notifier* notifier();
 
 QColor chrome();        // menu bar, status bar, window background
 QColor panel();         // items panel
@@ -45,9 +165,17 @@ QColor focusRingMuted(); // same outline, dimmed - a focused widget in a
                         // moved on to another application) still shows a
                         // ring, just not one that keeps shouting for
                         // attention
+QColor highlightHover();    // the viewport's hover tint
+QColor highlightSelected(); // and its selection tint
 
 // The whole app's type scale: four sizes, and every widget that paints text
 // reads one of them - a fifth size anywhere is a smell, not a design choice.
+//
+// All four are DERIVED from Spec::basePt, at fixed offsets: badge = base - 2,
+// label = base - 1, body = base, title = base + 3. Storing four independent
+// sizes would let the user set two of them equal, which is not a smaller
+// scale but a broken one - and would let the type-scale sweep pass while the
+// scale it is checking had collapsed to three sizes.
 QFont titleFont();      // panel and sheet titles
 QFont bodyFont();       // everything the user reads
 QFont labelFont();      // chip labels, status bar

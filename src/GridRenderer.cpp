@@ -92,6 +92,17 @@ void GridRenderer::attach(const Handle(AIS_InteractiveContext)& context)
     myContext = context;
 }
 
+void GridRenderer::invalidate()
+{
+    // Both halves, not just the step: update()'s early-out is a conjunction,
+    // so any single term going false is enough - but `myBuiltExtent = 0.0`
+    // also makes `sized` false, and clearing exactly the two fields the guard
+    // reads as "nothing has been built" leaves no combination of camera
+    // arguments that could still be judged a hit.
+    myBuiltStep = 0.0;
+    myBuiltExtent = 0.0;
+}
+
 void GridRenderer::update(double cameraDistance, const gp_Pnt& cameraTarget,
                           const gp_Pln& plane)
 {

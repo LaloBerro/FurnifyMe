@@ -130,7 +130,19 @@ WalkthroughPanel::WalkthroughPanel(MainWindow* window, QWidget* parent)
     syncSkipGeometry();
 
     connect(myWindow, &MainWindow::appStateChanged, this, &WalkthroughPanel::refresh);
+    connect(Theme::notifier(), &Theme::Notifier::changed, this, &WalkthroughPanel::applyTheme);
     refresh();
+}
+
+void WalkthroughPanel::applyTheme()
+{
+    // Same call the constructor makes, for the same reason - see the header.
+    // The skip pill is a sibling glued to skipRect(), so it has to be moved
+    // by hand after the card's own size changes; resizeEvent() would do it
+    // for a size change, but not for one setFixedSize() rejects as equal.
+    setFixedSize(Theme::wholeDevicePixels(sizeHint()));
+    syncSkipGeometry();
+    update();
 }
 
 WalkthroughPanel::~WalkthroughPanel()

@@ -175,29 +175,15 @@ void OcctViewWidget::initializeViewer()
     myView->SetWindow(window);
     if (!window->IsMapped()) window->Map();
 
-    const QColor bg = Theme::viewport();
-    myView->SetBackgroundColor(Quantity_Color(bg.redF(), bg.greenF(), bg.blueF(),
-                                              Quantity_TOC_sRGB));
     // No corner trihedron: AxisGizmo (top right) is the orientation surface,
     // and since the rail took the left edge the trihedron sat behind it with
     // one axis tip peeking out - redundant at best, a visual defect at worst.
-
-    // OCCT's default highlight barely reads against a shaded solid. Make hover
-    // and selection unmistakable - not being able to tell what is selected was
-    // the single most confusing thing about the app.
-    const Handle(Prs3d_Drawer) hover = myContext->HighlightStyle(Prs3d_TypeOfHighlight_Dynamic);
-    hover->SetColor(Quantity_NOC_CYAN1);
-    hover->SetDisplayMode(AIS_Shaded);
-    hover->SetTransparency(0.0f);
-
-    const Handle(Prs3d_Drawer) picked = myContext->HighlightStyle(Prs3d_TypeOfHighlight_Selected);
-    picked->SetColor(Quantity_NOC_ORANGE);
-    picked->SetDisplayMode(AIS_Shaded);
-    picked->SetTransparency(0.0f);
-
-    // Sub-shape (face-mode) highlighting uses its own styles.
-    myContext->HighlightStyle(Prs3d_TypeOfHighlight_LocalDynamic)->SetColor(Quantity_NOC_CYAN1);
-    myContext->HighlightStyle(Prs3d_TypeOfHighlight_LocalSelected)->SetColor(Quantity_NOC_ORANGE);
+    //
+    // The background and the two highlight styles are applied through the same
+    // applyTheme() a live Appearance edit uses, rather than set here and set
+    // again there: two copies of "what this view wears" is exactly the drift
+    // the Theme spec exists to end.
+    applyTheme();
 
     myGridRenderer.attach(myContext);
     myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane());
@@ -1345,6 +1331,46 @@ void OcctViewWidget::setViewRight()
     CameraState s = myCamera.state();
     s.azimuthDeg = -90.0; s.elevationDeg = 0.0;
     animateTo(s);
+}
+
+void OcctViewWidget::applyTheme()
+{
+    if (myView.IsNull() || myContext.IsNull()) return;
+
+    const QColor bg = Theme::viewport();
+    myView->SetBackgroundColor(Quantity_Color(bg.redF(), bg.greenF(), bg.blueF(),
+                                              Quantity_TOC_sRGB));
+
+    // OCCT's default highlight barely reads against a shaded body. Make hover
+    // and selection unmistakable - not being able to tell what is selected was
+    // the single most confusing thing about the app.
+    const Quantity_Color hoverColour = toOcctColor(Theme::highlightHover());
+    const Quantity_Color pickedColour = toOcctColor(Theme::highlightSelected());
+
+    const Handle(Prs3d_Drawer) hover = myContext->HighlightStyle(Prs3d_TypeOfHighlight_Dynamic);
+    hover->SetColor(hoverColour);
+    hover->SetDisplayMode(AIS_Shaded);
+    hover->SetTransparency(0.0f);
+
+    const Handle(Prs3d_Drawer) picked = myContext->HighlightStyle(Prs3d_TypeOfHighlight_Selected);
+    picked->SetColor(pickedColour);
+    picked->SetDisplayMode(AIS_Shaded);
+    picked->SetTransparency(0.0f);
+
+    // Sub-shape (face-mode) highlighting uses its own styles.
+    myContext->HighlightStyle(Prs3d_TypeOfHighlight_LocalDynamic)->SetColor(hoverColour);
+    myContext->HighlightStyle(Prs3d_TypeOfHighlight_LocalSelected)->SetColor(pickedColour);
+
+    // The grid's colours are baked into its vertices, so a repaint is not
+    // enough - it has to be built again. invalidate() only drops the cache;
+    // the update() below is what actually rebuilds it, exactly once. During
+    // initializeViewer() this runs before attach(), where update() is a no-op
+    // and the attach that follows does the first real build.
+    myGridRenderer.invalidate();
+    myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane());
+
+    myContext->UpdateCurrentViewer();
+    update();
 }
 
 void OcctViewWidget::setWireframe(bool wireframe)

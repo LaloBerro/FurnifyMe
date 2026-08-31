@@ -300,6 +300,25 @@ public:
     // viewLabelText() returns entries OF this list, so the two cannot drift.
     static const QStringList& viewLabelNames();
 
+    // Re-dresses everything on the OCCT side of the bridge from the current
+    // Theme spec: the background the view clears to, the two highlight
+    // drawers, and the ground grid, which is rebuilt because its colours are
+    // baked into the line segments at build time (see GridRenderer::invalidate).
+    //
+    // The Qt side needs nothing equivalent - every widget in the shell asks
+    // Theme for its colours inside paintEvent(), so a repaint is enough. The
+    // viewport is the exception because none of this is painted by Qt at all:
+    // the background is a driver clear colour, the highlights are Prs3d
+    // drawers held by the interactive context, and the grid is a presentation
+    // built once out of coloured vertices.
+    //
+    // Deliberately does NOT touch the sketch markers or the previews. Those
+    // exist only while a gesture is in progress, and MainWindow - which owns
+    // that gesture's state - re-issues them, so this class does not have to
+    // keep a copy of the points it was last handed just to be able to
+    // recolour them.
+    void applyTheme();
+
     void setWireframe(bool wireframe);
     bool isWireframe() const { return myWireframe; }
     // True if this solid's presentation is actually displayed in wireframe right

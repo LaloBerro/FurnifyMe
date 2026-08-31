@@ -266,7 +266,14 @@ PullArrow::PullArrow(MainWindow* window, OcctViewWidget* view)
 
     myField = new QLineEdit(view);
     myField->setAttribute(Qt::WA_NoMousePropagation);
+    // An explicitly set font does not follow QApplication::setFont, so the
+    // Theme broadcast has to put it back - see ExtrudePreview's constructor
+    // for the full reason.
     myField->setFont(Theme::bodyFont());
+    connect(Theme::notifier(), &Theme::Notifier::changed, this, [this] {
+        myField->setFont(Theme::bodyFont());
+        update();
+    });
     connect(myField, &QLineEdit::textChanged, this,
             [this](const QString&) { updatePreview(); });
     markInvalid(false);

@@ -53,19 +53,9 @@ ItemsPanel::ItemsPanel(const DocumentModel* document, OcctViewWidget* view, QWid
     myOuter->setContentsMargins(kPad, kPad, kPad, kPad);
     myOuter->setSpacing(8);
 
-    auto* title = new QLabel(tr("Items"), this);
-    // A per-widget stylesheet wins over the app-wide one regardless of
-    // selector specificity, so the size sticks reliably here - this is a
-    // panel title, Theme::titleFont(). `background: transparent` is not
-    // decoration: the app-wide sheet paints every QWidget chrome-black, and a
-    // label that stamps its own rectangle over this card would be a black bar
-    // across it.
-    title->setStyleSheet(QStringLiteral("background: transparent; color: %1; "
-                                        "font-weight: 600; font-size: %2pt;")
-                             .arg(Theme::textMuted().name())
-                             .arg(Theme::titleFont().pointSizeF()));
-    myOuter->addWidget(title);
-    title->show();   // measured immediately, same reason as the rows in refresh()
+    myTitle = new QLabel(tr("Items"), this);
+    myOuter->addWidget(myTitle);
+    myTitle->show();   // measured immediately, same reason as the rows in refresh()
 
     myRows = new QVBoxLayout();
     myRows->setContentsMargins(0, 0, 0, 0);
@@ -73,6 +63,32 @@ ItemsPanel::ItemsPanel(const DocumentModel* document, OcctViewWidget* view, QWid
     myOuter->addLayout(myRows);
     myOuter->addStretch(1);
 
+    // LAST, and the order is load-bearing: applyTheme() ends in refresh(),
+    // which walks myRows, so it cannot run before that layout exists. The
+    // title's stylesheet bakes in two Theme values, so it is written there
+    // rather than here - and re-written on every Theme broadcast. The ROWS
+    // need no such hook: refresh() rebuilds them from Theme every time, and
+    // MainWindow already drives it from appStateChanged.
+    applyTheme();
+    connect(Theme::notifier(), &Theme::Notifier::changed, this, &ItemsPanel::applyTheme);
+}
+
+void ItemsPanel::applyTheme()
+{
+    if (!myTitle) return;
+    // A per-widget stylesheet wins over the app-wide one regardless of
+    // selector specificity, so the size sticks reliably here - this is a
+    // panel title, Theme::titleFont(). `background: transparent` is not
+    // decoration: the app-wide sheet paints every QWidget chrome-black, and a
+    // label that stamps its own rectangle over this card would be a black bar
+    // across it.
+    myTitle->setStyleSheet(QStringLiteral("background: transparent; color: %1; "
+                                          "font-weight: 600; font-size: %2pt;")
+                               .arg(Theme::textMuted().name())
+                               .arg(Theme::titleFont().pointSizeF()));
+    // The card's height comes from its content, and the title just changed
+    // size - refresh() is the one path that re-measures this drawer, so it is
+    // the one used here rather than a second copy of that arithmetic.
     refresh();
 }
 
