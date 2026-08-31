@@ -11,9 +11,10 @@ library target `furnify_geometry`.
 
 This file distills the project brief (`CAD_APP_BRIEF.md`, supplied at init; ask the user
 for it if you need the verbatim original). Milestone 1 scope is exactly: **sketch → extrude → boolean**,
-plus STEP export. Fillets, chamfers, push/pull on faces, history/parametric tree,
-constraint solver, 2D drawings, assemblies, materials, and any file format beyond STEP are
-out of scope until Milestone 1 runs clean on both platforms.
+plus STEP export. **Milestone 2 (direct modeling) is merged**: push/pull on faces,
+fillets, chamfers, and a transform gizmo now exist — see "Direct modeling" below. Still out
+of scope: history/parametric tree, constraint solver, 2D drawings, assemblies, materials,
+and any file format beyond STEP.
 
 ### Stack decisions — settled, do not re-litigate
 
@@ -204,6 +205,9 @@ Source files under `src/`, plus `tests/`:
 | `ui/Toast.{h,cpp}` | one non-blocking message at a time, with Undo where it applies |
 | `ui/ExtrudePreview.{h,cpp}` | height entry with a live preview built by the commit's own path |
 | `ui/DimensionRenderer.{h,cpp}` | CAD length annotation; one renderer for the sketch and edges |
+| `ui/PullArrow.{h,cpp}` | face pull: 3D arrow + value chip, preview by the commit's own call |
+| `ui/BevelArrow.{h,cpp}` | edge drag: inward fillets, outward chamfers, same contract |
+| `ui/AppearancePanel.{h,cpp}` | every Theme token editable live; debounced persistence |
 | `ui/AppBar.{h,cpp}` | the menu strip: wordmark, real `QMenuBar`, view controls |
 
 ### The vocabulary — enforced by test
@@ -221,6 +225,10 @@ tooltip contains a banned word, so this table is executable, not aspirational.
 | Keeping the shared volume | Intersect | common, overlap, boolean common |
 | Turning a face into a body | Extrude | pull, push, prism |
 | The 3D area | viewport | scene, canvas, view |
+| Rounding an edge | Fillet, `R 20 mm` | bevel, round-over |
+| Flattening an edge | Chamfer, `C 20 mm` | bevel, break |
+| Repositioning a body | Move / Rotate / Scale | transform, translate |
+| The colours-and-fonts panel | Appearance | theme, settings, preferences |
 
 `ModelingOps::BooleanKind::Fuse` and `::Cut` keep their kernel-facing names — the
 user never sees them, and renaming them would churn the geometry library and its
@@ -461,6 +469,52 @@ widget painted over `OcctViewWidget`'s on-screen GL surface — it crashes; fade
 `QPainter::setOpacity()` instead. And `QAbstractAnimation::DeleteWhenStopped` deletes the
 animation on *natural completion* too, so a retained raw pointer dangles; one long-lived
 animation at `KeepWhenStopped` removes the question rather than detecting it.
+
+### Direct modeling
+
+Milestone 2's rule: geometry is edited by grabbing it, and the kernel refuses before the
+UI can lie. Four operations in `ModelingOps`, all Qt-free, all headless-tested, all
+returning `BooleanResult` where **`ok == false` always carries a null shape** (documented
+on the type, pinned by tests): `pullFace` (outward-normal prism, fused or cut; refuses a
+face that is not on the body — without that guard a mis-wired pick returned two
+disconnected solids as success), `filletEdge` / `chamferEdge` (OCCT throws are caught at
+the operation boundary; fillets legitimately fail on hard geometry and that refusal is a
+Failure toast, never a success), and `transformShape` (uniform scale only — `gp_Trsf`
+cannot express per-axis, and `GTransform` would convert faces to NURBS).
+
+Three selection-driven gizmos, no new rail buttons. Their visibility predicates are one
+derived function each, driven from `appStateChanged`, and **provably disjoint**:
+`ExtrudePreview` requires a pending face; the pull arrow, transform manipulator and bevel
+arrow all require none, plus three different selection modes. At most one app-wide
+Enter/Escape claim can therefore exist at a time. Gizmo previews go through the
+**dedicated `setModelingPreview` channel** (selection mode −1), never the sketch/extrude
+`setPreview` slot — two features sharing that slot already cost one bug.
+
+- **Face pull**: drag or type; outward grows, inward carves; snap follows Snap to Grid.
+  The distance is the closest-point parameter of the mouse ray against the outward-normal
+  line (`CameraController::axisParameterForRay`, headless-tested; a near-parallel ray
+  keeps the last value, and a press whose angle refuses still claims the gesture).
+- **Transform**: `AIS_Manipulator`, translation/rotation/uniform scaling, snapped deltas
+  (10 mm / 15° / 5%) rebuilt about the body's own pivot — naive `TranslationPart()`
+  snapping displaces the pivot. Scale bakes are clamped to [0.05, 20] at the UI; the
+  kernel accepts more. During an additive (Shift) pick the manipulator is `Deactivate`d
+  around the `MoveTo`/`SelectDetected` pair, or `AIS_ManipulatorOwner` outranks the
+  shape's owner and the second body cannot be picked.
+- **Bevels**: the drag axis is the bisector of the adjacent faces' outward normals
+  (`ModelingOps::bevelAxis`, 12-edge headless oracle); against the bisector = Fillet,
+  along it = Chamfer. On a concave edge the mapping is unchanged but the fillet bulges
+  toward the notch — correct CAD behaviour with an inverted-looking gesture, documented
+  rather than special-cased. Curved edges raise no arrow.
+
+**`Theme` is spec-backed** since the Appearance panel: every colour accessor and the four
+derived fonts (badge = base−2, label = base−1, body = base, title = base+3 pt) read
+`Theme::Spec`; `defaultSpec()` is Graphite byte-for-byte and all 21 defaults are pinned to
+hex in the suite. Edits apply live through one `themeChanged` broadcast — no widget may
+cache a colour across it — and persist **debounced** (400 ms, flushed on close), because a
+colour-wheel drag fires per mouse-move. The picker opens with `show()`, never `open()`:
+`QDialog::open()` forces window-modality regardless of `setModal(false)`, and nothing in
+this app blocks. The gizmo's axis hues and the OCCT body/preview materials are the
+remaining untokenised colours, by scope ruling.
 
 ### Dimensions, planes and units
 

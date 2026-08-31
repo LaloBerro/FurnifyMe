@@ -1,7 +1,7 @@
 # Milestone 2: Direct modeling — design
 
 Date: 2026-08-30
-Status: approved by standing instruction — the user answered four scoping questions and
+Status: implemented 2026-08-30. The user answered four scoping questions and
 asked for everything to be built without further questions. Decisions below were made
 rather than asked.
 
