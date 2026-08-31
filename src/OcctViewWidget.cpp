@@ -939,6 +939,24 @@ void OcctViewWidget::clearSketchStraightAnchor()
     myHasStraightAnchor = false;
 }
 
+void OcctViewWidget::setSketchCloseTarget(const gp_Pnt& first)
+{
+    myCloseTarget = first;
+    myHasCloseTarget = true;
+}
+
+void OcctViewWidget::clearSketchCloseTarget()
+{
+    myHasCloseTarget = false;
+}
+
+double OcctViewWidget::sketchCloseTolerance() const
+{
+    // Half a grid step is forgiving but unambiguous - it cannot reach the
+    // next grid intersection - and 5 mm is the free-hand equivalent.
+    return mySnapEnabled && mySnapStep > 0.0 ? mySnapStep * 0.5 : 5.0;
+}
+
 void OcctViewWidget::applySelectionMode(const Handle(AIS_Shape)& shape)
 {
     if (myContext.IsNull() || shape.IsNull()) return;
@@ -1044,9 +1062,10 @@ void OcctViewWidget::setSketchMode(bool enabled, const gp_Pln& plane)
     // entry, so nothing from a previous sketch can survive into this one.
     clearSketchPointMarkers();
     clearSketchCursorMarker();
-    // And the same rule for the straight-continuation anchor: it names a
-    // point in the sketch that is ending or has not started yet.
+    // And the same rule for the two sketch constraints: each names a point in
+    // the sketch that is ending or has not started yet.
     clearSketchStraightAnchor();
+    clearSketchCloseTarget();
 }
 
 gp_Pln OcctViewWidget::gridPlane() const
@@ -1143,7 +1162,22 @@ bool OcctViewWidget::pointOnSketchPlane(int px, int py, gp_Pnt& out, bool straig
     // 50 is not. Rounding the line parameter keeps both whenever the anchor
     // itself is on the grid and the direction is axis-aligned, which is the
     // ordinary case.
-    if (straight && myHasStraightAnchor) {
+    //
+    // One exemption, and it is not a special case so much as a precedence:
+    // CLOSING THE OUTLINE OUTRANKS CONTINUING IT STRAIGHT. Clicking the first
+    // point back is one of the two ways to finish a sketch, and the
+    // projection moves the click off the very point it was aimed at - so with
+    // Shift held that route silently stopped working, and a modifier that
+    // disables a way out of the mode is worse than one that does nothing.
+    // Tested on the RAW plane hit, before any snapping: what the user aimed
+    // at, not where a constraint would have put it. Falling through then
+    // takes the ordinary grid snap, which lands the click exactly on the
+    // first point - so a Shift-click on the start point behaves precisely
+    // like a plain one, rather than merely closing by a different route.
+    const bool closing =
+        myHasCloseTarget && out.Distance(myCloseTarget) <= sketchCloseTolerance();
+
+    if (straight && myHasStraightAnchor && !closing) {
         out = SketchController::snapToDirection(myStraightPrev, myStraightDir, out);
         if (mySnapEnabled && mySnapStep > 0.0) {
             const gp_Vec along(myStraightDir);

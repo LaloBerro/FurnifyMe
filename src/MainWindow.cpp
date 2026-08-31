@@ -1307,9 +1307,12 @@ void MainWindow::onStartSketch()
 
 void MainWindow::onSketchPointPicked(const gp_Pnt& point)
 {
-    // Clicking the first point again closes the sketch, the way every CAD tool
-    // behaves. Half a grid step is a forgiving but unambiguous target.
-    const double closeTolerance = myView->snapEnabled() ? myView->snapStep() * 0.5 : 5.0;
+    // Clicking the first point again closes the sketch, the way every CAD
+    // tool behaves. The radius comes from the viewport rather than being
+    // recomputed here: Shift's straight constraint has to stand down inside
+    // exactly this distance (see OcctViewWidget::sketchCloseTolerance), and
+    // two copies of the formula would be two answers to the same question.
+    const double closeTolerance = myView->sketchCloseTolerance();
     if (mySketch.isNearFirstPoint(point, closeTolerance)) {
         onFinishSketch();
         return;
@@ -1318,7 +1321,7 @@ void MainWindow::onSketchPointPicked(const gp_Pnt& point)
     mySketch.addPoint(point);
     myView->setPreview(mySketch.previewShape());
     myView->setSketchPointMarkers(mySketch.points());
-    syncSketchStraightAnchor();
+    syncSketchConstraints();
     updateActions();
     statusBar()->showMessage(
         mySketch.pointCount() == 1
@@ -1328,20 +1331,36 @@ void MainWindow::onSketchPointPicked(const gp_Pnt& point)
 
 void MainWindow::onUndoSketchPoint()
 {
+    if (mySketch.pointCount() == 0) return;
+
+    // The SAME counter the document path records, and recorded here rather
+    // than in onUndo()'s reroute so Backspace earns it too. "Undo" is one
+    // thing the user learns, not two: somebody who has taken back three
+    // points by whichever key has learned to take things back, and a hint
+    // still teaching them that would be teaching a lesson already taken.
+    recordProgress("undo.used");
     mySketch.removeLastPoint();
     myView->setPreview(mySketch.previewShape());
     myView->setSketchPointMarkers(mySketch.points());
-    syncSketchStraightAnchor();
+    syncSketchConstraints();
     updateActions();
 }
 
-void MainWindow::syncSketchStraightAnchor()
+void MainWindow::syncSketchConstraints()
 {
     gp_Dir dir;
     if (mySketching && mySketch.lastSegmentDirection(dir))
         myView->setSketchStraightAnchor(mySketch.points().back(), dir);
     else
         myView->clearSketchStraightAnchor();
+
+    // Only while clicking the first point would actually close the outline -
+    // the same canClose() rule isNearFirstPoint() carries, read from the same
+    // sketch, so the exemption cannot outlive the thing it exempts.
+    if (mySketching && mySketch.canClose())
+        myView->setSketchCloseTarget(mySketch.points().front());
+    else
+        myView->clearSketchCloseTarget();
 }
 
 void MainWindow::onCancelSketch()

@@ -150,7 +150,7 @@ int g_checks = 0;
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 1054;
+constexpr int kCheckFloor = 1071;
 
 void check(bool condition, const QString& what)
 {
@@ -1965,6 +1965,43 @@ int main(int argc, char* argv[])
                 boxH = maxY >= minY ? maxY - minY + 1 : 0;
             };
 
+            // The centre of the mark itself - the middle of the pixels near
+            // `centre` that wear `colour` - rather than the projection of the
+            // world point it stands on.
+            //
+            // projectToScreen answers in whole LOGICAL pixels, so at 1.75x
+            // that answer is already up to two dump pixels out before any
+            // marker is drawn. Two out is nothing against a 19x19 count and
+            // everything against a question asked two pixels from the centre
+            // of a seven-pixel mark: the first version of the fill check read
+            // 8 of 8 at native scale and 4 of 8 at 1.75x, for no reason but
+            // that. Finding the mark first and asking afterwards removes the
+            // scale from the question entirely.
+            //
+            // The first parameter is `around` and not `near` on purpose:
+            // `near` is still a macro in the Windows SDK's minwindef.h,
+            // defined to NOTHING for 16-bit legacy. As `near` the parameter
+            // silently became unnamed and `near + QPoint(dx, dy)` became
+            // Qt's UNARY plus on QPoint - so this scanned a patch at the
+            // dump's top-left corner, compiled without a murmur, and failed
+            // at all three scales with "the mark cannot be found".
+            auto markCentre = [&](const QPoint& around, const QColor& colour, int half,
+                                  QPoint& out) {
+                long long sumX = 0, sumY = 0;
+                int found = 0;
+                for (int dy = -half; dy <= half; ++dy) {
+                    for (int dx = -half; dx <= half; ++dx) {
+                        const QPoint p = around + QPoint(dx, dy);
+                        if (!shot.rect().contains(p)) continue;
+                        if (colorDistance(shot.pixelColor(p), colour) > 42.0) continue;
+                        sumX += p.x(); sumY += p.y(); ++found;
+                    }
+                }
+                if (found < 4) return false;
+                out = QPoint(int(sumX / found), int(sumY / found));
+                return true;
+            };
+
             const std::vector<gp_Pnt>& placed = window.sketch().points();
             gp_Pnt cursorPoint;
             QPoint firstAt, secondAt, cursorAt;
@@ -1974,13 +2011,52 @@ int main(int argc, char* argv[])
             check(haveAll,
                   "the first point, a later point and the live cursor all project "
                   "inside the dump, so the six style checks below cannot vanish quietly");
+            // The eight pixels ringing `centre` at `radius` that match
+            // `colour` - the honest way to ask "is the middle of this mark
+            // filled or hollow", since a single pixel answers for one point
+            // and an area count answers for neither.
+            auto ringAt = [&](const QPoint& centre, const QColor& colour, int radius) {
+                const QPoint offsets[8] = {{-radius, 0}, {radius, 0}, {0, -radius},
+                                           {0, radius},  {-radius, -radius}, {radius, -radius},
+                                           {-radius, radius}, {radius, radius}};
+                int found = 0;
+                for (const QPoint& o : offsets) {
+                    const QPoint p = centre + o;
+                    if (!shot.rect().contains(p)) continue;
+                    if (colorDistance(shot.pixelColor(p), colour) <= 42.0) ++found;
+                }
+                return found;
+            };
+
             if (haveAll) {
                 int hits = 0, boxW = 0, boxH = 0;
                 patch(firstAt, Theme::accent(), 9, hits, boxW, boxH);
-                // A FILLED square: sampled INSIDE it, not on a ring's rim.
-                // The yellow outline leaves the point through the middle of
-                // the square, so a single centre pixel is the one sample
-                // that could legitimately not be accent - hence a count.
+                // A FILLED square, and "filled" has to be sampled INSIDE it -
+                // a count over a 19x19 window would pass just as happily for
+                // a ring of the same diameter, which is exactly what this
+                // mark replaced. So: the middle is not bare ground, and the
+                // pixels immediately around the middle are the fill.
+                //
+                // Not the centre pixel alone. The yellow outline leaves the
+                // point through the middle of the square, so that one pixel
+                // is legitimately contested - which is why the centre claim
+                // is the weaker "not the ground" and the fill claim is made
+                // two pixels out, well inside a seven-pixel square and well
+                // inside the hole of any ring this size.
+                QPoint squareAt = firstAt;
+                const bool foundSquare = markCentre(firstAt, Theme::accent(), 7, squareAt);
+                check(foundSquare,
+                      "the first point's mark can be found in the dump, so the two "
+                      "fill checks below have something to measure");
+                const QColor middle = shot.pixelColor(squareAt);
+                check(colorDistance(middle, Theme::viewport()) > 25.0,
+                      QStringLiteral("the first point's middle is painted, not bare ground "
+                                     "showing through a ring (%1)").arg(middle.name()));
+                const int filled = ringAt(squareAt, Theme::accent(), 2);
+                check(filled >= 5,
+                      QStringLiteral("and it is FILLED with the accent right up to its "
+                                     "middle - %1 of the 8 pixels two out are accent, "
+                                     "where a ring would have none").arg(filled));
                 check(hits >= 12,
                       QStringLiteral("the first point is a filled accent patch, not an "
                                      "outline (%1 accent px)").arg(hits));
@@ -2002,11 +2078,35 @@ int main(int argc, char* argv[])
                 check(hits >= 20 && boxW > 8,
                       QStringLiteral("the live cursor is a much larger violet mark "
                                      "(%1 px, %2 wide)").arg(hits).arg(boxW));
-                // A RING, not a dot: the middle is not the ring's colour.
-                // This is the check that would fail if the cursor quietly
-                // went back to being a filled ball.
-                check(colorDistance(shot.pixelColor(cursorAt), Theme::sketchPointMarker()) > 42.0,
-                      "and it is a ring - its middle is not filled with its own colour");
+                // A RING, not a dot - measured as an ANNULUS rather than as
+                // one pixel in a roughly three-pixel hole, which is a target
+                // small enough that a pixel of rounding could hit its rim and
+                // report a filled mark. Rim present at radius 5, hole empty
+                // across the whole 3x3 middle: a filled ball fails the second
+                // half outright, and neither half turns on a single sample.
+                QPoint ringAtPoint = cursorAt;
+                const bool foundRing =
+                    markCentre(cursorAt, Theme::sketchPointMarker(), 12, ringAtPoint);
+                check(foundRing,
+                      "the cursor's mark can be found in the dump, so the rim and hole "
+                      "checks below have something to measure");
+                const int rim = ringAt(ringAtPoint, Theme::sketchPointMarker(), 5);
+                int middleHits = 0;
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        const QPoint p = ringAtPoint + QPoint(dx, dy);
+                        if (!shot.rect().contains(p)) continue;
+                        if (colorDistance(shot.pixelColor(p), Theme::sketchPointMarker()) <= 42.0)
+                            ++middleHits;
+                    }
+                }
+                check(rim >= 6,
+                      QStringLiteral("the cursor mark has a rim all the way round "
+                                     "(%1 of 8 pixels at radius 5)").arg(rim));
+                check(middleHits == 0,
+                      QStringLiteral("and a hollow middle - it is a ring, not a ball "
+                                     "(%1 of the 9 middle pixels wear its colour)")
+                          .arg(middleHits));
             }
         }
 
@@ -2814,6 +2914,50 @@ int main(int argc, char* argv[])
                   "out of the sketch, Undo goes back to meaning the document");
         }
 
+        // --- and Shift must not lock the user out of finishing ---------------
+        //
+        // Clicking the first point back is one of the two ways to close an
+        // outline, and the straight constraint projects a click off the very
+        // point it was aimed at - so holding Shift silently disabled that
+        // route. A modifier that removes a way out of the mode is worse than
+        // one that does nothing, hence the precedence: closing outranks
+        // continuing straight.
+        {
+            trigger(window, QStringLiteral("Start Sketch"));
+            const QPointF start(0.34 * w, 0.60 * h);
+            clickAt(view, start);
+            clickAt(view, QPointF(0.60 * w, 0.60 * h));
+            clickAt(view, QPointF(0.60 * w, 0.40 * h));
+            check(window.sketch().pointCount() == 3,
+                  "three points down, so clicking the first one would close the outline");
+            // Both constraints live at once - which is what makes this a real
+            // conflict rather than a case the anchor happened not to cover.
+            check(view->hasSketchCloseTarget() && view->hasSketchStraightAnchor(),
+                  "with both the closing target and a straight anchor live to fight "
+                  "over the next click");
+
+            moveTo(view, start, Qt::ShiftModifier);
+            gp_Pnt overStart;
+            const bool onStart =
+                view->lastHoverPoint(overStart) && window.sketch().pointCount() == 3 &&
+                overStart.Distance(window.sketch().points().front()) < 1.0e-6;
+            check(onStart,
+                  "with Shift held over the first point the cursor reports that point "
+                  "itself, not a projection of it onto the straight line");
+
+            clickAt(view, start, Qt::ShiftModifier);
+            check(!window.isSketching() && window.hasPendingFace(),
+                  "so a Shift-click on the first point still closes the outline - the "
+                  "click does what the cursor was promising");
+
+            // The pending face is this block's litter, not the suite's state.
+            trigger(window, QStringLiteral("Start Sketch"));
+            trigger(window, QStringLiteral("Cancel Sketch"));
+            settle(120);
+            check(!window.hasPendingFace() && !window.isSketching(),
+                  "and the probe leaves neither a sketch nor a face behind it");
+        }
+
         // Everything after this block inherits the camera, so put it back
         // where these probes found it rather than leaving the suite in a top
         // view that only this section wanted.
@@ -2910,11 +3054,44 @@ int main(int argc, char* argv[])
                 trigger(window, QStringLiteral("Start Sketch"));
                 settle(150);
                 QAction* undoAction = action(window, QStringLiteral("Undo"));
+                // NOT "disabled mid-sketch" any more, and saying so would
+                // contradict the mid-sketch Undo checks further up this same
+                // run. Since Ctrl+Z gained its remove-the-last-point meaning,
+                // what is true here is narrower: a sketch with NO points has
+                // nothing to take back, so the action is disabled for that
+                // reason rather than because a sketch is open.
                 check(undoAction != nullptr && !undoAction->isEnabled(),
-                      "the Undo action is disabled mid-sketch");
+                      "with a sketch open and no point placed yet, Undo has nothing "
+                      "to take back and is disabled");
                 QWidget* pill = toasts->undoControl();
                 check(pill != nullptr && !pill->isVisible(),
                       "and the toast's Undo control is unusable while it is");
+
+                // The corner the whole departure exists for, and it needs a
+                // PLACED POINT to exist at all: at zero points the action is
+                // disabled anyway, so this probe had no teeth - reverting
+                // both halves of the guard (MainWindow's "if (mySketching)
+                // return" and the narrowed setUndoEnabled) left it green.
+                //
+                // With a point down the action IS enabled, and it means
+                // "take back that point". The pill must still refuse: it sits
+                // under "Deleted Body 02 - Undo", and a control that took
+                // back a sketch point instead would be the label describing
+                // one change while the control performed another.
+                clickAt(view, QPointF(view->width() * 0.45, view->height() * 0.62));
+                settle(120);
+                const int pointsUnderToast = static_cast<int>(window.sketch().pointCount());
+                check(pointsUnderToast == 1,
+                      "a point is placed while the delete's toast is still up, so the "
+                      "pill guard below is tested where it can actually fail");
+                check(undoAction != nullptr && undoAction->isEnabled(),
+                      "Undo is now enabled - it means the point, not the body");
+                // Hidden, not disabled: Qt drops mouse events aimed at a
+                // DISABLED widget, which would have made the click below a
+                // no-op for the wrong reason.
+                check(pill != nullptr && !pill->isVisible(),
+                      "and the pill is still not offered, because the toast is about the "
+                      "document and Undo is not");
                 const int afterGuard = static_cast<int>(window.document().solids().size());
                 if (pill) {
                     // Straight at the control, the most generous thing a user
@@ -2924,6 +3101,9 @@ int main(int argc, char* argv[])
                 }
                 check(static_cast<int>(window.document().solids().size()) == afterGuard,
                       "clicking the toast's Undo mid-sketch undoes nothing");
+                check(static_cast<int>(window.sketch().pointCount()) == pointsUnderToast,
+                      "and it does not quietly take the sketch point either - the pill "
+                      "reaches neither meaning of Undo while a sketch is open");
                 check(window.isSketching(),
                       "and leaves the sketch the user was placing points in alone");
                 trigger(window, QStringLiteral("Cancel Sketch"));
@@ -3746,6 +3926,91 @@ int main(int argc, char* argv[])
                 // The grid is drawn in the 3D view, so the viewport dump is
                 // the only place it can be seen at all.
                 view->saveSnapshot(outDir + "/h-locked-face-grid.png");
+
+                // And the dump is where it gets ASSERTED, not merely looked
+                // at. This is the case that decided the grid's Z-layer:
+                // "the grid renders beneath the scene" reads as an underlay
+                // inserted before the default layer, and an underlay is
+                // rendered before the bodies - so this face would paint
+                // straight over the grid drawn on it and the locked-face grid
+                // would silently vanish, with gridPlane()'s nudge reduced to
+                // decoration. Inserted AFTER the default layer instead, with
+                // depth testing on, the nudge does its original job and the
+                // grid wins the tie against the face by a hair. The argument
+                // is in two comments; without this it was in no check.
+                {
+                    const QImage lockedShot(outDir + "/h-locked-face-grid.png");
+                    const double lockScale =
+                        lockedShot.isNull()
+                            ? 0.0
+                            : double(lockedShot.width()) / std::max(1, view->width());
+                    // The face's own screen extent, from the eight corners of
+                    // the box already computed above - no in-plane arithmetic
+                    // and no guessed margin.
+                    int minX = 1 << 28, minY = 1 << 28, maxX = -(1 << 28), maxY = -(1 << 28);
+                    bool haveRect = !lockedShot.isNull() && lockScale > 0.5;
+                    const double cornerX[2] = {bx0, bx1};
+                    const double cornerY[2] = {by0, by1};
+                    const double cornerZ[2] = {bz0, bz1};
+                    for (int i = 0; i < 8 && haveRect; ++i) {
+                        QPoint logical;
+                        if (!view->projectToScreen(gp_Pnt(cornerX[i & 1], cornerY[(i >> 1) & 1],
+                                                          cornerZ[(i >> 2) & 1]),
+                                                   logical)) {
+                            haveRect = false;
+                            break;
+                        }
+                        const int px = int(std::lround(logical.x() * lockScale));
+                        const int py = int(std::lround(logical.y() * lockScale));
+                        minX = std::min(minX, px); maxX = std::max(maxX, px);
+                        minY = std::min(minY, py); maxY = std::max(maxY, py);
+                    }
+                    QRect inner;
+                    if (haveRect) {
+                        const QRect faceRect(QPoint(minX, minY), QPoint(maxX, maxY));
+                        // Inset so every sampled pixel is unambiguously the
+                        // face's interior rather than its outline or the
+                        // selection highlight tracing it.
+                        inner = faceRect
+                                    .adjusted(std::max(1, faceRect.width() / 8),
+                                              std::max(1, faceRect.height() / 5),
+                                              -std::max(1, faceRect.width() / 8),
+                                              -std::max(1, faceRect.height() / 5))
+                                    .intersected(lockedShot.rect());
+                    }
+                    check(haveRect && inner.width() > 40 && inner.height() >= 4,
+                          QStringLiteral("the locked face has an interior to sample "
+                                         "(%1x%2 px), so the two checks below cannot "
+                                         "vanish quietly")
+                              .arg(inner.width()).arg(inner.height()));
+
+                    if (haveRect && inner.width() > 40 && inner.height() >= 4) {
+                        int gridOverFace = 0, facePaint = 0;
+                        for (int y = inner.top(); y <= inner.bottom(); ++y) {
+                            for (int x = inner.left(); x <= inner.right(); ++x) {
+                                const QColor c = lockedShot.pixelColor(x, y);
+                                if (colorDistance(c, Theme::gridMinor()) < 8.0 ||
+                                    colorDistance(c, Theme::gridMajor()) < 8.0) {
+                                    ++gridOverFace;
+                                } else if (colorDistance(c, Theme::viewport()) > 25.0) {
+                                    ++facePaint;
+                                }
+                            }
+                        }
+                        const int total = inner.width() * inner.height();
+                        // Non-vacuity: the region really is the face, not a
+                        // patch of empty viewport the projection wandered on
+                        // to.
+                        check(facePaint * 2 > total,
+                              QStringLiteral("that interior really is the face's own paint "
+                                             "(%1 of %2 px)").arg(facePaint).arg(total));
+                        check(gridOverFace >= 40 && gridOverFace * 100 >= total,
+                              QStringLiteral("and the work-plane grid is drawn ON TOP of "
+                                             "the face it is locked to - an underlay would "
+                                             "be hidden behind it (%1 of %2 px)")
+                                  .arg(gridOverFace).arg(total));
+                    }
+                }
 
                 // The part that makes this a feature rather than a label:
                 // a point clicked now lands ON the face's plane, not on Z=0.

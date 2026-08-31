@@ -225,6 +225,27 @@ public:
     void clearSketchStraightAnchor();
     bool hasSketchStraightAnchor() const { return myHasStraightAnchor; }
 
+    // The point that CLOSES the outline - the first one - for as long as
+    // clicking it would close it, and nothing otherwise. Shift's straight
+    // constraint stands down within sketchCloseTolerance() of it, because a
+    // constraint that makes the outline impossible to finish is not a
+    // convenience: the projection moves the click off the very point it was
+    // aimed at, so the close never fires and the key silently disables the
+    // second of the two ways to finish a sketch. Set from the same place the
+    // anchor is, off the same point list, so the two cannot disagree about
+    // which sketch they describe.
+    void setSketchCloseTarget(const gp_Pnt& first);
+    void clearSketchCloseTarget();
+    bool hasSketchCloseTarget() const { return myHasCloseTarget; }
+
+    // How near the first point a click has to be to close the outline: half a
+    // grid step while snapping, a flat 5 mm without it. It lives here rather
+    // than in MainWindow because its inputs - mySnapEnabled and mySnapStep -
+    // do, and because the straight constraint above has to consult the same
+    // number MainWindow decides the close with. Two copies of it would be two
+    // answers to "is this click on the start point".
+    double sketchCloseTolerance() const;
+
     // The Z-layer every piece of sketch work is displayed in - the in-progress
     // outline and the pending face (setPreview), the direct-modeling preview,
     // the point markers, the cursor marker and the dimension annotation.
@@ -607,6 +628,9 @@ private:
     bool myHasStraightAnchor = false;
     gp_Pnt myStraightPrev{0.0, 0.0, 0.0};
     gp_Dir myStraightDir{1.0, 0.0, 0.0};
+    // The outline's closing point - see setSketchCloseTarget().
+    bool myHasCloseTarget = false;
+    gp_Pnt myCloseTarget{0.0, 0.0, 0.0};
 
     gp_Pnt myLastHoverPoint{0.0, 0.0, 0.0};
     bool myHasLastHoverPoint = false;

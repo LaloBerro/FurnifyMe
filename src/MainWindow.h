@@ -284,14 +284,16 @@ private:
     void buildOverlay();
     void updateActions();
 
-    // Pushes the straight-continuation anchor onto the viewport from the
-    // sketch's own points - the last placed point and the direction of the
-    // segment that led into it, or nothing at all when there are fewer than
-    // two points. Called from every route that changes the point list, for
-    // the same reason updateEdgeDimension() is: an anchor only some of them
-    // refresh is an anchor that is sometimes a lie about which line Shift
-    // will hold the next point on.
-    void syncSketchStraightAnchor();
+    // Pushes both sketch constraints onto the viewport from the sketch's own
+    // points: the straight-continuation anchor (the last placed point and the
+    // direction of the segment that led into it, or nothing below two points)
+    // and the closing target (the first point, or nothing until the outline
+    // can close). One function, because the two are derived from the same
+    // list and must never describe different sketches. Called from every
+    // route that changes that list, for the same reason
+    // updateEdgeDimension() is: state only some of them refresh is state that
+    // is sometimes a lie.
+    void syncSketchConstraints();
     // Persistent right-hand readout: what mode we are in and what is possible.
     void updateStateLabel();
     // The grid-step length, through Measure, so the snap tooltip never goes
