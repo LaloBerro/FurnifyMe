@@ -33,7 +33,7 @@ target_include_directories(furnify_geometry PUBLIC
   src ${OpenCASCADE_INCLUDE_DIR})
 target_link_libraries(furnify_geometry PUBLIC
   TKernel TKMath TKG2d TKG3d TKGeomBase TKGeomAlgo
-  TKBRep TKTopAlgo TKPrim TKBO TKBool TKShHealing TKMesh
+  TKBRep TKTopAlgo TKPrim TKBO TKBool TKFillet TKShHealing TKMesh
   TKXSBase ${OCCT_STEP_LIBS}
 )
 
@@ -60,6 +60,10 @@ add_test(NAME headless_measure COMMAND headless_measure)
 add_executable(headless_progress tests/user_progress.cpp)
 target_link_libraries(headless_progress PRIVATE furnify_geometry)
 add_test(NAME headless_progress COMMAND headless_progress)
+
+add_executable(headless_direct_modeling tests/direct_modeling.cpp)
+target_link_libraries(headless_direct_modeling PRIVATE furnify_geometry)
+add_test(NAME headless_direct_modeling COMMAND headless_direct_modeling)
 
 # ---------------------------------------------------------------------------
 # Application (Qt + OCCT visualization)
@@ -98,6 +102,7 @@ if(FURNIFYME_BUILD_APP)
       src/OcctViewWidget.cpp
       src/GridRenderer.cpp
       src/ui/AppBar.cpp
+      src/ui/AppearancePanel.cpp
       src/ui/AxisGizmo.cpp
       src/ui/DimensionRenderer.cpp
       src/ui/Theme.cpp
@@ -111,6 +116,8 @@ if(FURNIFYME_BUILD_APP)
       src/ui/HintBalloon.cpp
       src/ui/Toast.cpp
       src/ui/ExtrudePreview.cpp
+      src/ui/PullArrow.cpp
+      src/ui/BevelArrow.cpp
     )
     target_include_directories(furnify_app PUBLIC src/ui)
     target_link_libraries(furnify_app PUBLIC

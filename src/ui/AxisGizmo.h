@@ -67,6 +67,13 @@ private:
     // The six tips for the current camera pose, unsorted.
     void computeTips(Tip tips[6]) const;
     void snapToAxis(int axis, bool positive);
+    // The two appearance values this card cannot re-derive inside
+    // paintEvent(): its per-widget font-size stylesheet, and its FIXED size -
+    // sizeHint() is a constant here, but wholeDevicePixels() is applied to it
+    // once, and setFixedSize() means ViewportOverlay's own rounding is a
+    // silent no-op on this widget (see Theme.h). Both are set from here at
+    // construction and again on every Theme broadcast.
+    void applyTheme();
 
     OcctViewWidget* myView = nullptr;
     int myHoverAxis = -1;        // -1 none; else axis index

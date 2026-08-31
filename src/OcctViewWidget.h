@@ -3,18 +3,23 @@
 // that Qt drags in.
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_InteractiveObject.hxx>
+#include <AIS_Manipulator.hxx>
+#include <AIS_ManipulatorMode.hxx>
 #include <AIS_Shape.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 #include <V3d_View.hxx>
 #include <V3d_Viewer.hxx>
+#include <gp_Ax2.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Trsf.hxx>
 
 #include "CameraController.h"
 #include "DimensionRenderer.h"
 #include "GridRenderer.h"
+#include "PullArrow.h"
 
 #include <QPoint>
 #include <QString>
@@ -62,6 +67,108 @@ public:
     // actually on screen, which is exactly the confusion that let cancelling
     // a preview erase the face.
     TopoDS_Shape previewShape() const;
+
+    // The DEDICATED direct-modeling preview channel, and deliberately not
+    // setPreview() above. That slot already has two writers - the in-progress
+    // sketch outline and ExtrudePreview's body - and CLAUDE.md records what
+    // that cost: cancelling the extrude preview cleared the slot and erased
+    // the pending face with it. A third writer on the same slot would be the
+    // same bug waiting for a different gesture, so the gizmos get their own.
+    // Selection mode -1: feedback only, never pickable, never in the document.
+    //
+    // `replacesSolidId` names the body this preview stands in for, or -1.
+    // That body's presentation is switched to wireframe for as long as the
+    // preview is up and restored when it clears - a carve preview sits
+    // INSIDE the body it carves, so without this the one operation the user
+    // most needs to see would be hidden behind the shape it is changing.
+    // SetDisplayMode is presentation state only: unlike Erase it does not
+    // touch the selection, which the gizmo's own predicate depends on.
+    void setModelingPreview(const TopoDS_Shape& shape, int replacesSolidId = -1);
+    void clearModelingPreview();
+    bool hasModelingPreview() const;
+    TopoDS_Shape modelingPreviewShape() const;
+
+    // The face-pull arrow, drawn in the scene so it stays glued to its face
+    // under orbit. See PullArrow.h for the split between this presentation
+    // and the Qt value chip.
+    void showPullArrow(const gp_Pnt& centre, const gp_Dir& outward);
+    void clearPullArrow();
+    bool hasPullArrow() const { return myPullArrow.isShowing(); }
+    // The outward tip in world space, for placing the value chip. False when
+    // no arrow is up.
+    bool pullArrowHead(gp_Pnt& out) const;
+    // True between the press that grabbed the arrow and the release that ends
+    // the pull. While it is true this widget picks nothing on release - see
+    // mouseReleaseEvent().
+    bool pullDragActive() const { return myPullDrag.active; }
+
+    // The bevel arrow: the same double-headed arrow, perpendicular to a
+    // selected edge along the bisector of its two faces' outward normals. See
+    // BevelArrow.h for the split between this presentation and the Qt value
+    // chip, and PullArrow.h for why the renderer itself is shared rather than
+    // copied. The two arrows are never up at once - their predicates need
+    // different selection modes - but nothing here depends on that.
+    void showBevelArrow(const gp_Pnt& centre, const gp_Dir& outward);
+    void clearBevelArrow();
+    bool hasBevelArrow() const { return myBevelArrow.isShowing(); }
+    // The outward tip in world space, for placing the value chip. False when
+    // no arrow is up.
+    bool bevelArrowHead(gp_Pnt& out) const;
+    bool bevelDragActive() const { return myBevelDrag.active; }
+
+    // Holds the edge-length annotation back while something else is already
+    // saying something about that edge. Two annotations on one edge is noise,
+    // and the bevel arrow's own value chip is the more specific of the two -
+    // so MainWindow raises this for as long as the arrow is up rather than
+    // anything reaching into DimensionRenderer directly. Setting it either way
+    // re-derives what should be on screen right now, so the annotation comes
+    // back on its own when the arrow goes.
+    void setEdgeDimensionSuppressed(bool suppressed);
+    bool edgeDimensionSuppressed() const { return myEdgeDimensionSuppressed; }
+
+    // The transform gizmo. AIS_Manipulator is OCCT's own: it draws the three
+    // arrows, the three rings and the three scale cubes, and it owns the drag
+    // maths that turns a cursor position into a gp_Trsf. This widget wires it
+    // to Qt's mouse events and nothing more - which is exactly why it lives
+    // here and not in a widget of its own, the way PullArrow's value chip
+    // needed to (a field has to take a keystroke; a manipulator does not).
+    //
+    // Attaching is idempotent per body, because the predicate that drives it
+    // fires on every appStateChanged and a fresh manipulator on each of those
+    // would reset its position mid-gesture.
+    void attachManipulator(int solidId);
+    void detachManipulator();
+    bool hasManipulator() const { return !myManipulator.IsNull(); }
+    // The body it is attached to, or -1.
+    int manipulatorSolid() const { return myManipulatorSolid; }
+
+    // Where the manipulator is and how big it is, in world units. Exposed so a
+    // test can aim at the gizmo's OWN geometry - a hardcoded pixel is a probe
+    // that silently stops hitting what it meant to the moment the camera or
+    // the body moves.
+    bool manipulatorFrame(gp_Ax2& position, double& size) const;
+
+    // The manipulation mode hover detection has armed right now: 0 none,
+    // 1 Move along an axis, 2 Rotate, 3 Scale, 4 Move in a plane - the values
+    // of OCCT's own AIS_ManipulatorMode. A test hovers candidate points and
+    // reads this to find a handle, rather than guessing at the arrow lengths
+    // the API keeps to itself.
+    int manipulatorActiveMode() const;
+    // 0, 1 or 2 for the armed part's axis, or -1.
+    int manipulatorActiveAxis() const;
+    // True between the press that grabbed a manipulator part and the release
+    // that ends the gesture. While it is true this widget picks nothing on
+    // release - the same rule pullDragActive() carries, for the same reason.
+    bool gizmoDragActive() const { return myGizmoDragActive; }
+
+    // The local transformation sitting on a body's PRESENTATION right now.
+    // Outside an active gizmo drag it is the identity for every body, because
+    // the gizmo moves the presentation and puts it back before it reports -
+    // so this is how the "the viewport and the document must never disagree"
+    // invariant is asserted. A volume check cannot answer it: a body drawn
+    // 200 mm from where the document says it is has exactly the right volume.
+    // False for an unknown id.
+    bool solidPresentationTransform(int id, gp_Trsf& out) const;
 
     void setSelectionMode(SelectionMode mode);
     SelectionMode selectionMode() const { return mySelectionMode; }
@@ -193,6 +300,25 @@ public:
     // viewLabelText() returns entries OF this list, so the two cannot drift.
     static const QStringList& viewLabelNames();
 
+    // Re-dresses everything on the OCCT side of the bridge from the current
+    // Theme spec: the background the view clears to, the two highlight
+    // drawers, and the ground grid, which is rebuilt because its colours are
+    // baked into the line segments at build time (see GridRenderer::invalidate).
+    //
+    // The Qt side needs nothing equivalent - every widget in the shell asks
+    // Theme for its colours inside paintEvent(), so a repaint is enough. The
+    // viewport is the exception because none of this is painted by Qt at all:
+    // the background is a driver clear colour, the highlights are Prs3d
+    // drawers held by the interactive context, and the grid is a presentation
+    // built once out of coloured vertices.
+    //
+    // Deliberately does NOT touch the sketch markers or the previews. Those
+    // exist only while a gesture is in progress, and MainWindow - which owns
+    // that gesture's state - re-issues them, so this class does not have to
+    // keep a copy of the points it was last handed just to be able to
+    // recolour them.
+    void applyTheme();
+
     void setWireframe(bool wireframe);
     bool isWireframe() const { return myWireframe; }
     // True if this solid's presentation is actually displayed in wireframe right
@@ -213,6 +339,38 @@ signals:
     // that means (it locks it); this widget knows nothing about locking.
     void faceDoubleClicked(const TopoDS_Face& face);
 
+    // A live face pull. `distance` is signed along the pulled face's outward
+    // normal and measured from the press - positive grows, negative carves -
+    // already snapped to the grid step when Snap to Grid is on. Emitted only
+    // when the value actually changes, and never at all while the cursor ray
+    // is too close to parallel with the arrow to mean anything (see
+    // CameraController::axisParameterForRay), so the chip simply keeps the
+    // last value rather than jumping.
+    void pullDragged(double distance);
+    // The end of that gesture. `dragged` is false for a press and release
+    // that never moved - a click on the arrow, which is not a pull.
+    void pullReleased(bool dragged);
+
+    // A live bevel drag. `size` is signed along the edge's outward bisector
+    // and measured from the press, already snapped to the grid step when Snap
+    // to Grid is on. NEGATIVE means the drag went inward, into the body, which
+    // is the rounding half of this gesture; positive means outward, which
+    // flattens. The sign is the whole reason this signal carries one and the
+    // chip does not: one axis, two operations.
+    void bevelDragged(double size);
+    // The end of that gesture, on the same terms as pullReleased().
+    void bevelReleased(bool dragged);
+
+    // The end of a transform-gizmo drag. `delta` is the whole accumulated
+    // transform of the gesture, ALREADY SNAPPED when Snap to Grid is on -
+    // this widget owns the snap state, so snapping here keeps the rule in one
+    // place rather than handing a raw transform out and hoping the consumer
+    // remembers. An identity `delta` means the drag netted nothing and must be
+    // treated as a cancel; the presentation has already been put back either
+    // way, so a consumer that ignores this signal entirely still leaves the
+    // viewport agreeing with the document.
+    void gizmoReleased(int solidId, const gp_Trsf& delta);
+
 protected:
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
@@ -223,14 +381,92 @@ protected:
     void mouseDoubleClickEvent(QMouseEvent* event) override;
 
 private:
+    // The live state of a drag measured along a scene arrow's axis. Two
+    // gizmos have one - the face pull and the bevel - and the maths is
+    // identical, so it is written once here rather than as two sets of five
+    // parallel members that would have to be fixed twice.
+    //
+    // `hasPressParam` is false when the press landed at an angle
+    // CameraController::axisParameterForRay refuses (within ~1.8 degrees of
+    // looking straight down the arrow). The gesture is still CLAIMED in that
+    // case - see mousePressEvent - and the first move that does resolve
+    // anchors it, so the drag contributes nothing until then instead of
+    // jumping by whatever the unmeasurable press would have implied.
+    struct AxisDrag {
+        bool active = false;
+        bool moved = false;
+        bool hasPressParam = false;
+        double pressParam = 0.0;
+        double value = 0.0;
+    };
+
     void initializeViewer();
     // The work plane, nudged a hair toward the eye. Locking a face makes the
     // grid exactly coplanar with a shaded face, and two coplanar surfaces are
     // a depth-buffer tie - stipple, and flicker under camera motion. See the
     // definition for why this is a geometric nudge rather than a ZLayer.
     gp_Pln gridPlane() const;
+    // THE Qt/OCCT pixel boundary, in one place each way.
+    //
+    // Qt reports mouse positions and widget geometry in LOGICAL pixels. The
+    // native window this widget handed to OCCT is sized in DEVICE pixels, so
+    // V3d_View::Convert, ConvertWithProj and AIS_InteractiveContext::MoveTo
+    // all speak device pixels. The two coincide at 100% display scaling and
+    // diverge by exactly the scale factor at any other - which is why passing
+    // a Qt position straight to MoveTo worked everywhere it was ever tested
+    // and missed by half a viewport on a 150% display. The two directions err
+    // OPPOSITE ways, and the comment here used to give only one of them:
+    //   - a PICK hands OCCT a logical position where a device one is wanted,
+    //     so it lands at 1/1.5 of the intended distance from the origin -
+    //     UP AND LEFT of where the user clicked;
+    //   - projectToScreen() returns a device position where Qt wants a
+    //     logical one, so a widget placed at it lands 1.5x too far RIGHT AND
+    //     DOWN. That is the half that surfaced this: the pull arrow's value
+    //     chip appeared nowhere near its arrow.
+    //
+    // Everything OUTSIDE these two functions - every signal, every accessor,
+    // every caller in gui_smoke - is logical, so a projected point can be
+    // clicked and a clicked point can be projected without either side
+    // knowing the ratio exists.
+    QPoint toDevicePixels(const QPoint& logical) const;
+    QPoint fromDevicePixels(int px, int py) const;
+    // The unprojected cursor ray - V3d_View::ConvertWithProj, in one place.
+    // Both the sketch unprojection and the pull-drag mapping start here, so
+    // "where is the cursor pointing" cannot be answered two different ways.
+    bool rayThroughPixel(int px, int py, gp_Lin& out) const;
     bool pointOnSketchPlane(int px, int py, gp_Pnt& out) const;
     bool pickWorldPoint(int px, int py, gp_Pnt& out) const;
+    // Whether `point` lands on `arrow`, tested in SCREEN space against the
+    // arrow's own projected endpoints rather than through AIS - see the
+    // comment on PullArrowLines in PullArrow.cpp for why these arrows must not
+    // be AIS-pickable objects. Takes the renderer rather than reading a member,
+    // because two gizmos are hit-tested exactly this way.
+    bool arrowHit(const PullArrowRenderer& arrow, const QPoint& point) const;
+    // Anchors `drag` at the press, and advances it on a move - the ONE
+    // implementation of "turn a cursor position into a signed distance along a
+    // scene arrow's axis, snapped". advanceAxisDrag() returns true when the
+    // value actually changed, which is the caller's cue to emit. Both drag
+    // gizmos go through these, so the near-parallel refusal, the late anchor
+    // and the snap step cannot be remembered in one gesture and forgotten in
+    // the other.
+    void beginAxisDrag(AxisDrag& drag, const gp_Lin& axis, const QPoint& at);
+    bool advanceAxisDrag(AxisDrag& drag, const gp_Lin& axis, const QPoint& at);
+    // Whether the context's LAST detection landed on the manipulator. The
+    // caller is responsible for the MoveTo that produced it, so the question
+    // and the answer belong to the same event.
+    bool detectedIsManipulator() const;
+    // Puts the manipulator's four manipulation modes back into the context's
+    // pick candidates. Two callers - the attach, and the restore after an
+    // additive pick has taken it out for the duration - so the list of modes
+    // lives in one place rather than being repeated and drifting.
+    void activateManipulatorModes();
+    // Reads the accumulated transform, puts the PRESENTATION back to where the
+    // document says it should be, snaps, and emits gizmoReleased(). The
+    // presentation reset is unconditional and happens here rather than in the
+    // consumer: a bake can be refused, and a viewport still showing the
+    // dragged pose above a document that never changed is the one outcome
+    // this gesture must not be able to produce.
+    void endGizmoDrag();
     void applySelectionMode(const Handle(AIS_Shape)& shape);
     void applyCameraState();
     void stopCameraAnimation();
@@ -246,6 +482,12 @@ private:
     Handle(V3d_View) myView;
     Handle(AIS_InteractiveContext) myContext;
     Handle(AIS_Shape) myPreview;
+    // The direct-modeling channel, kept strictly apart from myPreview above.
+    Handle(AIS_Shape) myModelingPreview;
+    // The body myModelingPreview stands in for while it is up, or -1. Its
+    // presentation is restored to the viewport's own display mode when the
+    // preview clears - see setModelingPreview().
+    int myModelingPreviewSolid = -1;
 
     // The sketch point markers - see setSketchPointMarkers()'s comment for
     // why these are not the preview slot above. One object per placed
@@ -259,6 +501,9 @@ private:
     CameraController myCamera;
     GridRenderer myGridRenderer;
     DimensionRenderer myDimension;
+    PullArrowRenderer myPullArrow;
+    // The same renderer class, a second instance - see PullArrow.h.
+    PullArrowRenderer myBevelArrow;
 
     std::map<int, Handle(AIS_Shape)> mySolids;
 
@@ -277,6 +522,32 @@ private:
     QPoint myLastPos;
     bool myOrbiting = false;
     bool myPanningDrag = false;
+
+    // True only for the duration of applyCameraState()'s cameraChanged()
+    // emission, so a slot that changes the scene can skip its own viewer
+    // update and let that function's redraw carry it - see showPullArrow().
+    bool myApplyingCamera = false;
+
+    // The transform gizmo and the live drag on it. myGizmoDelta is the WHOLE
+    // transform from the press, not an increment: AIS_Manipulator recomputes
+    // it from the original pick on every move (Transform() sets the object's
+    // local transformation to `delta * startTrsf`), so the last one it handed
+    // back is the accumulated answer. myGizmoStartPosition is the manipulator's
+    // own frame at the press, and it is the pivot snapTransform() decomposes
+    // about - the rotation and the scale both leave it fixed.
+    Handle(AIS_Manipulator) myManipulator;
+    int myManipulatorSolid = -1;
+    bool myGizmoDragActive = false;
+    gp_Trsf myGizmoDelta;
+    gp_Ax2 myGizmoStartPosition;
+
+    // The two axis drags, one per arrow. See AxisDrag above.
+    AxisDrag myPullDrag;
+    AxisDrag myBevelDrag;
+
+    // While true, updateEdgeDimension() draws nothing - see
+    // setEdgeDimensionSuppressed().
+    bool myEdgeDimensionSuppressed = false;
 
     class QVariantAnimation* myCameraAnimation = nullptr;
     bool myAnimationsEnabled = true;

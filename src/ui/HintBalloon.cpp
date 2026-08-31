@@ -198,7 +198,13 @@ void HintBalloon::reposition()
     // WalkthroughPanel's skip pill or Toast's Undo pill, so there is nothing
     // else here to keep in step.
     const int margin = Theme::surfaceShadowMargin();
-    resize(kWidth + margin * 2, bounds.height() + kPad * 2 + 22 + margin * 2);
+    // Through Theme::wholeDevicePixels() - see Theme.h. This card sizes
+    // itself from MEASURED TEXT, so its height is as arbitrary a number as
+    // this app produces, and the position snap below only makes the near edge
+    // whole: a whole origin with a fractional extent still lands the far edge
+    // between device rows.
+    resize(Theme::wholeDevicePixels(
+        QSize(kWidth + margin * 2, bounds.height() + kPad * 2 + 22 + margin * 2)));
 
     int x = (parentWidget()->width() - width()) / 2;
     int y = parentWidget()->height() - height() - 90;
@@ -296,6 +302,19 @@ void HintBalloon::reposition()
     // and still clickable, while one under the rail is neither.
     const int rightLimit = std::max(leftFloor, parentWidget()->width() - width());
     x = std::max(leftFloor, std::min(x, rightLimit));
+
+
+    // Whole DEVICE pixels, in the window's own coordinates - the position half
+    // of Theme's rule. Snapped last, after every avoidance clamp above, and
+    // always downward, so it cannot push the balloon back over an obstacle
+    // the clamps just moved it off - and never below the left floor, which is
+    // the one clamp that must survive (see the paragraph above).
+    {
+        const QPoint origin = parentWidget()->mapTo(window(), QPoint(0, 0));
+        const double dpr = devicePixelRatioF();
+        x = std::max(leftFloor, Theme::snapToDevicePixels(x, origin.x(), dpr));
+        y = Theme::snapToDevicePixels(y, origin.y(), dpr);
+    }
 
     move(x, y);
     // Re-raised here as well as re-placed: this runs from

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <Bnd_Box.hxx>
+#include <gp_Vec.hxx>
 
 namespace {
 constexpr double kDegToRad = 3.14159265358979323846 / 180.0;
@@ -131,4 +132,29 @@ double CameraController::shortestArcDelta(double fromDeg, double toDeg)
     if (delta > 180.0) delta -= 360.0;
     if (delta <= -180.0) delta += 360.0;
     return delta;
+}
+
+bool CameraController::axisParameterForRay(const gp_Lin& ray, const gp_Lin& axis, double& out)
+{
+    // Closest approach of two skew lines, solved directly. With
+    //   P(t) = a + t*u   on the axis      (u unit)
+    //   Q(s) = b + s*v   on the ray       (v unit)
+    // minimising |P - Q|^2 gives, writing w = a - b and c = u.v:
+    //   t * (1 - c^2) = c * (w.v) - (w.u)
+    // and 1 - c^2 is sin^2 of the angle between them, which is what makes
+    // the parallel case singular rather than merely awkward.
+    const gp_Vec u(axis.Direction());
+    const gp_Vec v(ray.Direction());
+    const double c = u.Dot(v);
+    const double sinSquared = 1.0 - c * c;
+
+    // See the header: within about 1.8 degrees of parallel there is no
+    // useful answer, and `out` is deliberately left alone so the caller keeps
+    // the last distance it had.
+    constexpr double kMinSinSquared = 1.0e-3;
+    if (sinSquared < kMinSinSquared) return false;
+
+    const gp_Vec w(ray.Location(), axis.Location());
+    out = (c * w.Dot(v) - w.Dot(u)) / sinSquared;
+    return true;
 }

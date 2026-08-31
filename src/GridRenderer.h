@@ -22,6 +22,21 @@ public:
     // default, a locked face's own plane while one is locked.
     void update(double cameraDistance, const gp_Pnt& cameraTarget, const gp_Pln& plane);
 
+    // Forces the next update() to rebuild, whatever the camera is doing.
+    //
+    // The cache below is keyed on everything that changes the grid's
+    // GEOMETRY - the step, the plane, the centre, the extent - because those
+    // were the only things that could change it. The colours are read from
+    // Theme inside rebuild(), which means they are correct at build time and
+    // frozen afterwards: a theme edit moves gridMinor(), gridMajor(), the two
+    // axis tints and the viewport colour the outer bands fade toward, and not
+    // one of them touches the cache key. The grid would then keep the old
+    // palette until the camera happened to cross a level boundary. This is
+    // the caller's way to say the built grid is stale for a reason this class
+    // cannot see - it does not repaint, it only drops the cache, so the next
+    // update() does the work exactly once.
+    void invalidate();
+
     static double minorStepFor(double cameraDistance);
 
     // First line position at or below -limit on the absolute grid of `step`.

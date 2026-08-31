@@ -1,6 +1,10 @@
 #pragma once
 // OCCT first (Handle() macro vs. Windows headers pulled in by Qt).
+#include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
+#include <gp_Dir.hxx>
+#include <gp_Pnt.hxx>
+#include <gp_Trsf.hxx>
 
 #include <QMainWindow>
 
@@ -10,8 +14,11 @@
 #include "UserProgress.h"
 
 class AppBar;
+class AppearancePanel;
+class BevelArrow;
 class ExtrudePreview;
 class OcctViewWidget;
+class PullArrow;
 class QAction;
 class QMenuBar;
 class ToastHost;
@@ -41,6 +48,133 @@ public:
     // not stable across a rebuild, so a stored face (or a plane re-derived
     // from one later) would let a boolean or an undo move the sketch plane
     // under the user without a single visible event.
+    // Pulls `face` by `distance` along its own outward normal - positive
+    // grows, negative carves - through ModelingOps::pullFace, replacing the
+    // body the face belongs to. The one commit path for the face-pull gizmo:
+    // it takes the undo checkpoint, resyncs the viewport, records progress
+    // and reports the outcome, so PullArrow never touches DocumentModel.
+    //
+    // False, with a Failure toast in cause-and-fix form and the body left
+    // exactly as it was, whenever the kernel refuses - which it legitimately
+    // does for a carve deeper than the body. The kernel's own error string is
+    // logged, never shown: it is written for this file, not for the user.
+    bool pullFaceBy(const TopoDS_Face& face, double distance);
+
+    // Exactly one flat face selected, no sketch in progress, no outline
+    // waiting. THE predicate behind the pull arrow, and the same one
+    // updateActions() uses for Lock to Face and updateStateLabel() uses for
+    // its teaching text - one function, so the gizmo, the enabled state and
+    // the label can never disagree about whether a pull is possible.
+    //
+    // It refuses while a face is pending, which is exactly when
+    // ExtrudePreview can be open: the two panels' application-wide
+    // Enter/Escape claims are therefore mutually exclusive by construction
+    // rather than by luck.
+    bool canPullSelectedFace() const;
+
+    // THE predicate behind the transform gizmo: the document id of the one
+    // body it should be standing on, or 0. Exactly one body selected, in body
+    // selection mode, with no sketch in progress and no outline waiting.
+    //
+    // The mode check is what keeps the three gizmos mutually exclusive BY
+    // CONSTRUCTION rather than by three predicates that have to be kept in
+    // step: face pull needs face mode, bevels need edge mode, and this needs
+    // body mode, so no two of them can ever be true at once. The sketch and
+    // pending-face halves are canPullSelectedFace()'s, for the same reasons
+    // spelled out there.
+    int transformableBodyId() const;
+    bool canTransformSelectedBody() const { return transformableBodyId() > 0; }
+
+    // Bakes `delta` into body `id` through ModelingOps::transformShape and
+    // replaces it, with an undo checkpoint and a Note toast offering Undo -
+    // the one commit path for the transform gizmo, so nothing else touches
+    // DocumentModel on its behalf.
+    //
+    // False, with a Failure toast and the body untouched, when the kernel
+    // refuses or when the scale factor falls outside kMinScale..kMaxScale.
+    // That clamp is this layer's, deliberately: the kernel only refuses a
+    // factor <= 0, and it will happily build a body 1e-9 of its size or a
+    // thousand times it - both of which are a lost body rather than an edit.
+    bool transformBody(int id, const gp_Trsf& delta);
+
+    // The OPEN band a single scale gesture may land in - both ends are
+    // refused, not merely everything beyond them. Exclusive on purpose: a
+    // shrink dragged all the way down snaps to exactly kMinScale with Snap on
+    // and lands a hair below it with Snap off, so a half-open band would let
+    // Snap to Grid decide whether the same gesture was legal.
+    //
+    // Below the low end a body is gone from the viewport without looking
+    // deleted; above the high end it swallows the scene. Both are recoverable
+    // by scaling again, which is why this refuses the gesture rather than
+    // clamping the number - a clamp would silently do something other than
+    // what the user dragged.
+    static constexpr double kMinScale = 0.05;
+    static constexpr double kMaxScale = 20.0;
+
+    // How long after the last appearance edit the spec is written to
+    // QSettings - see persistAppearance() for why that write is debounced at
+    // all. Public so the suite waits on the real number rather than a second
+    // copy of it that could drift out of step with this one.
+    static constexpr int kAppearanceWriteMs = 400;
+
+    // The document id of the body `face` belongs to, or 0. Derived by walking
+    // the document rather than remembered: face indices are not stable across
+    // a rebuild (CLAUDE.md's topological-naming warning), so a cached
+    // face-to-body mapping is a bug waiting for the user's next boolean.
+    int bodyIdForFace(const TopoDS_Face& face) const;
+    // The same, for an edge, and derived the same way for the same reason.
+    int bodyIdForEdge(const TopoDS_Edge& edge) const;
+
+    // THE predicate behind the bevel arrow, and everything the gizmo needs to
+    // stand itself up: exactly one STRAIGHT edge selected, in edge selection
+    // mode, on one document body, with two adjacent faces that define an
+    // outward bisector - and no sketch in progress and no outline waiting.
+    //
+    // One function, used to show the arrow, to hide it, and to write the
+    // status label, so the three can never disagree. The mode check is what
+    // keeps this exclusive with the face pull (face mode) and the transform
+    // gizmo (body mode); the sketch and pending-face halves are
+    // canPullSelectedFace()'s, and they are what keep it exclusive with
+    // ExtrudePreview - and so keep the two application-wide Enter/Escape
+    // claims from ever being installed at once.
+    //
+    // Outputs are left untouched when it returns false.
+    bool bevelTarget(TopoDS_Edge& edge, int& bodyId, gp_Pnt& centre, gp_Dir& outward) const;
+    bool canBevelSelectedEdge() const;
+
+    // Rounds `edge` with radius `size` (fillet == true) or flattens it with
+    // distance `size` (fillet == false), through ModelingOps, replacing the
+    // body the edge belongs to. The one commit path for the bevel gizmo: it
+    // takes the undo checkpoint, resyncs the viewport, records progress and
+    // reports the outcome, so BevelArrow never touches DocumentModel.
+    //
+    // False, with a Failure toast in cause-and-fix form and the body left
+    // exactly as it was, whenever the kernel refuses - which it legitimately
+    // does whenever the radius or the flat would eat a neighbouring face. The
+    // kernel's own error string is logged, never shown.
+    bool bevelEdgeBy(const TopoDS_Edge& edge, double size, bool fillet);
+
+    // The refusal copy, one source each, so the production path and the
+    // banned-word sweep read the same sentence rather than a second copy only
+    // the sweep sees.
+    //
+    // Toast::paintedTexts() records every message shown this run - which means
+    // a Failure a run never triggers is not swept at all, and two of this
+    // branch's are exactly that: a chamfer the kernel refuses (only the fillet
+    // half is reachable from a probe) and a transform it refuses (the kernel
+    // accepts every gp_Trsf a gesture can build). The suite shows both once
+    // through these, which is the only honest way to cover them.
+    static QString bevelRefusalText(bool fillet);
+
+    // Which of Move / Rotate / Scale a delta is, in the two forms the copy
+    // needs - "Rotate" for a sentence that leads with the operation, "rotated"
+    // for one that reports it. Read off the transform itself rather than
+    // remembered from the handle that was grabbed, and used by the success
+    // path AND both refusal paths, so a refused rotate cannot report a Move.
+    static QString transformOperationName(const gp_Trsf& delta);
+    static QString transformPastVerb(const gp_Trsf& delta);
+    static QString transformRefusalText(const gp_Trsf& delta);
+
     bool lockToFace(const TopoDS_Face& face);
     // Back to the ground plane. The ground plane is the default and is never
     // itself "locked", so this is not a toggle of the same state. Refused,
@@ -56,6 +190,7 @@ public:
     bool isSketching() const { return mySketching; }
     OcctViewWidget* view() const { return myView; }
     class ItemsPanel* itemsPanel() const { return myItemsPanel; }
+    AppearancePanel* appearancePanel() const { return myAppearancePanel; }
 
     UserProgress& progress() { return myProgress; }
     const UserProgress& progress() const { return myProgress; }
@@ -80,6 +215,14 @@ signals:
     // updateActions() from here would recurse.
     void appStateChanged();
 
+    // Emitted after Theme::setSpec() has installed a new appearance and this
+    // window has re-dressed everything that cannot re-derive its own colours
+    // at paint time. Purely an announcement for anything outside this window
+    // that wants to follow the look; the window's own relay - the viewport's
+    // background and grid, the status bar's font, updateActions() - has
+    // already run by the time this fires.
+    void themeChanged();
+
     // Emitted by Help -> Show tips again, immediately before the
     // appStateChanged() that follows it. Clearing the store is not enough on
     // its own to bring every teaching surface back: a surface that also
@@ -88,6 +231,10 @@ signals:
     // avoid. This lets each surface drop that session memory itself, without
     // MainWindow having to know any of them has one.
     void progressReset();
+
+protected:
+    // Flushes a pending appearance write - see myAppearanceWrite.
+    void closeEvent(QCloseEvent* event) override;
 
 private slots:
     void onStartSketch();
@@ -111,6 +258,12 @@ private slots:
     void onSelectionModeChanged();
     void onSelectionChanged();
     void onLockToFace();
+    // The end of a transform-gizmo drag. An identity delta is a cancel - the
+    // user released where they started, or the snap rounded the whole gesture
+    // away - and a cancel takes no checkpoint and says nothing. The viewport
+    // has already put its presentation back by the time this runs (see
+    // OcctViewWidget::endGizmoDrag), so there is nothing to undo here either.
+    void onGizmoReleased(int solidId, const gp_Trsf& delta);
 
 private:
     void buildActions();
@@ -147,6 +300,60 @@ private:
     // Rebuilds the viewport from the document. Cheaper than tracking individual
     // differences, and the only way to be sure the two agree after undo/redo.
     void resyncView();
+    // Shows or hides the transform gizmo from transformableBodyId(). A slot on
+    // appStateChanged, and the ONE thing that attaches or detaches it - a
+    // gizmo raised on a click and dismissed on some other click would be two
+    // rules that drift, which is PullArrow's rule one gizmo over. Reads state
+    // and moves AIS objects only, so it cannot recurse back into
+    // updateActions().
+    void refreshTransformGizmo();
+    // Holds the edge-length annotation back for as long as the bevel arrow is
+    // up, and lets it come back when the arrow goes. A slot on
+    // appStateChanged, derived from the SAME predicate that raises the arrow -
+    // BevelArrow does not reach into DimensionRenderer, and DimensionRenderer
+    // knows nothing about bevels. Reads state and moves AIS objects only, so
+    // it cannot recurse back into updateActions().
+    void refreshEdgeAnnotation();
+    // The relay from Theme's broadcast into this window. Re-dresses the three
+    // things a repaint cannot reach - the viewport (a driver clear colour,
+    // two Prs3d drawers and a grid built out of coloured vertices), the
+    // status bar's explicitly set font, and the live sketch markers, whose
+    // colours are baked into AIS objects built when the point was placed -
+    // then persists the spec and calls updateActions(), whose
+    // appStateChanged() is what repaints every painted widget in the shell.
+    //
+    // The sketch markers are re-issued from mySketch rather than from a copy
+    // OcctViewWidget would otherwise have to keep, which is why this lives
+    // here and not there: this window owns the gesture's state.
+    void onThemeChanged();
+    // Writes the live spec to QSettings under the same guard as the learning
+    // progress and the display unit. A no-op for the suite's windows.
+    //
+    // DEBOUNCED, unlike recordProgress()'s write-through. A learning event
+    // happens once per user action; a theme edit happens once per mouse MOVE
+    // inside the colour picker's wheel, and each of those already costs a
+    // full stylesheet re-polish and a grid rebuild. Adding a registry write
+    // and a file sync to every frame of a drag is the one part of that cost
+    // that buys nothing: nobody needs the value from halfway through a
+    // gesture to survive a crash. kAppearanceWriteMs after the last edit,
+    // so one write per editing burst however long the drag was.
+    void persistAppearance();
+    // The ONE place a spec reaches QSettings. Both routes that store one - the
+    // debounce timer and closeEvent()'s flush - call this rather than carrying
+    // a copy of the write each.
+    void writeAppearanceNow();
+    // Rounds the two chrome strips' heights up to whole device pixels, so the
+    // viewport's top and bottom edges cannot land on a fractional device row
+    // and leave an unpainted black line across the window. Called from the
+    // constructor and from every theme change, because the type scale is what
+    // moves those heights. See its definition for the measurement.
+    void syncChromeHeights();
+    // The two halves transformOperationName()/transformPastVerb() agree on.
+    // Scale is asked first: AIS_Manipulator leaves the rotation part identity
+    // during a scale, and a gesture that somehow carried both is a scale the
+    // user is watching happen.
+    static bool transformIsScale(const gp_Trsf& delta);
+    static bool transformIsRotation(const gp_Trsf& delta);
     void runBoolean(int kind);   // ModelingOps::BooleanKind as int, to keep it out of the header
     // The one place "the camera was moved to a named direction" is recorded.
     // Every route to that - the four View menu entries and a click on the
@@ -169,6 +376,12 @@ private:
 
     UserProgress myProgress;
     bool myPersistProgress = true;
+    // The debounce behind persistAppearance(). Single-shot and restarted by
+    // every edit, so it fires once the user stops moving. closeEvent() flushes
+    // it, because a window shut inside the debounce window must not lose the
+    // colour the user just chose - a debounce that can drop the last write is
+    // not a debounce, it is a bug with a timer.
+    class QTimer* myAppearanceWrite = nullptr;
 
     QAction* myStartSketchAction = nullptr;
     QAction* myFinishSketchAction = nullptr;
@@ -195,12 +408,16 @@ private:
     QAction* myUnitsCentimetresAction = nullptr;
     QAction* myLockFaceAction = nullptr;
     QAction* myUnlockFaceAction = nullptr;
+    QAction* myAppearanceAction = nullptr;
 
     AppBar* myAppBar = nullptr;
     class ViewportOverlay* myOverlay = nullptr;
     class QLabel* myStateLabel = nullptr;
     class ItemsPanel* myItemsPanel = nullptr;
+    AppearancePanel* myAppearancePanel = nullptr;
     class ShortcutSheet* myShortcutSheet = nullptr;
     ToastHost* myToasts = nullptr;
     ExtrudePreview* myExtrudePreview = nullptr;
+    PullArrow* myPullArrow = nullptr;
+    BevelArrow* myBevelArrow = nullptr;
 };

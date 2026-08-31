@@ -5,11 +5,14 @@
 #include "OcctViewWidget.h"
 
 #include "AppBar.h"
+#include "AppearancePanel.h"
 #include "AxisGizmo.h"
+#include "BevelArrow.h"
 #include "ExtrudePreview.h"
 #include "HintBalloon.h"
 #include "IconSet.h"
 #include "ItemsPanel.h"
+#include "PullArrow.h"
 #include "ShortcutSheet.h"
 #include "Theme.h"
 #include "Toast.h"
@@ -18,13 +21,17 @@
 #include "ViewportOverlay.h"
 #include "WalkthroughPanel.h"
 
+#include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <ElSLib.hxx>
+#include <GeomAbs_CurveType.hxx>
 #include <GeomAbs_SurfaceType.hxx>
 #include <TopAbs_Orientation.hxx>
+#include <TopExp_Explorer.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pln.hxx>
+#include <gp_Quaternion.hxx>
 #include <gp_Vec.hxx>
 
 #include <QAction>
@@ -32,11 +39,14 @@
 #include <QFileDialog>
 #include <QLabel>
 #include <QMenuBar>
+#include <QCloseEvent>
 #include <QSettings>
 #include <QStatusBar>
+#include <QTimer>
 #include <QtGlobal>
 
 #include <algorithm>
+#include <cmath>
 #include <initializer_list>
 #include <utility>
 #include <vector>
@@ -57,6 +67,19 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
         if (settings.value(QStringLiteral("displayUnit")).toString() ==
             QStringLiteral("cm"))
             Measure::setDisplayUnit(Measure::Unit::Centimetres);
+
+        // Before a single widget exists, for the same reason as the unit
+        // above: every card measures itself with the type scale in its own
+        // constructor, so installing the spec afterwards would leave the
+        // shell laid out for a size it is no longer wearing. Theme::apply()
+        // has already installed defaultSpec() by now (main.cpp calls it
+        // before this window is built), so a garbage or absent setting simply
+        // leaves the app at its shipped appearance - deserializeSpec()
+        // guarantees `stored` is untouched when it refuses.
+        Theme::Spec stored;
+        if (Theme::deserializeSpec(
+                settings.value(QStringLiteral("appearance")).toString(), stored))
+            Theme::setSpec(stored);
     }
 
     myView = new OcctViewWidget(this);
@@ -79,6 +102,9 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     // lockToFace() - including its refusal - rather than one of them growing
     // its own copy of the rule.
     connect(myView, &OcctViewWidget::faceDoubleClicked, this, &MainWindow::lockToFace);
+    // The transform gizmo reports the end of a drag; this window decides what
+    // it means, exactly as it does for the face-pull arrow above.
+    connect(myView, &OcctViewWidget::gizmoReleased, this, &MainWindow::onGizmoReleased);
 
     buildActions();
     buildAppBar(buildMenus());
@@ -114,6 +140,12 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     // updateActions().
     connect(this, &MainWindow::appStateChanged, this, [this] {
         myItemsPanel->setVisible(myItemsPanelAction->isChecked());
+        // Derived on every state change from the action, exactly as the
+        // drawer above is and for exactly the same reason - a one-shot hide
+        // is not a state, and QWidget::showChildren() on the window's first
+        // show will happily undo one.
+        if (myAppearancePanel)
+            myAppearancePanel->setVisible(myAppearanceAction->isChecked());
         if (myOverlay) myOverlay->relayout();
     });
 
@@ -127,6 +159,18 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     // appear; and it only reads and repaints, so it cannot recurse back into
     // updateActions().
     connect(this, &MainWindow::appStateChanged, myView, &OcctViewWidget::refreshDimension);
+
+    // The transform gizmo's visibility, derived on every state change from the
+    // one predicate that decides it - never set from the event that happened
+    // to make it true. Only reads state and attaches or detaches an AIS
+    // object, so it cannot recurse back into updateActions().
+    connect(this, &MainWindow::appStateChanged, this, &MainWindow::refreshTransformGizmo);
+
+    // And the edge annotation's, from the bevel arrow's predicate - two
+    // annotations on one edge is noise, so the length label stands down for as
+    // long as the arrow's own value chip is up. Only reads state and moves AIS
+    // objects, so it cannot recurse back into updateActions().
+    connect(this, &MainWindow::appStateChanged, this, &MainWindow::refreshEdgeAnnotation);
 
     // Selection syncs both ways.
     connect(myItemsPanel, &ItemsPanel::solidActivated, this,
@@ -158,6 +202,19 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
         if (myOverlay) myOverlay->relayout();
     });
 
+    // The Appearance card on the same terms - see the drawer's toggle above.
+    connect(myAppearanceAction, &QAction::toggled, this, [this](bool shown) {
+        if (myAppearancePanel) myAppearancePanel->setVisible(shown);
+        if (myOverlay) myOverlay->relayout();
+    });
+
+    // Theme's broadcast, relayed into this window. Connected to the
+    // application-wide notifier rather than to the panel: a spec can also be
+    // installed with no panel involved (the persisted one at startup, or a
+    // reset), and a relay hung off the panel would miss both.
+    connect(Theme::notifier(), &Theme::Notifier::changed, this,
+            &MainWindow::onThemeChanged);
+
     updateActions();
 
     // Theme.cpp's stylesheet reaches the status bar's own internal message
@@ -172,6 +229,7 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     myStateLabel = new QLabel(this);
     statusBar()->addPermanentWidget(myStateLabel);
     updateStateLabel();
+    syncChromeHeights();
 
     setWindowTitle(tr("FurnifyMe"));
     resize(1280, 800);
@@ -260,6 +318,17 @@ void MainWindow::buildActions()
     myItemsPanelAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Alt+S")));
     myItemsPanelAction->setToolTip(tr("Show or hide the list of bodies (Ctrl+Alt+S)"));
 
+    // Menu only, and deliberately: the rail stays at thirteen tools. Choosing
+    // colours is not a modelling tool and does not belong in the spine the
+    // user's hand lives on. Checkable, because the panel's visibility is
+    // DERIVED from it in both directions - the same contract the items drawer
+    // has, and the reason nothing else in this file shows or hides the panel.
+    myAppearanceAction = new QAction(tr("Appearance..."), this);
+    myAppearanceAction->setCheckable(true);
+    myAppearanceAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Alt+A")));
+    myAppearanceAction->setToolTip(tr("Choose the app's colours and text size (Ctrl+Alt+A)\n"
+                                      "Every change is applied as you make it."));
+
     myDisplayModeAction = new QAction(tr("Wireframe"), this);
     myDisplayModeAction->setCheckable(true);
     myDisplayModeAction->setToolTip(tr("Draw bodies as edges only\n"
@@ -289,7 +358,11 @@ void MainWindow::buildActions()
                                        "Click to place points; close it to make a face."));
     myFinishSketchAction->setToolTip(tr("Close the outline into a face (Enter)\n"
                                         "Needs at least three points."));
-    myExtrudeAction->setToolTip(tr("Pull the face up into a body (E)\n"
+    // NOT "pull the face up": Pull is the face-dragging operation's own name
+    // now (see CLAUDE.md's vocabulary table), and one word for two operations
+    // is the thing that table exists to stop. Extrude raises a closed outline;
+    // Pull moves a face of a body that already exists.
+    myExtrudeAction->setToolTip(tr("Raise the face into a body (E)\n"
                                    "The outline's shape becomes the body's footprint."));
     myUnionAction->setToolTip(tr("Combine two bodies into one\n"
                                  "Overlapping material is kept once, not twice."));
@@ -395,6 +468,7 @@ QMenuBar* MainWindow::buildMenus()
     QMenu* unitsMenu = viewMenu->addMenu(tr("Units"));
     unitsMenu->addAction(myUnitsMillimetresAction);
     unitsMenu->addAction(myUnitsCentimetresAction);
+    viewMenu->addAction(myAppearanceAction);
 
     QMenu* helpMenu = bar->addMenu(tr("&Help"));
 
@@ -570,6 +644,16 @@ void MainWindow::buildOverlay()
     connect(gizmo, &AxisGizmo::viewSnapped, this, &MainWindow::recordViewChanged);
     myOverlay->addWidget(gizmo, ViewportOverlay::Anchor::TopRight);
 
+    // The Appearance card, anchored at the same corner so relayout() stacks
+    // it one gap under the gizmo - see AppearancePanel.h for why TopRight and
+    // not RightCenter. Hidden BEFORE it is added: ViewportOverlay::addWidget()
+    // shows whatever it anchors unless the widget has already made an
+    // explicit hide decision of its own, and this card's visibility belongs to
+    // myAppearanceAction alone.
+    myAppearancePanel = new AppearancePanel(myView);
+    myAppearancePanel->hide();
+    myOverlay->addWidget(myAppearancePanel, ViewportOverlay::Anchor::TopRight);
+
     // Every outcome the app reports - success or failure - goes through this
     // one host rather than a modal dialog. It parents itself (and its Toast)
     // to the viewport and positions itself, so it needs no overlay anchor of
@@ -617,6 +701,19 @@ void MainWindow::buildOverlay()
     // so it needs no overlay anchor of its own either.
     myExtrudePreview = new ExtrudePreview(this, myView);
 
+    // The face-pull gizmo. Like the extrude panel it parents itself to the
+    // viewport and places itself - beside the arrow's projected head rather
+    // than against a viewport edge, so it needs no overlay anchor. It decides
+    // its own visibility from MainWindow::canPullSelectedFace() on every
+    // appStateChanged; nothing here shows or hides it.
+    myPullArrow = new PullArrow(this, myView);
+
+    // The bevel gizmo, on exactly the same terms: it parents itself to the
+    // viewport, places itself beside its arrow's projected head, and decides
+    // its own visibility from MainWindow::bevelTarget() on every
+    // appStateChanged. Nothing here shows or hides it.
+    myBevelArrow = new BevelArrow(this, myView);
+
     // Always built, even for a user who has already learned this - it
     // decides its own visibility in its constructor (see WalkthroughPanel's
     // refresh()) and hides itself immediately in that case. Gating
@@ -652,6 +749,8 @@ void MainWindow::buildOverlay()
     connect(myOverlay, &ViewportOverlay::laidOut, myToasts, &ToastHost::replace);
     connect(myOverlay, &ViewportOverlay::laidOut, hints, &HintBalloon::reposition);
     connect(myOverlay, &ViewportOverlay::laidOut, myExtrudePreview, &ExtrudePreview::replace);
+    connect(myOverlay, &ViewportOverlay::laidOut, myPullArrow, &PullArrow::replace);
+    connect(myOverlay, &ViewportOverlay::laidOut, myBevelArrow, &BevelArrow::replace);
 }
 
 void MainWindow::updateActions()
@@ -670,15 +769,15 @@ void MainWindow::updateActions()
     // live on, and a cylinder's side has no such plane. Both halves are
     // checked again inside lockToFace(), because the double-click route can
     // reach a curved face this enabled state never sees.
-    const TopoDS_Face selectedFace = myView->selectedFace();
+    //
     // Not while sketching: the points already placed live on the plane that is
     // about to be swapped, and an outline with points on two planes is not an
     // outline. Not while a closed outline is waiting either - see
     // canChangeSketchPlane() for what moving the plane out from under it does.
+    // That is exactly canPullSelectedFace()'s rule too, so the two read the
+    // same function rather than each carrying a copy of it.
     const bool planeCanMove = !mySketching && myPendingFace.IsNull();
-    const bool flatFaceSelected =
-        planeCanMove && !selectedFace.IsNull() &&
-        BRepAdaptor_Surface(selectedFace).GetType() == GeomAbs_Plane;
+    const bool flatFaceSelected = canPullSelectedFace();
     myLockFaceAction->setEnabled(flatFaceSelected);
     myUnlockFaceAction->setEnabled(myFaceLocked && planeCanMove);
     // A disabled control that does not say why is a control the user reads as
@@ -742,6 +841,121 @@ void MainWindow::setDisplayUnit(Measure::Unit unit)
     updateActions();
 }
 
+void MainWindow::onThemeChanged()
+{
+    // The status bar's font is SET, not inherited: Theme.cpp's stylesheet
+    // reaches QStatusBar's own internal message label through a selector, and
+    // this covers a plain QStatusBar with no matching rule. An explicitly set
+    // font does not follow QApplication::setFont, so it has to be put back.
+    statusBar()->setFont(Theme::labelFont());
+    // The font just changed, so both chrome strips just changed height - and
+    // that is exactly what moves the viewport's edges onto a fractional device
+    // row. See syncChromeHeights().
+    syncChromeHeights();
+
+    // The OCCT side of the bridge: a clear colour, two highlight drawers and
+    // a grid whose colours are baked into its vertices. None of it is painted
+    // by Qt, so none of it is reached by a repaint.
+    if (myView) myView->applyTheme();
+
+    // The live sketch markers are AIS objects coloured when they were built.
+    // Re-issued from the sketch this window owns rather than from a copy the
+    // viewport would have to keep - and only while there is a sketch, so this
+    // cannot make a marker appear.
+    if (mySketching && myView) {
+        if (!mySketch.points().empty()) myView->setSketchPointMarkers(mySketch.points());
+    }
+
+    persistAppearance();
+
+    emit themeChanged();
+
+    // Last, and it is what actually repaints the shell: every widget in it
+    // reads its colours from Theme inside paintEvent(), and appStateChanged()
+    // - which updateActions() ends by emitting - is the signal they already
+    // refresh on. No second refresh path.
+    updateActions();
+    if (myOverlay) myOverlay->relayout();
+}
+
+void MainWindow::persistAppearance()
+{
+    if (!myPersistProgress) return;
+
+    // Built on first use rather than in the constructor: a window that never
+    // sees a theme edit never creates one, and this is the only place that
+    // can say whether the guard above let us get this far.
+    if (!myAppearanceWrite) {
+        myAppearanceWrite = new QTimer(this);
+        myAppearanceWrite->setSingleShot(true);
+        myAppearanceWrite->setInterval(kAppearanceWriteMs);
+        connect(myAppearanceWrite, &QTimer::timeout, this,
+                &MainWindow::writeAppearanceNow);
+    }
+    // start() on a running single-shot timer RESTARTS it, which is the whole
+    // debounce: a drag through the colour wheel keeps pushing the deadline
+    // out and lands exactly one write once the user stops.
+    myAppearanceWrite->start();
+}
+
+void MainWindow::syncChromeHeights()
+{
+    // The viewport's top and bottom edges ARE the app bar's bottom edge and
+    // the status bar's top edge, and both have to land on a whole device row.
+    //
+    // Widget geometry is logical; the surface OCCT paints into is sized in
+    // device pixels. A chrome strip whose logical height does not multiply up
+    // to a whole number of device rows leaves the seam between it and the
+    // viewport on a fraction - Qt flushes the row, neither side's painter
+    // reaches it, and over the GL surface an unpainted row is not transparent
+    // but whatever the driver left, which measures as an exact 0,0,0 line.
+    // Measured at 175% with an edited type scale: a 2068-device-pixel black
+    // line the full width of the window, exactly where the status bar meets
+    // the viewport. It is the floating-card rule (Theme::wholeDevicePixels,
+    // see Theme.h) applied to the two cards that span the window, and neither
+    // paintSurface() nor anything else either widget paints can reach a row
+    // that is inside NEITHER widget's logical rect.
+    //
+    // It only appeared once the Appearance panel shipped because the default
+    // type scale happens to give both strips a whole height. The base size is
+    // a number the user edits now, so "happens to" stopped being a rule.
+    //
+    // The constraints are lifted before the hint is read, so this is
+    // idempotent whatever a strip's sizeHint() does with its own fixed size:
+    // re-running it can never ratchet a strip taller.
+    auto whole = [](QWidget* strip) {
+        if (!strip) return;
+        strip->setMinimumHeight(0);
+        strip->setMaximumHeight(QWIDGETSIZE_MAX);
+        strip->setFixedHeight(Theme::wholeDevicePixels(strip->sizeHint().height()));
+    };
+    whole(menuWidget());
+    whole(statusBar());
+}
+
+void MainWindow::writeAppearanceNow()
+{
+    // The ONE place the spec reaches QSettings. Two routes want it - the
+    // debounce timer's timeout and the flush in closeEvent() - and they used
+    // to carry a copy of the write each, which is two places to keep in step
+    // with the key name and with whatever else a stored appearance ever needs
+    // to include.
+    QSettings settings;
+    settings.setValue(QStringLiteral("appearance"), Theme::serializeSpec());
+}
+
+void MainWindow::closeEvent(QCloseEvent* event)
+{
+    // A window closed inside the debounce window still has to store what the
+    // user chose. Fired by hand rather than left to the timer, which is about
+    // to be destroyed with this window.
+    if (myAppearanceWrite && myAppearanceWrite->isActive()) {
+        myAppearanceWrite->stop();
+        writeAppearanceNow();
+    }
+    QMainWindow::closeEvent(event);
+}
+
 void MainWindow::recordProgress(const std::string& event)
 {
     myProgress.record(event);
@@ -790,13 +1004,36 @@ void MainWindow::updateStateLabel()
         }
     } else if (!myPendingFace.IsNull()) {
         state = tr("Face ready — press E to extrude");
+    } else if (canPullSelectedFace()) {
+        // The gizmo is on screen and it is not obvious what to do with it -
+        // an arrow with no words is a guess. Reads the same predicate the
+        // arrow itself does, so the label cannot describe a gizmo that is not
+        // there (or stay quiet about one that is).
+        state = tr("Face selected — drag the arrow to pull, or type a distance");
+    } else if (canBevelSelectedEdge()) {
+        // Same rule as the line above: the gizmo is on screen, one axis does
+        // two different things, and an arrow cannot say that by itself. Reads
+        // the same predicate the arrow does.
+        // The table's words, the same two the chip, the tooltips and the
+        // refusals use. Saying "round or flatten" here and "Fillet"/"Chamfer"
+        // everywhere else is two vocabularies for one pair of operations.
+        state = tr("Edge selected — drag in for a Fillet, out for a Chamfer, "
+                   "or type a size");
     } else {
         const std::size_t selected = myView->selectedSolidIds().size();
         const std::size_t bodies = myDocument.count();
         if (selected == 2) {
             state = tr("2 bodies selected — Union, Subtract and Intersect available");
         } else if (selected == 1) {
-            state = tr("1 body selected — Shift-click another to combine them");
+            // The transform gizmo is on screen whenever this holds, and a
+            // handful of arrows and rings with no words is a guess. Reads the
+            // same predicate the gizmo itself does, so the label cannot
+            // describe a gizmo that is not there - or stay quiet about one
+            // that is.
+            state = canTransformSelectedBody()
+                        ? tr("1 body selected — drag a handle to Move, Rotate or Scale — "
+                             "Shift-click another to combine them")
+                        : tr("1 body selected — Shift-click another to combine them");
         } else if (bodies == 0) {
             state = tr("Nothing yet — press Ctrl+K to draw an outline");
         } else if (bodies == 1) {
@@ -1048,6 +1285,345 @@ bool MainWindow::extrudePendingFace(double height)
     const QString message = tr("%1 created — %2")
                                 .arg(QString::fromStdString(myDocument.nameOf(id)),
                                      QString::fromStdString(Measure::formatDimensions(solid)));
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    return true;
+}
+
+bool MainWindow::canPullSelectedFace() const
+{
+    // No sketch in progress, and no closed outline waiting - see
+    // canChangeSketchPlane() and the header for both halves. The pending-face
+    // half is what keeps this and ExtrudePreview mutually exclusive.
+    if (mySketching || !myPendingFace.IsNull()) return false;
+
+    // selectedFace() is deliberately "the ONE selected face", never the first
+    // of several, so this cannot be a coin toss between two highlighted
+    // faces. It is null outside face-selection mode, which is what makes the
+    // mode check implicit rather than a second condition to keep in step.
+    const TopoDS_Face face = myView->selectedFace();
+    if (face.IsNull()) return false;
+    return BRepAdaptor_Surface(face).GetType() == GeomAbs_Plane;
+}
+
+int MainWindow::bodyIdForFace(const TopoDS_Face& face) const
+{
+    if (face.IsNull()) return 0;
+    for (const DocumentModel::Solid& solid : myDocument.solids()) {
+        for (TopExp_Explorer it(solid.shape, TopAbs_FACE); it.More(); it.Next()) {
+            if (it.Current().IsSame(face)) return solid.id;
+        }
+    }
+    return 0;
+}
+
+bool MainWindow::pullFaceBy(const TopoDS_Face& face, double distance)
+{
+    if (face.IsNull() || distance == 0.0) return false;
+
+    const int id = bodyIdForFace(face);
+    const TopoDS_Shape body = myDocument.shapeOf(id);
+    if (id <= 0 || body.IsNull()) return false;
+
+    const ModelingOps::BooleanResult result = ModelingOps::pullFace(body, face, distance);
+    if (!result.ok) {
+        // Never present a failed kernel operation as a success, and never
+        // show its error text: it is written for this file, not for the user.
+        qWarning("Pull failed: %s", result.error.c_str());
+        myToasts->show(tr("This face can't be pulled that far — a carve deeper than the "
+                          "body removes the whole thing, and the geometry engine has "
+                          "nothing left to build. Try a smaller distance, or drag the "
+                          "arrow the other way"),
+                      Toast::Kind::Failure, false);
+        statusBar()->showMessage(tr("Pull refused — nothing was changed"));
+        return false;
+    }
+
+    myDocument.checkpoint();
+    myDocument.replaceSolid(id, result.shape);
+    // The preview and the arrow both describe the face that is about to stop
+    // existing; the selection holds that face too. All three go before the
+    // body is redisplayed, in that order, so nothing is left pointing at
+    // topology from before the rebuild.
+    myView->clearModelingPreview();
+    myView->clearPullArrow();
+    myView->clearSelection();
+    myView->displaySolid(id, result.shape);
+    recordProgress("pull.completed");
+
+    updateActions();
+    emit documentChanged();
+    const QString message =
+        tr("%1 pulled — %2")
+            .arg(QString::fromStdString(myDocument.nameOf(id)),
+                 QString::fromStdString(Measure::formatDimensions(result.shape)));
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    return true;
+}
+
+int MainWindow::bodyIdForEdge(const TopoDS_Edge& edge) const
+{
+    if (edge.IsNull()) return 0;
+    for (const DocumentModel::Solid& solid : myDocument.solids()) {
+        for (TopExp_Explorer it(solid.shape, TopAbs_EDGE); it.More(); it.Next()) {
+            if (it.Current().IsSame(edge)) return solid.id;
+        }
+    }
+    return 0;
+}
+
+bool MainWindow::bevelTarget(TopoDS_Edge& edge, int& bodyId, gp_Pnt& centre,
+                             gp_Dir& outward) const
+{
+    // The same two halves canPullSelectedFace() opens with, for the same
+    // reasons - see its comment and the header.
+    if (mySketching || !myPendingFace.IsNull()) return false;
+
+    // Edge mode explicitly, so this cannot be true at the same time as the
+    // face pull's predicate or the transform gizmo's.
+    if (myView->selectionMode() != OcctViewWidget::SelectionMode::Edge) return false;
+
+    // "The ONE selected edge", never the first of several - selectedEdge()'s
+    // own rule, so a bevel can never be a coin toss between two highlighted
+    // edges.
+    const TopoDS_Edge selected = myView->selectedEdge();
+    if (selected.IsNull()) return false;
+
+    const int id = bodyIdForEdge(selected);
+    const TopoDS_Shape body = myDocument.shapeOf(id);
+    if (id <= 0 || body.IsNull()) return false;
+
+    // Straightness, the two adjacent faces and the outward bisector are all
+    // ModelingOps::bevelAxis()'s to decide, and it decides them once for the
+    // predicate and the gizmo both.
+    gp_Pnt at;
+    gp_Dir axis;
+    if (!ModelingOps::bevelAxis(body, selected, at, axis)) return false;
+
+    edge = selected;
+    bodyId = id;
+    centre = at;
+    outward = axis;
+    return true;
+}
+
+bool MainWindow::canBevelSelectedEdge() const
+{
+    TopoDS_Edge edge;
+    int bodyId = 0;
+    gp_Pnt centre;
+    gp_Dir outward;
+    return bevelTarget(edge, bodyId, centre, outward);
+}
+
+QString MainWindow::bevelRefusalText(bool fillet)
+{
+    // No trailing period: the app's failure sentences end without one (see the
+    // pull's and the transform's), and this pair was the exception.
+    return fillet ? tr("This edge can't take a fillet that big — the curve "
+                       "would eat a neighbouring face. Try a smaller size")
+                  : tr("This edge can't take a chamfer that big — the flat "
+                       "would eat a neighbouring face. Try a smaller size");
+}
+
+QString MainWindow::transformOperationName(const gp_Trsf& delta)
+{
+    return transformIsScale(delta)      ? tr("Scale")
+           : transformIsRotation(delta) ? tr("Rotate")
+                                        : tr("Move");
+}
+
+QString MainWindow::transformPastVerb(const gp_Trsf& delta)
+{
+    return transformIsScale(delta)      ? tr("scaled")
+           : transformIsRotation(delta) ? tr("rotated")
+                                        : tr("moved");
+}
+
+QString MainWindow::transformRefusalText(const gp_Trsf& delta)
+{
+    // "refused" would carry `fuse` as a substring, and the banned-word sweep
+    // matches bare substrings case-insensitively (CLAUDE.md says so). The
+    // sentence this replaced said "the geometry engine refused the change" and
+    // sailed through every run only because nothing ever triggered it - which
+    // is exactly why the suite now shows this copy through a probe.
+    return tr("This body couldn't be %1 — the geometry engine turned that "
+              "change down. Try a smaller drag, or a different handle")
+        .arg(transformPastVerb(delta));
+}
+
+bool MainWindow::transformIsScale(const gp_Trsf& delta)
+{
+    return std::fabs(delta.ScaleFactor() - 1.0) > 1.0e-9;
+}
+
+bool MainWindow::transformIsRotation(const gp_Trsf& delta)
+{
+    gp_Vec axis;
+    Standard_Real angle = 0.0;
+    delta.GetRotation().GetVectorAndAngle(axis, angle);
+    return std::fabs(angle) > 1.0e-9;
+}
+
+bool MainWindow::bevelEdgeBy(const TopoDS_Edge& edge, double size, bool fillet)
+{
+    if (edge.IsNull() || size <= 0.0) return false;
+
+    const int id = bodyIdForEdge(edge);
+    const TopoDS_Shape body = myDocument.shapeOf(id);
+    if (id <= 0 || body.IsNull()) return false;
+
+    const ModelingOps::BooleanResult result =
+        fillet ? ModelingOps::filletEdge(body, edge, size)
+               : ModelingOps::chamferEdge(body, edge, size);
+    if (!result.ok) {
+        // Never present a failed kernel operation as a success, and never show
+        // its error text: it is written for this file, not for the user. A
+        // fillet failing on hard geometry is normal, not exceptional - see
+        // ModelingOps::filletEdge - so the sentence names the cause and the fix
+        // rather than apologising.
+        qWarning("Bevel failed: %s", result.error.c_str());
+        myToasts->show(bevelRefusalText(fillet), Toast::Kind::Failure, false);
+        statusBar()->showMessage(fillet ? tr("Fillet refused — nothing was changed")
+                                        : tr("Chamfer refused — nothing was changed"));
+        return false;
+    }
+
+    myDocument.checkpoint();
+    myDocument.replaceSolid(id, result.shape);
+    // The preview, the arrow and the selection all describe the edge that is
+    // about to stop existing. All three go before the body is redisplayed, in
+    // that order, so nothing is left pointing at topology from before the
+    // rebuild - the face pull's rule, one gizmo over.
+    myView->clearModelingPreview();
+    myView->clearBevelArrow();
+    myView->clearSelection();
+    myView->displaySolid(id, result.shape);
+    recordProgress("bevel.completed");
+
+    updateActions();
+    emit documentChanged();
+    // Led by the operation's own name. "Body 03 rounded" describes the result
+    // in a word that appears nowhere else in the app - the chip, the tooltips,
+    // the state label and the refusal all say Fillet or Chamfer.
+    const QString message =
+        (fillet ? tr("Fillet added to %1 — %2") : tr("Chamfer added to %1 — %2"))
+            .arg(QString::fromStdString(myDocument.nameOf(id)),
+                 QString::fromStdString(Measure::formatDimensions(result.shape)));
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    return true;
+}
+
+int MainWindow::transformableBodyId() const
+{
+    // The same two halves canPullSelectedFace() opens with, for the same
+    // reasons: an outline in progress lives on a plane, and a body that moved
+    // under it would take the plane's meaning with it.
+    if (mySketching || !myPendingFace.IsNull()) return 0;
+
+    // Body mode explicitly. selectedSolidIds() reports the owning body of a
+    // selected FACE too, so without this the gizmo would appear over a face
+    // selection and fight the pull arrow for the same drag.
+    if (myView->selectionMode() != OcctViewWidget::SelectionMode::Solid) return 0;
+
+    const std::vector<int> ids = myView->selectedSolidIds();
+    if (ids.size() != 1) return 0;
+    return ids.front();
+}
+
+void MainWindow::refreshTransformGizmo()
+{
+    const int id = transformableBodyId();
+    if (id > 0) myView->attachManipulator(id);
+    else        myView->detachManipulator();
+}
+
+void MainWindow::refreshEdgeAnnotation()
+{
+    // Derived from the arrow's own predicate, not from the arrow's visibility
+    // and not from the event that happened to raise it - the rule this file
+    // keeps for every other surface over the viewport.
+    myView->setEdgeDimensionSuppressed(canBevelSelectedEdge());
+}
+
+void MainWindow::onGizmoReleased(int solidId, const gp_Trsf& delta)
+{
+    // A drag that nets nothing is a cancel, not an edit: no checkpoint, no
+    // toast, no revision. It reaches here for two reasons that look identical
+    // from the document's side - a press and release at the same point, and a
+    // real drag the snap rounded back to where it started - and both deserve
+    // the same silence. The viewport already restored its own presentation
+    // before emitting, so there is nothing to put back.
+    if (ModelingOps::isIdentityTransform(delta)) return;
+    transformBody(solidId, delta);
+}
+
+bool MainWindow::transformBody(int id, const gp_Trsf& delta)
+{
+    const TopoDS_Shape body = myDocument.shapeOf(id);
+    if (id <= 0 || body.IsNull()) return false;
+
+    // This layer's clamp, not the kernel's: transformShape refuses only a
+    // factor <= 0, and a body scaled to 1e-9 is not an error the kernel can
+    // see - it is a body the user has lost. See kMinScale/kMaxScale.
+    // INCLUSIVE on both ends, and that is the whole point: a shrink dragged to
+    // the floor snaps to exactly kMinScale with Snap on and lands fractionally
+    // below it with Snap off, so an exclusive test (`< kMinScale`) let the
+    // SAME gesture commit or be refused depending on a toggle that is supposed
+    // to change where a drag lands, not whether it is allowed at all.
+    const double scale = delta.ScaleFactor();
+
+    // Which of the three this gesture is, read off the transform itself and
+    // derived ONCE, ABOVE the two refusal branches. It used to be derived only
+    // on the success path, so a rotate or a scale the kernel turned down was
+    // announced as a failed Move - a refusal that names the wrong operation is
+    // worse than one that names none, because the user goes looking for a move
+    // they never made.
+    const QString operation = transformOperationName(delta);
+
+    if (scale <= kMinScale || scale >= kMaxScale) {
+        myToasts->show(tr("That's too big a change of size to make at once — anything "
+                          "under a twentieth or over twenty times leaves a body you "
+                          "can't see or can't fit on screen. Drag the handle back "
+                          "toward the body and scale it in smaller steps"),
+                      Toast::Kind::Failure, false);
+        statusBar()->showMessage(tr("%1 refused — nothing was changed").arg(operation));
+        return false;
+    }
+
+    const ModelingOps::BooleanResult result = ModelingOps::transformShape(body, delta);
+    if (!result.ok) {
+        // Never present a failed kernel operation as a success, and never show
+        // its error text - it is written for this file, not for the user.
+        qWarning("Transform failed: %s", result.error.c_str());
+        myToasts->show(transformRefusalText(delta), Toast::Kind::Failure, false);
+        statusBar()->showMessage(tr("%1 refused — nothing was changed").arg(operation));
+        return false;
+    }
+
+    myDocument.checkpoint();
+    myDocument.replaceSolid(id, result.shape);
+    myView->displaySolid(id, result.shape);
+    // Selected again on purpose, unlike the face pull's clearSelection(): the
+    // body is still the same body, and keeping it selected is what leaves the
+    // gizmo standing on it for a second drag. displaySolid() detached the
+    // gizmo along with the presentation it was holding; the updateActions()
+    // below re-attaches it at the body's new position.
+    myView->setSelectedSolids({id});
+    recordProgress("transform.completed");
+
+    updateActions();
+    emit documentChanged();
+
+    // The same derivation the refusals above use - one source for all three
+    // outcomes, and it stays right if a gesture ever combines two of them.
+    const QString message =
+        tr("%1 %2 — %3")
+            .arg(QString::fromStdString(myDocument.nameOf(id)),
+                 transformPastVerb(delta),
+                 QString::fromStdString(Measure::formatDimensions(result.shape)));
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
     return true;

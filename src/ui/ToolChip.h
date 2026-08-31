@@ -63,9 +63,21 @@ protected:
 
 private:
     void syncFromAction();
+    // Re-derives the two appearance values this widget cannot ask for at paint
+    // time: the QIcon, which IconSet rasterises out of text() and
+    // textDisabled() at whatever those were when it was built, and the
+    // per-widget stylesheet that pins this chip's own font to labelFont().
+    // Everything else a chip paints is read from Theme inside paintEvent(),
+    // so update() covers it. Hooked to Theme::notifier() rather than to any
+    // one window, because a chip has no MainWindow and should not need one.
+    void applyTheme();
 
     QAction* myAction = nullptr;
     ChipMode myMode = ChipMode::Labelled;
+    // Kept so applyTheme() can rasterise the glyph again in the new text
+    // colours. The QIcon this widget holds is the cache; this is the source
+    // it was built from.
+    IconSet::Glyph myGlyph;
     QString myShortcut;
     bool myHovered = false;
 };

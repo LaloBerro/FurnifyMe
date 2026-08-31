@@ -15,11 +15,14 @@
 #include <Graphic3d_AspectMarker3d.hxx>
 #include <Graphic3d_Camera.hxx>
 #include <Graphic3d_Group.hxx>
+#include <Graphic3d_MaterialAspect.hxx>
+#include <Graphic3d_NameOfMaterial.hxx>
 #include <Graphic3d_TransformPers.hxx>
 #include <Graphic3d_Vec2.hxx>
 #include <OpenGl_GraphicDriver.hxx>
 #include <Prs3d_Drawer.hxx>
 #include <Prs3d_LineAspect.hxx>
+#include <Prs3d_ShadingAspect.hxx>
 #include <Prs3d_Presentation.hxx>
 #include <Prs3d_TypeOfHighlight.hxx>
 #include <PrsMgr_PresentationManager.hxx>
@@ -60,6 +63,13 @@ namespace {
 constexpr int kSelectionModeWholeShape = 0;
 constexpr int kSelectionModeEdge       = 2;
 constexpr int kSelectionModeFace       = 4;
+
+// The transform gizmo's two extra snap steps. The translation step is not
+// here: it is the viewport's own mySnapStep, the same 10 mm grid outline
+// points and face pulls already land on, because a body that moved off the
+// grid the outlines were drawn on would be a body nothing lines up with.
+constexpr double kGizmoRotationStepDeg = 15.0;
+constexpr double kGizmoScaleStep       = 0.05;
 
 Quantity_Color toOcctColor(const QColor& c)
 {
@@ -165,33 +175,21 @@ void OcctViewWidget::initializeViewer()
     myView->SetWindow(window);
     if (!window->IsMapped()) window->Map();
 
-    const QColor bg = Theme::viewport();
-    myView->SetBackgroundColor(Quantity_Color(bg.redF(), bg.greenF(), bg.blueF(),
-                                              Quantity_TOC_sRGB));
     // No corner trihedron: AxisGizmo (top right) is the orientation surface,
     // and since the rail took the left edge the trihedron sat behind it with
     // one axis tip peeking out - redundant at best, a visual defect at worst.
-
-    // OCCT's default highlight barely reads against a shaded solid. Make hover
-    // and selection unmistakable - not being able to tell what is selected was
-    // the single most confusing thing about the app.
-    const Handle(Prs3d_Drawer) hover = myContext->HighlightStyle(Prs3d_TypeOfHighlight_Dynamic);
-    hover->SetColor(Quantity_NOC_CYAN1);
-    hover->SetDisplayMode(AIS_Shaded);
-    hover->SetTransparency(0.0f);
-
-    const Handle(Prs3d_Drawer) picked = myContext->HighlightStyle(Prs3d_TypeOfHighlight_Selected);
-    picked->SetColor(Quantity_NOC_ORANGE);
-    picked->SetDisplayMode(AIS_Shaded);
-    picked->SetTransparency(0.0f);
-
-    // Sub-shape (face-mode) highlighting uses its own styles.
-    myContext->HighlightStyle(Prs3d_TypeOfHighlight_LocalDynamic)->SetColor(Quantity_NOC_CYAN1);
-    myContext->HighlightStyle(Prs3d_TypeOfHighlight_LocalSelected)->SetColor(Quantity_NOC_ORANGE);
+    //
+    // The background and the two highlight styles are applied through the same
+    // applyTheme() a live Appearance edit uses, rather than set here and set
+    // again there: two copies of "what this view wears" is exactly the drift
+    // the Theme spec exists to end.
+    applyTheme();
 
     myGridRenderer.attach(myContext);
     myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane());
     myDimension.attach(myContext);
+    myPullArrow.attach(myContext);
+    myBevelArrow.attach(myContext);
 
     // Perspective projection: the turntable model is distance-based, and OCCT's
     // default orthographic camera zooms by scale, which would make
@@ -224,6 +222,11 @@ void OcctViewWidget::displaySolid(int id, const TopoDS_Shape& shape)
 
     const auto existing = mySolids.find(id);
     if (existing != mySolids.end()) {
+        // The gizmo holds a handle to the presentation about to be removed, so
+        // it goes first. MainWindow's predicate re-attaches it on the next
+        // updateActions() if the body is still the one selected - which is how
+        // a transform leaves the gizmo standing on the body it just moved.
+        if (myManipulatorSolid == id) detachManipulator();
         myContext->Remove(existing->second, Standard_False);
         mySolids.erase(existing);
     }
@@ -250,6 +253,15 @@ void OcctViewWidget::removeSolid(int id)
     const auto it = mySolids.find(id);
     if (it == mySolids.end() || myContext.IsNull()) return;
 
+    // Before the body goes, so the display mode it borrowed is put back on a
+    // presentation that still exists - see setModelingPreview(). The arrow
+    // goes with it for the same reason the dimension below does.
+    clearModelingPreview();
+    clearPullArrow();
+    clearBevelArrow();
+    // Same reason: the gizmo is attached to the presentation about to go.
+    if (myManipulatorSolid == id) detachManipulator();
+
     myContext->Remove(it->second, Standard_False);
     mySolids.erase(it);
     // An annotation must never outlive the thing it measures: Delete and Undo
@@ -265,6 +277,11 @@ void OcctViewWidget::removeSolid(int id)
 void OcctViewWidget::clearSolids()
 {
     if (myContext.IsNull()) return;
+
+    clearModelingPreview();   // same reasoning as removeSolid(), before the bodies go
+    clearPullArrow();
+    clearBevelArrow();
+    detachManipulator();
 
     for (auto& entry : mySolids) myContext->Remove(entry.second, Standard_False);
     mySolids.clear();
@@ -338,6 +355,384 @@ bool OcctViewWidget::hasPreview() const
 TopoDS_Shape OcctViewWidget::previewShape() const
 {
     return myPreview.IsNull() ? TopoDS_Shape() : myPreview->Shape();
+}
+
+void OcctViewWidget::setModelingPreview(const TopoDS_Shape& shape, int replacesSolidId)
+{
+    initializeViewer();
+    if (myContext.IsNull()) return;
+
+    clearModelingPreview();
+    if (shape.IsNull()) return;
+
+    ModelingOps::tessellate(shape, 0.1);
+
+    myModelingPreview = new AIS_Shape(shape);
+    // The same yellow setPreview() uses. One rule - a preview is yellow, a
+    // body is grey - rather than a second preview colour per feature. It also
+    // has to differ from the pull arrow standing on top of it: both were
+    // Theme::accent() at first, and the magnified capture showed an arrow
+    // that was technically drawn and practically invisible against the shape
+    // it was pulling.
+    myModelingPreview->SetColor(Quantity_Color(Quantity_NOC_YELLOW));
+    myModelingPreview->SetWidth(2.0);
+    // Selection mode -1: feedback only, never pickable - the same rule the
+    // sketch preview and every marker follows. A shape the user can select
+    // that exists in no document is the worst thing a preview can produce.
+    myContext->Display(myModelingPreview, AIS_Shaded, -1, Standard_False);
+
+    // The body this preview stands in for becomes a cage for the duration -
+    // see the header for why, and why this is SetDisplayMode rather than
+    // Erase (Erase would drop the selection the gizmo's predicate reads).
+    const auto it = mySolids.find(replacesSolidId);
+    if (it != mySolids.end()) {
+        myContext->SetDisplayMode(it->second, AIS_WireFrame, Standard_False);
+        myModelingPreviewSolid = replacesSolidId;
+    }
+
+    myContext->UpdateCurrentViewer();
+}
+
+void OcctViewWidget::clearModelingPreview()
+{
+    if (myContext.IsNull()) return;
+
+    bool changed = false;
+    if (myModelingPreviewSolid >= 0) {
+        const auto it = mySolids.find(myModelingPreviewSolid);
+        if (it != mySolids.end()) {
+            myContext->SetDisplayMode(it->second, myWireframe ? AIS_WireFrame : AIS_Shaded,
+                                      Standard_False);
+            changed = true;
+        }
+        // Cleared even when the body has gone (a commit replaces it), so the
+        // id can never be restored onto a different body later.
+        myModelingPreviewSolid = -1;
+    }
+    if (!myModelingPreview.IsNull()) {
+        myContext->Remove(myModelingPreview, Standard_False);
+        myModelingPreview.Nullify();
+        changed = true;
+    }
+    if (changed) myContext->UpdateCurrentViewer();
+}
+
+bool OcctViewWidget::hasModelingPreview() const
+{
+    return !myModelingPreview.IsNull();
+}
+
+TopoDS_Shape OcctViewWidget::modelingPreviewShape() const
+{
+    return myModelingPreview.IsNull() ? TopoDS_Shape() : myModelingPreview->Shape();
+}
+
+void OcctViewWidget::showPullArrow(const gp_Pnt& centre, const gp_Dir& outward)
+{
+    initializeViewer();
+    if (myView.IsNull()) return;
+    // No viewer update of its own while a camera change is being applied:
+    // applyCameraState() emits cameraChanged() and then redraws, and this
+    // rebuild rides along with that redraw. Forcing one here as well made
+    // every orbit step pay for two vsync-bound frames instead of one.
+    myPullArrow.show(centre, outward, myView->Camera()->Direction(), worldPerPixel(),
+                     /*updateViewer=*/!myApplyingCamera);
+}
+
+void OcctViewWidget::clearPullArrow()
+{
+    myPullArrow.clear();
+    myPullDrag.active = false;
+}
+
+bool OcctViewWidget::pullArrowHead(gp_Pnt& out) const
+{
+    if (!myPullArrow.isShowing()) return false;
+    out = myPullArrow.head();
+    return true;
+}
+
+void OcctViewWidget::showBevelArrow(const gp_Pnt& centre, const gp_Dir& outward)
+{
+    initializeViewer();
+    if (myView.IsNull()) return;
+    // No viewer update of its own while a camera change is being applied - the
+    // same rule showPullArrow() keeps, and for the same measured reason.
+    myBevelArrow.show(centre, outward, myView->Camera()->Direction(), worldPerPixel(),
+                      /*updateViewer=*/!myApplyingCamera);
+}
+
+void OcctViewWidget::clearBevelArrow()
+{
+    myBevelArrow.clear();
+    myBevelDrag.active = false;
+}
+
+bool OcctViewWidget::bevelArrowHead(gp_Pnt& out) const
+{
+    if (!myBevelArrow.isShowing()) return false;
+    out = myBevelArrow.head();
+    return true;
+}
+
+void OcctViewWidget::setEdgeDimensionSuppressed(bool suppressed)
+{
+    if (myEdgeDimensionSuppressed == suppressed) return;
+    myEdgeDimensionSuppressed = suppressed;
+    // Re-derive rather than only clear: turning it back off has to put the
+    // annotation back if a hover or a selection still calls for one, which is
+    // exactly what updateEdgeDimension() decides. A one-way clear here would
+    // be a state that only one direction maintains - the rule this file's
+    // sibling-visibility comments already record twice.
+    updateEdgeDimension();
+    if (!myView.IsNull()) myView->Redraw();
+}
+
+bool OcctViewWidget::arrowHit(const PullArrowRenderer& arrow, const QPoint& point) const
+{
+    if (!arrow.isShowing()) return false;
+
+    QPoint tail, head;
+    if (!projectToScreen(arrow.tail(), tail)) return false;
+    if (!projectToScreen(arrow.head(), head)) return false;
+
+    // Distance from the point to the projected shaft, in pixels. A generous
+    // 14 px: the arrow is a hairline, and a target the user has to hit
+    // exactly is one they will miss.
+    const double dx = head.x() - tail.x();
+    const double dy = head.y() - tail.y();
+    const double lengthSquared = dx * dx + dy * dy;
+    double t = 0.0;
+    if (lengthSquared > 1.0e-9) {
+        t = ((point.x() - tail.x()) * dx + (point.y() - tail.y()) * dy) / lengthSquared;
+        t = std::clamp(t, 0.0, 1.0);
+    }
+    const double nx = tail.x() + dx * t - point.x();
+    const double ny = tail.y() + dy * t - point.y();
+    return std::sqrt(nx * nx + ny * ny) <= 14.0;
+}
+
+void OcctViewWidget::beginAxisDrag(AxisDrag& drag, const gp_Lin& axis, const QPoint& at)
+{
+    drag.active = true;
+    drag.moved = false;
+    drag.value = 0.0;
+    gp_Lin ray;
+    drag.hasPressParam = rayThroughPixel(at.x(), at.y(), ray) &&
+                         CameraController::axisParameterForRay(ray, axis, drag.pressParam);
+}
+
+bool OcctViewWidget::advanceAxisDrag(AxisDrag& drag, const gp_Lin& axis, const QPoint& at)
+{
+    // Where the cursor now points along the arrow's axis, minus where it
+    // pointed at the press. A ray too close to parallel with the axis resolves
+    // to nothing and the last value simply stands - see
+    // CameraController::axisParameterForRay().
+    gp_Lin ray;
+    double parameter = 0.0;
+    if (!rayThroughPixel(at.x(), at.y(), ray) ||
+        !CameraController::axisParameterForRay(ray, axis, parameter))
+        return false;
+
+    if (!drag.hasPressParam) {
+        // The press itself could not be measured (see beginAxisDrag). Anchor
+        // here instead, the first moment it can be anchored at all: the drag
+        // contributes nothing until the angle improves and then starts from
+        // zero, rather than jumping by whatever the unmeasurable press would
+        // have implied.
+        drag.pressParam = parameter;
+        drag.hasPressParam = true;
+        return false;
+    }
+
+    double value = parameter - drag.pressParam;
+    // The same grid the outline points snap to, applied to the dragged
+    // distance rather than to a position.
+    if (mySnapEnabled && mySnapStep > 0.0)
+        value = std::round(value / mySnapStep) * mySnapStep;
+    if (std::fabs(value - drag.value) <= 1.0e-9) return false;
+
+    drag.value = value;
+    if (std::fabs(value) > 1.0e-9) drag.moved = true;
+    return true;
+}
+
+void OcctViewWidget::attachManipulator(int solidId)
+{
+    initializeViewer();
+    if (myContext.IsNull()) return;
+    // Idempotent per body. The predicate that drives this runs on every
+    // appStateChanged, and a fresh AIS_Manipulator on each of those would
+    // re-derive its position from the bounding box every time - including in
+    // the middle of a gesture, which is how a gizmo ends up snapping back to
+    // the body while the user is still holding it.
+    if (!myManipulator.IsNull() && myManipulatorSolid == solidId) return;
+
+    detachManipulator();
+    const auto it = mySolids.find(solidId);
+    if (it == mySolids.end() || !myContext->IsDisplayed(it->second)) return;
+
+    myManipulator = new AIS_Manipulator();
+    // Modes arm on DETECTION, not on selection. The alternative - OCCT's
+    // default - activates a mode when a manipulator part is SELECTED, and
+    // selecting a part replaces the body selection that raised the gizmo in
+    // the first place: the gizmo would vanish under the hand reaching for it.
+    myManipulator->SetModeActivationOnDetection(Standard_True);
+    // Sized and placed from the body it serves, so a 40 mm shelf and a 2 m
+    // wardrobe both get a gizmo you can actually grab.
+    AIS_Manipulator::OptionsForAttach options;
+    options.SetAdjustPosition(Standard_True);
+    options.SetAdjustSize(Standard_True);
+    options.SetEnableModes(Standard_True);
+    myManipulator->Attach(it->second, options);
+    activateManipulatorModes();
+    // The one styling hook AIS_Manipulator actually exposes: the shading
+    // aspect its parts are computed from. The per-axis HUES are private
+    // (AIS_Manipulator::Axis::myColor, set in init() and reachable through no
+    // public setter), and red/green/blue for X/Y/Z is the universal gizmo
+    // language anyway - tinting all three to one accent would cost more than
+    // it bought. What this does reach is the material, so the gizmo reads as
+    // part of this app's matte surface family rather than a glossy default.
+    const Handle(Prs3d_ShadingAspect) gizmoAspect =
+        myManipulator->Attributes()->ShadingAspect();
+    if (!gizmoAspect.IsNull()) {
+        Graphic3d_MaterialAspect material(Graphic3d_NameOfMaterial_UserDefined);
+        material.SetAmbientColor(Quantity_Color(0.35, 0.35, 0.35, Quantity_TOC_sRGB));
+        material.SetDiffuseColor(Quantity_Color(0.75, 0.75, 0.75, Quantity_TOC_sRGB));
+        material.SetSpecularColor(Quantity_Color(0.05, 0.05, 0.05, Quantity_TOC_sRGB));
+        gizmoAspect->SetMaterial(material);
+    }
+
+    myManipulatorSolid = solidId;
+    myContext->UpdateCurrentViewer();
+}
+
+void OcctViewWidget::activateManipulatorModes()
+{
+    if (myManipulator.IsNull()) return;
+    // Move along an axis, Move in a plane, Rotate, Scale - every mode the API
+    // offers. gp_Trsf cannot express a per-axis scale, so the scale cubes are
+    // uniform whichever one is grabbed; see MainWindow's bake for the clamp
+    // that keeps a uniform scale to something that is still furniture.
+    myManipulator->EnableMode(AIS_MM_Translation);
+    myManipulator->EnableMode(AIS_MM_TranslationPlane);
+    myManipulator->EnableMode(AIS_MM_Rotation);
+    myManipulator->EnableMode(AIS_MM_Scaling);
+}
+
+void OcctViewWidget::detachManipulator()
+{
+    if (myManipulator.IsNull()) {
+        myManipulatorSolid = -1;
+        return;
+    }
+
+    // A gesture cannot outlive the gizmo it was made on - and OCCT's Detach()
+    // does NOT put back the local transformations a live drag has written, so
+    // dropping the flag alone would leave the body frozen at the pose the drag
+    // reached while the document still said something else. Cancelling it is
+    // the reset. Unreachable today, because every route in here runs between
+    // gestures rather than during one; that is exactly what makes the line
+    // cheap to have, and it is the difference between a future mid-drag detach
+    // being harmless and being a body stuck where nothing put it.
+    if (myManipulator->HasActiveTransformation())
+        myManipulator->StopTransform(Standard_False);
+    myGizmoDragActive = false;
+    myGizmoDelta = gp_Trsf();
+    // Detach() erases it from the context as well as letting go of the body.
+    myManipulator->Detach();
+    if (!myContext.IsNull()) {
+        myContext->Remove(myManipulator, Standard_False);
+        myContext->UpdateCurrentViewer();
+    }
+    myManipulator.Nullify();
+    myManipulatorSolid = -1;
+}
+
+bool OcctViewWidget::manipulatorFrame(gp_Ax2& position, double& size) const
+{
+    if (myManipulator.IsNull()) return false;
+    position = myManipulator->Position();
+    size = myManipulator->Size();
+    return true;
+}
+
+int OcctViewWidget::manipulatorActiveMode() const
+{
+    return myManipulator.IsNull() ? 0 : static_cast<int>(myManipulator->ActiveMode());
+}
+
+int OcctViewWidget::manipulatorActiveAxis() const
+{
+    if (myManipulator.IsNull() || myManipulator->ActiveMode() == AIS_MM_None) return -1;
+    return myManipulator->ActiveAxisIndex();
+}
+
+bool OcctViewWidget::solidPresentationTransform(int id, gp_Trsf& out) const
+{
+    const auto it = mySolids.find(id);
+    if (it == mySolids.end() || it->second.IsNull()) return false;
+    out = it->second->LocalTransformation();
+    return true;
+}
+
+bool OcctViewWidget::detectedIsManipulator() const
+{
+    if (myManipulator.IsNull() || myContext.IsNull()) return false;
+    // HasDetected() FIRST, and it is not defensive padding - it is the whole
+    // reason this function does not crash the app.
+    //
+    // AIS_InteractiveContext::DetectedInteractive() is an inline that reads
+    // `myLastPicked->Selectable()` with no null check of its own, and a MoveTo
+    // that detects nothing sets myLastPicked to null. HasDetected() is
+    // literally `!myLastPicked.IsNull()`, so this line is the guard OCCT's own
+    // accessor does not carry.
+    //
+    // The reachable trigger was one click: select a body (which attaches the
+    // manipulator), then click empty viewport to deselect. The press handler
+    // MoveTo's, detects nothing, and asks this - null deref, process gone. It
+    // is a hover away too, through mouseMoveEvent's hover-highlight branch.
+    // Every other DetectedInteractive() call in this file already sits behind
+    // an explicit HasDetected() (see mouseDoubleClickEvent, which MoveTo's and
+    // returns early on !HasDetected() before it asks anything); this one
+    // function was the exception, and 850 green checks never went near it
+    // because nothing in the suite clicked empty space with a gizmo up.
+    if (!myContext->HasDetected()) return false;
+    const Handle(AIS_InteractiveObject) detected = myContext->DetectedInteractive();
+    return !detected.IsNull() && detected.get() == myManipulator.get();
+}
+
+void OcctViewWidget::endGizmoDrag()
+{
+    myGizmoDragActive = false;
+    if (myManipulator.IsNull()) return;
+
+    const int solidId = myManipulatorSolid;
+    const gp_Pnt pivot = myGizmoStartPosition.Location();
+    gp_Trsf delta = myGizmoDelta;
+    myGizmoDelta = gp_Trsf();
+
+    // StopTransform(false), not (true): it restores every attached object's
+    // local transformation and the manipulator's own position to what they
+    // were at the press. The drag moved the PRESENTATION and nothing else, and
+    // the document only changes if the bake that follows succeeds - so the
+    // presentation goes back first, unconditionally, and the consumer's job is
+    // purely to add a change rather than to undo one it did not make. A bake
+    // that is refused therefore leaves the viewport already agreeing with the
+    // document instead of showing a pose that exists nowhere.
+    myManipulator->StopTransform(Standard_False);
+    myManipulator->DeactivateCurrentMode();
+    if (!myView.IsNull()) myView->Redraw();
+
+    if (mySnapEnabled) {
+        // The same 10 mm grid outline points and face pulls land on, plus the
+        // two steps this gesture adds. 15 degrees is the smallest rotation
+        // anyone eyeballs; 5% is a size change you can see without measuring.
+        delta = ModelingOps::snapTransform(delta, pivot, mySnapStep,
+                                           kGizmoRotationStepDeg, kGizmoScaleStep);
+    }
+
+    emit gizmoReleased(solidId, delta);
 }
 
 void OcctViewWidget::setSketchPointMarkers(const std::vector<gp_Pnt>& points)
@@ -492,13 +887,29 @@ TopoDS_Face OcctViewWidget::selectedFace() const
     return found;
 }
 
+QPoint OcctViewWidget::toDevicePixels(const QPoint& logical) const
+{
+    const double ratio = devicePixelRatioF();
+    return QPoint(static_cast<int>(std::lround(logical.x() * ratio)),
+                  static_cast<int>(std::lround(logical.y() * ratio)));
+}
+
+QPoint OcctViewWidget::fromDevicePixels(int px, int py) const
+{
+    const double ratio = std::max(devicePixelRatioF(), 1.0e-6);
+    return QPoint(static_cast<int>(std::lround(px / ratio)),
+                  static_cast<int>(std::lround(py / ratio)));
+}
+
 bool OcctViewWidget::projectToScreen(const gp_Pnt& world, QPoint& out) const
 {
     if (myView.IsNull()) return false;
 
     Standard_Integer px = 0, py = 0;
     myView->Convert(world.X(), world.Y(), world.Z(), px, py);
-    out = QPoint(static_cast<int>(px), static_cast<int>(py));
+    // Back into the logical space every Qt caller lives in - see
+    // toDevicePixels()'s comment in the header.
+    out = fromDevicePixels(static_cast<int>(px), static_cast<int>(py));
     return true;
 }
 
@@ -558,14 +969,22 @@ gp_Pln OcctViewWidget::gridPlane() const
     return plane;
 }
 
-bool OcctViewWidget::pointOnSketchPlane(int px, int py, gp_Pnt& out) const
+bool OcctViewWidget::rayThroughPixel(int px, int py, gp_Lin& out) const
 {
     if (myView.IsNull()) return false;
 
+    const QPoint device = toDevicePixels(QPoint(px, py));
     Standard_Real x = 0.0, y = 0.0, z = 0.0, vx = 0.0, vy = 0.0, vz = 0.0;
-    myView->ConvertWithProj(px, py, x, y, z, vx, vy, vz);
+    myView->ConvertWithProj(device.x(), device.y(), x, y, z, vx, vy, vz);
+    out = gp_Lin(gp_Pnt(x, y, z), gp_Dir(vx, vy, vz));
+    return true;
+}
 
-    const gp_Lin ray(gp_Pnt(x, y, z), gp_Dir(vx, vy, vz));
+bool OcctViewWidget::pointOnSketchPlane(int px, int py, gp_Pnt& out) const
+{
+    gp_Lin ray;
+    if (!rayThroughPixel(px, py, ray)) return false;
+
     if (!SketchController::intersectRayWithPlane(ray, mySketchPlane, out)) return false;
     // A perspective camera has a horizon: an intersection with the sketch plane
     // can lie BEHIND the eye when the cursor is above it. Such a hit is not a
@@ -584,7 +1003,8 @@ bool OcctViewWidget::pickWorldPoint(int px, int py, gp_Pnt& out) const
     // Prefer a real hit on the model: MoveTo + detection gives the picked point
     // on the surface under the cursor.
     if (!myContext.IsNull() && !myView.IsNull()) {
-        myContext->MoveTo(px, py, myView, Standard_False);
+        const QPoint device = toDevicePixels(QPoint(px, py));
+        myContext->MoveTo(device.x(), device.y(), myView, Standard_False);
         if (myContext->HasDetected()) {
             const Handle(StdSelect_ViewerSelector3d) selector = myContext->MainSelector();
             if (selector->NbPicked() > 0) {
@@ -594,10 +1014,8 @@ bool OcctViewWidget::pickWorldPoint(int px, int py, gp_Pnt& out) const
         }
     }
     // Otherwise the ground plane, reusing the sketch unprojection.
-    if (myView.IsNull()) return false;
-    Standard_Real x, y, z, vx, vy, vz;
-    myView->ConvertWithProj(px, py, x, y, z, vx, vy, vz);
-    const gp_Lin ray(gp_Pnt(x, y, z), gp_Dir(vx, vy, vz));
+    gp_Lin ray;
+    if (!rayThroughPixel(px, py, ray)) return false;
     const gp_Pln ground(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
     if (!SketchController::intersectRayWithPlane(ray, ground, out)) return false;
     // A perspective camera has a horizon: an intersection with the ground can
@@ -645,7 +1063,12 @@ TopoDS_Edge OcctViewWidget::selectedEdge() const
 
 void OcctViewWidget::updateEdgeDimension()
 {
-    if (mySelectionMode != SelectionMode::Edge || myContext.IsNull() || myView.IsNull()) {
+    // Suppressed while the bevel arrow's value chip is up: two annotations on
+    // one edge is noise, and the chip is the more specific of the two. See
+    // setEdgeDimensionSuppressed(), which MainWindow drives off the same
+    // predicate that raises the arrow.
+    if (myEdgeDimensionSuppressed || mySelectionMode != SelectionMode::Edge ||
+        myContext.IsNull() || myView.IsNull()) {
         myDimension.clear();
         return;
     }
@@ -758,8 +1181,17 @@ void OcctViewWidget::applyCameraState()
     cam->SetCenter(at);
     cam->SetUp(up);
     myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane());
-    myView->Redraw();
+    // Slots FIRST, redraw second. A slot on cameraChanged() that changes the
+    // scene - PullArrow rebuilds its 3D arrow, which is sized in screen
+    // pixels and so has to be rebuilt whenever the camera moves - was
+    // otherwise both one frame stale and forced to call UpdateCurrentViewer()
+    // itself, so every orbit step cost two vsync-bound redraws instead of
+    // one. myApplyingCamera is how showPullArrow() knows the redraw below is
+    // coming; nothing else reads it.
+    myApplyingCamera = true;
     emit cameraChanged();
+    myApplyingCamera = false;
+    myView->Redraw();
 }
 
 void OcctViewWidget::fitAll()
@@ -901,6 +1333,55 @@ void OcctViewWidget::setViewRight()
     animateTo(s);
 }
 
+void OcctViewWidget::applyTheme()
+{
+    if (myView.IsNull() || myContext.IsNull()) return;
+
+    const QColor bg = Theme::viewport();
+    myView->SetBackgroundColor(Quantity_Color(bg.redF(), bg.greenF(), bg.blueF(),
+                                              Quantity_TOC_sRGB));
+
+    // OCCT's default highlight barely reads against a shaded body. Make hover
+    // and selection unmistakable - not being able to tell what is selected was
+    // the single most confusing thing about the app.
+    const Quantity_Color hoverColour = toOcctColor(Theme::highlightHover());
+    const Quantity_Color pickedColour = toOcctColor(Theme::highlightSelected());
+
+    const Handle(Prs3d_Drawer) hover = myContext->HighlightStyle(Prs3d_TypeOfHighlight_Dynamic);
+    hover->SetColor(hoverColour);
+    hover->SetDisplayMode(AIS_Shaded);
+    hover->SetTransparency(0.0f);
+
+    const Handle(Prs3d_Drawer) picked = myContext->HighlightStyle(Prs3d_TypeOfHighlight_Selected);
+    picked->SetColor(pickedColour);
+    picked->SetDisplayMode(AIS_Shaded);
+    picked->SetTransparency(0.0f);
+
+    // Sub-shape (face-mode) highlighting uses its own styles.
+    myContext->HighlightStyle(Prs3d_TypeOfHighlight_LocalDynamic)->SetColor(hoverColour);
+    myContext->HighlightStyle(Prs3d_TypeOfHighlight_LocalSelected)->SetColor(pickedColour);
+
+    // The grid's colours are baked into its vertices, so a repaint is not
+    // enough - it has to be built again. invalidate() only drops the cache;
+    // the update() below is what actually rebuilds it, exactly once. During
+    // initializeViewer() this runs before attach(), where update() is a no-op
+    // and the attach that follows does the first real build.
+    myGridRenderer.invalidate();
+    myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane());
+
+    // The same problem one presentation over: both drag arrows bake
+    // Theme::accent() into the AIS object at build time and their show()
+    // early-outs on an unchanged pose, so a live arrow kept the old accent.
+    // Both are no-ops when nothing is showing. The edge-length annotation
+    // needs no call here - MainWindow already drives refreshDimension() from
+    // appStateChanged, which onThemeChanged() ends by emitting.
+    myPullArrow.reapplyTheme();
+    myBevelArrow.reapplyTheme();
+
+    myContext->UpdateCurrentViewer();
+    update();
+}
+
 void OcctViewWidget::setWireframe(bool wireframe)
 {
     if (myWireframe == wireframe) return;
@@ -931,8 +1412,67 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
     // no cursor-anchored re-pivoting), MMB pans.
     if (event->button() == Qt::RightButton) {
         myOrbiting = true;
-    } else if (event->button() == Qt::MiddleButton) {
+        return;
+    }
+    if (event->button() == Qt::MiddleButton) {
         myPanningDrag = true;
+        return;
+    }
+
+    // The pull arrow owns LEFT drags that start on it, and nothing else -
+    // RMB orbit and MMB pan pass straight through above, so grabbing the
+    // arrow never costs the user the camera.
+    if (event->button() == Qt::LeftButton && !mySketchMode && arrowHit(myPullArrow, myLastPos)) {
+        // The press CLAIMS the gesture whether or not the drag maths can
+        // measure it yet. It used to claim it only when
+        // axisParameterForRay() resolved - so with the arrow near edge-on to
+        // the camera (looking straight down it, which is exactly when a user
+        // reaches for a top face from above) the press did nothing, the
+        // release fell through to an ordinary pick, and the face the user had
+        // just grabbed was silently deselected and its arrow dismissed. A
+        // grab has to be a grab; an unmeasurable angle is a reason to
+        // contribute nothing, not a reason to hand the gesture back.
+        beginAxisDrag(myPullDrag, myPullArrow.axis(), myLastPos);
+        return;
+    }
+
+    // The bevel arrow, on exactly the same terms - including claiming the
+    // gesture at an angle the maths refuses. The two arrows are never up at
+    // once (face mode against edge mode), so the order of these two blocks is
+    // not load-bearing.
+    if (event->button() == Qt::LeftButton && !mySketchMode && arrowHit(myBevelArrow, myLastPos)) {
+        beginAxisDrag(myBevelDrag, myBevelArrow.axis(), myLastPos);
+        return;
+    }
+
+    // The transform gizmo owns LEFT drags that start on one of its parts, and
+    // only those. RMB orbit and MMB pan returned above; a Shift-click is the
+    // "add this body to the selection" gesture and must reach the picker even
+    // when it lands on an arm of the gizmo standing on the first body.
+    const bool additive = (event->modifiers() & Qt::ShiftModifier) != 0;
+    if (event->button() == Qt::LeftButton && !mySketchMode && !additive &&
+        !myManipulator.IsNull() && !myContext.IsNull() && !myView.IsNull()) {
+        // Detection is what arms a mode (SetModeActivationOnDetection), so the
+        // press asks for it at its own pixel rather than trusting whatever the
+        // last hover happened to leave behind.
+        const QPoint device = toDevicePixels(myLastPos);
+        myContext->MoveTo(device.x(), device.y(), myView, Standard_False);
+        if (detectedIsManipulator()) {
+            // The press CLAIMS the gesture whether or not a mode armed - the
+            // pull arrow's lesson one gizmo over. If it fell through, the
+            // release would run an ordinary pick, select a manipulator part,
+            // and drop the body selection that raised the gizmo in the first
+            // place: the thing the user just grabbed would deselect itself.
+            myGizmoDragActive = true;
+            myGizmoDelta = gp_Trsf();
+            myGizmoStartPosition = myManipulator->Position();
+            if (myManipulator->HasActiveMode())
+                myManipulator->StartTransform(device.x(), device.y(), myView);
+            return;
+        }
+        // Nothing in OCCT disarms a mode when the cursor leaves the part that
+        // armed it, so a press that missed says so explicitly.
+        myManipulator->DeactivateCurrentMode();
     }
 }
 
@@ -940,6 +1480,33 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
 {
     if (event->button() == Qt::RightButton)  myOrbiting = false;
     if (event->button() == Qt::MiddleButton) myPanningDrag = false;
+
+    // The end of a pull. This widget picks NOTHING on this release: the press
+    // that started the drag was aimed at the arrow, and re-picking here would
+    // replace the face selection that raised the arrow in the first place -
+    // the same class of bug WA_NoMousePropagation closes for the Qt overlays,
+    // one layer down, where the culprit is this widget's own handler rather
+    // than a propagating child event.
+    if (myPullDrag.active && event->button() == Qt::LeftButton) {
+        myPullDrag.active = false;
+        emit pullReleased(myPullDrag.moved);
+        return;
+    }
+
+    // The end of a bevel drag, swallowed for exactly the same reason: the
+    // press was aimed at the arrow, and re-picking here would replace the edge
+    // selection that raised it.
+    if (myBevelDrag.active && event->button() == Qt::LeftButton) {
+        myBevelDrag.active = false;
+        emit bevelReleased(myBevelDrag.moved);
+        return;
+    }
+
+    // The end of a gizmo drag, swallowed for exactly the same reason.
+    if (myGizmoDragActive && event->button() == Qt::LeftButton) {
+        endGizmoDrag();
+        return;
+    }
 
     if (event->button() != Qt::LeftButton || myContext.IsNull()) return;
 
@@ -952,9 +1519,48 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
     }
 
     const bool additive = (event->modifiers() & Qt::ShiftModifier) != 0;
-    myContext->MoveTo(pos.x(), pos.y(), myView, Standard_False);
-    myContext->SelectDetected(additive ? AIS_SelectionScheme_XOR
-                                       : AIS_SelectionScheme_Replace);
+    // A Shift-click means "add this body to the selection", and the gizmo
+    // standing on the FIRST body must not be what the pick lands on.
+    // AIS_ManipulatorOwner carries a higher selection priority than a shape's
+    // owner, so an arm or a ring crossing the second body wins the pick
+    // outright and the click selects nothing at all - which is how a 100%
+    // display found this and a 150% one did not: at the smaller scale the
+    // second body sat under a ring, at the larger it did not.
+    //
+    // Deactivate(), not a detach: the pick only needs the manipulator's owners
+    // out of the CANDIDATES, and that is exactly what deactivating its modes
+    // does. Destroying and re-attaching it would do the same by demolition -
+    // an Attach and four EnableMode calls and two viewer updates on every
+    // additive click, even one nowhere near an arm - and would have to be put
+    // back indirectly, by relying on the selectionChanged() below to reach
+    // MainWindow's predicate. This restores itself, locally and
+    // unconditionally, a few lines down.
+    const bool hideGizmoFromPick = additive && !myManipulator.IsNull();
+    if (hideGizmoFromPick) myContext->Deactivate(myManipulator);
+
+    const QPoint device = toDevicePixels(pos);
+    myContext->MoveTo(device.x(), device.y(), myView, Standard_False);
+    // A click that landed on the gizmo but never became a drag - a press the
+    // gizmo declined, or a cursor that wandered onto it between press and
+    // release - must not select a manipulator part: SelectDetected would
+    // replace the body selection with an owner that belongs to no document,
+    // and the gizmo would erase itself. It cannot be detected at all on the
+    // additive path above, which is the point of that branch.
+    const bool onGizmo = detectedIsManipulator();
+    if (!onGizmo) {
+        myContext->SelectDetected(additive ? AIS_SelectionScheme_XOR
+                                           : AIS_SelectionScheme_Replace);
+    }
+
+    // Straight back into the picker, before anything can return. Unconditional
+    // on purpose: a restore that some path can skip is a gizmo that silently
+    // stops being grabbable.
+    if (hideGizmoFromPick) activateManipulatorModes();
+
+    if (onGizmo) {
+        myManipulator->DeactivateCurrentMode();
+        return;
+    }
     // The selection just changed, and in edge mode the dimension follows it as
     // well as the hover - selecting a second edge has to stop the annotation
     // claiming to measure the one before it.
@@ -969,7 +1575,33 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
 
     const QPoint pos = event->position().toPoint();
 
-    if (myOrbiting) {
+    if (myGizmoDragActive) {
+        // AIS_Manipulator does the drag maths. ObjectTransformation() answers
+        // "given this cursor position, what transform does the armed part
+        // mean" WITHOUT applying it, and returns false for a position it
+        // cannot resolve - which is why it is used in place of the
+        // Transform(x, y, view) convenience, whose return value is an identity
+        // transform in exactly that case and would clobber the accumulated
+        // delta with nothing.
+        //
+        // The transform it hands back is measured from the ORIGINAL press, not
+        // from the previous move, so the last one is the whole gesture.
+        if (!myManipulator.IsNull() && myManipulator->HasActiveTransformation()) {
+            const QPoint device = toDevicePixels(pos);
+            gp_Trsf trsf;
+            if (myManipulator->ObjectTransformation(device.x(), device.y(), myView, trsf)) {
+                myManipulator->Transform(trsf);
+                myGizmoDelta = trsf;
+                myView->Redraw();
+            }
+        }
+    } else if (myPullDrag.active) {
+        if (advanceAxisDrag(myPullDrag, myPullArrow.axis(), pos))
+            emit pullDragged(myPullDrag.value);
+    } else if (myBevelDrag.active) {
+        if (advanceAxisDrag(myBevelDrag, myBevelArrow.axis(), pos))
+            emit bevelDragged(myBevelDrag.value);
+    } else if (myOrbiting) {
         const QPoint delta = pos - myLastPos;
         // Dragging right swings the scene right: azimuth decreases; dragging up
         // raises the eye. 0.4 deg/px and 0.3 deg/px feel close to Fusion.
@@ -992,7 +1624,15 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
     } else if (!myContext.IsNull()) {
         // Hover highlight. Suppressed while sketching so the in-progress wire
         // does not fight the highlighter for attention.
-        myContext->MoveTo(pos.x(), pos.y(), myView, Standard_True);
+        const QPoint device = toDevicePixels(pos);
+        myContext->MoveTo(device.x(), device.y(), myView, Standard_True);
+        // The manipulator arms a manipulation mode when one of its parts is
+        // DETECTED, and OCCT disarms it for nobody - so a hover that once
+        // brushed an arrow would leave every later press anywhere in the
+        // viewport claiming a gizmo drag. Answered here, at the detection that
+        // would otherwise have armed it, rather than guessed at later.
+        if (!myManipulator.IsNull() && !detectedIsManipulator())
+            myManipulator->DeactivateCurrentMode();
         updateEdgeDimension();
     }
 
@@ -1023,8 +1663,15 @@ void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
     if (event->button() != Qt::LeftButton || mySketchMode || myContext.IsNull()) return;
 
     const QPoint pos = event->position().toPoint();
-    myContext->MoveTo(pos.x(), pos.y(), myView, Standard_False);
+    // A second click on either arrow is another drag, not a request to frame
+    // the body or lock the face underneath it.
+    if (arrowHit(myPullArrow, pos) || arrowHit(myBevelArrow, pos)) return;
+    const QPoint device = toDevicePixels(pos);
+    myContext->MoveTo(device.x(), device.y(), myView, Standard_False);
     if (!myContext->HasDetected()) return;
+    // A second click on a gizmo handle is another grab, not a request to frame
+    // the body underneath it - the same rule the pull arrow keeps above.
+    if (detectedIsManipulator()) return;
 
     // In face mode a double-click means "sketch on this" - the second route
     // to Lock to Face, alongside the action. Framing the body instead would

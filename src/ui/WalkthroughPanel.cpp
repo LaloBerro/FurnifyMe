@@ -98,7 +98,13 @@ WalkthroughPanel::WalkthroughPanel(MainWindow* window, QWidget* parent)
     , myWindow(window)
 {
     setAttribute(Qt::WA_NoSystemBackground);
-    setFixedSize(sizeHint());
+    // Through Theme::wholeDevicePixels() - see Theme.h. setFixedSize() is
+    // why this cannot be left to ViewportOverlay: a fixed-size widget IGNORES
+    // resize() silently, so the overlay's rounding is a no-op here and this
+    // card measured 382.5 device pixels wide at 150% scaling, with the half
+    // row Qt flushes but the widget's own logical clip cannot reach coming
+    // back black over the GL surface.
+    setFixedSize(Theme::wholeDevicePixels(sizeHint()));
 
     // The panel sits directly over the viewport it is teaching someone to
     // click and drag in. Transparent to mouse events for its whole subtree
@@ -124,7 +130,19 @@ WalkthroughPanel::WalkthroughPanel(MainWindow* window, QWidget* parent)
     syncSkipGeometry();
 
     connect(myWindow, &MainWindow::appStateChanged, this, &WalkthroughPanel::refresh);
+    connect(Theme::notifier(), &Theme::Notifier::changed, this, &WalkthroughPanel::applyTheme);
     refresh();
+}
+
+void WalkthroughPanel::applyTheme()
+{
+    // Same call the constructor makes, for the same reason - see the header.
+    // The skip pill is a sibling glued to skipRect(), so it has to be moved
+    // by hand after the card's own size changes; resizeEvent() would do it
+    // for a size change, but not for one setFixedSize() rejects as equal.
+    setFixedSize(Theme::wholeDevicePixels(sizeHint()));
+    syncSkipGeometry();
+    update();
 }
 
 WalkthroughPanel::~WalkthroughPanel()

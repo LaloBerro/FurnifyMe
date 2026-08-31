@@ -11,9 +11,10 @@ library target `furnify_geometry`.
 
 This file distills the project brief (`CAD_APP_BRIEF.md`, supplied at init; ask the user
 for it if you need the verbatim original). Milestone 1 scope is exactly: **sketch → extrude → boolean**,
-plus STEP export. Fillets, chamfers, push/pull on faces, history/parametric tree,
-constraint solver, 2D drawings, assemblies, materials, and any file format beyond STEP are
-out of scope until Milestone 1 runs clean on both platforms.
+plus STEP export. **Milestone 2 (direct modeling) is merged**: push/pull on faces,
+fillets, chamfers, and a transform gizmo now exist — see "Direct modeling" below. Still out
+of scope: history/parametric tree, constraint solver, 2D drawings, assemblies, materials,
+and any file format beyond STEP.
 
 ### Stack decisions — settled, do not re-litigate
 
@@ -204,6 +205,9 @@ Source files under `src/`, plus `tests/`:
 | `ui/Toast.{h,cpp}` | one non-blocking message at a time, with Undo where it applies |
 | `ui/ExtrudePreview.{h,cpp}` | height entry with a live preview built by the commit's own path |
 | `ui/DimensionRenderer.{h,cpp}` | CAD length annotation; one renderer for the sketch and edges |
+| `ui/PullArrow.{h,cpp}` | face pull: 3D arrow + value chip, preview by the commit's own call |
+| `ui/BevelArrow.{h,cpp}` | edge drag: inward fillets, outward chamfers, same contract |
+| `ui/AppearancePanel.{h,cpp}` | every Theme token editable live; debounced persistence |
 | `ui/AppBar.{h,cpp}` | the menu strip: wordmark, real `QMenuBar`, view controls |
 
 ### The vocabulary — enforced by test
@@ -219,8 +223,23 @@ tooltip contains a banned word, so this table is executable, not aspirational.
 | Combining two bodies | Union | fuse, merge, join, add |
 | Removing one body from another | Subtract | cut, difference, boolean cut |
 | Keeping the shared volume | Intersect | common, overlap, boolean common |
-| Turning a face into a body | Extrude | pull, push, prism |
+| Turning a closed outline into a body | Extrude | prism, raise-up |
+| Moving a face of an existing body | Pull, `Pull distance` | push/pull, offset, drag-face, extrude |
 | The 3D area | viewport | scene, canvas, view |
+| Rounding an edge | Fillet, `R 20 mm` | bevel, round-over, round |
+| Flattening an edge | Chamfer, `C 20 mm` | bevel, break, flatten |
+| Repositioning a body | Move / Rotate / Scale | transform, translate |
+| The colours-and-fonts panel | Appearance | theme, settings, preferences |
+
+Extrude and Pull are two rows, not one, and the Extrude row no longer bans "pull":
+Milestone 2 made face pull an operation in its own right, so "pull" became a word
+this app owns rather than one it avoids. The two must not borrow each other's verb
+— Extrude raises a **closed outline** that is not yet a body, Pull moves a **face of
+a body that already exists** — which is why `Extrude`'s tooltip says "Raise the face
+into a body" and only the pull arrow and its refusals say Pull. Fillet and Chamfer
+own "round" and "flatten" the same way: the two operations may be *described* as
+rounding and flattening in prose, but no painted string names them that way, because
+a user who reads "Body 03 rounded" has no word to look for in the interface.
 
 `ModelingOps::BooleanKind::Fuse` and `::Cut` keep their kernel-facing names — the
 user never sees them, and renaming them would churn the geometry library and its
@@ -462,6 +481,52 @@ widget painted over `OcctViewWidget`'s on-screen GL surface — it crashes; fade
 animation on *natural completion* too, so a retained raw pointer dangles; one long-lived
 animation at `KeepWhenStopped` removes the question rather than detecting it.
 
+### Direct modeling
+
+Milestone 2's rule: geometry is edited by grabbing it, and the kernel refuses before the
+UI can lie. Four operations in `ModelingOps`, all Qt-free, all headless-tested, all
+returning `BooleanResult` where **`ok == false` always carries a null shape** (documented
+on the type, pinned by tests): `pullFace` (outward-normal prism, fused or cut; refuses a
+face that is not on the body — without that guard a mis-wired pick returned two
+disconnected solids as success), `filletEdge` / `chamferEdge` (OCCT throws are caught at
+the operation boundary; fillets legitimately fail on hard geometry and that refusal is a
+Failure toast, never a success), and `transformShape` (uniform scale only — `gp_Trsf`
+cannot express per-axis, and `GTransform` would convert faces to NURBS).
+
+Three selection-driven gizmos, no new rail buttons. Their visibility predicates are one
+derived function each, driven from `appStateChanged`, and **provably disjoint**:
+`ExtrudePreview` requires a pending face; the pull arrow, transform manipulator and bevel
+arrow all require none, plus three different selection modes. At most one app-wide
+Enter/Escape claim can therefore exist at a time. Gizmo previews go through the
+**dedicated `setModelingPreview` channel** (selection mode −1), never the sketch/extrude
+`setPreview` slot — two features sharing that slot already cost one bug.
+
+- **Face pull**: drag or type; outward grows, inward carves; snap follows Snap to Grid.
+  The distance is the closest-point parameter of the mouse ray against the outward-normal
+  line (`CameraController::axisParameterForRay`, headless-tested; a near-parallel ray
+  keeps the last value, and a press whose angle refuses still claims the gesture).
+- **Transform**: `AIS_Manipulator`, translation/rotation/uniform scaling, snapped deltas
+  (10 mm / 15° / 5%) rebuilt about the body's own pivot — naive `TranslationPart()`
+  snapping displaces the pivot. Scale bakes are clamped to [0.05, 20] at the UI; the
+  kernel accepts more. During an additive (Shift) pick the manipulator is `Deactivate`d
+  around the `MoveTo`/`SelectDetected` pair, or `AIS_ManipulatorOwner` outranks the
+  shape's owner and the second body cannot be picked.
+- **Bevels**: the drag axis is the bisector of the adjacent faces' outward normals
+  (`ModelingOps::bevelAxis`, 12-edge headless oracle); against the bisector = Fillet,
+  along it = Chamfer. On a concave edge the mapping is unchanged but the fillet bulges
+  toward the notch — correct CAD behaviour with an inverted-looking gesture, documented
+  rather than special-cased. Curved edges raise no arrow.
+
+**`Theme` is spec-backed** since the Appearance panel: every colour accessor and the four
+derived fonts (badge = base−2, label = base−1, body = base, title = base+3 pt) read
+`Theme::Spec`; `defaultSpec()` is Graphite byte-for-byte and all 21 defaults are pinned to
+hex in the suite. Edits apply live through one `themeChanged` broadcast — no widget may
+cache a colour across it — and persist **debounced** (400 ms, flushed on close), because a
+colour-wheel drag fires per mouse-move. The picker opens with `show()`, never `open()`:
+`QDialog::open()` forces window-modality regardless of `setModal(false)`, and nothing in
+this app blocks. The gizmo's axis hues and the OCCT body/preview materials are the
+remaining untokenised colours, by scope ruling.
+
 ### Dimensions, planes and units
 
 **Millimetres are the only unit anything stores.** The model, the kernel, `DocumentModel`,
@@ -615,6 +680,28 @@ whole toast during its 160 ms dismiss fade - permitted because it is transient a
 motion-token-driven rather than a resting translucent surface, and because gui_smoke runs
 with animations off, so the opacity/colour sweeps never actually see a blended pixel.
 
+**A floating card's logical size must cover whole device pixels**, through
+`Theme::wholeDevicePixels()` at its `setFixedSize`. Widget geometry is logical and the
+backing store is device-sized, so a card 93 logical rows tall at 150% scaling occupies
+139.5 device rows: Qt flushes 140 and the paint event's clip - logical too - stops the
+widget's own painter at 139. Nothing the widget paints can cross its own clip and the
+viewport cannot paint underneath a child, so `paintSurface()` cannot save it and the size
+is the only cure. The leftover row is the corner-nub failure one scale down, and it is
+exactly as black: the bevel chip's first magnified capture carried a 264-device-pixel
+`0,0,0` hairline along its bottom edge. Rounding to a multiple of four is whole at every
+quarter-step Windows scale, so it does not read `devicePixelRatioF()` - a size that is only
+right on the monitor it was written on is the same bug with a longer fuse.
+
+**A whole size only helps if the near edge is whole too**, so a card's POSITION goes through
+`Theme::snapToDevicePixels()`. `ViewportOverlay::relayout()` grows every anchored card and
+snaps the rail's stretched height; the two chips that follow a projected 3D point
+(`PullArrow`, `BevelArrow`) snap their own `move()`. That one reads the live ratio, unlike
+the size rule - a size is set once at construction where a live read goes stale, a position
+is recomputed on every camera move where it cannot, and reading it buys a 2-pixel step at
+150% instead of the 4 a ratio-blind rule must assume. Both halves were found by measurement,
+one card at a time: the rail's bottom edge carried a 113-device-pixel black line at 225%
+that no crop showed and no 1:1 render could.
+
 **Verify appearance with measured pixels, never by eyeballing a crop.** This phase's worst
 finding was a commit message claiming a magnified crop confirmed a 3px gap while the real
 gap was 12px - `QBoxLayout` silently ignores negative spacing, and no crop was ever checked
@@ -622,7 +709,13 @@ against a number. The suite now measures: gap rows counted between adjacent rail
 borders, corner pixels sampled for exact token colours at alpha 255, whole-perimeter
 sweeps with non-vacuity assertions (a sweep that runs zero iterations must fail, not
 pass). A probe guarded by a condition that can quietly skip is how five shadow checks
-went silent instead of red when the behaviour under them changed.
+went silent instead of red when the behaviour under them changed. The black-hairline sweep
+above is the same discipline one step further out: it measures the whole **composited**
+`PrintWindow` capture rather than one widget rendered on its own, because `renderExact()`
+draws a widget at 1:1 into an image of exactly its logical size, where the offending pixel
+cannot exist - and because mapping a widget's rect into a capture that includes Windows 11's
+invisible resize frame needs a scale *and* an offset, and a region a few pixels out reports
+clean exactly as loudly as a clean window does.
 
 ### CMake note
 
@@ -669,11 +762,33 @@ Iterate with `InitSelected()`/`MoreSelected()`/`NextSelected()`, pull topology v
 
 ## Pitfalls (read before debugging)
 
+- **Qt speaks logical pixels; OCCT speaks device pixels.** Qt reports mouse positions and
+  widget geometry in *logical* pixels, while the native window handed to OCCT is sized in
+  *device* pixels — so `AIS_InteractiveContext::MoveTo`, `V3d_View::Convert` and
+  `ConvertWithProj` all want device pixels. The two coincide at 100% display scaling and
+  diverge by exactly the scale factor at any other, which is why passing a `QMouseEvent`
+  position straight through worked for two milestones and then missed every pick by 1.5× on
+  a 150% display. `OcctViewWidget::toDevicePixels()`/`fromDevicePixels()` are the only two
+  places that conversion happens; everything outside them — every signal, accessor and test —
+  is logical, so a projected point can be clicked and a clicked point projected without
+  either side knowing the ratio exists. A projected-geometry test can pass right through
+  this bug (it round-trips in the wrong space), so `gui_smoke` pins it directly: the camera's
+  own target must project to the viewport's logical centre.
 - **Wayland breaks the native window handle.** `winId()` under Wayland gives OCCT something
   it cannot use. Force XCB: `qputenv("QT_QPA_PLATFORM", "xcb")` before constructing
   `QApplication`, or run with `QT_QPA_PLATFORM=xcb`. This costs an afternoon if unknown.
 - **`paintEngine()` must return `nullptr`** or Qt and OpenGL fight over the surface.
 - **Never `delete` an OCCT handle.** `Handle(Foo)` is refcounted; let it go out of scope.
+- **`AIS_InteractiveContext::DetectedInteractive()` dereferences a null on its own.** It is
+  an inline that returns `myLastPicked->Selectable()` with no check, and any `MoveTo` that
+  detects nothing sets `myLastPicked` to null. **Always guard it with `HasDetected()`**,
+  which is literally `!myLastPicked.IsNull()`. This is not hypothetical hardening: one
+  unguarded call in `detectedIsManipulator()` crashed the app in a single click — select a
+  body, which attaches the transform gizmo, then click empty viewport to deselect. A hover
+  over empty space did it too, through a different call site. It survived 850 green checks
+  because every one of them clicked something that was there; `gui_smoke` now hovers *and*
+  clicks a pixel derived to have nothing behind it with the gizmo up, and surviving to the
+  next check is the assertion.
 - **`Handle()` is a macro** that collides with some Windows headers. Include OCCT headers
   before `<windows.h>` where possible.
 - **Tessellate before display or STL export:** `BRepMesh_IncrementalMesh(shape, 0.1)`.

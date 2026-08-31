@@ -481,7 +481,14 @@ void ToastHost::fadeTo(double opacity, std::function<void()> onFinished)
 void ToastHost::reposition()
 {
     if (!myViewport || !myToast) return;
-    myToast->resize(myToast->sizeHint());
+    // Through Theme::wholeDevicePixels() - see Theme.h. This card's width is
+    // its message's measured width, which is as arbitrary a number as exists
+    // in this app, and its far edge landing between device rows leaves a row
+    // Qt flushes but the widget's own logical clip cannot reach: black over
+    // the GL surface. Measured, not theorised - the whole-window black-run
+    // sweep caught a 630-device-pixel 0,0,0 line along this card's bottom edge
+    // at 175% scaling, dead centre, after the rail's had already been fixed.
+    myToast->resize(Theme::wholeDevicePixels(myToast->sizeHint()));
     const int centred = (myViewport->width() - myToast->width()) / 2;
     const int limitX = std::max(0, myViewport->width() - myToast->width());
     int x = centred;
@@ -537,6 +544,18 @@ void ToastHost::reposition()
         if (next >= y) { x = centred; break; }   // no upward progress left
         y = next;
         x = centred;
+    }
+
+
+    // Whole DEVICE pixels, in the window's own coordinates - the position half
+    // of Theme's rule; the size half is at the resize above. Snapped last,
+    // after every avoidance clamp, and always downward, so it cannot push the
+    // card back over an obstacle the clamps just moved it off.
+    {
+        const QPoint origin = myViewport->mapTo(myViewport->window(), QPoint(0, 0));
+        const double dpr = myViewport->devicePixelRatioF();
+        x = Theme::snapToDevicePixels(x, origin.x(), dpr);
+        y = Theme::snapToDevicePixels(y, origin.y(), dpr);
     }
 
     myToast->move(x, y);

@@ -12,6 +12,26 @@
 // sketch points, that picking returns the right solids, that the document and
 // the viewport stay in agreement.
 //
+// FIRST, and deliberately so - the one file in this project that includes
+// windows.h at all. CLAUDE.md's rule is "OCCT headers before <windows.h>
+// where possible", because OCCT's Handle() is a macro that some Windows
+// headers trip over; here it is not possible, and the other order is the one
+// that works. Putting windows.h first means the macro does not exist yet
+// while the Windows headers are parsed, which sidesteps the clash entirely.
+// Something in the Qt/OCCT include chain otherwise pulls windows.h in with
+// GDI and USER excluded, so a later include is a silent no-op and
+// GetWindowRect/BITMAPINFO simply are not there. NOMINMAX keeps the min/max
+// macros out of std::min/std::max's way. Only printWindowCapture() needs any
+// of this.
+#ifdef _WIN32
+  #define NOMINMAX
+  #include <windows.h>
+  #ifndef PW_RENDERFULLCONTENT
+    #define PW_RENDERFULLCONTENT 0x00000002
+  #endif
+#endif
+
+#include "AppearancePanel.h"
 #include "CameraController.h"
 #include "DimensionRenderer.h"
 #include "DocumentModel.h"
@@ -24,9 +44,11 @@
 #include "Measure.h"
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
+#include "PullArrow.h"
 #include "SketchController.h"
 #include "AppBar.h"
 #include "AxisGizmo.h"
+#include "BevelArrow.h"
 #include "ShortcutSheet.h"
 #include "Theme.h"
 #include "Toast.h"
@@ -39,8 +61,11 @@
 #include <QAbstractButton>
 #include <QAction>
 #include <QApplication>
+#include <QColorDialog>
+#include <QComboBox>
 #include <QDialog>
 #include <QDir>
+#include <QSpinBox>
 #include <QDockWidget>
 #include <QElapsedTimer>
 #include <QEnterEvent>
@@ -61,23 +86,34 @@
 #include <QStatusBar>
 #include <QString>
 
+#include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepBndLib.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepGProp.hxx>
 #include <BRep_Tool.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
+#include <Bnd_Box.hxx>
 #include <ElSLib.hxx>
 #include <TopAbs_Orientation.hxx>
 #include <GProp_GProps.hxx>
 #include <TopAbs_ShapeEnum.hxx>
+#include <TopAbs_State.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Vertex.hxx>
+#include <gp_Ax1.hxx>
+#include <gp_Ax2.hxx>
+#include <gp_Dir.hxx>
 #include <gp_Pln.hxx>
+#include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
+#include <gp_XYZ.hxx>
+#include <GeomAbs_CurveType.hxx>
 #include <GeomAbs_SurfaceType.hxx>
 
 #include <algorithm>
@@ -88,8 +124,36 @@ namespace {
 
 int g_failures = 0;
 
+// Every check() EXECUTION this run, printed on the PASS line and asserted
+// against kCheckFloor at the end.
+//
+// A suite that counts only its failures cannot tell a green run from a run
+// that quietly stopped asking. Every `if (something) { check(...); }` in this
+// file - and there are dozens, each of them deliberate, because a probe whose
+// setup failed must not go on to dereference a null - is a place where a
+// changed behaviour silently takes its checks with it. That has happened here
+// before: five shadow checks went silent instead of red when the behaviour
+// under them changed. The individual fix is to pin each guard with a check of
+// its own; the systemic one is this counter, which notices a drop wherever it
+// happens and whether or not anybody remembered to pin it.
+int g_checks = 0;
+
+// The floor a full run must reach.
+//
+// HOW TO UPDATE IT: add your checks, run the suite at native scale, read the
+// "checks" figure off the PASS line, and put that number here. It is a FLOOR,
+// not an equality, so a probe that legitimately runs a variable number of
+// times (checkNoBlackLine over however many captures a run takes) cannot make
+// it brittle.
+//
+// Never lower it to make a run pass. A count that has gone DOWN means a guard
+// stopped letting its checks run, which is the one thing this constant exists
+// to catch; find the guard, not a smaller number.
+constexpr int kCheckFloor = 965;
+
 void check(bool condition, const QString& what)
 {
+    ++g_checks;
     std::printf("%-6s %s\n", condition ? "[ ok ]" : "[FAIL]", qPrintable(what));
     if (!condition) ++g_failures;
 }
@@ -164,6 +228,24 @@ void clickAt(QWidget* target, const QPointF& pos,
     QCoreApplication::sendEvent(target, &release);
 
     settle(80);
+}
+
+// A press at one point and a release at ANOTHER, with no move event between
+// them. Deliberately not a drag: it isolates what a handler does with the
+// release POSITION from what it does with the movement, which is the only way
+// to tell a viewport that swallows its own release-pick from one that
+// re-picks and happens to land on the same thing. dragButton() cannot answer
+// that question, because a drag that moves also commits.
+void pressThenReleaseAt(QWidget* target, const QPointF& press, const QPointF& release,
+                        Qt::MouseButton button = Qt::LeftButton)
+{
+    QMouseEvent down(QEvent::MouseButtonPress, press, target->mapToGlobal(press),
+                     button, button, Qt::NoModifier);
+    QCoreApplication::sendEvent(target, &down);
+    QMouseEvent up(QEvent::MouseButtonRelease, release, target->mapToGlobal(release),
+                   button, Qt::NoButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(target, &up);
+    settle(120);
 }
 
 // A hover move with no button down - the live dimension and the hover
@@ -271,10 +353,14 @@ void sketchQuad(MainWindow& window, double x0, double y0, double x1, double y1)
 // literal list would be a vocabulary that drifts from itself.
 QStringList bannedWords()
 {
+    // "bevel" joined the list in Milestone 2: it is the CODE's word for the
+    // pair of operations (BevelArrow, bevelAxis) and it must never reach the
+    // user, who is offered a Fillet that rounds an edge or a Chamfer that
+    // flattens one - two operations with two names, not one vague one.
     return {QStringLiteral("Fuse"),  QStringLiteral("Solid"),
             QStringLiteral("OCCT"),  QStringLiteral("mm3"),
             QStringLiteral("(s)"),   QStringLiteral("Merge"),
-            QStringLiteral("Join")};
+            QStringLiteral("Join"),  QStringLiteral("bevel")};
 }
 
 bool buildBody(MainWindow& window, double x0, double y0, double x1, double y1, double height)
@@ -307,6 +393,151 @@ QImage renderExact(QWidget* widget)
     QPainter painter(&image);
     widget->render(&painter);
     return image;
+}
+
+// The same render, at a FRACTIONAL device-pixel ratio, onto a sentinel so an
+// unpainted pixel has a name.
+//
+// renderExact() above is deliberately 1:1, which is what makes its pixel
+// coordinates environment-independent - and which also makes it structurally
+// blind to one whole class of defect. At 1:1 a widget's logical rect and its
+// backing store are the same rectangle, so a pixel outside the logical rect
+// cannot exist. At 150% - what this machine actually runs - a card 93 logical
+// rows tall needs 139.5 device rows, Qt allocates 140, and QPainter's logical
+// fill reaches 139 of them. Over OCCT's GL surface the leftover row is not
+// transparent but whatever the driver left, and it measured as an exact
+// 0,0,0 line the full width of the round/flatten chip in a magnified
+// PrintWindow capture. Ceil, not round: the store is never SHORTER than the
+// logical rect, and a probe that cut the row off would be measuring nothing.
+// The longest horizontal run of PURE BLACK inside a PrintWindow capture,
+// ignoring `inset` pixels of frame on every side. Writes where it starts.
+//
+// Nothing this app paints is 0,0,0 - the darkest token is chrome() at
+// #1b1b1d, and the viewport clears to viewport() - so a black run across the
+// composited window is a run of pixels NOTHING painted: a widget's backing
+// store where its own painter never reached, with OCCT's on-screen GL surface
+// unable to show through a Qt child sitting on top of it. That is the exact
+// failure the floating-surface family exists to prevent, and CLAUDE.md has
+// already paid for it twice (the drawer's corner nubs, the rail's black band).
+//
+// Measured over the whole window rather than one card's footprint, which is
+// both stronger and more honest: mapping a widget's logical rect into a
+// PrintWindow capture needs a scale AND an offset, since Windows 11 includes
+// the invisible resize frame in what it hands back, and a probe whose region
+// is a few pixels out reports zero exactly as loudly as a clean window does.
+// The inset drops that frame and the uncaptured strip along the bottom, both
+// of which are legitimately black and belong to no widget.
+//
+// renderExact() is structurally blind to this class of defect: it renders one
+// widget at 1:1 into an image of precisely that widget's logical size, where a
+// pixel outside the logical rect cannot exist.
+int longestBlackRun(const QImage& image, int inset, QPoint& startsAt)
+{
+    int best = 0;
+    for (int y = inset; y < image.height() - inset; ++y) {
+        int run = 0;
+        for (int x = inset; x < image.width() - inset; ++x) {
+            if (qGray(image.pixel(x, y)) == 0) {
+                ++run;
+                if (run > best) {
+                    best = run;
+                    startsAt = QPoint(x - run + 1, y);
+                }
+            } else {
+                run = 0;
+            }
+        }
+    }
+    return best;
+}
+
+// Every gizmo capture goes through this, not just the one that found the bug.
+// A class of defect covered at one call site is an instance, and the round/
+// flatten chip was only the first card whose logical size and position did not
+// land on whole device pixels - the same sweep run over the face-pull capture
+// is what says the rest of the family is clean rather than untested.
+void checkNoBlackLine(const QImage& shot, const QString& label)
+{
+    constexpr int kFrame = 24;     // Windows 11's invisible resize frame
+    constexpr int kAllowed = 24;   // longer than any antialiasing artefact
+    // Non-vacuity first: a null or tiny capture sweeps nothing and reports
+    // clean exactly as loudly as a clean window does.
+    check(!shot.isNull() && shot.width() > kFrame * 4 && shot.height() > kFrame * 4,
+          QStringLiteral("the %1 capture is a real window to sweep (%2x%3)")
+              .arg(label).arg(shot.width()).arg(shot.height()));
+    if (shot.isNull()) return;
+
+    QPoint at;
+    const int run = longestBlackRun(shot, kFrame, at);
+    check(run < kAllowed,
+          QStringLiteral("and no widget over the 3D area leaves an unpainted black line "
+                         "across the %1 capture (%2)")
+              .arg(label)
+              .arg(run < kAllowed
+                       ? QStringLiteral("longest run %1 px").arg(run)
+                       : QStringLiteral("%1 px starting at %2,%3")
+                             .arg(run).arg(at.x()).arg(at.y())));
+}
+
+// The ONE capture that shows the app as the user sees it: Qt's overlay
+// widgets composited over OCCT's on-screen GL surface. Neither half-measure
+// can do that alone - QWidget::grab() renders the widget tree and the
+// viewport paints nothing into it (paintEngine() is null, by design), while
+// V3d_View::Dump() renders the 3D scene and knows nothing about the Qt cards
+// floating on top. PW_RENDERFULLCONTENT asks DWM for the window's real
+// composited content, which is exactly both.
+//
+// In-process and CAPTURE ONLY: it reads the window this suite already owns
+// and injects nothing, so it does not break the no-OS-input rule the way
+// SetCursorPos/mouse_event did. Being in-process is also what makes it usable
+// at a precise moment - a mid-drag gizmo state cannot be caught by an
+// external screenshot tool racing a millisecond-long drag.
+//
+// Returns the captured image (null on failure) as well as writing it, so a
+// caller can crop or magnify the same pixels it just saved.
+QImage printWindowCapture(QWidget* widget, const QString& path)
+{
+#ifdef _WIN32
+    HWND hwnd = reinterpret_cast<HWND>(widget->window()->winId());
+    RECT rect{};
+    if (!GetWindowRect(hwnd, &rect)) return QImage();
+    const int width = rect.right - rect.left;
+    const int height = rect.bottom - rect.top;
+    if (width <= 0 || height <= 0) return QImage();
+
+    HDC screen = GetDC(nullptr);
+    HDC memory = CreateCompatibleDC(screen);
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = width;
+    info.bmiHeader.biHeight = -height;   // top-down, to match QImage's row order
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP bitmap = CreateDIBSection(memory, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+    QImage shot;
+    if (bitmap && bits) {
+        HGDIOBJ previous = SelectObject(memory, bitmap);
+        if (PrintWindow(hwnd, memory, PW_RENDERFULLCONTENT)) {
+            shot = QImage(static_cast<const uchar*>(bits), width, height,
+                          QImage::Format_RGB32)
+                       .copy();   // copy: the DIB is about to be destroyed
+        }
+        SelectObject(memory, previous);
+    }
+    if (bitmap) DeleteObject(bitmap);
+    DeleteDC(memory);
+    ReleaseDC(nullptr, screen);
+    if (!shot.isNull()) shot.save(path);
+    return shot;
+#else
+    // No PrintWindow off Windows; the widget grab at least records the
+    // overlay geometry, which is what the layout checks stand on.
+    const QImage shot = widget->window()->grab().toImage();
+    shot.save(path);
+    return shot;
+#endif
 }
 
 // Straight-line RGB distance - used to say "this pixel reads as X, not Y"
@@ -365,11 +596,19 @@ void checkFamilySurface(QWidget* widget, const QPoint& edgePoint, const QRect& i
                         const QColor& edgeColour, const QString& label)
 {
     const QImage img = renderExact(widget);
-    if (!img.rect().contains(edgePoint)) {
-        check(false, QStringLiteral("%1: the edge probe point falls inside the "
-                                    "rendered image").arg(label));
-        return;
-    }
+    // Asserted unconditionally rather than as an `if (bad) check(false)`
+    // bail-out. In that shape it was the ONE check() in this file that never
+    // executed in a run - measured, by instrumenting check() with __LINE__ and
+    // differencing the executed set against every call site - so a caller
+    // handing it a probe point outside the widget would have reported nothing
+    // at all rather than one loud failure. Its message was inverted too: it
+    // fired when the point fell OUTSIDE and said "inside". As an assertion the
+    // sentence is right and it always runs.
+    const bool probeInside = img.rect().contains(edgePoint);
+    check(probeInside,
+          QStringLiteral("%1: the edge probe point falls inside the rendered image")
+              .arg(label));
+    if (!probeInside) return;
 
     // The card's own content - a title, a message, a list of rows - can sit
     // almost anywhere in its interior, so this searches the whole region for
@@ -445,6 +684,13 @@ void checkFamilySurface(QWidget* widget, const QPoint& edgePoint, const QRect& i
 
 int main(int argc, char* argv[])
 {
+    // Unbuffered, deliberately. This suite drives a real GL window through a
+    // kernel that can abort the process, and stdout to a pipe or a file is
+    // block-buffered - so the last few kilobytes of a run that dies are simply
+    // lost, and the visible tail points at a check that passed long before the
+    // fault. A crash whose location you cannot read costs far more than the
+    // syscall per line this gives up.
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
 #ifndef _WIN32
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) qputenv("QT_QPA_PLATFORM", "xcb");
 #endif
@@ -1690,6 +1936,49 @@ int main(int argc, char* argv[])
           "the extrusion is a single solid");
     view->saveSnapshot(outDir + "/g1-solid.png");
 
+    // --- the Qt/OCCT pixel boundary ------------------------------------------
+    // Pinned before the first pick that depends on it. Qt reports mouse
+    // positions and widget geometry in LOGICAL pixels; the native window
+    // OCCT was handed is sized in DEVICE pixels. They coincide at 100%
+    // display scaling and diverge by exactly the scale factor at any other -
+    // so every fraction-of-the-widget click in this file missed by that
+    // factor on a 150% display, while the projected-geometry clicks kept
+    // working because they round-tripped through the same wrong space.
+    // The camera's own target is by definition at the centre of the
+    // viewport, which makes it the one point whose projection is known
+    // without reference to any model.
+    {
+        QPoint targetAt;
+        const bool projected = view->projectToScreen(view->camera().state().target, targetAt);
+        check(projected && std::abs(targetAt.x() - view->width() / 2) <= 3 &&
+                  std::abs(targetAt.y() - view->height() / 2) <= 3,
+              QStringLiteral("projectToScreen answers in Qt's own logical pixels - the "
+                             "camera target lands at the viewport centre (%1,%2 vs %3,%4)")
+                  .arg(targetAt.x()).arg(targetAt.y())
+                  .arg(view->width() / 2).arg(view->height() / 2));
+
+        // The OTHER direction, pinned directly. The check above exercises
+        // only the device -> logical half; toDevicePixels() is what carries a
+        // click back the other way, and a round trip is the one thing that is
+        // false unless BOTH halves agree. A point known to be on the body,
+        // projected to a pixel and clicked at that pixel, must select that
+        // body.
+        GProp_GProps bodyProps;
+        BRepGProp::VolumeProperties(window.document().solids().front().shape, bodyProps);
+        QPoint bodyAt;
+        const int bodyId = window.document().solids().front().id;
+        check(view->projectToScreen(bodyProps.CentreOfMass(), bodyAt),
+              "a point inside the one body projects to a pixel");
+        view->clearSelection();
+        clickAt(view, QPointF(bodyAt));
+        settle(120);
+        check(view->selectedSolidIds().size() == 1 &&
+                  view->selectedSolidIds().front() == bodyId,
+              QStringLiteral("and clicking that pixel selects that body - the projection "
+                             "and the pick agree on one pixel space, in both directions"));
+        view->clearSelection();
+    }
+
     // --- picking -------------------------------------------------------------
     clickAt(view, QPointF(view->width() * 0.5, view->height() * 0.5));
     check(view->selectedSolidIds().size() == 1, "clicking the solid selects exactly one");
@@ -2274,26 +2563,52 @@ int main(int argc, char* argv[])
             const std::string expected =
                 Measure::formatLength(BRep_Tool::Pnt(v1).Distance(BRep_Tool::Pnt(v2)));
 
-            check(view->dimension().isShowing(), "selecting an edge shows its length");
-            check(view->dimension().labelText() == expected,
-                  QStringLiteral("which reads the true length (\"%1\" against \"%2\")")
-                      .arg(QString::fromStdString(view->dimension().labelText()),
-                           QString::fromStdString(expected)));
+            // Milestone 2 Task 4 changed what SELECTING a straight edge means:
+            // it now raises the round/flatten arrow, whose value chip labels
+            // that same edge. Two annotations on one edge is noise, so the
+            // length stands down for as long as the arrow is up. The Phase 4
+            // rules this used to check here - that the annotation follows the
+            // SELECTION as well as the hover, survives the cursor leaving, and
+            // never outlives the body it measures - are not dropped: they moved
+            // to the bevel block, onto a CURVED edge, where no arrow appears
+            // and the selection half is still the only thing holding the
+            // annotation up. That also covers the arrow's straight-only rule in
+            // the same breath.
+            check(!view->dimension().isShowing(),
+                  "selecting a straight edge stands its length annotation down - the "
+                  "gizmo's own value chip is the more specific of the two labels");
+            check(view->edgeDimensionSuppressed(),
+                  "and it is the window that stood it down, from the same predicate "
+                  "that raised the arrow");
+            check(view->hasBevelArrow(),
+                  "which is up on that edge, so the chip really is there to replace it");
 
-            // The defect: the cursor leaving a SELECTED edge used to clear it.
-            moveTo(view, QPointF(8, 8));
-            check(view->dimension().isShowing(),
-                  "and it survives the cursor moving off the edge, because the edge "
-                  "is still selected");
-            check(view->dimension().labelText() == expected,
-                  "still reading the same length rather than some other edge's");
-
+            // Non-vacuity for the three above: the annotation is not simply
+            // broken in edge mode. The pick left the cursor's DETECTION on that
+            // same edge, so the moment the arrow goes the hover half takes over
+            // and the length is back - with no mouse movement at all, which is
+            // what setEdgeDimensionSuppressed() re-deriving rather than merely
+            // clearing is for.
             view->clearSelection();
             settle(120);
+            check(!view->edgeDimensionSuppressed(),
+                  "letting go of the edge lets the annotation come back");
+            // Two assertions, two checks. Collapsed into one they report as a
+            // single failure, and "the annotation is gone" and "the annotation
+            // reads the wrong length" are different bugs with different causes.
+            check(view->dimension().isShowing(),
+                  "and the cursor still resting on it annotates it again immediately");
+            check(view->dimension().labelText() == expected,
+                  QStringLiteral("with the same length it had before (\"%1\" against "
+                                 "\"%2\")")
+                      .arg(QString::fromStdString(view->dimension().labelText()),
+                           QString::fromStdString(expected)));
+            moveTo(view, QPointF(8, 8));
             check(!view->dimension().isShowing(),
-                  "letting go of the edge is what clears it");
+                  "moving the cursor off it is then what clears it");
 
-            // The hover half, with nothing selected to fall back on.
+            // The hover half, with nothing selected to fall back on - unchanged
+            // by Task 4, because a hover raises no gizmo.
             moveTo(view, QPointF(screen));
             check(view->dimension().isShowing(), "hovering an edge shows its length");
             check(view->dimension().labelText() == expected,
@@ -2301,20 +2616,18 @@ int main(int argc, char* argv[])
             moveTo(view, QPointF(8, 8));
             check(!view->dimension().isShowing(), "and leaving it clears the dimension");
 
-            // An annotation must not outlive what it measures: Delete and Undo
-            // both go through removeSolid()/clearSolids(), which left it
-            // hanging in empty space until the next mouse move.
             clickAt(view, QPointF(screen));
             settle(100);
-            check(view->dimension().isShowing(), "the edge is annotated again");
+            check(view->hasBevelArrow(), "clicking it again raises the arrow again");
             check(view->selectedSolidIds().size() == 1,
                   "and selecting an edge selects the body it belongs to");
             const std::size_t bodiesBefore = window.document().count();
             trigger(window, QStringLiteral("Delete Selected"));
             settle(150);
             check(window.document().count() == bodiesBefore - 1, "deleting removes the body");
-            check(!view->dimension().isShowing(),
-                  "and its dimension goes with it rather than floating where it was");
+            check(!view->hasBevelArrow() && !view->dimension().isShowing(),
+                  "and the arrow and the annotation both go with it rather than "
+                  "floating where the body was");
 
             trigger(window, QStringLiteral("Undo"));
             settle(150);
@@ -2402,6 +2715,7 @@ int main(int argc, char* argv[])
         // the end-to-end path runs over the case the orientation fix exists
         // for rather than over the easy one. The deterministic coverage of
         // that fix is the box probe further down; this is belt and braces.
+        gp_Pnt pickedCentre;
         for (int pass = 0; pass < 2 && picked.IsNull(); ++pass) {
             const bool wantReversed = (pass == 0);
             for (const DocumentModel::Solid& solid : window.document().solids()) {
@@ -2468,8 +2782,18 @@ int main(int argc, char* argv[])
                     clickAt(view, QPointF(at));
                     settle(120);
                     const TopoDS_Face got = view->selectedFace();
-                    if (!isVerticalPlane(got)) continue;   // occluded, or the pick missed
+                    // The face this loop is REASONING about, not merely some
+                    // vertical face that happens to be selected. Everything
+                    // below - the outline corners, the plane, the outwardness
+                    // assertion, the lifted click - is derived from
+                    // `candidate`, so accepting a different face under
+                    // occlusion would silently measure one face's plane
+                    // against another face's geometry. The pull loop further
+                    // down has required IsSame from the start; this one
+                    // checked only the shape's kind.
+                    if (got.IsNull() || !got.IsSame(candidate)) continue;
                     picked = got;
+                    pickedCentre = props.CentreOfMass();
                     screen = at;
                     std::copy(corners, corners + 4, outlineCorners);
                     hoverAt = hoverCandidate;
@@ -2480,6 +2804,7 @@ int main(int argc, char* argv[])
         }
         check(!picked.IsNull(),
               "clicking a projected face centre selects a vertical flat face");
+
 
         // The host is the body that actually CONTAINS the selected face, not
         // whichever body the loop happened to be iterating when the click
@@ -2550,9 +2875,28 @@ int main(int argc, char* argv[])
 
                 // The part that makes this a feature rather than a label:
                 // a point clicked now lands ON the face's plane, not on Z=0.
+                //
+                // Clicked 20 mm UP the face rather than at its centre, and
+                // that matters. The locked plane is vertical, so +Z lies in
+                // it and the lifted point is on it by construction - but the
+                // ground plane and a vertical locked plane AGREE at Z = 0,
+                // and the candidate this probe finds is a side face of a
+                // 10 mm slab whose centre sits at Z = 5, which the 10 mm snap
+                // rounds straight back to zero. The assertion below would
+                // then be false however perfectly the feature worked. Lifting
+                // the click puts it somewhere the two planes cannot agree,
+                // which is the only place the claim can actually be tested.
+                const gp_Pnt liftedOnPlane = pickedCentre.Translated(gp_Vec(0.0, 0.0, 20.0));
+                QPoint liftedAt;
+                const bool haveLifted =
+                    view->projectToScreen(liftedOnPlane, liftedAt) &&
+                    view->rect().adjusted(8, 8, -8, -8).contains(liftedAt);
+                check(haveLifted,
+                      "a point 20 mm up the locked face projects inside the viewport, "
+                      "where the ground plane and the locked one cannot agree");
                 trigger(window, QStringLiteral("Start Sketch"));
                 settle(120);
-                clickAt(view, QPointF(screen));
+                clickAt(view, QPointF(haveLifted ? liftedAt : screen));
                 settle(150);
                 check(window.sketch().pointCount() == 1,
                       "clicking while locked places a point");
@@ -2563,7 +2907,9 @@ int main(int argc, char* argv[])
                                          "(%1 mm off it)")
                               .arg(facePlane.Distance(placed)));
                     check(std::fabs(placed.Z()) > 1.0e-6,
-                          "and not on the ground plane it would have used before");
+                          QStringLiteral("and not on the ground plane it would have used "
+                                         "before (Z = %1)")
+                              .arg(placed.Z()));
                 }
 
                 // The readout has to be the PLANE's own coordinates. On a face
@@ -2917,6 +3263,14 @@ int main(int argc, char* argv[])
         check(static_cast<int>(window.document().solids().size()) == before,
               "previewing creates no body");
 
+        // Pinned before it is used as a guard. SEVEN checks hang off this
+        // condition - five inside the block and the two after it, which only
+        // mean anything because the Enter at the end of the block was sent -
+        // and a preview that came up without a field would take all seven with
+        // it in silence.
+        check(preview != nullptr && preview->field() != nullptr,
+              "the preview carries its height field, so the seven checks that "
+              "depend on it cannot vanish quietly");
         if (preview && preview->field()) {
             preview->field()->setText(QStringLiteral("25"));
             settle(150);
@@ -3137,6 +3491,2398 @@ int main(int argc, char* argv[])
         }
         check(static_cast<int>(window.document().solids().size()) == before + 1,
               "the pending face left behind by Escape can still be extruded");
+    }
+
+    // --- pull a face: the headline direct-modeling gesture --------------------
+    // Select a face, get an arrow, drag it. Everything here is derived from
+    // projected geometry rather than a hardcoded pixel, and every distance is
+    // asserted as an exact volume delta (face area x distance) rather than
+    // "something changed" - a pull that moved the wrong way, or by the wrong
+    // amount, has to fail loudly.
+    {
+        const CameraState pullCameraBefore = view->camera().state();
+        // Snap decides the drag step, so it is set here rather than inherited
+        // from whatever an earlier block left it at.
+        QAction* snap = action(window, QStringLiteral("Snap to Grid"));
+        check(snap != nullptr, "there is a Snap to Grid action");
+        if (snap && !snap->isChecked()) { snap->trigger(); settle(120); }
+
+        // A fresh CONVEX body of our own: a prism grown on a planar face of a
+        // convex prism adds exactly area x distance and a carve removes
+        // exactly that, so the arithmetic below is an equality rather than an
+        // inequality. Pulling a face of one of the boolean results further up
+        // would not have that property.
+        const int bodiesBefore = static_cast<int>(window.document().count());
+        check(buildBody(window, 0.56, 0.30, 0.74, 0.46, 40.0),
+              "a fresh body to pull a face on");
+        check(static_cast<int>(window.document().count()) == bodiesBefore + 1,
+              "and it reached the document");
+        const int pullId = window.document().solids().empty()
+                               ? -1
+                               : window.document().solids().back().id;
+
+        view->fitAll();
+        settle(250);
+        trigger(window, QStringLiteral("Select Faces"));
+        settle(150);
+
+        // BRepAdaptor_Surface never applies TopAbs_Orientation, so a REVERSED
+        // face's plane normal points INTO the body - the Phase 4 lesson, and
+        // the one this whole feature's sign convention rests on.
+        auto outwardNormal = [](const TopoDS_Face& face) {
+            gp_Dir n = BRepAdaptor_Surface(face).Plane().Axis().Direction();
+            if (face.Orientation() == TopAbs_REVERSED) n.Reverse();
+            return n;
+        };
+        auto bodyVolume = [&window, pullId] {
+            return ModelingOps::volume(window.document().shapeOf(pullId));
+        };
+
+        TopoDS_Face target;
+        gp_Pnt targetCentre;
+        gp_Dir targetOutward;
+        double targetArea = 0.0;
+        QPoint centreAt;
+        // Pass 0 wants the top face specifically - it is the one guaranteed
+        // thick enough behind it for the inward carve below - and pass 1 will
+        // take any pickable planar face if the top one is occluded.
+        for (int pass = 0; pass < 2 && target.IsNull(); ++pass) {
+            for (TopExp_Explorer it(window.document().shapeOf(pullId), TopAbs_FACE);
+                 it.More(); it.Next()) {
+                const TopoDS_Face candidate = TopoDS::Face(it.Current());
+                if (BRepAdaptor_Surface(candidate).GetType() != GeomAbs_Plane) continue;
+                const gp_Dir outward = outwardNormal(candidate);
+                if (pass == 0 && outward.Z() < 0.9) continue;
+                const double facing =
+                    gp_Vec(outward).Dot(gp_Vec(view->camera().viewDirection()));
+                if (facing >= -0.2) continue;   // turned away from the camera
+                // Looking down the arrow makes the drag unmeasurable - the
+                // maths helper refuses that band outright - so a face nearly
+                // square-on to the eye is no use as a drag probe either.
+                if (facing < -0.97) continue;
+
+                GProp_GProps props;
+                BRepGProp::SurfaceProperties(candidate, props);
+                QPoint at;
+                if (!view->projectToScreen(props.CentreOfMass(), at)) continue;
+                if (!view->rect().adjusted(60, 60, -60, -60).contains(at)) continue;
+
+                clickAt(view, QPointF(at));
+                settle(150);
+                const TopoDS_Face got = view->selectedFace();
+                if (got.IsNull() || !got.IsSame(candidate)) continue;   // occluded, or missed
+                target = candidate;
+                targetCentre = props.CentreOfMass();
+                targetOutward = outward;
+                targetArea = props.Mass();
+                centreAt = at;
+                break;
+            }
+        }
+        check(!target.IsNull(),
+              "clicking a projected face centre selects a face of the new body");
+
+        PullArrow* arrow = window.findChild<PullArrow*>();
+        check(arrow != nullptr, "the window has a pull arrow");
+        check(arrow != nullptr && arrow->isVisible(),
+              "one flat face selected raises it");
+        check(view->hasPullArrow(),
+              "and the arrow itself is drawn in the 3D scene, not painted over it");
+        check(stateLabelText(window).contains(QStringLiteral("drag the arrow to pull")),
+              QStringLiteral("the state label teaches the gesture (\"%1\")")
+                  .arg(stateLabelText(window)));
+
+        // The value chip's field is a real, reachable control. childAt
+        // identity, not an attribute flag: asserting a flag passes against a
+        // control no user can click (CLAUDE.md's rule, learned twice).
+        check(arrow != nullptr && arrow->field() != nullptr,
+              "the pull arrow and its value field exist before the reachability probe");
+        if (arrow && arrow->field()) {
+            check(view->childAt(arrow->field()->geometry().center()) == arrow->field(),
+                  "a real click at the value field's centre finds the field itself");
+        }
+
+        // --- outward drag grows the body ---------------------------------
+        double volumeBefore = bodyVolume();
+        QPoint dragTo;
+        const bool haveOut =
+            !target.IsNull() &&
+            view->projectToScreen(targetCentre.Translated(gp_Vec(targetOutward) * 30.0),
+                                  dragTo) &&
+            view->rect().contains(dragTo);
+        check(haveOut, "a point 30 mm out along the normal projects into the viewport");
+        if (haveOut) {
+            dragButton(view, QPointF(centreAt), QPointF(dragTo), Qt::LeftButton);
+            settle(300);
+            const double grown = bodyVolume() - volumeBefore;
+            check(std::fabs(grown - targetArea * 30.0) < std::max(1.0, targetArea * 0.02),
+                  QStringLiteral("dragging the arrow out 30 mm grows the body by "
+                                 "exactly the face area x 30 (%1 vs %2)")
+                      .arg(grown).arg(targetArea * 30.0));
+
+            ToastHost* toasts = window.findChild<ToastHost*>();
+            check(toasts != nullptr && toasts->isShowing() && toasts->toast() != nullptr &&
+                      toasts->toast()->hasUndo(),
+                  "the pull is reported through a toast that offers Undo");
+
+            trigger(window, QStringLiteral("Undo"));
+            settle(250);
+            check(std::fabs(bodyVolume() - volumeBefore) < 1.0,
+                  "and Undo puts the body back");
+        }
+
+        // --- inward drag carves ------------------------------------------
+        clickAt(view, QPointF(centreAt));
+        settle(150);
+        check(!view->selectedFace().IsNull() && view->hasPullArrow(),
+              "the face selects again after the undo, and the arrow comes back");
+        volumeBefore = bodyVolume();
+        QPoint carveTo;
+        const bool haveIn =
+            !target.IsNull() &&
+            view->projectToScreen(targetCentre.Translated(gp_Vec(targetOutward) * -20.0),
+                                  carveTo) &&
+            view->rect().contains(carveTo);
+        check(haveIn, "a point 20 mm in along the normal projects into the viewport");
+        if (haveIn) {
+            dragButton(view, QPointF(centreAt), QPointF(carveTo), Qt::LeftButton);
+            settle(300);
+            const double carved = volumeBefore - bodyVolume();
+            check(std::fabs(carved - targetArea * 20.0) < std::max(1.0, targetArea * 0.02),
+                  QStringLiteral("dragging the arrow in 20 mm carves exactly the face "
+                                 "area x 20 out of it (%1 vs %2)")
+                      .arg(carved).arg(targetArea * 20.0));
+            trigger(window, QStringLiteral("Undo"));
+            settle(250);
+            check(std::fabs(bodyVolume() - volumeBefore) < 1.0,
+                  "and Undo puts that back too");
+        }
+
+        // The body is back to its built size here - both drags above were
+        // undone - and the two probes that follow both measure against it.
+        const double steadyVolumeBase = bodyVolume();
+
+        // --- the chip must be able to read its own writing -----------------
+        // A drag writes the field and the field is what previews and commits,
+        // so the text the chip writes has to survive Measure::parseLength()
+        // going back the other way. It did not past a thousand:
+        // formatLength() inserts a thousands separator and parseLength()'s
+        // grammar has no comma in it, so the chip wrote "1,410" and then
+        // refused to read it - the preview froze at the last good value and
+        // Enter committed nothing. Every other drag in this file is a few
+        // hundred millimetres and never crosses that boundary; this one is
+        // zoomed out until a few hundred pixels really is that far.
+        {
+            clickAt(view, QPointF(centreAt));
+            settle(150);
+            const CameraState nearCamera = view->camera().state();
+            CameraState farCamera = nearCamera;
+            farCamera.distance = 6000.0;
+            view->animateTo(farCamera);
+            settle(200);
+
+            QPoint farFrom, farTo;
+            const bool haveFar =
+                view->projectToScreen(targetCentre, farFrom) &&
+                view->projectToScreen(
+                    targetCentre.Translated(gp_Vec(targetOutward) * 1500.0), farTo) &&
+                view->rect().adjusted(10, 10, -10, -10).contains(farFrom) &&
+                view->rect().adjusted(10, 10, -10, -10).contains(farTo);
+            check(haveFar, "zoomed out, a 1,500 mm pull projects inside the viewport");
+
+            PullArrow* farArrow = window.findChild<PullArrow*>();
+            check(farArrow != nullptr && farArrow->field() != nullptr,
+                  "and the chip is up to be dragged");
+            if (haveFar && farArrow && farArrow->field()) {
+                // Press and move but do NOT release yet - the field has to be
+                // read while the drag is live.
+                const QPointF pressAt(farFrom);
+                QMouseEvent down(QEvent::MouseButtonPress, pressAt, view->mapToGlobal(pressAt),
+                                 Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QCoreApplication::sendEvent(view, &down);
+                for (int i = 1; i <= 8; ++i) {
+                    const QPointF p =
+                        pressAt + (QPointF(farTo) - pressAt) * (double(i) / 8.0);
+                    QMouseEvent move(QEvent::MouseMove, p, view->mapToGlobal(p),
+                                     Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+                    QCoreApplication::sendEvent(view, &move);
+                }
+                settle(200);
+
+                const QString text = farArrow->field()->text();
+                double readBack = 0.0;
+                const bool reads = Measure::parseLength(text.toStdString(), readBack);
+                check(!text.contains(QLatin1Char(',')),
+                      QStringLiteral("the chip writes a value with no thousands separator "
+                                     "(\"%1\")").arg(text));
+                check(reads && std::fabs(readBack - farArrow->distance()) < 1.0e-6,
+                      QStringLiteral("and Measure::parseLength reads it back as exactly the "
+                                     "distance the preview was built from (%1 vs %2)")
+                          .arg(readBack).arg(farArrow->distance()));
+                check(readBack > 1000.0,
+                      QStringLiteral("and that distance really is past the thousand this "
+                                     "probe exists for (%1 mm)").arg(readBack));
+                check(view->hasModelingPreview(),
+                      "the preview is live at that distance rather than frozen at the "
+                      "last value the chip could still read");
+
+                const QPointF releaseAt(farTo);
+                QMouseEvent up(QEvent::MouseButtonRelease, releaseAt,
+                               view->mapToGlobal(releaseAt), Qt::LeftButton, Qt::NoButton,
+                               Qt::NoModifier);
+                QCoreApplication::sendEvent(view, &up);
+                settle(300);
+                check(bodyVolume() > steadyVolumeBase * 1.5,
+                      "and releasing commits that big pull for real");
+                trigger(window, QStringLiteral("Undo"));
+                settle(250);
+                check(std::fabs(bodyVolume() - steadyVolumeBase) < 1.0,
+                      "which Undo puts back like any other");
+            }
+
+            view->animateTo(nearCamera);
+            settle(200);
+        }
+
+        // --- a typed carve the kernel refuses -----------------------------
+        clickAt(view, QPointF(centreAt));
+        settle(150);
+        arrow = window.findChild<PullArrow*>();
+        check(arrow != nullptr && arrow->isVisible(),
+              "the arrow is up again for the typed-value probe");
+        const double steadyVolume = bodyVolume();
+        ToastHost* toasts = window.findChild<ToastHost*>();
+        // Pinned before it guards anything. `field()` is a QPointer, and an
+        // `if (arrow && arrow->field())` with nothing asserting it deletes
+        // every check inside without a single red line - CLAUDE.md's
+        // vacuous-probe shape, the one that went silent five at a time in
+        // Phase 5. Both blocks below are `check(); if ()` for that reason.
+        check(arrow != nullptr && arrow->field() != nullptr,
+              "the arrow's value field exists, so the eleven checks that need it "
+              "cannot vanish quietly");
+        if (arrow && arrow->field()) {
+            arrow->field()->setText(QStringLiteral("-999"));
+            settle(250);
+            check(!arrow->hasPreview(),
+                  "a carve deeper than the body previews nothing");
+            check(!view->hasModelingPreview(),
+                  "and leaves the modeling preview channel empty");
+
+            sendKeyTo(&window, Qt::Key_Return);
+            settle(300);
+            check(std::fabs(bodyVolume() - steadyVolume) < 1.0e-6,
+                  "committing it leaves the body byte-for-byte untouched");
+            check(toasts != nullptr && toasts->isShowing() &&
+                      toasts->currentText().contains(QStringLiteral("can't be pulled")),
+                  QStringLiteral("and it is reported as a failure in cause-and-fix form "
+                                 "(\"%1\")")
+                      .arg(toasts ? toasts->currentText() : QString()));
+        }
+
+        // --- Escape clears the dedicated preview channel -------------------
+        check(arrow != nullptr && arrow->field() != nullptr,
+              "and it is still there for the preview-channel and capture checks");
+        if (arrow && arrow->field()) {
+            arrow->field()->setText(QStringLiteral("20"));
+            settle(250);
+            check(view->hasModelingPreview(),
+                  "a valid typed distance previews through the dedicated channel");
+            check(!view->hasPreview(),
+                  "and never through the sketch/extrude preview slot the two "
+                  "features already collided over once");
+            check(arrow->hasPreview(), "the arrow agrees that it has one");
+
+            // Step 5's evidence, taken at the one moment all three parts of
+            // the gesture are live: the 3D arrow, the value chip beside it,
+            // and the preview body the typed distance would build. A magnified
+            // crop of the same pixels goes beside it, framed on the arrow and
+            // its chip together - the anatomy the reference image is compared
+            // against.
+            settle(250);
+            const QImage shot =
+                printWindowCapture(&window, outDir + QStringLiteral("/pull-arrow.png"));
+            check(!shot.isNull(), "the mid-pull capture came back with pixels");
+            // The same whole-window sweep the round/flatten capture gets.
+            // This chip is 176x80 and lands on whole device pixels by luck
+            // rather than by rule until now, and its POSITION follows a
+            // projected 3D point - which is the half no fixed size can
+            // save. Covering the class, not the instance.
+            checkNoBlackLine(shot, QStringLiteral("face-pull"));
+            if (!shot.isNull()) {
+                // The chip and the arrow are both in the VIEWPORT's coordinate
+                // space (the chip is its child; projectToScreen answers in
+                // viewport pixels), so the union is translated into window
+                // coordinates once, at the end.
+                QPoint arrowAt;
+                QRect focus(arrow->geometry());
+                if (view->projectToScreen(targetCentre, arrowAt))
+                    focus = focus.united(QRect(arrowAt, QSize(1, 1)));
+                focus.adjust(-60, -60, 60, 60);
+                focus.translate(view->mapTo(&window, QPoint(0, 0)));
+                const double sx = double(shot.width()) / std::max(1, window.width());
+                const double sy = double(shot.height()) / std::max(1, window.height());
+                const QRect scaled(int(focus.left() * sx), int(focus.top() * sy),
+                                   int(focus.width() * sx), int(focus.height() * sy));
+                const QImage crop = shot.copy(scaled.intersected(shot.rect()));
+                if (!crop.isNull())
+                    crop.scaled(crop.width() * 3, crop.height() * 3, Qt::KeepAspectRatio,
+                                Qt::SmoothTransformation)
+                        .save(outDir + QStringLiteral("/pull-arrow-crop.png"));
+            }
+            // The 3D half on its own, straight from V3d_View::Dump - the arrow
+            // and the preview with no Qt chrome over them.
+            view->saveSnapshot(outDir + QStringLiteral("/pull-arrow-viewport.png"));
+
+            sendKeyTo(&window, Qt::Key_Escape);
+            settle(250);
+            check(!view->hasModelingPreview(), "Escape clears the modeling preview");
+            check(std::fabs(bodyVolume() - steadyVolume) < 1.0e-6,
+                  "and commits nothing on the way out");
+        }
+
+        // --- the arrow owns LMB only --------------------------------------
+        {
+            // Where the arrow is RIGHT NOW. The camera moves inside this
+            // block, so a `centreAt` captured before it goes stale - and a
+            // camera check that claims to start "on the arrow" while
+            // starting somewhere else is a check that has stopped meaning
+            // what it says.
+            auto arrowOnScreen = [&](QPoint& out) {
+                return view->projectToScreen(targetCentre, out);
+            };
+
+            // The release has to land somewhere a real pick would give a
+            // DIFFERENT answer, or the probe cannot tell a swallowed
+            // release-pick from one that re-picked the same face and looked
+            // identical. 400 mm out along the normal is well clear of the
+            // arrow (which is 52 px long) and of every body.
+            QPoint emptyAt;
+            const bool haveEmpty =
+                view->projectToScreen(targetCentre.Translated(gp_Vec(targetOutward) * 400.0),
+                                      emptyAt) &&
+                view->rect().adjusted(20, 20, -20, -20).contains(emptyAt) &&
+                (emptyAt - centreAt).manhattanLength() > 60;
+            check(haveEmpty,
+                  "a release point well clear of the arrow and of every body projects "
+                  "inside the viewport");
+
+            const double before = bodyVolume();
+            pressThenReleaseAt(view, QPointF(centreAt),
+                               QPointF(haveEmpty ? emptyAt : centreAt));
+            settle(150);
+            check(std::fabs(bodyVolume() - before) < 1.0e-6,
+                  "a press on the arrow released without a drag commits nothing");
+            check(!view->selectedFace().IsNull() && view->selectedFace().IsSame(target),
+                  "and the viewport swallows its own release-pick - the SAME face is "
+                  "still selected, though the release landed in empty space");
+            check(view->hasPullArrow(),
+                  "so the arrow that press grabbed is still on screen");
+
+            // Non-vacuity for the three checks above: that point really does
+            // deselect when an ordinary pick happens there. Without this the
+            // release check would pass just as well against a release point
+            // that happened to hit the same face again - which is exactly
+            // how it passed before, aimed at the face's own centre.
+            clickAt(view, QPointF(haveEmpty ? emptyAt : centreAt));
+            settle(150);
+            check(!haveEmpty || (view->selectedFace().IsNull() && !view->hasPullArrow()),
+                  "a plain click at that same empty point DOES clear the selection and "
+                  "retire the arrow - so the swallowed release was a real difference");
+
+            clickAt(view, QPointF(centreAt));
+            settle(150);
+            check(!view->selectedFace().IsNull() && view->hasPullArrow(),
+                  "the face selects again for the camera checks");
+
+            QPoint at = centreAt;
+            const double azimuth = view->camera().state().azimuthDeg;
+            if (arrowOnScreen(at))
+                dragButton(view, QPointF(at), QPointF(at + QPoint(70, 0)), Qt::RightButton);
+            check(std::fabs(view->camera().state().azimuthDeg - azimuth) > 5.0,
+                  "an RMB drag starting on the arrow still orbits the camera");
+            const gp_Pnt panTarget = view->camera().state().target;
+            if (arrowOnScreen(at))
+                dragButton(view, QPointF(at), QPointF(at + QPoint(50, 30)), Qt::MiddleButton);
+            check(view->camera().state().target.Distance(panTarget) > 1.0,
+                  "and an MMB drag starting on it still pans");
+        }
+
+        // --- a press the drag maths cannot measure still claims the grab ---
+        // Looking straight DOWN the arrow is not a corner case: it is what a
+        // user gets by pressing 1 for a top view and reaching for the face in
+        // front of them. axisParameterForRay() refuses inside ~1.8 degrees of
+        // parallel, and the press used to claim the gesture only when it
+        // resolved - so in that pose the press did nothing, the release fell
+        // through to an ordinary pick, and the face the user had just grabbed
+        // was silently deselected.
+        {
+            // Put the EYE exactly above the face centre. Then the ray through
+            // the face centre's own pixel is exactly vertical - exactly
+            // parallel to the arrow's axis - and the refusal is by
+            // construction rather than by luck.
+            //
+            // Aiming the camera's target at the face and steepening the
+            // elevation is NOT enough, and that is worth recording: the
+            // controller clamps elevation to 88 degrees (kMaxElevation), so
+            // the steepest pose reachable that way leaves the ray 2.0 degrees
+            // off the axis - just outside the ~1.81 degree band
+            // axisParameterForRay() refuses. The first version of this probe
+            // did exactly that, resolved, and read a 1,410 mm jump out of the
+            // field. The eye position is what has to be arranged, not the
+            // elevation.
+            CameraState edgeOn = view->camera().state();
+            edgeOn.elevationDeg = 88.0;
+            // Where the eye sits relative to its target at this pose, from
+            // the same controller the viewport uses rather than a second copy
+            // of the spherical maths.
+            CameraController scratchCam;
+            CameraState atOrigin = edgeOn;
+            atOrigin.target = gp_Pnt(0.0, 0.0, 0.0);
+            scratchCam.setState(atOrigin);
+            const gp_Pnt eyeOffset = scratchCam.eyePosition();
+            edgeOn.target = gp_Pnt(targetCentre.X() - eyeOffset.X(),
+                                   targetCentre.Y() - eyeOffset.Y(),
+                                   targetCentre.Z());
+            view->animateTo(edgeOn);   // animations are off: immediate
+            settle(250);
+            const gp_Pnt eyeNow = view->camera().eyePosition();
+            check(std::hypot(eyeNow.X() - targetCentre.X(), eyeNow.Y() - targetCentre.Y()) < 1.0e-6,
+                  QStringLiteral("the eye is directly above the face centre, so the ray "
+                                 "through it runs straight down the arrow (off by %1 mm)")
+                      .arg(std::hypot(eyeNow.X() - targetCentre.X(),
+                                      eyeNow.Y() - targetCentre.Y())));
+
+            QPoint downTheArrow;
+            const bool haveDown = view->projectToScreen(targetCentre, downTheArrow);
+            check(haveDown && view->hasPullArrow(),
+                  "the arrow is still up with the camera looking straight down it");
+
+            PullArrow* edgeArrow = window.findChild<PullArrow*>();
+            check(edgeArrow != nullptr && edgeArrow->field() != nullptr,
+                  "and its value field is there to read the drag off");
+            const QString beforeText =
+                (edgeArrow && edgeArrow->field()) ? edgeArrow->field()->text() : QString();
+
+            if (haveDown && edgeArrow && edgeArrow->field()) {
+                const QPointF press(downTheArrow);
+                QMouseEvent down(QEvent::MouseButtonPress, press, view->mapToGlobal(press),
+                                 Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QCoreApplication::sendEvent(view, &down);
+                settle(80);
+                check(view->pullDragActive(),
+                      "a press on the arrow claims the gesture even at an angle the drag "
+                      "maths refuses to measure");
+
+                // A long move, at an angle that DOES resolve. The field must
+                // still read what it did - which is also the non-vacuity for
+                // the check above: had the press resolved, this move would
+                // have produced a large distance and rewritten the field.
+                const QPointF moved = press + QPointF(0.0, -200.0);
+                for (int i = 1; i <= 8; ++i) {
+                    const QPointF p = press + (moved - press) * (double(i) / 8.0);
+                    QMouseEvent move(QEvent::MouseMove, p, view->mapToGlobal(p),
+                                     Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+                    QCoreApplication::sendEvent(view, &move);
+                }
+                settle(150);
+                check(edgeArrow->field()->text() == beforeText,
+                      QStringLiteral("and an unmeasurable press contributes nothing rather "
+                                     "than jumping - the value is untouched (\"%1\")")
+                          .arg(edgeArrow->field()->text()));
+
+                QMouseEvent up(QEvent::MouseButtonRelease, moved, view->mapToGlobal(moved),
+                               Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+                QCoreApplication::sendEvent(view, &up);
+                settle(200);
+                check(!view->selectedFace().IsNull() &&
+                          view->selectedFace().IsSame(target) && view->hasPullArrow(),
+                      "and that release is swallowed too, so the face the user grabbed "
+                      "is still selected");
+            }
+        }
+
+        // The arrow goes the moment its predicate stops holding - one
+        // function decides both directions.
+        trigger(window, QStringLiteral("Select Bodies"));
+        settle(200);
+        check(!view->hasPullArrow(),
+              "leaving face selection retires the arrow");
+        PullArrow* retired = window.findChild<PullArrow*>();
+        check(retired == nullptr || !retired->isVisible(),
+              "and its value chip goes with it");
+
+        view->clearSelection();
+        view->animateTo(pullCameraBefore);   // animations are off: immediate
+        settle(200);
+    }
+
+    // --- the transform gizmo: move, rotate and scale a whole body -------------
+    // Everything the gizmo is aimed at here is derived from AIS_Manipulator's
+    // OWN position and size, hovered until the widget reports which part the
+    // detection actually armed. A hardcoded pixel would be a probe that
+    // silently stops hitting what it meant to; guessing at the arrow lengths
+    // would be worse still, because AIS_Manipulator keeps them private and is
+    // free to change them.
+    {
+        trigger(window, QStringLiteral("Select Bodies"));
+        settle(150);
+        view->clearSelection();
+        settle(120);
+
+        QAction* snapAction = action(window, QStringLiteral("Snap to Grid"));
+        check(snapAction != nullptr, "there is a Snap to Grid action for the gizmo probes");
+        if (snapAction && !snapAction->isChecked()) { snapAction->trigger(); settle(120); }
+
+        // A fresh box of its own, so the rotation probe below can read an
+        // angle back out of axis-aligned extents. Every sub-probe undoes
+        // itself, which is what keeps it axis-aligned until then.
+        const int gizmoBodiesBefore = static_cast<int>(window.document().count());
+        check(buildBody(window, 0.30, 0.56, 0.52, 0.70, 40.0),
+              "a fresh body for the transform gizmo");
+        check(static_cast<int>(window.document().count()) == gizmoBodiesBefore + 1,
+              "and it reached the document");
+        const int gizmoId = window.document().solids().empty()
+                                ? -1
+                                : window.document().solids().back().id;
+        view->fitAll();
+        settle(250);
+
+        auto gizmoShape = [&window, gizmoId] { return window.document().shapeOf(gizmoId); };
+        auto gizmoVolume = [&] { return ModelingOps::volume(gizmoShape()); };
+        auto gizmoCentre = [&] {
+            GProp_GProps props;
+            BRepGProp::VolumeProperties(gizmoShape(), props);
+            return props.CentreOfMass();
+        };
+        // The invariant the whole gesture is built around: outside an active
+        // drag the body's PRESENTATION carries no transformation of its own,
+        // so what is on screen IS what the document holds. A gizmo drag moves
+        // the presentation and nothing else until it commits, and a volume or
+        // centre-of-mass check reads the document and so cannot see a
+        // viewport that stayed behind - this can.
+        auto presentationIsClean = [&] {
+            gp_Trsf local;
+            if (!view->solidPresentationTransform(gizmoId, local)) return false;
+            return ModelingOps::isIdentityTransform(local, 1.0e-6, 1.0e-4);
+        };
+        auto gizmoExtents = [&] {
+            Bnd_Box box;
+            BRepBndLib::Add(gizmoShape(), box);
+            Standard_Real x0, y0, z0, x1, y1, z1;
+            box.Get(x0, y0, z0, x1, y1, z1);
+            return gp_XYZ(x1 - x0, y1 - y0, z1 - z0);
+        };
+
+        // --- the predicate: exactly one body, in body mode -----------------
+        check(!view->hasManipulator(),
+              "nothing selected, no gizmo");
+        view->setSelectedSolids({gizmoId});
+        settle(200);
+        check(view->hasManipulator(),
+              "selecting exactly one body raises the transform gizmo");
+        check(view->manipulatorSolid() == gizmoId,
+              "and it stands on that body, not another");
+        check(window.canTransformSelectedBody(),
+              "the window's own predicate agrees");
+        // It lives outside the document, so it must never be counted as one of
+        // its bodies - the suite's body-count checks would notice, and so
+        // would every boolean.
+        check(view->selectedSolidIds().size() == 1,
+              "the gizmo is not itself pickable as a body");
+        check(static_cast<int>(window.document().count()) == gizmoBodiesBefore + 1,
+              "and it added nothing to the document");
+
+        if (window.document().count() >= 2) {
+            const int otherId = window.document().solids().front().id;
+            view->setSelectedSolids({otherId, gizmoId});
+            settle(200);
+            check(!view->hasManipulator(),
+                  "two bodies selected retires it - there is no one body to transform");
+            view->setSelectedSolids({gizmoId});
+            settle(200);
+            check(view->hasManipulator(), "and one body brings it back");
+        }
+
+        trigger(window, QStringLiteral("Select Faces"));
+        settle(200);
+        check(!view->hasManipulator(),
+              "face selection retires it, so it can never fight the pull arrow");
+        trigger(window, QStringLiteral("Select Bodies"));
+        view->setSelectedSolids({gizmoId});
+        settle(200);
+        check(view->hasManipulator(), "back in body selection it returns");
+
+        trigger(window, QStringLiteral("Start Sketch"));
+        settle(200);
+        check(!view->hasManipulator(), "starting a sketch retires it");
+        trigger(window, QStringLiteral("Cancel Sketch"));
+        view->setSelectedSolids({gizmoId});
+        settle(200);
+        check(view->hasManipulator(), "cancelling the sketch brings it back");
+
+        // A hover with no settle: MoveTo runs inside the handler, so the
+        // armed mode is readable the moment the event has been delivered, and
+        // a search that walked ~60 candidates through settle() would cost
+        // most of a minute for nothing.
+        auto hover = [view](const QPoint& at) {
+            const QPointF p(at);
+            QMouseEvent move(QEvent::MouseMove, p, view->mapToGlobal(p),
+                             Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+            QCoreApplication::sendEvent(view, &move);
+        };
+
+        // --- a hover and a click on EMPTY space, with the gizmo up ---------
+        //
+        // The one-click crash 850 green checks never went near, because every
+        // one of them clicked something that was there.
+        //
+        // AIS_InteractiveContext::DetectedInteractive() is an inline that
+        // reads myLastPicked->Selectable() with no null check of its own, and
+        // a MoveTo that detects nothing nulls myLastPicked.
+        // detectedIsManipulator() asked it without guarding, so selecting a
+        // body - which attaches the manipulator - and then clicking empty
+        // viewport to deselect took the process down. That is the most
+        // ordinary gesture in the app, and it is reachable from a cold start
+        // in two clicks.
+        //
+        // SURVIVING to the next check is the assertion for the crash itself;
+        // the two after it are what say the click still did its job rather
+        // than being swallowed by a guard that returns early too eagerly.
+        {
+            check(view->hasManipulator(),
+                  "the gizmo is up before the empty-space probe, so the crashing "
+                  "path is actually reachable from here");
+
+            // "Empty" is DERIVED: the union of every body's projected bounding
+            // box and the gizmo's own projected reach, stepped well clear of.
+            // A hardcoded pixel is a probe that stops meaning anything the
+            // moment the camera or the document moves.
+            QRect occupied;
+            auto swallow = [&](const gp_Pnt& world) {
+                QPoint at;
+                if (!view->projectToScreen(world, at)) return;
+                const QRect dot(at, QSize(1, 1));
+                occupied = occupied.isNull() ? dot : occupied.united(dot);
+            };
+            for (const DocumentModel::Solid& body : window.document().solids()) {
+                Bnd_Box box;
+                BRepBndLib::Add(body.shape, box);
+                if (box.IsVoid()) continue;
+                Standard_Real x0, y0, z0, x1, y1, z1;
+                box.Get(x0, y0, z0, x1, y1, z1);
+                for (int corner = 0; corner < 8; ++corner)
+                    swallow(gp_Pnt(corner & 1 ? x1 : x0, corner & 2 ? y1 : y0,
+                                   corner & 4 ? z1 : z0));
+            }
+            gp_Ax2 reach;
+            double reachSize = 0.0;
+            if (view->manipulatorFrame(reach, reachSize)) {
+                const gp_Dir axes[3] = {reach.XDirection(), reach.YDirection(),
+                                        reach.Direction()};
+                for (const gp_Dir& axis : axes) {
+                    swallow(reach.Location().Translated(gp_Vec(axis) * reachSize));
+                    swallow(reach.Location().Translated(gp_Vec(axis) * -reachSize));
+                }
+            }
+
+            // 40 px clear of all of it, and inside the viewport's own edges.
+            QPoint empty(-1, -1);
+            const QRect keepOut = occupied.adjusted(-40, -40, 40, 40);
+            for (int y = 20; y < view->height() - 20 && empty.x() < 0; y += 12) {
+                for (int x = 20; x < view->width() - 20; x += 12) {
+                    if (keepOut.contains(QPoint(x, y))) continue;
+                    empty = QPoint(x, y);
+                    break;
+                }
+            }
+            check(empty.x() >= 0,
+                  QStringLiteral("there is a pixel with nothing behind it to click "
+                                 "(bodies and gizmo occupy %1,%2 %3x%4 of %5x%6)")
+                      .arg(occupied.left()).arg(occupied.top())
+                      .arg(occupied.width()).arg(occupied.height())
+                      .arg(view->width()).arg(view->height()));
+
+            if (empty.x() >= 0) {
+                // The bare hover first: mouseMoveEvent's hover-highlight branch
+                // asks detectedIsManipulator() too, and it crashes there just
+                // as readily as on the press. Two separate call sites, two
+                // separate ways in.
+                hover(empty);
+                settle(80);
+                check(view->hasManipulator(),
+                      "a hover over empty space with the gizmo up is survivable, and "
+                      "leaves the gizmo alone");
+
+                clickAt(view, QPointF(empty));
+                settle(200);
+                check(view->selectedSolidIds().empty(),
+                      QStringLiteral("clicking empty space clears the selection (%1 "
+                                     "still selected)")
+                          .arg(view->selectedSolidIds().size()));
+                check(!view->hasManipulator(),
+                      "and the gizmo goes with it, from the same predicate that "
+                      "raised it");
+            }
+
+            view->setSelectedSolids({gizmoId});
+            settle(200);
+            check(view->hasManipulator(),
+                  "the gizmo is back for the probes that follow");
+        }
+
+        // Walks out from the gizmo's centre along `along`, in fractions of its
+        // own size, and stops at the first point whose hover arms `wantMode`
+        // (1 Move along an axis, 2 Rotate, 3 Scale) on `wantAxis` (-1 for any).
+        // Returning true IS the pick assertion this block's drags depend on: a
+        // drag that starts where detection never found the manipulator is a
+        // drag on nothing, and would pass every "the body did not move" check
+        // for the wrong reason.
+        //
+        // The axis matters for the rings in particular. Detection answers in
+        // SCREEN pixels, so a camera that sees one ring nearly edge-on happily
+        // reports a different one under the pixel a world-space walk aimed at
+        // - and then the world point the walk found is not on the ring that
+        // armed, so a drag computed around it turns the body by nothing. That
+        // is exactly what a 100% display did to a probe written at 150%.
+        // `clearOf`, when given, rejects candidates INSIDE that box. The gizmo
+        // is centred on the body's bounding box, so the inner end of every arm
+        // is buried in the body - fine for a drag, useless for the Shift-click
+        // probe below, which has to park a second body on the arm point and
+        // then click it: a point inside the first body has that body's own
+        // surface in front of it, and the click finds the wrong one.
+        auto findHandle = [&](int wantMode, int wantAxis, const gp_Dir& along, QPoint& out,
+                              gp_Pnt& world, const Bnd_Box* clearOf = nullptr) {
+            gp_Ax2 frame;
+            double size = 0.0;
+            if (!view->manipulatorFrame(frame, size)) return false;
+            for (int percent = 8; percent <= 140; percent += 2) {
+                const gp_Pnt candidate =
+                    frame.Location().Translated(gp_Vec(along) * (size * percent / 100.0));
+                if (clearOf && !clearOf->IsOut(candidate)) continue;
+                QPoint at;
+                if (!view->projectToScreen(candidate, at)) continue;
+                if (!view->rect().adjusted(6, 6, -6, -6).contains(at)) continue;
+                hover(at);
+                if (view->manipulatorActiveMode() != wantMode) continue;
+                if (wantAxis >= 0 && view->manipulatorActiveAxis() != wantAxis) continue;
+                out = at;
+                world = candidate;
+                return true;
+            }
+            return false;
+        };
+
+        // Undo, but only for a gesture that actually committed. An unguarded
+        // Undo after a drag that netted nothing rewinds a checkpoint some
+        // EARLIER probe took - and enough of those in a row rewind past the
+        // body's own creation, at which point every later probe is reading a
+        // null shape. That is not a hypothetical: it crashed this suite
+        // outright (BRepGProp on a null shape throws, and an OCCT exception
+        // escaping a Qt handler terminates the process), turning one legible
+        // failing check into no output at all.
+        auto undoIfCommitted = [&](std::size_t depthBefore) {
+            if (window.document().undoDepth() > depthBefore) {
+                trigger(window, QStringLiteral("Undo"));
+                settle(250);
+            }
+            view->setSelectedSolids({gizmoId});
+            settle(200);
+        };
+
+        // Read first, assert second. The condition and the message are two
+        // arguments to the same call and C++ leaves their evaluation order
+        // unspecified, so a check() that both fills a value and formats it
+        // prints whatever the value was BEFORE the call - which is how the
+        // first version of this reported a healthy gizmo as "0 mm".
+        gp_Ax2 gizmoFrame;
+        double gizmoSize = 0.0;
+        const bool haveFrame = view->manipulatorFrame(gizmoFrame, gizmoSize);
+        check(haveFrame && gizmoSize > 0.0,
+              QStringLiteral("the gizmo reports its own frame and size (%1 mm)")
+                  .arg(gizmoSize));
+
+        // --- Snap on: the Z arrow moves the body by a whole grid step ------
+        {
+            QPoint handleAt;
+            gp_Pnt handleWorld;
+            const bool found =
+                findHandle(1, 2, gizmoFrame.Direction(), handleAt, handleWorld);
+            check(found,
+                  "hovering out along the gizmo's own Z axis finds the Move handle - "
+                  "detection armed it, so the drag below really starts on the gizmo");
+            check(!found || view->manipulatorActiveAxis() == 2,
+                  "and it is the Z arm, not another");
+
+            QPoint dragTo;
+            const bool haveTarget =
+                found &&
+                view->projectToScreen(handleWorld.Translated(gp_Vec(0.0, 0.0, 30.0)),
+                                      dragTo) &&
+                view->rect().contains(dragTo);
+            check(haveTarget, "a point 30 mm up the Z axis projects into the viewport");
+
+            if (haveTarget) {
+                const double volumeBefore = gizmoVolume();
+                const gp_Pnt centreBefore = gizmoCentre();
+                const std::size_t depthBefore = window.document().undoDepth();
+
+                dragButton(view, QPointF(handleAt), QPointF(dragTo), Qt::LeftButton);
+                settle(300);
+
+                const gp_Pnt centreAfter = gizmoCentre();
+                const double dz = centreAfter.Z() - centreBefore.Z();
+                check(std::fabs(dz - std::round(dz / 10.0) * 10.0) < 1.0e-6,
+                      QStringLiteral("with Snap on the body lands on a whole 10 mm step "
+                                     "(moved %1 mm)").arg(dz));
+                check(dz > 1.0,
+                      QStringLiteral("and it really moved, upward, rather than nowhere "
+                                     "(%1 mm)").arg(dz));
+                check(std::fabs(dz - 30.0) < 10.001,
+                      QStringLiteral("within one step of the 30 mm dragged (%1 mm)").arg(dz));
+                check(std::hypot(centreAfter.X() - centreBefore.X(),
+                                 centreAfter.Y() - centreBefore.Y()) < 1.0e-6,
+                      "the Z arrow moves along Z only - X and Y are untouched");
+                check(std::fabs(gizmoVolume() - volumeBefore) < 1.0e-6,
+                      "a move changes where a body is, never how big it is");
+                check(window.document().undoDepth() == depthBefore + 1,
+                      "it took exactly one undo checkpoint");
+
+                ToastHost* toasts = window.findChild<ToastHost*>();
+                check(toasts != nullptr && toasts->isShowing() &&
+                          toasts->toast() != nullptr && toasts->toast()->hasUndo(),
+                      "and reported it through a toast that offers Undo");
+                check(toasts != nullptr &&
+                          toasts->currentText().contains(QStringLiteral("moved")),
+                      QStringLiteral("which names the gesture (\"%1\")")
+                          .arg(toasts ? toasts->currentText() : QString()));
+
+                check(view->hasManipulator() && view->manipulatorSolid() == gizmoId,
+                      "the gizmo is still standing on the body it just moved");
+                check(presentationIsClean(),
+                      "and the body on screen IS the body in the document - the drag's "
+                      "transform was baked into the geometry, not left sitting on the "
+                      "presentation");
+
+                undoIfCommitted(depthBefore);
+                check(gizmoCentre().Distance(centreBefore) < 1.0e-6,
+                      "Undo puts the body back exactly where it was");
+                check(std::fabs(gizmoVolume() - volumeBefore) < 1.0e-6,
+                      "at exactly the size it was");
+                check(presentationIsClean(),
+                      "with the presentation agreeing with the restored document too");
+                check(view->hasManipulator(),
+                      "and the gizmo comes back with the restored body's presentation");
+
+                // Redo is the other half of the same invariant. It is
+                // structurally safe today - resyncView() rebuilds every
+                // presentation from the document - which is exactly when a
+                // check costs nothing and is worth having: the day a transform
+                // is ever restored by re-applying a stored trsf instead of
+                // redisplaying the shape, this is what notices.
+                trigger(window, QStringLiteral("Redo"));
+                settle(250);
+                view->setSelectedSolids({gizmoId});
+                settle(200);
+                check(std::fabs((gizmoCentre().Z() - centreBefore.Z()) - dz) < 1.0e-6,
+                      "Redo puts the move back exactly");
+                check(presentationIsClean(),
+                      "and the redone body on screen IS the redone body in the document");
+                trigger(window, QStringLiteral("Undo"));
+                settle(250);
+                view->setSelectedSolids({gizmoId});
+                settle(200);
+                check(gizmoCentre().Distance(centreBefore) < 1.0e-6,
+                      "and Undo takes it away again for the probes that follow");
+            }
+        }
+
+        // --- Snap off: the body lands where it was dragged, not on the grid -
+        {
+            if (snapAction && snapAction->isChecked()) { snapAction->trigger(); settle(150); }
+            check(snapAction != nullptr && !snapAction->isChecked(),
+                  "Snap to Grid is off for the free-move probe");
+
+            // The handle is found FIRST, at the framing every other probe
+            // uses, and only then is the camera dollied in. Order matters and
+            // it cost a crash to learn: findHandle() walks the arm hovering
+            // candidate pixels, and hovering a manipulator that fills much of
+            // the viewport takes OCCT's own detection down with an access
+            // violation - reproduced on the pre-Task-4 baseline too, so it is
+            // not this branch's, but it is emphatically this probe's problem.
+            // Re-projecting the handle's WORLD point at the new camera needs
+            // no walk at all, and one hover at that single point is enough to
+            // arm the mode and to pin that it armed.
+            QPoint handleAt;
+            gp_Pnt handleWorld;
+            const bool found =
+                findHandle(1, 2, gizmoFrame.Direction(), handleAt, handleWorld);
+            check(found, "the Move handle is still findable with Snap off");
+
+            // Frame THIS body before measuring a distance in millimetres off a
+            // drag measured in pixels.
+            //
+            // fitAll() frames the whole document - six bodies by now - which
+            // left roughly 1.8 mm to the logical pixel, so the 35 mm below
+            // spanned FOURTEEN pixels and one pixel of rounding was 13% of the
+            // answer. The check's 2 mm tolerance was barely over one pixel, so
+            // it passed on where the rounding happened to land: 34.70 mm at
+            // one display scale and 32.74 mm at another, from the same code.
+            // Both are the same drag; only one of them passed.
+            const CameraState framedBefore = view->camera().state();
+            // Dollied until the 35 mm this drag is about to travel spans a
+            // healthy number of PIXELS - measured on the projection itself,
+            // pass by pass, rather than inferred from worldPerPixel(). The
+            // axis is oblique to the screen, so a straight-on estimate
+            // overstates the span by about a quarter and the first version of
+            // this landed at 1.2 mm to the pixel while aiming for under one.
+            //
+            // The target is deliberately NOT moved. Re-centring on the gizmo
+            // pulled the arm's projection back toward the middle of the
+            // screen, where the translation PLANE handles live, and the point
+            // that had armed the Z arrow came back arming a plane instead -
+            // detection speaks screen pixels, which is Task 3's own lesson.
+            // A pure dolly moves the arm's pixel outward, away from the
+            // centre, which is the direction that keeps it on the arrow.
+            //
+            // Bounded at 0.6 per pass over two passes, so the gizmo can grow
+            // to fill more of the viewport but not without limit: hovering a
+            // manipulator that fills the viewport takes OCCT's own detection
+            // down with an access violation. That crash reproduces on the
+            // pre-Task-4 baseline, so it is not this branch's - but an
+            // unbounded zoom here would walk straight into it.
+            //
+            // Each pass is KEPT only while the handle still arms the Z arrow.
+            // The gizmo grows on screen as the camera comes in, and past some
+            // point the translation-plane and scale parts win the pixel the
+            // arm used to own - mode 4 at one scale, mode 3 at another, both
+            // found by running this at scales the machine does not natively
+            // use. A pass that loses the handle is rolled back and the loop
+            // stops, so the probe trades precision for correctness rather than
+            // silently dragging the wrong part.
+            auto armsTheZArm = [&](QPoint& at) {
+                if (!view->projectToScreen(handleWorld, at)) return false;
+                if (!view->rect().adjusted(6, 6, -6, -6).contains(at)) return false;
+                hover(at);
+                return view->manipulatorActiveMode() == 1 &&
+                       view->manipulatorActiveAxis() == 2;
+            };
+            if (found) {
+                for (int pass = 0; pass < 3; ++pass) {
+                    QPoint from, to;
+                    if (!view->projectToScreen(handleWorld, from) ||
+                        !view->projectToScreen(handleWorld.Translated(gp_Vec(0.0, 0.0, 35.0)),
+                                               to))
+                        break;
+                    const double span = std::hypot(double(to.x() - from.x()),
+                                                   double(to.y() - from.y()));
+                    if (span >= 44.0) break;   // 35 mm over 44 px is under 0.8 mm/px
+                    const CameraState beforePass = view->camera().state();
+                    CameraState closer = beforePass;
+                    closer.distance *= std::max(0.6, span / 44.0);
+                    view->animateTo(closer);   // animations are off: immediate
+                    settle(220);
+                    QPoint probe;
+                    if (!armsTheZArm(probe)) {
+                        view->animateTo(beforePass);
+                        settle(220);
+                        break;
+                    }
+                }
+            }
+
+            // The handle's own world point, re-projected, and armed with one
+            // hover rather than a walk.
+            const bool armed = found && armsTheZArm(handleAt);
+            check(armed,
+                  QStringLiteral("the handle still projects into the viewport and arms "
+                                 "the Z move handle after the camera moved in (mode %1, "
+                                 "axis %2)")
+                      .arg(view->manipulatorActiveMode())
+                      .arg(view->manipulatorActiveAxis()));
+            const bool reprojected = armed;
+
+            // 35 mm, deliberately: its nearest 10 mm neighbours are 5 mm away,
+            // so a result within a couple of millimetres of it cannot be
+            // mistaken for a snapped one - which is the whole point here.
+            QPoint dragTo;
+            const bool haveTarget =
+                reprojected && view->manipulatorActiveMode() == 1 &&
+                view->projectToScreen(handleWorld.Translated(gp_Vec(0.0, 0.0, 35.0)),
+                                      dragTo) &&
+                view->rect().contains(dragTo);
+            check(haveTarget, "a point 35 mm up the Z axis projects into the viewport");
+
+            if (haveTarget) {
+                const gp_Pnt centreBefore = gizmoCentre();
+                const double volumeBefore = gizmoVolume();
+                const std::size_t depthBefore = window.document().undoDepth();
+                dragButton(view, QPointF(handleAt), QPointF(dragTo), Qt::LeftButton);
+                settle(300);
+
+                // The precision the framing above was for, asserted rather
+                // than assumed: how many millimetres one logical pixel is
+                // worth ALONG THIS DRAG. Under a millimetre the 2 mm
+                // tolerance below is two pixels of slack; at the 2.5 mm the
+                // un-framed camera gave, it was less than one, and the check
+                // was deciding on rounding luck. Pinned first so a framing
+                // that silently failed cannot leave the tolerance check
+                // looking meaningful.
+                const double dragPixels = std::hypot(double(dragTo.x() - handleAt.x()),
+                                                     double(dragTo.y() - handleAt.y()));
+                const double mmPerPixel = dragPixels > 0.0 ? 35.0 / dragPixels : 1.0e9;
+                // Two logical pixels of slack, or 2 mm, whichever is larger:
+                // both of this drag's endpoints are rounded to whole logical
+                // pixels, so +/-1 px is the floor on what it can resolve and a
+                // tolerance under that is a coin toss dressed as a check. The
+                // framing above is what keeps this at the 2 mm floor.
+                const double tolerance = std::max(2.0, 2.0 * mmPerPixel);
+                // And the tolerance has to leave the off-grid check below
+                // something to say: 35 mm is 5 mm from its nearest step, so a
+                // pixel worth more than about two millimetres could not tell a
+                // free landing from a snapped one at all. Pinned, not assumed
+                // - this is the assertion that fails loudly at a scale where
+                // the framing could not deliver, rather than the suite quietly
+                // deciding on rounding luck.
+                check(tolerance < 4.0,
+                      QStringLiteral("this drag can resolve a non-grid landing at all "
+                                     "(%1 mm/px over %2 px, tolerance %3 mm against a "
+                                     "5 mm margin)")
+                          .arg(mmPerPixel).arg(dragPixels).arg(tolerance));
+
+                const double dz = gizmoCentre().Z() - centreBefore.Z();
+                check(std::fabs(dz - 35.0) < tolerance,
+                      QStringLiteral("with Snap off the body lands at the 35 mm dragged, "
+                                     "not at a grid step (%1 mm)").arg(dz));
+                check(std::fabs(dz - std::round(dz / 10.0) * 10.0) > 2.0,
+                      QStringLiteral("and that really is off the 10 mm grid (%1 mm from "
+                                     "the nearest step)")
+                          .arg(std::fabs(dz - std::round(dz / 10.0) * 10.0)));
+                check(std::fabs(gizmoVolume() - volumeBefore) < 1.0e-6,
+                      "still the same size");
+
+                undoIfCommitted(depthBefore);
+                check(gizmoCentre().Distance(centreBefore) < 1.0e-6,
+                      "and Undo puts that back too");
+            }
+            // Back to the framing every probe after this one inherits.
+            view->animateTo(framedBefore);
+            settle(200);
+            view->setSelectedSolids({gizmoId});
+            settle(150);
+            if (snapAction && !snapAction->isChecked()) { snapAction->trigger(); settle(150); }
+            check(snapAction != nullptr && snapAction->isChecked(),
+                  "Snap to Grid is back on for the probes that follow");
+        }
+
+        // --- the scale cube: volume by the cube of a 5% multiple -----------
+        {
+            // Tried FIRST at the framing every other probe inherits, and
+            // re-framed only if that finds nothing.
+            //
+            // The gizmo has to be the right size on screen for the walk to
+            // find the scale cube, and the constraint has two sides: too big
+            // and the far end of the walk projects outside the viewport,
+            // where findHandle() skips every candidate; too small and the
+            // cube - a little box at the arrow's tip - is a couple of pixels
+            // and loses detection to the arrow and to the translation planes.
+            // At a forced display scale that left this window 813x565 logical
+            // the walk reported plane handles the whole way out and never a
+            // cube, which is the second case.
+            //
+            // The re-framing is a FALLBACK rather than an unconditional step,
+            // because an unconditional one broke the case it was not needed
+            // for: framing "correctly" by a reach-to-viewport ratio moved a
+            // camera where the walk already worked, and the cube stopped
+            // arming there instead. Doing nothing when nothing is wrong is
+            // the only version of this that holds at every scale.
+            QPoint handleAt;
+            gp_Pnt handleWorld;
+            bool found = findHandle(3, 0, gizmoFrame.XDirection(), handleAt, handleWorld);
+            const CameraState scaleFramedBefore = view->camera().state();
+            for (int pass = 0; pass < 2 && !found; ++pass) {
+                const gp_Pnt reachTip = gizmoFrame.Location().Translated(
+                    gp_Vec(gizmoFrame.XDirection()) * (gizmoSize * 1.4));
+                QPoint centreAt, tipAt;
+                if (!view->projectToScreen(gizmoFrame.Location(), centreAt) ||
+                    !view->projectToScreen(reachTip, tipAt))
+                    break;
+                const double reach = std::hypot(double(tipAt.x() - centreAt.x()),
+                                                double(tipAt.y() - centreAt.y()));
+                const double wanted = 0.25 * std::min(view->width(), view->height());
+                if (reach <= 0.0 || wanted <= 0.0) break;
+                CameraState framed = view->camera().state();
+                // Bounded to half or double the distance it started at, so a
+                // recovery can never dolly far enough to put the manipulator
+                // somewhere OCCT's own detection falls over.
+                framed.distance *= std::clamp(reach / wanted, 0.5, 2.0);
+                view->animateTo(framed);   // animations are off: immediate
+                settle(200);
+                found = findHandle(3, 0, gizmoFrame.XDirection(), handleAt, handleWorld);
+            }
+
+            // What the walk actually saw, when it saw no scale cube. A probe
+            // that reports only "not found" has failed twice here for two
+            // different reasons - candidates off-screen at a small viewport,
+            // and the cube too few pixels across to win the detection - and
+            // the two are indistinguishable without this.
+            QString trail;
+            if (!found) {
+                for (int percent = 8; percent <= 140; percent += 12) {
+                    const gp_Pnt candidate = gizmoFrame.Location().Translated(
+                        gp_Vec(gizmoFrame.XDirection()) * (gizmoSize * percent / 100.0));
+                    QPoint at;
+                    if (!view->projectToScreen(candidate, at)) { trail += QStringLiteral(" ?"); continue; }
+                    if (!view->rect().adjusted(6, 6, -6, -6).contains(at)) {
+                        trail += QStringLiteral(" off");
+                        continue;
+                    }
+                    hover(at);
+                    trail += QStringLiteral(" %1%%:m%2a%3")
+                                 .arg(percent).arg(view->manipulatorActiveMode())
+                                 .arg(view->manipulatorActiveAxis());
+                }
+            }
+            check(found,
+                  QStringLiteral("walking out along X finds the Scale handle past the "
+                                 "arrow (%1)")
+                      .arg(found ? QStringLiteral("armed") : trail.trimmed()));
+
+            // Further out along the same axis: AIS_Manipulator reads a scale
+            // as the ratio of the cursor's distance from the gizmo centre to
+            // the handle's, so a target further out is a growth.
+            QPoint dragTo;
+            gp_Pnt scaleTarget;
+            bool haveTarget = false;
+            double growth = 0.0;
+            if (found) {
+                // The LARGEST growth that still lands on screen, not a fixed
+                // 30%. The assertions below ask for a 5 per cent multiple and
+                // for something over 1.02 - they do not care which multiple -
+                // so a viewport too small to show the 30% point is a reason to
+                // drag less far, not a reason to fail. It was failing at one
+                // display scale for exactly that, with the handle found and
+                // the gesture never attempted.
+                for (const double candidate : {1.30, 1.25, 1.20, 1.15, 1.10}) {
+                    const gp_Pnt at = gizmoFrame.Location().Translated(
+                        gp_Vec(gizmoFrame.Location(), handleWorld) * candidate);
+                    QPoint projected;
+                    if (!view->projectToScreen(at, projected)) continue;
+                    if (!view->rect().contains(projected)) continue;
+                    scaleTarget = at;
+                    dragTo = projected;
+                    growth = candidate;
+                    haveTarget = true;
+                    break;
+                }
+            }
+            check(haveTarget,
+                  QStringLiteral("and a point further out along it projects into the "
+                                 "viewport to drag to (%1)")
+                      .arg(haveTarget ? QStringLiteral("x%1").arg(growth)
+                                      : QStringLiteral("none of 1.30 down to 1.10")));
+
+            if (haveTarget) {
+                const double volumeBefore = gizmoVolume();
+                const gp_XYZ extentsBefore = gizmoExtents();
+                const std::size_t depthBefore = window.document().undoDepth();
+                dragButton(view, QPointF(handleAt), QPointF(dragTo), Qt::LeftButton);
+                settle(300);
+
+                const double ratio = gizmoVolume() / std::max(1.0e-9, volumeBefore);
+                const double factor = std::cbrt(ratio);
+                check(factor > 1.02,
+                      QStringLiteral("dragging the scale cube outward grows the body "
+                                     "(x%1 on each side)").arg(factor));
+                check(std::fabs(factor - std::round(factor / 0.05) * 0.05) < 1.0e-4,
+                      QStringLiteral("by exactly a 5 per cent multiple with Snap on (x%1)")
+                          .arg(factor));
+                const gp_XYZ extentsAfter = gizmoExtents();
+                check(std::fabs(extentsAfter.X() / extentsBefore.X() - factor) < 1.0e-4 &&
+                          std::fabs(extentsAfter.Z() / extentsBefore.Z() - factor) < 1.0e-4,
+                      QStringLiteral("and it is a UNIFORM scale - every extent by the "
+                                     "same factor (%1, %2)")
+                          .arg(extentsAfter.X() / extentsBefore.X())
+                          .arg(extentsAfter.Z() / extentsBefore.Z()));
+
+                ToastHost* toasts = window.findChild<ToastHost*>();
+                check(toasts != nullptr &&
+                          toasts->currentText().contains(QStringLiteral("scaled")),
+                      QStringLiteral("the toast names this one Scale (\"%1\")")
+                          .arg(toasts ? toasts->currentText() : QString()));
+
+                undoIfCommitted(depthBefore);
+                check(std::fabs(gizmoVolume() - volumeBefore) < 1.0e-6,
+                      "and Undo restores the body's size exactly");
+            }
+            // Back to the framing every probe after this one inherits.
+            view->animateTo(scaleFramedBefore);
+            settle(200);
+            view->setSelectedSolids({gizmoId});
+            settle(150);
+        }
+
+        // --- the rotation ring: extents consistent with a snapped angle ----
+        {
+            // Out along the bisector of X and Y - a direction the arrows and
+            // the scale cubes do not lie along, so a walk out there meets a
+            // ring first. WHICH ring is not something the probe gets to
+            // assume: detection answers in screen pixels, and a camera that
+            // sees one ring nearly edge-on will happily report a different
+            // one under the same pixel. Demanding the Z ring is how the first
+            // version of this failed at a display scale it was not written on
+            // - so the probe reads the ring the widget says it armed and
+            // measures against THAT axis instead.
+            const gp_Vec bisector =
+                (gp_Vec(gizmoFrame.XDirection()) + gp_Vec(gizmoFrame.YDirection()))
+                    .Normalized();
+            const gp_Vec antiBisector =
+                (gp_Vec(gizmoFrame.XDirection()) - gp_Vec(gizmoFrame.YDirection()))
+                    .Normalized();
+            // Every direction tried lies IN the XY plane, which is the Z
+            // ring's own plane - so wherever the walk stops with the Z ring
+            // armed, the world point really is ON that ring, and the drag
+            // computed around it is a drag around the thing that armed.
+            // Demanding the Z ring rather than accepting whichever one
+            // answered is the whole point: a 100% display reported the Y ring
+            // under a pixel a 150% one gave to the Z ring, the walk's world
+            // point was nowhere near the Y ring, and the drag turned the body
+            // by nothing at all. Eight directions because which arc of the
+            // ring is on screen and unoccluded is the camera's business.
+            const gp_Vec inPlane[] = {bisector,          bisector.Reversed(),
+                                      antiBisector,      antiBisector.Reversed(),
+                                      gp_Vec(gizmoFrame.XDirection()),
+                                      gp_Vec(gizmoFrame.XDirection()).Reversed(),
+                                      gp_Vec(gizmoFrame.YDirection()),
+                                      gp_Vec(gizmoFrame.YDirection()).Reversed()};
+            QPoint handleAt;
+            gp_Pnt handleWorld;
+            bool found = false;
+            for (const gp_Vec& direction : inPlane) {
+                if (found) break;
+                found = findHandle(2, 2, gp_Dir(direction), handleAt, handleWorld);
+            }
+            // The same fallback the scale cube gets, for the same reason and
+            // on the same terms: a ring too few pixels across loses the
+            // detection to whatever else is under the cursor, and the walk
+            // then reports nothing for a reason that has nothing to do with
+            // the ring. Only entered when the walk found nothing, bounded to
+            // two passes and to half or double the starting distance, and
+            // restored at the end of this block.
+            const CameraState ringFramedBefore = view->camera().state();
+            for (int pass = 0; pass < 2 && !found; ++pass) {
+                QPoint centreAt, tipAt;
+                const gp_Pnt reachTip = gizmoFrame.Location().Translated(
+                    gp_Vec(gizmoFrame.XDirection()) * gizmoSize);
+                if (!view->projectToScreen(gizmoFrame.Location(), centreAt) ||
+                    !view->projectToScreen(reachTip, tipAt))
+                    break;
+                const double reach = std::hypot(double(tipAt.x() - centreAt.x()),
+                                                double(tipAt.y() - centreAt.y()));
+                const double wanted = 0.22 * std::min(view->width(), view->height());
+                if (reach <= 0.0 || wanted <= 0.0) break;
+                CameraState framed = view->camera().state();
+                framed.distance *= std::clamp(reach / wanted, 0.5, 2.0);
+                view->animateTo(framed);   // animations are off: immediate
+                settle(200);
+                for (const gp_Vec& direction : inPlane) {
+                    if (found) break;
+                    found = findHandle(2, 2, gp_Dir(direction), handleAt, handleWorld);
+                }
+            }
+            check(found, "walking the XY plane finds the Rotate ring about Z");
+            check(!found || view->manipulatorActiveAxis() == 2,
+                  "and it is the ring about Z, so the drag below turns about Z");
+
+            // The gizmo's frame RIGHT NOW - the undos above re-attached it, and
+            // Attach re-derives its position from the body's bounding box.
+            gp_Ax2 ringFrame;
+            double ringSize = 0.0;
+            const bool haveRingFrame = view->manipulatorFrame(ringFrame, ringSize);
+            const gp_Dir ringDir =
+                haveRingFrame ? ringFrame.Direction() : gp_Dir(0.0, 0.0, 1.0);
+
+            // 30 degrees around that ring, in world space, then projected.
+            QPoint dragTo;
+            bool haveTarget = false;
+            if (found && haveRingFrame) {
+                gp_Trsf spin;
+                spin.SetRotation(gp_Ax1(ringFrame.Location(), ringDir),
+                                 30.0 * 3.14159265358979323846 / 180.0);
+                haveTarget = view->projectToScreen(handleWorld.Transformed(spin), dragTo) &&
+                             view->rect().contains(dragTo);
+            }
+            check(haveTarget, "and a point 30 degrees round it projects inside the viewport");
+
+            if (haveTarget) {
+                const double volumeBefore = gizmoVolume();
+                const TopoDS_Shape shapeBefore = gizmoShape();
+                const gp_XYZ before = gizmoExtents();
+                const std::size_t depthBefore = window.document().undoDepth();
+                dragButton(view, QPointF(handleAt), QPointF(dragTo), Qt::LeftButton);
+                settle(300);
+
+                check(std::fabs(gizmoVolume() - volumeBefore) < volumeBefore * 1.0e-6,
+                      "a rotation changes which way a body faces, never its volume");
+
+                // The oracle is the geometry itself, not a closed form for a
+                // box's footprint: a sketched quad is NOT a box. The four
+                // clicks are screen-space corners of a rectangle, and a
+                // perspective camera unprojects those onto the ground as a
+                // trapezoid - so dx.cos a + dy.sin a describes a shape this
+                // body is not, and the first version of this check duly
+                // failed against a perfectly correct 30 degree turn. Turning
+                // the PRE-drag shape through each candidate step and comparing
+                // extents makes no assumption about its footprint at all.
+                // Extents are invariant to where the rotation is centred, so
+                // the pivot does not have to be reproduced here.
+                const gp_XYZ after = gizmoExtents();
+                check(std::fabs(after.X() - before.X()) + std::fabs(after.Y() - before.Y()) +
+                              std::fabs(after.Z() - before.Z()) > 1.0,
+                      QStringLiteral("the body really turned (%1 x %2 x %3 became "
+                                     "%4 x %5 x %6)")
+                          .arg(before.X()).arg(before.Y()).arg(before.Z())
+                          .arg(after.X()).arg(after.Y()).arg(after.Z()));
+                int matchedStep = 0;
+                for (int step = -5; step <= 5 && matchedStep == 0; ++step) {
+                    if (step == 0) continue;
+                    gp_Trsf spin;
+                    spin.SetRotation(gp_Ax1(gp_Pnt(0.0, 0.0, 0.0), ringDir),
+                                     step * 15.0 * 3.14159265358979323846 / 180.0);
+                    const ModelingOps::BooleanResult turned =
+                        ModelingOps::transformShape(shapeBefore, spin);
+                    if (!turned.ok) continue;
+                    Bnd_Box probe;
+                    BRepBndLib::Add(turned.shape, probe);
+                    Standard_Real px0, py0, pz0, px1, py1, pz1;
+                    probe.Get(px0, py0, pz0, px1, py1, pz1);
+                    if (std::fabs((px1 - px0) - after.X()) < 1.0 &&
+                        std::fabs((py1 - py0) - after.Y()) < 1.0 &&
+                        std::fabs((pz1 - pz0) - after.Z()) < 1.0) {
+                        matchedStep = step;
+                    }
+                }
+                check(matchedStep != 0,
+                      QStringLiteral("and its extents are exactly those of the same body "
+                                     "turned a whole 15 degree step about the ring's own "
+                                     "axis (%1 deg; %2 x %3 became %4 x %5)")
+                          .arg(matchedStep * 15).arg(before.X()).arg(before.Y())
+                          .arg(after.X()).arg(after.Y()));
+
+                ToastHost* toasts = window.findChild<ToastHost*>();
+                check(toasts != nullptr &&
+                          toasts->currentText().contains(QStringLiteral("rotated")),
+                      QStringLiteral("the toast names this one Rotate (\"%1\")")
+                          .arg(toasts ? toasts->currentText() : QString()));
+
+                undoIfCommitted(depthBefore);
+                const gp_XYZ restored = gizmoExtents();
+                check(std::fabs(restored.X() - before.X()) < 1.0e-6 &&
+                          std::fabs(restored.Y() - before.Y()) < 1.0e-6 &&
+                          std::fabs(restored.Z() - before.Z()) < 1.0e-6,
+                      "and Undo turns it back exactly");
+            }
+            // Back to the framing every probe after this one inherits.
+            view->animateTo(ringFramedBefore);
+            settle(200);
+            view->setSelectedSolids({gizmoId});
+            settle(150);
+        }
+
+        // --- a drag that nets nothing is a cancel, not an edit --------------
+        {
+            QPoint handleAt;
+            gp_Pnt handleWorld;
+            const bool found =
+                findHandle(1, 2, gizmoFrame.Direction(), handleAt, handleWorld);
+            check(found, "the Move handle is findable for the no-op probe");
+
+            if (found) {
+                const std::size_t depthBefore = window.document().undoDepth();
+                const int revisionBefore = window.document().revision();
+                const gp_Pnt centreBefore = gizmoCentre();
+                ToastHost* toasts = window.findChild<ToastHost*>();
+                if (toasts) { toasts->documentMovedTo(window.document().revision() + 1); settle(150); }
+
+                // Press, move away, and come back to exactly where it started
+                // before releasing. Not a bare press-and-release: that would
+                // pass against an implementation which simply never reads the
+                // transform, while this one has genuinely moved the
+                // presentation and has to notice it came home.
+                dragButton(view, QPointF(handleAt), QPointF(handleAt + QPoint(0, -60)),
+                           Qt::LeftButton, Qt::NoModifier);
+                settle(120);
+                dragButton(view, QPointF(handleAt), QPointF(handleAt), Qt::LeftButton);
+                settle(250);
+
+                check(window.document().undoDepth() == depthBefore + 1,
+                      "the first of those two drags did commit, so the probe is not "
+                      "vacuous");
+                undoIfCommitted(depthBefore);
+
+                const std::size_t depthNow = window.document().undoDepth();
+                const int revisionNow = window.document().revision();
+                if (toasts) { toasts->documentMovedTo(window.document().revision() + 1); settle(150); }
+                dragButton(view, QPointF(handleAt), QPointF(handleAt), Qt::LeftButton);
+                settle(250);
+                check(window.document().undoDepth() == depthNow,
+                      QStringLiteral("a drag that releases where it started takes no "
+                                     "checkpoint (%1 -> %2)")
+                          .arg(depthNow).arg(window.document().undoDepth()));
+                check(window.document().revision() == revisionNow,
+                      "and moves the document not at all");
+                check(toasts == nullptr || !toasts->isShowing(),
+                      "and says nothing");
+                check(gizmoCentre().Distance(centreBefore) < 1.0e-6,
+                      "leaving the body exactly where it was");
+                check(presentationIsClean(),
+                      "and the presentation back where the document says it is, rather "
+                      "than stuck at the pose the cancelled drag left it in");
+            }
+        }
+
+        // --- a scale nobody could have meant is refused, not clamped -------
+        // The kernel only refuses a factor <= 0: it will happily build a body
+        // a billionth of its size, which is a body the user has lost rather
+        // than an edit they can see. This band is MainWindow's, so it is
+        // asserted through MainWindow's own commit path - the same one a drag
+        // reaches - rather than through a gesture that would have to be
+        // dragged implausibly far to get there.
+        {
+            const double volumeBefore = gizmoVolume();
+            const std::size_t depthBefore = window.document().undoDepth();
+            gp_Trsf absurd;
+            absurd.SetScale(gizmoCentre(), 50.0);
+            check(!window.transformBody(gizmoId, absurd),
+                  "a x50 scale is refused rather than baked");
+            check(std::fabs(gizmoVolume() - volumeBefore) < 1.0e-6,
+                  "and the body is left byte-for-byte as it was");
+            check(window.document().undoDepth() == depthBefore,
+                  "with no checkpoint taken for the change that never happened");
+
+            ToastHost* toasts = window.findChild<ToastHost*>();
+            check(toasts != nullptr && toasts->isShowing() &&
+                      toasts->currentText().contains(QStringLiteral("change of size")),
+                  QStringLiteral("reported as a failure in cause-and-fix form (\"%1\")")
+                      .arg(toasts ? toasts->currentText() : QString()));
+
+            gp_Trsf vanishing;
+            vanishing.SetScale(gizmoCentre(), 0.01);
+            check(!window.transformBody(gizmoId, vanishing),
+                  "and so is a shrink to a hundredth, at the other end of the band");
+            check(std::fabs(gizmoVolume() - volumeBefore) < 1.0e-6,
+                  "leaving the body alone that time too");
+            check(presentationIsClean(),
+                  "and a refused bake leaves the viewport agreeing with the document, "
+                  "never showing a pose that exists nowhere");
+
+            // Non-vacuity: a factor INSIDE the band still commits, so the two
+            // refusals above are the clamp doing its job rather than
+            // transformBody refusing everything.
+            gp_Trsf sensible;
+            sensible.SetScale(gizmoCentre(), 1.5);
+            check(window.transformBody(gizmoId, sensible),
+                  "while a x1.5 scale inside the band is baked as normal");
+            undoIfCommitted(depthBefore);
+            check(std::fabs(gizmoVolume() - volumeBefore) < 1.0e-6,
+                  "and undone again for the probes that follow");
+        }
+
+        // --- the gizmo must not fight the camera ---------------------------
+        {
+            QPoint handleAt;
+            gp_Pnt handleWorld;
+            const bool found =
+                findHandle(1, 2, gizmoFrame.Direction(), handleAt, handleWorld);
+            check(found, "the Move handle is findable for the camera probes");
+
+            const double azimuth = view->camera().state().azimuthDeg;
+            const gp_Pnt centreBefore = gizmoCentre();
+            if (found)
+                dragButton(view, QPointF(handleAt), QPointF(handleAt + QPoint(70, 0)),
+                           Qt::RightButton);
+            check(std::fabs(view->camera().state().azimuthDeg - azimuth) > 5.0,
+                  "an RMB drag starting on a gizmo handle still orbits the camera");
+            check(gizmoCentre().Distance(centreBefore) < 1.0e-6,
+                  "and moves the body not at all");
+
+            const gp_Pnt panTarget = view->camera().state().target;
+            QPoint again;
+            gp_Pnt againWorld;
+            if (findHandle(1, 2, gizmoFrame.Direction(), again, againWorld))
+                dragButton(view, QPointF(again), QPointF(again + QPoint(50, 30)),
+                           Qt::MiddleButton);
+            check(view->camera().state().target.Distance(panTarget) > 1.0,
+                  "and an MMB drag starting on it still pans");
+        }
+
+        // --- a Shift-click must reach the body under a gizmo arm -----------
+        // The regression net for the bug a 100% display found and a 150% one
+        // hid: AIS_ManipulatorOwner outranks a shape's owner, so an arm
+        // crossing a second body wins the pick and "add this body to the
+        // selection" adds nothing at all.
+        //
+        // Everything here goes through the REAL mouse handler. Every other
+        // multi-body check in this block uses setSelectedSolids(), which
+        // bypasses the exact code the fix lives in - so without this, deleting
+        // the fix leaves the suite green at this machine's own scale and the
+        // bug has no net under it. The pixel is derived from the manipulator's
+        // own geometry and the second body is parked on it, so the arrangement
+        // holds at any display scale rather than depending on where two bodies
+        // happened to fall.
+        {
+            // A known camera, so which arm faces the eye is decided rather
+            // than inherited from whatever the camera probes above left
+            // behind, and a FRESH convex body to park on it. The document's
+            // first body was the obvious candidate and the wrong one: it has
+            // been through the booleans further up, and the centre of mass of
+            // a carved body need not lie in its own material - so parking it
+            // "at" the arm point put no material there at all, and the
+            // non-vacuity click found the body behind instead.
+            view->setViewAxonometric();
+            settle(250);
+            const int helperBefore = static_cast<int>(window.document().count());
+            check(buildBody(window, 0.62, 0.30, 0.76, 0.42, 30.0),
+                  "a second body for the Shift-click probe");
+            const int helperId = window.document().solids().empty()
+                                     ? -1
+                                     : window.document().solids().back().id;
+            check(helperId > 0 && helperId != gizmoId,
+                  "and it is a different body from the one the gizmo stands on");
+
+            view->setSelectedSolids({gizmoId});
+            settle(200);
+            check(view->hasManipulator(), "the gizmo is up for the Shift-click probe");
+
+            // Prefer the arm pointing most toward the camera, so the body
+            // parked on it is the NEAREST thing along that ray. Then a failure
+            // means the pick chose the manipulator over the body on selection
+            // priority - which is the bug - rather than choosing something in
+            // front of both on depth, which would be nobody's fault.
+            const gp_Dir viewDir = view->camera().viewDirection();
+            auto armDirection = [&](int axis) {
+                return axis == 0   ? gizmoFrame.XDirection()
+                       : axis == 1 ? gizmoFrame.YDirection()
+                                   : gizmoFrame.Direction();
+            };
+            int order[3] = {0, 1, 2};
+            for (int a = 0; a < 3; ++a) {
+                for (int b = a + 1; b < 3; ++b) {
+                    const double facingA =
+                        -gp_Vec(armDirection(order[a])).Dot(gp_Vec(viewDir));
+                    const double facingB =
+                        -gp_Vec(armDirection(order[b])).Dot(gp_Vec(viewDir));
+                    if (facingB > facingA) std::swap(order[a], order[b]);
+                }
+            }
+
+            // Clear of the body the gizmo stands on, with room to spare, so
+            // the second body can be parked on the arm point in open air.
+            gp_Ax2 armFrame;
+            double armSize = 1.0;
+            view->manipulatorFrame(armFrame, armSize);
+            Bnd_Box clearOfBody;
+            BRepBndLib::Add(window.document().shapeOf(gizmoId), clearOfBody);
+            clearOfBody.Enlarge(0.15 * armSize);
+
+            QPoint armAt;
+            gp_Pnt armWorld;
+            int armAxis = -1;
+            for (int i = 0; i < 3 && armAxis < 0; ++i) {
+                if (findHandle(1, order[i], armDirection(order[i]), armAt, armWorld,
+                               &clearOfBody))
+                    armAxis = order[i];
+            }
+            check(armAxis >= 0,
+                  "an arm of the gizmo is findable clear of the body it stands on");
+
+            if (armAxis >= 0 && helperId > 0 && helperId != gizmoId) {
+                // Park the second body exactly on that arm point, through the
+                // same commit path a drag uses.
+                GProp_GProps helperProps;
+                BRepGProp::VolumeProperties(window.document().shapeOf(helperId),
+                                            helperProps);
+                gp_Trsf park;
+                park.SetTranslation(gp_Vec(helperProps.CentreOfMass(), armWorld));
+                check(window.transformBody(helperId, park),
+                      "the second body can be parked on that arm");
+
+                // Non-vacuity, and it has to come first: with no gizmo in the
+                // way, a plain click at that pixel really does find the parked
+                // body. Without this the Shift-click check below would pass
+                // just as well against a pixel with nothing behind it.
+                view->clearSelection();
+                settle(200);
+                check(!view->hasManipulator(),
+                      "the gizmo is down for the non-vacuity click");
+                clickAt(view, QPointF(armAt));
+                settle(150);
+                std::vector<int> got = view->selectedSolidIds();
+                const bool plainFoundHelper =
+                    std::find(got.begin(), got.end(), helperId) != got.end();
+                check(plainFoundHelper,
+                      QStringLiteral("a plain click at the arm's pixel finds the parked "
+                                     "body, so that pixel really is over it (%1 selected)")
+                          .arg(got.size()));
+
+                view->setSelectedSolids({gizmoId});
+                settle(200);
+                check(view->hasManipulator(), "the gizmo is back on the first body");
+                hover(armAt);
+                check(view->manipulatorActiveMode() != 0,
+                      "and one of its arms genuinely crosses that same pixel - so the "
+                      "Shift-click below is aimed at the collision, not beside it");
+
+                // The gesture itself, through the mouse handler.
+                clickAt(view, QPointF(armAt), Qt::ShiftModifier);
+                settle(250);
+                got = view->selectedSolidIds();
+                const bool haveFirst =
+                    std::find(got.begin(), got.end(), gizmoId) != got.end();
+                const bool haveSecond =
+                    std::find(got.begin(), got.end(), helperId) != got.end();
+                check(haveFirst && haveSecond,
+                      QStringLiteral("a Shift-click at a pixel a gizmo arm crosses still "
+                                     "adds the body underneath (%1 selected)")
+                          .arg(got.size()));
+                check(!view->hasManipulator(),
+                      "and two bodies selected retires the gizmo, as the predicate says");
+            }
+
+            // The parked body was built for this probe, so it goes rather than
+            // being moved back - the block's own "leaves the document as it
+            // found it" check at the end is what this is keeping true.
+            if (helperId > 0) {
+                view->setSelectedSolids({helperId});
+                settle(150);
+                trigger(window, QStringLiteral("Delete Selected"));
+                settle(200);
+            }
+            check(static_cast<int>(window.document().count()) == helperBefore,
+                  "and the probe's own second body is cleared away after it");
+            view->setSelectedSolids({gizmoId});
+            settle(200);
+        }
+
+        // --- Step 5's evidence: the gizmo at the body ----------------------
+        {
+            view->setViewAxonometric();
+            settle(250);
+            view->setSelectedSolids({gizmoId});
+            settle(250);
+            check(view->hasManipulator(), "the gizmo is up for the capture");
+
+            const QImage shot =
+                printWindowCapture(&window, outDir + QStringLiteral("/transform-gizmo.png"));
+            check(!shot.isNull(), "the gizmo capture came back with pixels");
+            checkNoBlackLine(shot, QStringLiteral("transform gizmo"));
+            if (!shot.isNull()) {
+                gp_Ax2 frame;
+                double size = 0.0;
+                QPoint centreAt;
+                if (view->manipulatorFrame(frame, size) &&
+                    view->projectToScreen(frame.Location(), centreAt)) {
+                    // A box around the whole gizmo, sized from its own reach
+                    // rather than a pixel guess: the outermost ring sits about
+                    // one `size` from the centre, so project that and use it.
+                    QPoint tipAt;
+                    int reach = 160;
+                    if (view->projectToScreen(
+                            frame.Location().Translated(gp_Vec(frame.Direction()) * size),
+                            tipAt))
+                        reach = std::max(120, (tipAt - centreAt).manhattanLength() + 60);
+                    QRect focus(centreAt, QSize(1, 1));
+                    focus.adjust(-reach, -reach, reach, reach);
+                    focus.translate(view->mapTo(&window, QPoint(0, 0)));
+                    const double sx = double(shot.width()) / std::max(1, window.width());
+                    const double sy = double(shot.height()) / std::max(1, window.height());
+                    const QRect scaled(int(focus.left() * sx), int(focus.top() * sy),
+                                       int(focus.width() * sx), int(focus.height() * sy));
+                    const QImage crop = shot.copy(scaled.intersected(shot.rect()));
+                    if (!crop.isNull())
+                        crop.scaled(crop.width() * 3, crop.height() * 3,
+                                    Qt::KeepAspectRatio, Qt::SmoothTransformation)
+                            .save(outDir + QStringLiteral("/transform-gizmo-crop.png"));
+                }
+            }
+            view->saveSnapshot(outDir + QStringLiteral("/transform-gizmo-viewport.png"));
+        }
+
+        // The gizmo goes the moment its predicate stops holding.
+        view->clearSelection();
+        settle(200);
+        check(!view->hasManipulator(),
+              "clearing the selection retires the gizmo");
+        check(view->manipulatorSolid() == -1,
+              "and it lets go of the body it was standing on");
+
+        // Leave the document as this block found it, so every later probe's
+        // body counts still add up.
+        view->setSelectedSolids({gizmoId});
+        settle(150);
+        trigger(window, QStringLiteral("Delete Selected"));
+        settle(200);
+        check(static_cast<int>(window.document().count()) == gizmoBodiesBefore,
+              "the gizmo probe leaves the document as it found it");
+        view->clearSelection();
+        settle(150);
+    }
+
+    // --- one edge, one axis, two operations -----------------------------------
+    // Select an edge, drag one way to round it and the other way to flatten it.
+    // Everything is derived from projected geometry, and both outcomes are
+    // asserted as EXACT volume deltas from the closed forms a fillet and a
+    // chamfer of a straight edge have - (1 - pi/4)r^2 L and d^2 L / 2 - rather
+    // than "something got smaller", which both operations would satisfy in
+    // either direction.
+    {
+        const CameraState bevelCameraBefore = view->camera().state();
+        QAction* snap = action(window, QStringLiteral("Snap to Grid"));
+        check(snap != nullptr, "there is a Snap to Grid action for the bevel probes");
+        if (snap && !snap->isChecked()) { snap->trigger(); settle(120); }
+
+        const int bevelBodiesBefore = static_cast<int>(window.document().count());
+        check(buildBody(window, 0.34, 0.30, 0.72, 0.62, 40.0),
+              "a fresh box to round and flatten an edge of");
+        check(static_cast<int>(window.document().count()) == bevelBodiesBefore + 1,
+              "and it reached the document");
+        const int bevelId = window.document().solids().empty()
+                                ? -1
+                                : window.document().solids().back().id;
+        view->fitAll();
+        settle(250);
+        trigger(window, QStringLiteral("Select Edges"));
+        settle(150);
+
+        auto bodyShape = [&window, bevelId] { return window.document().shapeOf(bevelId); };
+        auto bodyVolume = [&] { return ModelingOps::volume(bodyShape()); };
+        auto faceCount = [&] {
+            int faces = 0;
+            for (TopExp_Explorer it(bodyShape(), TopAbs_FACE); it.More(); it.Next()) ++faces;
+            return faces;
+        };
+        // Press and move without releasing: every assertion about the kind, the
+        // label and the live preview has to be made while the gesture is still
+        // live, because committing it retires the chip that carries them.
+        auto pressAndDrag = [&](const QPoint& from, const QPoint& to) {
+            const QPointF start(from);
+            QMouseEvent down(QEvent::MouseButtonPress, start, view->mapToGlobal(start),
+                             Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QCoreApplication::sendEvent(view, &down);
+            for (int i = 1; i <= 8; ++i) {
+                const QPointF p = start + (QPointF(to) - start) * (double(i) / 8.0);
+                QMouseEvent move(QEvent::MouseMove, p, view->mapToGlobal(p),
+                                 Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+                QCoreApplication::sendEvent(view, &move);
+            }
+            settle(200);
+        };
+        auto releaseAt = [&](const QPoint& at) {
+            const QPointF p(at);
+            QMouseEvent up(QEvent::MouseButtonRelease, p, view->mapToGlobal(p),
+                           Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+            QCoreApplication::sendEvent(view, &up);
+            settle(300);
+        };
+
+        // The dragged size, in millimetres. 20 is a multiple of the 10 mm snap
+        // step (so the snap cannot round the assertion out from under it) and
+        // is comfortably inside the 40 mm the box is thick, which is what the
+        // neighbouring side face has to give up.
+        constexpr double kSize = 20.0;
+
+        // A LONG, TOP edge: the vertical ones are only as tall as the box, and
+        // the whole point of a bevel is that it runs along something. The axis
+        // is asked of ModelingOps::bevelAxis itself, so this probe aims at the
+        // gizmo's own geometry rather than guessing where the arrow will be.
+        TopoDS_Edge target;
+        QPoint edgeAt;
+        QPoint inwardAt;
+        QPoint outwardAt;
+        gp_Pnt edgeCentre;
+        gp_Dir edgeOutward;
+        double edgeLength = 0.0;
+        for (TopExp_Explorer it(bodyShape(), TopAbs_EDGE); it.More() && target.IsNull();
+             it.Next()) {
+            const TopoDS_Edge candidate = TopoDS::Edge(it.Current());
+            gp_Pnt centre;
+            gp_Dir outward;
+            if (!ModelingOps::bevelAxis(bodyShape(), candidate, centre, outward)) continue;
+            if (outward.Z() < 0.3) continue;   // a top edge, so both its faces are reachable
+
+            const double facing =
+                gp_Vec(outward).Dot(gp_Vec(view->camera().viewDirection()));
+            if (facing >= -0.25) continue;   // turned away from the camera
+            if (facing < -0.95) continue;    // looking down the arrow: unmeasurable
+
+            TopoDS_Vertex v1, v2;
+            TopExp::Vertices(candidate, v1, v2);
+            if (v1.IsNull() || v2.IsNull()) continue;
+            const double length = BRep_Tool::Pnt(v1).Distance(BRep_Tool::Pnt(v2));
+            if (length < 100.0) continue;
+
+            QPoint at, inAt, outAt;
+            if (!view->projectToScreen(centre, at)) continue;
+            if (!view->projectToScreen(centre.Translated(gp_Vec(outward) * -kSize), inAt))
+                continue;
+            if (!view->projectToScreen(centre.Translated(gp_Vec(outward) * kSize), outAt))
+                continue;
+            if (!view->rect().adjusted(60, 60, -60, -60).contains(at)) continue;
+            if (!view->rect().contains(inAt) || !view->rect().contains(outAt)) continue;
+
+            clickAt(view, QPointF(at));
+            settle(150);
+            const TopoDS_Edge got = view->selectedEdge();
+            if (got.IsNull() || !got.IsSame(candidate)) continue;   // occluded, or missed
+            target = candidate;
+            edgeAt = at;
+            inwardAt = inAt;
+            outwardAt = outAt;
+            edgeCentre = centre;
+            edgeOutward = outward;
+            edgeLength = length;
+        }
+        check(!target.IsNull(),
+              "clicking a projected edge midpoint selects a long top edge of the new body");
+
+        // --- dolly until the 20 mm drag spans enough PIXELS to aim with ----
+        //
+        // The transform gizmo's probe already invented this (see the Move
+        // handle's framing loop) and the bevel drags needed it just as badly.
+        // fitAll() frames the whole document, which left about 1.8 mm to the
+        // logical pixel at 100% - so the 20 mm this gesture drags spanned only
+        // eleven pixels, and at 125% it spanned nine. The press point and the
+        // release point are both rounded to whole pixels and the axis is
+        // oblique to the screen, so the error those two roundings put into the
+        // parameter along the arrow is a large fraction of a 10 mm snap step:
+        // measured, the flattening drag at 125% snapped to 30 mm instead of
+        // 20 and the released volume then missed its closed form by more than
+        // 2x. Both were parked as "display-scale sensitivity"; neither was the
+        // product's.
+        //
+        // A pure dolly, exactly as the gizmo probe does it, and for the same
+        // reason: moving the camera TARGET would slide the edge's projection
+        // across the screen and the pick could land on a different edge.
+        //
+        // Each pass is kept only while all three drag points still project
+        // comfortably inside the viewport AND the edge still selects at the
+        // new pixel - a pass that loses either is rolled back and the loop
+        // stops, so this trades precision for correctness rather than zooming
+        // until the probe aims at nothing. bevelCameraBefore is restored at
+        // the end of this block, so nothing after it inherits the framing.
+        // A pass is kept only while all three drag points still project inside
+        // the viewport - a probe that zooms until it is aiming at nothing has
+        // traded correctness for precision, which is the wrong way round.
+        auto projectDrag = [&](QPoint& at, QPoint& inAt, QPoint& outAt) {
+            return view->projectToScreen(edgeCentre, at) &&
+                   view->projectToScreen(edgeCentre.Translated(gp_Vec(edgeOutward) * -kSize),
+                                         inAt) &&
+                   view->projectToScreen(edgeCentre.Translated(gp_Vec(edgeOutward) * kSize),
+                                         outAt) &&
+                   view->rect().adjusted(30, 30, -30, -30).contains(at) &&
+                   view->rect().contains(inAt) && view->rect().contains(outAt);
+        };
+        // Called before EACH of the two drags, not once: the curved-edge probe
+        // between them re-frames the whole document on purpose (its arcs live
+        // at the far ends of a 1,100 mm edge and are off screen at any framing
+        // tight enough to aim a 20 mm drag), so the second drag's three points
+        // would otherwise be stale.
+        //
+        // Returns the pixel span the 20 mm drag ends up with, and how it
+        // stopped, so the check that reads it can say which.
+        auto aimTheDrag = [&](QString& why) {
+            // 20 mm over 32 px is under 0.7 mm to the pixel: the two endpoint
+            // roundings, amplified by however oblique the arrow is to the
+            // screen, then stay well inside half a 10 mm snap step.
+            constexpr double kWantedSpan = 32.0;
+            why = QStringLiteral("already wide enough");
+            for (int pass = 0; pass < 5; ++pass) {
+                QPoint at, inAt, outAt;
+                if (!projectDrag(at, inAt, outAt)) {
+                    why = QStringLiteral("a drag point left the viewport");
+                    break;
+                }
+                const double span = std::hypot(double(outAt.x() - at.x()),
+                                               double(outAt.y() - at.y()));
+                if (span >= kWantedSpan) break;
+                const CameraState beforePass = view->camera().state();
+                CameraState closer = beforePass;
+                // Bounded per pass, the same 0.6 the gizmo probe uses, so the
+                // camera walks in rather than jumping inside the body.
+                closer.distance *= std::max(0.6, span / kWantedSpan);
+                view->animateTo(closer);   // animations are off: immediate
+                settle(180);
+                QPoint a2, i2, o2;
+                if (!projectDrag(a2, i2, o2)) {
+                    view->animateTo(beforePass);
+                    settle(180);
+                    why = QStringLiteral("one pass further pushed a drag point off screen");
+                    break;
+                }
+                why = QStringLiteral("dollied in");
+            }
+            // Re-projected at whatever framing the loop settled on - the three
+            // points found before it are stale the moment the camera moves.
+            projectDrag(edgeAt, inwardAt, outwardAt);
+            return std::hypot(double(outwardAt.x() - edgeAt.x()),
+                              double(outwardAt.y() - edgeAt.y()));
+        };
+
+        if (!target.IsNull()) {
+            QString why;
+            const double dragSpan = aimTheDrag(why);
+            // The selection is re-taken at the new pixel, with the previous one
+            // cleared first: with the arrow up, a press within 14 px of its
+            // shaft begins a DRAG rather than a pick (OcctViewWidget::arrowHit),
+            // and edgeAt is the arrow's own tail - so a click there would
+            // validate nothing at all.
+            view->clearSelection();
+            settle(150);
+            clickAt(view, QPointF(edgeAt));
+            settle(150);
+            check(!view->selectedEdge().IsNull() && view->selectedEdge().IsSame(target),
+                  "the same edge still selects at the framing the drags are aimed from");
+            // The precision the framing was for, asserted rather than assumed -
+            // and the check that would have shown the two 125% failures as an
+            // aiming problem instead of leaving them looking like product bugs.
+            check(dragSpan >= 16.0,
+                  QStringLiteral("and the %1 mm drag spans enough pixels to aim with "
+                                 "(%2 px, %3 mm per pixel, %4)")
+                      .arg(kSize).arg(dragSpan)
+                      .arg(dragSpan > 0.0 ? kSize / dragSpan : 0.0)
+                      .arg(why));
+        }
+
+        // The sign convention's GROUND TRUTH, and not optional. Every other
+        // check in this block measures the drag against the very axis
+        // ModelingOps::bevelAxis hands back, so a bisector built from un-flipped
+        // REVERSED normals - which points INTO the body, the Phase 4 lesson -
+        // would send the gesture the opposite physical way and every one of
+        // them would still pass, consistently wrong. BRepClass3d_SolidClassifier
+        // is the same independent oracle Phase 4 used to pin lockToFace's flip:
+        // a step ALONG the axis has to leave the body and a step against it has
+        // to stay inside it.
+        if (!target.IsNull()) {
+            BRepClass3d_SolidClassifier classifier(bodyShape());
+            classifier.Perform(edgeCentre.Translated(gp_Vec(edgeOutward) * 2.0), 1.0e-7);
+            const bool leavesTheBody = classifier.State() == TopAbs_OUT;
+            classifier.Perform(edgeCentre.Translated(gp_Vec(edgeOutward) * -2.0), 1.0e-7);
+            const bool entersTheBody = classifier.State() == TopAbs_IN;
+            check(leavesTheBody && entersTheBody,
+                  QStringLiteral("the drag axis really points out of the body, so "
+                                 "\"inward rounds\" means inward (out: %1, in: %2)")
+                      .arg(leavesTheBody).arg(entersTheBody));
+        }
+
+        BevelArrow* bevel = window.findChild<BevelArrow*>();
+        check(bevel != nullptr, "the window has a round/flatten gizmo");
+        check(bevel != nullptr && bevel->isVisible(),
+              "one straight edge selected raises it");
+        check(view->hasBevelArrow(),
+              "and the arrow itself is drawn in the 3D scene, not painted over it");
+        // The table's words, not "round or flatten": one operation, one name,
+        // across the chip, the tooltips, this label and both refusals.
+        check(stateLabelText(window).contains(
+                  QStringLiteral("drag in for a Fillet, out for a Chamfer")),
+              QStringLiteral("the state label teaches the gesture in the operations' "
+                             "own names (\"%1\")")
+                  .arg(stateLabelText(window)));
+        check(!view->dimension().isShowing() && view->edgeDimensionSuppressed(),
+              "and the edge-length annotation stands down while it is up");
+
+        // The value chip's field is a real, reachable control. childAt
+        // identity, not an attribute flag - CLAUDE.md's rule, learned twice.
+        // Pinned non-null first, so the checks guarded by it cannot vanish
+        // quietly.
+        check(bevel != nullptr && bevel->field() != nullptr,
+              "the gizmo and its value field exist before the reachability probe");
+        if (bevel && bevel->field()) {
+            check(view->childAt(bevel->field()->geometry().center()) == bevel->field(),
+                  "a real click at the value field's centre finds the field itself");
+            // The field is where the two operations are TAUGHT, and the
+            // tooltip follows the kind rather than describing both - a
+            // tooltip that named the operation the chip is not about to
+            // perform would be worse than none. Checked on both sides: the
+            // flattening half is asserted after the outward drag below.
+            check(bevel->field()->toolTip().contains(QStringLiteral("rounds the edge")),
+                  QStringLiteral("and the field teaches what the rounding half does "
+                                 "(\"%1\")").arg(bevel->field()->toolTip()));
+            // The em dash, by codepoint. This file is UTF-8 with no BOM, the
+            // way every other source here is, and the first version of it
+            // carried a BOM and a double-encoded dash that compiled, passed
+            // the banned-word sweep, and rendered as mojibake. A separator
+            // nothing asserts is a separator nothing notices.
+            check(bevel->field()->toolTip().contains(QChar(0x2014)),
+                  "joined by a real em dash rather than a mis-encoded one");
+        }
+
+        const double startVolume = bodyVolume();
+        const int startFaces = faceCount();
+
+        // --- inward rounds ------------------------------------------------
+        if (bevel && !target.IsNull()) {
+            pressAndDrag(edgeAt, inwardAt);
+            check(bevel->isFillet(),
+                  "dragging INTO the body, against the bisector, chooses the rounding half");
+            check(bevel->valueText().startsWith(QLatin1Char('R')),
+                  QStringLiteral("so the value reads as a radius (\"%1\")")
+                      .arg(bevel->valueText()));
+            check(bevel->kindText() == QStringLiteral("Fillet"),
+                  QStringLiteral("and the chip names the operation in words (\"%1\")")
+                      .arg(bevel->kindText()));
+            check(std::fabs(bevel->size() - kSize) < 1.0e-6,
+                  QStringLiteral("the size snapped to the 10 mm step at exactly the "
+                                 "dragged distance (%1 vs %2)")
+                      .arg(bevel->size()).arg(kSize));
+            check(view->hasModelingPreview(),
+                  "a live preview is up on the dedicated channel");
+            check(!view->hasPreview(),
+                  "and never on the sketch/extrude slot two features already collided over");
+
+            // Step 5's evidence for the rounding half, taken at the one moment
+            // the arrow, the chip and the preview are all live.
+            const QImage roundShot =
+                printWindowCapture(&window, outDir + QStringLiteral("/bevel-fillet.png"));
+            check(!roundShot.isNull(), "the mid-drag rounding capture came back with pixels");
+
+            // --- measured, not eyeballed --------------------------------
+            // The whole composited window swept for a black run, taken at the
+            // one moment three overlay widgets, an in-scene arrow and a live
+            // preview are all up over the GL surface.
+            //
+            // It really was here, and only a measurement found it: the first
+            // capture of this gesture carried a 264-device-pixel 0,0,0
+            // hairline along the value chip's bottom edge - the row Qt
+            // flushes for a card 93 logical rows tall at 150% scaling and the
+            // widget's own logical clip stops it from painting. Both
+            // magnified crops read as clean to the eye. This phase's worst
+            // finding was a commit message claiming a crop confirmed a 3px
+            // gap that measured 12, so the crop is evidence and the sweep is
+            // the check - and it now runs on every gizmo capture, not only
+            // the one that found it.
+            checkNoBlackLine(roundShot, QStringLiteral("rounding"));
+
+            if (!roundShot.isNull()) {
+                QRect focus(bevel->geometry());
+                focus = focus.united(QRect(edgeAt, QSize(1, 1)));
+                focus.adjust(-70, -70, 70, 70);
+                focus.translate(view->mapTo(&window, QPoint(0, 0)));
+                const double sx = double(roundShot.width()) / std::max(1, window.width());
+                const double sy = double(roundShot.height()) / std::max(1, window.height());
+                const QRect scaled(int(focus.left() * sx), int(focus.top() * sy),
+                                   int(focus.width() * sx), int(focus.height() * sy));
+                const QImage crop = roundShot.copy(scaled.intersected(roundShot.rect()));
+                if (!crop.isNull())
+                    crop.scaled(crop.width() * 3, crop.height() * 3, Qt::KeepAspectRatio,
+                                Qt::SmoothTransformation)
+                        .save(outDir + QStringLiteral("/bevel-fillet-crop.png"));
+            }
+            view->saveSnapshot(outDir + QStringLiteral("/bevel-fillet-viewport.png"));
+
+            // The radius the chip is about to commit, read back rather than
+            // assumed from kSize - see the same readback on the flattening
+            // side for why a closed form must be evaluated at the size that
+            // was actually committed.
+            const double committedRadius = bevel->size();
+            releaseAt(inwardAt);
+            const double removed = startVolume - bodyVolume();
+            constexpr double kPi = 3.14159265358979323846;
+            const double expected =
+                (1.0 - kPi / 4.0) * committedRadius * committedRadius * edgeLength;
+            check(std::fabs(removed - expected) < std::max(1.0, expected * 0.02),
+                  QStringLiteral("releasing rounds it by exactly (1 - pi/4) r^2 L "
+                                 "(%1 vs %2 at r = %3 mm over a %4 mm edge)")
+                      .arg(removed).arg(expected).arg(committedRadius).arg(edgeLength));
+            check(faceCount() > startFaces,
+                  QStringLiteral("and the result carries the rounded strip as a new face "
+                                 "(%1 -> %2)").arg(startFaces).arg(faceCount()));
+
+            ToastHost* toasts = window.findChild<ToastHost*>();
+            check(toasts != nullptr && toasts->isShowing() && toasts->toast() != nullptr &&
+                      toasts->toast()->hasUndo(),
+                  "it is reported through a toast that offers Undo");
+
+            // --- the Phase 4 annotation rules, on a CURVED edge -----------
+            // Moved here from the edge-dimension block: selecting a STRAIGHT
+            // edge now raises this gizmo instead of an annotation, so the
+            // "follows the selection, survives the cursor leaving, never
+            // outlives its body" rules are checked on the one kind of edge
+            // that still has no gizmo - which is also the check that the
+            // arrow's straight-only rule is real.
+            //
+            // Re-framed on the whole document first, and deliberately: the
+            // only curved edges a filleted box has are the two end arcs of the
+            // rounded strip, which sit at the far ends of an 1,100 mm edge and
+            // are off screen at any framing tight enough to aim a 20 mm drag
+            // (see aimTheDrag). The drags re-aim themselves, so widening here
+            // costs them nothing.
+            view->fitAll();
+            settle(250);
+            TopoDS_Edge arc;
+            for (TopExp_Explorer it(bodyShape(), TopAbs_EDGE); it.More() && arc.IsNull();
+                 it.Next()) {
+                const TopoDS_Edge candidate = TopoDS::Edge(it.Current());
+                BRepAdaptor_Curve curve(candidate);
+                if (curve.GetType() == GeomAbs_Line) continue;
+                const gp_Pnt mid = curve.Value(
+                    0.5 * (curve.FirstParameter() + curve.LastParameter()));
+                QPoint at;
+                if (!view->projectToScreen(mid, at)) continue;
+                if (!view->rect().adjusted(30, 30, -30, -30).contains(at)) continue;
+                clickAt(view, QPointF(at));
+                settle(140);
+                const TopoDS_Edge got = view->selectedEdge();
+                if (got.IsNull() || !got.IsSame(candidate)) continue;
+                arc = got;
+            }
+            check(!arc.IsNull(),
+                  "one of the rounded body's curved edges can be selected");
+            if (!arc.IsNull()) {
+                check(!view->hasBevelArrow(),
+                      "a curved edge raises no arrow - one drag axis needs one "
+                      "perpendicular, and a bending edge has none");
+                check(view->dimension().isShowing(),
+                      "so its length annotation is the one label on it, and SELECTING it "
+                      "is what put it there");
+                TopoDS_Vertex a1, a2;
+                TopExp::Vertices(arc, a1, a2);
+                const std::string arcExpected =
+                    Measure::formatLength(BRep_Tool::Pnt(a1).Distance(BRep_Tool::Pnt(a2)));
+                check(view->dimension().labelText() == arcExpected,
+                      QStringLiteral("reading the true span between its ends (\"%1\" "
+                                     "against \"%2\")")
+                          .arg(QString::fromStdString(view->dimension().labelText()),
+                               QString::fromStdString(arcExpected)));
+                moveTo(view, QPointF(8, 8));
+                check(view->dimension().isShowing(),
+                      "and it survives the cursor moving off, because the edge is still "
+                      "selected - Phase 4's rule, still enforced");
+                check(view->dimension().labelText() == arcExpected,
+                      QStringLiteral("still reading that edge's own span rather than "
+                                     "some other edge's (\"%1\")")
+                          .arg(QString::fromStdString(view->dimension().labelText())));
+
+                const std::size_t bodiesHere = window.document().count();
+                trigger(window, QStringLiteral("Delete Selected"));
+                settle(200);
+                check(window.document().count() == bodiesHere - 1,
+                      "deleting the body the annotation measures removes it");
+                check(!view->dimension().isShowing(),
+                      "and takes the annotation with it rather than leaving it in "
+                      "empty space");
+                trigger(window, QStringLiteral("Undo"));
+                settle(250);
+                check(window.document().count() == bodiesHere,
+                      "and Undo brings the rounded body back");
+            }
+
+            trigger(window, QStringLiteral("Undo"));
+            settle(250);
+            check(std::fabs(bodyVolume() - startVolume) < 1.0 && faceCount() == startFaces,
+                  "Undo puts the sharp edge back, faces and all");
+        }
+
+        // --- outward flattens ---------------------------------------------
+        if (bevel && !target.IsNull()) {
+            // Re-aimed, because the curved-edge probe above widened the
+            // framing back out to the whole document on purpose. Done with
+            // nothing selected, so the click below is a real pick.
+            view->clearSelection();
+            settle(150);
+            QString whyOut;
+            const double outSpan = aimTheDrag(whyOut);
+            clickAt(view, QPointF(edgeAt));
+            settle(150);
+            check(!view->selectedEdge().IsNull() && view->selectedEdge().IsSame(target) &&
+                      view->hasBevelArrow(),
+                  "the same edge selects again after the undo, and the arrow comes back");
+            check(outSpan >= 16.0,
+                  QStringLiteral("and the flattening drag is aimed just as widely "
+                                 "(%1 px, %2 mm per pixel, %3)")
+                      .arg(outSpan).arg(outSpan > 0.0 ? kSize / outSpan : 0.0).arg(whyOut));
+
+            pressAndDrag(edgeAt, outwardAt);
+            check(!bevel->isFillet(),
+                  "dragging OUT along the bisector chooses the flattening half instead");
+            check(bevel->valueText().startsWith(QLatin1Char('C')),
+                  QStringLiteral("so the value reads as a chamfer size (\"%1\")")
+                      .arg(bevel->valueText()));
+            check(bevel->kindText() == QStringLiteral("Chamfer"),
+                  QStringLiteral("and the chip renames itself in words (\"%1\")")
+                      .arg(bevel->kindText()));
+            check(std::fabs(bevel->size() - kSize) < 1.0e-6,
+                  QStringLiteral("at the same snapped size as the drag the other way "
+                                 "(%1)").arg(bevel->size()));
+            // The other half of the tooltip rule pinned above: it follows the
+            // kind, so crossing zero has to have rewritten it.
+            check(bevel->field() != nullptr &&
+                      bevel->field()->toolTip().contains(QStringLiteral("flattens the edge")),
+                  QStringLiteral("and the field now teaches flattening instead (\"%1\")")
+                      .arg(bevel->field() ? bevel->field()->toolTip() : QString()));
+            // Its em dash by codepoint too, and not because the fillet one was
+            // checked: they are two separate literals in the source, each
+            // separately capable of being mis-encoded, and only one of them
+            // was on screen when the mojibake was found.
+            check(bevel->field() != nullptr &&
+                      bevel->field()->toolTip().contains(QChar(0x2014)),
+                  "joined by a real em dash on this side as well");
+
+            const QImage flatShot =
+                printWindowCapture(&window, outDir + QStringLiteral("/bevel-chamfer.png"));
+            check(!flatShot.isNull(), "the mid-drag flattening capture came back with pixels");
+            checkNoBlackLine(flatShot, QStringLiteral("flattening"));
+            if (!flatShot.isNull()) {
+                QRect focus(bevel->geometry());
+                focus = focus.united(QRect(edgeAt, QSize(1, 1)));
+                focus.adjust(-70, -70, 70, 70);
+                focus.translate(view->mapTo(&window, QPoint(0, 0)));
+                const double sx = double(flatShot.width()) / std::max(1, window.width());
+                const double sy = double(flatShot.height()) / std::max(1, window.height());
+                const QRect scaled(int(focus.left() * sx), int(focus.top() * sy),
+                                   int(focus.width() * sx), int(focus.height() * sy));
+                const QImage crop = flatShot.copy(scaled.intersected(flatShot.rect()));
+                if (!crop.isNull())
+                    crop.scaled(crop.width() * 3, crop.height() * 3, Qt::KeepAspectRatio,
+                                Qt::SmoothTransformation)
+                        .save(outDir + QStringLiteral("/bevel-chamfer-crop.png"));
+            }
+            view->saveSnapshot(outDir + QStringLiteral("/bevel-chamfer-viewport.png"));
+
+            // The size the CHIP is about to commit, read back before the
+            // release, not the constant the drag aimed at. The two agree - the
+            // check above says so - and when they ever stop agreeing this
+            // should report the snap that missed, once, rather than reporting
+            // it a second time as a closed form that does not hold. Computing
+            // `expected` from kSize turned one failure into two, the second of
+            // which reads as "the formula for a chamfer is wrong".
+            const double committedSize = bevel->size();
+            releaseAt(outwardAt);
+            const double removed = startVolume - bodyVolume();
+            const double expected = 0.5 * committedSize * committedSize * edgeLength;
+            check(std::fabs(removed - expected) < std::max(1.0, expected * 0.02),
+                  QStringLiteral("releasing flattens it by exactly d^2 L / 2 - a bigger "
+                                 "bite than the same drag inward took (%1 vs %2 at "
+                                 "d = %3 mm)")
+                      .arg(removed).arg(expected).arg(committedSize));
+            trigger(window, QStringLiteral("Undo"));
+            settle(250);
+            check(std::fabs(bodyVolume() - startVolume) < 1.0 && faceCount() == startFaces,
+                  "which Undo puts back like any other");
+        }
+
+        // --- a typed size the kernel refuses ------------------------------
+        clickAt(view, QPointF(edgeAt));
+        settle(150);
+        bevel = window.findChild<BevelArrow*>();
+        check(bevel != nullptr && bevel->isVisible() && bevel->field() != nullptr,
+              "the gizmo is up again with its field, so the six checks below cannot "
+              "vanish quietly");
+        ToastHost* toasts = window.findChild<ToastHost*>();
+        if (bevel && bevel->isVisible() && bevel->field()) {
+            const double steadyVolume = bodyVolume();
+            const int steadyFaces = faceCount();
+            // Far larger than the box is thick: the rounded strip would have to
+            // eat the whole side face and then some. OCCT refuses this, and
+            // refusing it is the contract.
+            bevel->field()->setText(QStringLiteral("999"));
+            settle(300);
+            check(!bevel->hasPreview(),
+                  "a radius the body cannot take previews nothing");
+            check(!view->hasModelingPreview(),
+                  "and leaves the last good preview - here, none - exactly as it was");
+
+            sendKeyTo(&window, Qt::Key_Return);
+            settle(300);
+            check(std::fabs(bodyVolume() - steadyVolume) < 1.0e-6 &&
+                      faceCount() == steadyFaces,
+                  "committing it leaves the body untouched, volume and faces both");
+            // The WHOLE sentence, character for character, not a substring of
+            // it. The brief fixes this wording exactly, and a `contains` on
+            // the memorable clause passes just as well over a sentence whose
+            // fix half has been dropped, whose em dash has decayed, or which
+            // has grown an apology in front of the cause.
+            // No trailing period: the app's failure sentences end without one
+            // (the pull's and the transform's always did) and this pair was
+            // the exception. Pinned character for character here, which is why
+            // dropping it is a test change as well as a copy change.
+            const QString expectedFailure = QStringLiteral(
+                "This edge can't take a fillet that big \xE2\x80\x94 the curve would eat "
+                "a neighbouring face. Try a smaller size");
+            check(toasts != nullptr && toasts->isShowing() &&
+                      toasts->currentText() == expectedFailure,
+                  QStringLiteral("and it is reported as a failure in the exact "
+                                 "cause-and-fix sentence (\"%1\")")
+                      .arg(toasts ? toasts->currentText() : QString()));
+
+            // --- Escape clears the dedicated preview channel --------------
+            bevel->field()->setText(QStringLiteral("10"));
+            settle(300);
+            check(view->hasModelingPreview() && bevel->hasPreview(),
+                  "a size the body can take previews through the dedicated channel");
+            sendKeyTo(&window, Qt::Key_Escape);
+            settle(250);
+            check(!view->hasModelingPreview(), "Escape clears the modeling preview");
+            check(std::fabs(bodyVolume() - steadyVolume) < 1.0e-6,
+                  "and commits nothing on the way out");
+            check(view->hasBevelArrow(),
+                  "leaving the arrow and the selection alone, so the user can simply "
+                  "drag again");
+
+            // --- Escape with the focus somewhere else entirely ------------
+            // The defect class CLAUDE.md documents on ExtrudePreview: a filter
+            // installed on the FIELD stops working the moment anything else
+            // takes focus, and an orbit - the entire reason a live preview
+            // exists - is a press in the viewport, which does exactly that.
+            // The check above cannot see it, because sendKeyTo goes to the
+            // window and the field still held focus. This moves focus to a
+            // real control the user can click and then presses Escape.
+            bevel->field()->setText(QStringLiteral("10"));
+            settle(300);
+            check(view->hasModelingPreview(),
+                  "a preview is up again for the focus-elsewhere probe");
+            QWidget* elsewhere = nullptr;
+            for (ToolChip* chip : window.findChildren<ToolChip*>()) {
+                if (chip->isVisible() && chip->isEnabled()) { elsewhere = chip; break; }
+            }
+            check(elsewhere != nullptr,
+                  "there is a visible rail control to move the focus onto");
+            if (elsewhere) {
+                elsewhere->setFocus(Qt::MouseFocusReason);
+                settle(120);
+                check(window.focusWidget() == elsewhere,
+                      QStringLiteral("the focus really left the value field (%1)")
+                          .arg(window.focusWidget() ? window.focusWidget()->metaObject()->className()
+                                                    : "none"));
+                sendKeyTo(&window, Qt::Key_Escape);
+                settle(250);
+                check(!view->hasModelingPreview(),
+                      "and Escape still cancels, because the claim is application-wide "
+                      "rather than on the field");
+                check(std::fabs(bodyVolume() - steadyVolume) < 1.0e-6,
+                      "with nothing committed on that route either");
+            }
+        }
+
+        // The arrow goes the moment its predicate stops holding - one function
+        // decides both directions.
+        trigger(window, QStringLiteral("Select Bodies"));
+        settle(200);
+        check(!view->hasBevelArrow(), "leaving edge selection retires the arrow");
+        BevelArrow* retired = window.findChild<BevelArrow*>();
+        check(retired == nullptr || !retired->isVisible(),
+              "and its value chip goes with it");
+        check(!view->edgeDimensionSuppressed(),
+              "and the edge-length annotation is free again");
+
+        // Leave the document as this block found it.
+        view->setSelectedSolids({bevelId});
+        settle(150);
+        trigger(window, QStringLiteral("Delete Selected"));
+        settle(200);
+        check(static_cast<int>(window.document().count()) == bevelBodiesBefore,
+              "the bevel probe leaves the document as it found it");
+        view->clearSelection();
+        view->animateTo(bevelCameraBefore);   // animations are off: immediate
+        settle(200);
     }
 
     // --- the whole app reads in one unit --------------------------------------
@@ -3776,9 +6522,79 @@ int main(int argc, char* argv[])
         // other three widgets it has no fixed set of strings to enumerate, so
         // it records every message it has been given this run and the sweep
         // covers all of them - it used to see only whichever one happened to
-        // be live, which made the sweep a coin toss. HONEST LIMIT, stated on
-        // Toast::paintedTexts() too: a message never actually triggered
-        // during a run is not covered by this.
+        // be live, which made the sweep a coin toss. That limit was HONEST but
+        // it was still a limit: a message never triggered during a run is a
+        // message the sweep never sees, and this branch shipped two of them.
+        //
+        // Both are refusals the kernel has to produce and a probe cannot make
+        // it produce: a chamfer big enough to be refused (only the fillet half
+        // of that pair is reachable - the box's geometry refuses one and
+        // accepts the other at every size the drag can reach) and a transform
+        // the kernel turns down (it accepts every gp_Trsf a gesture can build,
+        // which is why this layer clamps the scale itself).
+        //
+        // So they are shown here, once each, through the SAME accessors
+        // MainWindow's own refusal paths call - not through a second copy of
+        // the sentence that only the sweep would ever see, which would pin
+        // nothing at all. Each shown message lands in paintedTexts() and is
+        // swept below with the rest.
+        ToastHost* copyHost = window.findChild<ToastHost*>();
+        check(copyHost != nullptr, "there is a toast host to show the untriggered copy on");
+        if (copyHost) {
+            gp_Trsf rotated;
+            rotated.SetRotation(gp_Ax1(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0)), 0.4);
+            gp_Trsf scaled;
+            scaled.SetScale(gp_Pnt(0.0, 0.0, 0.0), 1.5);
+
+            // Important 3's fix, asserted on the derivation itself rather than
+            // on a string that happens to contain a word: the verb comes off
+            // the transform, so a refused rotate names Rotate. It used to be
+            // derived only on the SUCCESS path, with "Move" hard-coded above
+            // it, so every refused rotate and every refused scale reported a
+            // move the user never made.
+            check(MainWindow::transformOperationName(rotated) == QStringLiteral("Rotate") &&
+                      MainWindow::transformOperationName(scaled) == QStringLiteral("Scale") &&
+                      MainWindow::transformOperationName(gp_Trsf()) == QStringLiteral("Move"),
+                  QStringLiteral("a refusal names the operation the delta actually is "
+                                 "(%1 / %2 / %3)")
+                      .arg(MainWindow::transformOperationName(rotated),
+                           MainWindow::transformOperationName(scaled),
+                           MainWindow::transformOperationName(gp_Trsf())));
+            check(MainWindow::transformRefusalText(rotated).contains(
+                      QStringLiteral("rotated")) &&
+                      MainWindow::transformRefusalText(scaled).contains(
+                          QStringLiteral("scaled")),
+                  QStringLiteral("and its sentence says so too (\"%1\")")
+                      .arg(MainWindow::transformRefusalText(rotated)));
+
+            // Stamped, so the last of them can be dismissed the way a real
+            // one is - by telling the host the document moved past it - rather
+            // than left sitting over the viewport for its full eight seconds,
+            // where every later capture and layout probe would have to work
+            // around it.
+            constexpr int kCopyStamp = 1000000;
+            copyHost->show(MainWindow::bevelRefusalText(false), Toast::Kind::Failure, false,
+                           kCopyStamp);
+            settle(60);
+            copyHost->show(MainWindow::transformRefusalText(rotated), Toast::Kind::Failure,
+                           false, kCopyStamp);
+            settle(60);
+            copyHost->show(MainWindow::transformRefusalText(scaled), Toast::Kind::Failure,
+                           false, kCopyStamp);
+            settle(60);
+            copyHost->show(MainWindow::transformRefusalText(gp_Trsf()), Toast::Kind::Failure,
+                           false, kCopyStamp);
+            settle(60);
+            check(copyHost->currentText() ==
+                      MainWindow::transformRefusalText(gp_Trsf()),
+                  "the refusal copy really reached the toast, so paintedTexts() "
+                  "has it to sweep");
+            copyHost->documentMovedTo(kCopyStamp + 1);
+            settle(120);
+            check(!copyHost->isShowing(),
+                  "and the probe leaves no toast standing over the viewport");
+        }
+
         Toast* sweptToast = window.findChild<Toast*>();
         check(sweptToast != nullptr && sweptToast->paintedTexts().size() > 2,
               QStringLiteral("the toast sweep covers every message shown this run, "
@@ -3816,6 +6632,57 @@ int main(int argc, char* argv[])
                   .arg(extrudePreviewOffenders.isEmpty()
                            ? QStringLiteral("none")
                            : extrudePreviewOffenders.join(QStringLiteral(", "))));
+
+        // And the pull arrow's value chip, for the same reason: its label and
+        // its key hint are painted, so no action or tooltip carries them.
+        QStringList pullArrowOffenders;
+        for (PullArrow* pull : window.findChildren<PullArrow*>()) {
+            for (const QString& text : pull->paintedTexts()) {
+                for (const QString& word : banned) {
+                    if (text.contains(word, Qt::CaseInsensitive))
+                        pullArrowOffenders
+                            << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
+                }
+            }
+        }
+        check(pullArrowOffenders.isEmpty(),
+              QStringLiteral("no pull arrow text uses a banned word (%1)")
+                  .arg(pullArrowOffenders.isEmpty()
+                           ? QStringLiteral("none")
+                           : pullArrowOffenders.join(QStringLiteral(", "))));
+        // Non-vacuity - the partner the bevel chip's sweep below already has,
+        // and which this one was missing. findChildren() over no arrows at all
+        // reports "none" exactly as loudly as a clean arrow does.
+        PullArrow* sweptPull = window.findChild<PullArrow*>();
+        check(sweptPull != nullptr && sweptPull->paintedTexts().size() == 2,
+              QStringLiteral("and it really swept that arrow's two painted strings (%1)")
+                  .arg(sweptPull ? sweptPull->paintedTexts().join(QStringLiteral(" / "))
+                                 : QString()));
+
+        // And the round/flatten chip, which is the one place the newly banned
+        // word could most easily have leaked: the class is called BevelArrow
+        // and every string it paints has to say Fillet or Chamfer instead.
+        QStringList bevelOffenders;
+        for (BevelArrow* arrow : window.findChildren<BevelArrow*>()) {
+            for (const QString& text : arrow->paintedTexts()) {
+                for (const QString& word : banned) {
+                    if (text.contains(word, Qt::CaseInsensitive))
+                        bevelOffenders
+                            << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
+                }
+            }
+        }
+        check(bevelOffenders.isEmpty(),
+              QStringLiteral("no round/flatten chip text uses a banned word (%1)")
+                  .arg(bevelOffenders.isEmpty()
+                           ? QStringLiteral("none")
+                           : bevelOffenders.join(QStringLiteral(", "))));
+        // Non-vacuity: the sweep above passes just as well over an empty list.
+        BevelArrow* sweptBevel = window.findChild<BevelArrow*>();
+        check(sweptBevel != nullptr && sweptBevel->paintedTexts().size() == 4,
+              QStringLiteral("and it really swept that chip's four painted strings (%1)")
+                  .arg(sweptBevel ? sweptBevel->paintedTexts().join(QStringLiteral(" / "))
+                                  : QString()));
 
         // The state label is the app's most-updated string; it must obey the
         // vocabulary too. It is a permanent widget on the status bar.
@@ -4702,9 +7569,24 @@ int main(int argc, char* argv[])
                 // QWidgetItem::isEmpty() is isHidden() - so the layout
                 // measured the list as empty. Height and hint agreeing is
                 // the property that was actually broken.
-                check(drawer->height() ==
-                          static_cast<QWidget*>(drawer)->sizeHint().height(),
-                      "and the card's height is the height its own contents ask for");
+                // A band, not an equality, and the band is exactly the
+                // overlay's device-pixel rounding: it grows an anchored card
+                // by up to three pixels so its far edge lands on a whole
+                // device pixel. Writing this as == wholeDevicePixels(hint)
+                // looked tighter and was wrong - the card re-adjusts itself
+                // when its rows change, so at some scales it is sitting at
+                // the raw hint and at others at the rounded one, and pinning
+                // either exact value fails at the other. The property this
+                // check exists for survives both: the card measures the rows
+                // it actually holds rather than sitting at its 176px
+                // empty-state floor with eight bodies listed in it, which is
+                // a ~150px error, not a three-pixel one.
+                const int hint = static_cast<QWidget*>(drawer)->sizeHint().height();
+                check(drawer->height() >= hint &&
+                          drawer->height() <= Theme::wholeDevicePixels(hint),
+                      QStringLiteral("and the card's height is the height its own "
+                                     "contents ask for (%1 against %2)")
+                          .arg(drawer->height()).arg(hint));
 
                 // Drive the toast INTO the drawer's band. The drawer is a
                 // top-left card and the toast a bottom-centre one, so on any
@@ -4900,6 +7782,14 @@ int main(int argc, char* argv[])
         assertScale(hiddenPreview, QStringLiteral("ExtrudePreview"));
         assertScale(hiddenPreview ? hiddenPreview->field() : nullptr,
                     QStringLiteral("ExtrudePreview field"));
+        PullArrow* hiddenArrow = window.findChild<PullArrow*>();
+        assertScale(hiddenArrow, QStringLiteral("PullArrow"));
+        assertScale(hiddenArrow ? hiddenArrow->field() : nullptr,
+                    QStringLiteral("PullArrow field"));
+        BevelArrow* hiddenBevel = window.findChild<BevelArrow*>();
+        assertScale(hiddenBevel, QStringLiteral("BevelArrow"));
+        assertScale(hiddenBevel ? hiddenBevel->field() : nullptr,
+                    QStringLiteral("BevelArrow field"));
         check(exempt.isEmpty(),
               QStringLiteral("the widgets hidden when that sweep runs use the type "
                              "scale too (%1)")
@@ -5211,6 +8101,11 @@ int main(int argc, char* argv[])
             // left there. It carried `border-radius: 4px`, which leaves
             // exactly four such corners: the black-nub failure mode, on the
             // one control in this shell that had it and no card underneath.
+            // Pinned, like every other guard in this file that stands between
+            // a probe and its checks: without it the corner sweep below simply
+            // does not run, and a sweep that does not run reports clean.
+            check(extrudePreview->field() != nullptr,
+                  "the preview's height field is there for the corner sweep");
             if (extrudePreview->field()) {
                 const QImage fieldImg = renderExact(extrudePreview->field());
                 QStringList seeThroughCorners;
@@ -5234,6 +8129,10 @@ int main(int argc, char* argv[])
                                    : seeThroughCorners.join(QStringLiteral("; "))));
             }
 
+            // And again for the invalid-state probe, which is a second guard
+            // on the same condition and would go quiet just as silently.
+            check(extrudePreview->field() != nullptr,
+                  "and still there for the invalid-input outline probe");
             if (extrudePreview->field()) {
                 extrudePreview->field()->setText(QStringLiteral("abc"));
                 settle(150);
@@ -5254,6 +8153,951 @@ int main(int argc, char* argv[])
                 settle(200);
             }
         }
+    }
+
+    // --- the Appearance panel: every colour and the type scale, opened up ----
+    //
+    // Ordered LAST among the checks that drive `window`, and it restores
+    // Theme::defaultSpec() before it ends. Theme's spec is application-wide
+    // state, so a block that left it edited would hand every later check a
+    // differently coloured app - and the returning-user block below builds a
+    // whole second window.
+    {
+        QAction* appearance = action(window, QStringLiteral("Appearance..."));
+        check(appearance != nullptr, "there is an Appearance action");
+        check(appearance != nullptr && appearance->isCheckable(),
+              "and it is checkable, so the panel's visibility can be derived from it");
+
+        // The untouched app IS the shipped app. Both halves of that claim are
+        // pinned: the spec compares equal to the default one, and a pixel of
+        // real painted chrome is captured here to compare against after a
+        // reset - an accessor that quietly returned something else would pass
+        // the first check and fail the second.
+        check(Theme::spec() == Theme::defaultSpec(),
+              "an app nobody has themed is wearing exactly defaultSpec()");
+
+        // ALL of them, against literal hex. Three was not a pin: a uniform
+        // drift in any of the eighteen unlisted tokens passed both this check
+        // and the before/after-reset pixel comparison further down, since
+        // that one only proves the app is self-consistent WITHIN this build.
+        // Written out so the byte-identity claim survives without a reviewer
+        // re-deriving it from the pre-task file. The two highlight entries
+        // are OCCT's Quantity_NOC_CYAN1 and _ORANGE, which is what they were
+        // before they became tokens.
+        {
+            const QHash<QString, QString> shipped = {
+                {QStringLiteral("chrome"), QStringLiteral("#1b1b1d")},
+                {QStringLiteral("panel"), QStringLiteral("#232326")},
+                {QStringLiteral("chip"), QStringLiteral("#2c2c31")},
+                {QStringLiteral("chipHover"), QStringLiteral("#34343a")},
+                {QStringLiteral("chipActive"), QStringLiteral("#3d3d45")},
+                {QStringLiteral("accent"), QStringLiteral("#3d7eff")},
+                {QStringLiteral("text"), QStringLiteral("#f0f0f0")},
+                {QStringLiteral("textMuted"), QStringLiteral("#9a9aa2")},
+                {QStringLiteral("textDisabled"), QStringLiteral("#5c5c64")},
+                {QStringLiteral("border"), QStringLiteral("#3a3a40")},
+                {QStringLiteral("viewport"), QStringLiteral("#45454b")},
+                {QStringLiteral("gridMinor"), QStringLiteral("#3e3e44")},
+                {QStringLiteral("gridMajor"), QStringLiteral("#4d4d55")},
+                {QStringLiteral("axisX"), QStringLiteral("#7a4a4a")},
+                {QStringLiteral("axisY"), QStringLiteral("#4a7a4a")},
+                {QStringLiteral("sketchPointMarker"), QStringLiteral("#ff4fc3")},
+                {QStringLiteral("danger"), QStringLiteral("#e0564a")},
+                {QStringLiteral("focusRing"), QStringLiteral("#ffca4a")},
+                {QStringLiteral("focusRingMuted"), QStringLiteral("#9f7e2e")},
+                {QStringLiteral("highlightHover"), QStringLiteral("#00ffff")},
+                {QStringLiteral("highlightSelected"), QStringLiteral("#ffa500")},
+            };
+            const Theme::Spec shippedSpec = Theme::defaultSpec();
+            QStringList drifted;
+            int pinned = 0;
+            for (const Theme::ColourToken& token : Theme::colourTokens()) {
+                if (!shipped.contains(token.id)) {
+                    drifted << (token.id + QStringLiteral(" [no pinned value]"));
+                    continue;
+                }
+                ++pinned;
+                const QColor expected(shipped.value(token.id));
+                const QColor actual = shippedSpec.*(token.member);
+                if (actual != expected)
+                    drifted << QStringLiteral("%1 %2 != %3")
+                                   .arg(token.id, actual.name(), expected.name());
+            }
+            // Non-vacuity, and it is the half that makes this a pin rather
+            // than a list: every token must have been checked, so a token
+            // added to Spec without a line above fails here instead of
+            // slipping through unexamined.
+            check(pinned == Theme::colourTokens().size() &&
+                      shipped.size() == Theme::colourTokens().size(),
+                  QStringLiteral("every one of the %1 tokens has a pinned shipped value "
+                                 "(%2 pinned, %3 listed)")
+                      .arg(Theme::colourTokens().size()).arg(pinned).arg(shipped.size()));
+            check(drifted.isEmpty(),
+                  QStringLiteral("and defaultSpec() is Graphite byte for byte (%1)")
+                      .arg(drifted.isEmpty() ? QStringLiteral("all 21 exact")
+                                             : drifted.join(QStringLiteral(", "))));
+            check(std::fabs(shippedSpec.basePt - 10.0) < 1e-9,
+                  QStringLiteral("and the shipped base size is still 10pt (%1)")
+                      .arg(shippedSpec.basePt));
+        }
+
+        // A CHECKED rail chip, so the inset accent() ring is actually painted.
+        // Found by state rather than by index: which chip happens to be
+        // checked is MainWindow::updateActions()'s business, not this
+        // block's, and an index would go stale the day the rail is reordered.
+        ToolChip* checkedChip = nullptr;
+        for (ToolChip* candidate : window.findChildren<ToolChip*>()) {
+            if (candidate->isChecked() && candidate->isVisible()) { checkedChip = candidate; break; }
+        }
+        check(checkedChip != nullptr,
+              "there is a checked rail chip to sample the accent ring on");
+
+        const QImage graphiteChip = checkedChip ? renderExact(checkedChip) : QImage();
+        // ToolChip::paintEvent() draws the inset ring 2px in from the card's
+        // left edge - the same point the Graphite anatomy probe samples.
+        const QPoint ringPoint(2, checkedChip ? checkedChip->height() / 2 : 0);
+
+        appearance->trigger();
+        settle(200);
+        AppearancePanel* panel = window.appearancePanel();
+        check(panel != nullptr && panel->isVisible(),
+              "triggering Appearance opens the panel");
+        check(appearance->isChecked(), "and leaves the action checked, which is what shows it");
+
+        if (panel && panel->isVisible()) {
+            // Real hit-testing, not an attribute or a pointer comparison:
+            // the panel is a child of the viewport, over OCCT's GL surface,
+            // and CLAUDE.md's rule is that a control there is only reachable
+            // if childAt() actually finds it. Walked up from the hit the way
+            // the cluster probes do, since the point lands on a row or a
+            // label inside the card rather than on the card itself.
+            const QPoint inside = panel->geometry().center();
+            QWidget* hit = view->childAt(inside);
+            bool reachesPanel = false;
+            for (QWidget* w = hit; w; w = w->parentWidget()) {
+                if (w == panel) { reachesPanel = true; break; }
+                if (w == view) break;
+            }
+            check(reachesPanel,
+                  QStringLiteral("and a real click inside it reaches the panel (found %1)")
+                      .arg(hit ? QString::fromLatin1(hit->metaObject()->className())
+                               : QStringLiteral("nothing")));
+
+            // It is an overlay occupant like every other anchored card, which
+            // is the whole of what makes the toast, the balloon and the guide
+            // step around it - so its rectangle has to be IN that set.
+            bool anchored = false;
+            for (const QRect& r : window.findChild<ViewportOverlay*>()->occupiedRects()) {
+                if (r == panel->geometry()) anchored = true;
+            }
+            check(anchored,
+                  "and its rectangle is one of ViewportOverlay::occupiedRects(), so "
+                  "everything that avoids the anchored cards avoids it too");
+
+            // A member of the floating-surface family, painted opaquely right
+            // out to its own edge.
+            const QRect body = panel->rect().adjusted(Theme::surfaceShadowMargin(),
+                                                      Theme::surfaceShadowMargin(),
+                                                      -Theme::surfaceShadowMargin(),
+                                                      -Theme::surfaceShadowMargin());
+            checkFamilySurface(panel, QPoint(body.left(), body.center().y()),
+                               body.adjusted(4, 4, -4, -4), Theme::border(),
+                               QStringLiteral("AppearancePanel"));
+        }
+
+        // --- one row per token, in the user's words -------------------------
+        if (panel) {
+            check(panel->colourRowCount() == Theme::colourTokens().size(),
+                  QStringLiteral("every editable colour token has a row (%1 rows, %2 tokens)")
+                      .arg(panel->colourRowCount()).arg(Theme::colourTokens().size()));
+            QStringList nameless;
+            for (const Theme::ColourToken& token : Theme::colourTokens()) {
+                if (AppearancePanel::nameForToken(token.id).isEmpty()) nameless << token.id;
+                if (!panel->swatchFor(token.id)) nameless << token.id + QStringLiteral(" (no swatch)");
+            }
+            check(nameless.isEmpty(),
+                  QStringLiteral("and each one has a user-facing name and a swatch (%1)")
+                      .arg(nameless.isEmpty() ? QStringLiteral("all do")
+                                              : nameless.join(QStringLiteral(", "))));
+
+            // The panel's copy is QLabel and button text, which neither the
+            // action sweep nor the tooltip sweep can see - so it joins the
+            // vocabulary check through paintedTexts() like every other
+            // painted surface in the shell.
+            const QStringList painted = panel->paintedTexts();
+            check(painted.size() >= Theme::colourTokens().size() + 3,
+                  QStringLiteral("the panel exposes all of its own copy for the sweep "
+                                 "(%1 strings)").arg(painted.size()));
+            QStringList offenders;
+            for (const QString& text : painted) {
+                for (const QString& word : bannedWords()) {
+                    if (text.contains(word, Qt::CaseInsensitive))
+                        offenders << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
+                }
+                // Code names must not leak either - the whole point of
+                // nameForToken() is that `gridMinor` is not what a user is
+                // choosing.
+                for (const Theme::ColourToken& token : Theme::colourTokens()) {
+                    if (text == token.id) offenders << (text + QStringLiteral(" [code name]"));
+                }
+            }
+            check(offenders.isEmpty(),
+                  QStringLiteral("no Appearance panel text uses a banned or code word (%1)")
+                      .arg(offenders.isEmpty() ? QStringLiteral("none")
+                                               : offenders.join(QStringLiteral(", "))));
+        }
+
+        // --- the application stylesheet is built from the spec, not frozen --
+        //
+        // The sheet used to carry every colour as a hex literal, which made it
+        // the one place a token's value was written twice. It is substituted
+        // from the live spec now, and both halves of that are pinned: no
+        // placeholder survives into the installed sheet (a new @token with no
+        // substitution entry would otherwise ship as a colour name Qt silently
+        // ignores), and the values in it are the ones Theme currently reports.
+        {
+            const QString sheet = qApp->styleSheet();
+            const int leftover = sheet.indexOf(QLatin1Char('@'));
+            check(!sheet.isEmpty() && leftover < 0,
+                  QStringLiteral("every stylesheet placeholder was substituted (%1)")
+                      .arg(leftover >= 0 ? sheet.mid(leftover, 24)
+                                         : QStringLiteral("none left")));
+            check(sheet.contains(Theme::chrome().name()) &&
+                      sheet.contains(Theme::border().name()) &&
+                      sheet.contains(Theme::panel().name()),
+                  "and it carries the tokens Theme currently reports");
+        }
+
+        // --- a theme edit RESTYLES the drawer, it does not rebuild it -------
+        //
+        // ItemsPanel::applyTheme() used to call refresh(), which tears every
+        // row down with deleteLater() and constructs it again. A theme edit
+        // arrives once per mouse MOVE inside the colour picker, so that was a
+        // full teardown-and-rebuild of the body list per frame of a drag - and
+        // nothing about a colour changes WHICH bodies exist.
+        //
+        // Asserted on the row's VISIBILITY as well as its life, and the first
+        // half is the one that bites. A QPointer alone does not: refresh()
+        // retires a row with hide() + deleteLater(), and a DeferredDelete
+        // posted inside this suite's processEvents() loop is not necessarily
+        // collected by the time the next check runs - so the pointer can still
+        // be non-null after a genuine teardown. hide() is synchronous, and
+        // refresh() calls it FIRST and deliberately (see ItemsPanel::refresh),
+        // so a row that is still visible is a row that was never retired.
+        // Verified by stubbing applyTheme() back to a refresh(): the pointer
+        // check passed, this one failed.
+        QPointer<QWidget> survivingRow;
+        {
+            ItemsPanel* drawer = window.itemsPanel();
+            check(drawer != nullptr && drawer->isVisible() && drawer->rowCount() > 0,
+                  QStringLiteral("the items drawer is open with rows in it (%1)")
+                      .arg(drawer ? drawer->rowCount() : -1));
+            if (drawer) {
+                // The first VISIBLE row, not simply the first one found.
+                // refresh() retires a row with hide() + deleteLater(), and a
+                // DeferredDelete posted inside this suite's processEvents()
+                // loop is not reliably collected - so after the dozens of
+                // document edits above, findChildren() still returns hidden
+                // rows from earlier rebuilds. Capturing one of those made this
+                // probe read "hidden" no matter what the code did.
+                for (QWidget* row :
+                     drawer->findChildren<QWidget*>(QStringLiteral("itemsRow"))) {
+                    if (row->isVisible()) { survivingRow = row; break; }
+                }
+            }
+            check(!survivingRow.isNull(),
+                  "and a live row was captured to watch across the edit");
+        }
+        // The drawer's width is derived from the type scale now, so the
+        // shipped look has to come out at exactly the number it always was -
+        // opening the Appearance panel and resetting must not nudge a card
+        // the user never asked to move. Captured here at Graphite and checked
+        // again after the reset.
+        const int graphiteDrawerWidth =
+            window.itemsPanel() ? window.itemsPanel()->width() : -1;
+
+        // --- the accent token repaints a rail chip's checked ring -----------
+        const QColor probeAccent(QStringLiteral("#12d18e"));   // a green nothing else uses
+        if (panel && checkedChip) {
+            panel->setTokenColour(QStringLiteral("accent"), probeAccent);
+            settle(200);
+            check(!survivingRow.isNull() && survivingRow->isVisible(),
+                  QStringLiteral("a theme edit restyled the drawer's rows in place - the "
+                                 "same row widget is still alive and on screen, not "
+                                 "retired and rebuilt (%1)")
+                      .arg(survivingRow.isNull() ? QStringLiteral("deleted")
+                                                 : (survivingRow->isVisible()
+                                                        ? QStringLiteral("intact")
+                                                        : QStringLiteral("hidden"))));
+            check(Theme::accent() == probeAccent,
+                  "setting the accent token through the panel moves Theme::accent()");
+            const QImage themedChip = renderExact(checkedChip);
+            const QColor before = graphiteChip.pixelColor(ringPoint);
+            const QColor after = themedChip.pixelColor(ringPoint);
+            check(colorDistance(after, probeAccent) < colorDistance(before, probeAccent),
+                  QStringLiteral("and the checked chip's ring pixel now reads as the new "
+                                 "accent rather than the old one (was %1, now %2)")
+                      .arg(before.name(), after.name()));
+            check(colorDistance(after, probeAccent) < 40.0,
+                  QStringLiteral("- close enough to be that colour and not merely "
+                                 "different (distance %1)")
+                      .arg(colorDistance(after, probeAccent), 0, 'f', 1));
+        }
+
+        // --- and the one thing on that chip that is genuinely CACHED --------
+        //
+        // The ring above is painted from Theme inside paintEvent(), so it
+        // would follow a spec change even if nothing subscribed to the
+        // broadcast at all. The chip's GLYPH would not: IconSet rasterises it
+        // into a QPixmap out of text() and textDisabled() once, and a QIcon
+        // is pixels rather than a description. This is the check that fails
+        // if ToolChip stops re-rasterising it - the shape of "no widget
+        // caches a colour across the broadcast" that a repaint cannot fix.
+        if (panel && checkedChip) {
+            auto nearestTo = [](const QImage& image, const QColor& colour) {
+                double best = 1e9;
+                for (int y = 0; y < image.height(); ++y) {
+                    for (int x = 0; x < image.width(); ++x)
+                        best = std::min(best, colorDistance(image.pixelColor(x, y), colour));
+                }
+                return best;
+            };
+            const QColor probeText(QStringLiteral("#ff2d55"));   // a red no token carries
+            const double beforeGlyph = nearestTo(renderExact(checkedChip), probeText);
+            panel->setTokenColour(QStringLiteral("text"), probeText);
+            settle(250);
+            const double afterGlyph = nearestTo(renderExact(checkedChip), probeText);
+            check(beforeGlyph > 60.0,
+                  QStringLiteral("nothing on the chip was that red beforehand, so the "
+                                 "check below is not vacuous (nearest %1)")
+                      .arg(beforeGlyph, 0, 'f', 1));
+            check(afterGlyph < 24.0,
+                  QStringLiteral("and the chip's rasterised glyph was rebuilt in the new "
+                                 "text colour, not left at the cached one (nearest %1)")
+                      .arg(afterGlyph, 0, 'f', 1));
+        }
+
+        // --- the viewport token reaches OCCT's own clear colour -------------
+        //
+        // Sampled from V3d_View::Dump, not from a Qt render: the background
+        // is a driver clear colour that no Qt paint event ever touches, so a
+        // widget-tree grab could not tell whether it had moved at all.
+        {
+            const QString before = outDir + QStringLiteral("/appearance_viewport_before.png");
+            const QString after = outDir + QStringLiteral("/appearance_viewport_after.png");
+            check(view->saveSnapshot(before), "the viewport can be snapshotted before the edit");
+            const QImage beforeImg(before);
+
+            const QColor probeViewport(QStringLiteral("#3a0d5c"));   // a deep violet
+            if (panel) panel->setTokenColour(QStringLiteral("viewport"), probeViewport);
+            settle(300);
+            check(view->saveSnapshot(after), "and after it");
+            const QImage afterImg(after);
+
+            auto share = [](const QImage& image, const QColor& colour) {
+                if (image.isNull()) return -1.0;
+                int hits = 0, total = 0;
+                for (int y = 0; y < image.height(); y += 3) {
+                    for (int x = 0; x < image.width(); x += 3) {
+                        ++total;
+                        if (colorDistance(image.pixelColor(x, y), colour) < 8.0) ++hits;
+                    }
+                }
+                return total > 0 ? double(hits) / total : -1.0;
+            };
+            const double beforeShare = share(beforeImg, probeViewport);
+            const double afterShare = share(afterImg, probeViewport);
+            // Non-vacuity first: a null image samples nothing and reports
+            // zero exactly as loudly as a viewport that never changed.
+            check(!beforeImg.isNull() && !afterImg.isNull() &&
+                      beforeImg.width() > 100 && beforeImg.height() > 100,
+                  QStringLiteral("both viewport snapshots are real images to sample "
+                                 "(%1x%2)").arg(beforeImg.width()).arg(beforeImg.height()));
+            check(beforeShare >= 0.0 && beforeShare < 0.01,
+                  QStringLiteral("nothing in the viewport was that violet before the edit "
+                                 "(%1%)").arg(beforeShare * 100.0, 0, 'f', 2));
+            check(afterShare > 0.30,
+                  QStringLiteral("and the 3D area is cleared to it afterwards (%1% of "
+                                 "sampled pixels)").arg(afterShare * 100.0, 0, 'f', 1));
+        }
+
+        // --- the grid is REBUILT, not merely repainted ----------------------
+        //
+        // GridRenderer bakes its colours into the vertices it builds and
+        // caches on the geometry it built them for, so a theme change that
+        // did not invalidate that cache would leave the old palette on screen
+        // until the camera crossed a level boundary. Asserted on the OCCT
+        // dump, and non-vacuously: "the images differ" alone would pass on a
+        // grid that had merely moved.
+        {
+            const QString before = outDir + QStringLiteral("/appearance_grid_before.png");
+            const QString after = outDir + QStringLiteral("/appearance_grid_after.png");
+            view->saveSnapshot(before);
+            const QImage beforeImg(before);
+
+            const QColor probeGrid(QStringLiteral("#ffd400"));   // a yellow nothing else uses
+            if (panel) panel->setTokenColour(QStringLiteral("gridMajor"), probeGrid);
+            settle(300);
+            view->saveSnapshot(after);
+            const QImage afterImg(after);
+
+            auto hits = [](const QImage& image, const QColor& colour) {
+                int found = 0;
+                for (int y = 0; y < image.height(); ++y) {
+                    for (int x = 0; x < image.width(); ++x) {
+                        if (colorDistance(image.pixelColor(x, y), colour) < 24.0) ++found;
+                    }
+                }
+                return found;
+            };
+            const int beforeHits = beforeImg.isNull() ? -1 : hits(beforeImg, probeGrid);
+            const int afterHits = afterImg.isNull() ? -1 : hits(afterImg, probeGrid);
+            check(beforeHits >= 0 && beforeHits < 50,
+                  QStringLiteral("no grid line was that yellow before the edit (%1 px)")
+                      .arg(beforeHits));
+            check(afterHits > 200,
+                  QStringLiteral("and the ground grid is rebuilt in the new colour, not "
+                                 "left at the cached one (%1 px)").arg(afterHits));
+        }
+
+        // --- a LIVE drag arrow follows the accent too -----------------------
+        //
+        // PullArrowRenderer bakes Theme::accent() into the AIS object it
+        // builds, AND its show() early-outs on an unchanged pose - so an arrow
+        // already on screen kept the old accent until the camera happened to
+        // move far enough to defeat that cache.
+        //
+        // Raised through the REAL predicate - a face genuinely selected -
+        // rather than by calling showPullArrow() directly. The first version
+        // of this probe did call it directly, and the arrow vanished between
+        // the two snapshots: onThemeChanged() ends in updateActions(), whose
+        // appStateChanged() runs PullArrow::refresh(), which correctly tears
+        // down an arrow that no selection is holding up. A probe that has to
+        // dodge the feature's own derived visibility is testing something the
+        // app never does.
+        {
+            // A dedicated window with ONE body, so the face is unoccluded and
+            // the pick is deterministic - `window` has nine bodies in a camera
+            // pose thirty checks of other work have left it in.
+            MainWindow arrowProbe(nullptr, /*persistProgress=*/false);
+            arrowProbe.setAttribute(Qt::WA_ShowWithoutActivating);
+            arrowProbe.resize(1000, 760);
+            arrowProbe.show();
+            arrowProbe.view()->setAnimationsEnabled(false);
+            settle(400);
+            OcctViewWidget* probeView = arrowProbe.view();
+            check(buildBody(arrowProbe, 0.35, 0.35, 0.60, 0.60, 40.0),
+                  "a body is built for the arrow recolour probe");
+            trigger(arrowProbe, QStringLiteral("Select Faces"));
+            settle(150);
+
+            auto outward = [](const TopoDS_Face& face) {
+                gp_Dir n = BRepAdaptor_Surface(face).Plane().Axis().Direction();
+                if (face.Orientation() == TopAbs_REVERSED) n.Reverse();
+                return n;
+            };
+            const auto probeSolids = arrowProbe.document().solids();
+            if (!probeSolids.empty()) {
+                for (TopExp_Explorer it(arrowProbe.document().shapeOf(probeSolids.front().id),
+                                        TopAbs_FACE);
+                     it.More() && !probeView->hasPullArrow(); it.Next()) {
+                    const TopoDS_Face candidate = TopoDS::Face(it.Current());
+                    if (BRepAdaptor_Surface(candidate).GetType() != GeomAbs_Plane) continue;
+                    if (outward(candidate).Z() < 0.9) continue;   // the top face
+                    GProp_GProps props;
+                    BRepGProp::SurfaceProperties(candidate, props);
+                    QPoint at;
+                    if (!probeView->projectToScreen(props.CentreOfMass(), at)) continue;
+                    if (!probeView->rect().adjusted(40, 40, -40, -40).contains(at)) continue;
+                    clickAt(probeView, QPointF(at));
+                    settle(200);
+                }
+            }
+            check(probeView->hasPullArrow(),
+                  "selecting its top face raises a drag arrow for the recolour probe");
+
+            const QString before = outDir + QStringLiteral("/appearance_arrow_before.png");
+            const QString after = outDir + QStringLiteral("/appearance_arrow_after.png");
+            probeView->saveSnapshot(before);
+            const QImage beforeImg(before);
+
+            const QColor probeArrow(QStringLiteral("#aaff00"));   // a lime nothing else uses
+            if (panel) panel->setTokenColour(QStringLiteral("accent"), probeArrow);
+            settle(300);
+            probeView->saveSnapshot(after);
+            const QImage afterImg(after);
+
+            auto hits = [](const QImage& image, const QColor& colour) {
+                int found = 0;
+                for (int y = 0; y < image.height(); ++y) {
+                    for (int x = 0; x < image.width(); ++x) {
+                        if (colorDistance(image.pixelColor(x, y), colour) < 60.0) ++found;
+                    }
+                }
+                return found;
+            };
+            // Counted BOTH ways round, which is what makes this a recolour
+            // check rather than a "something is lime somewhere" check: the
+            // arrow has to be genuinely visible in the dump wearing the old
+            // accent first, and that old accent has to be GONE afterwards.
+            // Counting only the new colour would pass just as well against an
+            // arrow that was never drawn at all.
+            const int oldBefore = beforeImg.isNull() ? -1 : hits(beforeImg, probeAccent);
+            const int newBefore = beforeImg.isNull() ? -1 : hits(beforeImg, probeArrow);
+            const int oldAfter = afterImg.isNull() ? -1 : hits(afterImg, probeAccent);
+            const int newAfter = afterImg.isNull() ? -1 : hits(afterImg, probeArrow);
+            check(oldBefore > 60,
+                  QStringLiteral("the arrow is genuinely in the 3D dump, wearing the "
+                                 "accent it was built with (%1 px)").arg(oldBefore));
+            check(newBefore >= 0 && newBefore < 20,
+                  QStringLiteral("and nothing there was the new lime beforehand (%1 px)")
+                      .arg(newBefore));
+            check(newAfter > 60 && oldAfter < 20,
+                  QStringLiteral("and the live arrow was rebuilt in the new accent rather "
+                                 "than left at the one it was drawn with (lime %1 px, "
+                                 "old accent %2 px)").arg(newAfter).arg(oldAfter));
+            arrowProbe.close();
+            settle(200);
+        }
+
+        // --- the type scale follows the base size ---------------------------
+        {
+            const double base = 13.0;
+            if (panel) panel->setBaseSize(base);
+            settle(200);
+            check(std::fabs(Theme::bodyFont().pointSizeF() - base) < 1e-9,
+                  QStringLiteral("bodyFont() follows the base size (%1)")
+                      .arg(Theme::bodyFont().pointSizeF()));
+            check(std::fabs(Theme::badgeFont().pointSizeF() - (base - 2.0)) < 1e-9 &&
+                      std::fabs(Theme::labelFont().pointSizeF() - (base - 1.0)) < 1e-9 &&
+                      std::fabs(Theme::titleFont().pointSizeF() - (base + 3.0)) < 1e-9,
+                  QStringLiteral("and all four derive at their fixed offsets "
+                                 "(%1 / %2 / %3 / %4)")
+                      .arg(Theme::badgeFont().pointSizeF())
+                      .arg(Theme::labelFont().pointSizeF())
+                      .arg(Theme::bodyFont().pointSizeF())
+                      .arg(Theme::titleFont().pointSizeF()));
+            QSet<double> moved;
+            for (const QFont& f : {Theme::titleFont(), Theme::bodyFont(),
+                                   Theme::labelFont(), Theme::badgeFont()})
+                moved.insert(f.pointSizeF());
+            check(moved.size() == 4, "and the four are still four distinct sizes");
+
+            // The type-scale LAW, re-run at a base size nobody shipped. The
+            // sweep further up runs at 10pt, where a widget that had frozen
+            // its font at construction would still be inside the scale by
+            // accident - which is precisely the failure this task could
+            // introduce and that sweep could not see.
+            QStringList strays;
+            for (QWidget* w : window.findChildren<QWidget*>()) {
+                if (!w->isVisible()) continue;
+                if (!moved.contains(w->font().pointSizeF()))
+                    strays << (w->metaObject()->className() +
+                               QStringLiteral(" @ %1").arg(w->font().pointSizeF()));
+            }
+            check(strays.isEmpty(),
+                  QStringLiteral("every visible widget still uses the type scale at a "
+                                 "non-default base size (%1)")
+                      .arg(strays.isEmpty() ? QStringLiteral("all do")
+                                            : strays.join(QStringLiteral(", "))));
+
+            // The hidden four the main sweep is structurally blind to, at the
+            // new size too - each of them sets its field's font explicitly,
+            // and an explicit font does not follow QApplication::setFont.
+            QStringList hidden;
+            auto assertMoved = [&](QWidget* w, const QString& name) {
+                if (!w) { hidden << name + QStringLiteral(" (missing)"); return; }
+                if (!moved.contains(w->font().pointSizeF()))
+                    hidden << name + QStringLiteral(" @ %1").arg(w->font().pointSizeF());
+            };
+            ExtrudePreview* themedPreview = window.findChild<ExtrudePreview*>();
+            PullArrow* themedPull = window.findChild<PullArrow*>();
+            BevelArrow* themedBevel = window.findChild<BevelArrow*>();
+            assertMoved(themedPreview ? themedPreview->field() : nullptr,
+                        QStringLiteral("ExtrudePreview field"));
+            assertMoved(themedPull ? themedPull->field() : nullptr,
+                        QStringLiteral("PullArrow field"));
+            assertMoved(themedBevel ? themedBevel->field() : nullptr,
+                        QStringLiteral("BevelArrow field"));
+            check(hidden.isEmpty(),
+                  QStringLiteral("and the hidden fields that set their own font followed "
+                                 "it too (%1)")
+                      .arg(hidden.isEmpty() ? QStringLiteral("all did")
+                                            : hidden.join(QStringLiteral(", "))));
+        }
+
+        // --- a capture of the app actually wearing an edited spec -----------
+        //
+        // Taken here rather than after the reset, and it is the evidence the
+        // numeric checks above stand in for: by this point the accent, the
+        // text colour, the viewport, the grid and the base size have all been
+        // moved, so a shell that had NOT re-dressed would be obvious in it.
+        // Swept for unpainted black rows like every other capture - a
+        // resized-by-the-type-scale card is exactly the sort that starts
+        // landing on a fractional device row.
+        if (panel && panel->isVisible()) {
+            const QImage themed = printWindowCapture(
+                &window, outDir + QStringLiteral("/appearance_themed.png"));
+            checkNoBlackLine(themed, QStringLiteral("edited-appearance"));
+        }
+
+        // --- the same class, at the fractional scales this run is not at ----
+        //
+        // The capture above is the strongest evidence there is and it is
+        // evidence at exactly ONE display scale - whatever QT_SCALE_FACTOR
+        // this process was started with, which is fixed before QApplication
+        // exists and cannot be changed for a second window. The defect it
+        // caught proves why that is not enough: with the type scale edited,
+        // the status bar came out 26 logical rows tall, the viewport's bottom
+        // edge landed on device row 1354.5 at 175%, and a 2068-device-pixel
+        // 0,0,0 line ran the full width of the window between the two. At
+        // 150% the same 26 rows are a whole 39 and the capture is spotless.
+        // A suite that only ever ran here would have called it clean.
+        //
+        // So the ratio is forced in ARITHMETIC. The seam between the viewport
+        // and each chrome strip sits at the viewport's top and bottom edge in
+        // window coordinates; the device row it lands on is that edge times
+        // the ratio, and it has to be WHOLE at every quarter step Windows
+        // offers - or Qt flushes a row that is inside neither widget's logical
+        // rect, nothing paints it, and over the GL surface an unpainted row is
+        // black. Same property Theme::wholeDevicePixels() promises for a
+        // floating card; MainWindow::syncChromeHeights() is what now holds it
+        // for the two strips that span the window.
+        //
+        // Run HERE, on the edited spec, because the default type scale happens
+        // to give both strips a whole height - which is exactly how this
+        // shipped.
+        {
+            const QPoint viewportTopLeft = view->mapTo(&window, QPoint(0, 0));
+            const int seams[2] = {viewportTopLeft.y(),
+                                  viewportTopLeft.y() + view->height()};
+            const double ratios[] = {1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0};
+            QStringList fractional;
+            int probed = 0;
+            for (const double ratio : ratios) {
+                for (const int seam : seams) {
+                    ++probed;
+                    const double device = seam * ratio;
+                    if (std::fabs(device - std::round(device)) > 1.0e-9) {
+                        fractional << QStringLiteral("row %1 at %2x -> %3")
+                                          .arg(seam).arg(ratio).arg(device);
+                    }
+                }
+            }
+            // Non-vacuity first, the rule this file already keeps for every
+            // sweep: a loop that ran zero times reports clean exactly as
+            // loudly as a clean window does.
+            check(probed == 16,
+                  QStringLiteral("the themed seam sweep really ran at all eight "
+                                 "fractional scales, both edges (%1 probes)")
+                      .arg(probed));
+            check(fractional.isEmpty(),
+                  QStringLiteral("and with the type scale edited the viewport's top and "
+                                 "bottom edges land on whole device rows at every one of "
+                                 "them - no unpainted line between the chrome and the "
+                                 "3D area (top %1, bottom %2%3)")
+                      .arg(seams[0]).arg(seams[1])
+                      .arg(fractional.isEmpty()
+                               ? QString()
+                               : QStringLiteral("; ") +
+                                     fractional.join(QStringLiteral(", "))));
+        }
+
+        // --- the picker opens without blocking -------------------------------
+        if (panel) {
+            // The FIRST token's swatch, not a hand-picked one: the rows live
+            // in a scroll area, and a swatch far enough down the list is
+            // genuinely clipped out of the card - childAt() finds nothing
+            // there, correctly, because a user cannot click it either without
+            // scrolling first. Read from the same table that orders the rows,
+            // so this cannot go stale when the order changes.
+            const QString topId = Theme::colourTokens().first().id;
+            QWidget* swatch = panel->swatchFor(topId);
+            check(swatch != nullptr && swatch->isVisible(),
+                  QStringLiteral("the %1 swatch is on screen")
+                      .arg(AppearancePanel::nameForToken(topId)));
+            if (swatch) {
+                // Reached the way a user reaches it - through the viewport's
+                // own hit-testing - rather than by sending an event straight
+                // at the pointer this block happens to hold. CLAUDE.md's rule
+                // for anything interactive over the GL surface.
+                const QPoint inView = swatch->mapTo(view, swatch->rect().center());
+                QWidget* hit = view->childAt(inView);
+                check(hit == swatch,
+                      QStringLiteral("and a real click at its centre finds the swatch "
+                                     "itself (found %1)")
+                          .arg(hit ? QString::fromLatin1(hit->metaObject()->className())
+                                   : QStringLiteral("nothing")));
+                clickAt(swatch, swatch->rect().center());
+                settle(200);
+                QColorDialog* picker = panel->activeColourDialog();
+                check(picker != nullptr, "clicking a swatch opens a colour picker");
+
+                // Two properties, and the second is the one an earlier round
+                // got wrong. show() returns immediately, so the suite REACHES
+                // this line with the picker up - exec() would never have
+                // returned and the run would hang here rather than fail,
+                // which is the honest backstop CLAUDE.md already records for
+                // the outcome dialogs. And the picker is genuinely NOT MODAL:
+                // QDialog::open() forces Qt::WindowModal past setModal(false),
+                // which locked the rail and the viewport while a colour was
+                // being chosen, so this asserts isModal() outright rather
+                // than the weaker "not application-modal" that a window-modal
+                // dialog also satisfies.
+                check(picker != nullptr && picker->isVisible(),
+                      "and it returned with the picker on screen rather than exec()'s "
+                      "nested loop swallowing this run");
+                check(picker != nullptr && !picker->isModal() &&
+                          picker->windowModality() == Qt::NonModal,
+                      QStringLiteral("and it is genuinely modeless - nothing is blocked "
+                                     "while a colour is chosen (modality %1)")
+                          .arg(picker ? int(picker->windowModality()) : -1));
+
+                // The shell behind the picker is still there and still wired:
+                // hit-testable, and its action fires when an event reaches it.
+                //
+                // HONEST LIMIT, stated because the obvious reading is wrong:
+                // this does NOT prove the app is unblocked. Qt enforces
+                // modality inside QApplication::notify()'s spontaneous-event
+                // path, and this suite delivers events with sendEvent()
+                // straight to the widget - so these two pass against a
+                // window-modal picker as well (measured: they did). The
+                // isModal() assertion above is what carries that claim; this
+                // pair guards the wiring underneath it.
+                if (checkedChip && picker) {
+                    QAction* chipAction = checkedChip->action();
+                    const QPoint railPoint =
+                        checkedChip->mapTo(view, checkedChip->rect().center());
+                    check(view->childAt(railPoint) == checkedChip,
+                          "a rail chip is still hit-testable behind the open picker");
+                    if (chipAction && chipAction->isCheckable()) {
+                        const bool was = chipAction->isChecked();
+                        clickAt(checkedChip, checkedChip->rect().center());
+                        settle(150);
+                        check(chipAction->isChecked() != was,
+                              "and a click delivered to it still toggles its action - "
+                              "the shell behind the picker is wired, not torn down");
+                        // Put it back: the rest of this block, and every
+                        // block after it, expects the shell it found.
+                        clickAt(checkedChip, checkedChip->rect().center());
+                        settle(150);
+                        check(chipAction->isChecked() == was,
+                              "and it is restored to the state the suite found it in");
+                    }
+                }
+                if (picker) {
+                    // Closed here, deliberately: the suite's "no dialog is
+                    // ever constructed for an outcome" checks are only
+                    // meaningful while nothing leaves one lying around.
+                    picker->close();
+                    settle(200);
+                }
+                check(window.findChildren<QDialog*>().isEmpty(),
+                      "and closing it leaves no dialog behind");
+            }
+        }
+
+        // --- serialise, and refuse garbage ----------------------------------
+        {
+            const QString stored = Theme::serializeSpec();
+            Theme::Spec round;
+            check(Theme::deserializeSpec(stored, round),
+                  "a serialised spec reads back");
+            check(round == Theme::spec(),
+                  "and round-trips to exactly the spec it came from");
+
+            // Tolerant on an unknown KEY - that is how a token can be removed
+            // in a later build without stranding everyone's stored appearance.
+            Theme::Spec tolerant;
+            check(Theme::deserializeSpec(
+                      QStringLiteral("accent=#ff0000;somethingElse=#00ff00;base=11"), tolerant) &&
+                      tolerant.accent == QColor(QStringLiteral("#ff0000")) &&
+                      std::fabs(tolerant.basePt - 11.0) < 1e-9,
+                  "an unrecognised token is ignored rather than refused");
+            check(tolerant.viewport == Theme::defaultSpec().viewport,
+                  "and a token the string never mentions comes back at its default");
+
+            // Garbage is refused, and `out` is left ALONE - a deserialize that
+            // half-filled its output on the way to failing would be worse than
+            // one that failed loudly.
+            Theme::Spec sentinel;
+            sentinel.accent = QColor(QStringLiteral("#010203"));
+            const Theme::Spec untouched = sentinel;
+            check(!Theme::deserializeSpec(QStringLiteral(""), sentinel),
+                  "an empty string is refused");
+            check(!Theme::deserializeSpec(QStringLiteral("not a spec at all"), sentinel),
+                  "so is a string with no key=value fragment");
+            check(!Theme::deserializeSpec(QStringLiteral("accent=notacolour"), sentinel),
+                  "so is a colour QColor cannot parse");
+            check(!Theme::deserializeSpec(QStringLiteral("base=40"), sentinel),
+                  "so is a base size outside the 8-14 pt band");
+            check(sentinel == untouched,
+                  "and every one of those refusals left the output untouched");
+
+            // A family this machine does not have FALLS BACK rather than
+            // being taken or refused - see Theme.h. Taken, Qt's matcher would
+            // silently substitute something and the panel's combo would name
+            // a family it does not list; refused, a spec carried from a
+            // machine with one extra font installed would cost the user every
+            // colour in it.
+            Theme::Spec missingFont;
+            check(Theme::deserializeSpec(
+                      QStringLiteral("accent=#ff0000;family=NoSuchFamily Ultra Expanded"),
+                      missingFont),
+                  "a spec naming an uninstalled font still reads back");
+            check(missingFont.fontFamily == Theme::defaultSpec().fontFamily,
+                  QStringLiteral("with the family fallen back to the shipped one (\"%1\")")
+                      .arg(missingFont.fontFamily));
+            check(missingFont.accent == QColor(QStringLiteral("#ff0000")),
+                  "and its colours intact - a missing font costs the font, not the spec");
+            // The installed case still round-trips, so the guard is a filter
+            // rather than a blanket.
+            Theme::Spec realFont;
+            check(Theme::deserializeSpec(
+                      QStringLiteral("family=") + Theme::defaultSpec().fontFamily, realFont) &&
+                      realFont.fontFamily == Theme::defaultSpec().fontFamily,
+                  "while a family that IS installed is taken as given");
+        }
+
+        // --- reset restores Graphite exactly ---------------------------------
+        if (panel) {
+            check(Theme::spec() != Theme::defaultSpec(),
+                  "the app is genuinely themed before the reset, so the check below "
+                  "is not vacuous");
+            QWidget* reset = panel->resetButton();
+            check(reset != nullptr && reset->isVisible(), "the reset control is on screen");
+            if (reset) {
+                clickAt(reset, reset->rect().center());
+                settle(250);
+            }
+            check(Theme::spec() == Theme::defaultSpec(),
+                  "Reset restores defaultSpec() exactly");
+            check(graphiteDrawerWidth > 0 && window.itemsPanel() &&
+                      window.itemsPanel()->width() == graphiteDrawerWidth,
+                  QStringLiteral("and the items drawer is back at exactly the width it "
+                                 "had before any of this - a type-derived width still "
+                                 "resolves to the shipped number at the shipped scale "
+                                 "(%1 vs %2)")
+                      .arg(window.itemsPanel() ? window.itemsPanel()->width() : -1)
+                      .arg(graphiteDrawerWidth));
+            // The panel is a VIEW of the live spec, not a second copy of it -
+            // so a reset it did not itself perform still leaves its own
+            // controls showing what the app is actually wearing. Both
+            // directions of that binding are asserted: the size the panel had
+            // pushed out is back at the default, and the family combo names
+            // the family Theme reports.
+            check(panel->sizeControl() != nullptr &&
+                      std::fabs(panel->sizeControl()->value() - Theme::spec().basePt) < 1e-9,
+                  QStringLiteral("and the panel's own size control followed it back "
+                                 "(showing %1)")
+                      .arg(panel->sizeControl() ? panel->sizeControl()->value() : -1));
+            check(panel->familyControl() != nullptr &&
+                      panel->familyControl()->currentText() == Theme::spec().fontFamily,
+                  QStringLiteral("and its family control names the family Theme reports "
+                                 "(\"%1\" vs \"%2\")")
+                      .arg(panel->familyControl() ? panel->familyControl()->currentText()
+                                                  : QString(),
+                           Theme::spec().fontFamily));
+            if (checkedChip) {
+                const QImage restored = renderExact(checkedChip);
+                check(!graphiteChip.isNull() && restored == graphiteChip,
+                      "and the rail chip renders pixel-identically to the way it did "
+                      "before a single token was touched");
+            }
+        }
+
+        // --- a capture of the panel, and the black-hairline sweep -----------
+        if (panel && panel->isVisible()) {
+            const QImage shot = printWindowCapture(
+                &window, outDir + QStringLiteral("/appearance_panel.png"));
+            checkNoBlackLine(shot, QStringLiteral("Appearance panel"));
+        }
+
+        // --- persistProgress=false writes nothing ---------------------------
+        {
+            // Under a scoped, file-backed QSettings identity, so this probe
+            // can look at what was written without ever reading or touching
+            // the developer's real store.
+            ScopedTestSettings scopedSettings;
+            {
+                QSettings clean;
+                clean.remove(QStringLiteral("appearance"));
+            }
+
+            MainWindow quiet(nullptr, /*persistProgress=*/false);
+            quiet.setAttribute(Qt::WA_ShowWithoutActivating);
+            quiet.resize(900, 700);
+            quiet.show();
+            settle(300);
+            AppearancePanel* quietPanel = quiet.appearancePanel();
+            check(quietPanel != nullptr, "the probe window has an Appearance panel too");
+            if (quietPanel) {
+                quietPanel->setTokenColour(QStringLiteral("accent"),
+                                           QColor(QStringLiteral("#ff00ff")));
+                settle(200);
+                check(Theme::accent() == QColor(QStringLiteral("#ff00ff")),
+                      "a persistProgress=false window still applies a theme edit");
+            }
+            settle(MainWindow::kAppearanceWriteMs * 2);
+            {
+                QSettings after;
+                check(!after.contains(QStringLiteral("appearance")),
+                      QStringLiteral("but writes nothing to the store, even well past "
+                                     "the debounce (%1)")
+                          .arg(after.value(QStringLiteral("appearance")).toString()));
+            }
+
+            // And the persisting path DOES write - the check above is only
+            // worth having if the guard is the reason nothing was stored,
+            // rather than the write never happening at all. This is also
+            // where the DEBOUNCE is pinned: a colour picker emits
+            // currentColorChanged per mouse move, and a write-through would
+            // put a registry write and a file sync on every frame of a drag.
+            {
+                MainWindow persisting(nullptr, /*persistProgress=*/true);
+                persisting.setAttribute(Qt::WA_ShowWithoutActivating);
+                persisting.resize(900, 700);
+                persisting.show();
+                settle(300);
+
+                // A burst, the way a drag through the colour wheel arrives.
+                const QColor burst[3] = {QColor(QStringLiteral("#112233")),
+                                         QColor(QStringLiteral("#445566")),
+                                         QColor(QStringLiteral("#00c2ff"))};
+                for (const QColor& c : burst) {
+                    if (persisting.appearancePanel())
+                        persisting.appearancePanel()->setTokenColour(QStringLiteral("accent"), c);
+                    settle(60);
+                }
+                check(Theme::accent() == burst[2],
+                      "a burst of edits applies live, every one of them");
+                {
+                    QSettings midBurst;
+                    check(!midBurst.contains(QStringLiteral("appearance")),
+                          "and nothing has been written yet - the store is not touched "
+                          "once per edit");
+                }
+
+                settle(MainWindow::kAppearanceWriteMs * 2);
+                QSettings written;
+                Theme::Spec readBack;
+                check(Theme::deserializeSpec(
+                          written.value(QStringLiteral("appearance")).toString(), readBack) &&
+                          readBack.accent == burst[2],
+                      "and once the edits stop, one write stores the spec that survived");
+                persisting.close();
+            }
+            quiet.close();
+            settle(150);
+        }
+
+        // Back to Graphite for everything that follows, and the action back to
+        // unchecked so the shell is as the next block expects to find it.
+        Theme::setSpec(Theme::defaultSpec());
+        if (appearance && appearance->isChecked()) appearance->trigger();
+        settle(200);
+        check(Theme::spec() == Theme::defaultSpec() && panel && !panel->isVisible(),
+              "the appearance block leaves the app back at Graphite with the panel closed");
     }
 
     // --- Show tips again restores the walkthrough for a returning user too ---
@@ -5369,8 +9213,20 @@ int main(int argc, char* argv[])
         // out of scope here.
     }
 
-    std::printf("\n%s (%d failure%s)  volumes: A=%.1f B=%.1f\n",
+    // The coverage floor, asserted OUTSIDE check() on purpose: an assertion
+    // about how many checks ran must not be one of the checks it counts, or
+    // the number it reports and the number it tests are two different things.
+    // Reported the same way trigger()'s own failure is.
+    if (g_checks < kCheckFloor) {
+        std::printf("[FAIL] the run executed %d checks, below the floor of %d - "
+                    "a guard has stopped letting its checks run; find the guard, "
+                    "do not lower the floor\n",
+                    g_checks, kCheckFloor);
+        ++g_failures;
+    }
+
+    std::printf("\n%s (%d failure%s, %d checks, floor %d)  volumes: A=%.1f B=%.1f\n",
                 g_failures == 0 ? "PASS" : "FAIL", g_failures,
-                g_failures == 1 ? "" : "s", volumeA, volumeB);
+                g_failures == 1 ? "" : "s", g_checks, kCheckFloor, volumeA, volumeB);
     return g_failures == 0 ? 0 : 1;
 }

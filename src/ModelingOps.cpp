@@ -7,27 +7,46 @@
 
 #include <BRep_Builder.hxx>
 #include <BRep_Tool.hxx>
+#include <BRepAdaptor_Curve.hxx>
+#include <BRepAdaptor_Surface.hxx>
+#include <BRepLProp_SLProps.hxx>
 #include <BRepAlgoAPI_BooleanOperation.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
+#include <BRepCheck_Analyzer.hxx>
+#include <BRepFilletAPI_MakeChamfer.hxx>
+#include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepGProp.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
 #include <GProp_GProps.hxx>
+#include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <GeomAbs_CurveType.hxx>
+#include <GeomAbs_SurfaceType.hxx>
 #include <Geom_Plane.hxx>
 #include <Geom_Surface.hxx>
 #include <IFSelect_ReturnStatus.hxx>
 #include <Interface_Static.hxx>
 #include <STEPControl_Writer.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
+#include <Standard_Failure.hxx>
+#include <TopAbs_Orientation.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
+#include <TopoDS_Vertex.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
+#include <gp_Ax1.hxx>
+#include <gp_Ax3.hxx>
 #include <gp_Pln.hxx>
+#include <gp_Quaternion.hxx>
 #include <gp_Vec.hxx>
 
 namespace ModelingOps {
@@ -65,6 +84,83 @@ bool sweepLeavesThePlane(const TopoDS_Face& profile, const gp_Dir& direction)
 
     const gp_Dir normal = plane->Pln().Axis().Direction();
     return std::fabs(gp_Vec(direction).Dot(gp_Vec(normal))) > 1.0e-7;
+}
+
+// A shared, cheap sanity gate for the direct-modeling operations below:
+// IsDone()/non-null alone is not enough (the whole point of the pitfall this
+// project keeps rediscovering), so every result also passes
+// BRepCheck_Analyzer before it is handed back as ok == true.
+bool isShapeSane(const TopoDS_Shape& shape)
+{
+    if (shape.IsNull()) return false;
+    const BRepCheck_Analyzer analyzer(shape);
+    return analyzer.IsValid();
+}
+
+// BRepAdaptor_Surface carries geometry and location only - it never applies
+// TopAbs_Orientation. On a plain box three of six faces are REVERSED and
+// their plane normals point into the body; the same one-line fix
+// MainWindow::lockToFace already carries for the sketch plane belongs here
+// too, so pullFace's caller never has to know about it.
+gp_Pln outwardPlane(const TopoDS_Face& face, const BRepAdaptor_Surface& surface)
+{
+    gp_Pln plane = surface.Plane();
+    if (face.Orientation() == TopAbs_REVERSED) {
+        plane = gp_Pln(gp_Ax3(plane.Location(), plane.Axis().Direction().Reversed(),
+                              plane.Position().XDirection()));
+    }
+    return plane;
+}
+
+// filletEdge/chamferEdge get this check for free - BRepFilletAPI throws on
+// an edge foreign to the shape. pullFace has no such kernel-level guard: a
+// prism built from a foreign face and fused/cut against `body` is a
+// perfectly well-formed boolean between two unrelated shapes, so OCCT
+// happily reports success. Without this, one mis-wired pick from the UI
+// (the gizmo tasks feed a picked TopoDS_Face straight in) silently produces
+// two disconnected solids instead of a refusal.
+bool faceBelongsToBody(const TopoDS_Shape& body, const TopoDS_Face& face)
+{
+    for (TopExp_Explorer it(body, TopAbs_FACE); it.More(); it.Next()) {
+        if (it.Current().IsSame(face)) return true;
+    }
+    return false;
+}
+
+// The face's OUTWARD normal at (or nearest to) `at`. outwardPlane() above
+// answers the same question for a face that is known planar and is asked
+// about as a whole; this one answers it at a POINT, which is what an edge's
+// neighbour needs - the far side of an earlier fillet is a cylinder, and its
+// normal is a different direction at every point along it.
+//
+// The planar short-circuit is not an optimisation for its own sake: every
+// straight edge of a box-shaped body has two planar faces on it, and
+// bevelAxis() runs on every appStateChanged in the app that drives it.
+bool outwardNormalNear(const TopoDS_Face& face, const gp_Pnt& at, gp_Dir& out)
+{
+    if (face.IsNull()) return false;
+
+    BRepAdaptor_Surface surface(face);
+    gp_Dir normal;
+    if (surface.GetType() == GeomAbs_Plane) {
+        normal = surface.Plane().Axis().Direction();
+    } else {
+        const Handle(Geom_Surface) geometry = BRep_Tool::Surface(face);
+        if (geometry.IsNull()) return false;
+        GeomAPI_ProjectPointOnSurf projector(at, geometry);
+        if (!projector.IsDone() || projector.NbPoints() < 1) return false;
+        double u = 0.0;
+        double v = 0.0;
+        projector.LowerDistanceParameters(u, v);
+        BRepLProp_SLProps properties(surface, u, v, 1, 1.0e-7);
+        if (!properties.IsNormalDefined()) return false;
+        normal = properties.Normal();
+    }
+
+    // The flip, for the third time in this project - see bevelAxis()'s header.
+    if (face.Orientation() == TopAbs_REVERSED) normal.Reverse();
+    out = normal;
+    return true;
 }
 
 }  // namespace
@@ -159,6 +255,306 @@ TopoDS_Shape makeCompound(const std::vector<TopoDS_Shape>& shapes)
         if (!s.IsNull()) builder.Add(compound, s);
     }
     return compound;
+}
+
+BooleanResult pullFace(const TopoDS_Shape& body, const TopoDS_Face& face, double distance)
+{
+    BooleanResult out;
+    if (body.IsNull() || face.IsNull()) {
+        out.error = "pull: body or face is null";
+        return out;
+    }
+    if (std::fabs(distance) < 1.0e-7) {
+        out.error = "pull: distance is effectively zero";
+        return out;
+    }
+    if (!faceBelongsToBody(body, face)) {
+        out.error = "pull: face does not belong to the body";
+        return out;
+    }
+
+    try {
+        const BRepAdaptor_Surface surface(face);
+        if (surface.GetType() != GeomAbs_Plane) {
+            out.error = "pull: face is not planar";
+            return out;
+        }
+
+        const gp_Pln plane = outwardPlane(face, surface);
+        const gp_Dir outward = plane.Axis().Direction();
+        // Growing sweeps outward and fuses the prism on; carving sweeps
+        // INWARD by the same amount and cuts that prism away - a carve tool
+        // built along the outward normal would sit entirely outside the
+        // body and remove nothing.
+        const gp_Dir sweepDir = (distance > 0.0) ? outward : outward.Reversed();
+
+        const TopoDS_Shape prism = extrude(face, sweepDir, std::fabs(distance));
+        if (prism.IsNull()) {
+            out.error = "pull: prism build failed";
+            return out;
+        }
+
+        const BooleanKind kind = (distance > 0.0) ? BooleanKind::Fuse : BooleanKind::Cut;
+        const BooleanResult result = applyBoolean(kind, body, prism);
+        if (!result.ok) {
+            out.error = "pull: " + result.error;
+            return out;
+        }
+
+        // A carve that consumes the body entirely is a valid boolean and a
+        // useless result - IsDone() alone would surface it as a success.
+        if (result.shape.IsNull() || countSolids(result.shape) == 0 ||
+            volume(result.shape) < 1.0e-6) {
+            out.error = "pull: the carve removed the entire body";
+            return out;
+        }
+        if (!isShapeSane(result.shape)) {
+            out.error = "pull: result failed validity check";
+            return out;
+        }
+
+        out.ok = true;
+        out.shape = result.shape;
+    } catch (const Standard_Failure& e) {
+        out.ok = false;
+        out.error = std::string("pull: kernel exception - ") +
+                     (e.GetMessageString() ? e.GetMessageString() : "unknown");
+    }
+    return out;
+}
+
+BooleanResult filletEdge(const TopoDS_Shape& body, const TopoDS_Edge& edge, double radius)
+{
+    BooleanResult out;
+    if (body.IsNull() || edge.IsNull()) {
+        out.error = "fillet: body or edge is null";
+        return out;
+    }
+    if (radius <= 0.0) {
+        out.error = "fillet: radius must be positive";
+        return out;
+    }
+
+    try {
+        BRepFilletAPI_MakeFillet mkFillet(body);
+        mkFillet.Add(radius, edge);
+        mkFillet.Build();
+        // OCCT fillets legitimately fail on hard geometry (e.g. a radius
+        // that would eat a neighbouring face) - IsDone() false is a normal
+        // outcome here, not a bug, and must carry through as ok == false.
+        if (!mkFillet.IsDone()) {
+            out.error = "fillet: the kernel could not build this radius on this edge";
+            return out;
+        }
+        const TopoDS_Shape result = mkFillet.Shape();
+        if (!isShapeSane(result)) {
+            out.error = "fillet: result is empty or invalid";
+            return out;
+        }
+
+        out.ok = true;
+        out.shape = result;
+    } catch (const Standard_Failure& e) {
+        out.ok = false;
+        out.error = std::string("fillet: kernel exception - ") +
+                     (e.GetMessageString() ? e.GetMessageString() : "unknown");
+    }
+    return out;
+}
+
+BooleanResult chamferEdge(const TopoDS_Shape& body, const TopoDS_Edge& edge, double distance)
+{
+    BooleanResult out;
+    if (body.IsNull() || edge.IsNull()) {
+        out.error = "chamfer: body or edge is null";
+        return out;
+    }
+    if (distance <= 0.0) {
+        out.error = "chamfer: distance must be positive";
+        return out;
+    }
+
+    try {
+        BRepFilletAPI_MakeChamfer mkChamfer(body);
+        mkChamfer.Add(distance, edge);  // symmetric chamfer, both adjacent faces
+        mkChamfer.Build();
+        if (!mkChamfer.IsDone()) {
+            out.error = "chamfer: the kernel could not build this distance on this edge";
+            return out;
+        }
+        const TopoDS_Shape result = mkChamfer.Shape();
+        if (!isShapeSane(result)) {
+            out.error = "chamfer: result is empty or invalid";
+            return out;
+        }
+
+        out.ok = true;
+        out.shape = result;
+    } catch (const Standard_Failure& e) {
+        out.ok = false;
+        out.error = std::string("chamfer: kernel exception - ") +
+                     (e.GetMessageString() ? e.GetMessageString() : "unknown");
+    }
+    return out;
+}
+
+bool bevelAxis(const TopoDS_Shape& body, const TopoDS_Edge& edge, gp_Pnt& centre,
+               gp_Dir& outward)
+{
+    if (body.IsNull() || edge.IsNull()) return false;
+
+    // Straight only. BRepFilletAPI will round a curved edge perfectly well,
+    // but the gesture this drives measures a drag against ONE fixed axis, and
+    // an edge whose direction changes along its length has no single
+    // perpendicular for that axis to be.
+    if (BRepAdaptor_Curve(edge).GetType() != GeomAbs_Line) return false;
+
+    TopoDS_Vertex first, last;
+    TopExp::Vertices(edge, first, last);
+    if (first.IsNull() || last.IsNull()) return false;
+    const gp_Pnt a = BRep_Tool::Pnt(first);
+    const gp_Pnt b = BRep_Tool::Pnt(last);
+    const gp_Vec along(a, b);
+    if (along.Magnitude() < 1.0e-7) return false;
+    const gp_Pnt midpoint(0.5 * (a.X() + b.X()), 0.5 * (a.Y() + b.Y()),
+                          0.5 * (a.Z() + b.Z()));
+
+    TopTools_IndexedDataMapOfShapeListOfShape edgeToFaces;
+    TopExp::MapShapesAndAncestors(body, TopAbs_EDGE, TopAbs_FACE, edgeToFaces);
+    const int index = edgeToFaces.FindIndex(edge);
+    if (index <= 0) return false;   // not this body's edge at all
+    const TopTools_ListOfShape& faces = edgeToFaces.FindFromIndex(index);
+    // Exactly two. A seam or a free edge has one, and a non-manifold junction
+    // has more; neither has a bisector to drag along.
+    if (faces.Extent() != 2) return false;
+
+    gp_Vec bisector(0.0, 0.0, 0.0);
+    for (const TopoDS_Shape& neighbour : faces) {
+        gp_Dir normal;
+        if (!outwardNormalNear(TopoDS::Face(neighbour), midpoint, normal)) return false;
+        bisector += gp_Vec(normal);
+    }
+
+    // Perpendicular to the edge, by construction rather than by luck - see the
+    // header. On a box the subtraction removes nothing; on a body whose faces
+    // meet the edge at an angle it is what keeps the arrow on the edge.
+    // Braces, not parentheses: `gp_Vec direction(gp_Dir(along))` is a function
+    // declaration, not a variable - C++'s most vexing parse, and MSVC's error
+    // for it names the wrong line.
+    const gp_Vec direction{gp_Dir(along)};
+    bisector -= direction * bisector.Dot(direction);
+    if (bisector.Magnitude() < 1.0e-7) return false;   // opposed normals: no bisector
+
+    centre = midpoint;
+    outward = gp_Dir(bisector);
+    return true;
+}
+
+BooleanResult transformShape(const TopoDS_Shape& body, const gp_Trsf& trsf)
+{
+    BooleanResult out;
+    if (body.IsNull()) {
+        out.error = "transform: body is null";
+        return out;
+    }
+    if (trsf.ScaleFactor() <= 0.0) {
+        out.error = "transform: scale factor must be positive";
+        return out;
+    }
+
+    try {
+        BRepBuilderAPI_Transform transform(body, trsf, Standard_True /* copy geometry */);
+        if (!transform.IsDone()) {
+            out.error = "transform: kernel failed to apply the transform";
+            return out;
+        }
+        const TopoDS_Shape result = transform.Shape();
+        if (!isShapeSane(result)) {
+            out.error = "transform: result is empty or invalid";
+            return out;
+        }
+
+        out.ok = true;
+        out.shape = result;
+    } catch (const Standard_Failure& e) {
+        out.ok = false;
+        out.error = std::string("transform: kernel exception - ") +
+                     (e.GetMessageString() ? e.GetMessageString() : "unknown");
+    }
+    return out;
+}
+
+namespace {
+constexpr double kPi = 3.14159265358979323846;
+
+// One step, or the value untouched when the step is not a step. Every
+// component of snapTransform() rounds through here so "a step <= 0 leaves
+// that component alone" is one rule rather than three copies of it.
+double snapToStep(double value, double step)
+{
+    if (step <= 0.0) return value;
+    return std::round(value / step) * step;
+}
+}  // namespace
+
+gp_Trsf snapTransform(const gp_Trsf& delta, const gp_Pnt& pivot,
+                      double translationStep, double rotationStepDeg,
+                      double scaleStep)
+{
+    // The three components, pulled apart about the pivot - see the header for
+    // why the translation is read off the pivot's own movement rather than
+    // gp_Trsf::TranslationPart().
+    const double scale = delta.ScaleFactor();
+    gp_Vec axisVec;
+    Standard_Real angle = 0.0;
+    delta.GetRotation().GetVectorAndAngle(axisVec, angle);
+    const gp_Vec movement(pivot, pivot.Transformed(delta));
+
+    double snappedScale = snapToStep(scale, scaleStep);
+    // A snap must never be what makes a transform illegal: the kernel refuses
+    // a factor <= 0, so a shrink that rounds to nothing is held at one step
+    // instead. The caller's own sanity clamp then has something to refuse.
+    if (snappedScale <= 0.0) snappedScale = scaleStep > 0.0 ? scaleStep : scale;
+
+    const double stepRad = rotationStepDeg * kPi / 180.0;
+    const double snappedAngle = snapToStep(angle, stepRad);
+
+    const gp_Vec snappedMove(snapToStep(movement.X(), translationStep),
+                             snapToStep(movement.Y(), translationStep),
+                             snapToStep(movement.Z(), translationStep));
+
+    // Rebuilt in the order the decomposition names, not edited in place.
+    // Rotation and scale both fix the pivot, so they compose either way round;
+    // the translation has to come last, or it would itself be scaled.
+    gp_Trsf out;
+    if (std::fabs(snappedAngle) > 1.0e-12 && axisVec.Magnitude() > 1.0e-12) {
+        gp_Trsf rotation;
+        rotation.SetRotation(gp_Ax1(pivot, gp_Dir(axisVec)), snappedAngle);
+        out = rotation;
+    }
+    if (std::fabs(snappedScale - 1.0) > 1.0e-12) {
+        gp_Trsf scaling;
+        scaling.SetScale(pivot, snappedScale);
+        out = scaling * out;
+    }
+    if (snappedMove.Magnitude() > 1.0e-12) {
+        gp_Trsf translation;
+        translation.SetTranslation(snappedMove);
+        out = translation * out;
+    }
+    return out;
+}
+
+bool isIdentityTransform(const gp_Trsf& trsf, double linearTolerance,
+                         double angularToleranceDeg)
+{
+    if (std::fabs(trsf.ScaleFactor() - 1.0) > linearTolerance) return false;
+    if (trsf.TranslationPart().Modulus() > linearTolerance) return false;
+
+    gp_Vec axis;
+    Standard_Real angle = 0.0;
+    trsf.GetRotation().GetVectorAndAngle(axis, angle);
+    return std::fabs(angle) <= angularToleranceDeg * kPi / 180.0;
 }
 
 void tessellate(const TopoDS_Shape& shape, double linearDeflection)

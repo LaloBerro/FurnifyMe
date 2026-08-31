@@ -27,6 +27,7 @@ ToolChip::ToolChip(QAction* action, IconSet::Glyph glyph, ChipMode mode, QWidget
     : QAbstractButton(parent)
     , myAction(action)
     , myMode(mode)
+    , myGlyph(glyph)
 {
     if (myMode == ChipMode::IconOnly) {
         // The rail stretches to the viewport's full height and distributes
@@ -38,21 +39,39 @@ ToolChip::ToolChip(QAction* action, IconSet::Glyph glyph, ChipMode mode, QWidget
     }
     setAttribute(Qt::WA_Hover, true);
     setCursor(Qt::PointingHandCursor);
-    setIcon(IconSet::icon(glyph));
     // Every chip is keyboard-reachable, not just clickable - a focus ring
     // that can never actually receive focus would be dead code.
     setFocusPolicy(Qt::StrongFocus);
-    // Baseline for this widget's own font() (what the sweep in gui_smoke
-    // checks): the chip's own text is a chip label. A per-widget stylesheet
-    // wins over the app-wide one regardless of selector specificity, so this
-    // sticks reliably rather than fighting the cascade.
-    setStyleSheet(QStringLiteral("font-size: %1pt;").arg(Theme::labelFont().pointSizeF()));
+    // The icon and the font-size stylesheet are the only two appearance
+    // values this widget cannot re-derive inside paintEvent(), so they are
+    // set through the same applyTheme() a live Appearance edit calls rather
+    // than written out once here and again there.
+    applyTheme();
+    connect(Theme::notifier(), &Theme::Notifier::changed, this, &ToolChip::applyTheme);
 
     if (myAction) {
         connect(this, &QAbstractButton::clicked, myAction, &QAction::trigger);
         connect(myAction, &QAction::changed, this, &ToolChip::syncFromAction);
         syncFromAction();
     }
+}
+
+void ToolChip::applyTheme()
+{
+    // Rasterised from Theme::text()/textDisabled() at this moment - a QIcon
+    // is pixels, not a description, so it is stale the instant either colour
+    // moves.
+    setIcon(IconSet::icon(myGlyph));
+    // Baseline for this widget's own font() (what the sweep in gui_smoke
+    // checks): the chip's own text is a chip label. A per-widget stylesheet
+    // wins over the app-wide one regardless of selector specificity, so this
+    // sticks reliably rather than fighting the cascade.
+    setStyleSheet(QStringLiteral("font-size: %1pt;").arg(Theme::labelFont().pointSizeF()));
+    // A labelled chip's width is measured with labelFont()/badgeFont(), so a
+    // base-size change moves it - the rail's icon-only chips are a fixed
+    // square and are unaffected, but sizeHint() is one function for both.
+    updateGeometry();
+    update();
 }
 
 void ToolChip::syncFromAction()
