@@ -3,6 +3,9 @@
 #include <algorithm>
 #include <cstdio>
 
+#include <TopAbs_ShapeEnum.hxx>
+#include <TopoDS.hxx>
+
 namespace {
 
 std::string defaultName(int index)
@@ -207,4 +210,96 @@ bool DocumentModel::renameSolid(int id, const std::string& name)
         }
     }
     return false;
+}
+
+bool DocumentModel::setItemName(int id, const std::string& name)
+{
+    if (renameSolid(id, name)) return true;
+
+    for (Outline& o : myOutlines) {
+        if (o.id == id) {
+            o.name = name;
+            return true;
+        }
+    }
+    return false;
+}
+
+void DocumentModel::setVisible(int id, bool visible)
+{
+    myVisibility[id] = visible;
+}
+
+bool DocumentModel::isVisible(int id) const
+{
+    const auto it = myVisibility.find(id);
+    return it == myVisibility.end() ? true : it->second;
+}
+
+FurnifySerial::SerializedDocument DocumentModel::toSerialized(DocumentMeta& meta) const
+{
+    FurnifySerial::SerializedDocument serial;
+    meta = DocumentMeta{};
+
+    serial.bodies.reserve(mySolids.size());
+    meta.bodyNames.reserve(mySolids.size());
+    meta.bodyVisible.reserve(mySolids.size());
+    for (const Solid& s : mySolids) {
+        serial.bodies.push_back(s.shape);
+        meta.bodyNames.push_back(s.name);
+        meta.bodyVisible.push_back(isVisible(s.id));
+    }
+
+    serial.outlineFaces.reserve(myOutlines.size());
+    serial.outlinePlanes.reserve(myOutlines.size());
+    meta.outlineNames.reserve(myOutlines.size());
+    meta.outlineVisible.reserve(myOutlines.size());
+    for (const Outline& o : myOutlines) {
+        serial.outlineFaces.push_back(o.face);
+        serial.outlinePlanes.push_back(o.plane);
+        meta.outlineNames.push_back(o.name);
+        meta.outlineVisible.push_back(isVisible(o.id));
+    }
+
+    return serial;
+}
+
+bool DocumentModel::fromSerialized(const FurnifySerial::SerializedDocument& serial,
+                                   const DocumentMeta& meta)
+{
+    // Validate everything BEFORE mutating `this` - a refused load must
+    // leave the document exactly as it was.
+    if (serial.outlineFaces.size() != serial.outlinePlanes.size()) return false;
+    if (serial.bodies.size() != meta.bodyNames.size()) return false;
+    if (serial.bodies.size() != meta.bodyVisible.size()) return false;
+    if (serial.outlineFaces.size() != meta.outlineNames.size()) return false;
+    if (serial.outlineFaces.size() != meta.outlineVisible.size()) return false;
+
+    for (const TopoDS_Shape& s : serial.bodies) {
+        if (s.IsNull()) return false;
+    }
+    for (const TopoDS_Shape& s : serial.outlineFaces) {
+        if (s.IsNull() || s.ShapeType() != TopAbs_FACE) return false;
+    }
+
+    mySolids.clear();
+    myOutlines.clear();
+    myUndo.clear();
+    myRedo.clear();
+    myVisibility.clear();
+    ++myRevision;
+
+    for (std::size_t i = 0; i < serial.bodies.size(); ++i) {
+        const int id = addSolid(serial.bodies[i]);
+        setItemName(id, meta.bodyNames[i]);
+        setVisible(id, meta.bodyVisible[i]);
+    }
+    for (std::size_t i = 0; i < serial.outlineFaces.size(); ++i) {
+        const TopoDS_Face face = TopoDS::Face(serial.outlineFaces[i]);
+        const int id = addOutline(face, serial.outlinePlanes[i]);
+        setItemName(id, meta.outlineNames[i]);
+        setVisible(id, meta.outlineVisible[i]);
+    }
+
+    return true;
 }

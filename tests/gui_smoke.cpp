@@ -36,6 +36,8 @@
 #include "DimensionRenderer.h"
 #include "DocumentModel.h"
 #include "ExtrudePreview.h"
+#include "FurnifySerial.h"
+#include "FurnitureStore.h"
 #include "GridRenderer.h"
 #include "HintBalloon.h"
 #include "IconSet.h"
@@ -70,6 +72,7 @@
 #include <QElapsedTimer>
 #include <QEnterEvent>
 #include <QFile>
+#include <QFileInfo>
 #include <QImage>
 #include <QKeyEvent>
 #include <QKeySequence>
@@ -86,6 +89,7 @@
 #include <QSplitter>
 #include <QStatusBar>
 #include <QString>
+#include <QTemporaryDir>
 #include <QWheelEvent>
 
 #include <BRepAdaptor_Curve.hxx>
@@ -178,7 +182,7 @@ void skipByEnvironment(int checks, const QString& why)
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 1318;
+constexpr int kCheckFloor = 1359;
 
 void check(bool condition, const QString& what)
 {
@@ -505,8 +509,22 @@ bool bannedWordNeedsBoundary(const QString& word)
 // cannot hold at one surface and not another - which is exactly how the two
 // refusal sentences above survived: a rule that lives at one call site is not
 // a rule.
-bool usesBannedWord(const QString& text, const QString& word)
+//
+// `isUserData` is Milestone 3's addition: the hook a sweep site uses to say
+// "this string is something a PERSON typed" - an item's name, a version's
+// name - rather than copy this app wrote. The vocabulary law governs our own
+// words, never the user's; a furniture named "Fuse My Table" is the owner's
+// choice of word, not a lapse in this app's copy, and must not fail the same
+// sweep that (correctly) fails an action tooltip saying "Fuse the two
+// bodies". Defaults to false so every one of the dozens of existing call
+// sites below keeps sweeping app copy exactly as it did before this
+// parameter existed - this task lays the hook and pins that it works (see
+// the "user-data exemption" check just below); wiring individual painted
+// surfaces to pass true for their user-typed strings is later work (item 1's
+// rename, item 4's version names).
+bool usesBannedWord(const QString& text, const QString& word, bool isUserData = false)
 {
+    if (isUserData) return false;
     if (!bannedWordNeedsBoundary(word)) return text.contains(word, Qt::CaseInsensitive);
 
     // Hand-rolled rather than a QRegularExpression, because the boundary this
@@ -9173,6 +9191,20 @@ int main(int argc, char* argv[])
         check(usesBannedWord(QStringLiteral("the Fused result"), QStringLiteral("Fuse")) &&
                   usesBannedWord(QStringLiteral("1 body(s)"), QStringLiteral("(s)")),
               "while the code words it was already matching stay bare substrings");
+
+        // The user-data exemption hook (Milestone 3): the SAME string, with
+        // the SAME banned word, on either side of the flag - both directions
+        // pinned in one place, exactly like the boundary matcher above, so a
+        // later surface that passes isUserData can trust the mechanism
+        // rather than re-deriving it.
+        check(usesBannedWord(QStringLiteral("Fuse My Table"), QStringLiteral("Fuse")),
+              "unflagged, a banned word in what LOOKS like user text still fails the sweep");
+        check(!usesBannedWord(QStringLiteral("Fuse My Table"), QStringLiteral("Fuse"),
+                              /*isUserData=*/true),
+              "the identical string, flagged as user data, passes it");
+        check(!usesBannedWord(QStringLiteral("it will only round some of them"),
+                              QStringLiteral("round"), /*isUserData=*/true),
+              "the exemption applies to a boundary-matched word too, not just a bare substring");
         QStringList offenders;
         for (QAction* candidate : window.findChildren<QAction*>()) {
             const QString text = candidate->text().remove(QLatin1Char('&'));
@@ -12939,6 +12971,166 @@ int main(int argc, char* argv[])
         returning.close();
         // scopedSettings restores the real QSettings identity as it goes
         // out of scope here.
+    }
+
+    // --- FurnitureStore: the .furnify library, injected into a temp dir -----
+    // Milestone 3, Task 1. FurnitureStore is Qt but not GUI - no window, no
+    // MainWindow wiring yet (that is Task 2) - so this needs nothing this
+    // suite built above; it is covered here rather than in the headless
+    // suite only because QString/QDateTime/QImage/QJsonDocument make it
+    // un-Qt-free, and headless tests must stay Qt-free by construction. A
+    // QTemporaryDir keeps this off the real Documents/FurnifyMe/ library,
+    // the same injection discipline UserProgress's storage and
+    // ScopedTestSettings already established.
+    {
+        QTemporaryDir tempDir;
+        check(tempDir.isValid(), "the temp library directory was created");
+        FurnitureStore store(tempDir.path());
+
+        check(store.listFurniture().isEmpty(), "a fresh store lists no furniture");
+
+        const QString chairId = store.createFurniture(QStringLiteral("Chair"));
+        check(!chairId.isEmpty(), "createFurniture returns a non-empty id");
+
+        {
+            const QVector<FurnitureStore::FurnitureInfo> listed = store.listFurniture();
+            check(listed.size() == 1 && listed.front().id == chairId &&
+                      listed.front().name == QStringLiteral("Chair"),
+                  "the new furniture is listed by id and name");
+        }
+
+        // A document with two bodies (one hidden) and one outline, all named -
+        // exactly what toSerialized()/fromSerialized() and the store both
+        // have to carry through a save/load round trip.
+        DocumentModel doc;
+        const int seatId = doc.addSolid(
+            ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 400.0, 400.0, 20.0));
+        const int legId =
+            doc.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 0.0, -300.0), 40.0, 40.0, 300.0));
+        doc.setItemName(seatId, QStringLiteral("Seat").toStdString());
+        doc.setItemName(legId, QStringLiteral("Leg").toStdString());
+        doc.setVisible(legId, false);
+        {
+            SketchController sketch;
+            sketch.addPoint(gp_Pnt(0.0, 0.0, 400.0));
+            sketch.addPoint(gp_Pnt(100.0, 0.0, 400.0));
+            sketch.addPoint(gp_Pnt(100.0, 100.0, 400.0));
+            sketch.addPoint(gp_Pnt(0.0, 100.0, 400.0));
+            const int outlineId = doc.addOutline(
+                sketch.closedFace(), gp_Pln(gp_Pnt(0.0, 0.0, 400.0), gp_Dir(0.0, 0.0, 1.0)));
+            doc.setItemName(outlineId, QStringLiteral("Back Outline").toStdString());
+        }
+
+        check(store.saveFurniture(chairId, doc, QImage()),
+              "saveFurniture succeeds with a null (not-yet-captured) thumbnail");
+        check(!QFileInfo::exists(QDir(tempDir.path()).filePath(chairId + QStringLiteral("/thumb.png"))),
+              "and writes no thumbnail file when none was given");
+
+        {
+            DocumentModel loaded;
+            QString error;
+            check(store.loadFurniture(chairId, loaded, &error),
+                  QStringLiteral("loadFurniture succeeds reading it back (%1)").arg(error));
+            check(loaded.count() == 2, "both bodies came back");
+            check(loaded.outlineCount() == 1, "and the one outline");
+
+            bool foundSeat = false, foundLeg = false;
+            for (const DocumentModel::Solid& s : loaded.solids()) {
+                if (s.name == "Seat") { foundSeat = true; check(loaded.isVisible(s.id), "Seat is visible"); }
+                if (s.name == "Leg") { foundLeg = true; check(!loaded.isVisible(s.id), "Leg stayed hidden"); }
+            }
+            check(foundSeat && foundLeg, "both body names survived the round trip");
+            check(!loaded.outlines().empty() && loaded.outlines().front().name == "Back Outline",
+                  "the outline's name survived too");
+        }
+
+        // A real thumbnail this time - and the PNG header is checked, not
+        // just non-emptiness, so a save that wrote garbage would be caught.
+        {
+            QImage thumb(8, 8, QImage::Format_RGB32);
+            thumb.fill(Qt::gray);
+            check(store.saveFurniture(chairId, doc, thumb), "saveFurniture with a real thumbnail succeeds");
+            const QString thumbFile = QDir(tempDir.path()).filePath(chairId + QStringLiteral("/thumb.png"));
+            QFile f(thumbFile);
+            check(f.exists() && f.size() > 8, "the thumbnail file now exists and is non-empty");
+            if (f.open(QIODevice::ReadOnly)) {
+                const QByteArray header = f.read(8);
+                const QByteArray pngMagic =
+                    QByteArray::fromHex("89504e470d0a1a0a");
+                check(header == pngMagic, "and carries a real PNG header");
+            }
+        }
+
+        check(store.renameFurniture(chairId, QStringLiteral("Dining Chair")),
+              "renameFurniture succeeds for a known id");
+        check(store.listFurniture().front().name == QStringLiteral("Dining Chair"),
+              "and the new name is what listFurniture reports");
+        check(!store.renameFurniture(QStringLiteral("no-such-id"), QStringLiteral("X")),
+              "renameFurniture refuses an unknown id");
+
+        // --- versions ---------------------------------------------------------
+        check(store.versions(chairId).isEmpty(), "a fresh furniture has no versions");
+        check(store.saveVersion(chairId, QStringLiteral("First Draft"), doc),
+              "saveVersion succeeds");
+        {
+            const QVector<FurnitureStore::VersionInfo> vers = store.versions(chairId);
+            check(vers.size() == 1 && vers.front().name == QStringLiteral("First Draft"),
+                  "the saved version is listed by name");
+        }
+        check(!store.saveVersion(chairId, QStringLiteral("First Draft"), doc),
+              "saveVersion refuses a duplicate name");
+
+        // Change the live document, then prove the version still holds the
+        // OLDER snapshot rather than whatever is current now.
+        doc.addSolid(ModelingOps::makeBox(gp_Pnt(500.0, 0.0, 0.0), 10.0, 10.0, 10.0));
+        check(store.saveFurniture(chairId, doc, QImage()), "the modified document saves as current");
+        {
+            DocumentModel versionDoc;
+            check(store.loadVersion(chairId, QStringLiteral("First Draft"), versionDoc),
+                  "loadVersion succeeds for a known name");
+            check(versionDoc.count() == 2,
+                  "and holds the version's OWN body count, not the current document's (3)");
+        }
+        {
+            DocumentModel currentDoc;
+            QString error;
+            check(store.loadFurniture(chairId, currentDoc, &error) && currentDoc.count() == 3,
+                  "loadFurniture still reads the current, modified document");
+        }
+        check(!store.loadVersion(chairId, QStringLiteral("No Such Version"), doc),
+              "loadVersion refuses an unknown version name");
+
+        check(store.deleteVersion(chairId, QStringLiteral("First Draft")), "deleteVersion succeeds");
+        check(store.versions(chairId).isEmpty(), "and the version is gone from the list");
+        check(!store.deleteVersion(chairId, QStringLiteral("First Draft")),
+              "deleting it again refuses - it is already gone");
+
+        // --- refusals -----------------------------------------------------
+        {
+            DocumentModel unknown;
+            QString error;
+            check(!store.loadFurniture(QStringLiteral("no-such-id"), unknown, &error),
+                  "loadFurniture refuses an unknown id");
+            check(!error.isEmpty(), "and explains why");
+        }
+
+        // --- enumeration is newest-edited first ----------------------------
+        settle(20);  // ISO-with-ms timestamps distinguish these two creations
+        const QString tableId = store.createFurniture(QStringLiteral("Table"));
+        check(!tableId.isEmpty(), "a second furniture is created");
+        {
+            const QVector<FurnitureStore::FurnitureInfo> listed = store.listFurniture();
+            check(listed.size() == 2, "the store now lists both furniture");
+            check(listed.front().id == tableId,
+                  "and the most recently created/saved one sorts first (newest-first)");
+        }
+        settle(20);
+        check(store.saveFurniture(chairId, doc, QImage()), "re-saving the chair bumps its lastEdited");
+        {
+            const QVector<FurnitureStore::FurnitureInfo> listed = store.listFurniture();
+            check(listed.front().id == chairId,
+                  "and it now sorts first again, ahead of the table");
+        }
     }
 
     // The coverage floor, asserted OUTSIDE check() on purpose: an assertion

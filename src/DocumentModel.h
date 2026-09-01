@@ -10,11 +10,14 @@
 // before giving them any longer life.
 //
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
 #include <gp_Pln.hxx>
+
+#include "FurnifySerial.h"
 
 class DocumentModel {
 public:
@@ -57,6 +60,30 @@ public:
     // Empty string if the id is unknown.
     std::string nameOf(int id) const;
     bool renameSolid(int id, const std::string& name);
+
+    // Renames whichever kind of item `id` belongs to - a body or an
+    // outline, since the two share one id space. Milestone 3 introduces
+    // user-editable names (Task 5 wires the drawer's rename gesture); this
+    // is the one setter both a UI rename and a file load go through, so
+    // there is exactly one place a name can be written. False for an
+    // unknown id, same as renameSolid.
+    bool setItemName(int id, const std::string& name);
+
+    // Presentation state - whether an item currently displays in the
+    // viewport - deliberately kept OUTSIDE `State` and therefore outside
+    // checkpoint()/undo()/redo(), for the same reason OcctViewWidget's own
+    // setSolidVisible()/setOutlineVisible() are not undo-tracked: hiding a
+    // body is not a document edit any more than orbiting the camera is.
+    // It lives here (rather than only in the view) purely so
+    // toSerialized()/fromSerialized() can round-trip it without the
+    // geometry library reaching into Qt or the OCCT visualization
+    // toolkits - reconciling this with the view's own tracking into one
+    // source of truth belongs to whichever task wires FurnitureStore into
+    // MainWindow. False for a known id hides it; querying an unknown id
+    // answers true (the safe default - "not hidden" - for an item nobody
+    // has touched).
+    void setVisible(int id, bool visible);
+    bool isVisible(int id) const;
 
     const std::vector<Solid>& solids() const { return mySolids; }
     // BODIES, deliberately - every existing caller ("3 bodies in the
@@ -124,6 +151,45 @@ public:
     bool undo();
     bool redo();
 
+    // --- serialization -------------------------------------------------------
+    // Everything a save/load round-trip needs beyond raw geometry: the
+    // labels and visibility the user set, positionally matched to
+    // FurnifySerial::SerializedDocument's own vectors - index i of
+    // bodyNames/bodyVisible describes serial.bodies[i], and
+    // outlineNames/outlineVisible describe serial.outlineFaces[i] the same
+    // way. Kept separate from SerializedDocument itself because
+    // FurnifySerial is pure kernel geometry and knows nothing about labels
+    // or presentation - see FurnifySerial.h.
+    struct DocumentMeta {
+        std::vector<std::string> bodyNames;
+        std::vector<bool> bodyVisible;
+        std::vector<std::string> outlineNames;
+        std::vector<bool> outlineVisible;
+    };
+
+    // Walks mySolids/myOutlines in order, building the kernel-side shapes
+    // and the matching names/visibility. Does not touch undo history or the
+    // revision counter - reading the document out is not a change to it.
+    FurnifySerial::SerializedDocument toSerialized(DocumentMeta& meta) const;
+
+    // Replaces the WHOLE document - bodies, outlines, names, visibility -
+    // with what `serial`/`meta` describe. Everything is validated BEFORE
+    // any mutation, so a refused load leaves `this` exactly as it was; the
+    // caller (FurnitureStore::loadFurniture) additionally loads into a
+    // scratch instance and only swaps on success, but that discipline is
+    // not what makes this safe to call directly - the validation here does.
+    // Ids are freshly assigned through the normal addSolid()/addOutline()
+    // counters (ids are session-only handles, never persisted - see the
+    // header note above), and the loaded names/visibility are applied
+    // after. Undo history is cleared: a freshly loaded document has
+    // nothing to undo back past.
+    //
+    // Refuses (false, `this` untouched): outlineFaces/outlinePlanes size
+    // mismatch, any null body or outline face, an outline "face" whose
+    // shape type is not actually TopAbs_FACE, or a names/visible vector
+    // whose length does not match its shapes vector.
+    bool fromSerialized(const FurnifySerial::SerializedDocument& serial, const DocumentMeta& meta);
+
 private:
     // Everything a checkpoint restores. One struct rather than two parallel
     // stacks: two stacks could be pushed to in different numbers by two
@@ -149,4 +215,9 @@ private:
     // reference resolve to a different solid.
     std::vector<State> myUndo;
     std::vector<State> myRedo;
+
+    // See setVisible()/isVisible(): presentation state, deliberately not
+    // part of State and therefore not undo-tracked. An id absent here reads
+    // as visible (true) - see isVisible()'s doc comment.
+    std::unordered_map<int, bool> myVisibility;
 };
