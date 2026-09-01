@@ -185,7 +185,7 @@ void skipByEnvironment(int checks, const QString& why)
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 1535;
+constexpr int kCheckFloor = 1536;
 
 void check(bool condition, const QString& what)
 {
@@ -14143,6 +14143,17 @@ int main(int argc, char* argv[])
             }
         }
         check(closeCompareBtn != nullptr, "the compare badge's Close compare control exists");
+        {
+            QStringList badgeOffenders;
+            for (const QString& word : bannedWords()) {
+                if (usesBannedWord(MainWindow::compareBadgeCloseLabel(), word))
+                    badgeOffenders << word;
+            }
+            check(badgeOffenders.isEmpty(),
+                  QStringLiteral("the compare badge's fixed copy uses no banned word (%1)")
+                      .arg(badgeOffenders.isEmpty() ? QStringLiteral("none")
+                                                    : badgeOffenders.join(QStringLiteral(", "))));
+        }
         if (closeCompareBtn && compareView) {
             const QPoint centre = closeCompareBtn->rect().center();
             check(compareView->childAt(closeCompareBtn->mapTo(compareView, centre)) ==
