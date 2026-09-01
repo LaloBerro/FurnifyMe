@@ -870,6 +870,44 @@ Iterate with `InitSelected()`/`MoreSelected()`/`NextSelected()`, pull topology v
 - **STEP export:** `STEPControl_Writer` with
   `Interface_Static::SetCVal("write.step.schema", "AP214IS")`.
 
+### Outlines, layers and gestures (Phase 7)
+
+**A closed outline is a document item** — `Outline NN` in the drawer, one checkpoint on
+close, converted to a Body by extrude in **one** checkpoint so a single undo restores the
+outline and removes the body. `hasPendingFace()` is a **derived view** over the pending
+outline — its truth table at every gizmo predicate, `ExtrudePreview` and the plane-change
+guard is unchanged, and every outline carries **its own plane**, captured at close, so an
+extrude can never sweep along a plane the user changed afterwards (the Milestone-2 bug
+class, retired by construction). Outlines are not pickable viewport geometry; the drawer
+row is their handle, and the pending one wears the accent inset bar. Start Sketch no
+longer discards a waiting outline — refusal copy must say E-or-Ctrl+Z, never Ctrl+K.
+
+**The scene is three Z-layers**: Default (bodies) → grid (depth test on, depth **write**
+off) → sketch work (outline, markers, dimension, pending face, modeling preview). The
+grid hides behind bodies but never draws over sketch work; sketch lines still hide behind
+bodies because the sketch layer depth-tests against what Default wrote. The locked-face
+octave nudge stays — the layer settles draw order, the nudge settles the depth tie.
+Insert the grid layer **after** Default: inserted before, the locked-face grid vanishes
+under the face it decorates (measured: 0 of 5616 grid pixels).
+
+**Gestures, face and edge modes**: plain double-click selects the whole body and switches
+to body mode; **Ctrl+double-click on a face** locks the sketch plane (the old plain
+double-click route); `L`/`Shift+L`/menu unchanged. The Ctrl exemption from the
+pull-arrow's double-click guard applies **only** in the face-lock branch — widened, it
+lets Ctrl+double-click in edge mode yank the mode out from under a live bevel arrow.
+
+**Notes can be silenced, Failures cannot.** `View → Show notifications` drops
+`Toast::Kind::Note` only; a refusal that reports nowhere would violate the
+never-silent-failure law, so `Failure` bypasses the toggle unconditionally. Every Note is
+a success report carrying Undo; every refusal is a Failure — the taxonomy is load-bearing.
+
+**Sketching**: Shift snaps the cursor onto the previous segment's direction (parameter
+then grid-snapped along the line); the close-hit on the first point is tested on the RAW
+plane hit and outranks the straight constraint, with the radius in one place
+(`OcctViewWidget::sketchCloseTolerance()`). Ctrl+Z mid-sketch removes the last point
+through Backspace's one implementation; the toast's Undo pill deliberately keeps the
+document-only predicate.
+
 ## Pitfalls (read before debugging)
 
 - **Qt speaks logical pixels; OCCT speaks device pixels.** Qt reports mouse positions and
@@ -903,6 +941,20 @@ Iterate with `InitSelected()`/`MoreSelected()`/`NextSelected()`, pull topology v
   before `<windows.h>` where possible.
 - **Tessellate before display or STL export:** `BRepMesh_IncrementalMesh(shape, 0.1)`.
   Without it, curved faces render faceted or not at all.
+- **`AIS_Manipulator` is constructed with zoom persistence ON in OCCT 8.0** — undocumented
+  beside `AdjustSize`'s documented default. Its drawn size never follows the camera, so any
+  camera-derived sizing writes numbers that never reach a pixel, and a probe that reads
+  `Size()` back is a self-oracle that stays green. `SetZoomPersistence(false)` before
+  `Attach`, and measure gizmo pixels in a `Dump`, never the setter's own data.
+- **`near` and `far` are Windows SDK macros defined to nothing.** A parameter named `near`
+  silently becomes unnamed, `near + QPoint(...)` becomes unary plus, and the code compiles
+  clean while reading the wrong corner. Do not name anything `near` or `far`.
+- **`V3d_View::Dump` returns false when the output directory does not exist** and the
+  failure surfaces many checks later as unrelated-looking colour-probe failures. Create the
+  snapshot directory before running `gui_smoke`.
+- **`projectToScreen` answers in whole logical pixels** and is ~2 dump pixels out at 175%
+  scale — a pixel probe must FIND the mark it questions (scan a neighbourhood) rather than
+  sampling one projected point.
 - **Booleans fail on near-tangent geometry** — OCCT's known weak spot vs. Parasolid. Always
   check `IsDone()`; tune `SetFuzzyValue` when it fails. **Never surface a failed boolean as a
   success**, and do not silently continue past one.

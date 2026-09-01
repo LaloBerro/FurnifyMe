@@ -1,9 +1,9 @@
 # Phase 7: Polish and fixes — design
 
 Date: 2026-08-31
-Status: approved by standing pattern — the user listed sixteen items with reference
-images, answered four scoping questions, and the build proceeds without further
-questions. Numbers below are the user's own numbering.
+Status: implemented 2026-09-01. Approved by standing pattern — the user listed sixteen
+items with reference images, answered four scoping questions, and the build proceeded
+without further questions. Numbers below are the user's own numbering.
 
 ## The sixteen items, as decided
 
