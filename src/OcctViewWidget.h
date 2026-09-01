@@ -735,6 +735,10 @@ private:
     // nothing is attached.
     double myManipulatorNaturalSize = 0.0;
     double myManipulatorAppliedSize = 0.0;
+    // Where the gizmo stands, from the body's own bounding box at the attach.
+    // The clamp needs its DEPTH, and AIS_Manipulator::Position() cannot answer
+    // that during the attach itself - see attachManipulator().
+    gp_Pnt myManipulatorCentre;
     bool myGizmoDragActive = false;
     gp_Trsf myGizmoDelta;
     gp_Ax2 myGizmoStartPosition;

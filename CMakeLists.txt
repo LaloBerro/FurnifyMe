@@ -139,6 +139,12 @@ if(FURNIFYME_BUILD_APP)
       configure_file(assets/app.rc.in "${CMAKE_CURRENT_BINARY_DIR}/app.rc" @ONLY)
       enable_language(RC)
       target_sources(furnifyme PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/app.rc")
+      # The .rc names the .ico but does not #include it, so no dependency
+      # scanner can see the edge: repainting the icon would leave the linked
+      # resource stale until something else happened to force a recompile.
+      # Stated explicitly instead.
+      set_property(SOURCE "${CMAKE_CURRENT_BINARY_DIR}/app.rc"
+                   APPEND PROPERTY OBJECT_DEPENDS "${FURNIFYME_ICON_FILE}")
     endif()
 
     # Repaints assets/icon.ico from IconSet::appIcon() - the same painting the

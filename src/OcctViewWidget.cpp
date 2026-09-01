@@ -744,8 +744,50 @@ void OcctViewWidget::attachManipulator(int solidId)
     // selecting a part replaces the body selection that raised the gizmo in
     // the first place: the gizmo would vanish under the hand reaching for it.
     myManipulator->SetModeActivationOnDetection(Standard_True);
-    // Sized and placed from the body it serves, so a 40 mm shelf and a 2 m
-    // wardrobe both get a gizmo you can actually grab.
+    // PLAIN WORLD SPACE. OCCT 8.0 constructs AIS_Manipulator with zoom
+    // persistence ON - the header documents OptionsForAttach::AdjustSize as
+    // defaulting to false and says nothing about this one, and it cost the best
+    // part of a fix round to find. In that mode the manipulator's presentation
+    // is anchored to the screen: its drawn size tracks SetSize() but ignores
+    // the camera entirely, so every camera-derived correction below wrote a
+    // number that could not reach a pixel. The measurements said so plainly
+    // once they were taken from a dump rather than from the code's own
+    // opinion - the painted size per unit came out 1.08 px at one zoom and
+    // 1.10 px at another, across a 4.2x change in world-per-pixel.
+    //
+    // Turned off rather than accommodated, for three reasons: worldPerPixel()
+    // is how everything else in this file relates world units to pixels and it
+    // is verified in both projections; manipulatorFrame()'s size becomes an
+    // honest world measurement, which is what every probe that projects a
+    // point from it already assumes; and accommodating it would mean carrying
+    // a screen-space constant nobody can derive from the API.
+    //
+    // It must be set BEFORE Attach() - the header's own warning is that
+    // enabling this mode overrides transform-persistence flags and the local
+    // transformation, which is exactly the machinery the drag path uses.
+    myManipulator->SetZoomPersistence(Standard_False);
+
+    // The body's own measurements, which the clamp needs and which nothing
+    // else can answer for it. The SIZING itself happens at the END of this
+    // function - see the comment there for why it cannot happen here.
+    Bnd_Box box;
+    BRepBndLib::Add(it->second->Shape(), box);
+    if (!box.IsVoid()) {
+        Standard_Real x0, y0, z0, x1, y1, z1;
+        box.Get(x0, y0, z0, x1, y1, z1);
+        // The longest side - SetSize() documents its argument as the side of
+        // the manipulator's cubic bounding box, so a side is the like measure.
+        myManipulatorNaturalSize = std::max({x1 - x0, y1 - y0, z1 - z0});
+        // And where it stands, which the clamp needs in order to know how deep
+        // the gizmo is. From the BODY's box rather than from
+        // AIS_Manipulator::Position(), which cannot answer until AdjustPosition
+        // has run inside Attach() - asked before that it says the world origin,
+        // and a depth measured to the origin made the budget 2.5x too generous.
+        myManipulatorCentre = gp_Pnt(0.5 * (x0 + x1), 0.5 * (y0 + y1), 0.5 * (z0 + z1));
+    }
+    // AdjustSize stays ON as the fallback the clamp narrows a moment later: if
+    // the body's box ever comes back void, a gizmo framed from the object is a
+    // better answer than OCCT's bare default.
     AIS_Manipulator::OptionsForAttach options;
     options.SetAdjustPosition(Standard_True);
     options.SetAdjustSize(Standard_True);
@@ -781,36 +823,38 @@ void OcctViewWidget::attachManipulator(int solidId)
     // the layer clears depth, so a grid in it would paint over every body
     // standing on it. Here painting over the body IS the requirement. Depth
     // still applies within the layer, so the gizmo's own three arms occlude
-    // each other correctly, and picking is untouched - AIS_ManipulatorOwner
-    // already outranks a shape's owner regardless of layer.
+    // each other correctly.
+    //
+    // It DOES change picking, and saying otherwise would be convenient rather
+    // than true: SelectMgr_SortCriterion::IsCloserDepth ranks ZLayerPosition
+    // ahead of depth, so a manipulator part now wins picks against a body in
+    // front of it that it would previously have lost. That is the right
+    // outcome for a control the user can see and reach - a handle that is
+    // drawn on top and picks underneath is worse than either - and it costs
+    // nothing already relied on: the one place a body MUST outrank the gizmo
+    // is the additive Shift pick, which Deactivates the manipulator around the
+    // MoveTo/SelectDetected pair rather than trusting the ordering.
     myContext->SetZLayer(myManipulator, Graphic3d_ZLayerId_Topmost);
 
     myManipulatorSolid = solidId;
-
-    // The ceiling the clamp works down from, derived HERE from the body's own
-    // bounding box rather than read back from the manipulator.
+    // ON SCREEN FIRST, THEN SIZED, and the order is the whole fix rather than
+    // fussiness. Measured three ways: with the clamp applied before or during
+    // the attach, AIS_Manipulator reported the clamped size while the viewport
+    // drew the bounding-diagonal one - 731 mm painted against a 256 mm budget -
+    // because the presentation is computed once, inside Attach(), and a
+    // Redisplay() issued before the object has been through a redraw does not
+    // dislodge it. The identical call one frame later does. So the update runs
+    // after this first UpdateCurrentViewer(), which is what puts the
+    // manipulator on screen, and the second one carries the resized
+    // presentation out.
     //
-    // AIS_Manipulator::Size() does not return what SetSize() was given - it
-    // reports the outer radius of the whole assembly, which is a little over
-    // the side length that produced it, and the relation changes branch
-    // depending on the gap. Feeding one back into the other therefore inflates
-    // the gizmo slightly on every pass. Keeping every number this class stores
-    // in SetSize()'s own units removes that question rather than correcting
-    // for it: OCCT's AdjustSize still runs and still frames the attach, and
-    // this simply overrides the size a moment later.
-    Bnd_Box box;
-    BRepBndLib::Add(it->second->Shape(), box);
-    if (!box.IsVoid()) {
-        Standard_Real x0, y0, z0, x1, y1, z1;
-        box.Get(x0, y0, z0, x1, y1, z1);
-        // The longest side - SetSize() documents its argument as the side of
-        // the manipulator's cubic bounding box, so a side is the like measure.
-        myManipulatorNaturalSize =
-            std::max({x1 - x0, y1 - y0, z1 - z0});
-    }
-    myManipulatorAppliedSize = 0.0;   // nothing installed yet: force the first derive
-    updateManipulatorSize();
+    // The cost is one extra viewer update per attach - once per selection, not
+    // per frame - and the alternative is a gizmo that is the right size only
+    // after the user touches the camera, which is never the frame they are
+    // shown first.
     myContext->UpdateCurrentViewer();
+    myManipulatorAppliedSize = 0.0;   // nothing of ours installed yet: force it
+    applyCameraState();
 }
 
 void OcctViewWidget::updateManipulatorSize()
@@ -859,7 +903,7 @@ void OcctViewWidget::updateManipulatorSize()
         // Along the view axis, never the straight-line distance: it is the
         // depth that scales a perspective projection, and an off-centre gizmo
         // is further away without being any deeper.
-        gizmoDepth = gp_Vec(eye, myManipulator->Position().Location()).Dot(gp_Vec(viewDir));
+        gizmoDepth = gp_Vec(eye, myManipulatorCentre).Dot(gp_Vec(viewDir));
         const double targetDepth = myCamera.state().distance;
         if (gizmoDepth > 1.0e-6 && targetDepth > 1.0e-6) depthRatio = gizmoDepth / targetDepth;
     }
@@ -903,6 +947,22 @@ void OcctViewWidget::updateManipulatorSize()
         side *= maxWorld / reported;
         myManipulator->SetSize(static_cast<float>(side));
     }
+
+    // AND THEN REDRAWN, which is the whole difference between a number and a
+    // gizmo. SetSize() writes the axes' parameters and marks the object
+    // ToBeUpdated; it does NOT recompute the presentation, so without this the
+    // manipulator kept drawing at whatever AdjustSize() gave it on attach while
+    // Size() cheerfully reported the clamped value. Everything above was
+    // arithmetically correct and reached no pixel: the first capture of this
+    // work shows a gizmo 538 px across a 110 px budget, taken from a build
+    // whose own probe read 103 px, because that probe asked the code for the
+    // number the code had just written.
+    // Only once it is on screen. Before the attach there is no presentation to
+    // rebuild - the size set above is simply the one the first Compute will
+    // use - and asking the context to redisplay an object it does not yet hold
+    // is at best a no-op.
+    if (!myContext.IsNull() && myContext->IsDisplayed(myManipulator))
+        myContext->Redisplay(myManipulator, Standard_False);
 
     // OCCT's own SetZoomPersistence(true) would hold a FIXED screen size
     // instead, and was rejected rather than missed: it overrides the local
@@ -1939,7 +1999,17 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
     // The pull arrow owns LEFT drags that start on it, and nothing else -
     // RMB orbit and MMB pan pass straight through above, so grabbing the
     // arrow never costs the user the camera.
-    if (event->button() == Qt::LeftButton && !mySketchMode && arrowHit(myPullArrow, myLastPos)) {
+    // Ctrl in FACE mode is the lock gesture and is not a grab, scoped exactly as
+    // mouseDoubleClickEvent() scopes the same exemption. Without it the lock's
+    // first press armed a pull drag on the way past: the release ended a drag
+    // that had moved nothing, which fell through to an ordinary pick and
+    // deselected the very face the gesture was aimed at. The exemption names
+    // face mode rather than the modifier alone, so the bevel arrow one branch
+    // down - where Ctrl means nothing - keeps its guard whole.
+    const bool lockGesture = (event->modifiers() & Qt::ControlModifier) &&
+                             mySelectionMode == SelectionMode::Face;
+    if (event->button() == Qt::LeftButton && !mySketchMode && !lockGesture &&
+        arrowHit(myPullArrow, myLastPos)) {
         // The press CLAIMS the gesture whether or not the drag maths can
         // measure it yet. It used to claim it only when
         // axisParameterForRay() resolved - so with the arrow near edge-on to
@@ -2210,21 +2280,31 @@ void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
     if (event->button() != Qt::LeftButton || mySketchMode || myContext.IsNull()) return;
 
     const QPoint pos = event->position().toPoint();
+    const bool onArrow = arrowHit(myPullArrow, pos) || arrowHit(myBevelArrow, pos);
+
     // A second click on either arrow belongs to the arrow, not to whatever the
     // double-click would otherwise mean - the same rule every control over the
     // viewport follows. It matters most for the two gestures that would move
     // something the user is not looking at: framing the body, and selecting the
-    // whole body out from under a face they are mid-pull on.
+    // whole body out from under a face or an edge they are mid-drag on.
     //
-    // CTRL IS EXEMPT, and this is not a loophole. An arrow's tail sits at the
-    // centre of the face it belongs to, which is exactly where a user aims when
-    // they want to draw on that face - so with no exemption the lock gesture
-    // was unreachable at the most obvious pixel on its own target, and reaching
-    // it meant aiming at a corner. A modified double-click is also the one
-    // gesture on this arrow that no sequence of drags can produce by accident,
-    // which is what the guard is actually protecting against.
+    // ONE gesture is exempt, and only one: Ctrl+double-click in FACE mode, the
+    // lock. An arrow's tail sits at the centre of the face it belongs to, which
+    // is exactly where a user aims when they want to draw on that face - so
+    // with no exemption the lock was unreachable at the most obvious pixel on
+    // its own target, and reaching it meant aiming at a corner. That gesture is
+    // also the one thing on this arrow that no sequence of drags can produce by
+    // accident, which is what the guard is protecting against.
+    //
+    // The exemption is deliberately NOT "Ctrl held": it was written that way
+    // first, and it let Ctrl+double-click in EDGE mode fall through to the
+    // whole-body route below, which switches the selection mode out from under
+    // a live bevel arrow - precisely the case the guard exists for, reachable
+    // by holding a key the edge-mode gesture does not even use. The exemption
+    // names the branch it exists for, so nothing else can inherit it.
     const bool ctrlHeld = (event->modifiers() & Qt::ControlModifier) != 0;
-    if (!ctrlHeld && (arrowHit(myPullArrow, pos) || arrowHit(myBevelArrow, pos))) return;
+    const bool lockGesture = ctrlHeld && mySelectionMode == SelectionMode::Face;
+    if (onArrow && !lockGesture) return;
     const QPoint device = toDevicePixels(pos);
     myContext->MoveTo(device.x(), device.y(), myView, Standard_False);
     if (!myContext->HasDetected()) return;
@@ -2243,8 +2323,7 @@ void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
     //
     // The refusal for a non-planar face, and the pending-outline guard, both
     // live in MainWindow, which owns the toast, not here.
-    if (mySelectionMode == SelectionMode::Face &&
-        (event->modifiers() & Qt::ControlModifier) && myContext->HasDetectedShape() &&
+    if (lockGesture && myContext->HasDetectedShape() &&
         myContext->DetectedShape().ShapeType() == TopAbs_FACE) {
         // Select it too, so the actions agree with what was just locked.
         myContext->SelectDetected(AIS_SelectionScheme_Replace);
@@ -2253,6 +2332,13 @@ void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
         emit faceDoubleClicked(TopoDS::Face(myContext->DetectedShape()));
         return;
     }
+
+    // Past the one exempt branch, an arrow hit is an arrow hit again. A
+    // Ctrl+double-click that got this far is one whose detection was not a
+    // face after all - a body, an edge, the ground - and there is no reason
+    // the modifier should buy it the whole-body route the guard would refuse
+    // to an unmodified click on the same pixel.
+    if (onArrow) return;
 
     const Handle(AIS_InteractiveObject) hit = myContext->DetectedInteractive();
 

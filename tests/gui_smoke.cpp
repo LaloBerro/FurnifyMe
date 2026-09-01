@@ -151,7 +151,7 @@ int g_checks = 0;
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 1265;
+constexpr int kCheckFloor = 1272;
 
 void check(bool condition, const QString& what)
 {
@@ -6201,8 +6201,24 @@ int main(int argc, char* argv[])
                     closer.distance *= std::max(0.6, span / 44.0);
                     view->animateTo(closer);   // animations are off: immediate
                     settle(220);
+                    // RE-DERIVED, not re-projected. The gizmo's world size
+                    // follows the camera since item 11's clamp - it is capped
+                    // to a share of the SCREEN, so coming closer shrinks it in
+                    // millimetres - which means the handle's world point moves
+                    // when the camera does. Re-projecting the point captured
+                    // before the dolly landed off the arm, armed nothing, and
+                    // rolled the pass back: the loop then gave up at 2.3 mm to
+                    // the pixel and the drag below could no longer tell a free
+                    // landing from a snapped one. The frame is re-read too,
+                    // since it is the same thing one level up.
+                    gp_Ax2 movedFrame;
+                    double movedSize = 0.0;
                     QPoint probe;
-                    if (!armsTheZArm(probe)) {
+                    const bool stillOnTheArm =
+                        view->manipulatorFrame(movedFrame, movedSize) &&
+                        findHandle(1, 2, movedFrame.Direction(), handleAt, handleWorld) &&
+                        armsTheZArm(probe);
+                    if (!stillOnTheArm) {
                         view->animateTo(beforePass);
                         settle(220);
                         break;
@@ -11816,6 +11832,66 @@ int main(int argc, char* argv[])
                         trigger(window, QStringLiteral("Unlock Face"));
                         settle(150);
                     }
+
+                    // --- the exemption is the LOCK's, not Ctrl's -------------
+                    //
+                    // The exemption that lets Ctrl through the arrow guard was
+                    // written as "Ctrl is held" first, and in that shape a
+                    // Ctrl+double-click in EDGE mode fell past the face branch
+                    // and into the whole-body route - switching the selection
+                    // mode out from under a live bevel arrow, which is the
+                    // exact thing the guard exists to stop, reachable by
+                    // holding a key that means nothing in edge mode.
+                    trigger(window, QStringLiteral("Select Edges"));
+                    view->setSelectedSolids({});
+                    settle(150);
+                    // An edge of the body, picked by clicking its projected
+                    // midpoint - the bevel arrow then stands on that edge, and
+                    // the probe aims at the arrow's own tail.
+                    TopoDS_Edge probeEdge;
+                    QPoint edgeAt;
+                    bool haveEdge = false;
+                    for (const DocumentModel::Solid& solid : window.document().solids()) {
+                        if (solid.id != owner) continue;
+                        for (TopExp_Explorer it(solid.shape, TopAbs_EDGE);
+                             it.More() && !haveEdge; it.Next()) {
+                            const TopoDS_Edge candidate = TopoDS::Edge(it.Current());
+                            BRepAdaptor_Curve curve(candidate);
+                            if (curve.GetType() != GeomAbs_Line) continue;
+                            GProp_GProps props;
+                            BRepGProp::LinearProperties(candidate, props);
+                            QPoint atEdge;
+                            if (!view->projectToScreen(props.CentreOfMass(), atEdge)) continue;
+                            if (!view->rect().adjusted(30, 30, -30, -30).contains(atEdge))
+                                continue;
+                            clickAt(view, QPointF(atEdge));
+                            settle(120);
+                            if (view->selectedEdge().IsNull()) continue;
+                            probeEdge = candidate;
+                            edgeAt = atEdge;
+                            haveEdge = true;
+                        }
+                        break;
+                    }
+                    check(haveEdge, "an edge of that body can be selected for the "
+                                    "edge-mode Ctrl probe");
+                    if (haveEdge) {
+                        check(view->hasBevelArrow(),
+                              "and selecting it raises the bevel arrow the guard "
+                              "protects");
+                        const OcctViewWidget::SelectionMode modeBefore =
+                            view->selectionMode();
+                        doubleClickAt(view, QPointF(edgeAt), Qt::ControlModifier);
+                        settle(200);
+                        check(view->selectionMode() == modeBefore,
+                              "Ctrl+double-clicking on a live bevel arrow leaves the "
+                              "selection mode alone - the exemption belongs to the "
+                              "lock, not to the modifier");
+                        check(!window.isFaceLocked(),
+                              "and locks nothing either, there being no face in it");
+                    }
+                    view->setSelectedSolids({});
+                    settle(120);
                     check(!window.isFaceLocked(), "the probe leaves the ground plane in use");
                     view->camera().setTemporaryOrtho(false);
                     view->setSelectedSolids({});
@@ -11847,45 +11923,87 @@ int main(int argc, char* argv[])
             check(view->hasManipulator(),
                   "one body selected in body mode raises the transform gizmo");
 
-            // The gizmo's on-screen reach: the furthest of its three arms,
-            // measured out to the size OCCT itself reports. That number is the
-            // whole assembly's outer radius rather than the drawn arm length,
-            // so this is a deliberately CONSERVATIVE measure - anything it
-            // passes, the visible gizmo passes with room to spare.
-            auto gizmoReachPx = [&]() -> double {
+            // MEASURED OFF THE RENDERED PIXELS, and the first version of this
+            // probe was not - it projected AIS_Manipulator::Size(), which is
+            // the very number the clamp had just written. That is a self-
+            // oracle: it reported 103 px against a 110 px budget while the
+            // gizmo on screen spanned 538 px and ran off the viewport's edge,
+            // because SetSize() only marks the object ToBeUpdated and nothing
+            // was recomputing the presentation. A probe that asks the code for
+            // the code's own opinion can only ever confirm it.
+            //
+            // The gizmo is found by its three axis hues - saturated red, green
+            // and blue, each with the other two channels low. Calibrated
+            // against a real dump: the arrows read (183,0,0), (0,195,0) and
+            // (0,0,195); the SELECTED body is orange (225,145,0) and fails the
+            // red test on its green channel; grey bodies, the viewport ground
+            // and the grid's own muted axis tints fail all three. The hover
+            // cyan is deliberately not counted - it tints whole bodies, not
+            // just the gizmo's ring - which only ever makes this measure
+            // smaller, never larger.
+            auto gizmoReachPx = [&](const QString& dumpName, int& litPixels) -> double {
+                litPixels = 0;
+                const QString path = outDir + QStringLiteral("/") + dumpName;
+                if (!view->saveSnapshot(path)) return -1.0;
+                const QImage dump(path);
+                if (dump.isNull() || view->width() <= 0) return -1.0;
+
                 gp_Ax2 frame;
                 double size = 0.0;
                 if (!view->manipulatorFrame(frame, size)) return -1.0;
-                QPoint origin;
-                if (!view->projectToScreen(frame.Location(), origin)) return -1.0;
+                QPoint centreLogical;
+                if (!view->projectToScreen(frame.Location(), centreLogical)) return -1.0;
+
+                // V3d_View::Dump writes DEVICE pixels; every limit here is in
+                // Qt's logical ones. The ratio is read off the dump itself
+                // rather than from devicePixelRatioF(), so the two cannot
+                // disagree about which space this measurement is in.
+                const double pxPerLogical = dump.width() / double(view->width());
+                const QPointF centre(centreLogical.x() * pxPerLogical,
+                                     centreLogical.y() * pxPerLogical);
+
                 double worst = 0.0;
-                const gp_Dir arms[3] = {frame.XDirection(), frame.YDirection(),
-                                        frame.Direction()};
-                for (const gp_Dir& arm : arms) {
-                    QPoint tip;
-                    const gp_Pnt tipWorld =
-                        frame.Location().Translated(gp_Vec(arm) * size);
-                    if (!view->projectToScreen(tipWorld, tip)) return -1.0;
-                    worst = std::max(worst, std::hypot(double(tip.x() - origin.x()),
-                                                       double(tip.y() - origin.y())));
+                for (int y = 0; y < dump.height(); ++y) {
+                    for (int x = 0; x < dump.width(); ++x) {
+                        const QColor c = dump.pixelColor(x, y);
+                        const bool axisHue =
+                            (c.red() > 100 && c.green() < 70 && c.blue() < 70) ||
+                            (c.green() > 100 && c.red() < 70 && c.blue() < 70) ||
+                            (c.blue() > 100 && c.red() < 70 && c.green() < 70);
+                        if (!axisHue) continue;
+                        ++litPixels;
+                        worst = std::max(worst, std::hypot(x - centre.x(), y - centre.y()));
+                    }
                 }
-                return worst;
+                return worst / pxPerLogical;
             };
             auto gizmoLimitPx = [&]() {
                 return OcctViewWidget::kGizmoMaxViewportFraction *
                        std::min(view->width(), view->height());
             };
-            // Two logical pixels of slack and no more: projectToScreen answers
-            // in whole logical pixels, so a reach that is exactly at the limit
-            // can read one pixel over on either end of the segment.
-            const double slack = 2.0;
+            // Six logical pixels of slack. The budget is the assembly's outer
+            // radius, and what is measured is painted geometry: a ring has a
+            // stroke width and antialiasing spreads it another pixel or two.
+            // It is nowhere near enough slack to hide the failure this probe
+            // exists for, which was five times the budget.
+            const double slack = 6.0;
 
-            const double framedReach = gizmoReachPx();
+            int framedPixels = 0;
+            const double framedReach =
+                gizmoReachPx(QStringLiteral("k-gizmo-framed.png"), framedPixels);
+            // NON-VACUITY, and it is not a formality: "no gizmo-coloured pixel
+            // is far from the centre" is exactly as true of a dump with no
+            // gizmo in it at all, which is what a failed snapshot or a
+            // detached manipulator would produce.
+            check(framedPixels > 200,
+                  QStringLiteral("the dump really contains a gizmo to measure, so the "
+                                 "reach below is not vacuous (%1 lit pixels)")
+                      .arg(framedPixels));
             check(framedReach > 0.0,
-                  QStringLiteral("the gizmo's projected reach can be measured at the "
-                                 "framed zoom (%1 px)").arg(framedReach));
+                  QStringLiteral("the gizmo's painted reach can be measured at the "
+                                 "framed zoom (%1 px)").arg(framedReach, 0, 'f', 1));
             check(framedReach <= gizmoLimitPx() + slack,
-                  QStringLiteral("and it is inside %1%% of the viewport's smaller side "
+                  QStringLiteral("and it is inside %1% of the viewport's smaller side "
                                  "(%2 px, limit %3 px)")
                       .arg(int(OcctViewWidget::kGizmoMaxViewportFraction * 100))
                       .arg(framedReach, 0, 'f', 1)
@@ -11902,10 +12020,15 @@ int main(int argc, char* argv[])
                 QCoreApplication::sendEvent(view, &zoom);
             }
             settle(250);
-            const double closeReach = gizmoReachPx();
+            int closePixels = 0;
+            const double closeReach =
+                gizmoReachPx(QStringLiteral("k-gizmo-clamped.png"), closePixels);
+            check(closePixels > 200,
+                  QStringLiteral("the close-zoom dump contains a gizmo too (%1 lit "
+                                 "pixels)").arg(closePixels));
             check(closeReach > 0.0,
                   QStringLiteral("the gizmo is still there and measurable zoomed in "
-                                 "(%1 px)").arg(closeReach));
+                                 "(%1 px)").arg(closeReach, 0, 'f', 1));
             check(closeReach <= gizmoLimitPx() + slack,
                   QStringLiteral("and the clamp holds at a close zoom, which is where "
                                  "it used to fill the screen (%1 px, limit %2 px)")
@@ -11923,10 +12046,15 @@ int main(int argc, char* argv[])
                 settle(250);
                 check(view->viewIsOrthographic(),
                       "the gizmo probe really is in a parallel projection");
-                const double orthoReach = gizmoReachPx();
+                int orthoPixels = 0;
+                const double orthoReach =
+                    gizmoReachPx(QStringLiteral("k-gizmo-ortho.png"), orthoPixels);
+                check(orthoPixels > 200,
+                      QStringLiteral("the ortho dump contains a gizmo (%1 lit pixels)")
+                          .arg(orthoPixels));
                 check(orthoReach > 0.0,
                       QStringLiteral("the gizmo measures in ortho too (%1 px)")
-                          .arg(orthoReach));
+                          .arg(orthoReach, 0, 'f', 1));
                 check(orthoReach <= gizmoLimitPx() + slack,
                       QStringLiteral("and the clamp holds there as well (%1 px, limit "
                                      "%2 px)")
@@ -11936,10 +12064,10 @@ int main(int argc, char* argv[])
                 settle(200);
             }
 
-            // A capture of the clamped gizmo at the close zoom this probe
-            // reached, since a size is exactly the kind of claim a number
-            // alone reads poorly for.
-            view->saveSnapshot(outDir + "/k-gizmo-clamped.png");
+            // The three dumps above ARE the captures - k-gizmo-clamped.png is
+            // written by the close-zoom measurement itself, so the picture
+            // presented and the picture measured are the same file rather than
+            // two renders that could differ.
 
             view->setSelectedSolids({});
             trigger(window, QStringLiteral("Fit All"));
