@@ -41,7 +41,7 @@ constexpr int kPad = 12;
 constexpr int kMinHeight = 176;
 }  // namespace
 
-ItemsPanel::ItemsPanel(const DocumentModel* document, OcctViewWidget* view, QWidget* parent)
+ItemsPanel::ItemsPanel(DocumentModel* document, OcctViewWidget* view, QWidget* parent)
     : QWidget(parent)
     , myDocument(document)
     , myView(view)
@@ -214,8 +214,8 @@ void ItemsPanel::refresh()
                          QString::fromStdString(
                              Measure::formatFaceExtents(outline.face, outline.plane)) +
                          QLatin1Char('\x1f') +
-                         ((myView && myView->isOutlineVisible(outline.id)) ? QLatin1Char('1')
-                                                                          : QLatin1Char('0')) +
+                         (myDocument->isVisible(outline.id) ? QLatin1Char('1')
+                                                            : QLatin1Char('0')) +
                          QLatin1Char('\x1e');
         }
         for (const DocumentModel::Solid& solid : myDocument->solids()) {
@@ -223,8 +223,8 @@ void ItemsPanel::refresh()
                          QString::fromStdString(solid.name) + QLatin1Char('\x1f') +
                          QString::fromStdString(Measure::formatDimensions(solid.shape)) +
                          QLatin1Char('\x1f') +
-                         ((myView && myView->isSolidVisible(solid.id)) ? QLatin1Char('1')
-                                                                       : QLatin1Char('0')) +
+                         (myDocument->isVisible(solid.id) ? QLatin1Char('1')
+                                                          : QLatin1Char('0')) +
                          QLatin1Char('\x1e');
         }
     }
@@ -296,6 +296,11 @@ void ItemsPanel::refresh()
         eye->setToolTip(isOutline ? tr("Show or hide this outline")
                                   : tr("Show or hide this body"));
         connect(eye, &QPushButton::toggled, this, [this, id, isOutline](bool show) {
+            // DocumentModel owns visibility now (Task 1's isVisible()/
+            // setVisible()); the view is a mirror of it, written second so a
+            // save reads back exactly what the eye buttons show rather than
+            // a copy that only ever lived in the viewport.
+            if (myDocument) myDocument->setVisible(id, show);
             if (!myView) return;
             if (isOutline) myView->setOutlineVisible(id, show);
             else myView->setSolidVisible(id, show);
@@ -334,12 +339,12 @@ void ItemsPanel::refresh()
     for (const DocumentModel::Outline& outline : myDocument->outlines()) {
         addRow(outline.id, QString::fromStdString(outline.name),
                QString::fromStdString(Measure::formatFaceExtents(outline.face, outline.plane)),
-               myView && myView->isOutlineVisible(outline.id), /*isOutline=*/true);
+               myDocument->isVisible(outline.id), /*isOutline=*/true);
     }
     for (const DocumentModel::Solid& solid : myDocument->solids()) {
         addRow(solid.id, QString::fromStdString(solid.name),
                QString::fromStdString(Measure::formatDimensions(solid.shape)),
-               myView && myView->isSolidVisible(solid.id), /*isOutline=*/false);
+               myDocument->isVisible(solid.id), /*isOutline=*/false);
     }
 
     if (myRowList.empty()) {

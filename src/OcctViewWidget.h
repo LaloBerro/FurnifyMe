@@ -22,6 +22,7 @@
 #include "GridRenderer.h"
 #include "PullArrow.h"
 
+#include <QImage>
 #include <QPoint>
 #include <QString>
 #include <QStringList>
@@ -393,6 +394,15 @@ public:
     // Renders the viewport straight to an image file. Independent of what is on
     // screen or on top of the window, unlike a screen grab.
     bool saveSnapshot(const QString& path);
+
+    // MainWindow's furniture-thumbnail capture at save time - built on
+    // saveSnapshot() itself (V3d_View::Dump has no in-memory sibling) through
+    // a short-lived temp file this function owns start to finish, so
+    // FurnitureStore's own thumbPath() never has to leave that class (its
+    // exact directory layout is FurnitureStore's private business - see
+    // FurnitureStore.h). A null image on any failure: Dump refusing, or the
+    // PNG it wrote failing to reload.
+    QImage captureThumbnail();
 
     void fitAll();
     void animateTo(const CameraState& goal);

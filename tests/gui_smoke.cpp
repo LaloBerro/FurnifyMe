@@ -41,6 +41,7 @@
 #include "GridRenderer.h"
 #include "HintBalloon.h"
 #include "IconSet.h"
+#include "InitScreen.h"
 #include "ItemsPanel.h"
 #include "MainWindow.h"
 #include "Measure.h"
@@ -182,7 +183,7 @@ void skipByEnvironment(int checks, const QString& why)
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 1359;
+constexpr int kCheckFloor = 1426;
 
 void check(bool condition, const QString& what)
 {
@@ -436,6 +437,27 @@ bool trigger(MainWindow& window, const QString& label)
     found->trigger();
     settle(120);
     return true;
+}
+
+// Every MainWindow this suite builds now starts on the init screen
+// (Milestone 3, item 2) rather than handing out an immediately-editable
+// document - see the "init screen, on launch" block near the top of main()
+// for the one place that is actually under test. Every OTHER probe window in
+// this file just needs an editable document to get on with whatever it is
+// actually testing, the same way a user would get one: by opening New
+// furniture on the real gallery widget. One driver, so the click sequence
+// cannot drift between the twenty-odd call sites that need it.
+void enterFreshFurniture(MainWindow& window)
+{
+    InitScreen* gallery = window.initScreen();
+    QWidget* newCard = gallery ? gallery->newCard() : nullptr;
+    if (!newCard) {
+        std::printf("[FAIL] enterFreshFurniture: no New furniture card\n");
+        ++g_failures;
+        return;
+    }
+    clickAt(newCard, QPointF(newCard->width() / 2.0, newCard->height() / 2.0));
+    settle(200);
 }
 
 // Draws a quad by clicking four points given as fractions of the viewport, so
@@ -891,9 +913,17 @@ int main(int argc, char* argv[])
 
     const QString outDir = argc > 1 ? QString::fromLocal8Bit(argv[1]) : QDir::currentPath();
 
+    // The furniture library's own temp directory - injected, never the real
+    // QStandardPaths::DocumentsLocation, on the same terms as
+    // persistProgress=false: a suite whose behaviour depended on what the
+    // developer's own Documents folder happened to hold would not be a
+    // suite. Every MainWindow this file constructs gets one.
+    QTemporaryDir libraryDir;
+    check(libraryDir.isValid(), "a temp library directory for the main window");
+
     // Never persist: a suite whose behaviour depends on how often the developer
     // ran the real app is not a suite.
-    MainWindow window(nullptr, /*persistProgress=*/false);
+    MainWindow window(nullptr, /*persistProgress=*/false, libraryDir.path());
     // Show without taking focus: the point of this harness is that the user can
     // keep working while it runs.
     window.setAttribute(Qt::WA_ShowWithoutActivating);
@@ -943,6 +973,377 @@ int main(int argc, char* argv[])
                       .arg(buried.isEmpty() ? QStringLiteral("all are")
                                             : buried.join(QStringLiteral(", "))));
         }
+    }
+
+    // --- the init screen, on launch, and how this suite gets a furniture -----
+    // Milestone 3, item 2. The window opens with nothing loaded - the init
+    // screen is a STATE, not a dialog - and every modeling action is
+    // unreachable while it shows, not merely painted over: Start Sketch's own
+    // predicate is `!mySketching` alone, which an empty document does not
+    // touch, so it is the sharpest probe that the gate in updateActions() is
+    // real and not merely a consequence of the document being empty.
+    //
+    // The rest of this file - some 12,000 lines, roughly 40 checks by the
+    // brief's own count - was written when MainWindow handed out an
+    // immediately-editable document at construction. Rather than rewriting
+    // any of that, this block gets it a furniture the way a user would: it
+    // opens the New furniture card through a real click on the real gallery
+    // widget. Every check after this one runs exactly as it always has,
+    // against a fresh, empty, genuinely-opened furniture.
+    {
+        check(window.isShowingInitScreen(), "the window opens on the init screen");
+        InitScreen* gallery = window.initScreen();
+        check(gallery != nullptr && gallery->isVisible(), "the gallery is up and visible");
+
+        QAction* startSketch = action(window, QStringLiteral("Start Sketch"));
+        check(startSketch != nullptr && !startSketch->isEnabled(),
+              "Start Sketch is disabled while the gallery shows");
+        QAction* saveAction = action(window, QStringLiteral("Save"));
+        check(saveAction != nullptr && !saveAction->isEnabled(),
+              "so is Save, with no furniture open to save");
+        QAction* closeFurnitureAction = action(window, QStringLiteral("Close furniture"));
+        check(closeFurnitureAction != nullptr && !closeFurnitureAction->isEnabled(),
+              "and Close furniture, with nothing open to close");
+
+        check(gallery != nullptr && gallery->furnitureCount() == 0,
+              "a fresh temp library starts with no furniture - only New furniture");
+        QWidget* newCard = gallery ? gallery->newCard() : nullptr;
+        check(newCard != nullptr, "the New furniture card is there from the start");
+        if (newCard) {
+            // childAt-real: a probe that clicks a coordinate and asserts
+            // identity against the pointer InitScreen hands back, not merely
+            // "something was there" - the same discipline every other
+            // reachability check in this file already applies.
+            const QPoint centre(newCard->width() / 2, newCard->height() / 2);
+            check(gallery->childAt(newCard->mapTo(gallery, centre)) == newCard,
+                  "childAt() at its centre finds the card itself");
+            clickAt(newCard, QPointF(newCard->width() / 2.0, newCard->height() / 2.0));
+            settle(300);
+        }
+        check(!window.isShowingInitScreen(), "New furniture leaves the init screen");
+        check(window.document().count() == 0,
+              "...with a genuinely empty document - the rest of this suite proceeds "
+              "from exactly this state");
+        check(window.currentFurnitureName().startsWith(QStringLiteral("Furniture ")),
+              QStringLiteral("named Furniture NN (\"%1\")")
+                  .arg(window.currentFurnitureName()));
+        check(gallery != nullptr && !gallery->isVisible(), "and the gallery itself is gone");
+        check(!window.windowTitle().contains(QLatin1Char('*')),
+              "a freshly opened furniture carries no dirty star");
+
+        // No modal ever appears for any of this - the standing sweep this
+        // suite runs everywhere else applies here too.
+        check(window.findChild<QDialog*>() == nullptr,
+              "and none of it opened a single QDialog");
+    }
+
+    // --- a seeded library: cards, opening, the volume they carry --------------
+    // An ISOLATED window and store, not the `window` above. Opening a
+    // furniture that already carries a body can immediately satisfy
+    // HintBalloon's face-mode condition (document().count() > 0, not yet in
+    // face mode) with nothing else required - and this file's own later
+    // blocks test that exact hint's natural, FIRST appearance on `window`.
+    // A probe that had already spent it here, this early, would fail a
+    // check hundreds of lines away for a reason with nothing to do with what
+    // that check is actually testing. Isolation is this file's own answer to
+    // exactly that risk everywhere else (the `returning`/`probe`/`learned`
+    // windows further down) - this is the same idiom, used here for the same
+    // reason.
+    {
+        QTemporaryDir seedDir;
+        check(seedDir.isValid(), "a temp dir for the seeded-library probe");
+
+        QString seededId;
+        double seededVolume = 0.0;
+        const QString seededName = QStringLiteral("Chair");
+        {
+            FurnitureStore seedStore(seedDir.path());
+            seededId = seedStore.createFurniture(seededName);
+            check(!seededId.isEmpty(), "seeding: createFurniture succeeds");
+
+            DocumentModel seedDoc;
+            const TopoDS_Shape box = BRepPrimAPI_MakeBox(300.0, 200.0, 100.0).Shape();
+            seedDoc.addSolid(box);
+            GProp_GProps boxProps;
+            BRepGProp::VolumeProperties(box, boxProps);
+            seededVolume = boxProps.Mass();
+            check(!seededId.isEmpty() && seedStore.saveFurniture(seededId, seedDoc, QImage()),
+                  "seeding: saveFurniture writes a real body straight to disk");
+        }
+
+        MainWindow libraryProbe(nullptr, /*persistProgress=*/false, seedDir.path());
+        libraryProbe.setAttribute(Qt::WA_ShowWithoutActivating);
+        libraryProbe.resize(1000, 700);
+        libraryProbe.show();
+        settle(400);
+        libraryProbe.view()->setAnimationsEnabled(false);
+
+        InitScreen* gallery = libraryProbe.initScreen();
+        check(gallery != nullptr && gallery->furnitureCount() == 1,
+              QStringLiteral("the seeded library shows exactly the one card (%1)")
+                  .arg(gallery ? gallery->furnitureCount() : -1));
+        check(gallery != nullptr && gallery->cardName(0) == seededName,
+              QStringLiteral("named for the seeded furniture (\"%1\")")
+                  .arg(gallery ? gallery->cardName(0) : QString()));
+
+        QWidget* card = gallery ? gallery->cardAt(0) : nullptr;
+        QWidget* newCard = gallery ? gallery->newCard() : nullptr;
+        check(card != nullptr && newCard != nullptr && card != newCard,
+              "the seeded card and New furniture are two different widgets");
+        if (card) {
+            const QPoint centre(card->width() / 2, card->height() / 2);
+            check(gallery->childAt(card->mapTo(gallery, centre)) == card,
+                  "childAt() at the seeded card's centre finds the card itself");
+        }
+
+        // --- renaming: F2/double-click's shared driver, InlineRename --------
+        // beginRenameAt() drives the same InlineRename::beginRename() a real
+        // F2 or a double-click on the card's name would - see ui/InitScreen.h.
+        QString renamedTo = seededName;
+        if (card && gallery) {
+            gallery->beginRenameAt(0);
+            QLineEdit* edit = card->findChild<QLineEdit*>();
+            check(edit != nullptr, "beginning a rename opens an inline editor over the card");
+            if (edit) {
+                edit->setText(QStringLiteral("Dining Chair"));
+                sendKeyTo(edit, Qt::Key_Return);
+                settle(150);
+                renamedTo = QStringLiteral("Dining Chair");
+            }
+            check(gallery->cardName(0) == renamedTo,
+                  QStringLiteral("Enter commits the rename (\"%1\")")
+                      .arg(gallery->cardName(0)));
+
+            // Escape cancels outright - the card is untouched by the edit
+            // that never committed.
+            gallery->beginRenameAt(0);
+            QWidget* stillCard = gallery->cardAt(0);
+            QLineEdit* edit2 = stillCard ? stillCard->findChild<QLineEdit*>() : nullptr;
+            if (edit2) {
+                edit2->setText(QStringLiteral("Should not stick"));
+                sendKeyTo(edit2, Qt::Key_Escape);
+                settle(150);
+            }
+            check(gallery->cardName(0) == renamedTo,
+                  "Escape cancels outright - the old name stands");
+
+            // An empty/whitespace commit is refused silently - same result,
+            // reached the other way.
+            gallery->beginRenameAt(0);
+            QWidget* stillCard2 = gallery->cardAt(0);
+            QLineEdit* edit3 = stillCard2 ? stillCard2->findChild<QLineEdit*>() : nullptr;
+            if (edit3) {
+                edit3->setText(QStringLiteral("   "));
+                sendKeyTo(edit3, Qt::Key_Return);
+                settle(150);
+            }
+            check(gallery->cardName(0) == renamedTo,
+                  "a whitespace-only commit is refused silently - the old name stands, "
+                  "with no toast and no shake");
+        }
+
+        // --- opening loads the seeded shapes: a volume probe -----------------
+        QWidget* openCard = gallery ? gallery->cardAt(0) : nullptr;
+        if (openCard) {
+            clickAt(openCard, QPointF(openCard->width() / 2.0, openCard->height() / 2.0));
+            settle(300);
+        }
+        check(!libraryProbe.isShowingInitScreen(), "clicking the card opens it");
+        check(libraryProbe.currentFurnitureName() == renamedTo,
+              QStringLiteral("opening it names the (renamed) furniture (\"%1\")")
+                  .arg(libraryProbe.currentFurnitureName()));
+        check(libraryProbe.document().count() == 1,
+              QStringLiteral("with its one seeded body loaded (%1 bodies)")
+                  .arg(libraryProbe.document().count()));
+        if (libraryProbe.document().count() == 1) {
+            GProp_GProps loadedProps;
+            BRepGProp::VolumeProperties(libraryProbe.document().solids().front().shape,
+                                        loadedProps);
+            check(std::fabs(loadedProps.Mass() - seededVolume) < 1.0,
+                  QStringLiteral("and its volume matches what was seeded on disk "
+                                 "(%1 mm3 against %2 mm3)")
+                      .arg(loadedProps.Mass(), 0, 'f', 1)
+                      .arg(seededVolume, 0, 'f', 1));
+        }
+        check(!libraryProbe.isFurnitureDirty(), "a freshly opened furniture is not dirty");
+        check(!libraryProbe.windowTitle().contains(QLatin1Char('*')),
+              "and its title carries no dirty star");
+
+        // --- and separately: New furniture opens an empty document -----------
+        trigger(libraryProbe, QStringLiteral("Close furniture"));
+        check(libraryProbe.isShowingInitScreen(), "Close furniture returns to the gallery");
+        InitScreen* galleryAgain = libraryProbe.initScreen();
+        QWidget* freshNewCard = galleryAgain ? galleryAgain->newCard() : nullptr;
+        if (freshNewCard) {
+            clickAt(freshNewCard, QPointF(freshNewCard->width() / 2.0,
+                                          freshNewCard->height() / 2.0));
+            settle(300);
+        }
+        check(!libraryProbe.isShowingInitScreen() && libraryProbe.document().count() == 0,
+              "New furniture opens a genuinely empty document");
+        check(libraryProbe.findChild<QDialog*>() == nullptr,
+              "no modal appeared anywhere in this block either");
+    }
+
+    // --- Save, the dirty star, autosave, and Close furniture ------------------
+    // Another isolated window, for the same reason the seeded-library probe
+    // just above is one: this block checkpoints for real (a sketch and an
+    // extrude), and that machinery's side effects - recorded progress, the
+    // walkthrough completing - must not leak into the shared `window` the
+    // rest of this suite still has thousands of lines of assumptions about.
+    {
+        QTemporaryDir saveDir;
+        check(saveDir.isValid(), "a temp dir for the save/autosave probe");
+
+        MainWindow saveProbe(nullptr, /*persistProgress=*/false, saveDir.path());
+        saveProbe.setAttribute(Qt::WA_ShowWithoutActivating);
+        saveProbe.resize(1000, 700);
+        saveProbe.show();
+        settle(400);
+        saveProbe.view()->setAnimationsEnabled(false);
+
+        InitScreen* gallery = saveProbe.initScreen();
+        QWidget* newCard = gallery ? gallery->newCard() : nullptr;
+        check(newCard != nullptr, "the probe's gallery offers New furniture");
+        if (newCard) {
+            clickAt(newCard, QPointF(newCard->width() / 2.0, newCard->height() / 2.0));
+            settle(300);
+        }
+        check(!saveProbe.isShowingInitScreen(), "New furniture opens it");
+        const QString furnitureId = saveProbe.currentFurnitureId();
+
+        check(saveProbe.autosaveEnabled(), "autosave starts on, per the default");
+        check(!saveProbe.isFurnitureDirty(), "a fresh furniture is not dirty");
+        check(!saveProbe.windowTitle().contains(QLatin1Char('*')),
+              "and carries no dirty star");
+        check(saveProbe.autosavePendingMs() < 0,
+              "with nothing changed yet, no autosave is pending");
+
+        // --- the checkpoint: a real sketch and extrude ------------------------
+        trigger(saveProbe, QStringLiteral("Start Sketch"));
+        sketchQuad(saveProbe, 0.35, 0.35, 0.55, 0.55);
+        trigger(saveProbe, QStringLiteral("Finish Sketch"));
+        check(saveProbe.extrudePendingFace(120.0), "the checkpoint: a body committed");
+        check(saveProbe.document().count() == 1, "one body now lives in the probe furniture");
+
+        // --- the dirty star -----------------------------------------------------
+        // RED-VERIFIED (task-2-report.md): hard-coding isFurnitureDirty() to
+        // false made this pair fail, and cascaded into the autosave-arm
+        // check just below (armAutosaveTimer() never runs for a document
+        // that never reads dirty) and the second dirty-again check further
+        // down - four failures total, nothing else in the 1,400+-check
+        // suite affected. See the report for the run.
+        check(saveProbe.isFurnitureDirty(),
+              "a checkpoint marks the furniture dirty - the live revision no "
+              "longer matches what was last saved");
+        check(saveProbe.windowTitle().contains(QLatin1Char('*')),
+              QStringLiteral("...and the title shows the star (\"%1\")")
+                  .arg(saveProbe.windowTitle()));
+
+        // --- autosave: armed after the checkpoint, asserted rather than waited
+        const int pendingMs = saveProbe.autosavePendingMs();
+        check(pendingMs > 0 && pendingMs <= MainWindow::kAutosaveWriteMs,
+              QStringLiteral("the checkpoint arms the autosave debounce (%1 ms left "
+                             "of %2)")
+                  .arg(pendingMs)
+                  .arg(MainWindow::kAutosaveWriteMs));
+
+        // --- File -> Save (Ctrl+S) writes the shapes and a real thumbnail ------
+        check(trigger(saveProbe, QStringLiteral("Save")), "Ctrl+S's own action triggers");
+        check(!saveProbe.isFurnitureDirty(), "...and Save clears the dirty flag");
+        check(!saveProbe.windowTitle().contains(QLatin1Char('*')),
+              "...taking the star with it");
+
+        QString thumbPath;
+        QString furnitureDir;
+        for (const FurnitureStore::FurnitureInfo& info : saveProbe.furnitureStore().listFurniture()) {
+            if (info.id == furnitureId) { thumbPath = info.thumbPath; furnitureDir = info.filePath; }
+        }
+        check(!furnitureDir.isEmpty() && !QDir(furnitureDir).entryList(QDir::Files).isEmpty(),
+              "Save leaves real files behind in the furniture's own directory");
+        check(!thumbPath.isEmpty() && QFileInfo::exists(thumbPath) &&
+                  QFileInfo(thumbPath).size() > 0,
+              "...and a non-empty thumbnail, at the path FurnitureInfo names");
+        if (!thumbPath.isEmpty() && QFileInfo::exists(thumbPath)) {
+            QFile thumb(thumbPath);
+            check(thumb.open(QIODevice::ReadOnly), "the thumbnail file opens");
+            static const QByteArray kPngMagic = QByteArray::fromHex("89504e470d0a1a0a");
+            check(thumb.read(8) == kPngMagic, "and its header is a real PNG signature");
+        }
+        {
+            DocumentModel reloaded;
+            QString err;
+            FurnitureStore probeStore(saveDir.path());
+            check(probeStore.loadFurniture(furnitureId, reloaded, &err) && reloaded.count() == 1,
+                  QStringLiteral("and the saved furniture reloads with the body Save "
+                                 "wrote (%1)")
+                      .arg(err.isEmpty() ? QStringLiteral("ok") : err));
+        }
+
+        // --- Close furniture, autosave off: SAVES FIRST, never a question ------
+        // The oracle has to be something the SECOND checkpoint actually
+        // changes. transformBody() was chosen for this checkpoint precisely
+        // because it does not change body COUNT (see the block comment
+        // above on why sketch/extrude is not used for this half) - which
+        // means a body-count check here cannot tell "the move was saved"
+        // from "it was not": the FIRST checkpoint's body was on disk
+        // already. The real oracle is the body's POSITION - captured before
+        // the move, and required to have actually moved once reloaded.
+        GProp_GProps beforeMoveProps;
+        BRepGProp::VolumeProperties(saveProbe.document().solids().front().shape,
+                                    beforeMoveProps);
+        const double xBeforeMove = beforeMoveProps.CentreOfMass().X();
+
+        QAction* autosaveAction = action(saveProbe, QStringLiteral("Save automatically"));
+        check(autosaveAction != nullptr && autosaveAction->isChecked(),
+              "the menu entry starts checked, matching the default");
+        if (autosaveAction) autosaveAction->trigger();
+        check(!saveProbe.autosaveEnabled(), "...and turns it off");
+
+        gp_Trsf move;
+        move.SetTranslation(gp_Vec(15.0, 0.0, 0.0));
+        const int bodyId = saveProbe.document().solids().front().id;
+        check(saveProbe.transformBody(bodyId, move),
+              "a second, unsaved checkpoint - moving the body - with autosave off");
+        check(saveProbe.isFurnitureDirty(), "the furniture reads dirty again");
+        check(saveProbe.autosavePendingMs() < 0,
+              "and with autosave off, this checkpoint arms no debounce at all");
+
+        ToastHost* toasts = saveProbe.findChild<ToastHost*>();
+        check(trigger(saveProbe, QStringLiteral("Close furniture")),
+              "Close furniture's action triggers");
+        check(saveProbe.isShowingInitScreen(), "...and it lands back on the init screen");
+        check(toasts != nullptr &&
+                  toasts->currentText().contains(QStringLiteral("Saved and closed")),
+              QStringLiteral("the toast says so plainly - never a modal question (\"%1\")")
+                  .arg(toasts ? toasts->currentText() : QString()));
+
+        // RED-VERIFIED (task-2-report.md): with the save call removed from
+        // closeCurrentFurniture()'s autosave-off branch, this reloaded the
+        // PRE-move X (the body count alone stayed 1 either way, and every
+        // check above this one - the toast, "lands on init" - was still
+        // green) - see the report for the run.
+        DocumentModel reloadedAfterClose;
+        QString err2;
+        FurnitureStore probeStore2(saveDir.path());
+        check(probeStore2.loadFurniture(furnitureId, reloadedAfterClose, &err2) &&
+                  reloadedAfterClose.count() == 1,
+              QStringLiteral("closing with autosave off leaves exactly the one body on "
+                             "disk (%1)")
+                  .arg(err2.isEmpty() ? QStringLiteral("ok") : err2));
+        if (reloadedAfterClose.count() == 1) {
+            GProp_GProps afterProps;
+            BRepGProp::VolumeProperties(reloadedAfterClose.solids().front().shape, afterProps);
+            const double xAfterReload = afterProps.CentreOfMass().X();
+            check(std::fabs(xAfterReload - (xBeforeMove + 15.0)) < 1.0e-3,
+                  QStringLiteral("...and it saved the MOVE, not just the body - the "
+                                 "reloaded centre sits at the post-move X (%1 mm, wanted "
+                                 "%2 mm)")
+                      .arg(xAfterReload, 0, 'f', 3)
+                      .arg(xBeforeMove + 15.0, 0, 'f', 3));
+        }
+        check(saveProbe.findChild<QDialog*>() == nullptr,
+              "and none of this - Save, autosave, Close - ever opened a QDialog");
     }
 
     // --- the window carries the app's own mark --------------------------------
@@ -2065,11 +2466,13 @@ int main(int argc, char* argv[])
     // leave the whole rail, Redo included, inside the viewport and reachable
     // by a real click.
     {
-        MainWindow minWin(nullptr, /*persistProgress=*/false);
+        QTemporaryDir minWinLib;
+        MainWindow minWin(nullptr, /*persistProgress=*/false, minWinLib.path());
         minWin.setAttribute(Qt::WA_ShowWithoutActivating);
         minWin.show();
         settle(300);
         minWin.view()->setAnimationsEnabled(false);
+        enterFreshFurniture(minWin);
 
         // Straight to the window's own computed minimum, not an iterative
         // shrink toward a guessed target - this probe wants exactly what
@@ -3520,12 +3923,14 @@ int main(int argc, char* argv[])
         // conditions that raise all three are reproduced from scratch. Delete
         // the hasLearned() term from isDue() and this fails; that was not true
         // of the version this replaces.
-        MainWindow learned(nullptr, /*persistProgress=*/false);
+        QTemporaryDir learnedLib;
+        MainWindow learned(nullptr, /*persistProgress=*/false, learnedLib.path());
         learned.setAttribute(Qt::WA_ShowWithoutActivating);
         learned.resize(900, 600);
         learned.show();
         settle(300);
         learned.view()->setAnimationsEnabled(false);
+        enterFreshFurniture(learned);
 
         for (int i = 0; i < UserProgress::kLearnedThreshold; ++i) {
             learned.progress().record("boolean.completed");
@@ -3569,13 +3974,15 @@ int main(int argc, char* argv[])
     // scenario is built from scratch, deterministically, to pin the contract
     // down instead.
     {
-        MainWindow probe(nullptr, /*persistProgress=*/false);
+        QTemporaryDir probeLib;
+        MainWindow probe(nullptr, /*persistProgress=*/false, probeLib.path());
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
         probe.resize(900, 600);
         probe.show();
         settle(300);
         OcctViewWidget* probeView = probe.view();
         probeView->setAnimationsEnabled(false);
+        enterFreshFurniture(probe);
 
         HintBalloon* hint = probe.findChild<HintBalloon*>();
         check(hint != nullptr, "the probe window has a hint balloon");
@@ -3658,13 +4065,15 @@ int main(int argc, char* argv[])
     // and each hint's one showing in the probes above is already spent
     // proving a different trigger.
     {
-        MainWindow modeProbe(nullptr, /*persistProgress=*/false);
+        QTemporaryDir modeProbeLib;
+        MainWindow modeProbe(nullptr, /*persistProgress=*/false, modeProbeLib.path());
         modeProbe.setAttribute(Qt::WA_ShowWithoutActivating);
         modeProbe.resize(900, 600);
         modeProbe.show();
         settle(300);
         OcctViewWidget* modeProbeView = modeProbe.view();
         modeProbeView->setAnimationsEnabled(false);
+        enterFreshFurniture(modeProbe);
 
         HintBalloon* hint = modeProbe.findChild<HintBalloon*>();
         check(hint != nullptr, "the mode-transition probe has a hint balloon");
@@ -9317,6 +9726,27 @@ int main(int argc, char* argv[])
                            ? QStringLiteral("none")
                            : walkthroughOffenders.join(QStringLiteral(", "))));
 
+        // Same story for the init screen: its title and its New furniture
+        // card are painted copy this app wrote. Per-furniture card NAMES are
+        // deliberately excluded from paintedTexts() itself - they are the
+        // user's own word choice, the same exemption a furniture literally
+        // named "Fuse My Table" gets below.
+        QStringList initScreenOffenders;
+        if (InitScreen* gallery = window.initScreen()) {
+            for (const QString& text : gallery->paintedTexts()) {
+                for (const QString& word : banned) {
+                    if (usesBannedWord(text, word))
+                        initScreenOffenders
+                            << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
+                }
+            }
+        }
+        check(initScreenOffenders.isEmpty(),
+              QStringLiteral("no init screen text uses a banned word (%1)")
+                  .arg(initScreenOffenders.isEmpty()
+                           ? QStringLiteral("none")
+                           : initScreenOffenders.join(QStringLiteral(", "))));
+
         // Same story for the hint balloon: its copy is painted, not put on an
         // action or a tooltip, so it needs its own explicit sweep too.
         QStringList hintOffenders;
@@ -9629,12 +10059,14 @@ int main(int argc, char* argv[])
     // exactly what it taught. One probe per route, since a hint only gets one
     // showing per session.
     {
-        MainWindow axoProbe(nullptr, /*persistProgress=*/false);
+        QTemporaryDir axoProbeLib;
+        MainWindow axoProbe(nullptr, /*persistProgress=*/false, axoProbeLib.path());
         axoProbe.setAttribute(Qt::WA_ShowWithoutActivating);
         axoProbe.resize(900, 600);
         axoProbe.show();
         settle(300);
         axoProbe.view()->setAnimationsEnabled(false);
+        enterFreshFurniture(axoProbe);
         // Learn face selection so the view hint is the one the first body
         // raises, rather than queueing behind it.
         for (int i = 0; i < UserProgress::kLearnedThreshold; ++i) {
@@ -9669,12 +10101,14 @@ int main(int argc, char* argv[])
     }
 
     {
-        MainWindow gizmoProbe(nullptr, /*persistProgress=*/false);
+        QTemporaryDir gizmoProbeLib;
+        MainWindow gizmoProbe(nullptr, /*persistProgress=*/false, gizmoProbeLib.path());
         gizmoProbe.setAttribute(Qt::WA_ShowWithoutActivating);
         gizmoProbe.resize(900, 600);
         gizmoProbe.show();
         settle(300);
         gizmoProbe.view()->setAnimationsEnabled(false);
+        enterFreshFurniture(gizmoProbe);
         for (int i = 0; i < UserProgress::kLearnedThreshold; ++i) {
             gizmoProbe.progress().record("faceMode.used");
         }
@@ -9714,12 +10148,14 @@ int main(int argc, char* argv[])
     // because this needs a hint genuinely dismissed earlier in the SAME
     // session, with nothing else having consumed the other hints' turns.
     {
-        MainWindow resetProbe(nullptr, /*persistProgress=*/false);
+        QTemporaryDir resetProbeLib;
+        MainWindow resetProbe(nullptr, /*persistProgress=*/false, resetProbeLib.path());
         resetProbe.setAttribute(Qt::WA_ShowWithoutActivating);
         resetProbe.resize(900, 600);
         resetProbe.show();
         settle(300);
         resetProbe.view()->setAnimationsEnabled(false);
+        enterFreshFurniture(resetProbe);
 
         HintBalloon* resetHint = resetProbe.findChild<HintBalloon*>();
         WalkthroughPanel* resetGuide = resetProbe.findChild<WalkthroughPanel*>();
@@ -9913,7 +10349,8 @@ int main(int argc, char* argv[])
               "finishing records walkthrough.done");
 
         // A returning user does not see it again.
-        MainWindow second(nullptr, /*persistProgress=*/false);
+        QTemporaryDir secondLib;
+        MainWindow second(nullptr, /*persistProgress=*/false, secondLib.path());
         // Shown (and settled) before anything below reads a widget's
         // position: ViewportOverlay lays overlay widgets out against the
         // viewport's size at the time of each addWidget() call, which
@@ -9926,6 +10363,10 @@ int main(int argc, char* argv[])
         second.resize(900, 600);
         second.show();
         settle(300);
+        // The guide this block is about is hidden behind the init screen
+        // until a furniture is open - see WalkthroughPanel::refresh()'s own
+        // gate.
+        enterFreshFurniture(second);
 
         // An earlier version of this check only asserted
         // Qt::WA_TransparentForMouseEvents on the panel and nothing more.
@@ -10041,12 +10482,14 @@ int main(int argc, char* argv[])
     // Snap/Select - reachable on a first run the moment a self-crossing
     // outline raises a failure message.
     {
-        MainWindow narrow(nullptr, /*persistProgress=*/false);
+        QTemporaryDir narrowLib;
+        MainWindow narrow(nullptr, /*persistProgress=*/false, narrowLib.path());
         narrow.setAttribute(Qt::WA_ShowWithoutActivating);
         narrow.resize(900, 620);
         narrow.show();
         settle(300);
         narrow.view()->setAnimationsEnabled(false);
+        enterFreshFurniture(narrow);
 
         OcctViewWidget* nv = narrow.view();
         // The defect is stated in VIEWPORT pixels, and the items panel eats a
@@ -10321,12 +10764,14 @@ int main(int argc, char* argv[])
     // drawer open AND closed, so the assertion cannot pass because the drawer
     // happened to be nowhere near it.
     {
-        MainWindow probe(nullptr, /*persistProgress=*/false);
+        QTemporaryDir probeLib2;
+        MainWindow probe(nullptr, /*persistProgress=*/false, probeLib2.path());
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
         probe.resize(900, 640);
         probe.show();
         settle(400);
         probe.view()->setAnimationsEnabled(false);
+        enterFreshFurniture(probe);
         OcctViewWidget* pv = probe.view();
 
         auto resizeViewport = [&](int w, int h) {
@@ -11647,12 +12092,14 @@ int main(int argc, char* argv[])
             // A dedicated window with ONE body, so the face is unoccluded and
             // the pick is deterministic - `window` has nine bodies in a camera
             // pose thirty checks of other work have left it in.
-            MainWindow arrowProbe(nullptr, /*persistProgress=*/false);
+            QTemporaryDir arrowProbeLib;
+            MainWindow arrowProbe(nullptr, /*persistProgress=*/false, arrowProbeLib.path());
             arrowProbe.setAttribute(Qt::WA_ShowWithoutActivating);
             arrowProbe.resize(1000, 760);
             arrowProbe.show();
             arrowProbe.view()->setAnimationsEnabled(false);
             settle(400);
+            enterFreshFurniture(arrowProbe);
             OcctViewWidget* probeView = arrowProbe.view();
             check(buildBody(arrowProbe, 0.35, 0.35, 0.60, 0.60, 40.0),
                   "a body is built for the arrow recolour probe");
@@ -12092,7 +12539,8 @@ int main(int argc, char* argv[])
                 clean.remove(QStringLiteral("appearance"));
             }
 
-            MainWindow quiet(nullptr, /*persistProgress=*/false);
+            QTemporaryDir quietLib3;
+            MainWindow quiet(nullptr, /*persistProgress=*/false, quietLib3.path());
             quiet.setAttribute(Qt::WA_ShowWithoutActivating);
             quiet.resize(900, 700);
             quiet.show();
@@ -12122,7 +12570,8 @@ int main(int argc, char* argv[])
             // currentColorChanged per mouse move, and a write-through would
             // put a registry write and a file sync on every frame of a drag.
             {
-                MainWindow persisting(nullptr, /*persistProgress=*/true);
+                QTemporaryDir persistingLib3;
+                MainWindow persisting(nullptr, /*persistProgress=*/true, persistingLib3.path());
                 persisting.setAttribute(Qt::WA_ShowWithoutActivating);
                 persisting.resize(900, 700);
                 persisting.show();
@@ -12685,7 +13134,8 @@ int main(int argc, char* argv[])
         }
 
         {
-            MainWindow quiet(nullptr, /*persistProgress=*/false);
+            QTemporaryDir quietLib2;
+            MainWindow quiet(nullptr, /*persistProgress=*/false, quietLib2.path());
             quiet.setAttribute(Qt::WA_ShowWithoutActivating);
             quiet.resize(900, 700);
             quiet.show();
@@ -12705,7 +13155,8 @@ int main(int argc, char* argv[])
         }
 
         {
-            MainWindow persisting(nullptr, /*persistProgress=*/true);
+            QTemporaryDir persistingLib2;
+            MainWindow persisting(nullptr, /*persistProgress=*/true, persistingLib2.path());
             persisting.setAttribute(Qt::WA_ShowWithoutActivating);
             persisting.resize(900, 700);
             persisting.show();
@@ -12722,7 +13173,8 @@ int main(int argc, char* argv[])
         }
 
         {
-            MainWindow returning(nullptr, /*persistProgress=*/true);
+            QTemporaryDir returningLib3;
+            MainWindow returning(nullptr, /*persistProgress=*/true, returningLib3.path());
             returning.setAttribute(Qt::WA_ShowWithoutActivating);
             returning.resize(900, 700);
             returning.show();
@@ -12797,7 +13249,8 @@ int main(int argc, char* argv[])
 
         // A window that must not write.
         {
-            MainWindow quiet(nullptr, /*persistProgress=*/false);
+            QTemporaryDir quietLib1;
+            MainWindow quiet(nullptr, /*persistProgress=*/false, quietLib1.path());
             quiet.setAttribute(Qt::WA_ShowWithoutActivating);
             quiet.resize(900, 700);
             quiet.show();
@@ -12822,7 +13275,8 @@ int main(int argc, char* argv[])
         // ...and one that must, so the check above is about the guard rather
         // than about a write that never happens at all.
         {
-            MainWindow persisting(nullptr, /*persistProgress=*/true);
+            QTemporaryDir persistingLib1;
+            MainWindow persisting(nullptr, /*persistProgress=*/true, persistingLib1.path());
             persisting.setAttribute(Qt::WA_ShowWithoutActivating);
             persisting.resize(900, 700);
             persisting.show();
@@ -12845,7 +13299,8 @@ int main(int argc, char* argv[])
         // an action that came back checked over a perspective viewport is
         // precisely the failure this reads for.
         {
-            MainWindow returning(nullptr, /*persistProgress=*/true);
+            QTemporaryDir returningLib2;
+            MainWindow returning(nullptr, /*persistProgress=*/true, returningLib2.path());
             returning.setAttribute(Qt::WA_ShowWithoutActivating);
             returning.resize(900, 700);
             returning.show();
@@ -12881,7 +13336,8 @@ int main(int argc, char* argv[])
                                   QString::fromStdString(seed.serialize()));
         }
 
-        MainWindow returning(nullptr, /*persistProgress=*/true);
+        QTemporaryDir returningLib1;
+        MainWindow returning(nullptr, /*persistProgress=*/true, returningLib1.path());
         WalkthroughPanel* returningGuide = returning.findChild<WalkthroughPanel*>();
         check(returningGuide != nullptr,
               "a returning user still gets a panel built, just hidden");
@@ -12941,6 +13397,13 @@ int main(int argc, char* argv[])
                              "constructor rectangle (found %1 there)")
                   .arg(hitStale ? QString::fromLatin1(hitStale->metaObject()->className())
                                 : QStringLiteral("nothing")));
+
+        // Show tips again brings the guide back for a furniture the user is
+        // actually looking at - it still has nowhere to stand while the
+        // init screen shows (see WalkthroughPanel::refresh()'s own gate), so
+        // a returning user reaches this exactly the way a fresh one does:
+        // open something first.
+        enterFreshFurniture(returning);
 
         QAction* returningReset = action(returning, QStringLiteral("Show tips again"));
         check(returningReset != nullptr, "the returning user's window has the reset action too");

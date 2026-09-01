@@ -11,6 +11,7 @@
 #include "ExtrudePreview.h"
 #include "HintBalloon.h"
 #include "IconSet.h"
+#include "InitScreen.h"
 #include "ItemsPanel.h"
 #include "PullArrow.h"
 #include "ShortcutSheet.h"
@@ -43,6 +44,7 @@
 #include <QMenuBar>
 #include <QCloseEvent>
 #include <QSettings>
+#include <QStandardPaths>
 #include <QStatusBar>
 #include <QTimer>
 #include <QtGlobal>
@@ -53,8 +55,22 @@
 #include <utility>
 #include <vector>
 
-MainWindow::MainWindow(QWidget* parent, bool persistProgress)
+namespace {
+// The real library location - QStandardPaths::DocumentsLocation +
+// "/FurnifyMe" - is resolved here rather than inline in the initializer
+// list below, purely so the constructor's own comment can stay next to the
+// member it explains rather than a one-liner buried in a mem-initializer.
+QString resolveLibraryRoot(const QString& injected)
+{
+    if (!injected.isEmpty()) return injected;
+    return QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation) +
+          QStringLiteral("/FurnifyMe");
+}
+}  // namespace
+
+MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& libraryRoot)
     : QMainWindow(parent)
+    , myStore(resolveLibraryRoot(libraryRoot))
     , myPersistProgress(persistProgress)
 {
     if (myPersistProgress) {
@@ -84,6 +100,14 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
         // started silent would look broken to a first-time user.
         myShowNotifications =
             settings.value(QStringLiteral("showNotifications"), true).toBool();
+
+        // File -> Save automatically. Same guard, same "read before
+        // buildActions()" reason: the menu entry's initial checked state has
+        // to agree with what was last chosen rather than being corrected
+        // afterwards. Defaults to ON - see the member's own comment in the
+        // header for why the safer default wins for a user who has not found
+        // the toggle yet.
+        myAutosaveOn = settings.value(QStringLiteral("autosave"), true).toBool();
 
         // Before a single widget exists, for the same reason as the unit
         // above: every card measures itself with the type scale in its own
@@ -279,6 +303,14 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     setWindowTitle(tr("FurnifyMe"));
     resize(1280, 800);
     statusBar()->showMessage(tr("Right-drag to orbit, middle-drag to pan, wheel to zoom"));
+
+    // Built after buildOverlay() so it can be raised above everything that
+    // already exists over the viewport, and shown last: on launch nothing is
+    // open, myShowingInitScreen already starts true, and this is what
+    // actually raises the gallery and writes its own status message over
+    // the generic one two lines up.
+    buildInitScreen();
+    showInitScreen();
 }
 
 void MainWindow::buildActions()
@@ -323,8 +355,32 @@ void MainWindow::buildActions()
     connect(myUnlockFaceAction, &QAction::triggered, this, &MainWindow::unlockFace);
 
     myExportStepAction = new QAction(tr("Export &STEP..."), this);
-    myExportStepAction->setShortcut(QKeySequence::Save);
+    // Ctrl+S is Save's now - the platform standard key and a furniture SAVE
+    // is what it should mean the moment a library exists to save into.
+    // Export keeps a mnemonic of its own rather than losing a binding
+    // outright.
+    myExportStepAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_E));
     connect(myExportStepAction, &QAction::triggered, this, &MainWindow::onExportStep);
+
+    myFileSaveAction = new QAction(tr("&Save"), this);
+    myFileSaveAction->setShortcut(QKeySequence::Save);
+    myFileSaveAction->setToolTip(tr("Save this furniture (Ctrl+S)"));
+    connect(myFileSaveAction, &QAction::triggered, this,
+            [this] { saveCurrentFurniture(); });
+
+    myAutosaveAction = new QAction(tr("Save &automatically"), this);
+    myAutosaveAction->setCheckable(true);
+    myAutosaveAction->setChecked(myAutosaveOn);
+    myAutosaveAction->setToolTip(tr("Save a moment after every change\n"
+                                    "Off, Ctrl+S is how a change reaches disk."));
+    connect(myAutosaveAction, &QAction::toggled, this, &MainWindow::setAutosaveEnabled);
+
+    myCloseFurnitureAction = new QAction(tr("&Close furniture"), this);
+    myCloseFurnitureAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_W));
+    myCloseFurnitureAction->setToolTip(tr("Return to your furniture library (Ctrl+W)\n"
+                                          "With Save automatically off, this saves first."));
+    connect(myCloseFurnitureAction, &QAction::triggered, this,
+            &MainWindow::closeCurrentFurniture);
 
     mySolidSelectAction = new QAction(tr("Select &Bodies"), this);
     mySolidSelectAction->setCheckable(true);
@@ -495,6 +551,10 @@ QMenuBar* MainWindow::buildMenus()
     auto* bar = new QMenuBar(this);
 
     QMenu* fileMenu = bar->addMenu(tr("&File"));
+    fileMenu->addAction(myFileSaveAction);
+    fileMenu->addAction(myAutosaveAction);
+    fileMenu->addAction(myCloseFurnitureAction);
+    fileMenu->addSeparator();
     fileMenu->addAction(myExportStepAction);
     fileMenu->addAction(myScreenshotAction);
     fileMenu->addSeparator();
@@ -813,6 +873,25 @@ void MainWindow::buildOverlay()
     // operation - see ToastHost::documentMovedTo().
     connect(this, &MainWindow::documentChanged, this,
             [this] { myToasts->documentMovedTo(myDocument.revision()); });
+
+    // File -> Save automatically's arm: documentChanged fires after every
+    // committed change to the document (every commit path checkpoints THEN
+    // mutates THEN emits this), which is functionally "after every
+    // checkpoint" without a second signal only this feature would need.
+    // Restarted on every call, exactly like the appearance debounce - a
+    // burst of edits inside the 400ms window lands one write, not one per
+    // edit. Skips entirely while no furniture is open or the toggle is off,
+    // so this never fires for the seeded startup document a test builds
+    // before opening anything.
+    connect(this, &MainWindow::documentChanged, this, [this] {
+        if (myShowingInitScreen || myFurnitureId.isEmpty() || !myAutosaveOn) return;
+        // openFurniture() emits this too, for a freshly loaded document that
+        // is clean by construction (mySavedRevision is set to its revision
+        // in the same call) - guarded here so opening a furniture cannot
+        // itself arm a spurious autosave write.
+        if (!isFurnitureDirty()) return;
+        armAutosaveTimer();
+    });
     // A guide can appear UNDERNEATH a toast that is already up (Show tips
     // again does exactly that), and nothing told the toast to step aside
     // when it did - HintBalloon::reconsider() already handled that case for
@@ -890,15 +969,28 @@ void MainWindow::buildOverlay()
 
 void MainWindow::updateActions()
 {
-    const std::size_t selectedCount = myView->selectedSolidIds().size();
-    const bool booleanReady = !mySketching && selectedCount == 2;
+    // The init screen's own gate. Every modeling action is disabled while
+    // it shows - not merely painted over. A fresh, empty DocumentModel
+    // (showInitScreen() replaces it, never just clears it) already makes
+    // most of the predicates below false on their own - there is nothing to
+    // select, nothing to undo, no outline waiting - but Start Sketch's own
+    // predicate is `!mySketching` alone, which an empty document does not
+    // touch: without this a shortcut typed over the gallery would start
+    // drawing an outline nobody can see. Kept as one explicit clause here
+    // rather than trusted to the document being empty, because "empty" and
+    // "no furniture is open" are two different facts that only happen to
+    // coincide right now.
+    const bool atInit = myShowingInitScreen;
 
-    myStartSketchAction->setEnabled(!mySketching);
+    const std::size_t selectedCount = myView->selectedSolidIds().size();
+    const bool booleanReady = !mySketching && !atInit && selectedCount == 2;
+
+    myStartSketchAction->setEnabled(!mySketching && !atInit);
     myFinishSketchAction->setEnabled(mySketching && mySketch.canClose());
     myUndoPointAction->setEnabled(mySketching && mySketch.pointCount() > 0);
     myCancelSketchAction->setEnabled(mySketching);
 
-    myExtrudeAction->setEnabled(!mySketching && hasPendingFace());
+    myExtrudeAction->setEnabled(!mySketching && !atInit && hasPendingFace());
 
     // Exactly one face, and a flat one: an outline needs a single plane to
     // live on, and a cylinder's side has no such plane. Both halves are
@@ -911,8 +1003,8 @@ void MainWindow::updateActions()
     // canChangeSketchPlane() for what moving the plane out from under it does.
     // That is exactly canPullSelectedFace()'s rule too, so the two read the
     // same function rather than each carrying a copy of it.
-    const bool planeCanMove = !mySketching && !hasPendingFace();
-    const bool flatFaceSelected = canPullSelectedFace();
+    const bool planeCanMove = !mySketching && !atInit && !hasPendingFace();
+    const bool flatFaceSelected = !atInit && canPullSelectedFace();
     myLockFaceAction->setEnabled(flatFaceSelected);
     myUnlockFaceAction->setEnabled(myFaceLocked && planeCanMove);
     // A disabled control that does not say why is a control the user reads as
@@ -951,7 +1043,7 @@ void MainWindow::updateActions()
     mySubtractAction->setEnabled(booleanReady);
     myIntersectAction->setEnabled(booleanReady);
 
-    myExportStepAction->setEnabled(myDocument.count() > 0);
+    myExportStepAction->setEnabled(!atInit && myDocument.count() > 0);
     // Delete has TWO meanings and one of them is new: bodies when bodies are
     // selected, and the waiting outline when nothing is. It is the outline's
     // only exit besides Extrude, and the whole reason it needed one is in
@@ -961,7 +1053,7 @@ void MainWindow::updateActions()
     // decided HERE, in the one place that decides what is available, and
     // onDeleteSelected() asks the same question the same way.
     const bool deleteTargetsOutline = selectedCount == 0 && hasPendingFace();
-    myDeleteAction->setEnabled(!mySketching && (selectedCount > 0 || hasPendingFace()));
+    myDeleteAction->setEnabled(!mySketching && !atInit && (selectedCount > 0 || hasPendingFace()));
     // A control whose meaning moves has to say which meaning is live, or the
     // user reads one label and gets the other - the same argument the Lock to
     // Face tooltip above makes for a control that is disabled.
@@ -981,7 +1073,7 @@ void MainWindow::updateActions()
     // asymmetry is deliberate: it is better than a Redo that silently means
     // "redo a document change" while the user is looking at an outline.
     myUndoAction->setEnabled(mySketching ? mySketch.pointCount() > 0
-                                         : myDocument.canUndo());
+                                         : (!atInit && myDocument.canUndo()));
     myUndoAction->setToolTip(mySketching
                                  ? tr("Take back the last point you placed (Ctrl+Z)")
                                  : tr("Undo the last change to your bodies (Ctrl+Z)"));
@@ -995,7 +1087,7 @@ void MainWindow::updateActions()
     // revision guard in ToastHost was added to end. Still decided here, in
     // the one place that decides what is available, and still pushed out
     // rather than re-derived at the toast.
-    if (myToasts) myToasts->setUndoEnabled(!mySketching && myDocument.canUndo());
+    if (myToasts) myToasts->setUndoEnabled(!mySketching && !atInit && myDocument.canUndo());
     // View -> Show notifications, pushed the same way and for the same reason:
     // this is the one place that decides it, and the host reads it rather than
     // re-deriving it from an action it would otherwise have to know about.
@@ -1011,7 +1103,7 @@ void MainWindow::updateActions()
     // rather than at the click, so an undo or a redo that moves the pending
     // outline moves the highlight with it.
     if (myItemsPanel) myItemsPanel->showPendingOutline(pendingOutlineId());
-    myRedoAction->setEnabled(!mySketching && myDocument.canRedo());
+    myRedoAction->setEnabled(!mySketching && !atInit && myDocument.canRedo());
 
     // Not a slot on appStateChanged - part of updateActions() itself, same
     // as updateStateLabel(), so it recomputes on every unit switch too
@@ -1019,7 +1111,22 @@ void MainWindow::updateActions()
     // first built in buildActions().
     mySnapAction->setToolTip(snapTooltipText());
 
+    // Selection mode and snap are meaningless with nothing to select or
+    // snap - part of the same "every modeling action" gate atInit closes,
+    // even though an empty document already leaves them harmless.
+    mySnapAction->setEnabled(!atInit);
+    mySolidSelectAction->setEnabled(!atInit);
+    myFaceSelectAction->setEnabled(!atInit);
+    myEdgeSelectAction->setEnabled(!atInit);
+
+    // File -> Save / Save automatically / Close furniture: available only
+    // with a furniture actually open.
+    if (myFileSaveAction) myFileSaveAction->setEnabled(!atInit);
+    if (myAutosaveAction) myAutosaveAction->setEnabled(!atInit);
+    if (myCloseFurnitureAction) myCloseFurnitureAction->setEnabled(!atInit);
+
     updateStateLabel();
+    updateWindowTitle();
     emit appStateChanged();
 }
 
@@ -1199,7 +1306,261 @@ void MainWindow::closeEvent(QCloseEvent* event)
         myAppearanceWrite->stop();
         writeAppearanceNow();
     }
+    // Closing the app mid-furniture is Close furniture's own ruling, not a
+    // separate one: flush anything still waiting inside the autosave
+    // debounce, and with autosave off, save outright. Never lose work, never
+    // block - this app has no modal "save before closing?" question to ask.
+    if (!myShowingInitScreen && !myFurnitureId.isEmpty()) {
+        if (myAutosaveTimer && myAutosaveTimer->isActive()) {
+            myAutosaveTimer->stop();
+            flushAutosave();
+        }
+        if (!myAutosaveOn) performSave(false);
+    }
     QMainWindow::closeEvent(event);
+}
+
+void MainWindow::buildInitScreen()
+{
+    myInitScreen = new InitScreen(&myStore, myView);
+    myInitScreen->setGeometry(myView->rect());
+
+    connect(myInitScreen, &InitScreen::furnitureChosen, this, &MainWindow::openFurniture);
+    connect(myInitScreen, &InitScreen::furnitureCreated, this, &MainWindow::openFurniture);
+
+    // The gallery fills the whole viewport, not one anchored corner, so it
+    // does not go through ViewportOverlay's anchor system - but it still has
+    // to track the viewport's size, and laidOut() is where every other
+    // widget that positions itself against the viewport already does that
+    // (see the connections at the end of buildOverlay()). Only reads
+    // geometry, so it cannot recurse back into updateActions().
+    connect(myOverlay, &ViewportOverlay::laidOut, this, [this] {
+        if (myInitScreen) myInitScreen->setGeometry(myView->rect());
+    });
+}
+
+void MainWindow::showInitScreen()
+{
+    // Flush whatever furniture is currently open before leaving it - the
+    // same rule closeCurrentFurniture() follows, reached here too (a
+    // furniture can be left behind by more than one route, and this is the
+    // one both converge on).
+    if (myAutosaveTimer && myAutosaveTimer->isActive()) {
+        myAutosaveTimer->stop();
+        flushAutosave();
+    }
+
+    myShowingInitScreen = true;
+    myFurnitureId.clear();
+    myFurnitureName.clear();
+    mySavedRevision = 0;
+
+    // A FRESH document, not a cleared one: DocumentModel::clear() leaves the
+    // undo stack standing, and the next furniture opened must not inherit
+    // checkpoints that were never its own.
+    myDocument = DocumentModel();
+    mySelectedOutlineId = 0;
+    myFaceLocked = false;
+    mySketching = false;
+    mySketch.reset();
+    myView->setSketchMode(false, mySketch.plane());
+    myView->clearPreview();
+    myView->clearSelection();
+    resyncView();
+
+    if (myInitScreen) {
+        myInitScreen->setGeometry(myView->rect());
+        myInitScreen->refresh();
+        myInitScreen->show();
+        myInitScreen->raise();
+    }
+
+    updateActions();
+    statusBar()->showMessage(tr("Choose a furniture to open, or start a new one"));
+}
+
+bool MainWindow::openFurniture(const QString& id)
+{
+    QString error;
+    DocumentModel loaded;
+    if (!myStore.loadFurniture(id, loaded, &error)) {
+        myToasts->show(tr("Couldn't open this furniture — %1").arg(error),
+                      Toast::Kind::Failure, false);
+        return false;
+    }
+
+    myDocument = loaded;
+    myFurnitureId = id;
+    // Read once from the library listing rather than from the manifest
+    // directly - FurnitureStore's own layout stays its private business
+    // (see FurnitureStore.h), and listFurniture() is the one place this
+    // window is allowed to read a name from.
+    myFurnitureName.clear();
+    for (const FurnitureStore::FurnitureInfo& info : myStore.listFurniture()) {
+        if (info.id == id) { myFurnitureName = info.name; break; }
+    }
+
+    mySavedRevision = myDocument.revision();
+    myShowingInitScreen = false;
+    mySelectedOutlineId = 0;
+    myFaceLocked = false;
+    mySketching = false;
+    mySketch.reset();
+    myView->setSketchMode(false, mySketch.plane());
+    myView->clearPreview();
+    myView->clearSelection();
+    resyncView();
+
+    // The reconciliation this task owns: DocumentModel is the single source
+    // of truth for visibility (Task 1's isVisible()/setVisible(), and
+    // ItemsPanel's eye button now writes through to it - see ItemsPanel.cpp)
+    // and the view is a mirror of it. resyncView() just redisplayed every
+    // item fully visible (that is what displaySolid()/displayOutline() do),
+    // so the persisted state is reapplied on top of it here.
+    for (const DocumentModel::Solid& solid : myDocument.solids())
+        myView->setSolidVisible(solid.id, myDocument.isVisible(solid.id));
+    for (const DocumentModel::Outline& outline : myDocument.outlines())
+        myView->setOutlineVisible(outline.id, myDocument.isVisible(outline.id));
+
+    if (myInitScreen) myInitScreen->hide();
+
+    myView->fitAll();
+    updateActions();
+    emit documentChanged();
+    statusBar()->showMessage(tr("Opened %1").arg(myFurnitureName));
+    return true;
+}
+
+bool MainWindow::isFurnitureDirty() const
+{
+    if (myShowingInitScreen || myFurnitureId.isEmpty()) return false;
+    return myDocument.revision() != mySavedRevision;
+}
+
+bool MainWindow::performSave(bool announce)
+{
+    if (myShowingInitScreen || myFurnitureId.isEmpty()) return false;
+
+    // Thumbnail capture reuses OcctViewWidget::saveSnapshot() - see its
+    // header. A failed capture (a null image) is not itself a save failure;
+    // saveFurniture() already treats a null thumbnail as "nothing to write
+    // there yet" rather than as a reason to refuse.
+    const QImage thumb = myView->captureThumbnail();
+    if (!myStore.saveFurniture(myFurnitureId, myDocument, thumb)) {
+        // A refusal reports here whether or not the caller wanted an
+        // announcement - CLAUDE.md's law that a Failure is never silenced
+        // applies to autosave's own background writes exactly as it does to
+        // Ctrl+S.
+        myToasts->show(tr("Couldn't save %1 — Check that its folder still exists "
+                          "and isn't read-only").arg(myFurnitureName),
+                      Toast::Kind::Failure, false);
+        return false;
+    }
+
+    mySavedRevision = myDocument.revision();
+    // Whatever the debounce was waiting to write, it just got written by
+    // this call instead - a pending autosave surviving a save right next to
+    // it would fire a moment later and write nothing new, but it would also
+    // leave the debounce armed for longer than the checkpoint that started
+    // it actually explains, which is exactly what autosavePendingMs() exists
+    // to let a test catch.
+    if (myAutosaveTimer) myAutosaveTimer->stop();
+    updateActions();   // the dirty star and the Save action both follow this
+    if (announce) {
+        const QString message = tr("Saved %1").arg(myFurnitureName);
+        statusBar()->showMessage(message);
+        // Not a document change - no Undo, and no document-revision stamp:
+        // a save does not touch the undo stack (see DocumentModel.h), so
+        // there is nothing for the pill to take back.
+        myToasts->show(message, Toast::Kind::Note, false);
+    }
+    return true;
+}
+
+bool MainWindow::saveCurrentFurniture()
+{
+    return performSave(/*announce=*/true);
+}
+
+void MainWindow::flushAutosave()
+{
+    if (myShowingInitScreen || myFurnitureId.isEmpty()) return;
+    if (!isFurnitureDirty()) return;   // nothing changed since the last write
+    performSave(/*announce=*/false);
+}
+
+void MainWindow::setAutosaveEnabled(bool enabled)
+{
+    myAutosaveOn = enabled;
+    if (myPersistProgress) {
+        QSettings settings;
+        settings.setValue(QStringLiteral("autosave"), enabled);
+    }
+    // Turning it ON while a dirty furniture is open should not leave that
+    // furniture waiting for its NEXT checkpoint before the toggle's promise
+    // takes effect - the document has already moved since the last save,
+    // and that is exactly what "save after every change" means for the
+    // change that already happened.
+    if (enabled && isFurnitureDirty()) armAutosaveTimer();
+    updateActions();
+}
+
+int MainWindow::autosavePendingMs() const
+{
+    return (myAutosaveTimer && myAutosaveTimer->isActive()) ? myAutosaveTimer->remainingTime()
+                                                            : -1;
+}
+
+void MainWindow::armAutosaveTimer()
+{
+    if (!myAutosaveTimer) {
+        myAutosaveTimer = new QTimer(this);
+        myAutosaveTimer->setSingleShot(true);
+        myAutosaveTimer->setInterval(kAutosaveWriteMs);
+        connect(myAutosaveTimer, &QTimer::timeout, this, &MainWindow::flushAutosave);
+    }
+    // start() on a running single-shot timer RESTARTS it - the whole
+    // debounce, exactly as persistAppearance()'s does.
+    myAutosaveTimer->start();
+}
+
+void MainWindow::closeCurrentFurniture()
+{
+    if (myShowingInitScreen || myFurnitureId.isEmpty()) return;
+
+    // Flush anything still waiting inside the debounce window FIRST,
+    // regardless of the toggle: a checkpoint made a moment ago must not be
+    // lost to a timer that had not fired yet, autosave on or off.
+    if (myAutosaveTimer && myAutosaveTimer->isActive()) {
+        myAutosaveTimer->stop();
+        flushAutosave();
+    }
+
+    const QString name = myFurnitureName;
+    if (!myAutosaveOn) {
+        // The ruling: never a modal question. Save first, then say so - one
+        // toast names both halves of what just happened rather than asking
+        // permission for either.
+        performSave(/*announce=*/false);
+        const QString message = tr("Saved and closed %1").arg(name);
+        statusBar()->showMessage(message);
+        myToasts->show(message, Toast::Kind::Note, false);
+    } else {
+        statusBar()->showMessage(tr("Closed %1").arg(name));
+    }
+
+    showInitScreen();
+}
+
+void MainWindow::updateWindowTitle()
+{
+    if (myShowingInitScreen || myFurnitureId.isEmpty()) {
+        setWindowTitle(tr("FurnifyMe"));
+        return;
+    }
+    setWindowTitle(QStringLiteral("%1%2 — FurnifyMe")
+                       .arg(myFurnitureName, isFurnitureDirty() ? QStringLiteral(" *")
+                                                                : QString()));
 }
 
 void MainWindow::recordProgress(const std::string& event)

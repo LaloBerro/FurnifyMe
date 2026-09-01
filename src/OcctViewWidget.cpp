@@ -50,10 +50,13 @@
   #include <Xw_Window.hxx>
 #endif
 
+#include <QDir>
 #include <QEasingCurve>
+#include <QFile>
 #include <QMouseEvent>
 #include <QPaintEvent>
 #include <QResizeEvent>
+#include <QTemporaryFile>
 #include <QVariantAnimation>
 #include <QWheelEvent>
 
@@ -1687,6 +1690,25 @@ bool OcctViewWidget::saveSnapshot(const QString& path)
 
     myView->Redraw();
     return myView->Dump(path.toUtf8().constData()) == Standard_True;
+}
+
+QImage OcctViewWidget::captureThumbnail()
+{
+    QTemporaryFile temp(QDir::tempPath() + QStringLiteral("/furnifyme-thumb-XXXXXX.png"));
+    if (!temp.open()) return QImage();
+    const QString path = temp.fileName();
+    // Closed rather than left open: V3d_View::Dump opens the path itself and
+    // "the output directory does not exist" is not the only way it can
+    // refuse to write - a file handle already open on it is another.
+    temp.close();
+
+    if (!saveSnapshot(path)) {
+        QFile::remove(path);
+        return QImage();
+    }
+    const QImage image(path);
+    QFile::remove(path);
+    return image;
 }
 
 void OcctViewWidget::applyCameraState()

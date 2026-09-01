@@ -175,6 +175,23 @@ void WalkthroughPanel::refresh()
         return;
     }
 
+    // The init screen's own gate (Milestone 3, item 2). Checked AFTER
+    // hasLearned() and BEFORE everything else - a returning, already-learned
+    // user has to read as finished the instant this panel exists, before it
+    // has ever been shown and before any furniture is open, because that is
+    // exactly what the returning-user probe asserts; ordered the other way
+    // round, this branch would return before myFinished was ever set and a
+    // learned user would read as not-finished for as long as the gallery
+    // happened to be up. Not learned, and the gallery is showing: hide and
+    // say nothing about myFinished either way, since a fresh guide has not
+    // been rejected, it simply has nowhere to stand yet - document().count()
+    // is 0 for every furniture that has not been opened, so there is no
+    // "step 4" to measure against.
+    if (myWindow->isShowingInitScreen()) {
+        hide();
+        return;
+    }
+
     // hasLearned() just went false while the panel was still finished/hidden
     // from an earlier completion - "Show tips again" resetting progress out
     // from under it is the case that matters, but anything that flips the
@@ -186,7 +203,18 @@ void WalkthroughPanel::refresh()
     // spot - a reset immediately followed by re-completion is the bug this
     // replaces, not a variant of the fix. The steps get their real derivation
     // on the next refresh(), against the baseline captured here.
-    if (myFinished) {
+    //
+    // isHidden() joins myFinished here for the same reason: the init-screen
+    // gate above hides this panel by the same mechanism a completion does
+    // (hide(), which sets WA_WState_ExplicitShowHide), and nothing else in
+    // this function ever calls show() again on its own - the "derive from
+    // live state" tail below only update()s. Leaving the init screen for a
+    // furniture that is not yet learned needs its own baseline exactly as a
+    // restore does: document().count() is whatever that furniture already
+    // held, and treating it as step 4's target rather than as the panel's
+    // own starting line would let an already-populated furniture finish the
+    // guide on the spot, the same bug the myFinished branch exists to avoid.
+    if (myFinished || isHidden()) {
         myFinished = false;
         myStartedSketch = false;
         myPlacedPoints = false;

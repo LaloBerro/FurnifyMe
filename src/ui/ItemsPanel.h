@@ -37,7 +37,12 @@ class ItemsPanel : public QWidget {
     Q_OBJECT
 
 public:
-    ItemsPanel(const DocumentModel* document, OcctViewWidget* view, QWidget* parent = nullptr);
+    // `document` is NOT const, since Milestone 3: the eye button is a write
+    // path now, not only a read. DocumentModel owns visibility
+    // (isVisible()/setVisible(), Task 1) and the view is a mirror of it -
+    // this panel writes both on every toggle, in that order, so a save
+    // captures exactly what the eye buttons show.
+    ItemsPanel(DocumentModel* document, OcctViewWidget* view, QWidget* parent = nullptr);
 
     void refresh();
     int rowCount() const { return static_cast<int>(myRowList.size()); }
@@ -122,7 +127,7 @@ private:
         QString text;      // what rowTextAt() reports
     };
 
-    const DocumentModel* myDocument = nullptr;
+    DocumentModel* myDocument = nullptr;
     OcctViewWidget* myView = nullptr;
     class QLabel* myTitle = nullptr;
     QVBoxLayout* myOuter = nullptr;

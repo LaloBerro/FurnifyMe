@@ -9,6 +9,7 @@
 #include <QMainWindow>
 
 #include "DocumentModel.h"
+#include "FurnitureStore.h"
 #include "Measure.h"
 #include "SketchController.h"
 #include "UserProgress.h"
@@ -17,6 +18,7 @@ class AppBar;
 class AppearancePanel;
 class BevelArrow;
 class ExtrudePreview;
+class InitScreen;
 class OcctViewWidget;
 class PullArrow;
 class QAction;
@@ -27,7 +29,13 @@ class MainWindow : public QMainWindow {
     Q_OBJECT
 
 public:
-    explicit MainWindow(QWidget* parent = nullptr, bool persistProgress = true);
+    // `libraryRoot` is FurnitureStore's INJECTED directory - see
+    // FurnitureStore.h. Empty (the default) means the real one:
+    // QStandardPaths::DocumentsLocation + "/FurnifyMe". Every test passes a
+    // QTemporaryDir path here, the same discipline persistProgress=false
+    // already established for QSettings.
+    explicit MainWindow(QWidget* parent = nullptr, bool persistProgress = true,
+                        const QString& libraryRoot = QString());
 
     // Operations, split from the dialogs that ask for their parameters. The GUI
     // smoke test drives these directly; a modal QInputDialog cannot be answered
@@ -266,6 +274,55 @@ public:
     // preference, not a learned capability.
     void setDisplayUnit(Measure::Unit unit);
 
+    // --- the init screen, save and autosave (Milestone 3) -------------------
+    //
+    // The init screen is a STATE, not a dialog and not a separate window -
+    // CLAUDE.md's no-modal law applies to it exactly as to everything else.
+    // showInitScreen() puts the window into it: the live document is
+    // replaced with a fresh, empty one (never merely cleared - clear()
+    // leaves the undo stack behind it, and the next furniture opened must
+    // not inherit checkpoints that were never its own) and the gallery is
+    // raised over the viewport. openFurniture() is the one path both an
+    // existing card and a freshly created one go through, so a new
+    // furniture and a reopened one round-trip identically.
+    void showInitScreen();
+    bool openFurniture(const QString& id);
+    bool isShowingInitScreen() const { return myShowingInitScreen; }
+    QString currentFurnitureId() const { return myFurnitureId; }
+    QString currentFurnitureName() const { return myFurnitureName; }
+    // Dirty = the live document's revision differs from the revision as of
+    // the last save - revision() is monotonic (DocumentModel.h), so this can
+    // never be fooled by an undo landing back on a number it already used.
+    bool isFurnitureDirty() const;
+
+    // File -> Save (Ctrl+S). The one save path this window has - autosave's
+    // debounce timer and "close with autosave off" both call this rather
+    // than carrying a copy of the write each, so a save always means the
+    // same thing: capture the document, capture a thumbnail through
+    // OcctViewWidget::captureThumbnail(), advance the saved-revision mark.
+    // Read-only while no furniture is open or the init screen is showing.
+    bool saveCurrentFurniture();
+    // File -> Close furniture. With autosave off this SAVES FIRST - never a
+    // modal question - and the toast says so; either way it returns to the
+    // init screen. Flushes any autosave still waiting inside its debounce
+    // window first, so a furniture closed a moment after its last edit never
+    // loses that edit to a timer that had not fired yet.
+    void closeCurrentFurniture();
+    // File -> Save automatically (checkable, persisted). On, a debounced
+    // (400 ms) save runs after every document change; see
+    // kAutosaveWriteMs.
+    void setAutosaveEnabled(bool enabled);
+    bool autosaveEnabled() const { return myAutosaveOn; }
+    static constexpr int kAutosaveWriteMs = 400;
+    // The live autosave countdown in ms, or -1 when nothing is pending -
+    // ToastHost::remainingMs()'s own shape, for the same reason: the suite
+    // asserts the ARMED timer rather than waiting kAutosaveWriteMs real
+    // milliseconds for it to fire.
+    int autosavePendingMs() const;
+
+    InitScreen* initScreen() const { return myInitScreen; }
+    FurnitureStore& furnitureStore() { return myStore; }
+
 signals:
     // DocumentModel is Qt-free by design, so the window announces its changes.
     void documentChanged();
@@ -467,6 +524,36 @@ private:
     // a Failure is not this preference's to suppress.
     void setShowNotifications(bool show);
 
+    // Builds myInitScreen and wires its two signals - see the header for why
+    // it is a state rather than a dialog. Called once, from the
+    // constructor, after buildOverlay() so it can be raised above every
+    // overlay widget that already exists.
+    void buildInitScreen();
+    // The one save implementation - Ctrl+S, autosave's debounce timer and
+    // "close with autosave off" all call this rather than each carrying its
+    // own copy. `announce` is what tells Ctrl+S's success apart from
+    // autosave's: a Note ("Saved Furniture NN") only when the user asked for
+    // it directly, never once per debounced background write, while a
+    // FAILURE is never conditional on it - CLAUDE.md's law that a refusal
+    // must report somewhere applies to a silent autosave exactly as it does
+    // to everything else.
+    bool performSave(bool announce);
+    // The debounce timer's own timeout, and closeCurrentFurniture()'s flush.
+    // A no-op when nothing is actually dirty, so closing a furniture the
+    // instant after its own autosave just ran does not write it twice.
+    void flushAutosave();
+    // Builds myAutosaveTimer on first use (same lazy-build reasoning as
+    // persistAppearance()'s myAppearanceWrite) and (re)starts it - the ONE
+    // place either happens, so the two call sites that arm it (a checkpoint,
+    // and the toggle turning on over an already-dirty document) cannot drift
+    // out of step with each other's interval or wiring.
+    void armAutosaveTimer();
+    // The window title from the furniture name and the dirty star - the
+    // ONE place either is written, called from updateActions() the way
+    // updateStateLabel() is, so a save, an undo/redo, or opening a different
+    // furniture can never leave it stale.
+    void updateWindowTitle();
+
     // Flies the camera square onto a face: the eye moves onto the face's
     // OUTWARD normal, the target to the face's centre, the distance out far
     // enough to frame it, orthographic for as long as the user does not orbit.
@@ -478,6 +565,37 @@ private:
     OcctViewWidget* myView = nullptr;
     DocumentModel myDocument;
     SketchController mySketch;
+
+    // The managed library - see FurnitureStore.h. A plain value member, not
+    // a pointer: the class holds nothing but its own root directory string,
+    // so there is no ownership question to resolve between "the real one"
+    // and "the one a test injected" - the constructor just picks which
+    // string to build it from.
+    FurnitureStore myStore;
+    InitScreen* myInitScreen = nullptr;
+    // The init screen is the window's state whenever no furniture is open -
+    // true from construction (nothing is open yet) until openFurniture()
+    // succeeds, and true again the moment showInitScreen() runs.
+    bool myShowingInitScreen = true;
+    // Empty exactly when myShowingInitScreen is true - the two are kept in
+    // step by showInitScreen()/openFurniture() rather than derived from one
+    // another, because "derived from an empty id" reads backwards from what
+    // actually causes what.
+    QString myFurnitureId;
+    QString myFurnitureName;
+    // DocumentModel::revision() as of the last successful save - see
+    // isFurnitureDirty(). 0 while no furniture is open, which is harmless:
+    // isFurnitureDirty() refuses to answer true for that state regardless.
+    int mySavedRevision = 0;
+    // File -> Save automatically, persisted under the same guard as every
+    // other preference. Defaults to on: CLAUDE.md's ruling for this branch
+    // is "never lose work, never block", and a new user who has not found
+    // the toggle yet should get the safer default.
+    bool myAutosaveOn = true;
+    // The debounce behind autosave - built on first use, exactly as
+    // myAppearanceWrite is, and for the same reason: a window that never
+    // sees a checkpoint while autosave is on never creates one.
+    class QTimer* myAutosaveTimer = nullptr;
 
     // Which outline item Extrude would consume, when the user has chosen one
     // from the drawer. Not the pending face itself and not a cursor into the
@@ -528,6 +646,11 @@ private:
     QAction* myLockFaceAction = nullptr;
     QAction* myUnlockFaceAction = nullptr;
     QAction* myAppearanceAction = nullptr;
+    // File -> Save / Save automatically / Close furniture - see the public
+    // methods above, which every one of these three triggers into.
+    QAction* myFileSaveAction = nullptr;
+    QAction* myAutosaveAction = nullptr;
+    QAction* myCloseFurnitureAction = nullptr;
     // Checkable, and the single source of the base projection's truth: the
     // View menu entry, the O shortcut and the bar's readout button are all
     // this one action, exactly as the unit chip is the Units entries.
