@@ -144,6 +144,14 @@ cmake --build --preset windows
 .\build\RelWithDebInfo\gui_smoke.exe <output-dir-for-snapshots>
 ```
 
+**The no-input law runs both ways.** `gui_smoke` installs an application-wide filter that
+drops every *spontaneous* mouse, wheel and key event, so the machine's own user cannot drive
+the app under test either. That is not belt-and-braces: Windows' "scroll inactive windows on
+hover" delivers real wheel events to whatever the resting cursor happens to sit over, with
+no focus and no click, and a single one of them moved the camera between `show()` and the
+`startup distance is 700mm` check — the 1.75× flake that cascaded to 43 failures, and
+scale-dependent because the window covers more screen at 1.75×.
+
 A window still appears - OCCT's `V3d_View` needs a real native window and a GL surface, so
 `-platform offscreen` cannot work - but it is shown with `WA_ShowWithoutActivating` and
 never takes focus. `gui_smoke` is deliberately **not** registered with ctest: it needs a GPU
@@ -244,8 +252,16 @@ a user who reads "Body 03 rounded" has no word to look for in the interface.
 `ModelingOps::BooleanKind::Fuse` and `::Cut` keep their kernel-facing names — the
 user never sees them, and renaming them would churn the geometry library and its
 tests for no visible gain. The enforced bans match the bare word (case-insensitive):
-`OCCT`, `Fuse`, `Solid`, `mm3`, `(s)`, `Merge`, and `Join` are forbidden everywhere
-in action text and widget tooltips, regardless of capitalization.
+`OCCT`, `Fuse`, `Solid`, `mm3`, `(s)`, `Merge`, `Join` and `bevel` are forbidden
+everywhere in action text and widget tooltips, regardless of capitalization.
+
+**`round` and `flatten` are banned too, but matched at a word boundary.** They are the
+Never column for Fillet and Chamfer and they shipped for a whole branch inside two Failure
+sentences ("will only round some of them") because the sweep could not see them — while
+substring matching would red-flag "background", "ground" and "surround", which this app is
+entitled to say. `gui_smoke`'s `usesBannedWord()` is the one matcher every sweep goes
+through, and its boundary rule is pinned in both directions: a rule living at one call site
+is not a rule.
 
 Numbers are formatted by `Measure` (`src/Measure.h`), never by hand at a call
 site: lengths as `340 mm` / `1,200 mm` / `18.5 mm`, sizes as `340 × 220 × 18 mm`.
@@ -880,7 +896,23 @@ guard is unchanged, and every outline carries **its own plane**, captured at clo
 extrude can never sweep along a plane the user changed afterwards (the Milestone-2 bug
 class, retired by construction). Outlines are not pickable viewport geometry; the drawer
 row is their handle, and the pending one wears the accent inset bar. Start Sketch no
-longer discards a waiting outline — refusal copy must say E-or-Ctrl+Z, never Ctrl+K.
+longer discards a waiting outline.
+
+**An outline has two exits, and Delete is the second one.** Extrude was the only one, and
+that was a trap: every direct-modeling gate (pull arrow, bevel arrow, transform gizmo,
+Lock to Face) refuses while an outline waits, while the operations that are *not* gated —
+booleans, Delete — push onto the undo stack. So "Ctrl+Z to take it back", which both
+refusals advised, stopped being the outline's undo the moment the user did anything else:
+close an outline, Union two bodies, and every gate is shut with no way to open one.
+`Delete Selected` therefore extends to the pending outline **when no body is selected** —
+the one state in which it had no work of its own, so the second meaning displaces nothing.
+One checkpoint, a `Deleted Outline 01` Note with Undo, and `updateActions()` — the single
+place that decides availability — owns both the enablement and the tooltip that says which
+of the two meanings is live. Refusal copy says **E-or-Delete**; never Ctrl+K, never Ctrl+Z.
+
+**`fitAll()` frames outlines too.** It walked `mySolids` alone, so an outline-only document
+fell to the ±250 fallback box and an outline drawn outside it was unreachable by the one
+control whose job is finding things. Both maps are what the widget displays.
 
 **The scene is three Z-layers**: Default (bodies) → grid (depth test on, depth **write**
 off) → sketch work (outline, markers, dimension, pending face, modeling preview). The

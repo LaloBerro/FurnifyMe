@@ -1749,8 +1749,23 @@ void OcctViewWidget::fitAll()
 
     // Frame everything we display ourselves (the grid and view cube are
     // presentation furniture, not content).
+    //
+    // OUTLINES COUNT. They are document items since Phase 7, and this walked
+    // mySolids alone - so a document holding only outlines fell straight to
+    // the +/-250 fallback below, and an outline drawn outside that box could
+    // not be brought back by the one control whose entire job is to find
+    // things. Both maps hold what this widget displays; a visibility toggle
+    // erases the presentation without removing the entry, so Fit All frames
+    // the whole document rather than the currently-visible part of it - which
+    // is the behaviour the bodies have always had, and the two should not
+    // differ on the same question.
     Bnd_Box box;
     for (const auto& entry : mySolids) {
+        Bnd_Box b;
+        BRepBndLib::Add(entry.second->Shape(), b);
+        box.Add(b);
+    }
+    for (const auto& entry : myOutlines) {
         Bnd_Box b;
         BRepBndLib::Add(entry.second->Shape(), b);
         box.Add(b);

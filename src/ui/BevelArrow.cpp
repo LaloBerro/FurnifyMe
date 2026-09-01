@@ -476,8 +476,16 @@ void BevelArrow::syncFieldTooltip()
     if (!myField) return;
     // The one place the two operations are taught in words. Follows the kind,
     // so the tooltip can never describe the other one.
-    myField->setToolTip(myFillet ? tr("Fillet radius — rounds the edge")
-                                 : tr("Chamfer size — flattens the edge"));
+    //
+    // "rounds the edge" / "flattens the edge" is what this said until the
+    // whole-branch review taught the sweep to see `round` and `flatten` at a
+    // word boundary. They are the Never column for Fillet and Chamfer: a user
+    // who reads "rounds" has no control anywhere in the app spelled that way,
+    // and the operation is the only word that leads anywhere. The teaching
+    // sentence says what the SHAPE becomes instead, which is the part a name
+    // cannot carry.
+    myField->setToolTip(myFillet ? tr("Fillet radius — the edge becomes a curve")
+                                 : tr("Chamfer size — the edge becomes a flat"));
 }
 
 void BevelArrow::reposition()

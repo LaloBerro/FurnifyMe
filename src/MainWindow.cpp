@@ -931,13 +931,18 @@ void MainWindow::updateActions()
     // The outline reason names the remedies that WORK. "Ctrl+K to start a new
     // one" was one of them until this phase - see canChangeSketchPlane() for
     // why it stopped being one and why advice that does nothing is worse than
-    // none.
+    // none. "Ctrl+Z to take it back" went the same way for the same reason,
+    // one review later: it is only the outline's undo while the outline is
+    // the TOP of the stack, and nothing gates the operations that push onto
+    // it - close an outline, Union two bodies, and Ctrl+Z means the Union.
+    // Delete is the remedy that is always the outline's, whatever has
+    // happened since (see onDeleteSelected()).
     const QString sketchReason =
         tr("Unavailable while you're drawing — press Enter to close this outline, "
            "or Esc to cancel it");
     const QString pendingReason =
         tr("Unavailable while an outline is waiting — press E to extrude it, "
-           "or Ctrl+Z to take it back");
+           "or Delete to discard it");
     const QString planeReason = mySketching ? sketchReason : pendingReason;
     myLockFaceAction->setToolTip(planeCanMove ? lockTooltipText() : planeReason);
     myUnlockFaceAction->setToolTip(planeCanMove ? unlockTooltipText() : planeReason);
@@ -947,7 +952,24 @@ void MainWindow::updateActions()
     myIntersectAction->setEnabled(booleanReady);
 
     myExportStepAction->setEnabled(myDocument.count() > 0);
-    myDeleteAction->setEnabled(!mySketching && selectedCount > 0);
+    // Delete has TWO meanings and one of them is new: bodies when bodies are
+    // selected, and the waiting outline when nothing is. It is the outline's
+    // only exit besides Extrude, and the whole reason it needed one is in
+    // onDeleteSelected() - the operations that push onto the undo stack are
+    // not gated on a waiting outline, so "Ctrl+Z to take it back" stops being
+    // true the moment the user does anything else. Which meaning applies is
+    // decided HERE, in the one place that decides what is available, and
+    // onDeleteSelected() asks the same question the same way.
+    const bool deleteTargetsOutline = selectedCount == 0 && hasPendingFace();
+    myDeleteAction->setEnabled(!mySketching && (selectedCount > 0 || hasPendingFace()));
+    // A control whose meaning moves has to say which meaning is live, or the
+    // user reads one label and gets the other - the same argument the Lock to
+    // Face tooltip above makes for a control that is disabled.
+    myDeleteAction->setToolTip(
+        deleteTargetsOutline
+            ? tr("Discard the outline that's waiting (Del) — nothing is selected, "
+                 "so Delete takes the outline instead of a body")
+            : tr("Delete the selected bodies (Del)"));
     // Mid-sketch, Undo removes the last placed point (onUndo() reroutes to
     // onUndoSketchPoint); outside a sketch it undoes a document change. The
     // menu text stays "Undo" either way - the user's word for "take that
@@ -1313,14 +1335,28 @@ void MainWindow::resyncView()
 
 void MainWindow::onDeleteSelected()
 {
-    // BODIES only, deliberately. Outlines are document items now, but they are
-    // not pickable viewport geometry this phase - the drawer row is their
-    // handle - so there is no gesture that could put one in this selection.
-    // An outline leaves the document by being extruded or by Ctrl+Z, and
-    // giving Delete a second, drawer-only meaning is a separate decision from
-    // the one this phase made.
+    // BODIES when bodies are selected; the WAITING OUTLINE when nothing is.
+    //
+    // Outlines are not pickable viewport geometry, so no gesture can put one
+    // in this selection - which is exactly why they had no Delete route at
+    // all, and why they needed one. Every direct-modeling gate (the pull
+    // arrow, the bevel arrow, the transform gizmo, Lock to Face) refuses
+    // while an outline waits, and the operations that are NOT gated -
+    // booleans, Delete - push onto the undo stack. Close an outline, Union
+    // two bodies, and the advice those refusals used to give, "Ctrl+Z to take
+    // it back", undoes the Union instead: every gate shut and no way to open
+    // one. Extrude was the only exit, and "make a body you do not want" is
+    // not an exit.
+    //
+    // Nothing-selected is the one state in which Delete had no work of its
+    // own, so the second meaning displaces nothing. updateActions() decides
+    // which one is live and says so in the tooltip; this asks the same
+    // question the same way rather than keeping a second copy of the rule.
     const std::vector<int> ids = myView->selectedSolidIds();
-    if (ids.empty()) return;
+    if (ids.empty()) {
+        deletePendingOutline();
+        return;
+    }
 
     const std::string deletedName = ids.size() == 1 ? myDocument.nameOf(ids.front())
                                                     : std::string();
@@ -1340,6 +1376,42 @@ void MainWindow::onDeleteSelected()
                         : tr("Deleted %1 bodies").arg(ids.size());
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+}
+
+bool MainWindow::deletePendingOutline()
+{
+    const int id = pendingOutlineId();
+    if (id == 0) return false;
+
+    // Read BEFORE the removal: once the outline is out of the document its
+    // name cannot be looked up, and a toast that named the wrong thing - or
+    // nothing - would be worse than no toast.
+    const QString name = QString::fromStdString(myDocument.outlineNameOf(id));
+
+    // One checkpoint, like every other change to the document, so one Ctrl+Z
+    // puts it back. The toast that reports it carries Undo for the same
+    // reason - CLAUDE.md's rule is that a change the user can see is a change
+    // they can take back from where it is reported.
+    myDocument.checkpoint();
+    myDocument.removeOutline(id);
+    myView->removeOutline(id);
+    // The drawer's choice went with it. Not strictly required -
+    // pendingOutlineId() validates its id against the live list on every read
+    // - but leaving a dead id behind means the NEXT outline could inherit the
+    // pending mark from an id that no longer exists if the counter ever
+    // reused one.
+    if (mySelectedOutlineId == id) mySelectedOutlineId = 0;
+    recordProgress("delete.used");
+
+    updateActions();
+    emit documentChanged();
+    // The same sentence shape the body half uses - "Deleted Body 02" and
+    // "Deleted Outline 01" are one message with one subject, not two messages
+    // the user has to learn separately.
+    const QString message = tr("Deleted %1").arg(name);
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    return true;
 }
 
 void MainWindow::onUndo()
@@ -1873,10 +1945,20 @@ QString MainWindow::bevelCombinationRefusalText(bool fillet)
     // sends them round a loop with no exit. What changes the outcome is the
     // SELECTION, so that is what the sentence asks for. No trailing period,
     // em dash between the clauses, like every other failure in this app.
+    //
+    // "will only round some of them" / "will only flatten some of them" is
+    // what this said until the whole-branch review found it: those are the
+    // Never column for Fillet and Chamfer, and a user who reads "round" has
+    // no control anywhere in the app spelled that way. The operation names
+    // itself instead. The sweep can see this pair now - `round` and `flatten`
+    // joined the banned list with word-boundary matching, so "background"
+    // stays legal and "rounded" does not.
     return fillet ? tr("These edges can't take a fillet together — the geometry "
-                       "engine will only round some of them. Try them one at a time")
+                       "engine would build it on only some of them. Try them one "
+                       "at a time")
                   : tr("These edges can't take a chamfer together — the geometry "
-                       "engine will only flatten some of them. Try them one at a time");
+                       "engine would build it on only some of them. Try them one "
+                       "at a time");
 }
 
 QString MainWindow::transformOperationName(const gp_Trsf& delta)
@@ -2298,15 +2380,24 @@ bool MainWindow::canChangeSketchPlane()
     // waiting one, so following that advice left the action just as disabled
     // as before. Advice that does nothing is worse than no advice - the user
     // does the thing, nothing changes, and now they distrust the message too.
+    // "Ctrl+Z to take it back" was the second one to fail that test: nothing
+    // gates the operations that push onto the undo stack, so one Union later
+    // Ctrl+Z means the Union. Delete is the remedy that is always the
+    // outline's - see onDeleteSelected().
+    //
     // A FAILURE, not a Note, and the reason is item 12's toggle: this is a
     // refusal - the gesture the user just made did not happen - and a refusal
     // that goes silent when notifications are off is a silent failure. It is
     // reachable from the Ctrl+double-click route, which consults no action's
     // enabled state, so "the action was disabled anyway" is not an answer here.
     // See ToastHost::show() for the rule.
+    //
+    // Punctuation, per CLAUDE.md and per every other failure sentence in this
+    // file: no trailing period, an em dash between the clauses. This one
+    // carried a period and a full stop where the dash belonged.
     myToasts->show(tr("There's an outline waiting to be extruded, and it belongs to the "
-                      "plane it was drawn on. Press E to turn it into a body, or Ctrl+Z "
-                      "to take it back, before you change the face you draw on."),
+                      "plane it was drawn on — press E to turn it into a body, or Delete "
+                      "to discard it, before you change the face you draw on"),
                   Toast::Kind::Failure, false);
     return false;
 }

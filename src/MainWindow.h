@@ -233,6 +233,20 @@ public:
     // click, and the only route to it. A no-op for an id that is not a live
     // outline.
     void selectOutline(int id);
+
+    // Discards the waiting outline - one checkpoint, one Note toast carrying
+    // Undo, nothing else in the document touched. False when none is waiting.
+    //
+    // This is the outline's EXIT, and it exists because it had none. Extrude
+    // is the only other way one leaves the document, and every
+    // direct-modeling gate (the pull arrow, the bevel arrow, the transform
+    // gizmo, Lock to Face) refuses while one waits - while booleans and
+    // Delete, which are not gated, push onto the undo stack and take
+    // "Ctrl+Z to take it back" with them. Reached from Delete Selected when
+    // NO BODIES are selected; see onDeleteSelected() for why that state is
+    // the right one to give the second meaning to.
+    bool deletePendingOutline();
+
     bool isSketching() const { return mySketching; }
     OcctViewWidget* view() const { return myView; }
     class ItemsPanel* itemsPanel() const { return myItemsPanel; }

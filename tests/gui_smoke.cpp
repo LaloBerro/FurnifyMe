@@ -91,6 +91,8 @@
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepGProp.hxx>
 #include <BRep_Tool.hxx>
@@ -140,6 +142,28 @@ int g_failures = 0;
 // happens and whether or not anybody remembered to pin it.
 int g_checks = 0;
 
+// Checks this run did not execute because the MACHINE could not offer what
+// they need - a second installed font family to preview, a composited window
+// capture off Windows. Counted, named on stdout, and added to g_checks before
+// the floor is compared.
+//
+// The floor had zero headroom and two environment-dependent blocks under it,
+// so a perfectly healthy run on a box with one font installed failed with
+// "checks 1267 < floor 1272" - a message that says "a guard stopped letting
+// its checks run" about a machine that simply has fewer fonts. The counter
+// exists so the two cases stop looking identical: a SILENT skip still drops
+// the total and still fails, while a skip that names itself is accounted for
+// and prints its reason. Never reach for this to quiet a guard whose
+// condition your own change made false - that is the drop the floor is for.
+int g_skippedByEnvironment = 0;
+
+void skipByEnvironment(int checks, const QString& why)
+{
+    g_skippedByEnvironment += checks;
+    std::printf("[skip] %d check%s not run - %s\n", checks, checks == 1 ? "" : "s",
+                qPrintable(why));
+}
+
 // The floor a full run must reach.
 //
 // HOW TO UPDATE IT: add your checks, run the suite at native scale, read the
@@ -148,10 +172,13 @@ int g_checks = 0;
 // times (checkNoBlackLine over however many captures a run takes) cannot make
 // it brittle.
 //
+// Compared against g_checks + g_skippedByEnvironment, not g_checks alone -
+// see skipByEnvironment() above for the difference that draws.
+//
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 1272;
+constexpr int kCheckFloor = 1318;
 
 void check(bool condition, const QString& what)
 {
@@ -159,6 +186,52 @@ void check(bool condition, const QString& what)
     std::printf("%-6s %s\n", condition ? "[ ok ]" : "[FAIL]", qPrintable(what));
     if (!condition) ++g_failures;
 }
+
+// Drops every mouse, wheel and key event that arrives from the WINDOW SYSTEM
+// rather than from this file.
+//
+// Two reasons, and the second one is why it is not merely belt-and-braces.
+//
+// It enforces the law this harness was built around: nothing the suite does
+// goes through the OS input queue, so the machine stays usable while it runs
+// - and the converse has to hold too, or the machine's user is a second
+// driver of the app under test. `spontaneous()` is exactly that distinction:
+// true for anything the platform posted, false for every sendEvent() below.
+//
+// And it fixes the 1.75x flake. "startup distance is 700mm" failed
+// intermittently at that scale and cascaded to 43 downstream failures when it
+// did. The camera's distance is mutated by exactly one thing between show()
+// and that check - a wheel event - and Windows' "scroll inactive windows on
+// hover" delivers real ones to whatever the pointer happens to be over,
+// without focus and without a click. The window is parked at 40,40 and is
+// larger on screen at 1.75x, so it covers more of where a resting cursor
+// tends to sit: the same defect, more likely to be hit, which is precisely
+// the scale-dependence the flake showed. Determinism in both directions -
+// the suite does not touch the user's input, and the user's input does not
+// touch the suite.
+class SpontaneousInputBlocker : public QObject {
+public:
+    using QObject::QObject;
+
+protected:
+    bool eventFilter(QObject*, QEvent* event) override
+    {
+        if (!event->spontaneous()) return false;
+        switch (event->type()) {
+        case QEvent::MouseButtonPress:
+        case QEvent::MouseButtonRelease:
+        case QEvent::MouseButtonDblClick:
+        case QEvent::MouseMove:
+        case QEvent::Wheel:
+        case QEvent::KeyPress:
+        case QEvent::KeyRelease:
+        case QEvent::ShortcutOverride:
+            return true;   // eaten: it was not this suite's
+        default:
+            return false;
+        }
+    }
+};
 
 // RAII for the one probe below that needs to seed QSettings before
 // constructing a persistProgress=true MainWindow: saves the real
@@ -375,6 +448,22 @@ void sketchQuad(MainWindow& window, double x0, double y0, double x1, double y1)
     clickAt(view, QPointF(x0 * w, y1 * h));
 }
 
+// The eye on the drawer's TOP row. Each row carries exactly one QPushButton
+// and outline rows come first, so the first visible one is the topmost row's.
+//
+// One implementation, because two places wanted precisely this scan and a
+// second copy is a scan that can drift into looking for something else - the
+// pair differed already: one pinned its result with a check and the other
+// silently did nothing when it found none.
+QPushButton* firstVisibleRowToggle(QWidget* drawer)
+{
+    if (!drawer) return nullptr;
+    for (QPushButton* button : drawer->findChildren<QPushButton*>()) {
+        if (button->isVisible()) return button;
+    }
+    return nullptr;
+}
+
 // Sketch-quad-then-extrude, for probes that only care about ending up with a
 // given number of bodies and would otherwise repeat this boilerplate inline.
 // The one copy of the banned list. Two blocks sweep with it now - the
@@ -386,10 +475,50 @@ QStringList bannedWords()
     // pair of operations (BevelArrow, bevelAxis) and it must never reach the
     // user, who is offered a Fillet that rounds an edge or a Chamfer that
     // flattens one - two operations with two names, not one vague one.
+    //
+    // "round" and "flatten" joined it after the whole-branch review found two
+    // Failure sentences saying "will only round some of them" / "will only
+    // flatten some of them" - the Never column for Fillet and Chamfer,
+    // shipped for a whole branch because the sweep could not see them. They
+    // are matched at a WORD BOUNDARY, not as substrings: the other seven are
+    // code words nothing legitimate contains, while "background", "ground"
+    // and "surround" are ordinary copy this app is entitled to use. See
+    // usesBannedWord().
     return {QStringLiteral("Fuse"),  QStringLiteral("Solid"),
             QStringLiteral("OCCT"),  QStringLiteral("mm3"),
             QStringLiteral("(s)"),   QStringLiteral("Merge"),
-            QStringLiteral("Join"),  QStringLiteral("bevel")};
+            QStringLiteral("Join"),  QStringLiteral("bevel"),
+            QStringLiteral("round"), QStringLiteral("flatten")};
+}
+
+// Which of the banned words are matched at a word boundary rather than as a
+// bare substring. Only the two English ones need it, and only at the FRONT of
+// the word: "rounded", "rounds" and "flattening" are all the ban's subject,
+// while "background" and "surround" are not.
+bool bannedWordNeedsBoundary(const QString& word)
+{
+    return word.compare(QStringLiteral("round"), Qt::CaseInsensitive) == 0 ||
+           word.compare(QStringLiteral("flatten"), Qt::CaseInsensitive) == 0;
+}
+
+// THE matcher. Every sweep in this file goes through it, so the boundary rule
+// cannot hold at one surface and not another - which is exactly how the two
+// refusal sentences above survived: a rule that lives at one call site is not
+// a rule.
+bool usesBannedWord(const QString& text, const QString& word)
+{
+    if (!bannedWordNeedsBoundary(word)) return text.contains(word, Qt::CaseInsensitive);
+
+    // Hand-rolled rather than a QRegularExpression, because the boundary this
+    // wants is one-sided (a preceding letter or digit disqualifies; a
+    // following one does not) and \b would need spelling out either way.
+    for (int at = text.indexOf(word, 0, Qt::CaseInsensitive); at >= 0;
+         at = text.indexOf(word, at + 1, Qt::CaseInsensitive)) {
+        if (at == 0) return true;
+        const QChar before = text.at(at - 1);
+        if (!before.isLetterOrNumber()) return true;
+    }
+    return false;
 }
 
 bool buildBody(MainWindow& window, double x0, double y0, double x1, double y1, double height)
@@ -494,7 +623,16 @@ void checkNoBlackLine(const QImage& shot, const QString& label)
     check(!shot.isNull() && shot.width() > kFrame * 4 && shot.height() > kFrame * 4,
           QStringLiteral("the %1 capture is a real window to sweep (%2x%3)")
               .arg(label).arg(shot.width()).arg(shot.height()));
-    if (shot.isNull()) return;
+    if (shot.isNull()) {
+        // The sweep below cannot run, and on a machine with no composited
+        // capture (printWindowCapture()'s non-Windows path, or a
+        // PrintWindow that came back empty) that is the environment, not a
+        // guard that went quiet. Accounted rather than silently missing -
+        // the check above has already reported it as a failure.
+        skipByEnvironment(1, QStringLiteral("no composited capture to sweep for the %1")
+                                 .arg(label));
+        return;
+    }
 
     QPoint at;
     const int run = longestBlackRun(shot, kFrame, at);
@@ -724,6 +862,11 @@ int main(int argc, char* argv[])
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) qputenv("QT_QPA_PLATFORM", "xcb");
 #endif
     QApplication app(argc, argv);
+    // Before anything is shown, so not one real mouse-move, wheel or keystroke
+    // can reach the app under test - see SpontaneousInputBlocker for the law
+    // it enforces and the 1.75x flake it closes.
+    SpontaneousInputBlocker inputBlocker;
+    app.installEventFilter(&inputBlocker);
     // Exercise what actually ships: main.cpp themes the app before building the
     // window, so the test must too, or it checks an app nobody runs.
     Theme::apply(app);
@@ -843,6 +986,57 @@ int main(int argc, char* argv[])
         check(std::fabs(cam.azimuthDeg - (-45.0)) < 1e-6, "startup azimuth is -45");
         check(std::fabs(cam.elevationDeg - 30.0) < 1e-6, "startup elevation is +30");
         check(std::fabs(cam.distance - 700.0) < 1e-6, "startup distance is 700mm");
+    }
+
+    // --- Fit All knows outlines exist -----------------------------------------
+    // Whole-branch review, Important 3. fitAll() walked mySolids alone, so a
+    // document holding only outlines fell straight through to the +/-250
+    // fallback box - and an outline drawn outside it could not be brought
+    // back by the one control whose entire job is to find things.
+    //
+    // Run HERE, before any body exists, because that is the state the defect
+    // lives in: with a body anywhere in the document the bodies' bounds carry
+    // the frame and the outline's absence from it is invisible. Driven at the
+    // viewport, whose map fitAll() actually reads, rather than through the
+    // document - the id is the viewport's own and is removed again below.
+    {
+        const CameraState beforeFit = view->camera().state();
+        BRepBuilderAPI_MakePolygon poly;
+        poly.Add(gp_Pnt(2800.0, 2800.0, 0.0));
+        poly.Add(gp_Pnt(3200.0, 2800.0, 0.0));
+        poly.Add(gp_Pnt(3200.0, 3200.0, 0.0));
+        poly.Add(gp_Pnt(2800.0, 3200.0, 0.0));
+        poly.Close();
+        const TopoDS_Face remote = BRepBuilderAPI_MakeFace(poly.Wire(), Standard_True);
+        check(!remote.IsNull(),
+              "a 400mm outline 3,000mm out, well outside the fallback box");
+        constexpr int kProbeOutlineId = 90001;
+        view->displayOutline(kProbeOutlineId, remote);
+        settle(150);
+        check(view->outlineCount() == 1 && window.document().count() == 0,
+              "the viewport is showing one outline and no body at all");
+
+        view->fitAll();
+        settle(250);
+        const gp_Pnt outlineCentre(3000.0, 3000.0, 0.0);
+        const double toOutline = view->camera().state().target.Distance(outlineCentre);
+        check(toOutline < 100.0,
+              QStringLiteral("Fit All frames it - the camera target lands on the "
+                             "outline's own centre (%1 mm away)").arg(toOutline));
+        // The other half, and the one that makes this RED rather than merely
+        // green: without the fix the target is the fallback box's centre, on
+        // the origin, ~4,240 mm from where the outline actually is.
+        const double toOrigin = view->camera().state().target.Distance(gp_Pnt(0.0, 0.0, 5.0));
+        check(toOrigin > 1000.0,
+              QStringLiteral("and not on the +/-250 fallback box the outline-only "
+                             "document used to fall to (%1 mm from the origin)")
+                  .arg(toOrigin));
+
+        view->removeOutline(kProbeOutlineId);
+        settle(120);
+        check(view->outlineCount() == 0, "and the probe leaves no outline behind it");
+        view->camera().setState(beforeFit);
+        settle(120);
     }
 
     // --- turntable input ------------------------------------------------------
@@ -3540,7 +3734,7 @@ int main(int argc, char* argv[])
         const QString labelText = QString::fromStdString(view->dimension().labelText());
         QStringList labelOffenders;
         for (const QString& word : bannedWords()) {
-            if (labelText.contains(word, Qt::CaseInsensitive)) labelOffenders << word;
+            if (usesBannedWord(labelText, word)) labelOffenders << word;
         }
         check(labelOffenders.isEmpty(),
               QStringLiteral("the dimension label uses no banned word (\"%1\"%2)")
@@ -4425,13 +4619,19 @@ int main(int argc, char* argv[])
                     // advice from stale advice is not checking the copy.
                     const QString lockTip = lockAgain ? lockAgain->toolTip() : QString();
                     check(lockTip.contains(QStringLiteral("E to extrude")) &&
-                              lockTip.contains(QStringLiteral("Ctrl+Z")),
+                              lockTip.contains(QStringLiteral("Delete to discard it")),
                           QStringLiteral("naming the two remedies that actually work - "
-                                         "extrude it, or take it back (\"%1\")")
+                                         "extrude it, or discard it (\"%1\")")
                               .arg(lockTip));
-                    check(!lockTip.contains(QStringLiteral("Ctrl+K")),
-                          QStringLiteral("and not the one that no longer does (\"%1\")")
-                              .arg(lockTip));
+                    // Ctrl+K went first, then Ctrl+Z: Ctrl+Z is the outline's
+                    // undo only while the outline is the TOP of the stack, and
+                    // nothing gates the operations that push onto it. Both are
+                    // pinned OUT, because a copy check that cannot tell working
+                    // advice from stale advice is not checking the copy.
+                    check(!lockTip.contains(QStringLiteral("Ctrl+K")) &&
+                              !lockTip.contains(QStringLiteral("Ctrl+Z")),
+                          QStringLiteral("and neither of the two that no longer do "
+                                         "(\"%1\")").arg(lockTip));
 
                     // The double-click route never consults that enabled
                     // state, so the refusal has to live in lockToFace() too.
@@ -4442,13 +4642,15 @@ int main(int argc, char* argv[])
                     check(refusal.contains(QStringLiteral("outline")),
                           QStringLiteral("naming the cause (\"%1\")").arg(refusal));
                     // The same pinning on the toast, which carried the same
-                    // stale Ctrl+K advice.
-                    check(refusal.contains(QStringLiteral("Press E")) &&
-                              refusal.contains(QStringLiteral("Ctrl+Z")),
+                    // stale advice - Ctrl+K first, then Ctrl+Z.
+                    check(refusal.contains(QStringLiteral("press E")) &&
+                              refusal.contains(QStringLiteral("Delete to discard it")),
                           QStringLiteral("and the fixes that work (\"%1\")").arg(refusal));
-                    check(!refusal.contains(QStringLiteral("Ctrl+K")),
-                          QStringLiteral("rather than starting a new outline, which no "
-                                         "longer clears this one (\"%1\")").arg(refusal));
+                    check(!refusal.contains(QStringLiteral("Ctrl+K")) &&
+                              !refusal.contains(QStringLiteral("Ctrl+Z")),
+                          QStringLiteral("rather than starting a new outline or a Ctrl+Z "
+                                         "the next change takes over (\"%1\")")
+                              .arg(refusal));
 
                     // Important 2: mid-sketch, hasPendingFace() is TRUE - the
                     // waiting outline survives the new sketch - so an
@@ -4962,9 +5164,7 @@ int main(int argc, char* argv[])
                 // The eye on its row, found the same way the body rows' is -
                 // the first VISIBLE toggle, which is the outline's because
                 // outline rows come first.
-                QPushButton* outlineEye = nullptr;
-                for (QPushButton* b : drawer->findChildren<QPushButton*>())
-                    if (b->isVisible()) { outlineEye = b; break; }
+                QPushButton* outlineEye = firstVisibleRowToggle(drawer);
                 check(outlineEye != nullptr, "the outline row carries a visibility toggle");
                 if (outlineEye) {
                     const QPoint at =
@@ -4991,10 +5191,17 @@ int main(int argc, char* argv[])
                                   .arg(colorDistance(gone, QColor(Qt::yellow))));
                     }
 
-                    // Back on, so the rest of this block sees it.
-                    QPushButton* again = nullptr;
-                    for (QPushButton* b : drawer->findChildren<QPushButton*>())
-                        if (b->isVisible()) { again = b; break; }
+                    // Back on, so the rest of this block sees it. Re-found
+                    // rather than reused: restyleRows() rebuilds the rows on
+                    // a visibility change, so the pointer above can be a
+                    // corpse by now.
+                    QPushButton* again = firstVisibleRowToggle(drawer);
+                    // Pinned: `if (again)` with nothing asserting it takes the
+                    // check below with it - the toggle would simply never be
+                    // clicked and "clicking it again brings the outline back"
+                    // would be reporting on a click that never happened.
+                    check(again != nullptr,
+                          "the row still carries its toggle after the hide, to click back on");
                     if (again)
                         clickAt(again, QPointF(again->width() / 2.0, again->height() / 2.0));
                     settle(200);
@@ -5211,6 +5418,208 @@ int main(int argc, char* argv[])
                   .arg(drawer ? drawer->rowCount() : -1).arg(rowsAtStart));
         view->clearSelection();
         settle(120);
+    }
+
+    // --- the waiting outline has an exit, and Delete is it --------------------
+    // Whole-branch review, Important 1. Every direct-modeling gate refuses
+    // while an outline waits - the pull arrow, the bevel arrow, the transform
+    // gizmo, Lock to Face - while the operations that are NOT gated (booleans,
+    // Delete) push onto the undo stack. So the sequence below used to be a
+    // trap with no exit but Extrude: close an outline, Union two bodies, and
+    // "Ctrl+Z to take it back" - what both refusals advised - undid the Union.
+    //
+    // The whole scenario is driven, in order, rather than asserted piecewise:
+    // the defect was in the RELATIONSHIP between three things that each worked.
+    {
+        ToastHost* lockoutToasts = window.findChild<ToastHost*>();
+        check(lockoutToasts != nullptr, "there is a toast host for the lock-out probe");
+        const int bodiesBefore = static_cast<int>(window.document().count());
+        view->clearSelection();
+        settle(120);
+        check(window.document().outlineCount() == 0 && !window.hasPendingFace(),
+              "the lock-out probe starts with nothing waiting");
+
+        // Two overlapping bodies of its own, so the Union below is this
+        // block's change and not a rearrangement of an earlier block's.
+        check(buildBody(window, 0.24, 0.56, 0.36, 0.68, 20.0),
+              "a body for the Union that springs the trap");
+        check(buildBody(window, 0.30, 0.62, 0.42, 0.74, 20.0),
+              "and a second one overlapping it");
+        const std::vector<DocumentModel::Solid>& lockoutSolids = window.document().solids();
+        check(static_cast<int>(lockoutSolids.size()) == bodiesBefore + 2,
+              "both reached the document");
+        std::vector<int> unionPair;
+        if (lockoutSolids.size() >= 2) {
+            unionPair.push_back(lockoutSolids[lockoutSolids.size() - 2].id);
+            unionPair.push_back(lockoutSolids.back().id);
+        }
+
+        // THE outline that gets stranded.
+        trigger(window, QStringLiteral("Start Sketch"));
+        sketchQuad(window, 0.60, 0.56, 0.70, 0.66);
+        trigger(window, QStringLiteral("Finish Sketch"));
+        settle(200);
+        const int strandedId = window.pendingOutlineId();
+        const QString strandedName =
+            QString::fromStdString(window.document().outlineNameOf(strandedId));
+        check(strandedId != 0 && window.hasPendingFace() && !strandedName.isEmpty(),
+              QStringLiteral("an outline is closed and waiting (\"%1\")").arg(strandedName));
+
+        // The refusal copy, on both surfaces that carry it, BEFORE anything
+        // has been done to make the old advice wrong: it has to name the
+        // remedy that always works rather than the one that usually does.
+        QAction* lockAction = action(window, QStringLiteral("Lock to Face"));
+        check(lockAction != nullptr, "there is a Lock to Face action to read the reason off");
+        if (lockAction) {
+            const QString tip = lockAction->toolTip();
+            check(tip.contains(QStringLiteral("press E to extrude it")) &&
+                      tip.contains(QStringLiteral("Delete to discard it")),
+                  QStringLiteral("its disabled reason names both remedies that work "
+                                 "(\"%1\")").arg(tip));
+            check(!tip.contains(QStringLiteral("Ctrl+Z")),
+                  "and no longer sends the user to a Ctrl+Z that the next change takes over");
+        }
+        // The other surface: the Failure toast on the Ctrl+double-click route,
+        // which consults no action's enabled state. Any face reaches it - the
+        // pending-outline refusal is asked before the flatness test.
+        TopoDS_Face anyFace;
+        if (!window.document().solids().empty()) {
+            for (TopExp_Explorer it(window.document().solids().front().shape, TopAbs_FACE);
+                 it.More(); it.Next()) {
+                anyFace = TopoDS::Face(it.Current());
+                break;
+            }
+        }
+        check(!anyFace.IsNull(), "there is a face to aim the plane-change refusal at");
+        if (!anyFace.IsNull()) {
+            check(!window.lockToFace(anyFace),
+                  "locking a face is refused while an outline waits");
+            const QString refusal = lockoutToasts ? lockoutToasts->currentText() : QString();
+            check(lockoutToasts && lockoutToasts->isShowing() &&
+                      refusal.contains(QStringLiteral("press E to turn it into a body")) &&
+                      refusal.contains(QStringLiteral("Delete to discard it")),
+                  QStringLiteral("and the toast names the same two remedies (\"%1\")")
+                      .arg(refusal));
+            check(!refusal.contains(QStringLiteral("Ctrl+Z")),
+                  "not the Ctrl+Z that stops meaning the outline the moment anything "
+                  "else is done");
+            // Minor 4, in the same sentence: the punctuation every other
+            // failure in this app keeps.
+            check(!refusal.isEmpty() && !refusal.endsWith(QLatin1Char('.')) &&
+                      refusal.contains(QChar(0x2014)),
+                  QStringLiteral("with no trailing period and an em dash between the "
+                                 "clauses (\"%1\")").arg(refusal));
+        }
+
+        // The gate itself, shut.
+        trigger(window, QStringLiteral("Select Bodies"));
+        if (!unionPair.empty()) view->setSelectedSolids({unionPair.front()});
+        settle(150);
+        check(!window.canTransformSelectedBody(),
+              "with an outline waiting, a selected body raises no transform gizmo");
+
+        // The Union - ungated, and the thing that used to strand the outline
+        // for good by taking the top of the undo stack.
+        view->setSelectedSolids(unionPair);
+        settle(150);
+        check(view->selectedSolidIds().size() == 2, "two bodies selected for the Union");
+        check(window.applyBooleanToSelection(
+                  static_cast<int>(ModelingOps::BooleanKind::Fuse)),
+              "Union runs while the outline waits - booleans were never gated on it");
+        settle(250);
+        const int bodiesAfterUnion = static_cast<int>(window.document().count());
+        check(bodiesAfterUnion == bodiesBefore + 1, "the two operands became one");
+        check(window.hasPendingFace() && window.pendingOutlineId() == strandedId,
+              "and the outline is still waiting - now BEHIND the Union on the undo stack, "
+              "which is what made Ctrl+Z the wrong advice");
+
+        // THE EXIT. Nothing selected, so Delete means the outline.
+        view->clearSelection();
+        settle(150);
+        QAction* deleteAction = action(window, QStringLiteral("Delete Selected"));
+        check(deleteAction != nullptr && deleteAction->isEnabled(),
+              "Delete is available with no body selected, because an outline is waiting");
+        check(deleteAction != nullptr &&
+                  deleteAction->toolTip().contains(QStringLiteral("outline")),
+              QStringLiteral("and its tooltip says which of its two meanings is live "
+                             "(\"%1\")")
+                  .arg(deleteAction ? deleteAction->toolTip() : QString()));
+        const int revisionBeforeDiscard = window.document().revision();
+        trigger(window, QStringLiteral("Delete Selected"));
+        settle(250);
+        check(!window.hasPendingFace() && window.document().outlineCount() == 0,
+              "triggering it discards the waiting outline");
+        check(static_cast<int>(window.document().count()) == bodiesAfterUnion,
+              "without touching a single body");
+        check(!view->hasOutline(strandedId),
+              "and the viewport followed - no outline left on screen");
+        check(window.document().revision() == revisionBeforeDiscard + 1,
+              "as ONE change, so one Undo is all it takes back");
+        check(lockoutToasts && lockoutToasts->isShowing() &&
+                  lockoutToasts->currentText().contains(strandedName),
+              QStringLiteral("reported by a Note naming the outline that went (\"%1\")")
+                  .arg(lockoutToasts ? lockoutToasts->currentText() : QString()));
+        check(lockoutToasts && lockoutToasts->toast() != nullptr &&
+                  lockoutToasts->toast()->hasUndo(),
+              "which offers Undo, like every other change to the document");
+        check(lockoutToasts && lockoutToasts->remainingMs() < 5000,
+              QStringLiteral("as a Note rather than a Failure - it is a change, not a "
+                             "refusal (%1 ms)")
+                  .arg(lockoutToasts ? lockoutToasts->remainingMs() : -1));
+        printWindowCapture(&window, outDir + QStringLiteral("/outline-deleted-toast.png"));
+
+        // The gates it was holding shut are open.
+        if (!window.document().solids().empty())
+            view->setSelectedSolids({window.document().solids().back().id});
+        settle(150);
+        check(window.canTransformSelectedBody(),
+              "and a selected body raises the transform gizmo again - the discard freed "
+              "every gate the outline was holding");
+
+        // Undo puts it back, and only it.
+        view->clearSelection();
+        settle(120);
+        trigger(window, QStringLiteral("Undo"));
+        settle(250);
+        check(window.document().outlineCount() == 1 &&
+                  window.document().containsOutline(strandedId),
+              "Undo puts the outline back, by id");
+        check(view->hasOutline(strandedId), "on screen with it");
+        check(static_cast<int>(window.document().count()) == bodiesAfterUnion,
+              "with the Union still standing - the discard was its own checkpoint, not "
+              "a rewind of everything since");
+
+        // And the FIRST meaning is untouched: a body selected still means the
+        // body, and the waiting outline stays exactly where it is.
+        trigger(window, QStringLiteral("Select Bodies"));
+        if (!window.document().solids().empty())
+            view->setSelectedSolids({window.document().solids().back().id});
+        settle(150);
+        const int bodiesBeforeBodyDelete = static_cast<int>(window.document().count());
+        trigger(window, QStringLiteral("Delete Selected"));
+        settle(250);
+        check(static_cast<int>(window.document().count()) == bodiesBeforeBodyDelete - 1,
+              "Delete with a body selected still takes the body");
+        check(window.document().outlineCount() == 1 && window.hasPendingFace() &&
+                  window.document().containsOutline(strandedId),
+              "and leaves the waiting outline exactly where it was - the second meaning "
+              "displaces nothing");
+
+        // Back to where this block found the document.
+        while ((window.document().outlineCount() > 0 ||
+                static_cast<int>(window.document().count()) > bodiesBefore) &&
+               window.document().canUndo()) {
+            trigger(window, QStringLiteral("Undo"));
+        }
+        settle(200);
+        view->clearSelection();
+        settle(120);
+        check(static_cast<int>(window.document().count()) == bodiesBefore &&
+                  window.document().outlineCount() == 0,
+              QStringLiteral("and the lock-out probe leaves the document as it found it "
+                             "(%1 bodies, %2 outlines)")
+                  .arg(window.document().count())
+                  .arg(window.document().outlineCount()));
     }
 
     // --- pull a face: the headline direct-modeling gesture --------------------
@@ -7239,8 +7648,14 @@ int main(int argc, char* argv[])
             // tooltip that named the operation the chip is not about to
             // perform would be worse than none. Checked on both sides: the
             // flattening half is asserted after the outward drag below.
-            check(bevel->field()->toolTip().contains(QStringLiteral("rounds the edge")),
-                  QStringLiteral("and the field teaches what the rounding half does "
+            // The wording moved when `round` and `flatten` joined the banned
+            // list: the tooltip says what the EDGE becomes rather than naming
+            // the operation in a word the interface never uses. Pinned on the
+            // fillet-specific half of it, so a tooltip that stopped following
+            // the kind still fails.
+            check(bevel->field()->toolTip().contains(QStringLiteral("Fillet radius")) &&
+                      bevel->field()->toolTip().contains(QStringLiteral("becomes a curve")),
+                  QStringLiteral("and the field teaches what the fillet half does "
                                  "(\"%1\")").arg(bevel->field()->toolTip()));
             // The em dash, by codepoint. This file is UTF-8 with no BOM, the
             // way every other source here is, and the first version of it
@@ -7451,8 +7866,9 @@ int main(int argc, char* argv[])
             // The other half of the tooltip rule pinned above: it follows the
             // kind, so crossing zero has to have rewritten it.
             check(bevel->field() != nullptr &&
-                      bevel->field()->toolTip().contains(QStringLiteral("flattens the edge")),
-                  QStringLiteral("and the field now teaches flattening instead (\"%1\")")
+                      bevel->field()->toolTip().contains(QStringLiteral("Chamfer size")) &&
+                      bevel->field()->toolTip().contains(QStringLiteral("becomes a flat")),
+                  QStringLiteral("and the field now teaches the chamfer instead (\"%1\")")
                       .arg(bevel->field() ? bevel->field()->toolTip() : QString()));
             // Its em dash by codepoint too, and not because the fillet one was
             // checked: they are two separate literals in the source, each
@@ -7821,6 +8237,13 @@ int main(int argc, char* argv[])
                                  "written out (\"%1\")")
                       .arg(stateLabelText(window)));
 
+            // Pinned before it guards anything, exactly as the pull arrow's
+            // field is: `field()` is a QPointer, and an unasserted
+            // `if (multi->field())` deletes the twelve checks below without a
+            // single red line - CLAUDE.md's vacuous-probe shape.
+            check(multi->field() != nullptr,
+                  "the chip has a size field to type into, so the twelve multi-edge "
+                  "checks below cannot vanish quietly");
             if (multi->field()) {
                 multi->field()->setText(QStringLiteral("20"));
                 settle(300);
@@ -8726,13 +9149,37 @@ int main(int argc, char* argv[])
         // A documented vocabulary drifts the moment someone is in a hurry. An
         // asserted one cannot.
         const QStringList banned = bannedWords();
+
+        // THE MATCHER, pinned in both directions before anything is swept
+        // with it. "round" and "flatten" are ordinary English as well as the
+        // Never column for Fillet and Chamfer, so they are matched at a word
+        // boundary - and a boundary rule that is too loose bans "background",
+        // while one that is too tight lets "rounded" through. A sweep whose
+        // matcher is untested reports "none" with equal confidence either way.
+        check(usesBannedWord(QStringLiteral("Body 03 rounded"),
+                             QStringLiteral("round")) &&
+                  usesBannedWord(QStringLiteral("Round this edge"),
+                                 QStringLiteral("round")) &&
+                  usesBannedWord(QStringLiteral("it flattens the edge"),
+                                 QStringLiteral("flatten")),
+              "the boundary matcher catches the banned word and its inflections");
+        check(!usesBannedWord(QStringLiteral("the background grid"),
+                              QStringLiteral("round")) &&
+                  !usesBannedWord(QStringLiteral("faces that surround it"),
+                                  QStringLiteral("round")) &&
+                  !usesBannedWord(QStringLiteral("the ground plane"),
+                                  QStringLiteral("round")),
+              "and leaves the ordinary English the app is entitled to use");
+        check(usesBannedWord(QStringLiteral("the Fused result"), QStringLiteral("Fuse")) &&
+                  usesBannedWord(QStringLiteral("1 body(s)"), QStringLiteral("(s)")),
+              "while the code words it was already matching stay bare substrings");
         QStringList offenders;
         for (QAction* candidate : window.findChildren<QAction*>()) {
             const QString text = candidate->text().remove(QLatin1Char('&'));
             const QString tip = candidate->toolTip();
             for (const QString& word : banned) {
-                if (text.contains(word, Qt::CaseInsensitive) ||
-                    tip.contains(word, Qt::CaseInsensitive)) {
+                if (usesBannedWord(text, word) ||
+                    usesBannedWord(tip, word)) {
                     offenders << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
                 }
             }
@@ -8747,7 +9194,7 @@ int main(int argc, char* argv[])
             const QString tip = widget->toolTip();
             if (tip.isEmpty()) continue;
             for (const QString& word : banned) {
-                if (tip.contains(word, Qt::CaseInsensitive))
+                if (usesBannedWord(tip, word))
                     tipOffenders << (tip.left(30) + QStringLiteral("…"));
             }
         }
@@ -8782,7 +9229,7 @@ int main(int argc, char* argv[])
             for (int i = 0; i < sweptDrawer->rowCount(); ++i) {
                 const QString rowText = sweptDrawer->rowTextAt(i);
                 for (const QString& word : banned) {
-                    if (rowText.contains(word, Qt::CaseInsensitive))
+                    if (usesBannedWord(rowText, word))
                         rowOffenders << (rowText + QStringLiteral(" [") + word +
                                          QStringLiteral("]"));
                 }
@@ -8807,7 +9254,7 @@ int main(int argc, char* argv[])
             QStringList barOffenders;
             for (const QString& text : barTexts) {
                 for (const QString& word : banned) {
-                    if (text.contains(word, Qt::CaseInsensitive))
+                    if (usesBannedWord(text, word))
                         barOffenders << (text + QStringLiteral(" [") + word +
                                          QStringLiteral("]"));
                 }
@@ -8827,7 +9274,7 @@ int main(int argc, char* argv[])
         for (WalkthroughPanel* panel : window.findChildren<WalkthroughPanel*>()) {
             for (const QString& text : panel->paintedTexts()) {
                 for (const QString& word : banned) {
-                    if (text.contains(word, Qt::CaseInsensitive))
+                    if (usesBannedWord(text, word))
                         walkthroughOffenders << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
                 }
             }
@@ -8844,7 +9291,7 @@ int main(int argc, char* argv[])
         for (HintBalloon* hint : window.findChildren<HintBalloon*>()) {
             for (const QString& text : hint->paintedTexts()) {
                 for (const QString& word : banned) {
-                    if (text.contains(word, Qt::CaseInsensitive))
+                    if (usesBannedWord(text, word))
                         hintOffenders << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
                 }
             }
@@ -8933,6 +9380,20 @@ int main(int argc, char* argv[])
             check(!MainWindow::bevelCombinationRefusalText(true).contains(
                       QStringLiteral("smaller size")),
                   "and never repeats the size advice the other sentence gives");
+            // Whole-branch review, Important 2. Both halves of this pair said
+            // "will only round some of them" / "will only flatten some of
+            // them" for a whole branch - the Never column for Fillet and
+            // Chamfer - because the sweep could not see either word. Asserted
+            // here as well as swept below: the sweep proves no CURRENT string
+            // offends, this proves the two that did have actually been
+            // rewritten rather than merely moved somewhere the sweep misses.
+            check(!usesBannedWord(MainWindow::bevelCombinationRefusalText(true),
+                                  QStringLiteral("round")) &&
+                      !usesBannedWord(MainWindow::bevelCombinationRefusalText(false),
+                                      QStringLiteral("flatten")),
+                  QStringLiteral("and neither half names the operation in a word the "
+                                 "interface never uses (\"%1\")")
+                      .arg(MainWindow::bevelCombinationRefusalText(true)));
             copyHost->show(MainWindow::bevelCombinationRefusalText(true),
                            Toast::Kind::Failure, false, kCopyStamp);
             settle(60);
@@ -8967,7 +9428,7 @@ int main(int argc, char* argv[])
         for (Toast* toastWidget : window.findChildren<Toast*>()) {
             for (const QString& text : toastWidget->paintedTexts()) {
                 for (const QString& word : banned) {
-                    if (text.contains(word, Qt::CaseInsensitive))
+                    if (usesBannedWord(text, word))
                         toastOffenders << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
                 }
             }
@@ -8984,7 +9445,7 @@ int main(int argc, char* argv[])
         for (ExtrudePreview* preview : window.findChildren<ExtrudePreview*>()) {
             for (const QString& text : preview->paintedTexts()) {
                 for (const QString& word : banned) {
-                    if (text.contains(word, Qt::CaseInsensitive))
+                    if (usesBannedWord(text, word))
                         extrudePreviewOffenders
                             << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
                 }
@@ -9002,7 +9463,7 @@ int main(int argc, char* argv[])
         for (PullArrow* pull : window.findChildren<PullArrow*>()) {
             for (const QString& text : pull->paintedTexts()) {
                 for (const QString& word : banned) {
-                    if (text.contains(word, Qt::CaseInsensitive))
+                    if (usesBannedWord(text, word))
                         pullArrowOffenders
                             << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
                 }
@@ -9029,7 +9490,7 @@ int main(int argc, char* argv[])
         for (BevelArrow* arrow : window.findChildren<BevelArrow*>()) {
             for (const QString& text : arrow->paintedTexts()) {
                 for (const QString& word : banned) {
-                    if (text.contains(word, Qt::CaseInsensitive))
+                    if (usesBannedWord(text, word))
                         bevelOffenders
                             << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
                 }
@@ -9344,7 +9805,7 @@ int main(int argc, char* argv[])
                 QStringList sheetOffenders;
                 for (const QString& text : painted) {
                     for (const QString& word : bannedWords()) {
-                        if (text.contains(word, Qt::CaseInsensitive))
+                        if (usesBannedWord(text, word))
                             sheetOffenders << (text + QStringLiteral(" [") + word +
                                                QStringLiteral("]"));
                     }
@@ -10717,7 +11178,7 @@ int main(int argc, char* argv[])
             QStringList offenders;
             for (const QString& text : painted) {
                 for (const QString& word : bannedWords()) {
-                    if (text.contains(word, Qt::CaseInsensitive))
+                    if (usesBannedWord(text, word))
                         offenders << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
                 }
                 // Code names must not leak either - the whole point of
@@ -10908,6 +11369,15 @@ int main(int argc, char* argv[])
                                      "(\"%1\")").arg(Theme::spec().fontFamily));
                 check(panel->familyBeforePreview().isEmpty(),
                       "and the fallback is spent, so a second Escape restores nothing");
+            } else {
+                // A machine with exactly one font family installed cannot
+                // preview a second one, and that is not a guard going quiet -
+                // the check above already went red for it. Accounted so the
+                // FLOOR does not fail a second time with a message about
+                // guards that would send the reader looking for a defect that
+                // is not there.
+                skipByEnvironment(5, QStringLiteral("this machine offers no second font "
+                                                    "family to preview"));
             }
             Theme::setSpec(Theme::defaultSpec());
             settle(120);
@@ -12475,16 +12945,27 @@ int main(int argc, char* argv[])
     // about how many checks ran must not be one of the checks it counts, or
     // the number it reports and the number it tests are two different things.
     // Reported the same way trigger()'s own failure is.
-    if (g_checks < kCheckFloor) {
-        std::printf("[FAIL] the run executed %d checks, below the floor of %d - "
-                    "a guard has stopped letting its checks run; find the guard, "
-                    "do not lower the floor\n",
-                    g_checks, kCheckFloor);
+    //
+    // Environment skips are ADDED IN, and the difference that draws is the
+    // point: a check that vanished because a guard's condition quietly went
+    // false still drops the total and still fails here, while a check that
+    // could not run because this machine has one font family installed - or
+    // no PrintWindow - is counted, named on stdout by skipByEnvironment(),
+    // and does not turn a healthy run red with a message about guards.
+    const int accounted = g_checks + g_skippedByEnvironment;
+    if (accounted < kCheckFloor) {
+        std::printf("[FAIL] the run executed %d checks (+%d skipped by the "
+                    "environment = %d), below the floor of %d - a guard has "
+                    "stopped letting its checks run; find the guard, do not lower "
+                    "the floor\n",
+                    g_checks, g_skippedByEnvironment, accounted, kCheckFloor);
         ++g_failures;
     }
 
-    std::printf("\n%s (%d failure%s, %d checks, floor %d)  volumes: A=%.1f B=%.1f\n",
+    std::printf("\n%s (%d failure%s, %d checks, %d skipped by the environment, "
+                "floor %d)  volumes: A=%.1f B=%.1f\n",
                 g_failures == 0 ? "PASS" : "FAIL", g_failures,
-                g_failures == 1 ? "" : "s", g_checks, kCheckFloor, volumeA, volumeB);
+                g_failures == 1 ? "" : "s", g_checks, g_skippedByEnvironment,
+                kCheckFloor, volumeA, volumeB);
     return g_failures == 0 ? 0 : 1;
 }
