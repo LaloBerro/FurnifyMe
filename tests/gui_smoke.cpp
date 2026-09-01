@@ -183,7 +183,7 @@ void skipByEnvironment(int checks, const QString& why)
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 1426;
+constexpr int kCheckFloor = 1462;
 
 void check(bool condition, const QString& what)
 {
@@ -282,6 +282,41 @@ private:
     QString myOrg;
     QString myApp;
     QSettings::Format myFormat;
+};
+
+// A QTemporaryDir that cannot silently become the real
+// Documents/FurnifyMe library. MainWindow treats an EMPTY libraryRoot as
+// "use the real one" (the persistProgress=false pattern - see its
+// constructor), and QTemporaryDir::path() returns exactly that empty
+// string when the directory could not be created at all - so a soft
+// check(dir.isValid(), ...) left every MainWindow construction after it
+// one failed mkdir away from quietly reading and writing a developer's
+// real furniture library. This wrapper makes the failure structural
+// instead of advisory: a temp directory that cannot be created aborts the
+// run right there, before any path derived from it reaches a MainWindow
+// or a FurnitureStore constructor. Same .path() surface as QTemporaryDir
+// itself, so every call site in this file needed only its declared TYPE
+// changed, not its usage.
+class RequiredTempDir {
+public:
+    RequiredTempDir()
+    {
+        if (!myDir.isValid()) {
+            std::fprintf(stderr,
+                        "FATAL: could not create a temp directory for this suite (%s) - "
+                        "refusing to fall through to a real library path\n",
+                        qPrintable(myDir.errorString()));
+            std::abort();
+        }
+    }
+
+    QString path() const { return myDir.path(); }
+
+    RequiredTempDir(const RequiredTempDir&) = delete;
+    RequiredTempDir& operator=(const RequiredTempDir&) = delete;
+
+private:
+    QTemporaryDir myDir;
 };
 
 // Lets the event loop breathe so Qt delivers exposure/resize and OCCT redraws.
@@ -917,9 +952,11 @@ int main(int argc, char* argv[])
     // QStandardPaths::DocumentsLocation, on the same terms as
     // persistProgress=false: a suite whose behaviour depended on what the
     // developer's own Documents folder happened to hold would not be a
-    // suite. Every MainWindow this file constructs gets one.
-    QTemporaryDir libraryDir;
-    check(libraryDir.isValid(), "a temp library directory for the main window");
+    // suite. Every MainWindow this file constructs gets one; RequiredTempDir
+    // itself aborts the run if this ever fails to be created, rather than
+    // handing back an empty path a MainWindow constructor would read as
+    // "use the real one" - see its own comment.
+    RequiredTempDir libraryDir;
 
     // Never persist: a suite whose behaviour depends on how often the developer
     // ran the real app is not a suite.
@@ -995,6 +1032,21 @@ int main(int argc, char* argv[])
         InitScreen* gallery = window.initScreen();
         check(gallery != nullptr && gallery->isVisible(), "the gallery is up and visible");
 
+        // Pinned, not merely implied by the checks further down that happen
+        // never to trip it: WalkthroughPanel::refresh() gates on
+        // isShowingInitScreen() specifically so the guide cannot pop up over
+        // the gallery for a brand-new user, and this file rewrote that gate
+        // twice getting the ordering right (see WalkthroughPanel.cpp).
+        WalkthroughPanel* galleryGuide = window.findChild<WalkthroughPanel*>();
+        check(galleryGuide != nullptr && !galleryGuide->isVisible(),
+              "the walkthrough guide is not visible while the gallery is up");
+        check(galleryGuide != nullptr && galleryGuide->completedSteps() == 0,
+              "...and has nothing completed yet either - it has not had anywhere "
+              "to stand");
+        HintBalloon* galleryHint = window.findChild<HintBalloon*>();
+        check(galleryHint != nullptr && !galleryHint->isVisible(),
+              "and no hint balloon is up over it either");
+
         QAction* startSketch = action(window, QStringLiteral("Start Sketch"));
         check(startSketch != nullptr && !startSketch->isEnabled(),
               "Start Sketch is disabled while the gallery shows");
@@ -1050,8 +1102,7 @@ int main(int argc, char* argv[])
     // windows further down) - this is the same idiom, used here for the same
     // reason.
     {
-        QTemporaryDir seedDir;
-        check(seedDir.isValid(), "a temp dir for the seeded-library probe");
+        RequiredTempDir seedDir;
 
         QString seededId;
         double seededVolume = 0.0;
@@ -1185,6 +1236,95 @@ int main(int argc, char* argv[])
               "no modal appeared anywhere in this block either");
     }
 
+    // --- the gallery's two refusals are never silent ---------------------------
+    // createFurniture() and renameFurniture() can both refuse; before this fix
+    // round, InitScreen swallowed either outcome outright - a failed create did
+    // nothing at all, and a failed rename simply repainted the old name with
+    // no report of why. Both are now Failure toasts, forced here without
+    // needing real filesystem permissions (unreliable to twiddle portably).
+    {
+        // createFurniture(): a REGULAR FILE sits where the library root would
+        // need to be a directory, so QDir::mkpath() cannot create it - the
+        // same refusal a read-only or disconnected drive would produce, with
+        // nothing that depends on this machine's actual permissions.
+        RequiredTempDir failParent;
+        const QString blockingFile = failParent.path() + QStringLiteral("/blocked");
+        {
+            QFile blocker(blockingFile);
+            check(blocker.open(QIODevice::WriteOnly), "a blocking file for the create-refusal probe");
+            blocker.write("x");
+        }
+        const QString badRoot = blockingFile + QStringLiteral("/library");
+
+        MainWindow createFailProbe(nullptr, /*persistProgress=*/false, badRoot);
+        createFailProbe.setAttribute(Qt::WA_ShowWithoutActivating);
+        createFailProbe.resize(900, 600);
+        createFailProbe.show();
+        settle(300);
+
+        InitScreen* createFailGallery = createFailProbe.initScreen();
+        QWidget* createFailCard = createFailGallery ? createFailGallery->newCard() : nullptr;
+        check(createFailCard != nullptr, "the create-refusal probe still offers New furniture");
+        ToastHost* createFailToasts = createFailProbe.findChild<ToastHost*>();
+        if (createFailCard) {
+            clickAt(createFailCard,
+                   QPointF(createFailCard->width() / 2.0, createFailCard->height() / 2.0));
+            settle(200);
+        }
+        check(createFailProbe.isShowingInitScreen(),
+              "a refused createFurniture leaves the window on the init screen");
+        check(createFailToasts != nullptr &&
+                  createFailToasts->currentText().contains(QStringLiteral("Couldn't create")),
+              QStringLiteral("...and reports it as a Failure toast, never silently (\"%1\")")
+                  .arg(createFailToasts ? createFailToasts->currentText() : QString()));
+    }
+    {
+        // renameFurniture(): a furniture whose own directory is removed out
+        // from under it after the gallery has already listed it - the
+        // manifest renameFurniture() needs is simply gone, the same refusal
+        // an unreadable or half-deleted furniture would produce.
+        RequiredTempDir renameFailDir;
+        FurnitureStore renameFailStore(renameFailDir.path());
+        const QString doomedId = renameFailStore.createFurniture(QStringLiteral("Doomed"));
+        check(!doomedId.isEmpty(), "seeding a furniture to break for the rename-refusal probe");
+
+        MainWindow renameFailProbe(nullptr, /*persistProgress=*/false, renameFailDir.path());
+        renameFailProbe.setAttribute(Qt::WA_ShowWithoutActivating);
+        renameFailProbe.resize(900, 600);
+        renameFailProbe.show();
+        settle(300);
+
+        InitScreen* renameFailGallery = renameFailProbe.initScreen();
+        check(renameFailGallery != nullptr && renameFailGallery->furnitureCount() == 1,
+              "the rename-refusal probe's library shows the doomed furniture");
+
+        QString doomedDir;
+        for (const FurnitureStore::FurnitureInfo& info :
+             renameFailProbe.furnitureStore().listFurniture()) {
+            if (info.id == doomedId) doomedDir = info.filePath;
+        }
+        check(!doomedDir.isEmpty() && QDir(doomedDir).removeRecursively(),
+              "the doomed furniture's own directory is removed out from under it");
+
+        ToastHost* renameFailToasts = renameFailProbe.findChild<ToastHost*>();
+        if (renameFailGallery && renameFailGallery->furnitureCount() == 1) {
+            renameFailGallery->beginRenameAt(0);
+            QWidget* doomedCard = renameFailGallery->cardAt(0);
+            QLineEdit* doomedEdit = doomedCard ? doomedCard->findChild<QLineEdit*>() : nullptr;
+            check(doomedEdit != nullptr, "the rename editor still opens over the doomed card");
+            if (doomedEdit) {
+                doomedEdit->setText(QStringLiteral("New Name"));
+                sendKeyTo(doomedEdit, Qt::Key_Return);
+                settle(150);
+            }
+        }
+        check(renameFailToasts != nullptr &&
+                  renameFailToasts->currentText().contains(QStringLiteral("Couldn't rename")),
+              QStringLiteral("renameFurniture's refusal is reported as a Failure toast too "
+                             "(\"%1\")")
+                  .arg(renameFailToasts ? renameFailToasts->currentText() : QString()));
+    }
+
     // --- Save, the dirty star, autosave, and Close furniture ------------------
     // Another isolated window, for the same reason the seeded-library probe
     // just above is one: this block checkpoints for real (a sketch and an
@@ -1192,8 +1332,7 @@ int main(int argc, char* argv[])
     // walkthrough completing - must not leak into the shared `window` the
     // rest of this suite still has thousands of lines of assumptions about.
     {
-        QTemporaryDir saveDir;
-        check(saveDir.isValid(), "a temp dir for the save/autosave probe");
+        RequiredTempDir saveDir;
 
         MainWindow saveProbe(nullptr, /*persistProgress=*/false, saveDir.path());
         saveProbe.setAttribute(Qt::WA_ShowWithoutActivating);
@@ -1278,6 +1417,91 @@ int main(int argc, char* argv[])
                   QStringLiteral("and the saved furniture reloads with the body Save "
                                  "wrote (%1)")
                       .arg(err.isEmpty() ? QStringLiteral("ok") : err));
+            // bodyId itself is NOT read from `reloaded`: ids are session-only
+            // handles and are never persisted (DocumentModel.h), so a scratch
+            // document populated fresh from disk assigns its own - here 1,
+            // since it holds only the one body - which need not match the
+            // LIVE document's id at all. This furniture's live body is 2:
+            // the outline the sketch created consumed id 1 before extrude
+            // ever converted it into a body. The live id, below, is the only
+            // one any further call into `saveProbe` may use.
+        }
+        const int bodyId =
+            saveProbe.document().count() == 1 ? saveProbe.document().solids().front().id : 0;
+
+        // --- the visibility reconciliation, proved end to end: eye -> save --
+        // -> load. Ledgered from Task 1 and wired this task (ItemsPanel's
+        // eye button now writes DocumentModel::isVisible() before the view -
+        // see ItemsPanel.cpp) - this is the check that actually walks the
+        // whole chain rather than trusting either half in isolation.
+        {
+            ItemsPanel* items = saveProbe.itemsPanel();
+            check(items != nullptr, "the save probe has an items drawer");
+            // Filtered to VISIBLE buttons: refresh()'s row rebuild hides an
+            // old row and calls deleteLater() on it rather than deleting it
+            // outright (see ItemsPanel.cpp's own comment on why), so a row
+            // from a moment ago can still be a live, findChildren()-visible
+            // QObject for one event-loop turn after the rebuild that
+            // replaced it - exactly the kind of stale-but-still-there
+            // control CLAUDE.md's childAt()-vs-isVisible() discipline
+            // already warns about elsewhere in this file.
+            QList<QPushButton*> eyeButtons;
+            if (items) {
+                for (QPushButton* b : items->findChildren<QPushButton*>()) {
+                    if (b->isVisible()) eyeButtons << b;
+                }
+            }
+            check(eyeButtons.size() == 1,
+                  QStringLiteral("exactly one VISIBLE eye button, for the probe's one "
+                                 "body (%1)")
+                      .arg(eyeButtons.size()));
+            if (eyeButtons.size() == 1) {
+                QPushButton* eye = eyeButtons.first();
+                clickAt(eye, QPointF(eye->width() / 2.0, eye->height() / 2.0));
+                settle(150);
+                check(bodyId != 0 && !saveProbe.document().isVisible(bodyId),
+                      "clicking the eye writes through to DocumentModel::isVisible() "
+                      "directly, not just the view");
+                check(saveProbe.saveCurrentFurniture(), "saving with the body hidden");
+
+                DocumentModel reloadedHidden;
+                QString errHidden;
+                FurnitureStore probeStore2(saveDir.path());
+                check(probeStore2.loadFurniture(furnitureId, reloadedHidden, &errHidden) &&
+                          !reloadedHidden.solids().empty(),
+                      QStringLiteral("the furniture reloads after the hide+save (%1)")
+                          .arg(errHidden.isEmpty() ? QStringLiteral("ok") : errHidden));
+                check(!reloadedHidden.solids().empty() &&
+                          !reloadedHidden.isVisible(reloadedHidden.solids().front().id),
+                      "and the reloaded document still says the body is hidden - the "
+                      "eye -> save -> load round trip survives");
+
+                // Left visible again for the rest of this block, which reads
+                // the view's own presentation later (the close-furniture
+                // reload's centroid check does not care about visibility,
+                // but leaving a probe in the state the next block assumes is
+                // simple hygiene).
+                //
+                // Re-fetched rather than reusing `eye`: the save above ran
+                // updateActions(), and refresh()'s row rebuild - triggered
+                // because visibility is part of its signature - replaced the
+                // row `eye` belonged to with a new one, on the same terms
+                // documented above.
+                QPushButton* eyeAgain = nullptr;
+                if (items) {
+                    for (QPushButton* b : items->findChildren<QPushButton*>()) {
+                        if (b->isVisible()) { eyeAgain = b; break; }
+                    }
+                }
+                check(eyeAgain != nullptr, "a fresh, visible eye button exists to click again");
+                if (eyeAgain) {
+                    clickAt(eyeAgain, QPointF(eyeAgain->width() / 2.0, eyeAgain->height() / 2.0));
+                    settle(150);
+                }
+                check(bodyId != 0 && saveProbe.document().isVisible(bodyId),
+                      "clicking it again shows the body again");
+                check(saveProbe.saveCurrentFurniture(), "and that save leaves it visible on disk");
+            }
         }
 
         // --- Close furniture, autosave off: SAVES FIRST, never a question ------
@@ -1302,7 +1526,7 @@ int main(int argc, char* argv[])
 
         gp_Trsf move;
         move.SetTranslation(gp_Vec(15.0, 0.0, 0.0));
-        const int bodyId = saveProbe.document().solids().front().id;
+        check(bodyId != 0, "the probe's live body id is still good");
         check(saveProbe.transformBody(bodyId, move),
               "a second, unsaved checkpoint - moving the body - with autosave off");
         check(saveProbe.isFurnitureDirty(), "the furniture reads dirty again");
@@ -1344,6 +1568,187 @@ int main(int argc, char* argv[])
         }
         check(saveProbe.findChild<QDialog*>() == nullptr,
               "and none of this - Save, autosave, Close - ever opened a QDialog");
+    }
+
+    // --- resyncView() reapplies hidden state on EVERY caller, not just -----
+    // openFurniture() - the visibility drift the reconciliation missed
+    // until this fix round. Undo is the vehicle: it rebuilds the whole
+    // presentation exactly as a fresh open does, and a body hidden before
+    // an undo must still read (and look) hidden after one.
+    {
+        RequiredTempDir visDir;
+        MainWindow visProbe(nullptr, /*persistProgress=*/false, visDir.path());
+        visProbe.setAttribute(Qt::WA_ShowWithoutActivating);
+        visProbe.resize(900, 700);
+        visProbe.show();
+        settle(300);
+        OcctViewWidget* visView = visProbe.view();
+        visView->setAnimationsEnabled(false);
+        enterFreshFurniture(visProbe);
+
+        check(buildBody(visProbe, 0.30, 0.30, 0.45, 0.45, 80.0),
+              "a first body for the resync-visibility probe");
+        const int firstId = visProbe.document().solids().empty()
+                                ? 0
+                                : visProbe.document().solids().front().id;
+        // A second body gives Undo something to take back without removing
+        // the first - undo has to drive resyncView() with the first body
+        // still standing, or this proves nothing about it.
+        check(buildBody(visProbe, 0.60, 0.30, 0.75, 0.45, 80.0),
+              "a second body, so Undo has something to take back");
+        check(visProbe.document().count() == 2, "two bodies now");
+
+        visView->fitAll();
+        settle(200);
+
+        GProp_GProps firstProps;
+        BRepGProp::VolumeProperties(visProbe.document().shapeOf(firstId), firstProps);
+        QPoint firstScreen;
+        check(firstId != 0 && visView->projectToScreen(firstProps.CentreOfMass(), firstScreen),
+              "the first body's centre projects onto the viewport");
+
+        // saveSnapshot() dumps at DEVICE resolution while projectToScreen()
+        // answers in Qt's own LOGICAL pixels (CLAUDE.md's own pitfall) -
+        // scaled back down to the viewport's logical size here rather than
+        // read at native size, which is what lets `firstScreen` index the
+        // dump directly instead of every caller repeating the ratio math.
+        // A small box around the point, not the single pixel: projectToScreen
+        // is only accurate to a couple of dump pixels at an odd display
+        // scale, and the box also means the softening the scale-down itself
+        // introduces cannot hide the body it is meant to catch.
+        auto luminanceNear = [&](const QString& path) -> double {
+            visView->saveSnapshot(path);
+            QImage dump(path);
+            if (dump.isNull()) return -1.0;
+            if (dump.size() != visView->size()) dump = dump.scaled(visView->size());
+            const QRect box(firstScreen.x() - 15, firstScreen.y() - 15, 30, 30);
+            return averageLuminance(dump, box);
+        };
+
+        const double beforeLuminance = luminanceNear(outDir + QStringLiteral("/resync-vis-before.png"));
+
+        // Hide the first body through its own real eye button - the same
+        // gesture item 3b proves writes through to DocumentModel.
+        ItemsPanel* visItems = visProbe.itemsPanel();
+        QPushButton* firstEye = nullptr;
+        if (visItems) {
+            for (QPushButton* b : visItems->findChildren<QPushButton*>()) {
+                if (b->isVisible() && b->parentWidget() &&
+                    b->parentWidget()->property("solidId").toInt() == firstId) {
+                    firstEye = b;
+                    break;
+                }
+            }
+        }
+        check(firstEye != nullptr, "found the first body's own eye button");
+        if (firstEye) {
+            clickAt(firstEye, QPointF(firstEye->width() / 2.0, firstEye->height() / 2.0));
+            settle(150);
+        }
+        check(firstId != 0 && !visProbe.document().isVisible(firstId),
+              "the first body reads hidden right after the click");
+
+        // The undo: takes back the SECOND body's checkpoint, and drives
+        // resyncView() exactly as every other undo/redo does.
+        trigger(visProbe, QStringLiteral("Undo"));
+        check(visProbe.document().count() == 1,
+              "undo removed the second body, leaving the first");
+        check(firstId != 0 && !visProbe.document().isVisible(firstId),
+              "and the first body STILL reads hidden after the resync - the fix "
+              "under test: resyncView() itself reapplies visibility now, not "
+              "only the one caller that used to");
+
+        const double afterLuminance = luminanceNear(outDir + QStringLiteral("/resync-vis-after.png"));
+        check(beforeLuminance >= 0.0 && afterLuminance >= 0.0,
+              "both dumps are real images to sample");
+        check(std::fabs(afterLuminance - beforeLuminance) > 10.0,
+              QStringLiteral("and the pixels agree with isVisible() - the shaded body "
+                             "that stood there is genuinely gone from the dump, not "
+                             "merely mis-reported (luminance %1 before, %2 after)")
+                  .arg(beforeLuminance, 0, 'f', 1)
+                  .arg(afterLuminance, 0, 'f', 1));
+    }
+
+    // --- closeEvent() itself saves - flushes a pending autosave, and saves
+    // outright with autosave off - rather than only closeCurrentFurniture()
+    // doing so. Two isolated probes, each isolating ONE of the two halves:
+    // a save that only happened because the debounce timer had already
+    // fired on its own (unrelated to closeEvent()'s own code) would prove
+    // nothing, so each probe closes the window before that could happen by
+    // coincidence.
+    {
+        // Autosave ON, closed the instant after the checkpoint - well
+        // inside the 400ms debounce window, so any save that lands here can
+        // only be closeEvent()'s own "flush what's pending" branch, not the
+        // timer firing under it.
+        RequiredTempDir flushDir;
+        MainWindow flushProbe(nullptr, /*persistProgress=*/false, flushDir.path());
+        flushProbe.setAttribute(Qt::WA_ShowWithoutActivating);
+        flushProbe.resize(900, 600);
+        flushProbe.show();
+        settle(300);
+        flushProbe.view()->setAnimationsEnabled(false);
+        enterFreshFurniture(flushProbe);
+        const QString flushId = flushProbe.currentFurnitureId();
+
+        trigger(flushProbe, QStringLiteral("Start Sketch"));
+        sketchQuad(flushProbe, 0.35, 0.35, 0.55, 0.55);
+        trigger(flushProbe, QStringLiteral("Finish Sketch"));
+        check(flushProbe.extrudePendingFace(80.0),
+              "a checkpoint for the close-flushes-autosave probe");
+        check(flushProbe.autosavePendingMs() > 0,
+              "autosave is armed and has not fired yet");
+
+        flushProbe.close();
+        settle(150);
+
+        DocumentModel reloadedFlush;
+        QString flushErr;
+        FurnitureStore flushStore(flushDir.path());
+        check(flushStore.loadFurniture(flushId, reloadedFlush, &flushErr) &&
+                  reloadedFlush.count() == 1,
+              QStringLiteral("closeEvent() flushed the still-pending autosave before the "
+                             "window closed (%1)")
+                  .arg(flushErr.isEmpty() ? QStringLiteral("ok") : flushErr));
+    }
+    {
+        // Autosave OFF: the ONLY way this furniture's checkpoint reaches
+        // disk is closeEvent()'s own explicit performSave() call.
+        RequiredTempDir closeDir;
+        MainWindow closeProbe(nullptr, /*persistProgress=*/false, closeDir.path());
+        closeProbe.setAttribute(Qt::WA_ShowWithoutActivating);
+        closeProbe.resize(900, 600);
+        closeProbe.show();
+        settle(300);
+        closeProbe.view()->setAnimationsEnabled(false);
+        enterFreshFurniture(closeProbe);
+        const QString closeId = closeProbe.currentFurnitureId();
+
+        QAction* closeProbeAutosave = action(closeProbe, QStringLiteral("Save automatically"));
+        if (closeProbeAutosave) closeProbeAutosave->trigger();
+        check(closeProbeAutosave != nullptr && !closeProbe.autosaveEnabled(),
+              "autosave turned off for the close-saves-outright probe");
+
+        trigger(closeProbe, QStringLiteral("Start Sketch"));
+        sketchQuad(closeProbe, 0.35, 0.35, 0.55, 0.55);
+        trigger(closeProbe, QStringLiteral("Finish Sketch"));
+        check(closeProbe.extrudePendingFace(80.0),
+              "a checkpoint for the close-saves-outright probe");
+        check(closeProbe.isFurnitureDirty(), "the furniture reads dirty before closing");
+        check(closeProbe.autosavePendingMs() < 0,
+              "and with autosave off, nothing is pending to flush");
+
+        closeProbe.close();
+        settle(150);
+
+        DocumentModel reloadedClose;
+        QString closeErr;
+        FurnitureStore closeStore(closeDir.path());
+        check(closeStore.loadFurniture(closeId, reloadedClose, &closeErr) &&
+                  reloadedClose.count() == 1,
+              QStringLiteral("closeEvent() saved outright with autosave off, with no "
+                             "debounce to have flushed (%1)")
+                  .arg(closeErr.isEmpty() ? QStringLiteral("ok") : closeErr));
     }
 
     // --- the window carries the app's own mark --------------------------------
@@ -2466,7 +2871,7 @@ int main(int argc, char* argv[])
     // leave the whole rail, Redo included, inside the viewport and reachable
     // by a real click.
     {
-        QTemporaryDir minWinLib;
+        RequiredTempDir minWinLib;
         MainWindow minWin(nullptr, /*persistProgress=*/false, minWinLib.path());
         minWin.setAttribute(Qt::WA_ShowWithoutActivating);
         minWin.show();
@@ -3923,7 +4328,7 @@ int main(int argc, char* argv[])
         // conditions that raise all three are reproduced from scratch. Delete
         // the hasLearned() term from isDue() and this fails; that was not true
         // of the version this replaces.
-        QTemporaryDir learnedLib;
+        RequiredTempDir learnedLib;
         MainWindow learned(nullptr, /*persistProgress=*/false, learnedLib.path());
         learned.setAttribute(Qt::WA_ShowWithoutActivating);
         learned.resize(900, 600);
@@ -3974,7 +4379,7 @@ int main(int argc, char* argv[])
     // scenario is built from scratch, deterministically, to pin the contract
     // down instead.
     {
-        QTemporaryDir probeLib;
+        RequiredTempDir probeLib;
         MainWindow probe(nullptr, /*persistProgress=*/false, probeLib.path());
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
         probe.resize(900, 600);
@@ -4065,7 +4470,7 @@ int main(int argc, char* argv[])
     // and each hint's one showing in the probes above is already spent
     // proving a different trigger.
     {
-        QTemporaryDir modeProbeLib;
+        RequiredTempDir modeProbeLib;
         MainWindow modeProbe(nullptr, /*persistProgress=*/false, modeProbeLib.path());
         modeProbe.setAttribute(Qt::WA_ShowWithoutActivating);
         modeProbe.resize(900, 600);
@@ -10059,7 +10464,7 @@ int main(int argc, char* argv[])
     // exactly what it taught. One probe per route, since a hint only gets one
     // showing per session.
     {
-        QTemporaryDir axoProbeLib;
+        RequiredTempDir axoProbeLib;
         MainWindow axoProbe(nullptr, /*persistProgress=*/false, axoProbeLib.path());
         axoProbe.setAttribute(Qt::WA_ShowWithoutActivating);
         axoProbe.resize(900, 600);
@@ -10101,7 +10506,7 @@ int main(int argc, char* argv[])
     }
 
     {
-        QTemporaryDir gizmoProbeLib;
+        RequiredTempDir gizmoProbeLib;
         MainWindow gizmoProbe(nullptr, /*persistProgress=*/false, gizmoProbeLib.path());
         gizmoProbe.setAttribute(Qt::WA_ShowWithoutActivating);
         gizmoProbe.resize(900, 600);
@@ -10148,7 +10553,7 @@ int main(int argc, char* argv[])
     // because this needs a hint genuinely dismissed earlier in the SAME
     // session, with nothing else having consumed the other hints' turns.
     {
-        QTemporaryDir resetProbeLib;
+        RequiredTempDir resetProbeLib;
         MainWindow resetProbe(nullptr, /*persistProgress=*/false, resetProbeLib.path());
         resetProbe.setAttribute(Qt::WA_ShowWithoutActivating);
         resetProbe.resize(900, 600);
@@ -10349,7 +10754,7 @@ int main(int argc, char* argv[])
               "finishing records walkthrough.done");
 
         // A returning user does not see it again.
-        QTemporaryDir secondLib;
+        RequiredTempDir secondLib;
         MainWindow second(nullptr, /*persistProgress=*/false, secondLib.path());
         // Shown (and settled) before anything below reads a widget's
         // position: ViewportOverlay lays overlay widgets out against the
@@ -10482,7 +10887,7 @@ int main(int argc, char* argv[])
     // Snap/Select - reachable on a first run the moment a self-crossing
     // outline raises a failure message.
     {
-        QTemporaryDir narrowLib;
+        RequiredTempDir narrowLib;
         MainWindow narrow(nullptr, /*persistProgress=*/false, narrowLib.path());
         narrow.setAttribute(Qt::WA_ShowWithoutActivating);
         narrow.resize(900, 620);
@@ -10764,7 +11169,7 @@ int main(int argc, char* argv[])
     // drawer open AND closed, so the assertion cannot pass because the drawer
     // happened to be nowhere near it.
     {
-        QTemporaryDir probeLib2;
+        RequiredTempDir probeLib2;
         MainWindow probe(nullptr, /*persistProgress=*/false, probeLib2.path());
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
         probe.resize(900, 640);
@@ -12092,7 +12497,7 @@ int main(int argc, char* argv[])
             // A dedicated window with ONE body, so the face is unoccluded and
             // the pick is deterministic - `window` has nine bodies in a camera
             // pose thirty checks of other work have left it in.
-            QTemporaryDir arrowProbeLib;
+            RequiredTempDir arrowProbeLib;
             MainWindow arrowProbe(nullptr, /*persistProgress=*/false, arrowProbeLib.path());
             arrowProbe.setAttribute(Qt::WA_ShowWithoutActivating);
             arrowProbe.resize(1000, 760);
@@ -12539,7 +12944,7 @@ int main(int argc, char* argv[])
                 clean.remove(QStringLiteral("appearance"));
             }
 
-            QTemporaryDir quietLib3;
+            RequiredTempDir quietLib3;
             MainWindow quiet(nullptr, /*persistProgress=*/false, quietLib3.path());
             quiet.setAttribute(Qt::WA_ShowWithoutActivating);
             quiet.resize(900, 700);
@@ -12570,7 +12975,7 @@ int main(int argc, char* argv[])
             // currentColorChanged per mouse move, and a write-through would
             // put a registry write and a file sync on every frame of a drag.
             {
-                QTemporaryDir persistingLib3;
+                RequiredTempDir persistingLib3;
                 MainWindow persisting(nullptr, /*persistProgress=*/true, persistingLib3.path());
                 persisting.setAttribute(Qt::WA_ShowWithoutActivating);
                 persisting.resize(900, 700);
@@ -13134,7 +13539,7 @@ int main(int argc, char* argv[])
         }
 
         {
-            QTemporaryDir quietLib2;
+            RequiredTempDir quietLib2;
             MainWindow quiet(nullptr, /*persistProgress=*/false, quietLib2.path());
             quiet.setAttribute(Qt::WA_ShowWithoutActivating);
             quiet.resize(900, 700);
@@ -13155,7 +13560,7 @@ int main(int argc, char* argv[])
         }
 
         {
-            QTemporaryDir persistingLib2;
+            RequiredTempDir persistingLib2;
             MainWindow persisting(nullptr, /*persistProgress=*/true, persistingLib2.path());
             persisting.setAttribute(Qt::WA_ShowWithoutActivating);
             persisting.resize(900, 700);
@@ -13173,7 +13578,7 @@ int main(int argc, char* argv[])
         }
 
         {
-            QTemporaryDir returningLib3;
+            RequiredTempDir returningLib3;
             MainWindow returning(nullptr, /*persistProgress=*/true, returningLib3.path());
             returning.setAttribute(Qt::WA_ShowWithoutActivating);
             returning.resize(900, 700);
@@ -13249,7 +13654,7 @@ int main(int argc, char* argv[])
 
         // A window that must not write.
         {
-            QTemporaryDir quietLib1;
+            RequiredTempDir quietLib1;
             MainWindow quiet(nullptr, /*persistProgress=*/false, quietLib1.path());
             quiet.setAttribute(Qt::WA_ShowWithoutActivating);
             quiet.resize(900, 700);
@@ -13275,7 +13680,7 @@ int main(int argc, char* argv[])
         // ...and one that must, so the check above is about the guard rather
         // than about a write that never happens at all.
         {
-            QTemporaryDir persistingLib1;
+            RequiredTempDir persistingLib1;
             MainWindow persisting(nullptr, /*persistProgress=*/true, persistingLib1.path());
             persisting.setAttribute(Qt::WA_ShowWithoutActivating);
             persisting.resize(900, 700);
@@ -13299,7 +13704,7 @@ int main(int argc, char* argv[])
         // an action that came back checked over a perspective viewport is
         // precisely the failure this reads for.
         {
-            QTemporaryDir returningLib2;
+            RequiredTempDir returningLib2;
             MainWindow returning(nullptr, /*persistProgress=*/true, returningLib2.path());
             returning.setAttribute(Qt::WA_ShowWithoutActivating);
             returning.resize(900, 700);
@@ -13336,7 +13741,7 @@ int main(int argc, char* argv[])
                                   QString::fromStdString(seed.serialize()));
         }
 
-        QTemporaryDir returningLib1;
+        RequiredTempDir returningLib1;
         MainWindow returning(nullptr, /*persistProgress=*/true, returningLib1.path());
         WalkthroughPanel* returningGuide = returning.findChild<WalkthroughPanel*>();
         check(returningGuide != nullptr,
@@ -13442,12 +13847,11 @@ int main(int argc, char* argv[])
     // suite built above; it is covered here rather than in the headless
     // suite only because QString/QDateTime/QImage/QJsonDocument make it
     // un-Qt-free, and headless tests must stay Qt-free by construction. A
-    // QTemporaryDir keeps this off the real Documents/FurnifyMe/ library,
-    // the same injection discipline UserProgress's storage and
-    // ScopedTestSettings already established.
+    // RequiredTempDir keeps this off the real Documents/FurnifyMe/ library
+    // structurally (see its own comment), the same injection discipline
+    // UserProgress's storage and ScopedTestSettings already established.
     {
-        QTemporaryDir tempDir;
-        check(tempDir.isValid(), "the temp library directory was created");
+        RequiredTempDir tempDir;
         FurnitureStore store(tempDir.path());
 
         check(store.listFurniture().isEmpty(), "a fresh store lists no furniture");

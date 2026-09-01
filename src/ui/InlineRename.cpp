@@ -1,5 +1,6 @@
 #include "InlineRename.h"
 
+#include <QKeyEvent>
 #include <QKeySequence>
 #include <QLineEdit>
 #include <QPointer>
@@ -8,6 +9,46 @@
 #include <memory>
 
 namespace InlineRename {
+namespace {
+
+// QLineEdit's own Return/Enter handling does not consume the key event - it
+// fires returnPressed()/editingFinished() and then lets the event carry on
+// propagating to the parent widget, which is why "Enter in a text field
+// inside a dialog also activates the dialog's default button" is ordinary
+// Qt behaviour rather than a bug anyone fixed. Here the parent is a card
+// whose OWN keyPressEvent binds Return to "open" (see InitCardWidget in
+// InitScreen.cpp) - so committing a rename with Enter would, one event
+// later, also open the very card being renamed. An event filter installed
+// on the edit intercepts Return/Enter BEFORE QLineEdit ever sees it, runs
+// the commit directly, and swallows the event outright (returns true) so
+// nothing downstream - not QLineEdit's own signals, not the parent - gets
+// a look at it. A plain QObject: eventFilter() overrides a virtual QObject
+// already declares, which needs no Q_OBJECT/moc of its own.
+class ReturnSwallower : public QObject {
+public:
+    ReturnSwallower(std::function<void()> onReturn, QObject* parent)
+        : QObject(parent), myOnReturn(std::move(onReturn))
+    {
+    }
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        if (event->type() == QEvent::KeyPress) {
+            auto* key = static_cast<QKeyEvent*>(event);
+            if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) {
+                myOnReturn();
+                return true;
+            }
+        }
+        return QObject::eventFilter(watched, event);
+    }
+
+private:
+    std::function<void()> myOnReturn;
+};
+
+}  // namespace
 
 void beginRename(QWidget* host, const QRect& cellRect, const QString& current,
                  std::function<void(QString)> commit)
@@ -35,15 +76,23 @@ void beginRename(QWidget* host, const QRect& cellRect, const QString& current,
     // no-op rather than a second, contradictory commit.
     auto settled = std::make_shared<bool>(false);
 
-    QObject::connect(edit, &QLineEdit::editingFinished, edit,
-                     [edit, commit, settled]() mutable {
-                         if (*settled || edit.isNull()) return;
-                         *settled = true;
-                         const QString text = edit->text().trimmed();
-                         // Empty/whitespace: refused silently, old name stands.
-                         if (!text.isEmpty()) commit(text);
-                         if (edit) edit->deleteLater();
-                     });
+    auto doCommit = [edit, commit, settled]() mutable {
+        if (*settled || edit.isNull()) return;
+        *settled = true;
+        const QString text = edit->text().trimmed();
+        // Empty/whitespace: refused silently, old name stands.
+        if (!text.isEmpty()) commit(text);
+        if (edit) edit->deleteLater();
+    };
+
+    // Enter, via the swallower above - it calls doCommit() itself and never
+    // lets QLineEdit's own Return handling run at all.
+    edit->installEventFilter(new ReturnSwallower(doCommit, edit));
+
+    // An ordinary focus-out (clicking away) - the Enter case above never
+    // reaches this signal, since the filter swallows that key event before
+    // QLineEdit can raise it from its own Return handling.
+    QObject::connect(edit, &QLineEdit::editingFinished, edit, doCommit);
 
     auto* escape = new QShortcut(QKeySequence(Qt::Key_Escape), edit);
     escape->setContext(Qt::WidgetWithChildrenShortcut);

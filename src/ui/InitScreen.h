@@ -69,6 +69,17 @@ signals:
     // round-trips through loadFurniture() is what makes that safe.
     void furnitureCreated(const QString& id);
 
+    // The two refusals FurnitureStore can hand back from this screen's own
+    // gestures - a disk that will not take a new directory, or a rename
+    // landing on a furniture whose files have gone missing underneath it.
+    // Neither is swallowed: this card owns the gallery, not the way this
+    // app reports outcomes, so the copy - in cause-and-fix form, like every
+    // other refusal - lives in MainWindow with everything else this app
+    // says no to, on the same terms AppearancePanel's colourSaveFailed()/
+    // colourLoadRefused() already established.
+    void furnitureCreateFailed(const QString& attemptedName);
+    void furnitureRenameFailed(const QString& id, const QString& attemptedName);
+
 protected:
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
@@ -84,7 +95,6 @@ private:
     QWidget* buildFurnitureCard(const QString& id, const QString& name,
                                const QString& thumbPath, const QDateTime& lastEdited);
     QWidget* buildNewCard();
-    QString nextFurnitureName() const;
     void applyTheme();
 
     FurnitureStore* myStore = nullptr;

@@ -55,16 +55,51 @@
 #include <utility>
 #include <vector>
 
+QString MainWindow::defaultLibraryRoot()
+{
+    // A SENTINEL, not the real path - resolveLibraryRoot() below is the one
+    // place that actually asks QStandardPaths, so there is exactly one
+    // implementation of "where the real library lives". Deliberately not
+    // the empty string: see this method's declaration in MainWindow.h for
+    // why an empty libraryRoot has to mean something else entirely (a
+    // refusal, not "use the default"). The leading \x01 makes collision
+    // with any string a caller could type or a path could resolve to
+    // essentially impossible.
+    static const QString sentinel =
+        QStringLiteral("\x01__FurnifyMe_default_library_root__");
+    return sentinel;
+}
+
 namespace {
 // The real library location - QStandardPaths::DocumentsLocation +
 // "/FurnifyMe" - is resolved here rather than inline in the initializer
 // list below, purely so the constructor's own comment can stay next to the
 // member it explains rather than a one-liner buried in a mem-initializer.
+//
+// Structural, not advisory: an EMPTY (or all-whitespace) libraryRoot
+// reaching this function is refused outright with qFatal() rather than
+// quietly treated as "use the default". That default is asked for through
+// MainWindow::defaultLibraryRoot()'s own sentinel - the constructor's
+// header default, so main.cpp's plain `MainWindow window;` still gets it
+// for free - so an empty string here can only mean a caller passed one
+// explicitly, most concretely a QTemporaryDir that failed to create and
+// handed back "". Silently falling through to the real library in that
+// case is exactly the failure mode this refusal exists to close off; the
+// test suite's own RequiredTempDir (gui_smoke.cpp) is the other half of
+// the same fix, at the point such a failure would actually originate.
 QString resolveLibraryRoot(const QString& injected)
 {
-    if (!injected.isEmpty()) return injected;
-    return QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation) +
-          QStringLiteral("/FurnifyMe");
+    if (injected == MainWindow::defaultLibraryRoot()) {
+        return QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation) +
+              QStringLiteral("/FurnifyMe");
+    }
+    if (injected.trimmed().isEmpty()) {
+        qFatal("MainWindow: an empty library root was passed explicitly - refusing to "
+              "silently fall back to the real furniture library. Pass "
+              "MainWindow::defaultLibraryRoot() to ask for that on purpose, or a real "
+              "path otherwise.");
+    }
+    return injected;
 }
 }  // namespace
 
@@ -1328,6 +1363,27 @@ void MainWindow::buildInitScreen()
     connect(myInitScreen, &InitScreen::furnitureChosen, this, &MainWindow::openFurniture);
     connect(myInitScreen, &InitScreen::furnitureCreated, this, &MainWindow::openFurniture);
 
+    // The gallery's two refusals - a library that will not take a new
+    // directory, a rename landing on a furniture whose files are gone - are
+    // never silent. Same cause-and-fix shape as every other refusal this
+    // window reports, and the same reasoning AppearancePanel's colour-file
+    // failures already established: the card owns a gallery, not the way
+    // this app says no, so the copy lives here.
+    connect(myInitScreen, &InitScreen::furnitureCreateFailed, this,
+            [this](const QString& name) {
+                myToasts->show(tr("Couldn't create %1 — Check that the library folder "
+                                  "still exists and isn't read-only").arg(name),
+                              Toast::Kind::Failure, false);
+            });
+    connect(myInitScreen, &InitScreen::furnitureRenameFailed, this,
+            [this](const QString& id, const QString& name) {
+                Q_UNUSED(id);
+                myToasts->show(tr("Couldn't rename this furniture to %1 — Check that "
+                                  "its folder still exists and isn't read-only")
+                                  .arg(name),
+                              Toast::Kind::Failure, false);
+            });
+
     // The gallery fills the whole viewport, not one anchored corner, so it
     // does not go through ViewportOverlay's anchor system - but it still has
     // to track the viewport's size, and laidOut() is where every other
@@ -1409,18 +1465,10 @@ bool MainWindow::openFurniture(const QString& id)
     myView->setSketchMode(false, mySketch.plane());
     myView->clearPreview();
     myView->clearSelection();
+    // resyncView() itself reapplies persisted visibility onto the freshly
+    // displayed items now - see its own comment - so nothing further is
+    // needed here.
     resyncView();
-
-    // The reconciliation this task owns: DocumentModel is the single source
-    // of truth for visibility (Task 1's isVisible()/setVisible(), and
-    // ItemsPanel's eye button now writes through to it - see ItemsPanel.cpp)
-    // and the view is a mirror of it. resyncView() just redisplayed every
-    // item fully visible (that is what displaySolid()/displayOutline() do),
-    // so the persisted state is reapplied on top of it here.
-    for (const DocumentModel::Solid& solid : myDocument.solids())
-        myView->setSolidVisible(solid.id, myDocument.isVisible(solid.id));
-    for (const DocumentModel::Outline& outline : myDocument.outlines())
-        myView->setOutlineVisible(outline.id, myDocument.isVisible(outline.id));
 
     if (myInitScreen) myInitScreen->hide();
 
@@ -1692,6 +1740,20 @@ void MainWindow::resyncView()
     for (const DocumentModel::Outline& outline : myDocument.outlines()) {
         myView->displayOutline(outline.id, outline.face);
     }
+
+    // The visibility reconciliation: DocumentModel owns isVisible() (Task 1,
+    // written through by ItemsPanel's eye button - see ItemsPanel.cpp), and
+    // the view is a mirror of it. displaySolid()/displayOutline() above
+    // always show what they just built, so the persisted state is reapplied
+    // on top HERE, in the one place every caller of this function goes
+    // through - not just the caller (openFurniture()) that happened to be
+    // written first. Undo, redo, and every other resync (six call sites)
+    // rebuild the presentation wholesale exactly as a fresh open does, so a
+    // hidden body must not silently reappear on any of them.
+    for (const DocumentModel::Solid& solid : myDocument.solids())
+        myView->setSolidVisible(solid.id, myDocument.isVisible(solid.id));
+    for (const DocumentModel::Outline& outline : myDocument.outlines())
+        myView->setOutlineVisible(outline.id, myDocument.isVisible(outline.id));
 }
 
 void MainWindow::onDeleteSelected()

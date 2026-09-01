@@ -29,13 +29,25 @@ class MainWindow : public QMainWindow {
     Q_OBJECT
 
 public:
+    // The sentinel `libraryRoot` means "use the real library location" -
+    // QStandardPaths::DocumentsLocation + "/FurnifyMe" - and is the
+    // constructor's own default, so `MainWindow window;` (main.cpp's own
+    // call) still gets it for free. Deliberately NOT the empty string:
+    // QTemporaryDir::path() returns exactly "" when a temp directory could
+    // not be created at all, and treating that the same as "the caller
+    // wants the default" would let a broken test silently read and write a
+    // real user's Documents folder instead of failing where the mistake
+    // happened. An empty (or otherwise blank) `libraryRoot` reaching the
+    // constructor is refused outright - see its definition - rather than
+    // quietly resolved to the real path.
+    static QString defaultLibraryRoot();
+
     // `libraryRoot` is FurnitureStore's INJECTED directory - see
-    // FurnitureStore.h. Empty (the default) means the real one:
-    // QStandardPaths::DocumentsLocation + "/FurnifyMe". Every test passes a
-    // QTemporaryDir path here, the same discipline persistProgress=false
+    // FurnitureStore.h and defaultLibraryRoot() above. Every test passes a
+    // real QTemporaryDir path here, the same discipline persistProgress=false
     // already established for QSettings.
     explicit MainWindow(QWidget* parent = nullptr, bool persistProgress = true,
-                        const QString& libraryRoot = QString());
+                        const QString& libraryRoot = defaultLibraryRoot());
 
     // Operations, split from the dialogs that ask for their parameters. The GUI
     // smoke test drives these directly; a modal QInputDialog cannot be answered

@@ -140,6 +140,19 @@ QVector<FurnitureStore::FurnitureInfo> FurnitureStore::listFurniture() const
     return result;
 }
 
+QString FurnitureStore::nextFurnitureName() const
+{
+    int highest = 0;
+    static const QString prefix = QStringLiteral("Furniture ");
+    for (const FurnitureInfo& info : listFurniture()) {
+        if (!info.name.startsWith(prefix)) continue;
+        bool ok = false;
+        const int n = info.name.mid(prefix.size()).toInt(&ok);
+        if (ok) highest = std::max(highest, n);
+    }
+    return QStringLiteral("Furniture %1").arg(highest + 1, 2, 10, QLatin1Char('0'));
+}
+
 QString FurnitureStore::createFurniture(const QString& name)
 {
     if (!QDir().mkpath(myRootDir)) return QString();

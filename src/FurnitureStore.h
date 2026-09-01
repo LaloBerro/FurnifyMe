@@ -52,6 +52,17 @@ public:
     // every other furniture in the library.
     QVector<FurnitureInfo> listFurniture() const;
 
+    // "Furniture NN" - the same two-digit-and-up numbering DocumentModel's
+    // own Body/Outline names use - scanned from what the library actually
+    // holds (listFurniture()) rather than counted, so a deleted-and-
+    // recreated furniture never collides with a name still on screen.
+    // Lives HERE rather than at a caller (InitScreen is the one caller
+    // today) so a second creation path - a future import, a duplicate
+    // gesture - cannot fork the numbering by carrying its own copy of this
+    // scan. Does not itself create anything; a caller still calls
+    // createFurniture(nextFurnitureName()).
+    QString nextFurnitureName() const;
+
     // Creates a new, empty furniture and returns its id - a fresh
     // identifier, never derived from `name` (so renaming later never
     // touches the directory or breaks a held id). Returns an empty string

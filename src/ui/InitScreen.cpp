@@ -18,6 +18,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <vector>
 
 namespace {
 
@@ -276,8 +277,17 @@ QWidget* InitScreen::buildNewCard()
     card->setAsNewCard(tr("New furniture"));
     card->onActivated = [this] {
         if (!myStore) return;
-        const QString id = myStore->createFurniture(nextFurnitureName());
-        if (!id.isEmpty()) emit furnitureCreated(id);
+        const QString name = myStore->nextFurnitureName();
+        const QString id = myStore->createFurniture(name);
+        // FurnitureStore::createFurniture() refuses (empty id) when the
+        // root or the furniture's own directory cannot be created - a
+        // refusal this screen must not swallow. Never silent: every outcome
+        // this app reports either succeeds visibly or says so as a Failure.
+        if (id.isEmpty()) {
+            emit furnitureCreateFailed(name);
+            return;
+        }
+        emit furnitureCreated(id);
     };
     return card;
 }
@@ -292,30 +302,24 @@ QWidget* InitScreen::buildFurnitureCard(const QString& id, const QString& name,
         if (!myStore) return;
         InlineRename::beginRename(card, card->nameLabelGeometry(), card->nameText(),
                                   [this, id](QString newName) {
-                                      if (myStore) myStore->renameFurniture(id, newName);
+                                      if (!myStore) return;
+                                      // A refusal here (the furniture's own
+                                      // manifest is unreadable or gone) must
+                                      // not be repainted over in silence -
+                                      // refresh() only runs on the success
+                                      // path, so a refused rename leaves the
+                                      // card showing exactly what it showed
+                                      // before, with the refusal reported
+                                      // rather than merely implied by
+                                      // nothing changing.
+                                      if (!myStore->renameFurniture(id, newName)) {
+                                          emit furnitureRenameFailed(id, newName);
+                                          return;
+                                      }
                                       refresh();
                                   });
     };
     return card;
-}
-
-QString InitScreen::nextFurnitureName() const
-{
-    // "Furniture NN", the same two-digit-and-up numbering DocumentModel's
-    // own Body/Outline names use - scanned from what the library actually
-    // holds rather than counted, so a deleted-and-recreated furniture never
-    // collides with a name still on screen.
-    int highest = 0;
-    if (myStore) {
-        static const QString prefix = QStringLiteral("Furniture ");
-        for (const FurnitureStore::FurnitureInfo& info : myStore->listFurniture()) {
-            if (!info.name.startsWith(prefix)) continue;
-            bool ok = false;
-            const int n = info.name.mid(prefix.size()).toInt(&ok);
-            if (ok) highest = std::max(highest, n);
-        }
-    }
-    return QStringLiteral("Furniture %1").arg(highest + 1, 2, 10, QLatin1Char('0'));
 }
 
 void InitScreen::refresh()
@@ -356,9 +360,11 @@ void InitScreen::relayoutCards()
     grid->setVerticalSpacing(kCardSpacing);
 
     int row = 0, col = 0;
+    std::vector<QWidget*> placedWidgets;
     auto place = [&](QWidget* w) {
         grid->addWidget(w, row, col);
         w->show();
+        placedWidgets.push_back(w);
         if (++col >= perRow) { col = 0; ++row; }
     };
 
@@ -367,6 +373,27 @@ void InitScreen::relayoutCards()
     if (myNewCard) place(myNewCard);
     for (const Card& c : myCards) {
         if (c.widget) place(c.widget);
+    }
+
+    // Whole-device-pixel positions, the same rule every other floating card
+    // in this shell follows (Theme.h) - each card's own SIZE already rounds
+    // up whole (InitCardWidget's constructor), but QGridLayout still lands
+    // its LOGICAL position wherever the row/column arithmetic puts it, which
+    // a fractional display scale can leave on a fractional device row. The
+    // seam here is chrome-on-chrome (this card's own paintSurface() ground
+    // over InitScreen's own opaque fill) rather than over OCCT's GL surface,
+    // so a miss reads as a soft antialiasing edge rather than the hard black
+    // hairline the GL-surface cards risk - lower stakes, but "every floating
+    // card" is the rule, not "every floating card where it would otherwise
+    // be visible". activate() forces the grid to actually compute positions
+    // now, synchronously, rather than leaving them pending for the next
+    // paint/resize cycle - addWidget() alone only marks the layout dirty.
+    grid->activate();
+    const QPoint origin = myGrid->mapTo(window(), QPoint(0, 0));
+    const double dpr = devicePixelRatioF();
+    for (QWidget* w : placedWidgets) {
+        w->move(Theme::snapToDevicePixels(w->x(), origin.x(), dpr),
+               Theme::snapToDevicePixels(w->y(), origin.y(), dpr));
     }
 }
 

@@ -120,6 +120,21 @@ QString HintBalloon::textForEvent(const QString& event) const
 
 void HintBalloon::reconsider()
 {
+    // The init screen's own gate (Milestone 3, item 2), on the same terms
+    // as WalkthroughPanel's - see that class for the fuller reasoning. Every
+    // one of the three conditions below already requires document().count()
+    // > 0 or a live selection, both of which showInitScreen() forces to
+    // nothing, so this has never actually been reachable in practice; it is
+    // still made explicit rather than left to that coincidence, because a
+    // future hint with no document requirement would otherwise be free to
+    // pop up over the gallery with nothing here to stop it. dismiss() rather
+    // than a bare hide(): a hint the gallery caught mid-display must not be
+    // left remembering state a real dismissal would have cleared.
+    if (myWindow->isShowingInitScreen()) {
+        dismiss();
+        return;
+    }
+
     const UserProgress& progress = myWindow->progress();
 
     // A shown hint is dismissed by any one of three equally valid triggers:
