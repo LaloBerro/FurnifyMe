@@ -162,6 +162,15 @@ public:
         layout->addWidget(myName, 1);
         layout->addWidget(myClose);
 
+        // Tracks the PARENT's own resize, not this widget's - the badge sits
+        // at a fixed offset from myCompareView's own top-left corner, and
+        // that offset's snapped device-pixel value depends on where
+        // myCompareView itself lands inside the window (see reposition()),
+        // which moves whenever the splitter handle is dragged. No Q_OBJECT
+        // needed: eventFilter() overrides a plain virtual QObject already
+        // declares.
+        if (parent) parent->installEventFilter(this);
+
         applyTheme();
         connect(Theme::notifier(), &Theme::Notifier::changed, this,
                 [this] { applyTheme(); });
@@ -178,10 +187,26 @@ public:
         const QFontMetrics fm(Theme::bodyFont());
         myName->setText(fm.elidedText(name, Qt::ElideRight, kMaxNameWidth));
         myName->setToolTip(name);
-        adjustSize();
+        growAndReposition();
     }
 
     QPushButton* closeButton() const { return myClose; }
+
+    // Snaps this card's position off its parent's own placement inside the
+    // window - Theme.h's position half of the whole-device-pixel rule, the
+    // same one ViewportOverlay::relayout() applies to every anchored card.
+    // Public so MainWindow can call it once right after construction
+    // (before the first paint, when this card is not yet parent-resized) as
+    // well as from the event filter below.
+    void reposition()
+    {
+        QWidget* host = parentWidget();
+        if (!host) return;
+        const QPoint origin = host->mapTo(host->window(), QPoint(0, 0));
+        const double dpr = host->devicePixelRatioF();
+        move(Theme::snapToDevicePixels(kMargin, origin.x(), dpr),
+             Theme::snapToDevicePixels(kMargin, origin.y(), dpr));
+    }
 
 protected:
     void paintEvent(QPaintEvent* /*event*/) override
@@ -190,9 +215,33 @@ protected:
         Theme::paintSurface(painter, rect(), 8);
     }
 
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        if (watched == parentWidget() && event->type() == QEvent::Resize) reposition();
+        return QWidget::eventFilter(watched, event);
+    }
+
 private:
     static constexpr int kPad = 10;
     static constexpr int kMaxNameWidth = 160;
+    static constexpr int kMargin = 16;   // the same corner margin every other floating card uses
+
+    // Theme.h's SIZE half of the whole-device-pixel rule: adjustSize() first,
+    // to get this card's natural size from its own layout (the name label's
+    // width changed), then grown to a whole number of device pixels so a
+    // fractional display scale cannot leave an unpainted row along its far
+    // edge over OCCT's GL surface - see ExtrudePreview::applyTheme() and
+    // ViewportOverlay::relayout() for the same rule applied to a
+    // setFixedSize() card and an anchored one respectively; this is the
+    // adjustSize()-driven variant of the identical rule. reposition() runs
+    // afterward too, since a font or padding change can, in principle, move
+    // where this card's content wants to sit relative to its own top-left.
+    void growAndReposition()
+    {
+        adjustSize();
+        resize(Theme::wholeDevicePixels(size()));
+        reposition();
+    }
 
     void applyTheme()
     {
@@ -206,6 +255,7 @@ private:
                 .arg(Theme::chip().name(), Theme::text().name())
                 .arg(Theme::labelFont().pointSizeF())
                 .arg(Theme::chipHover().name()));
+        growAndReposition();
         update();
     }
 
@@ -1797,9 +1847,21 @@ bool MainWindow::canOpenSaveVersion() const
     // Every OTHER application-wide Enter/Escape claim this app can have
     // live at once, named explicitly rather than folded into one flag -
     // see the declaration for why this is what keeps the four claims
-    // mutually exclusive by construction.
+    // mutually exclusive by construction. canTransformSelectedBody()
+    // deliberately does NOT appear here (fix round 1, Important 2): the
+    // transform gizmo holds no application-wide key claim of its own - it is
+    // a direct 3D drag with no text field and no Enter/Escape filter, unlike
+    // the other three - so excluding it bought no disjointness, only a false
+    // conflict. With it included, clicking a body while this card was open
+    // (an ordinary Shift-click, or even a stray click meant for something
+    // else entirely) flipped this predicate false, appStateChanged() fired,
+    // and SaveVersionCard::onAppStateChanged() cancelled the card - silently
+    // discarding whatever name the user had already typed. A single body
+    // selected raises the gizmo but claims no keys, so the card and the
+    // gizmo can coexist on screen with no ambiguity about which one Enter or
+    // Escape belongs to.
     return !myShowingInitScreen && !mySketching && !hasPendingFace() &&
-           !canPullSelectedFace() && !canBevelSelectedEdge() && !canTransformSelectedBody();
+           !canPullSelectedFace() && !canBevelSelectedEdge();
 }
 
 void MainWindow::onSaveVersion()
@@ -1911,6 +1973,10 @@ bool MainWindow::openCompare(const QString& name)
     // it rather than stacking a second one.
     if (myCompareView) closeCompare();
 
+    // A fresh generation for this compare session - see the badge's own
+    // Close-button connect() below for what this guards against.
+    ++myCompareGeneration;
+
     // The live view's PARENT never changes here - only the compare pane is
     // ever newly parented, so there is no risk to the live view's own OCCT
     // bridge from this call. mySplitter takes myView as its first pane
@@ -1944,8 +2010,11 @@ bool MainWindow::openCompare(const QString& name)
 
     myCompareVersionName = name;
     auto* badge = new CompareBadge(myCompareView);
+    // setVersionName() ends in growAndReposition() - both device-pixel
+    // rules (Theme::wholeDevicePixels() for the size, Theme::
+    // snapToDevicePixels() for the position) apply themselves; nothing
+    // further to place by hand here.
     badge->setVersionName(name);
-    badge->move(16, 16);
     badge->show();
     badge->raise();
     // Deferred by one event-loop turn, deliberately - see closeCompare()'s
@@ -1956,8 +2025,24 @@ bool MainWindow::openCompare(const QString& name)
     // call stack. QTimer::singleShot(0, ...) runs it on the next turn
     // instead, by which point this click has finished being handled and
     // nothing is executing inside the object about to be deleted.
-    connect(badge->closeButton(), &QPushButton::clicked, this,
-            [this] { QTimer::singleShot(0, this, &MainWindow::closeCompare); });
+    //
+    // The generation captured here (fix round 1, Minor 6) is what stops a
+    // STALE deferred close from acting on the WRONG compare session: a
+    // click, then - inside that single deferred turn - Restore or a second
+    // Compare click replacing this pane with a different version before the
+    // timer fires. Without it the deferred call would still run
+    // closeCompare() unconditionally and close whatever compare happens to
+    // be open BY THEN, silently discarding a session the user never asked
+    // to end. myCompareGeneration is bumped once per openCompare() call
+    // (below), so a mismatch here means "the compare this button belonged
+    // to is already gone or already replaced" and the deferred call becomes
+    // a no-op rather than acting on the wrong pane.
+    const int generation = myCompareGeneration;
+    connect(badge->closeButton(), &QPushButton::clicked, this, [this, generation] {
+        QTimer::singleShot(0, this, [this, generation] {
+            if (myCompareGeneration == generation) closeCompare();
+        });
+    });
     myCompareBadge = badge;
 
     updateActions();
@@ -1969,11 +2054,42 @@ void MainWindow::closeCompare()
 {
     if (!myCompareView) return;
 
+    // The splitter's own size IS the correct target for whatever replaces
+    // it as central widget - QMainWindowLayout already computed and applied
+    // it when mySplitter itself became central, back in openCompare().
+    // Captured before anything below touches mySplitter.
+    const QSize centralSize = mySplitter ? mySplitter->size() : QSize();
+
     // Pulls the live view back OUT of the splitter and back to being the
     // window's plain central widget - the same reparenting openCompare()
     // did in reverse, and the one QMainWindow::setCentralWidget() already
     // knows how to perform on a widget it does not currently own.
     setCentralWidget(myView);
+    // setCentralWidget() alone leaves myView at whatever geometry it held as
+    // ONE PANE of the splitter (roughly half the window, since QSplitter
+    // gives its FIRST widget's own sizeHint priority in the absence of an
+    // explicit setSizes() call) until something else forces
+    // QMainWindowLayout to lay out again - and empirically, neither
+    // layout()->invalidate() nor layout()->activate() is that something for
+    // a QMainWindow's own specialised layout in this situation. Found by a
+    // real composited capture (fix round 1, Important 1/Minor 3), not
+    // assumed: centralWidget()==view was true and the view still rendered
+    // and picked CORRECTLY within its own (wrong, roughly-600-of-1000-px)
+    // rect, so neither of those checks caught it - only a PrintWindow
+    // capture showed the other ~40% of the window still painting the
+    // compare pane's stale pixels, and a direct geometry check confirmed it
+    // (view->width() == 601 in a 1000px-wide probe).
+    //
+    // myView is resized explicitly to the size we KNOW is right, because it
+    // is exactly the size the widget it is replacing just had. That alone
+    // still was not the whole fix, though - see
+    // OcctViewWidget::resizeEvent() for the other half: the resize() call
+    // below updates Qt's own widget-level bookkeeping (which this
+    // triggered correctly, and which is what V3d_View::Dump() reads), but
+    // the underlying native HWND's ACTUAL client rect turned out not to
+    // follow it here, confirmed with GetClientRect - a defect resizeEvent()
+    // now corrects on every resize, not just this one call site.
+    if (centralSize.isValid()) myView->resize(centralSize);
 
     // A SYNCHRONOUS delete, not deleteLater(). QMainWindow keeps the
     // REPLACED central widget referenced in its own internal layout state
@@ -1999,6 +2115,19 @@ void MainWindow::closeCompare()
     // restoreVersion()/openCompare(), and a direct call from a test) is not
     // itself a descendant of what this deletes, so no such deferral is
     // needed for them.
+    //
+    // A SECOND reentrancy shape was considered and is safe without any
+    // deferral of its own: a window-level shortcut (Ctrl+W for Close
+    // furniture, say) firing while focus happens to sit on a widget this
+    // call is about to delete - the badge's Close button, if it was ever
+    // Tab-focused rather than clicked. That dispatch runs through
+    // QApplication::notify(), which Qt guards internally with QPointer
+    // around the focus widget across the handler call specifically so a
+    // slot invoked by a shortcut can delete the widget the shortcut was
+    // dispatched through without notify() touching a dangling pointer
+    // afterward - unlike the click case above, where the reentrancy is
+    // THIS class's own signal/slot wiring and nothing upstream is guarding
+    // it for us.
     myCompareBadge = nullptr;   // a child of myCompareView - goes with it below
     delete myCompareView;
     myCompareView = nullptr;

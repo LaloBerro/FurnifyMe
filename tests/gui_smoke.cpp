@@ -185,7 +185,7 @@ void skipByEnvironment(int checks, const QString& why)
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 1536;
+constexpr int kCheckFloor = 1545;
 
 void check(bool condition, const QString& what)
 {
@@ -14019,6 +14019,8 @@ int main(int argc, char* argv[])
         probe.show();
         settle(200);
         probe.view()->setAnimationsEnabled(false);
+        const QString snapDir = versionsLib.path() + QStringLiteral("/snap");
+        QDir().mkpath(snapDir);
 
         enterFreshFurniture(probe);
 
@@ -14216,6 +14218,39 @@ int main(int argc, char* argv[])
                                           : QStringLiteral("the compare view")));
         }
 
+        // --- fix round 1, Important 1: measure the badge, the drawer and --
+        // the save card together, not just built. Every other floating card
+        // in this app is proven against a real composited capture
+        // (checkNoBlackLine()); the compare badge was the one new family
+        // member this task never actually measured - it only asserted
+        // childAt() reachability, which says nothing about a fractional
+        // display scale leaving an unpainted device row along its edge, the
+        // exact defect class CLAUDE.md records this family paying for twice
+        // already. All three floating cards this task added or reuses are
+        // on screen at once here: the versions drawer (opened earlier and
+        // still up), the compare badge (compare is still open), and
+        // Save version...'s own card, opened for exactly this capture.
+        check(probe.findChild<VersionsPanel*>() != nullptr &&
+                  probe.findChild<VersionsPanel*>()->isVisible(),
+              "the versions drawer is still up for the combined capture");
+        trigger(probe, QStringLiteral("Save version..."));
+        SaveVersionCard* captureCard = probe.findChild<SaveVersionCard*>();
+        check(captureCard != nullptr && captureCard->isVisible(),
+              "the save-version card is up too - all three families on screen at once");
+        settle(200);
+        const QImage familyShot = printWindowCapture(
+            &probe, snapDir + QStringLiteral("/badge-drawer-card.png"));
+        checkNoBlackLine(familyShot, QStringLiteral("badge + versions drawer + save card"));
+        if (captureCard) {
+            QKeyEvent esc(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+            QCoreApplication::sendEvent(captureCard->field(), &esc);
+            settle(120);
+        }
+        check((captureCard = probe.findChild<SaveVersionCard*>()) == nullptr ||
+                  !captureCard->isVisible(),
+              "and the capture card closes cleanly afterward, leaving compare and the "
+              "drawer exactly as they were");
+
         // --- closing compare leaves the live viewport intact -------------------
         // Tracked through a QPointer, not just absence from probe's own
         // findChildren() list - closeCompare() deletes synchronously (see
@@ -14235,12 +14270,22 @@ int main(int argc, char* argv[])
         check(splitterBeforeClose.isNull(),
               "the splitter object was genuinely destroyed, not merely detached");
         check(probe.findChildren<QSplitter*>().isEmpty(), "no splitter is left behind");
+        // A real, measured bug this exact check caught (fix round 1): after
+        // setCentralWidget(myView), Qt's own WIDGET-level geometry recovers
+        // to the full window width on its own, but that alone is not
+        // proof of anything on screen - see the native HWND check further
+        // down (after settle(), which is what the fix actually needs a
+        // turn of the event loop to complete through) for the one that
+        // actually found the defect.
+        check(probe.view()->width() >= probe.width() - 40,
+              QStringLiteral("the live view's WIDGET geometry is full-bleed again (%1 of "
+                             "%2 px wide)")
+                  .arg(probe.view()->width())
+                  .arg(probe.width()));
 
         // The reparenting risk CLAUDE.md's own task brief flagged explicitly:
         // does the live view's native GL window survive being moved into the
         // splitter and back? A fresh snapshot proves it still renders...
-        const QString snapDir = versionsLib.path() + QStringLiteral("/snap");
-        QDir().mkpath(snapDir);
         check(probe.view()->saveSnapshot(snapDir + QStringLiteral("/after-compare.png")),
               "the live view still renders after compare closes - the reparent round "
               "trip did not break its native window");
@@ -14256,6 +14301,45 @@ int main(int argc, char* argv[])
         check(probe.view()->selectedSolidIds().size() == 1,
               "and picking on the live view still works after the round trip");
         probe.view()->clearSelection();
+
+        // Fix round 1, Minor 3: neither of the two checks above actually
+        // touches the native HWND. saveSnapshot() is V3d_View::Dump, an
+        // OFFSCREEN render into a file that says nothing about what DWM is
+        // compositing on screen; picking is pure maths against the OCCT
+        // scene graph and would answer the same whether or not a single
+        // pixel of it ever reached a window. A PrintWindow-based composited
+        // capture - the same machinery checkNoBlackLine()'s own callers use
+        // elsewhere in this file - is the one proof that actually reads
+        // what the window manager is showing, which is the only place a
+        // broken native window (a stale HWND, a GL context still bound to a
+        // destroyed surface) would ever show up.
+        settle(200);
+#ifdef _WIN32
+        // The real regression pin (fix round 1, Important 1 / Minor 3): the
+        // NATIVE HWND's own client rect, read directly with GetClientRect
+        // rather than through any Qt bookkeeping. This is exactly the check
+        // that first caught the bug the composited capture right below only
+        // shows the SYMPTOM of - Qt's widget geometry and OCCT's V3d_View
+        // both agreed the view was full-width (V3d_View::Dump() rendered
+        // correctly at that width) while the actual on-screen HWND stayed
+        // at its old, splitter-constrained size until this settle() gave
+        // the queued resize event - and the fix inside it,
+        // OcctViewWidget::resizeEvent()'s explicit SetWindowPos - a turn of
+        // the event loop to actually run.
+        {
+            RECT clientRect{};
+            GetClientRect(reinterpret_cast<HWND>(probe.view()->winId()), &clientRect);
+            const int nativeWidth = clientRect.right - clientRect.left;
+            check(nativeWidth >= probe.view()->width() - 4,
+                  QStringLiteral("the native HWND's own client rect actually matches - "
+                                 "%1 device px against a %2 logical-px-wide widget")
+                      .arg(nativeWidth)
+                      .arg(probe.view()->width()));
+        }
+#endif
+        const QImage afterCompareShot = printWindowCapture(
+            &probe, snapDir + QStringLiteral("/after-compare-composited.png"));
+        checkNoBlackLine(afterCompareShot, QStringLiteral("post-compare live view"));
 
         // --- Restore: one checkpoint, undo returns the whole pre-restore document
         trigger(probe, QStringLiteral("Start Sketch"));
@@ -14361,6 +14445,47 @@ int main(int argc, char* argv[])
         check(toasts != nullptr && toasts->toast() != nullptr && !toasts->toast()->hasUndo(),
               "the Note toast for a version delete offers no Undo - versions carry none");
 
+        // --- this probe's own toasts join the vocabulary sweep too (fix ---
+        // round 1, Minor 5) - the SAME mechanism the shared `window`'s own
+        // sweep uses (Toast::paintedTexts(), walked by
+        // window.findChildren<Toast*>() many thousand lines above), just
+        // pointed at `probe` instead: an isolated probe's own ToastHost is a
+        // SEPARATE object in a separate tree, so nothing about the shared
+        // window's sweep could ever reach the "Version ... saved" /
+        // "Restored version ..." / "Deleted version ..." messages this
+        // block has produced so far, and every one of Task 3's own Note and
+        // Failure copy went untested by any automated sweep until now - only
+        // by the handful of exact-text checks above, which prove the
+        // message shown at one moment but not the vocabulary of every
+        // message shown across the whole probe.
+        //
+        // Run HERE, before the deliberate banned-word version below - that
+        // one's own toast (`Version "Fuse Edition" saved`) genuinely
+        // contains a banned word, because Toast has no user-data exemption
+        // of its own (only VersionsPanel's row text does - see below); a
+        // sweep run after it would correctly, and unhelpfully, fail on
+        // exactly the string this task means to exempt one layer up.
+        {
+            QStringList probeToastOffenders;
+            for (Toast* toastWidget : probe.findChildren<Toast*>()) {
+                for (const QString& text : toastWidget->paintedTexts()) {
+                    for (const QString& word : bannedWords()) {
+                        if (usesBannedWord(text, word))
+                            probeToastOffenders
+                                << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
+                    }
+                }
+            }
+            check(!probe.findChildren<Toast*>().isEmpty(),
+                  "the probe has a toast host to sweep, so this is not vacuous");
+            check(probeToastOffenders.isEmpty(),
+                  QStringLiteral("none of this probe's own toast text (Save/Restore/Delete "
+                                 "version copy) uses a banned word (%1)")
+                      .arg(probeToastOffenders.isEmpty()
+                               ? QStringLiteral("none")
+                               : probeToastOffenders.join(QStringLiteral(", "))));
+        }
+
         // --- a version named with a banned word: the row shows it unmangled, -
         // and the drawer's real sweep still passes, because a version's own
         // name is user text and this panel's paintedTexts() never includes it
@@ -14403,31 +14528,47 @@ int main(int argc, char* argv[])
                                                    : versionsOffenders.join(QStringLiteral(", "))));
 
         // The mirrored assertion: the SAME string, used the way app copy is
-        // checked, does trip the matcher - proving the row's silence above is
-        // the user-data exemption at work, not a coincidence of what this
-        // panel happens to paint.
+        // checked, DOES trip the matcher - proving the row's silence above is
+        // the user-data exemption genuinely being exercised at
+        // VersionsPanel's own paintedTexts() boundary, not a coincidence of
+        // what this panel happens to paint or a banned word that was never a
+        // real risk to begin with.
+        //
+        // Fix round 1, Minor 4: this used to be a PAIR - the line above and a
+        // second `check(!usesBannedWord(bannedName, word, /*isUserData=*/true))`
+        // beside it. That second half was tautological: usesBannedWord()'s
+        // OWN first line is `if (isUserData) return false;`, unconditionally,
+        // for ANY string - so a check built by calling it with
+        // isUserData=true can never fail regardless of what this task did or
+        // did not wire correctly. The exemption mechanism actually being
+        // TAKEN by a real call site is what versionsOffenders.isEmpty()
+        // above already proves (a real sweep of this panel's real
+        // paintedTexts(), which excludes the name outright), and the probe
+        // toast sweep just above proves the same for every ORDINARY message
+        // this feature produces - removed here rather than kept as a check
+        // that could never turn red.
         check(usesBannedWord(bannedName, QStringLiteral("Fuse")),
-              "the version's own name WOULD trip the sweep if it were treated as app copy");
-        check(!usesBannedWord(bannedName, QStringLiteral("Fuse"), /*isUserData=*/true),
-              "...but the user-data exemption clears the identical string");
+              "the version's own name WOULD trip the sweep if it were treated as app copy - "
+              "the row's own silence above is a real exemption, not an accident of a word "
+              "that was never actually dangerous");
 
-        // The same pair, pinned against the REAL composed toast message this
-        // feature actually produces (not a hand-typed example) - the Toast
-        // class's own sweep is generic (every message shown this run, with no
-        // per-string exemption), so this run deliberately never shows that
-        // toast on the SHARED `window` below; here, on an isolated probe the
-        // shared sweep never reaches, is where the real string is captured
-        // and proven.
+        // The real, live-captured toast message this save produced DOES
+        // contain the banned word, genuinely, with nothing clearing it -
+        // Toast has no user-data exemption of its own (only VersionsPanel's
+        // row does; see this task's report for why), so this is the honest
+        // outcome, not a gap. It is why the probe-wide toast sweep a few
+        // dozen lines above runs BEFORE this block: sweeping every OTHER
+        // message this probe showed, while leaving this one deliberate
+        // exception to be proven here, on its own, precisely because
+        // nothing exempts it.
         check(toasts != nullptr &&
                   toasts->currentText() == QStringLiteral("Version \"%1\" saved").arg(bannedName),
               QStringLiteral("the real toast for this save reads \"%1\"")
                   .arg(toasts ? toasts->currentText() : QString()));
         if (toasts) {
-            const QString realMessage = toasts->currentText();
-            check(usesBannedWord(realMessage, QStringLiteral("Fuse")),
-                  "the REAL toast text would trip the sweep if it were app copy");
-            check(!usesBannedWord(realMessage, QStringLiteral("Fuse"), /*isUserData=*/true),
-                  "...and the same exemption clears that real string too");
+            check(usesBannedWord(toasts->currentText(), QStringLiteral("Fuse")),
+                  "...and that real toast text genuinely does use the banned word - Toast "
+                  "carries no user-data exemption of its own, so this is expected, not a bug");
         }
     }
 

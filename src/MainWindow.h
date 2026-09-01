@@ -792,4 +792,10 @@ private:
     // kept only so closeCompare() need not search for them and the badge's
     // name can be updated without a second lookup if that is ever wanted.
     class QWidget* myCompareBadge = nullptr;
+    // Bumped once per openCompare() call - the token a deferred
+    // QTimer::singleShot(0, ...) close (the compare badge's own Close
+    // button; see closeCompare()'s comment) checks against before acting,
+    // so a stale deferred close from a session already replaced by a newer
+    // one cannot close the WRONG pane.
+    int myCompareGeneration = 0;
 };

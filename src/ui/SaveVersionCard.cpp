@@ -86,9 +86,28 @@ void SaveVersionCard::cancel()
 void SaveVersionCard::onAppStateChanged()
 {
     // Mirrors ExtrudePreview::onAppStateChanged(): the predicate that gates
-    // opening this panel can go false while it is already open (a sketch
-    // started, a face selected and pulled), and nothing else would tell it
-    // to close.
+    // opening this panel can go false while it is already open, and nothing
+    // else would tell it to close.
+    //
+    // The ruling (fix round 1, Important 2), stated explicitly because a
+    // silent discard is exactly the defect that round found: an ORDINARY
+    // selection change - clicking a body, which used to flip
+    // canOpenSaveVersion() false through the transform-gizmo term that has
+    // since been removed from it - must NOT be able to close this card,
+    // because it carries no genuine key-claim conflict and the user did
+    // nothing that should cost them a typed name. What canOpenSaveVersion()
+    // can STILL go false on are the three real application-wide key claims -
+    // a sketch started (hasPendingFace()), a face pulled
+    // (canPullSelectedFace()), an edge bevelled (canBevelSelectedEdge()) -
+    // and each of those is a DELIBERATE gesture the user made while looking
+    // at this very card, not an incidental side effect of using the
+    // viewport. Closing on one of those, discarding whatever name was typed,
+    // is the same rule ExtrudePreview already applies to its own typed
+    // height for the identical reason: two application-wide Enter/Escape
+    // claims can never coexist, so one of them has to yield, and there is no
+    // queue to put the abandoned one on. See gui_smoke.cpp for both halves
+    // of this pinned explicitly - a stray body click leaves the card open
+    // with its text intact, and starting a sketch closes it.
     if (isVisible() && myWindow && !myWindow->canOpenSaveVersion()) {
         cancel();
     }

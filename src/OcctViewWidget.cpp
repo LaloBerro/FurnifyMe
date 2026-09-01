@@ -1,3 +1,20 @@
+// windows.h FIRST, deliberately - the one exception to "OCCT headers before
+// windows.h", and for the same reason gui_smoke.cpp takes it (see that
+// file's own top-of-file comment): OCCT's own Standard_Macro.hxx includes
+// windows.h itself, but with NOUSER defined first, which excludes the
+// entire User32 window-management API. resizeEvent() below needs
+// SetWindowPos and its SWP_* flags from that API (see its own comment for
+// why), and windows.h's include guard means a second, unrestricted
+// #include after OCCT's own restricted one is a silent no-op - the only
+// way to get the real declarations is to be the FIRST includer. Handle()
+// (OCCT's macro that collides with some Windows headers) does not exist
+// yet at this point in the file, so there is nothing for windows.h to
+// collide with here.
+#ifdef _WIN32
+  #define NOMINMAX
+  #include <windows.h>
+#endif
+
 #include "OcctViewWidget.h"
 
 #include "ModelingOps.h"
@@ -249,10 +266,19 @@ void OcctViewWidget::initializeViewer()
         if (myViewer->InsertLayerAfter(layer, settings, after)) mySketchLayer = layer;
     }
     myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane());
-    myDimension.attach(myContext);
-    myDimension.setZLayer(mySketchLayer);
-    myPullArrow.attach(myContext);
-    myBevelArrow.attach(myContext);
+    // None of these three are ever driven for a viewer-only widget - nothing
+    // calls showPullArrow()/showBevelArrow()/updateEdgeDimension() on one
+    // (see the header) - so attaching them would only be inert presentation
+    // channels sitting in the context for no caller to ever reach. Skipped
+    // outright rather than left as harmless dead weight, so "viewer-only has
+    // no picking, no hover, no grid" reads as the true, complete list rather
+    // than one this constructor quietly disagrees with.
+    if (!myViewerOnly) {
+        myDimension.attach(myContext);
+        myDimension.setZLayer(mySketchLayer);
+        myPullArrow.attach(myContext);
+        myBevelArrow.attach(myContext);
+    }
 
     // The field of view is fixed for the life of the view; WHICH projection is
     // drawn with it moves, so applyCameraState() owns that and this does not
@@ -276,6 +302,32 @@ void OcctViewWidget::paintEvent(QPaintEvent* /*event*/)
 
 void OcctViewWidget::resizeEvent(QResizeEvent* /*event*/)
 {
+#ifdef _WIN32
+    // A safety net for a real, measured defect (fix round 1, Important 1 /
+    // Minor 3 on Milestone 3's Task 3): reparenting this widget's native
+    // window OUT of a QSplitter and back - MainWindow's compare pane,
+    // closeCompare() - left Qt's own WIDGET-LEVEL geometry correctly
+    // updated (width()/height() agreed with the window) while the ACTUAL
+    // underlying HWND's client rect stayed at its old, splitter-constrained
+    // size. Confirmed with GetClientRect, and unmoved by resize(),
+    // repaint(), hide()/show(), or even a full top-level window resize
+    // round trip - none of which reach whatever is actually caching the
+    // native surface's extent here. SetWindowPos, synced to Qt's own idea
+    // of this widget's size on EVERY resize, closes the gap regardless of
+    // what caused it - a defensive, always-on correction that costs
+    // nothing when the two already agree (SetWindowPos with an unchanged
+    // size is a cheap no-op) rather than a special case wired only into
+    // the one call site that happened to find it.
+    //
+    // DEVICE pixels, not logical - toDevicePixels() is this file's one
+    // conversion point (see its own comment), and a raw HWND client rect is
+    // unambiguously a device-pixel quantity. Passing width()/height()
+    // straight through would undersize the native surface at any scale
+    // other than 100%, the exact class of bug that helper exists to close.
+    const QPoint deviceSize = toDevicePixels(QPoint(width(), height()));
+    SetWindowPos(reinterpret_cast<HWND>(winId()), nullptr, 0, 0, deviceSize.x(), deviceSize.y(),
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE);
+#endif
     if (!myView.IsNull()) myView->MustBeResized();
 }
 
