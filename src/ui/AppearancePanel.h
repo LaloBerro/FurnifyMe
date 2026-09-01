@@ -44,6 +44,8 @@ class QColorDialog;
 class QLabel;
 class QSpinBox;
 class QVBoxLayout;
+class QEvent;
+class QObject;
 
 class AppearancePanel : public QWidget {
     Q_OBJECT
@@ -59,6 +61,48 @@ public:
     void setFontFamily(const QString& family);
     // Back to Theme::defaultSpec() - Graphite, and the bundled family at 10pt.
     void reset();
+
+    // --- a look, written to a file and read back ----------------------------
+    //
+    // The FILE HALF of Save colours / Load colours, split off from the two
+    // buttons deliberately. QFileDialog's native dialogs cannot be driven from
+    // inside the event loop that raised them, so a suite that could only reach
+    // this through the buttons could not reach it at all; these two are what
+    // the buttons call and what the suite calls, so what is tested is what
+    // ships rather than a parallel path.
+    //
+    // saveColoursTo() writes Theme::serializeSpec() - the same string
+    // QSettings stores - and answers false for a path it cannot open or write.
+    //
+    // loadColoursFrom() routes the file's contents through
+    // Theme::deserializeSpec(), whose contract is that it leaves its output
+    // UNTOUCHED when it refuses (see Theme.h). So a garbage file cannot
+    // half-apply: either every token in it lands through Theme::setSpec() -
+    // live, and persisted by MainWindow's existing debounce, since this goes
+    // through the same broadcast every other edit does - or nothing does and
+    // this answers false with the live spec exactly as it was.
+    bool saveColoursTo(const QString& path) const;
+    bool loadColoursFrom(const QString& path);
+    // The extension and the file dialog's filter, in one place so the two
+    // buttons and the suite cannot disagree about what a colour file is called.
+    static QString colourFileSuffix();   // ".furnifytheme"
+    static QString colourFileFilter();
+
+    // The popup-preview pair behind the font combo (item 10).
+    //
+    // The family applies on `highlighted` rather than only on `activated`, so
+    // arrowing down the open list re-dresses the whole app as the user moves -
+    // the same live-preview rule the colour picker already follows, and for the
+    // same reason: this is a look, and a look is judged by looking at it.
+    // Escape must therefore be able to put back what was there BEFORE the
+    // popup opened, which is what these two remember and restore. Public
+    // because the popup itself cannot be opened from inside the event loop
+    // driving it, exactly as the file pair above cannot.
+    void beginFamilyPreview();
+    void cancelFamilyPreview();
+    // The family recorded when the popup opened, or empty when no preview is
+    // in flight.
+    QString familyBeforePreview() const { return myFamilyBeforePreview; }
 
     // The user's word for a token id (`viewport` -> "Viewport"). Empty for an
     // id this panel has no name for, which is the case gui_smoke asserts can
@@ -77,6 +121,8 @@ public:
     // unknown id.
     QWidget* swatchFor(const QString& id) const;
     QWidget* resetButton() const;
+    QWidget* saveButton() const;
+    QWidget* loadButton() const;
     QSpinBox* sizeControl() const { return mySize; }
     QComboBox* familyControl() const { return myFamily; }
     // The live modeless picker, or null when none is open. Exposed so the
@@ -85,8 +131,23 @@ public:
     // and that check has to stay meaningful.
     QColorDialog* activeColourDialog() const { return myDialog; }
 
+signals:
+    // A colour file that could not be written, and one that was not a colour
+    // file at all. The COPY lives in MainWindow, with every other outcome the
+    // app reports, rather than here: this card owns a look, not the toast
+    // host, and a refusal that reported through a second surface would be a
+    // second set of rules for how this app says no.
+    void colourSaveFailed(const QString& path);
+    void colourLoadRefused(const QString& path);
+
 protected:
     void paintEvent(QPaintEvent* event) override;
+    // Watches the family combo's popup: Show records the family to fall back
+    // to, Escape puts it back, Hide ends the preview. A filter rather than a
+    // QComboBox subclass because showPopup() is the only hook a subclass would
+    // add and Escape is handled inside the popup's own window, which a
+    // subclass of the combo never sees.
+    bool eventFilter(QObject* watched, QEvent* event) override;
     // The scroll area swallows the wheel while it has somewhere to scroll,
     // but not once it is at an end - and an unhandled wheel over this card
     // would reach the viewport underneath and zoom the camera. Accepting it
@@ -102,6 +163,11 @@ private:
     };
 
     void openColourDialog(const QString& id);
+    // The two buttons' own handlers: a native file dialog, then the matching
+    // function above. Native dialogs are the one modal surface this app does
+    // use, and deliberately - see the comment at each call site.
+    void chooseSaveFile();
+    void chooseLoadFile();
     // Re-reads every swatch, the spinner and the combo from the live spec.
     // Hooked to Theme::notifier(), so the panel follows a change it did not
     // make - a reset, or the persisted spec installed at startup - without
@@ -115,7 +181,13 @@ private:
     QSpinBox* mySize = nullptr;
     QComboBox* myFamily = nullptr;
     class QPushButton* myReset = nullptr;
+    class QPushButton* mySave = nullptr;
+    class QPushButton* myLoad = nullptr;
     QColorDialog* myDialog = nullptr;
+    // The family the combo's popup opened over, so Escape can put it back.
+    // Empty when no popup preview is in flight - which is also the flag, so
+    // there is no second boolean to keep in step with it.
+    QString myFamilyBeforePreview;
     // True while applyTheme() is writing the controls, so a control's own
     // valueChanged/currentTextChanged does not write straight back into
     // Theme. Not a cursor and not state: it is the standard guard against a

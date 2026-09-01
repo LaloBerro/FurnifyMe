@@ -304,6 +304,12 @@ private slots:
     void onSelectionModeChanged();
     void onSelectionChanged();
     void onLockToFace();
+    // A plain double-click on a body in face or edge selection mode: switch to
+    // body selection and select that body, in one gesture. Routed through
+    // mySolidSelectAction rather than straight at the viewport, so the rail
+    // chip, the menu entry and the status label all follow - the mode is that
+    // action's checked state, and nothing else may write it.
+    void onBodyDoubleClicked(int solidId);
     // The end of a transform-gizmo drag. An identity delta is a cancel - the
     // user released where they started, or the snap rounded the whole gesture
     // away - and a cancel takes no checkpoint and says nothing. The viewport
@@ -441,6 +447,12 @@ private:
     // "a hint retires when its own trigger stops holding" rule exists to stop.
     void setBaseProjection(bool orthographic);
 
+    // View -> Show notifications. Stores the preference under the same guard as
+    // every other one and calls updateActions(), which is what pushes it onto
+    // the toast host. Silences Kind::Note only - see ToastHost::show() for why
+    // a Failure is not this preference's to suppress.
+    void setShowNotifications(bool show);
+
     // Flies the camera square onto a face: the eye moves onto the face's
     // OUTWARD normal, the target to the face's centre, the distance out far
     // enough to frame it, orthographic for as long as the user does not orbit.
@@ -506,6 +518,12 @@ private:
     // View menu entry, the O shortcut and the bar's readout button are all
     // this one action, exactly as the unit chip is the Units entries.
     QAction* myOrthographicAction = nullptr;
+    // Checkable, and the single source of the notification preference's truth,
+    // exactly as myOrthographicAction is for the projection.
+    QAction* myNotificationsAction = nullptr;
+    // What the stored setting said, read in the constructor before any action
+    // exists so the View entry is built already ticked correctly. Default true.
+    bool myShowNotifications = true;
     // What the stored setting said, read in the constructor before the
     // viewport exists and applied the moment it does. A plain bool rather
     // than a second read, because QSettings is touched once per preference

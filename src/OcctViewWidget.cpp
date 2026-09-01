@@ -769,8 +769,149 @@ void OcctViewWidget::attachManipulator(int solidId)
         gizmoAspect->SetMaterial(material);
     }
 
+    // TOPMOST, and it is the clamp below that makes this necessary. A
+    // manipulator stands at its body's own centre, and once its arms are
+    // capped to a share of the SCREEN they are routinely shorter than the body
+    // is wide - which in the default layer means a gizmo drawn inside the solid
+    // it belongs to, depth-tested away and invisible at exactly the zoom the
+    // clamp exists for. A manipulator is a control rather than geometry, and
+    // every CAD application draws one over the model for this reason.
+    //
+    // CLAUDE.md rejects this layer for the ground GRID, and that ruling stands:
+    // the layer clears depth, so a grid in it would paint over every body
+    // standing on it. Here painting over the body IS the requirement. Depth
+    // still applies within the layer, so the gizmo's own three arms occlude
+    // each other correctly, and picking is untouched - AIS_ManipulatorOwner
+    // already outranks a shape's owner regardless of layer.
+    myContext->SetZLayer(myManipulator, Graphic3d_ZLayerId_Topmost);
+
     myManipulatorSolid = solidId;
+
+    // The ceiling the clamp works down from, derived HERE from the body's own
+    // bounding box rather than read back from the manipulator.
+    //
+    // AIS_Manipulator::Size() does not return what SetSize() was given - it
+    // reports the outer radius of the whole assembly, which is a little over
+    // the side length that produced it, and the relation changes branch
+    // depending on the gap. Feeding one back into the other therefore inflates
+    // the gizmo slightly on every pass. Keeping every number this class stores
+    // in SetSize()'s own units removes that question rather than correcting
+    // for it: OCCT's AdjustSize still runs and still frames the attach, and
+    // this simply overrides the size a moment later.
+    Bnd_Box box;
+    BRepBndLib::Add(it->second->Shape(), box);
+    if (!box.IsVoid()) {
+        Standard_Real x0, y0, z0, x1, y1, z1;
+        box.Get(x0, y0, z0, x1, y1, z1);
+        // The longest side - SetSize() documents its argument as the side of
+        // the manipulator's cubic bounding box, so a side is the like measure.
+        myManipulatorNaturalSize =
+            std::max({x1 - x0, y1 - y0, z1 - z0});
+    }
+    myManipulatorAppliedSize = 0.0;   // nothing installed yet: force the first derive
+    updateManipulatorSize();
     myContext->UpdateCurrentViewer();
+}
+
+void OcctViewWidget::updateManipulatorSize()
+{
+    if (myManipulator.IsNull() || myView.IsNull()) return;
+    // Never mid-gesture: AIS_Manipulator's drag maths is anchored on the arm
+    // the press landed on, and resizing that arm under the cursor moves the
+    // handle away from the hand holding it.
+    if (myGizmoDragActive) return;
+    if (myManipulatorNaturalSize <= 0.0) return;
+
+    // worldPerPixel() is ONE formula for both projections here (see its
+    // definition - the orthographic scale is set to exactly the perspective
+    // frustum's height at the target), so this needs no branch on the
+    // projection and is correct the moment the Persp/Ortho toggle flips.
+    //
+    // The smaller viewport dimension, because a gizmo that fits a wide
+    // viewport's width can still run off the top and bottom of a short one.
+    // Both are logical pixels, which is what worldPerPixel() divides by.
+    const double smallerSide = std::min(std::max(1, width()), std::max(1, height()));
+
+    // Two things separate a screen budget from a world size, and both of them
+    // are perspective. Neither exists in a parallel projection, where a world
+    // length projects to the same pixels at every depth - so both fall out to
+    // 1 there by construction rather than by a branch that could go stale.
+    //
+    // FIRST, DEPTH. worldPerPixel() answers for the camera TARGET's plane,
+    // which is the right question for the ground grid and for a dimension the
+    // user is looking straight at. A gizmo stands wherever its body stands, and
+    // a body nearer than the target projects larger than that number says.
+    //
+    // SECOND, THE ARM ITSELF. An arm pointing towards the eye ends nearer than
+    // it starts, so its tip projects further out than a flat depth-scaled
+    // estimate - measured at 9% over budget at 175% zoomed in, which is not a
+    // rounding error and is not fixed by the depth term alone. Requiring the
+    // NEAREST point of the gizmo to fit rather than its centre means solving
+    //     side / (k * (depth - side)) <= limitPixels,  k = worldPerPixel/depth
+    // for side, which is the closed form below - no iteration, and it collapses
+    // to the flat budget whenever the gizmo is small against its own depth.
+    double depthRatio = 1.0;
+    double gizmoDepth = 0.0;
+    const bool perspective = !myCamera.effectiveOrtho();
+    if (perspective) {
+        const gp_Pnt eye = myCamera.eyePosition();
+        const gp_Dir viewDir = myCamera.viewDirection();
+        // Along the view axis, never the straight-line distance: it is the
+        // depth that scales a perspective projection, and an off-centre gizmo
+        // is further away without being any deeper.
+        gizmoDepth = gp_Vec(eye, myManipulator->Position().Location()).Dot(gp_Vec(viewDir));
+        const double targetDepth = myCamera.state().distance;
+        if (gizmoDepth > 1.0e-6 && targetDepth > 1.0e-6) depthRatio = gizmoDepth / targetDepth;
+    }
+
+    const double flatBudget =
+        kGizmoMaxViewportFraction * smallerSide * worldPerPixel() * depthRatio;
+    const double maxWorld = (perspective && gizmoDepth > 1.0e-6)
+                                ? flatBudget / (1.0 + flatBudget / gizmoDepth)
+                                : flatBudget;
+    if (maxWorld <= 0.0) return;
+
+    const double wanted = std::min(myManipulatorNaturalSize, maxWorld);
+    // The equal-guard, in the shape the view label's is: this runs on every
+    // frame of an orbit and a pan, and SetSize() recomputes all seven of the
+    // manipulator's presentations. Relative, not absolute, because the same
+    // gizmo is legitimately 3 mm on a drawer front and 3 m on a wardrobe.
+    //
+    // It keys on `wanted`, which is a pure function of the camera and the
+    // body - NOT on what the manipulator reports afterwards - so a call that
+    // does not return early always performs exactly the same work below, and
+    // the correction cannot ratchet across frames.
+    if (std::fabs(wanted - myManipulatorAppliedSize) <= 1.0e-3 * std::fabs(wanted)) return;
+
+    myManipulatorAppliedSize = wanted;
+
+    // Installed, then CORRECTED, because Size() is not SetSize()'s own unit
+    // (see the attach): what it reports is the assembly's outer reach, and that
+    // is the number which actually has to fit inside the fraction. Scaling the
+    // side length by the overshoot very nearly lands it but not exactly - the
+    // relation is affine with an offset, since the gap between the parts does
+    // not always scale with the whole - so it is applied until the reach is
+    // inside budget rather than assumed to converge in one. Two passes is the
+    // observed worst case; the bound is a bound, not a schedule, and the
+    // equal-guard above means none of this runs again until the camera or the
+    // body actually moves.
+    double side = wanted;
+    myManipulator->SetSize(static_cast<float>(side));
+    for (int pass = 0; pass < 4; ++pass) {
+        const double reported = myManipulator->Size();
+        if (reported <= maxWorld || reported <= 1.0e-9) break;
+        side *= maxWorld / reported;
+        myManipulator->SetSize(static_cast<float>(side));
+    }
+
+    // OCCT's own SetZoomPersistence(true) would hold a FIXED screen size
+    // instead, and was rejected rather than missed: it overrides the local
+    // transformation and the transform-persistence flags of every
+    // sub-presentation, which is precisely the machinery the drag path here
+    // already leans on (see endGizmoDrag and the presentation reset it
+    // performs). A cap that is re-derived from the camera keeps the drag maths
+    // untouched, and it also lets a small body keep a small gizmo instead of
+    // giving every body the same one.
 }
 
 void OcctViewWidget::activateManipulatorModes()
@@ -813,6 +954,8 @@ void OcctViewWidget::detachManipulator()
     }
     myManipulator.Nullify();
     myManipulatorSolid = -1;
+    myManipulatorNaturalSize = 0.0;
+    myManipulatorAppliedSize = 0.0;
 }
 
 bool OcctViewWidget::manipulatorFrame(gp_Ax2& position, double& size) const
@@ -1521,6 +1664,12 @@ void OcctViewWidget::applyCameraState()
     }
 
     myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane());
+    // The transform gizmo is sized in world units and judged in screen ones,
+    // so the zoom is half of its arithmetic - re-derived here, before the
+    // redraw below carries it, rather than from a slot on cameraChanged()
+    // that would need its own UpdateCurrentViewer(). Its own guards make this
+    // free on a camera move that does not change the scale.
+    updateManipulatorSize();
     // Slots FIRST, redraw second. A slot on cameraChanged() that changes the
     // scene - PullArrow rebuilds its 3D arrow, which is sized in screen
     // pixels and so has to be rebuilt whenever the camera moves - was
@@ -2061,9 +2210,21 @@ void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
     if (event->button() != Qt::LeftButton || mySketchMode || myContext.IsNull()) return;
 
     const QPoint pos = event->position().toPoint();
-    // A second click on either arrow is another drag, not a request to frame
-    // the body or lock the face underneath it.
-    if (arrowHit(myPullArrow, pos) || arrowHit(myBevelArrow, pos)) return;
+    // A second click on either arrow belongs to the arrow, not to whatever the
+    // double-click would otherwise mean - the same rule every control over the
+    // viewport follows. It matters most for the two gestures that would move
+    // something the user is not looking at: framing the body, and selecting the
+    // whole body out from under a face they are mid-pull on.
+    //
+    // CTRL IS EXEMPT, and this is not a loophole. An arrow's tail sits at the
+    // centre of the face it belongs to, which is exactly where a user aims when
+    // they want to draw on that face - so with no exemption the lock gesture
+    // was unreachable at the most obvious pixel on its own target, and reaching
+    // it meant aiming at a corner. A modified double-click is also the one
+    // gesture on this arrow that no sequence of drags can produce by accident,
+    // which is what the guard is actually protecting against.
+    const bool ctrlHeld = (event->modifiers() & Qt::ControlModifier) != 0;
+    if (!ctrlHeld && (arrowHit(myPullArrow, pos) || arrowHit(myBevelArrow, pos))) return;
     const QPoint device = toDevicePixels(pos);
     myContext->MoveTo(device.x(), device.y(), myView, Standard_False);
     if (!myContext->HasDetected()) return;
@@ -2071,12 +2232,19 @@ void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
     // the body underneath it - the same rule the pull arrow keeps above.
     if (detectedIsManipulator()) return;
 
-    // In face mode a double-click means "sketch on this" - the second route
-    // to Lock to Face, alongside the action. Framing the body instead would
-    // be the one gesture that takes the camera away from the face the user
-    // just chose to work on. The refusal for a non-planar face lives in
-    // MainWindow, which owns the toast, not here.
-    if (mySelectionMode == SelectionMode::Face && myContext->HasDetectedShape() &&
+    // CTRL+double-click in face mode means "sketch on this" - the second route
+    // to Lock to Face, alongside the action and its L shortcut. It carried no
+    // modifier until this phase, and it had to give the plain gesture up: a
+    // user working on a face or an edge who wants the whole body back reaches
+    // for a double-click first, and locking the sketch plane instead is a mode
+    // change they did not ask for. Framing the body would be no better - it is
+    // the one gesture that takes the camera away from the face just chosen -
+    // which is why locking keeps the gesture and only gains the modifier.
+    //
+    // The refusal for a non-planar face, and the pending-outline guard, both
+    // live in MainWindow, which owns the toast, not here.
+    if (mySelectionMode == SelectionMode::Face &&
+        (event->modifiers() & Qt::ControlModifier) && myContext->HasDetectedShape() &&
         myContext->DetectedShape().ShapeType() == TopAbs_FACE) {
         // Select it too, so the actions agree with what was just locked.
         myContext->SelectDetected(AIS_SelectionScheme_Replace);
@@ -2087,6 +2255,27 @@ void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
     }
 
     const Handle(AIS_InteractiveObject) hit = myContext->DetectedInteractive();
+
+    // A PLAIN double-click on a body while picking its parts means "give me
+    // the whole thing" - one gesture that both changes the selection mode and
+    // selects the body, so a user who drilled into faces or edges gets back
+    // out without going to the rail for it.
+    //
+    // Announced rather than performed: the selection MODE is a QAction's
+    // checked state and updateActions() is the single place that decides what
+    // is available, so a viewport that switched its own mode would leave the
+    // rail chip, the menu entry and the status label all describing the mode
+    // the user just left. MainWindow answers this by triggering the same
+    // action a click on the chip does.
+    if (mySelectionMode != SelectionMode::Solid) {
+        for (const auto& entry : mySolids) {
+            if (entry.second.get() != hit.get()) continue;
+            emit bodyDoubleClicked(entry.first);
+            return;
+        }
+        return;   // nothing of ours under the cursor
+    }
+
     for (const auto& entry : mySolids) {
         if (entry.second.get() != hit.get()) continue;
         Bnd_Box box;

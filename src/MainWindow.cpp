@@ -77,6 +77,14 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
         myStartOrthographic = settings.value(QStringLiteral("projection")).toString() ==
                               QStringLiteral("ortho");
 
+        // Whether the app announces the things that went right. Same guard,
+        // same "read once before buildActions()" reason as the two above: the
+        // View menu entry is built with its checked state already correct
+        // rather than corrected afterwards. Defaults to ON - an app that
+        // started silent would look broken to a first-time user.
+        myShowNotifications =
+            settings.value(QStringLiteral("showNotifications"), true).toBool();
+
         // Before a single widget exists, for the same reason as the unit
         // above: every card measures itself with the type scale in its own
         // constructor, so installing the spec afterwards would leave the
@@ -90,6 +98,13 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
                 settings.value(QStringLiteral("appearance")).toString(), stored))
             Theme::setSpec(stored);
     }
+
+    // The title bar's and the taskbar's mark, painted rather than loaded - see
+    // IconSet::appIcon(). Set on the WINDOW rather than only on the
+    // application, so a window built by the suite (which never runs main.cpp)
+    // carries it too; QWidget::windowIcon() would otherwise fall back to an
+    // application icon nothing had set.
+    setWindowIcon(IconSet::appIcon());
 
     myView = new OcctViewWidget(this);
     // Straight onto the camera rather than through setBaseProjection(): that
@@ -119,6 +134,12 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     // lockToFace() - including its refusal - rather than one of them growing
     // its own copy of the rule.
     connect(myView, &OcctViewWidget::faceDoubleClicked, this, &MainWindow::lockToFace);
+    // The other double-click route: a plain one on a body while faces or edges
+    // are what is being picked means "select the whole body". The viewport
+    // reports the gesture; this window performs it, because the selection mode
+    // is a QAction's checked state and updateActions() is the single place that
+    // decides what is available.
+    connect(myView, &OcctViewWidget::bodyDoubleClicked, this, &MainWindow::onBodyDoubleClicked);
     // The transform gizmo reports the end of a drag; this window decides what
     // it means, exactly as it does for the face-pull arrow above.
     connect(myView, &OcctViewWidget::gizmoReleased, this, &MainWindow::onGizmoReleased);
@@ -353,6 +374,23 @@ void MainWindow::buildActions()
     myAppearanceAction->setToolTip(tr("Choose the app's colours and text size (Ctrl+Alt+A)\n"
                                       "Every change is applied as you make it."));
 
+    // Whether the app says so when something goes RIGHT. Checkable and
+    // persisted, on the same terms as the projection and the unit below; its
+    // initial state is the one the constructor read from the store (default
+    // on), and updateActions() is what pushes it onto the toast host, so this
+    // preference obeys the same single authority every other one does.
+    //
+    // It cannot silence a refusal, by construction rather than by care here:
+    // ToastHost::show() drops Kind::Note only, and the label says notifications
+    // rather than messages for exactly that reason.
+    myNotificationsAction = new QAction(tr("Show &notifications"), this);
+    myNotificationsAction->setCheckable(true);
+    myNotificationsAction->setChecked(myShowNotifications);
+    myNotificationsAction->setToolTip(tr("Report the things that went right\n"
+                                         "Off, only refusals appear. Undo stays on the "
+                                         "Edit menu and on Ctrl+Z either way."));
+    connect(myNotificationsAction, &QAction::toggled, this, &MainWindow::setShowNotifications);
+
     // The projection toggle. Checkable, because the mode is state the user
     // chose and comes back next session; a QAction rather than a button that
     // decides for itself, because the bar's readout, the View menu entry and
@@ -521,6 +559,7 @@ QMenuBar* MainWindow::buildMenus()
     viewMenu->addAction(myFaceSelectAction);
     viewMenu->addAction(myEdgeSelectAction);
     viewMenu->addAction(myItemsPanelAction);
+    viewMenu->addAction(myNotificationsAction);
     viewMenu->addSeparator();
     QMenu* unitsMenu = viewMenu->addMenu(tr("Units"));
     unitsMenu->addAction(myUnitsMillimetresAction);
@@ -750,6 +789,26 @@ void MainWindow::buildOverlay()
         if (mySketching) return;
         if (myUndoAction->isEnabled()) myUndoAction->trigger();
     });
+    // The Appearance card's two file outcomes. The card owns a look, not the
+    // way this app reports things, so it announces and the copy lives here
+    // with every other outcome - in cause-and-fix form, like each of them.
+    // Failures, so they are shown whether or not the user has notifications on
+    // (see ToastHost::show): a Load that changed nothing and said nothing would
+    // be indistinguishable from a colour file with nothing in it.
+    connect(myAppearancePanel, &AppearancePanel::colourSaveFailed, this,
+            [this](const QString& path) {
+                myToasts->show(tr("Couldn't write the colours to %1 — Check that the "
+                                  "folder exists and isn't read-only").arg(path),
+                              Toast::Kind::Failure, false);
+            });
+    connect(myAppearancePanel, &AppearancePanel::colourLoadRefused, this,
+            [this](const QString& path) {
+                myToasts->show(tr("%1 doesn't hold a look this app can read, so nothing "
+                                  "changed — Pick a file made with Save colours")
+                                   .arg(path),
+                              Toast::Kind::Failure, false);
+            });
+
     // A toast that offers to undo one operation must not survive that
     // operation - see ToastHost::documentMovedTo().
     connect(this, &MainWindow::documentChanged, this,
@@ -915,6 +974,14 @@ void MainWindow::updateActions()
     // the one place that decides what is available, and still pushed out
     // rather than re-derived at the toast.
     if (myToasts) myToasts->setUndoEnabled(!mySketching && myDocument.canUndo());
+    // View -> Show notifications, pushed the same way and for the same reason:
+    // this is the one place that decides it, and the host reads it rather than
+    // re-deriving it from an action it would otherwise have to know about.
+    // Note that Undo remains reachable with notifications off - the menu entry,
+    // the rail chip and Ctrl+Z are untouched by this; only the toast that would
+    // have offered a shortcut to it goes away.
+    if (myToasts && myNotificationsAction)
+        myToasts->setNotesEnabled(myNotificationsAction->isChecked());
     // Which outline Extrude would consume, pushed onto the drawer the same
     // way and for the same reason: this is the one place that decides it, and
     // the drawer row is the only handle the user has on the choice, so a
@@ -961,6 +1028,20 @@ void MainWindow::setBaseProjection(bool orthographic)
     updateActions();
 }
 
+void MainWindow::setShowNotifications(bool show)
+{
+    myShowNotifications = show;
+    if (myPersistProgress) {
+        QSettings settings;
+        settings.setValue(QStringLiteral("showNotifications"), show);
+    }
+    // Not recordProgress(): this is a display preference, not a learned
+    // capability. updateActions() is what actually pushes the state onto the
+    // toast host - this function only stores it - so the one place that
+    // decides what is available stays the one place that says it.
+    updateActions();
+}
+
 void MainWindow::setDisplayUnit(Measure::Unit unit)
 {
     Measure::setDisplayUnit(unit);
@@ -980,6 +1061,12 @@ void MainWindow::setDisplayUnit(Measure::Unit unit)
 
 void MainWindow::onThemeChanged()
 {
+    // The window icon is a QIcon rasterised once, which is exactly the kind of
+    // cached appearance value Theme's broadcast exists for (see Theme.h): it
+    // carries accent() and panel(), and nothing repaints it. Re-painted here so
+    // an edited palette reaches the title bar too.
+    setWindowIcon(IconSet::appIcon());
+
     // The status bar's font is SET, not inherited: Theme.cpp's stylesheet
     // reaches QStatusBar's own internal message label through a selector, and
     // this covers a plain QStatusBar with no matching rule. An explicitly set
@@ -1105,8 +1192,12 @@ void MainWindow::recordProgress(const std::string& event)
 
 QString MainWindow::lockTooltipText() const
 {
+    // The gesture gained its Ctrl this phase, and the sentence has to say so:
+    // a plain double-click on a body now selects the whole body instead. A
+    // tooltip that still taught the old gesture would be teaching something
+    // that quietly does a different thing.
     return tr("Draw on the selected face instead of the ground (L)\n"
-              "Double-clicking a face does the same. Outlines drawn "
+              "Ctrl+double-clicking a face does the same. Outlines drawn "
               "there extrude square to it.");
 }
 
@@ -2035,10 +2126,14 @@ bool MainWindow::applyBooleanToSelection(int kind)
 
     std::vector<int> ids = myView->selectedSolidIds();
     if (ids.size() != 2) {
+        // A FAILURE for the same reason canChangeSketchPlane()'s refusal is:
+        // this path returns false and changes nothing, and a refusal the
+        // notifications toggle could silence would be an operation that did
+        // nothing and said nothing. See ToastHost::show().
         myToasts->show(tr("%1 needs exactly two bodies — "
                           "Click one body, then Shift-click another")
                           .arg(operationName),
-                      Toast::Kind::Note, false);
+                      Toast::Kind::Failure, false);
         return false;
     }
 
@@ -2145,6 +2240,33 @@ void MainWindow::onSelectionModeChanged()
     updateActions();
 }
 
+void MainWindow::onBodyDoubleClicked(int solidId)
+{
+    if (solidId <= 0) return;
+
+    // The MODE first, and through the action - setChecked() alone would leave
+    // the QActionGroup right and the viewport wrong, and setSelectionMode() on
+    // the viewport alone would leave the chip, the menu tick and the status
+    // label all describing the mode the user just left. onSelectionModeChanged()
+    // is the one function that reads the group and pushes the answer out, and
+    // it ends in updateActions().
+    if (mySolidSelectAction && !mySolidSelectAction->isChecked()) {
+        mySolidSelectAction->setChecked(true);
+        onSelectionModeChanged();
+    }
+
+    // Then the body. Changing the mode clears the old sub-shape selection
+    // (setSelectionMode re-activates every displayed shape), so this has to
+    // follow it rather than lead - selecting first and switching after would
+    // throw the selection away again and leave the user in body mode with
+    // nothing picked, which is the gesture doing half of what it says.
+    //
+    // It announces itself: setSelectedSolids() emits selectionChanged(), which
+    // this window answers with onSelectionChanged() -> updateActions(). No
+    // second refresh path from here.
+    myView->setSelectedSolids({solidId});
+}
+
 bool MainWindow::canChangeSketchPlane()
 {
     // This guard's ORIGINAL argument no longer holds, and saying so is worth
@@ -2176,10 +2298,16 @@ bool MainWindow::canChangeSketchPlane()
     // waiting one, so following that advice left the action just as disabled
     // as before. Advice that does nothing is worse than no advice - the user
     // does the thing, nothing changes, and now they distrust the message too.
+    // A FAILURE, not a Note, and the reason is item 12's toggle: this is a
+    // refusal - the gesture the user just made did not happen - and a refusal
+    // that goes silent when notifications are off is a silent failure. It is
+    // reachable from the Ctrl+double-click route, which consults no action's
+    // enabled state, so "the action was disabled anyway" is not an answer here.
+    // See ToastHost::show() for the rule.
     myToasts->show(tr("There's an outline waiting to be extruded, and it belongs to the "
                       "plane it was drawn on. Press E to turn it into a body, or Ctrl+Z "
                       "to take it back, before you change the face you draw on."),
-                  Toast::Kind::Note, false);
+                  Toast::Kind::Failure, false);
     return false;
 }
 

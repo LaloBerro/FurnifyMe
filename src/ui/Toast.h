@@ -174,6 +174,14 @@ public:
     // Calling this while a toast is already up replaces its content and
     // restarts the timer; it never creates a second Toast and never stacks.
     //
+    // A Kind::Note is DROPPED entirely while notesEnabled() is false - the
+    // user has said they do not want to be told about the things that went
+    // right. A Kind::Failure is shown regardless, and every caller may rely on
+    // that: this app has no modal dialogs and no error log, so a toast is the
+    // only place a refusal can appear, and a refusal that reports NOWHERE is a
+    // silent failure - the one thing CLAUDE.md's kernel rules refuse to allow
+    // anywhere else either.
+    //
     // `documentStamp` is DocumentModel::revision() at the moment the message
     // was composed, or -1 for a message that does not describe a document
     // change at all. A toast that names one operation and offers Undo must
@@ -189,6 +197,14 @@ public:
 
     // Forwarded to the Toast - see Toast::setUndoEnabled().
     void setUndoEnabled(bool enabled);
+
+    // View -> Show notifications, pushed here by MainWindow::updateActions()
+    // the way setUndoEnabled() is, because that is the single place that
+    // decides what is available. False silences Kind::Note ONLY; a
+    // Kind::Failure is shown whatever this says. See show() for why that
+    // asymmetry is a law rather than a preference.
+    void setNotesEnabled(bool enabled);
+    bool notesEnabled() const { return myNotesEnabled; }
 
     // Re-places (and re-raises) a live toast. Driven by
     // ViewportOverlay::laidOut(), so it runs AFTER the overlay has moved the
@@ -242,6 +258,10 @@ private:
     // DocumentModel::revision() as of the live message, or -1 when the
     // message does not describe a document change - see show().
     int myStamp = -1;
+    // View -> Show notifications. Default true, which is what the app ships
+    // with and what a window built before updateActions() first runs must
+    // behave as.
+    bool myNotesEnabled = true;
     // One QVariantAnimation, constructed once (see the constructor) and kept
     // for the lifetime of this host - not built fresh per fadeTo() call, and
     // deliberately left at the default KeepWhenStopped rather than

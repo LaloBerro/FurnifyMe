@@ -20,4 +20,19 @@ enum class Glyph {
 // Returns an icon with Normal and Disabled modes already filled in.
 QIcon icon(Glyph glyph);
 
+// The APPLICATION icon: the wordmark's accent mark on a rounded Graphite tile.
+// The window's title bar and the taskbar show appIcon(); the committed
+// assets/icon.ico that the executable itself carries is the same painting,
+// written out by tools/make_icon.cpp (built only under
+// -DFURNIFYME_BUILD_ICON_TOOL=ON), so the look has one implementation rather
+// than a picture and a piece of code that can drift apart.
+//
+// This is a TEMPORARY mark, and it is deliberately the one thing the shell
+// already has that reads as this app: the bar's "▰ FurnifyMe". The parallelogram
+// is painted as geometry rather than as the character U+25B0, because an icon
+// is the one surface with no font stack behind it - a family without that glyph
+// would put a box on the taskbar with nothing to fall back to.
+QPixmap appIconPixmap(int px);
+QIcon appIcon();
+
 }  // namespace IconSet

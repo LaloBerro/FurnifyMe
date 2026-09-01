@@ -3,6 +3,7 @@
 #include "Theme.h"
 
 #include <QPainter>
+#include <QPainterPath>
 #include <QPixmap>
 
 namespace IconSet {
@@ -121,6 +122,59 @@ QIcon icon(Glyph glyph)
         result.addPixmap(render(glyph, Theme::text(), size), QIcon::Normal);
         result.addPixmap(render(glyph, Theme::textDisabled(), size), QIcon::Disabled);
     }
+    return result;
+}
+
+QPixmap appIconPixmap(int px)
+{
+    QPixmap pixmap(px, px);
+    // Transparent outside the tile, so the rounded corners read as rounded
+    // wherever the OS paints it. This is the one painted surface in the project
+    // that MAY carry alpha: it is never composited over OCCT's GL surface -
+    // Windows draws it, in its own title bar and its own taskbar - so the
+    // opaque-family rule that governs every widget does not reach here.
+    pixmap.fill(Qt::transparent);
+
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing, true);
+    // Everything below is expressed on the same 24x24 grid the glyphs use, so
+    // one number changes the mark at every size it is ever asked for.
+    painter.scale(px / 24.0, px / 24.0);
+
+    // The tile: the shell's own panel colour with the family's border, at the
+    // rail's and the drawer's radius rather than the glyph grid's - an icon is
+    // a card, and this is the card family's corner.
+    const QRectF tile(0.5, 0.5, 23.0, 23.0);
+    QPainterPath card;
+    card.addRoundedRect(tile, 5.0, 5.0);
+    painter.fillPath(card, Theme::panel());
+    QPen edge(Theme::border());
+    edge.setWidthF(1.0);
+    painter.setPen(edge);
+    painter.drawPath(card);
+
+    // The mark: U+25B0 BLACK PARALLELOGRAM as geometry - the same shape the app
+    // bar paints in accent() at the head of the wordmark. Leaning right, wider
+    // than tall, centred in the tile.
+    QPainterPath mark;
+    mark.moveTo(9.0, 7.5);
+    mark.lineTo(19.0, 7.5);
+    mark.lineTo(15.0, 16.5);
+    mark.lineTo(5.0, 16.5);
+    mark.closeSubpath();
+    painter.fillPath(mark, Theme::accent());
+
+    return pixmap;
+}
+
+QIcon appIcon()
+{
+    QIcon result;
+    // The sizes Windows actually asks for - a title bar takes 16, the task
+    // switcher 32, the taskbar 48 at 100% and 256 at high scalings - painted
+    // rather than scaled, since the whole point of drawing in code is that
+    // every one of them is crisp.
+    for (int size : {16, 24, 32, 48, 64, 128, 256}) result.addPixmap(appIconPixmap(size));
     return result;
 }
 

@@ -171,6 +171,19 @@ public:
     // the body moves.
     bool manipulatorFrame(gp_Ax2& position, double& size) const;
 
+    // The share of the viewport's SMALLER dimension one arm of the transform
+    // gizmo may occupy on screen. AIS_Manipulator's own AdjustSize sizes it
+    // from the body's bounding box and then leaves it there, which is right at
+    // the zoom the body was selected at and wrong at every other: a wardrobe,
+    // or any body seen close up, gave a gizmo whose arms ran off all four
+    // edges of the viewport with the body invisible behind it.
+    //
+    // A CAP, not a target. The bounding-box size still wins whenever it is the
+    // smaller of the two, so a gizmo never grows to fill this - zooming out
+    // shrinks it with the body, exactly as it should - and the clamp only bites
+    // when the arms would otherwise be bigger than a hand can aim at.
+    static constexpr double kGizmoMaxViewportFraction = 0.15;
+
     // The manipulation mode hover detection has armed right now: 0 none,
     // 1 Move along an axis, 2 Rotate, 3 Scale, 4 Move in a plane - the values
     // of OCCT's own AIS_ManipulatorMode. A test hovers candidate points and
@@ -465,9 +478,16 @@ signals:
     // rubber band and the coordinate readout.
     void sketchCursorMoved(const gp_Pnt& point);
     void selectionChanged();
-    // A face double-clicked in face-selection mode. MainWindow decides what
-    // that means (it locks it); this widget knows nothing about locking.
+    // A face CTRL+double-clicked in face-selection mode. MainWindow decides
+    // what that means (it locks it); this widget knows nothing about locking.
+    // The modifier is what leaves the plain double-click free for the body
+    // route below - see mouseDoubleClickEvent().
     void faceDoubleClicked(const TopoDS_Face& face);
+    // A body plainly double-clicked while its faces or edges were what was
+    // being picked. MainWindow answers by switching to body selection - through
+    // the same QAction the rail chip triggers, because the mode is that
+    // action's checked state and nothing else may write it.
+    void bodyDoubleClicked(int solidId);
 
     // A live face pull. `distance` is signed along the pulled face's outward
     // normal and measured from the press - positive grows, negative carves -
@@ -601,6 +621,18 @@ private:
     // additive pick has taken it out for the duration - so the list of modes
     // lives in one place rather than being repeated and drifting.
     void activateManipulatorModes();
+    // Re-derives the manipulator's world size from the camera so its on-screen
+    // arms stay inside kGizmoMaxViewportFraction of the viewport's smaller
+    // dimension - see that constant. Called from attachManipulator() and from
+    // applyCameraState(), because the zoom is half of the arithmetic and the
+    // camera is the only thing that moves it.
+    //
+    // Guarded twice. It does nothing while a gizmo drag is live - resizing the
+    // thing under the user's hand mid-gesture would move the handle away from
+    // the cursor that grabbed it - and it does not call SetSize() for a value
+    // the manipulator already holds, since that recomputes every one of its
+    // presentations and this runs on every frame of an orbit.
+    void updateManipulatorSize();
     // Reads the accumulated transform, puts the PRESENTATION back to where the
     // document says it should be, snaps, and emits gizmoReleased(). The
     // presentation reset is unconditional and happens here rather than in the
@@ -695,6 +727,14 @@ private:
     // about - the rotation and the scale both leave it fixed.
     Handle(AIS_Manipulator) myManipulator;
     int myManipulatorSolid = -1;
+    // The size AIS_Manipulator's own AdjustSize derived from the body's
+    // bounding box at the moment of the attach, and the size actually installed
+    // by the last updateManipulatorSize(). The first is the ceiling the clamp
+    // never grows past; the second is the equal-guard, so an orbit that leaves
+    // the zoom alone costs no presentation rebuilds at all. Both are 0 while
+    // nothing is attached.
+    double myManipulatorNaturalSize = 0.0;
+    double myManipulatorAppliedSize = 0.0;
     bool myGizmoDragActive = false;
     gp_Trsf myGizmoDelta;
     gp_Ax2 myGizmoStartPosition;

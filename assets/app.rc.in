@@ -1,0 +1,14 @@
+// The executable's own icon - what Explorer, the taskbar's pinned entry and
+// the Alt+Tab switcher read off the binary, none of which run any of our code
+// and so none of which can see QApplication::setWindowIcon().
+//
+// CONFIGURED, not compiled as-is: rc.exe resolves a relative path against its
+// own working directory and its include path, neither of which is reliably the
+// source tree under a multi-config generator. CMake substitutes an absolute
+// path here (forward slashes, which rc accepts), so the reference cannot break
+// depending on where the build ran from.
+//
+// IDI_ICON1 is a plain string name rather than a defined identifier, which is
+// what Qt's own documentation uses: Windows shows the icon whose name sorts
+// first, and this is the only one in the binary.
+IDI_ICON1 ICON "@FURNIFYME_ICON_FILE@"

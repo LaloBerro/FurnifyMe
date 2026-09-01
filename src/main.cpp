@@ -1,3 +1,4 @@
+#include "IconSet.h"
 #include "MainWindow.h"
 #include "Theme.h"
 
@@ -19,6 +20,11 @@ int main(int argc, char* argv[])
     QApplication::setOrganizationName(QStringLiteral("FurnifyMe"));
 
     Theme::apply(app);
+    // AFTER Theme::apply(): the mark is painted from panel(), border() and
+    // accent(), so it has to be asked for once those exist. The application's
+    // icon rather than only the window's, so anything else this app ever puts
+    // on screen - a native file dialog, most of all - carries it too.
+    QApplication::setWindowIcon(IconSet::appIcon());
 
     MainWindow window;
     window.show();

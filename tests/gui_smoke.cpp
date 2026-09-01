@@ -69,6 +69,7 @@
 #include <QDockWidget>
 #include <QElapsedTimer>
 #include <QEnterEvent>
+#include <QFile>
 #include <QImage>
 #include <QKeyEvent>
 #include <QKeySequence>
@@ -150,7 +151,7 @@ int g_checks = 0;
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 1192;
+constexpr int kCheckFloor = 1265;
 
 void check(bool condition, const QString& what)
 {
@@ -229,6 +230,33 @@ void clickAt(QWidget* target, const QPointF& pos,
     QCoreApplication::sendEvent(target, &release);
 
     settle(80);
+}
+
+// A double-click, delivered as Qt delivers a real one: the second press
+// arrives as QEvent::MouseButtonDblClick rather than as a second
+// MouseButtonPress, and the release that follows it is an ordinary one. Both
+// halves matter - a probe that sent only the DblClick would never notice a
+// handler that left the release to re-pick underneath it, which is the bug
+// WA_NoMousePropagation exists for one widget over.
+void doubleClickAt(QWidget* target, const QPointF& pos,
+                   Qt::KeyboardModifiers mods = Qt::NoModifier)
+{
+    const QPointF global = target->mapToGlobal(pos);
+
+    QMouseEvent press(QEvent::MouseButtonPress, pos, global,
+                      Qt::LeftButton, Qt::LeftButton, mods);
+    QCoreApplication::sendEvent(target, &press);
+    QMouseEvent release(QEvent::MouseButtonRelease, pos, global,
+                        Qt::LeftButton, Qt::NoButton, mods);
+    QCoreApplication::sendEvent(target, &release);
+    QMouseEvent second(QEvent::MouseButtonDblClick, pos, global,
+                       Qt::LeftButton, Qt::LeftButton, mods);
+    QCoreApplication::sendEvent(target, &second);
+    QMouseEvent secondRelease(QEvent::MouseButtonRelease, pos, global,
+                              Qt::LeftButton, Qt::NoButton, mods);
+    QCoreApplication::sendEvent(target, &secondRelease);
+
+    settle(150);
 }
 
 // A press at one point and a release at ANOTHER, with no move event between
@@ -754,6 +782,36 @@ int main(int argc, char* argv[])
                       .arg(buried.isEmpty() ? QStringLiteral("all are")
                                             : buried.join(QStringLiteral(", "))));
         }
+    }
+
+    // --- the window carries the app's own mark --------------------------------
+    // Phase 7 item 16. Asserted on the WINDOW rather than on QApplication,
+    // because that is what a title bar and a taskbar button read - and because
+    // this suite never runs main.cpp, so a mark set only there would be a mark
+    // no check in this file could see. The pixel assertion is what stops an
+    // empty-but-non-null QIcon from passing: a QIcon with no pixmaps is not
+    // null, it simply draws nothing.
+    {
+        check(!window.windowIcon().isNull(), "the window carries an application icon");
+        const QPixmap mark = window.windowIcon().pixmap(64, 64);
+        check(!mark.isNull() && mark.width() >= 32 && mark.height() >= 32,
+              QStringLiteral("and it really has pixels at the size an OS asks for "
+                             "(%1x%2)").arg(mark.width()).arg(mark.height()));
+        // It is the shell's own palette, not a default: the accent colour has
+        // to actually appear in it. Sampled over the whole image rather than at
+        // one point, since the mark's position within the tile is the icon's
+        // business and not this check's.
+        const QImage markImage = mark.toImage().convertToFormat(QImage::Format_ARGB32);
+        int accentPixels = 0;
+        for (int y = 0; y < markImage.height(); ++y) {
+            for (int x = 0; x < markImage.width(); ++x) {
+                if (colorDistance(markImage.pixelColor(x, y), Theme::accent()) < 20.0)
+                    ++accentPixels;
+            }
+        }
+        check(accentPixels > 100,
+              QStringLiteral("and it is painted in this app's own accent (%1 px)")
+                  .arg(accentPixels));
     }
 
     // --- the walkthrough appears for a newcomer -------------------------------
@@ -10343,6 +10401,14 @@ int main(int argc, char* argv[])
                 const QImage noteImg = renderExact(toastWidget);
                 const QPoint stripePoint(body.left() + 1, body.center().y());
                 const QColor noteStripe = noteImg.pixelColor(stripePoint);
+                // The WIDTH, pinned rather than assumed. The stripe went from
+                // 3px to 6px this phase, and the probe above would have read
+                // the same colour at either - it samples one pixel one column
+                // in from the edge, which is inside both. This second point at
+                // +4 is inside a 6px stripe and outside a 3px one, so a
+                // silent revert fails here instead of passing everywhere.
+                const QPoint widePoint(body.left() + 4, body.center().y());
+                const QColor noteWide = noteImg.pixelColor(widePoint);
 
                 toasts->show(QStringLiteral("Graphite family probe - failure"),
                             Toast::Kind::Failure, false);
@@ -10350,6 +10416,7 @@ int main(int argc, char* argv[])
                 const QImage failureImg = renderExact(toastWidget);
                 failureImg.save(outDir + QStringLiteral("/toast_failure.png"));
                 const QColor failureStripe = failureImg.pixelColor(stripePoint);
+                const QColor failureWide = failureImg.pixelColor(widePoint);
 
                 check(colorDistance(noteStripe, failureStripe) > 15.0,
                       "a Failure toast's stripe reads as a different colour "
@@ -10360,6 +10427,20 @@ int main(int argc, char* argv[])
                 check(colorDistance(failureStripe, Theme::danger()) <
                           colorDistance(failureStripe, Theme::accent()),
                       "the Failure toast's stripe reads closer to danger()");
+
+                // Four columns in is still stripe, on both kinds - which is
+                // only true of the 6px stripe. The comparison is against
+                // panel(), the colour that pixel would be if the stripe had
+                // gone back to 3.
+                check(colorDistance(noteWide, Theme::accent()) <
+                          colorDistance(noteWide, Theme::panel()),
+                      QStringLiteral("the Note stripe is still accent() 4 columns in, "
+                                     "so it is 6px wide rather than 3 (%1)")
+                          .arg(noteWide.name()));
+                check(colorDistance(failureWide, Theme::danger()) <
+                          colorDistance(failureWide, Theme::panel()),
+                      QStringLiteral("and the Failure stripe likewise (%1)")
+                          .arg(failureWide.name()));
             }
         }
 
@@ -10634,6 +10715,186 @@ int main(int argc, char* argv[])
                   QStringLiteral("no Appearance panel text uses a banned or code word (%1)")
                       .arg(offenders.isEmpty() ? QStringLiteral("none")
                                                : offenders.join(QStringLiteral(", "))));
+        }
+
+        // --- a look, saved to a file and read back (item 7) -------------------
+        //
+        // The two BUTTONS are checked for reachability and the two FILE
+        // FUNCTIONS for behaviour, because the buttons open native file
+        // dialogs, which cannot be answered from inside the event loop that
+        // raised them - the same reason MainWindow splits every operation from
+        // the dialog that asks for its parameters. What the buttons call is
+        // what is driven here, so there is no second path being tested.
+        if (panel && panel->isVisible()) {
+            QWidget* save = panel->saveButton();
+            QWidget* load = panel->loadButton();
+            check(save != nullptr && save->isVisible() && load != nullptr &&
+                      load->isVisible(),
+                  "the Appearance panel offers Save colours and Load colours");
+            if (save && load) {
+                // Real hit-testing through the viewport, walking up from the
+                // hit the way every other control over the GL surface is
+                // checked - a button nested in the card is found as itself or
+                // as one of its own children, never as the card.
+                auto reachable = [&](QWidget* button) {
+                    const QPoint centre = button->mapTo(
+                        view, QPoint(button->width() / 2, button->height() / 2));
+                    for (QWidget* w = view->childAt(centre); w; w = w->parentWidget()) {
+                        if (w == button) return true;
+                        if (w == view) break;
+                    }
+                    return false;
+                };
+                check(reachable(save) && reachable(load),
+                      "and both are reachable by a real click, not merely present");
+            }
+
+            const QString colourPath = QDir::tempPath() +
+                                       QStringLiteral("/furnifyme-gui_smoke-look") +
+                                       AppearancePanel::colourFileSuffix();
+            QFile::remove(colourPath);
+
+            // A look worth telling apart from both Graphite and whatever the
+            // next edit makes, so neither end of the round trip can pass by
+            // accident.
+            const QColor savedAccent(QStringLiteral("#ff6600"));
+            const QColor savedPanel(QStringLiteral("#101820"));
+            panel->setTokenColour(QStringLiteral("accent"), savedAccent);
+            panel->setTokenColour(QStringLiteral("panel"), savedPanel);
+            panel->setBaseSize(12);
+            settle(120);
+            check(Theme::accent() == savedAccent && Theme::panel() == savedPanel,
+                  "a look is set up to be written to a file");
+
+            check(panel->saveColoursTo(colourPath),
+                  QStringLiteral("Save colours writes the file (%1)").arg(colourPath));
+            check(QFile::exists(colourPath) && QFile(colourPath).size() > 0,
+                  "and the file it wrote is not empty");
+
+            // Move the spec somewhere else entirely, so a load that did
+            // nothing at all would be caught rather than mistaken for a
+            // successful restore.
+            panel->setTokenColour(QStringLiteral("accent"), QColor(QStringLiteral("#00ff88")));
+            panel->setBaseSize(9);
+            settle(120);
+            check(Theme::accent() != savedAccent,
+                  "the live look is then moved away from what was saved");
+
+            check(panel->loadColoursFrom(colourPath),
+                  "Load colours accepts the file it just wrote");
+            check(Theme::accent() == savedAccent && Theme::panel() == savedPanel,
+                  QStringLiteral("and every colour comes back (%1, %2)")
+                      .arg(Theme::accent().name(), Theme::panel().name()));
+            check(std::fabs(Theme::spec().basePt - 12.0) < 1e-9,
+                  QStringLiteral("and the text size with them (%1 pt)")
+                      .arg(Theme::spec().basePt));
+            // Applied LIVE, not merely stored: the panel's own controls follow
+            // the load through the same broadcast a swatch click uses.
+            check(panel->sizeControl() != nullptr && panel->sizeControl()->value() == 12,
+                  "and the panel's own controls followed the load");
+
+            // A file that is not a look at all. deserializeSpec() refuses it,
+            // and the contract this leans on is that a refusal leaves the live
+            // spec untouched - so the assertion is about what did NOT happen.
+            const QString junkPath = QDir::tempPath() +
+                                     QStringLiteral("/furnifyme-gui_smoke-junk") +
+                                     AppearancePanel::colourFileSuffix();
+            {
+                QFile junk(junkPath);
+                check(junk.open(QIODevice::WriteOnly | QIODevice::Truncate),
+                      "a deliberately bad colour file can be written for the probe");
+                junk.write("this is not a look, it is a sentence\n\x01\x02\x03");
+                junk.close();
+            }
+            const Theme::Spec beforeJunk = Theme::spec();
+            check(!panel->loadColoursFrom(junkPath),
+                  "Load colours refuses a file that is not a look");
+            check(Theme::spec() == beforeJunk,
+                  "and the live look is untouched by the refusal - not half applied");
+            // A path that does not exist is refused the same way, and is the
+            // case a user reaches by typing rather than picking.
+            check(!panel->loadColoursFrom(QDir::tempPath() +
+                                          QStringLiteral("/furnifyme-no-such-look.furnifytheme")),
+                  "and refuses a file that is not there at all");
+            check(Theme::spec() == beforeJunk, "leaving the look untouched again");
+
+            // The refusal REPORTS, and it reports as a Failure - which is what
+            // makes it survive View -> Show notifications being off. Driven
+            // through the signal the button's own handler emits, since the
+            // dialog half cannot be driven here.
+            ToastHost* colourToasts = window.findChild<ToastHost*>();
+            check(colourToasts != nullptr, "there is a toast host for the colour-file refusal");
+            if (colourToasts) {
+                emit panel->colourLoadRefused(junkPath);
+                settle(150);
+                check(colourToasts->isShowing() &&
+                          colourToasts->currentText().contains(junkPath),
+                      QStringLiteral("a refused colour file is reported by name (\"%1\")")
+                          .arg(colourToasts->currentText()));
+                const int refusalMs = colourToasts->remainingMs();
+                check(refusalMs > 7500,
+                      QStringLiteral("as a Failure, which is the kind the notifications "
+                                     "toggle can never silence (%1 ms)").arg(refusalMs));
+                emit panel->colourSaveFailed(colourPath);
+                settle(150);
+                check(colourToasts->isShowing() &&
+                          colourToasts->currentText().contains(colourPath),
+                      "and a colour file that could not be written is reported too");
+            }
+
+            QFile::remove(colourPath);
+            QFile::remove(junkPath);
+            Theme::setSpec(Theme::defaultSpec());
+            settle(120);
+        }
+
+        // --- the font previews while the list is open (item 10) ---------------
+        if (panel && panel->isVisible() && panel->familyControl()) {
+            QComboBox* family = panel->familyControl();
+            const QString startFamily = Theme::spec().fontFamily;
+            // A family that is genuinely something else. Every machine has a
+            // different font list, so this is picked from the combo itself
+            // rather than named - and the check that one was found is a check,
+            // not a silent guard.
+            int other = -1;
+            for (int i = 0; i < family->count() && other < 0; ++i) {
+                if (family->itemText(i) != startFamily) other = i;
+            }
+            check(other >= 0,
+                  QStringLiteral("this machine offers a second font to preview (%1 in the "
+                                 "list)").arg(family->count()));
+            if (other >= 0) {
+                const QString previewFamily = family->itemText(other);
+                // The popup cannot be opened from inside the event loop that
+                // would drive it, so the two halves the popup triggers are
+                // driven directly: beginFamilyPreview() is what its Show hooks
+                // and highlighted() is what arrowing down it emits.
+                panel->beginFamilyPreview();
+                check(panel->familyBeforePreview() == startFamily,
+                      "opening the font list records the family to fall back to");
+
+                emit family->highlighted(other);
+                settle(150);
+                check(Theme::spec().fontFamily == previewFamily,
+                      QStringLiteral("merely highlighting a family applies it live "
+                                     "(\"%1\")").arg(Theme::spec().fontFamily));
+                // LIVE means the application font, not just the stored spec -
+                // the whole point is that the user sees the app re-set itself
+                // before choosing.
+                check(QApplication::font().family() == previewFamily,
+                      QStringLiteral("and the application really is set in it (\"%1\")")
+                          .arg(QApplication::font().family()));
+
+                panel->cancelFamilyPreview();
+                settle(150);
+                check(Theme::spec().fontFamily == startFamily,
+                      QStringLiteral("Escape puts back the family the list opened over "
+                                     "(\"%1\")").arg(Theme::spec().fontFamily));
+                check(panel->familyBeforePreview().isEmpty(),
+                      "and the fallback is spent, so a second Escape restores nothing");
+            }
+            Theme::setSpec(Theme::defaultSpec());
+            settle(120);
         }
 
         // --- the application stylesheet is built from the spec, not frozen --
@@ -11387,6 +11648,466 @@ int main(int argc, char* argv[])
         settle(200);
         check(Theme::spec() == Theme::defaultSpec() && panel && !panel->isVisible(),
               "the appearance block leaves the app back at Graphite with the panel closed");
+    }
+
+    // --- double-click routes (item 13) ---------------------------------------
+    //
+    // Two gestures on the same pixel, told apart by one modifier: plain means
+    // "give me the whole body", Ctrl means "let me draw on this face". The
+    // plain one used to be the lock, and the checks below are what make the
+    // move deliberate rather than a silent change of meaning.
+    {
+        // The lock is refused while an outline is waiting (canChangeSketchPlane),
+        // and the Ctrl route consults no action's enabled state, so the
+        // precondition is CLEARED and then pinned rather than assumed.
+        if (window.hasPendingFace()) {
+            trigger(window, QStringLiteral("Undo"));
+            settle(200);
+        }
+        check(!window.hasPendingFace(),
+              "the double-click probe starts with no outline waiting");
+        check(!window.document().solids().empty(),
+              "and with bodies to double-click");
+
+        if (!window.hasPendingFace() && !window.document().solids().empty()) {
+            view->setSelectedSolids({});
+            trigger(window, QStringLiteral("Select Bodies"));
+            trigger(window, QStringLiteral("Fit All"));
+            settle(350);
+
+            // A pixel over a body, derived from the model rather than guessed:
+            // a body's centre of mass projects to a point that is over that
+            // body from any angle it is not edge-on at.
+            QPoint at;
+            bool haveTarget = false;
+            for (const DocumentModel::Solid& solid : window.document().solids()) {
+                GProp_GProps props;
+                BRepGProp::VolumeProperties(solid.shape, props);
+                QPoint candidate;
+                if (!view->projectToScreen(props.CentreOfMass(), candidate)) continue;
+                if (!view->rect().adjusted(40, 40, -40, -40).contains(candidate)) continue;
+                at = candidate;
+                haveTarget = true;
+                break;
+            }
+            check(haveTarget,
+                  "a body's centre projects to a clickable point in the viewport");
+
+            if (haveTarget) {
+                // Face mode, and a face genuinely picked there - the OWNER of
+                // that face is the oracle for what the double-click must
+                // select, since occlusion can put a different body under the
+                // cursor than the one whose centre was projected.
+                trigger(window, QStringLiteral("Select Faces"));
+                settle(150);
+                clickAt(view, QPointF(at));
+                settle(150);
+                const TopoDS_Face under = view->selectedFace();
+                check(!under.IsNull(), "clicking there in face mode selects a face");
+                const int owner = under.IsNull() ? 0 : window.bodyIdForFace(under);
+                check(owner > 0, "and that face belongs to a body in the document");
+
+                if (owner > 0) {
+                    const bool lockedBefore = window.isFaceLocked();
+
+                    // --- plain: the whole body, and the mode follows ---------
+                    //
+                    // Aimed CLEAR OF THE PULL ARROW, which the first click of
+                    // any double-click in face mode raises at the selected
+                    // face's own centre. An unmodified click on that arrow
+                    // belongs to the arrow (see mouseDoubleClickEvent), so a
+                    // probe that ignored it would be asserting a gesture the
+                    // app deliberately does not offer there. The point is
+                    // searched for rather than nudged by a fixed offset: which
+                    // pixels are over this body depends on the pose, and a
+                    // hardcoded offset is the exact shape of probe that stops
+                    // hitting what it meant to.
+                    auto arrowDistance = [&](const QPoint& p) -> double {
+                        if (!view->hasPullArrow()) return 1.0e9;
+                        const TopoDS_Face f = view->selectedFace();
+                        if (f.IsNull()) return 1.0e9;
+                        GProp_GProps fp;
+                        BRepGProp::SurfaceProperties(f, fp);
+                        gp_Pnt headWorld;
+                        QPoint tail, head;
+                        if (!view->projectToScreen(fp.CentreOfMass(), tail)) return 1.0e9;
+                        if (!view->pullArrowHead(headWorld) ||
+                            !view->projectToScreen(headWorld, head))
+                            return 1.0e9;
+                        const double dx = head.x() - tail.x();
+                        const double dy = head.y() - tail.y();
+                        const double lengthSquared = dx * dx + dy * dy;
+                        double t = 0.0;
+                        if (lengthSquared > 1.0e-9) {
+                            t = ((p.x() - tail.x()) * dx + (p.y() - tail.y()) * dy) /
+                                lengthSquared;
+                            t = std::clamp(t, 0.0, 1.0);
+                        }
+                        return std::hypot(tail.x() + dx * t - p.x(),
+                                          tail.y() + dy * t - p.y());
+                    };
+
+                    QPoint clearOfArrow;
+                    bool haveClear = false;
+                    const int radii[3] = {45, 70, 95};
+                    for (int r = 0; r < 3 && !haveClear; ++r) {
+                        for (int i = 0; i < 8 && !haveClear; ++i) {
+                            const double angle = i * 3.14159265358979323846 / 4.0;
+                            const QPoint candidate(
+                                at.x() + int(std::cos(angle) * radii[r]),
+                                at.y() + int(std::sin(angle) * radii[r]));
+                            if (!view->rect().adjusted(30, 30, -30, -30).contains(candidate))
+                                continue;
+                            clickAt(view, QPointF(candidate));
+                            settle(100);
+                            const TopoDS_Face f = view->selectedFace();
+                            if (f.IsNull() || window.bodyIdForFace(f) != owner) continue;
+                            // Measured against the arrow raised by THIS click,
+                            // which stands on whichever face was just picked -
+                            // not the one the earlier click raised.
+                            if (arrowDistance(candidate) < 25.0) continue;
+                            clearOfArrow = candidate;
+                            haveClear = true;
+                        }
+                    }
+                    check(haveClear,
+                          "a point over the body and clear of its pull arrow can be found "
+                          "for the plain double-click");
+                    if (!haveClear) clearOfArrow = at;
+
+                    doubleClickAt(view, QPointF(clearOfArrow));
+                    settle(200);
+                    check(view->selectionMode() == OcctViewWidget::SelectionMode::Solid,
+                          "a plain double-click in face mode switches to body selection");
+                    QAction* bodiesAction = action(window, QStringLiteral("Select Bodies"));
+                    check(bodiesAction != nullptr && bodiesAction->isChecked(),
+                          "and the action that owns that mode is checked, so the rail "
+                          "chip and the menu agree with the viewport");
+                    const std::vector<int> selected = view->selectedSolidIds();
+                    check(selected.size() == 1 && selected.front() == owner,
+                          QStringLiteral("and the body under the cursor is the one "
+                                         "selected (%1 selected)").arg(selected.size()));
+                    check(window.isFaceLocked() == lockedBefore,
+                          "and the sketch plane is left exactly as it was - the plain "
+                          "gesture no longer locks");
+
+                    // --- Ctrl: the lock, on the same pixel -------------------
+                    trigger(window, QStringLiteral("Select Faces"));
+                    settle(150);
+                    clickAt(view, QPointF(at));
+                    settle(150);
+                    const TopoDS_Face again = view->selectedFace();
+                    check(!again.IsNull() && again.IsSame(under),
+                          "the same face is picked again for the Ctrl route");
+                    if (!again.IsNull() && again.IsSame(under)) {
+                        check(BRepAdaptor_Surface(again).GetType() == GeomAbs_Plane,
+                              "and it is flat, so the lock has something to accept");
+                        doubleClickAt(view, QPointF(at), Qt::ControlModifier);
+                        settle(300);
+                        check(window.isFaceLocked(),
+                              "Ctrl+double-clicking a face locks the sketch plane onto it");
+                    }
+
+                    // Back to the ground and the startup pose - locking flies
+                    // the camera square onto the face and borrows an
+                    // orthographic look, exactly as the lock probes further up
+                    // restore for themselves.
+                    if (window.isFaceLocked()) {
+                        trigger(window, QStringLiteral("Unlock Face"));
+                        settle(150);
+                    }
+                    check(!window.isFaceLocked(), "the probe leaves the ground plane in use");
+                    view->camera().setTemporaryOrtho(false);
+                    view->setSelectedSolids({});
+                    trigger(window, QStringLiteral("Select Bodies"));
+                    trigger(window, QStringLiteral("Axonometric"));
+                    settle(250);
+                }
+            }
+        }
+    }
+
+    // --- the transform gizmo stays a size a hand can aim at (item 11) ---------
+    //
+    // AIS_Manipulator sized itself from the body's bounding box and then stayed
+    // there, so a large body - or any body seen close up - gave a gizmo whose
+    // arms ran off every edge of the viewport. The cap is derived from the
+    // camera, so the property to check is a SCREEN one, measured at two very
+    // different zooms and in both projections.
+    {
+        check(!window.document().solids().empty(),
+              "there are bodies for the gizmo-size probe");
+        if (!window.document().solids().empty()) {
+            trigger(window, QStringLiteral("Select Bodies"));
+            trigger(window, QStringLiteral("Fit All"));
+            settle(300);
+            const int gizmoBody = window.document().solids().front().id;
+            view->setSelectedSolids({gizmoBody});
+            settle(250);
+            check(view->hasManipulator(),
+                  "one body selected in body mode raises the transform gizmo");
+
+            // The gizmo's on-screen reach: the furthest of its three arms,
+            // measured out to the size OCCT itself reports. That number is the
+            // whole assembly's outer radius rather than the drawn arm length,
+            // so this is a deliberately CONSERVATIVE measure - anything it
+            // passes, the visible gizmo passes with room to spare.
+            auto gizmoReachPx = [&]() -> double {
+                gp_Ax2 frame;
+                double size = 0.0;
+                if (!view->manipulatorFrame(frame, size)) return -1.0;
+                QPoint origin;
+                if (!view->projectToScreen(frame.Location(), origin)) return -1.0;
+                double worst = 0.0;
+                const gp_Dir arms[3] = {frame.XDirection(), frame.YDirection(),
+                                        frame.Direction()};
+                for (const gp_Dir& arm : arms) {
+                    QPoint tip;
+                    const gp_Pnt tipWorld =
+                        frame.Location().Translated(gp_Vec(arm) * size);
+                    if (!view->projectToScreen(tipWorld, tip)) return -1.0;
+                    worst = std::max(worst, std::hypot(double(tip.x() - origin.x()),
+                                                       double(tip.y() - origin.y())));
+                }
+                return worst;
+            };
+            auto gizmoLimitPx = [&]() {
+                return OcctViewWidget::kGizmoMaxViewportFraction *
+                       std::min(view->width(), view->height());
+            };
+            // Two logical pixels of slack and no more: projectToScreen answers
+            // in whole logical pixels, so a reach that is exactly at the limit
+            // can read one pixel over on either end of the segment.
+            const double slack = 2.0;
+
+            const double framedReach = gizmoReachPx();
+            check(framedReach > 0.0,
+                  QStringLiteral("the gizmo's projected reach can be measured at the "
+                                 "framed zoom (%1 px)").arg(framedReach));
+            check(framedReach <= gizmoLimitPx() + slack,
+                  QStringLiteral("and it is inside %1%% of the viewport's smaller side "
+                                 "(%2 px, limit %3 px)")
+                      .arg(int(OcctViewWidget::kGizmoMaxViewportFraction * 100))
+                      .arg(framedReach, 0, 'f', 1)
+                      .arg(gizmoLimitPx(), 0, 'f', 1));
+
+            // CLOSE UP, which is the case the user reported: at this zoom the
+            // unclamped gizmo was several times the viewport.
+            for (int i = 0; i < 12; ++i) {
+                QWheelEvent zoom(QPointF(view->width() / 2.0, view->height() / 2.0),
+                                 view->mapToGlobal(QPointF(view->width() / 2.0,
+                                                           view->height() / 2.0)),
+                                 QPoint(0, 0), QPoint(0, 120), Qt::NoButton,
+                                 Qt::NoModifier, Qt::NoScrollPhase, false);
+                QCoreApplication::sendEvent(view, &zoom);
+            }
+            settle(250);
+            const double closeReach = gizmoReachPx();
+            check(closeReach > 0.0,
+                  QStringLiteral("the gizmo is still there and measurable zoomed in "
+                                 "(%1 px)").arg(closeReach));
+            check(closeReach <= gizmoLimitPx() + slack,
+                  QStringLiteral("and the clamp holds at a close zoom, which is where "
+                                 "it used to fill the screen (%1 px, limit %2 px)")
+                      .arg(closeReach, 0, 'f', 1)
+                      .arg(gizmoLimitPx(), 0, 'f', 1));
+
+            // ORTHOGRAPHIC: the frustum is built differently and worldPerPixel()
+            // is the one formula both modes share, so the clamp has to survive
+            // the flip without a branch of its own.
+            QAction* orthoForGizmo = action(window, QStringLiteral("Orthographic"));
+            check(orthoForGizmo != nullptr, "there is a projection toggle for the probe");
+            if (orthoForGizmo) {
+                const bool wasOrtho = orthoForGizmo->isChecked();
+                if (!wasOrtho) orthoForGizmo->trigger();
+                settle(250);
+                check(view->viewIsOrthographic(),
+                      "the gizmo probe really is in a parallel projection");
+                const double orthoReach = gizmoReachPx();
+                check(orthoReach > 0.0,
+                      QStringLiteral("the gizmo measures in ortho too (%1 px)")
+                          .arg(orthoReach));
+                check(orthoReach <= gizmoLimitPx() + slack,
+                      QStringLiteral("and the clamp holds there as well (%1 px, limit "
+                                     "%2 px)")
+                          .arg(orthoReach, 0, 'f', 1)
+                          .arg(gizmoLimitPx(), 0, 'f', 1));
+                if (!wasOrtho) orthoForGizmo->trigger();
+                settle(200);
+            }
+
+            // A capture of the clamped gizmo at the close zoom this probe
+            // reached, since a size is exactly the kind of claim a number
+            // alone reads poorly for.
+            view->saveSnapshot(outDir + "/k-gizmo-clamped.png");
+
+            view->setSelectedSolids({});
+            trigger(window, QStringLiteral("Fit All"));
+            trigger(window, QStringLiteral("Axonometric"));
+            settle(250);
+        }
+    }
+
+    // --- View -> Show notifications (item 12) --------------------------------
+    //
+    // Off, the app stops saying what went right; it never stops saying what was
+    // refused, and Undo never stops being reachable. All three are checked,
+    // because the first two are the preference and the third is the thing the
+    // preference must not quietly cost the user.
+    {
+        QAction* notes = action(window, QStringLiteral("Show notifications"));
+        check(notes != nullptr, "there is a Show notifications entry");
+        ToastHost* noteHost = window.findChild<ToastHost*>();
+        check(noteHost != nullptr, "and a toast host for it to govern");
+        if (notes && noteHost) {
+            check(notes->isCheckable() && notes->isChecked(),
+                  "it is checkable and the app ships with notifications on");
+            check(noteHost->notesEnabled(),
+                  "and the host has been told so by updateActions(), not left to guess");
+
+            // Make a body to delete, so the probe is not at the mercy of what
+            // the run happens to have left in the document.
+            trigger(window, QStringLiteral("Select Bodies"));
+            trigger(window, QStringLiteral("Start Sketch"));
+            sketchQuad(window, 0.55, 0.30, 0.66, 0.40);
+            trigger(window, QStringLiteral("Finish Sketch"));
+            const bool built = window.extrudePendingFace(30.0);
+            check(built, "the notifications probe builds a body of its own");
+
+            if (built) {
+                const int bodies = static_cast<int>(window.document().solids().size());
+                const int victim = window.document().solids().back().id;
+
+                notes->setChecked(false);
+                settle(150);
+                check(!noteHost->notesEnabled(),
+                      "unticking the entry silences notes at the host");
+
+                view->setSelectedSolids({victim});
+                settle(150);
+                trigger(window, QStringLiteral("Delete Selected"));
+                settle(200);
+                check(static_cast<int>(window.document().solids().size()) == bodies - 1,
+                      "a delete with notifications off still deletes");
+                check(!noteHost->isShowing(),
+                      QStringLiteral("and says nothing about it (\"%1\")")
+                          .arg(noteHost->currentText()));
+
+                // The route the toast's pill would have offered is still there.
+                // This is the whole reason a Note may be dropped at all: it is
+                // a convenience over the menu, never the only way back.
+                QAction* undoAction = action(window, QStringLiteral("Undo"));
+                check(undoAction != nullptr && undoAction->isEnabled(),
+                      "Undo is still offered on the menu with notifications off");
+                if (undoAction && undoAction->isEnabled()) {
+                    undoAction->trigger();
+                    settle(250);
+                    check(static_cast<int>(window.document().solids().size()) == bodies,
+                          "and it still brings the body back");
+                }
+
+                // A REFUSAL, with notifications off. Two bodies are required
+                // for a Union and one is selected, so this is the app's own
+                // path rather than a toast posted by the probe.
+                view->setSelectedSolids({victim});
+                settle(150);
+                const bool refused =
+                    !window.applyBooleanToSelection(
+                        static_cast<int>(ModelingOps::BooleanKind::Fuse));
+                check(refused, "a Union with one body selected is refused");
+                check(noteHost->isShowing(),
+                      QStringLiteral("and the refusal is reported even with notifications "
+                                     "off - a refusal that reports nowhere is a silent "
+                                     "failure (\"%1\")").arg(noteHost->currentText()));
+
+                notes->setChecked(true);
+                settle(150);
+                check(noteHost->notesEnabled(),
+                      "ticking it again lets the app speak up about successes");
+
+                // And a Note really does come back, so the check above is about
+                // the toggle rather than about a message that stopped existing.
+                view->setSelectedSolids({victim});
+                settle(150);
+                trigger(window, QStringLiteral("Delete Selected"));
+                settle(200);
+                check(noteHost->isShowing() && !noteHost->currentText().isEmpty(),
+                      QStringLiteral("a delete with notifications on reports it again "
+                                     "(\"%1\")").arg(noteHost->currentText()));
+                trigger(window, QStringLiteral("Undo"));
+                settle(250);
+            }
+            view->setSelectedSolids({});
+            settle(120);
+        }
+    }
+
+    // --- and the preference comes back (item 12, persistence) ----------------
+    // On exactly the terms the projection and the unit are on, and checked the
+    // same way: a window that must not write, one that must, and one that reads
+    // it back. A preference that is stored and never read looks identical to
+    // one that was never stored.
+    {
+        ScopedTestSettings scopedSettings;
+        {
+            QSettings clean;
+            clean.remove(QStringLiteral("showNotifications"));
+        }
+
+        {
+            MainWindow quiet(nullptr, /*persistProgress=*/false);
+            quiet.setAttribute(Qt::WA_ShowWithoutActivating);
+            quiet.resize(900, 700);
+            quiet.show();
+            settle(250);
+            QAction* quietNotes = action(quiet, QStringLiteral("Show notifications"));
+            check(quietNotes != nullptr && quietNotes->isChecked(),
+                  "a fresh window ships with notifications on");
+            if (quietNotes) quietNotes->setChecked(false);
+            settle(150);
+            {
+                QSettings after;
+                check(!after.contains(QStringLiteral("showNotifications")),
+                      "but a persistProgress=false window stores nothing");
+            }
+            quiet.close();
+            settle(120);
+        }
+
+        {
+            MainWindow persisting(nullptr, /*persistProgress=*/true);
+            persisting.setAttribute(Qt::WA_ShowWithoutActivating);
+            persisting.resize(900, 700);
+            persisting.show();
+            settle(250);
+            QAction* persistNotes = action(persisting, QStringLiteral("Show notifications"));
+            if (persistNotes) persistNotes->setChecked(false);
+            settle(150);
+            QSettings written;
+            check(written.contains(QStringLiteral("showNotifications")) &&
+                      !written.value(QStringLiteral("showNotifications")).toBool(),
+                  "a persisting window stores the choice");
+            persisting.close();
+            settle(120);
+        }
+
+        {
+            MainWindow returning(nullptr, /*persistProgress=*/true);
+            returning.setAttribute(Qt::WA_ShowWithoutActivating);
+            returning.resize(900, 700);
+            returning.show();
+            settle(250);
+            QAction* returnedNotes = action(returning, QStringLiteral("Show notifications"));
+            check(returnedNotes != nullptr && !returnedNotes->isChecked(),
+                  "a returning window comes back with notifications off");
+            // And the host was actually told, rather than the tick merely
+            // coming back - the failure a checked-state-only assertion misses.
+            ToastHost* returnedHost = returning.findChild<ToastHost*>();
+            check(returnedHost != nullptr && !returnedHost->notesEnabled(),
+                  "and the toast host is silenced before the first message");
+            returning.close();
+            settle(120);
+        }
     }
 
     // --- the picture the whole item is for -----------------------------------

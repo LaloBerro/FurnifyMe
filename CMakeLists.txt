@@ -129,6 +129,28 @@ if(FURNIFYME_BUILD_APP)
     add_executable(furnifyme src/main.cpp)
     target_link_libraries(furnifyme PRIVATE furnify_app)
 
+    # The executable's own icon. QApplication::setWindowIcon covers everything
+    # that runs our code; Explorer, the taskbar's pinned entry and Alt+Tab read
+    # the binary itself, so the .ico has to be a linked resource as well. The
+    # path is substituted absolute because rc.exe resolves relative ones
+    # against a working directory we do not control - see assets/app.rc.in.
+    if(WIN32 AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon.ico")
+      set(FURNIFYME_ICON_FILE "${CMAKE_CURRENT_SOURCE_DIR}/assets/icon.ico")
+      configure_file(assets/app.rc.in "${CMAKE_CURRENT_BINARY_DIR}/app.rc" @ONLY)
+      enable_language(RC)
+      target_sources(furnifyme PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/app.rc")
+    endif()
+
+    # Repaints assets/icon.ico from IconSet::appIcon() - the same painting the
+    # running window uses. Off by default: the icon is a committed asset, and
+    # this exists so it stays reproducible rather than so it is rebuilt.
+    # See tools/make_icon.cpp for how to run it.
+    option(FURNIFYME_BUILD_ICON_TOOL "Build the tool that repaints assets/icon.ico" OFF)
+    if(FURNIFYME_BUILD_ICON_TOOL)
+      add_executable(make_icon tools/make_icon.cpp)
+      target_link_libraries(make_icon PRIVATE furnify_app)
+    endif()
+
     # Drives the real widgets with synthetic Qt events delivered straight to
     # them, so it never touches the OS cursor or steals focus - the machine
     # stays usable while it runs. Not registered with ctest: it needs a GPU and
