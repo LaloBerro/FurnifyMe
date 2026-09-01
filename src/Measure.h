@@ -7,6 +7,7 @@
 #include <string>
 
 #include <TopoDS_Shape.hxx>
+#include <gp_Pln.hxx>
 
 namespace Measure {
 
@@ -44,6 +45,19 @@ std::string formatLength(double millimetres);
 // void shape. Each number goes through formatLength, so it reads in the
 // current display unit too.
 std::string formatDimensions(const TopoDS_Shape& shape);
+
+// "340 x 220 mm" with U+00D7 between the numbers - the size of a flat shape
+// measured IN ITS OWN PLANE, u first then v. Empty string for a null shape or
+// one with no vertices.
+//
+// Not formatDimensions(): that reports the world-axis bounding box, and an
+// outline drawn on the side of a cabinet is 18 x 0 x 220 there - one of its
+// two real dimensions replaced by a zero, and the other two hiding which is
+// which. The plane's own (u, v) is the same frame SketchController snaps in
+// and the same one the cursor readout reports, so a 340 x 220 outline reads
+// as 340 x 220 wherever it was drawn. Each number still goes through
+// formatLength, so it follows the display unit like every other length.
+std::string formatFaceExtents(const TopoDS_Shape& face, const gp_Pln& plane);
 
 // Parses a number the user typed **in the current display unit** and returns
 // millimetres in `out`. Accepted grammar, after trimming surrounding spaces:

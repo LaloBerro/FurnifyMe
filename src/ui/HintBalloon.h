@@ -23,7 +23,7 @@
 //
 // That last one is why no predicate here reads the camera. The view hint
 // used to retire on the view-name label != "Persp" - a string that lived on
-// AxisGizmo then and is OcctViewWidget::viewLabelText() now - which disagreed
+// AxisGizmo then and is OcctViewWidget::viewDirectionName() now - which disagreed
 // with the event it is governed by in both directions: pressing 0 records
 // view.changed but leaves the camera at a pose that label calls "Persp", and
 // nothing about a free orbit records anything. All three hints now retire by

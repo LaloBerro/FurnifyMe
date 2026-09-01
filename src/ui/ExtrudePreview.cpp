@@ -106,6 +106,12 @@ ExtrudePreview::~ExtrudePreview()
 void ExtrudePreview::begin(const TopoDS_Face& face)
 {
     myFace = face;
+    // WHICH outline this preview is for. Since outlines became document items
+    // they accumulate - starting another sketch no longer discards the one
+    // waiting - so "is a face still pending" is no longer enough to tell that
+    // this panel is still describing the same thing it opened on. See
+    // onAppStateChanged().
+    myOutlineId = myWindow ? myWindow->pendingOutlineId() : 0;
 
     reposition();
     show();
@@ -132,21 +138,17 @@ void ExtrudePreview::begin(const TopoDS_Face& face)
 void ExtrudePreview::cancel()
 {
     if (myHasPreview && myView) {
-        // Restore, do not clear. MainWindow::onFinishSketch() shows the
-        // closed face through the viewport's SINGLE preview slot, and
-        // updatePreview() above overwrites that same slot with the extruded
-        // body - so clearing it here left the user with an intact pending
-        // face, an enabled Extrude action and a status bar still saying
-        // "Outline closed", above an empty viewport. Milestone 1's
-        // acceptance criteria say closing an outline produces a VISIBLE
-        // filled face; backing out of the height must hand that face back,
-        // not delete it. When there is no pending face left to restore -
-        // onAppStateChanged() calls this precisely because the face went
-        // away - clearing is the correct end state.
-        if (myWindow && myWindow->hasPendingFace() && !myFace.IsNull())
-            myView->setPreview(myFace, /*shaded=*/true);
-        else
-            myView->clearPreview();
+        // Just clear it, and that is a Phase-7 simplification rather than a
+        // regression of the fix this used to carry. The closed outline used to
+        // be shown through this same single preview slot, so clearing here
+        // erased it and left an intact pending face above an empty viewport -
+        // the fix was to restore the face instead. An outline is a DOCUMENT
+        // ITEM now, displayed through its own channel and untouched by
+        // anything this panel does, so the face is still on screen either way
+        // and restoring it here would put a second copy of it in the preview
+        // slot - two ways to show one face, which is the bug that started
+        // this whole paragraph.
+        myView->clearPreview();
         myHasPreview = false;
     }
     markInvalid(false);
@@ -172,7 +174,18 @@ void ExtrudePreview::onAppStateChanged()
     // for its own triggers. Reads state and calls cancel(), which touches
     // neither DocumentModel nor updateActions() - safe per CLAUDE.md's rule
     // that a slot on this signal must never call back into updateActions().
-    if (isVisible() && myWindow && !myWindow->hasPendingFace()) {
+    //
+    // Phase 7 widened the condition from "no face is pending" to "the outline
+    // this panel opened on is no longer the one Extrude would consume".
+    // Outlines accumulate now, so starting a new sketch leaves a face pending
+    // - the OLD one - and the narrower test stopped closing this panel at
+    // exactly the moment it most needed to: the check that a new sketch
+    // closes an open preview is what caught it. isSketching() covers the
+    // interval before the new outline exists, and the id comparison covers
+    // everything after, including an undo that took this outline away and a
+    // drawer click that chose a different one.
+    if (isVisible() && myWindow &&
+        (myWindow->isSketching() || myWindow->pendingOutlineId() != myOutlineId)) {
         cancel();
         return;
     }
@@ -323,10 +336,14 @@ void ExtrudePreview::updatePreview()
         return;
     }
 
-    // The SAME ModelingOps::extrude() call the commit uses - a preview built
-    // by a different path than the commit would be a lie.
+    // The SAME ModelingOps::extrude() call the commit uses, along the SAME
+    // direction it would use - a preview built by a different path, or in a
+    // different direction, than the commit would be a lie. The sweep
+    // direction is asked for rather than re-derived from the sketch
+    // controller's current plane: the outline pins the plane it was drawn on,
+    // and this panel must not be the one place that forgets it.
     const TopoDS_Shape solid =
-        ModelingOps::extrude(myFace, myWindow->sketch().plane().Axis().Direction(), h);
+        ModelingOps::extrude(myFace, myWindow->pendingSweepDirection(), h);
     if (solid.IsNull()) {
         markInvalid(true);
         return;

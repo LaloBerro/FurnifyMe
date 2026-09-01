@@ -254,7 +254,11 @@ void Toast::paintEvent(QPaintEvent* /*event*/)
     // corners follow paintSurface()'s radius instead of a hard square
     // corner poking past it.
     {
-        constexpr int kStripeWidth = 3;
+        // 6px rather than the 3 this shipped with. At 3 the stripe read as a
+        // border artefact at a glance - the thing a user's eye skips - and the
+        // kind of a message is the first thing they need from it. It stays
+        // clear of the text, which starts kPad (14) in from the same edge.
+        constexpr int kStripeWidth = 6;
         QPainterPath cardPath;
         cardPath.addRoundedRect(body, 8, 8);
         painter.save();
@@ -354,6 +358,21 @@ ToastHost::ToastHost(OcctViewWidget* viewport, QWidget* parent)
 
 void ToastHost::show(const QString& text, Toast::Kind kind, bool undo, int documentStamp)
 {
+    // THE drop site for View -> Show notifications, and the asymmetry in it is
+    // a law rather than a preference: a Note is the app telling the user
+    // something went right, which they are entitled to switch off, while a
+    // FAILURE IS A REFUSAL AND A REFUSAL THAT REPORTS NOWHERE IS A SILENT
+    // FAILURE. This app has no modal dialogs, no error log and no status line
+    // that persists - a toast is the only surface a refusal has - so a
+    // preference that could reach one would turn every kernel refusal into an
+    // operation that simply did nothing, which is exactly what CLAUDE.md's
+    // "never surface a failed boolean as a success" forbids one layer down.
+    //
+    // Dropped rather than shown-and-hidden: nothing is repositioned, no timer
+    // is armed, and myStamp is left alone, so a live message that a document
+    // change is about to dismiss is not replaced by one that was never shown.
+    if (kind == Toast::Kind::Note && !myNotesEnabled) return;
+
     myStamp = documentStamp;
     myToast->setMessage(text, kind, undo);
     reposition();
@@ -392,6 +411,15 @@ void ToastHost::documentMovedTo(int documentStamp)
 void ToastHost::setUndoEnabled(bool enabled)
 {
     if (myToast) myToast->setUndoEnabled(enabled);
+}
+
+void ToastHost::setNotesEnabled(bool enabled)
+{
+    // Stored only. A Note already on screen when the user switches
+    // notifications off is left to time out on its own: it is four seconds
+    // old at most, and yanking a message away mid-read is a worse surprise
+    // than one more message.
+    myNotesEnabled = enabled;
 }
 
 void ToastHost::replace()

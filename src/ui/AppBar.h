@@ -39,8 +39,8 @@ class QMenuBar;
 //
 // With an action it is a mirror: text, enabled, checkable, checked and
 // tooltip all come from the action and nothing is stored here. Without one it
-// is a plain readout button - the view label and the unit chip - whose text
-// its owner sets and whose click its owner interprets.
+// is a plain readout button - the projection toggle and the unit chip - whose
+// text its owner sets and whose click its owner interprets.
 class BarButton : public QAbstractButton {
     Q_OBJECT
 
@@ -83,7 +83,13 @@ public:
     AppBar(QMenuBar* menuBar, QAction* wireframe, QAction* fitAll,
            QWidget* parent = nullptr);
 
-    void setViewLabel(const QString& text);   // "Persp", "Top", ...
+    // The projection toggle's readout. Takes the MODE, not the word: the two
+    // strings are this class's own and nothing outside it should hold a copy.
+    void setOrthographic(bool orthographic);
+    // "Persp" / "Ortho", so a caller that has to compare against what is
+    // painted uses this rather than a second copy of the literal.
+    static QString projectionLabel(bool orthographic);
+
     void setUnitLabel(const QString& text);   // "mm" / "cm"
 
     // The menu bar this bar was given. Not QMainWindow::menuBar() - see the
@@ -91,7 +97,7 @@ public:
     // asks here.
     QMenuBar* menus() const { return myMenus; }
 
-    QWidget* viewLabelButton() const;
+    QWidget* projectionButton() const;
     QWidget* unitButton() const;
 
     // The wordmark, exactly as painted, so a caller comparing against it uses
@@ -104,7 +110,10 @@ public:
     QStringList paintedTexts() const;
 
 signals:
-    void viewLabelClicked();   // -> MainWindow snaps to the axonometric pose
+    // -> MainWindow triggers the Orthographic action. The button holds no
+    // projection state of its own, exactly as the unit chip holds no unit:
+    // both report a click and let the action that owns the state decide.
+    void projectionClicked();
     void unitClicked();        // -> MainWindow triggers the other unit's action
 
 protected:
@@ -121,7 +130,7 @@ private:
 
     QMenuBar* myMenus = nullptr;
     class QSpacerItem* myWordmarkSpace = nullptr;
-    BarButton* myViewLabel = nullptr;
+    BarButton* myProjection = nullptr;
     BarButton* myUnit = nullptr;
     BarButton* myWireframe = nullptr;
     BarButton* myFit = nullptr;

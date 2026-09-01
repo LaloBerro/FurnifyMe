@@ -204,6 +204,20 @@ void ItemsPanel::refresh()
     // rebuild below already paid on every call.
     QString signature;
     if (myDocument) {
+        // Outlines first, exactly as the rows are built below. Everything a
+        // row DISPLAYS goes into the signature - id, name, extents,
+        // visibility - which is the Phase-5 lesson: a field a row shows but
+        // the early-out does not compare is a field that stops updating.
+        for (const DocumentModel::Outline& outline : myDocument->outlines()) {
+            signature += QString::number(outline.id) + QLatin1Char('\x1f') +
+                         QString::fromStdString(outline.name) + QLatin1Char('\x1f') +
+                         QString::fromStdString(
+                             Measure::formatFaceExtents(outline.face, outline.plane)) +
+                         QLatin1Char('\x1f') +
+                         ((myView && myView->isOutlineVisible(outline.id)) ? QLatin1Char('1')
+                                                                          : QLatin1Char('0')) +
+                         QLatin1Char('\x1e');
+        }
         for (const DocumentModel::Solid& solid : myDocument->solids()) {
             signature += QString::number(solid.id) + QLatin1Char('\x1f') +
                          QString::fromStdString(solid.name) + QLatin1Char('\x1f') +
@@ -250,19 +264,23 @@ void ItemsPanel::refresh()
     myRowList.clear();
     if (!myDocument) return;
 
-    for (const DocumentModel::Solid& solid : myDocument->solids()) {
+    // One row builder for both kinds. The two differ only in the text, which
+    // visibility channel the eye drives and which signal a click emits -
+    // writing the widget construction twice would be two places to fix the
+    // next time a row grows a control.
+    auto addRow = [this](int id, const QString& itemName, const QString& sizeText,
+                         bool visible, bool isOutline) {
         auto* row = new QWidget(this);
         auto* layout = new QHBoxLayout(row);
         layout->setContentsMargins(6, 4, 6, 4);
         layout->setSpacing(8);
 
-        auto* name = new QLabel(QString::fromStdString(solid.name), row);
+        auto* name = new QLabel(itemName, row);
         name->setStyleSheet(QStringLiteral("background: transparent; color: %1;")
                                 .arg(Theme::text().name()));
         layout->addWidget(name, 1);
 
-        auto* size = new QLabel(
-            QString::fromStdString(Measure::formatDimensions(solid.shape)), row);
+        auto* size = new QLabel(sizeText, row);
         // A secondary readout beside the name, sized like a chip label.
         size->setStyleSheet(QStringLiteral("background: transparent; color: %1; "
                                            "font-size: %2pt;")
@@ -272,19 +290,23 @@ void ItemsPanel::refresh()
 
         auto* eye = new QPushButton(row);
         eye->setCheckable(true);
-        eye->setChecked(myView && myView->isSolidVisible(solid.id));
+        eye->setChecked(visible);
         eye->setFixedSize(24, 24);
         eye->setIcon(IconSet::icon(IconSet::Glyph::SelectSolid));
-        eye->setToolTip(tr("Show or hide this body"));
-        const int id = solid.id;
-        connect(eye, &QPushButton::toggled, this, [this, id](bool visible) {
-            if (myView) myView->setSolidVisible(id, visible);
+        eye->setToolTip(isOutline ? tr("Show or hide this outline")
+                                  : tr("Show or hide this body"));
+        connect(eye, &QPushButton::toggled, this, [this, id, isOutline](bool show) {
+            if (!myView) return;
+            if (isOutline) myView->setOutlineVisible(id, show);
+            else myView->setSolidVisible(id, show);
         });
         layout->addWidget(eye);
 
-        // Clicking anywhere on the row selects that solid in the viewport.
+        // Clicking anywhere on the row activates that item - a body row
+        // selects it in the viewport, an outline row makes it the one Extrude
+        // will consume.
         row->installEventFilter(this);
-        row->setProperty("solidId", id);
+        row->setProperty(isOutline ? "outlineId" : "solidId", id);
         // Named so showSelection()'s stylesheet can address THIS widget
         // rather than the whole subtree: an unqualified rule set on a widget
         // applies to its children too, which would hand the eye button the
@@ -302,8 +324,22 @@ void ItemsPanel::refresh()
         // it. adjustSize() below has to see the real rows, now, not one event
         // loop turn from now.
         row->show();
-        myRowList.push_back(
-            Row{row, name, size, eye, id, name->text() + QLatin1Char(' ') + size->text()});
+        Row entry{row, name, size, eye, id, isOutline,
+                  name->text() + QLatin1Char(' ') + size->text()};
+        myRowList.push_back(entry);
+    };
+
+    // Outlines ABOVE bodies: an outline is the thing the user is about to act
+    // on, and it is the newest item in the document whenever one exists.
+    for (const DocumentModel::Outline& outline : myDocument->outlines()) {
+        addRow(outline.id, QString::fromStdString(outline.name),
+               QString::fromStdString(Measure::formatFaceExtents(outline.face, outline.plane)),
+               myView && myView->isOutlineVisible(outline.id), /*isOutline=*/true);
+    }
+    for (const DocumentModel::Solid& solid : myDocument->solids()) {
+        addRow(solid.id, QString::fromStdString(solid.name),
+               QString::fromStdString(Measure::formatDimensions(solid.shape)),
+               myView && myView->isSolidVisible(solid.id), /*isOutline=*/false);
     }
 
     if (myRowList.empty()) {
@@ -345,6 +381,11 @@ void ItemsPanel::refresh()
 bool ItemsPanel::eventFilter(QObject* watched, QEvent* event)
 {
     if (event->type() == QEvent::MouseButtonPress) {
+        const QVariant outline = watched->property("outlineId");
+        if (outline.isValid()) {
+            emit outlineActivated(outline.toInt());
+            return true;
+        }
         const QVariant id = watched->property("solidId");
         if (id.isValid()) {
             emit solidActivated(id.toInt());
@@ -358,19 +399,47 @@ bool ItemsPanel::eventFilter(QObject* watched, QEvent* event)
     // as well means the row's own two halves are handled in one place rather
     // than one of them relying on an attribute set somewhere else.
     if (event->type() == QEvent::MouseButtonRelease &&
-        watched->property("solidId").isValid())
+        (watched->property("solidId").isValid() ||
+         watched->property("outlineId").isValid()))
         return true;
     return QWidget::eventFilter(watched, event);
 }
 
 void ItemsPanel::showSelection(const std::vector<int>& ids)
 {
+    mySelectedIds = ids;
+    restyleRows();
+}
+
+void ItemsPanel::showPendingOutline(int id)
+{
+    myPendingOutlineId = id;
+    restyleRows();
+}
+
+void ItemsPanel::restyleRows()
+{
     for (const Row& row : myRowList) {
-        const bool selected = std::find(ids.begin(), ids.end(), row.id) != ids.end();
+        // Two ways a row can be marked, and which one applies depends on
+        // which KIND of row it is - never on which list happens to contain
+        // the number. A body row is marked when the viewport has it selected;
+        // an outline row is marked when it is the one Extrude would consume.
+        // Ids come from a single counter, so the two can never collide - but
+        // styling a row from a list it is not a member of is the kind of
+        // coincidence worth refusing outright rather than relying on, which
+        // is why each kind asks only its own question.
+        const bool marked =
+            row.isOutline
+                ? (myPendingOutlineId != 0 && row.id == myPendingOutlineId)
+                : std::find(mySelectedIds.begin(), mySelectedIds.end(), row.id) !=
+                      mySelectedIds.end();
+        // The SAME fill a selected body row wears. One mark, one meaning -
+        // "this is the row the next thing you do will act on" - rather than a
+        // second visual language for the second kind of item.
         row.widget->setStyleSheet(
-            selected ? QStringLiteral("#itemsRow { background-color: %1; "
-                                      "border-radius: 4px; }")
-                           .arg(Theme::chipActive().name())
-                     : QStringLiteral("#itemsRow { background: transparent; }"));
+            marked ? QStringLiteral("#itemsRow { background-color: %1; "
+                                    "border-radius: 4px; }")
+                         .arg(Theme::chipActive().name())
+                   : QStringLiteral("#itemsRow { background: transparent; }"));
     }
 }

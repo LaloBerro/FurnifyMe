@@ -34,6 +34,28 @@ gp_Pnt SketchController::snapToPlaneGrid(const gp_Pnt& point, const gp_Pln& plan
     return ElSLib::Value(std::round(u / step) * step, std::round(v / step) * step, plane);
 }
 
+gp_Pnt SketchController::snapToDirection(const gp_Pnt& prev, const gp_Dir& dir,
+                                         const gp_Pnt& candidate)
+{
+    // gp_Dir is unit length, so the dot product IS the parameter along the
+    // line and no division by |dir|^2 is needed.
+    const gp_Vec along(dir);
+    return prev.Translated(along * gp_Vec(prev, candidate).Dot(along));
+}
+
+bool SketchController::lastSegmentDirection(gp_Dir& out) const
+{
+    if (myPoints.size() < 2) return false;
+
+    const gp_Vec segment(myPoints[myPoints.size() - 2], myPoints.back());
+    // gp_Dir's own constructor RAISES on a zero-length vector, so this guard
+    // is the whole reason the caller can pass a gp_Dir at all.
+    if (segment.Magnitude() < Precision::Confusion()) return false;
+
+    out = gp_Dir(segment);
+    return true;
+}
+
 bool SketchController::isNearFirstPoint(const gp_Pnt& candidate, double tolerance) const
 {
     if (!canClose()) return false;

@@ -12,16 +12,23 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 #include <BRep_Tool.hxx>
 #include <BRepAdaptor_Curve.hxx>
+#include <BRepAdaptor_Surface.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepCheck_Analyzer.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
+#include <BRepFilletAPI_MakeFillet.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepGProp.hxx>
 #include <Bnd_Box.hxx>
+#include <GCPnts_AbscissaPoint.hxx>
 #include <GeomAbs_CurveType.hxx>
+#include <GeomAbs_SurfaceType.hxx>
 #include <GProp_GProps.hxx>
+#include <Standard_Failure.hxx>
 #include <TopAbs_Orientation.hxx>
 #include <TopAbs_State.hxx>
 #include <TopExp.hxx>
@@ -97,6 +104,46 @@ TopoDS_Edge longEdgeAlongX(const TopoDS_Shape& box, double length)
         }
     }
     return TopoDS_Edge();
+}
+
+// The straight edge whose two endpoints are `a` and `b` in either order -
+// how the spreading-bevel block names a specific edge without depending on
+// OCCT's iteration order, which changes with every rebuild.
+TopoDS_Edge edgeBetween(const TopoDS_Shape& shape, const gp_Pnt& a, const gp_Pnt& b)
+{
+    for (TopExp_Explorer it(shape, TopAbs_EDGE); it.More(); it.Next()) {
+        const TopoDS_Edge edge = TopoDS::Edge(it.Current());
+        TopoDS_Vertex v1, v2;
+        TopExp::Vertices(edge, v1, v2);
+        if (v1.IsNull() || v2.IsNull()) continue;
+        const gp_Pnt p1 = BRep_Tool::Pnt(v1);
+        const gp_Pnt p2 = BRep_Tool::Pnt(v2);
+        if ((p1.Distance(a) < 1.0e-6 && p2.Distance(b) < 1.0e-6) ||
+            (p1.Distance(b) < 1.0e-6 && p2.Distance(a) < 1.0e-6))
+            return edge;
+    }
+    return TopoDS_Edge();
+}
+
+double edgeLength(const TopoDS_Edge& edge)
+{
+    if (edge.IsNull()) return 0.0;
+    BRepAdaptor_Curve curve(edge);
+    return GCPnts_AbscissaPoint::Length(curve);
+}
+
+// How many rounded strips a body carries. A fillet makes exactly one
+// cylindrical face per edge it rounds, so this counts the operations the
+// kernel actually performed - which is the assertion a volume check cannot
+// make when a spread happens to remove a plausible amount.
+int countCylindricalFaces(const TopoDS_Shape& shape)
+{
+    int found = 0;
+    for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+        if (BRepAdaptor_Surface(TopoDS::Face(it.Current())).GetType() == GeomAbs_Cylinder)
+            ++found;
+    }
+    return found;
 }
 
 }  // namespace
@@ -264,6 +311,293 @@ int main()
         check(!foreignChamfer.ok,
               "chamfer on an edge foreign to the body is refused for the same reason");
         check(foreignChamfer.shape.IsNull(), "with a null shape likewise");
+    }
+
+    // --- the spreading bevel, and the multi-edge list forms -------------------
+    //
+    // The user-reported bug: rounding an edge that ENDS on an earlier
+    // fillet's strip also rounded a neighbouring edge nobody picked.
+    // BRepFilletAPI's Add() is documented to build a contour "composed of
+    // edges of the shape which are tangential to one another and which
+    // delimit two series of tangential faces" - a fillet strip is exactly
+    // such a series, so the contour walks straight out through the picked
+    // edge's endpoint and takes the far neighbour with it. Measured on this
+    // box: one Add produced a contour of THREE edges, and the volume removed
+    // came out 13.8% over the single-edge formula.
+    //
+    // Every number below is arithmetic, not eyeballing: the second fillet
+    // must remove exactly (1-pi/4)*r^2*len and nothing else, and the first
+    // fillet's strip must still be the full 100 mm it was built at. Stub the
+    // containment out and both fail.
+    std::printf("\n-- the spreading bevel (item 8) --\n");
+    {
+        // Edge A: the top-front long edge, (0,0,10)-(100,0,10).
+        const TopoDS_Edge edgeA = edgeBetween(box, gp_Pnt(0, 0, 10), gp_Pnt(100, 0, 10));
+        check(!edgeA.IsNull(), "the top-front edge found on the plain box");
+
+        const BooleanResult first = filletEdge(box, edgeA, 3.0);
+        check(first.ok, "fillet r=3 on it succeeds" +
+                        (first.ok ? std::string() : ": " + first.error));
+        if (first.ok) {
+            const TopoDS_Shape rounded = first.shape;
+            const double roundedVolume = volume(rounded);
+            check(countFaces(rounded) == 7, "the rounded body carries the one new strip");
+
+            // Edge B: the top-left edge, shortened by A's fillet to 77 mm and
+            // now running (0,3,10)-(0,80,10). It ENDS on A's strip, which is
+            // the whole point.
+            const TopoDS_Edge edgeB =
+                edgeBetween(rounded, gp_Pnt(0, 3, 10), gp_Pnt(0, 80, 10));
+            check(!edgeB.IsNull(),
+                  "the neighbouring top-left edge, now ending on that strip, found");
+            checkNear(edgeLength(edgeB), 77.0, 1.0e-6,
+                      "and it really is the shortened 77 mm edge, not the original 80");
+
+            const BooleanResult second = filletEdge(rounded, edgeB, 3.0);
+            check(second.ok, "fillet r=3 on that neighbour succeeds" +
+                             (second.ok ? std::string() : ": " + second.error));
+            if (second.ok) {
+                const double expected = (1.0 - kPi / 4.0) * 9.0 * 77.0;
+                checkNear(roundedVolume - volume(second.shape), expected, expected * 1.0e-4,
+                          "and removes EXACTLY its own (1-pi/4)*9*77 - no neighbouring "
+                          "edge came with it");
+                check(countSolids(second.shape) == 1, "the twice-rounded body is one body");
+                check(BRepCheck_Analyzer(second.shape).IsValid(),
+                      "and passes BRepCheck_Analyzer");
+
+                // The other half of the assertion, and the one a volume check
+                // alone cannot make: the FIRST fillet's strip is untouched.
+                // Its lower boundary was built at the body's full 100 mm; the
+                // spread shortened it to 97.
+                const TopoDS_Edge aStripEdge =
+                    edgeBetween(second.shape, gp_Pnt(0, 0, 7), gp_Pnt(100, 0, 7));
+                check(!aStripEdge.IsNull(),
+                      "the first strip's lower boundary is still there at its own corners");
+                if (!aStripEdge.IsNull())
+                    checkNear(edgeLength(aStripEdge), 100.0, 1.0e-6,
+                              "and still spans the body's full 100 mm - the spread cut it "
+                              "back to 97");
+                check(countCylindricalFaces(second.shape) == 2,
+                      "exactly two rounded strips exist on the body: A's and B's, and not "
+                      "a third on an edge nobody picked");
+            }
+        }
+    }
+
+    std::printf("\n-- multi-edge bevels (item 9) --\n");
+    {
+        // Two edges as far apart as this box allows: the top-front and the
+        // bottom-back long edges. They share no vertex, so one build removes
+        // exactly twice one edge's worth.
+        const TopoDS_Edge top = edgeBetween(box, gp_Pnt(0, 0, 10), gp_Pnt(100, 0, 10));
+        const TopoDS_Edge bottom = edgeBetween(box, gp_Pnt(0, 80, 0), gp_Pnt(100, 80, 0));
+        check(!top.IsNull() && !bottom.IsNull(), "two far-apart 100 mm edges found");
+
+        const std::vector<TopoDS_Edge> pair{top, bottom};
+        const BooleanResult both = filletEdges(box, pair, 3.0);
+        check(both.ok, "one fillet build over both succeeds" +
+                       (both.ok ? std::string() : ": " + both.error));
+        if (both.ok) {
+            const double single = (1.0 - kPi / 4.0) * 9.0 * 100.0;
+            checkNear(boxVolume - volume(both.shape), single * 2.0, single * 2.0 * 1.0e-4,
+                      "and removes exactly TWICE the single-edge formula");
+            check(countCylindricalFaces(both.shape) == 2, "leaving two rounded strips");
+            check(countSolids(both.shape) == 1, "on one body");
+            check(BRepCheck_Analyzer(both.shape).IsValid(), "which is valid");
+        }
+
+        const BooleanResult bothFlat = chamferEdges(box, pair, 3.0);
+        check(bothFlat.ok, "and one chamfer build over both succeeds" +
+                           (bothFlat.ok ? std::string() : ": " + bothFlat.error));
+        if (bothFlat.ok)
+            checkNear(boxVolume - volume(bothFlat.shape), 0.5 * 9.0 * 100.0 * 2.0,
+                      0.5 * 9.0 * 100.0 * 2.0 * 1.0e-4,
+                      "removing exactly twice the single-edge chamfer wedge");
+
+        // All-or-nothing: one bad edge refuses the whole gesture. A partial
+        // bevel - two of the three edges rounded - would be the worst
+        // possible answer, because the user would have to work out which.
+        TopExp_Explorer foreignIt(distantBox, TopAbs_EDGE);
+        const TopoDS_Edge foreign = TopoDS::Edge(foreignIt.Current());
+        const BooleanResult mixed = filletEdges(box, {top, foreign}, 3.0);
+        check(!mixed.ok, "one good edge and one foreign edge refuses the WHOLE call");
+        check(mixed.shape.IsNull(), "with a null shape, per BooleanResult's contract");
+        const BooleanResult withNull = filletEdges(box, {top, TopoDS_Edge()}, 3.0);
+        check(!withNull.ok, "so does one good edge and one null edge");
+        check(withNull.shape.IsNull(), "likewise null");
+        const BooleanResult tooBigTogether = filletEdges(box, {top, bottom}, 20.0);
+        check(!tooBigTogether.ok,
+              "and a radius that fails on either of them refuses both, rather than "
+              "rounding the one it could");
+        check(tooBigTogether.shape.IsNull(), "null shape again");
+        checkNear(volume(box), boxVolume, 1.0e-9,
+                  "after all three refusals the body is untouched");
+        check(countFaces(box) == 6, "with its original face count");
+
+        check(!filletEdges(box, {}, 3.0).ok, "an empty edge list is refused");
+        check(!chamferEdges(box, {}, 3.0).ok, "for the chamfer too");
+        check(!filletEdges(TopoDS_Shape(), {top}, 3.0).ok, "as is a null body");
+        check(!filletEdges(box, {top}, 0.0).ok, "as is a radius of zero");
+
+        // --- multi-edge ON AN ALREADY-BEVELLED BODY --------------------------
+        //
+        // The arrangement item 8 exists for, done in two clicks instead of
+        // one: fillet an edge, then Shift-select the edges next to it and
+        // fillet those together. Every one of these went through the clip -
+        // each picked edge ends on the first strip, so every contour
+        // propagates - and the clip's own "nothing to put back" case is
+        // reachable from here, which is what made this block necessary.
+        {
+            const TopoDS_Edge first = edgeBetween(box, gp_Pnt(0, 0, 10), gp_Pnt(100, 0, 10));
+            const BooleanResult rounded = filletEdge(box, first, 3.0);
+            check(rounded.ok, "a box with one edge already rounded");
+            if (rounded.ok) {
+                const TopoDS_Shape body = rounded.shape;
+                const double bodyVolume = volume(body);
+
+                // The two edges that END on that strip, one at each end of it.
+                const TopoDS_Edge left = edgeBetween(body, gp_Pnt(0, 3, 10), gp_Pnt(0, 80, 10));
+                const TopoDS_Edge right =
+                    edgeBetween(body, gp_Pnt(100, 3, 10), gp_Pnt(100, 80, 10));
+                // And the one running the body's full 100 mm the other way,
+                // whose extent alone covers the body in its own direction.
+                const TopoDS_Edge across =
+                    edgeBetween(body, gp_Pnt(0, 80, 10), gp_Pnt(100, 80, 10));
+                check(!left.IsNull() && !right.IsNull() && !across.IsNull(),
+                      "with the two edges that end on it, and the one that spans the body, "
+                      "all found");
+
+                const BooleanResult pair = filletEdges(body, {left, right}, 3.0);
+                check(pair.ok, "filleting BOTH edges that end on the strip, in one gesture, "
+                               "succeeds" + (pair.ok ? std::string() : ": " + pair.error));
+                if (pair.ok) {
+                    const double expected = (1.0 - kPi / 4.0) * 9.0 * (77.0 + 77.0);
+                    checkNear(bodyVolume - volume(pair.shape), expected, expected * 1.0e-4,
+                              "removing exactly the two-edge closed form and nothing more - "
+                              "the clip contained both contours");
+                    check(countCylindricalFaces(pair.shape) == 3,
+                          "leaving three rounded strips: the first and the two just asked "
+                          "for");
+                    check(BRepCheck_Analyzer(pair.shape).IsValid(), "and a valid body");
+                }
+
+                // The case the clip CANNOT contain, and which used to be
+                // refused at every radius with "try a smaller size" - advice
+                // that was false, because the geometry and not the number is
+                // what makes the picked extents cover the body. `across`
+                // spans the body's whole X extent, so `body minus the slabs`
+                // is empty and there is nothing outside the picked edges to
+                // put back. The kernel's own result stands.
+                //
+                // The expectation is MEASURED, not a closed form: these two
+                // fillets meet at a shared corner and blend there, and the
+                // raw build also carries what the clip could not reach, so
+                // the naive sum is about 5% under. Pinned against a raw build
+                // done right here rather than against a number copied out of
+                // a probe run, so it cannot go stale.
+                for (double radius : {0.5, 1.0, 3.0, 5.0}) {
+                    const BooleanResult spanning = filletEdges(body, {left, across}, radius);
+                    check(spanning.ok,
+                          "an edge that spans the body, filleted together with one that "
+                          "ends on the strip, succeeds at r = " + std::to_string(radius) +
+                              (spanning.ok ? std::string() : ": " + spanning.error));
+                }
+                {
+                    const double radius = 3.0;
+                    const BooleanResult spanning = filletEdges(body, {left, across}, radius);
+                    BRepFilletAPI_MakeFillet raw(body);
+                    raw.Add(radius, left);
+                    raw.Add(radius, across);
+                    raw.Build();
+                    check(raw.IsDone(), "and the kernel's own build of it is what it hands "
+                                        "back");
+                    if (spanning.ok && raw.IsDone()) {
+                        checkNear(volume(spanning.shape), volume(raw.Shape()), 1.0e-6,
+                                  "to the cubic millimetre - with nothing to put back, the "
+                                  "clip changes nothing rather than refusing");
+                        check(BRepCheck_Analyzer(spanning.shape).IsValid(),
+                              "and it is a valid body");
+                        check(countSolids(spanning.shape) == 1, "and one body");
+                        const double naive = (1.0 - kPi / 4.0) * radius * radius *
+                                             (77.0 + 100.0);
+                        const double removed = bodyVolume - volume(spanning.shape);
+                        check(removed > naive && removed < naive * 1.2,
+                              "removing a little more than the naive two-edge sum - the "
+                              "corner where the two picked fillets meet, plus what the "
+                              "clip could not reach");
+                    }
+                }
+            }
+        }
+
+        // --- all-or-nothing, against an edge the kernel actually drops -------
+        //
+        // NbContours() > 0 is NOT the guard: BRepFilletAPI's Add() takes or
+        // drops each edge on its own, so a list with one dropped edge still
+        // builds and would bevel the rest silently. A cylinder's seam edge is
+        // a real, straight, non-degenerate edge that yields no contour at
+        // all - so this is a measured case, not a theoretical one.
+        {
+            const TopoDS_Shape cylinder = BRepPrimAPI_MakeCylinder(20.0, 50.0).Shape();
+            check(!cylinder.IsNull(), "a cylinder, for the edge the kernel will not take");
+
+            TopoDS_Edge taken;
+            TopoDS_Edge dropped;
+            for (TopExp_Explorer it(cylinder, TopAbs_EDGE); it.More(); it.Next()) {
+                const TopoDS_Edge candidate = TopoDS::Edge(it.Current());
+                BRepFilletAPI_MakeFillet probe(cylinder);
+                try {
+                    probe.Add(2.0, candidate);
+                } catch (const Standard_Failure&) {
+                    continue;
+                }
+                if (probe.NbContours() == 0) {
+                    if (dropped.IsNull()) dropped = candidate;
+                } else if (taken.IsNull()) {
+                    taken = candidate;
+                }
+            }
+            check(!taken.IsNull() && !dropped.IsNull(),
+                  "which carries both an edge the fillet builder takes and one it drops, so "
+                  "the two checks below are measuring a real case");
+
+            if (!taken.IsNull() && !dropped.IsNull()) {
+                check(filletEdges(cylinder, {taken}, 2.0).ok,
+                      "the taken edge fillets on its own");
+                check(!filletEdges(cylinder, {dropped}, 2.0).ok,
+                      "the dropped one is refused on its own");
+
+                const BooleanResult mixed = filletEdges(cylinder, {taken, dropped}, 2.0);
+                check(!mixed.ok,
+                      "and the two TOGETHER are refused - the builder would have taken one "
+                      "of them and handed back a body with half the gesture applied");
+                check(mixed.shape.IsNull(), "with a null shape, per the refusal contract");
+                check(mixed.combinationRefused,
+                      "flagged as a refusal of the COMBINATION, so the UI says \"try them "
+                      "one at a time\" rather than \"try a smaller size\", which no size "
+                      "would fix");
+                check(!chamferEdges(cylinder, {taken, dropped}, 2.0).ok,
+                      "and the chamfer builder is held to the same rule");
+            }
+        }
+
+        // A size the kernel refuses is NOT a combination refusal - the two
+        // sentences the UI picks between must not collapse into one.
+        {
+            const BooleanResult tooBig = filletEdges(box, {top, bottom}, 20.0);
+            check(!tooBig.ok && !tooBig.combinationRefused,
+                  "a radius the body cannot take is refused WITHOUT the combination flag, "
+                  "so it still gets the \"try a smaller size\" sentence");
+        }
+
+        // The one-edge spellings must be the list forms, not a second
+        // implementation that can drift from them.
+        const BooleanResult viaOne = filletEdge(box, top, 3.0);
+        const BooleanResult viaList = filletEdges(box, {top}, 3.0);
+        check(viaOne.ok && viaList.ok, "the one-edge and one-element-list spellings agree");
+        if (viaOne.ok && viaList.ok)
+            checkNear(volume(viaOne.shape), volume(viaList.shape), 1.0e-9,
+                      "to the same volume, because they are the same call");
     }
 
     // --- bevelAxis: every edge of a box, against an independent oracle -------

@@ -34,6 +34,31 @@ public:
     // point off its plane. A step <= 0 returns the point unchanged.
     static gp_Pnt snapToPlaneGrid(const gp_Pnt& point, const gp_Pln& plane, double step);
 
+    // Projects `candidate` onto the LINE through `prev` along `dir` - the
+    // straight continuation the user asks for by holding Shift. A line and
+    // not a ray: extending the previous segment backwards through `prev` is
+    // as much a straight continuation as extending it forwards, and refusing
+    // the backward half would make the constraint snap away at exactly the
+    // moment the cursor crossed the last point.
+    //
+    // `dir` is a gp_Dir, so it is unit length by construction and a
+    // degenerate direction is not representable here at all - it is refused
+    // one level up, by lastSegmentDirection(), which is where two coincident
+    // points can actually occur.
+    //
+    // Plane-safe without knowing about the plane: `prev` lies on the sketch
+    // plane and `dir` is derived from two points on it, so every point of the
+    // line lies on it too. The headless suite asserts that on a locked
+    // vertical plane rather than trusting the argument.
+    static gp_Pnt snapToDirection(const gp_Pnt& prev, const gp_Dir& dir,
+                                  const gp_Pnt& candidate);
+
+    // The direction of the last placed segment, for snapToDirection() above.
+    // False with fewer than two points - Shift does nothing until there is a
+    // segment to continue - and false when the last two points coincide,
+    // which is the one way a zero-length direction can arise.
+    bool lastSegmentDirection(gp_Dir& out) const;
+
     // True when `candidate` is within `tolerance` of the first point AND the
     // sketch already has enough points to close - clicking the start point is
     // the second way to finish a sketch, besides Enter.

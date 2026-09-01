@@ -21,9 +21,15 @@
 //
 // Axes and tips, and nothing else. It used to carry a chip below them naming
 // the current view, and that chip's job - showing the name, and snapping back
-// to the angled view when clicked - moved into the app bar. The string itself
-// has one source, OcctViewWidget::viewLabelText(); this widget no longer
-// knows it exists.
+// to the angled view when clicked - moved into the app bar, whose button now
+// shows the PROJECTION instead; the angled snap lives on the View menu and
+// key 0. The direction name itself still has one source,
+// OcctViewWidget::viewDirectionName(); this widget no longer knows it exists.
+//
+// Clicking an arm does borrow an orthographic look
+// (CameraController::setTemporaryOrtho) - an axis view IS a face-on view, and
+// perspective convergence is what stops one reading as square. The user's
+// first orbit hands it back.
 #include <QPointF>
 #include <QWidget>
 

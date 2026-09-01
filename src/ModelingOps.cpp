@@ -14,10 +14,12 @@
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
+#include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepCheck_Analyzer.hxx>
+#include <BRepFilletAPI_LocalOperation.hxx>
 #include <BRepFilletAPI_MakeChamfer.hxx>
 #include <BRepFilletAPI_MakeFillet.hxx>
 #include <BRepGProp.hxx>
@@ -43,7 +45,9 @@
 #include <TopoDS_Vertex.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
+#include <Bnd_Box.hxx>
 #include <gp_Ax1.hxx>
+#include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Quaternion.hxx>
@@ -161,6 +165,245 @@ bool outwardNormalNear(const TopoDS_Face& face, const gp_Pnt& at, gp_Dir& out)
     if (face.Orientation() == TopAbs_REVERSED) normal.Reverse();
     out = normal;
     return true;
+}
+
+// The edge counterpart of faceBelongsToBody. BRepFilletAPI_MakeFillet throws
+// Standard_Failure on a foreign edge and BRepFilletAPI_MakeChamfer is
+// documented to do NOTHING at all ("nothing is done if edge E does not belong
+// to the initial shape") - two different wrong answers from one mistake, and
+// the chamfer's is the dangerous one, since a builder with no contours can
+// still hand back a perfectly valid unchanged body. Checking membership here
+// makes both refuse the same way, with a reason, before either builder is
+// asked.
+bool edgeBelongsToBody(const TopoDS_Shape& body, const TopoDS_Edge& edge)
+{
+    for (TopExp_Explorer it(body, TopAbs_EDGE); it.More(); it.Next()) {
+        if (it.Current().IsSame(edge)) return true;
+    }
+    return false;
+}
+
+bool edgeIsStraight(const TopoDS_Edge& edge)
+{
+    if (edge.IsNull()) return false;
+    return BRepAdaptor_Curve(edge).GetType() == GeomAbs_Line;
+}
+
+// The region of space between the two planes perpendicular to `edge` at its
+// own endpoints - wide enough, in the other two directions, to swallow
+// `body` whole. Everything a bevel of `edge` may legitimately remove lies
+// inside it, and everything a propagated contour reached by walking OUT
+// through one of those endpoints lies outside it. Null for an edge with no
+// single direction (a curved or zero-length one), which is what makes the
+// caller refuse rather than clip.
+TopoDS_Shape edgeExtentSlab(const TopoDS_Shape& body, const TopoDS_Edge& edge)
+{
+    if (!edgeIsStraight(edge)) return TopoDS_Shape();
+
+    TopoDS_Vertex v1, v2;
+    TopExp::Vertices(edge, v1, v2);
+    if (v1.IsNull() || v2.IsNull()) return TopoDS_Shape();
+    const gp_Pnt p1 = BRep_Tool::Pnt(v1);
+    const gp_Pnt p2 = BRep_Tool::Pnt(v2);
+    const gp_Vec along(p1, p2);
+    const double length = along.Magnitude();
+    if (length < 1.0e-7) return TopoDS_Shape();
+
+    Bnd_Box bounds;
+    BRepBndLib::Add(body, bounds);
+    if (bounds.IsVoid()) return TopoDS_Shape();
+    // The body's own diagonal, so the slab is wide enough for any body
+    // without a magic number that a large one would outgrow.
+    const double reach = std::sqrt(bounds.SquareExtent()) * 2.0 + 10.0;
+
+    const gp_Dir direction(along);
+    const gp_Ax2 frame(p1, direction);
+    const gp_Pnt corner =
+        p1.Translated(gp_Vec(frame.XDirection()) * -reach + gp_Vec(frame.YDirection()) * -reach);
+    BRepPrimAPI_MakeBox slab(gp_Ax2(corner, direction, frame.XDirection()), reach * 2.0,
+                             reach * 2.0, length);
+    slab.Build();
+    if (!slab.IsDone()) return TopoDS_Shape();
+    return slab.Shape();
+}
+
+// Did the builder's contours pull in an edge nobody asked for? See
+// filletEdges()' header for why they do.
+bool contourReachesBeyond(const BRepFilletAPI_LocalOperation& op,
+                          const std::vector<TopoDS_Edge>& requested)
+{
+    for (int contour = 1; contour <= op.NbContours(); ++contour) {
+        for (int index = 1; index <= op.NbEdges(contour); ++index) {
+            const TopoDS_Edge& inContour = op.Edge(contour, index);
+            bool asked = false;
+            for (const TopoDS_Edge& edge : requested) {
+                if (inContour.IsSame(edge)) { asked = true; break; }
+            }
+            if (!asked) return true;
+        }
+    }
+    return false;
+}
+
+// Put back everything `raw` removed outside the picked edges' own extents.
+// Refuses only where there is no honest answer at all: a picked edge with no
+// perpendicular pair (curved, degenerate) gives nothing to clip against.
+BooleanResult clipBevelToPickedEdges(const TopoDS_Shape& body, const TopoDS_Shape& raw,
+                                     const std::vector<TopoDS_Edge>& requested,
+                                     const std::string& what)
+{
+    BooleanResult out;
+
+    TopoDS_Shape restore = body;
+    for (const TopoDS_Edge& edge : requested) {
+        const TopoDS_Shape slab = edgeExtentSlab(body, edge);
+        if (slab.IsNull()) {
+            out.error = what + ": the kernel spread this onto neighbouring edges and "
+                               "a curved edge gives nothing to clip it against";
+            return out;
+        }
+        const BooleanResult trimmed = applyBoolean(BooleanKind::Cut, restore, slab);
+        if (!trimmed.ok) {
+            out.error = what + ": containing the spread failed - " + trimmed.error;
+            return out;
+        }
+        restore = trimmed.shape;
+        if (restore.IsNull() || countSolids(restore) == 0) break;
+    }
+
+    // NOTHING OUTSIDE THE PICKED EXTENTS - so nothing to put back, and the
+    // kernel's own result is the answer. This is not a failure and must never
+    // be reported as one: one picked edge that spans the body in its own
+    // direction is enough to make the slabs cover it, which a Shift-selection
+    // on a box reaches in two clicks. Every propagated edge is then inside
+    // some picked edge's extent, and the shape that comes back is exactly the
+    // one this app shipped before the clip existed. Refusing here told the
+    // user to try a smaller size when no size could ever work - the geometry
+    // decides whether the slabs cover the body, not the radius. See the
+    // header.
+    if (restore.IsNull() || countSolids(restore) == 0) {
+        out.ok = true;
+        out.shape = raw;
+        return out;
+    }
+
+    const BooleanResult rejoined = applyBoolean(BooleanKind::Fuse, raw, restore);
+    if (!rejoined.ok) {
+        out.error = what + ": containing the spread failed - " + rejoined.error;
+        return out;
+    }
+    out.ok = true;
+    out.shape = rejoined.shape;
+    return out;
+}
+
+// Every requested edge, present in some contour the builder made? See
+// filletEdges()' header: Add() takes or drops each edge on its own, so a list
+// with one dropped edge still builds - and bevels the rest, silently.
+bool everyRequestedEdgeWasTaken(const BRepFilletAPI_LocalOperation& op,
+                                const std::vector<TopoDS_Edge>& requested)
+{
+    for (const TopoDS_Edge& edge : requested) {
+        bool taken = false;
+        for (int contour = 1; contour <= op.NbContours() && !taken; ++contour) {
+            for (int index = 1; index <= op.NbEdges(contour); ++index) {
+                if (op.Edge(contour, index).IsSame(edge)) { taken = true; break; }
+            }
+        }
+        if (!taken) return false;
+    }
+    return true;
+}
+
+// One body for fillet and chamfer both: they differ only in which OCCT
+// builder does the work, and every refusal, the contour check and the
+// containment are the same rules for the two. Writing them twice is how the
+// two drift.
+template <typename Builder>
+BooleanResult bevelEdgesWith(const TopoDS_Shape& body, const std::vector<TopoDS_Edge>& edges,
+                             double size, const std::string& what)
+{
+    BooleanResult out;
+    if (body.IsNull()) {
+        out.error = what + ": body is null";
+        return out;
+    }
+    if (edges.empty()) {
+        out.error = what + ": no edge given";
+        return out;
+    }
+    if (size <= 0.0) {
+        out.error = what + ": size must be positive";
+        return out;
+    }
+    for (const TopoDS_Edge& edge : edges) {
+        if (edge.IsNull()) {
+            out.error = what + ": one of the edges is null";
+            return out;
+        }
+        if (!edgeBelongsToBody(body, edge)) {
+            out.error = what + ": an edge does not belong to the body";
+            return out;
+        }
+    }
+
+    try {
+        Builder builder(body);
+        for (const TopoDS_Edge& edge : edges) builder.Add(size, edge);
+        // ALL-OR-NOTHING, enforced here and nowhere else. NbContours() == 0
+        // alone catches only "took none of them": Add() decides per edge, so
+        // a three-edge list with one dropped leaves two contours, builds, and
+        // returns a body with two of the three bevelled - a partial result
+        // reported as a success, which is the exact shape of failure this
+        // file exists to prevent. Both cases carry combinationRefused,
+        // because the answer to them is a different edge selection and never
+        // a different size.
+        if (builder.NbContours() == 0) {
+            out.combinationRefused = true;
+            out.error = what + ": the kernel accepted none of these edges";
+            return out;
+        }
+        if (!everyRequestedEdgeWasTaken(builder, edges)) {
+            out.combinationRefused = true;
+            out.error = what + ": the kernel accepted only some of these edges, and a "
+                               "partial bevel is not an outcome this offers";
+            return out;
+        }
+        const bool spread = contourReachesBeyond(builder, edges);
+
+        builder.Build();
+        // OCCT bevels legitimately fail on hard geometry (e.g. a radius that
+        // would eat a neighbouring face) - IsDone() false is a normal
+        // outcome here, not a bug, and must carry through as ok == false.
+        if (!builder.IsDone()) {
+            out.error = what + ": the kernel could not build this size on these edges";
+            return out;
+        }
+        TopoDS_Shape result = builder.Shape();
+        if (!isShapeSane(result)) {
+            out.error = what + ": result is empty or invalid";
+            return out;
+        }
+
+        if (spread) {
+            const BooleanResult contained = clipBevelToPickedEdges(body, result, edges, what);
+            if (!contained.ok) return contained;
+            result = contained.shape;
+            if (!isShapeSane(result) || countSolids(result) != 1) {
+                out.error = what + ": containing the spread left an invalid result";
+                return out;
+            }
+        }
+
+        out.ok = true;
+        out.shape = result;
+    } catch (const Standard_Failure& e) {
+        out.ok = false;
+        out.shape = TopoDS_Shape();
+        out.error = what + ": kernel exception - " +
+                    (e.GetMessageString() ? e.GetMessageString() : "unknown");
+    }
+    return out;
 }
 
 }  // namespace
@@ -323,79 +566,28 @@ BooleanResult pullFace(const TopoDS_Shape& body, const TopoDS_Face& face, double
     return out;
 }
 
+BooleanResult filletEdges(const TopoDS_Shape& body, const std::vector<TopoDS_Edge>& edges,
+                          double radius)
+{
+    return bevelEdgesWith<BRepFilletAPI_MakeFillet>(body, edges, radius, "fillet");
+}
+
+// Symmetric chamfer, both adjacent faces - BRepFilletAPI_MakeChamfer's
+// Add(distance, edge) overload.
+BooleanResult chamferEdges(const TopoDS_Shape& body, const std::vector<TopoDS_Edge>& edges,
+                           double distance)
+{
+    return bevelEdgesWith<BRepFilletAPI_MakeChamfer>(body, edges, distance, "chamfer");
+}
+
 BooleanResult filletEdge(const TopoDS_Shape& body, const TopoDS_Edge& edge, double radius)
 {
-    BooleanResult out;
-    if (body.IsNull() || edge.IsNull()) {
-        out.error = "fillet: body or edge is null";
-        return out;
-    }
-    if (radius <= 0.0) {
-        out.error = "fillet: radius must be positive";
-        return out;
-    }
-
-    try {
-        BRepFilletAPI_MakeFillet mkFillet(body);
-        mkFillet.Add(radius, edge);
-        mkFillet.Build();
-        // OCCT fillets legitimately fail on hard geometry (e.g. a radius
-        // that would eat a neighbouring face) - IsDone() false is a normal
-        // outcome here, not a bug, and must carry through as ok == false.
-        if (!mkFillet.IsDone()) {
-            out.error = "fillet: the kernel could not build this radius on this edge";
-            return out;
-        }
-        const TopoDS_Shape result = mkFillet.Shape();
-        if (!isShapeSane(result)) {
-            out.error = "fillet: result is empty or invalid";
-            return out;
-        }
-
-        out.ok = true;
-        out.shape = result;
-    } catch (const Standard_Failure& e) {
-        out.ok = false;
-        out.error = std::string("fillet: kernel exception - ") +
-                     (e.GetMessageString() ? e.GetMessageString() : "unknown");
-    }
-    return out;
+    return filletEdges(body, std::vector<TopoDS_Edge>{edge}, radius);
 }
 
 BooleanResult chamferEdge(const TopoDS_Shape& body, const TopoDS_Edge& edge, double distance)
 {
-    BooleanResult out;
-    if (body.IsNull() || edge.IsNull()) {
-        out.error = "chamfer: body or edge is null";
-        return out;
-    }
-    if (distance <= 0.0) {
-        out.error = "chamfer: distance must be positive";
-        return out;
-    }
-
-    try {
-        BRepFilletAPI_MakeChamfer mkChamfer(body);
-        mkChamfer.Add(distance, edge);  // symmetric chamfer, both adjacent faces
-        mkChamfer.Build();
-        if (!mkChamfer.IsDone()) {
-            out.error = "chamfer: the kernel could not build this distance on this edge";
-            return out;
-        }
-        const TopoDS_Shape result = mkChamfer.Shape();
-        if (!isShapeSane(result)) {
-            out.error = "chamfer: result is empty or invalid";
-            return out;
-        }
-
-        out.ok = true;
-        out.shape = result;
-    } catch (const Standard_Failure& e) {
-        out.ok = false;
-        out.error = std::string("chamfer: kernel exception - ") +
-                     (e.GetMessageString() ? e.GetMessageString() : "unknown");
-    }
-    return out;
+    return chamferEdges(body, std::vector<TopoDS_Edge>{edge}, distance);
 }
 
 bool bevelAxis(const TopoDS_Shape& body, const TopoDS_Edge& edge, gp_Pnt& centre,

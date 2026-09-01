@@ -126,9 +126,15 @@ public:
     int bodyIdForEdge(const TopoDS_Edge& edge) const;
 
     // THE predicate behind the bevel arrow, and everything the gizmo needs to
-    // stand itself up: exactly one STRAIGHT edge selected, in edge selection
-    // mode, on one document body, with two adjacent faces that define an
-    // outward bisector - and no sketch in progress and no outline waiting.
+    // stand itself up: ONE OR MORE straight edges selected, in edge selection
+    // mode, ALL ON ONE document body, each with two adjacent faces that define
+    // an outward bisector - and no sketch in progress and no outline waiting.
+    //
+    // The widening from "exactly one" to "one or more on one body" is
+    // multi-edge bevels. A selection spanning two bodies raises no arrow: one
+    // gesture is one kernel build on one body, and there is no honest way to
+    // draw one arrow for two. `edges` comes back in selection order and
+    // `edge` is the one the arrow stands on - the last one picked.
     //
     // One function, used to show the arrow, to hide it, and to write the
     // status label, so the three can never disagree. The mode check is what
@@ -139,20 +145,26 @@ public:
     // claims from ever being installed at once.
     //
     // Outputs are left untouched when it returns false.
-    bool bevelTarget(TopoDS_Edge& edge, int& bodyId, gp_Pnt& centre, gp_Dir& outward) const;
+    bool bevelTarget(std::vector<TopoDS_Edge>& edges, TopoDS_Edge& edge, int& bodyId,
+                     gp_Pnt& centre, gp_Dir& outward) const;
     bool canBevelSelectedEdge() const;
 
-    // Rounds `edge` with radius `size` (fillet == true) or flattens it with
+    // Rounds `edges` with radius `size` (fillet == true) or flattens them with
     // distance `size` (fillet == false), through ModelingOps, replacing the
-    // body the edge belongs to. The one commit path for the bevel gizmo: it
-    // takes the undo checkpoint, resyncs the viewport, records progress and
-    // reports the outcome, so BevelArrow never touches DocumentModel.
+    // body they belong to. The one commit path for the bevel gizmo: it takes
+    // the undo checkpoint, resyncs the viewport, records progress and reports
+    // the outcome, so BevelArrow never touches DocumentModel.
+    //
+    // ONE checkpoint and ONE toast however many edges are named, because it is
+    // one gesture - and one kernel build, so the refusal is all-or-nothing
+    // (ModelingOps::filletEdges' contract). Every edge must belong to the same
+    // body; a list spanning two is refused before the kernel is asked.
     //
     // False, with a Failure toast in cause-and-fix form and the body left
     // exactly as it was, whenever the kernel refuses - which it legitimately
     // does whenever the radius or the flat would eat a neighbouring face. The
     // kernel's own error string is logged, never shown.
-    bool bevelEdgeBy(const TopoDS_Edge& edge, double size, bool fillet);
+    bool bevelEdgesBy(const std::vector<TopoDS_Edge>& edges, double size, bool fillet);
 
     // The refusal copy, one source each, so the production path and the
     // banned-word sweep read the same sentence rather than a second copy only
@@ -165,6 +177,10 @@ public:
     // accepts every gp_Trsf a gesture can build). The suite shows both once
     // through these, which is the only honest way to cover them.
     static QString bevelRefusalText(bool fillet);
+    // The refusal that is NOT about the size - a set of edges the kernel will
+    // only bevel some of. Separate copy because "try a smaller size" is false
+    // advice there: no size works. See ModelingOps' combinationRefused.
+    static QString bevelCombinationRefusalText(bool fillet);
 
     // Which of Move / Rotate / Scale a delta is, in the two forms the copy
     // needs - "Rotate" for a sentence that leads with the operation, "rotated"
@@ -186,7 +202,51 @@ public:
     // Read-only state, for assertions.
     const DocumentModel& document() const { return myDocument; }
     const SketchController& sketch() const { return mySketch; }
-    bool hasPendingFace() const { return !myPendingFace.IsNull(); }
+
+    // THE outline Extrude would consume: the one selected in the Items drawer
+    // if that selection still names a live outline, otherwise the most recent
+    // one. 0 when there is none.
+    //
+    // Since Phase 7 the "pending face" is not a member any more - it is this
+    // derived view over DocumentModel's outline items, and hasPendingFace()
+    // below is exactly `pendingOutlineId() != 0`. Every gizmo predicate,
+    // ExtrudePreview, canChangeSketchPlane() and the Enter/Escape exclusivity
+    // ruling gate on that function, and its truth table is unchanged for the
+    // flow they were all written against: close an outline and it is true,
+    // extrude and it is false.
+    //
+    // What DID change is that starting or cancelling another sketch no longer
+    // makes it false. An outline is a document item now: discarding one as a
+    // side effect of picking up the pencil again would delete something the
+    // drawer lists and the undo stack owns. Undo is how an outline goes away
+    // without becoming a body.
+    int pendingOutlineId() const;
+    TopoDS_Face pendingFace() const;
+    // The direction extrudePendingFace() would sweep the pending outline
+    // along: that outline's OWN stored plane normal, falling back to the live
+    // sketch plane when nothing is pending. Exposed so ExtrudePreview builds
+    // its preview along the direction the commit will actually use rather
+    // than re-deriving one from state that may have moved since.
+    gp_Dir pendingSweepDirection() const;
+    bool hasPendingFace() const { return pendingOutlineId() != 0; }
+    // Makes `id` the outline Extrude will consume - the Items drawer's row
+    // click, and the only route to it. A no-op for an id that is not a live
+    // outline.
+    void selectOutline(int id);
+
+    // Discards the waiting outline - one checkpoint, one Note toast carrying
+    // Undo, nothing else in the document touched. False when none is waiting.
+    //
+    // This is the outline's EXIT, and it exists because it had none. Extrude
+    // is the only other way one leaves the document, and every
+    // direct-modeling gate (the pull arrow, the bevel arrow, the transform
+    // gizmo, Lock to Face) refuses while one waits - while booleans and
+    // Delete, which are not gated, push onto the undo stack and take
+    // "Ctrl+Z to take it back" with them. Reached from Delete Selected when
+    // NO BODIES are selected; see onDeleteSelected() for why that state is
+    // the right one to give the second meaning to.
+    bool deletePendingOutline();
+
     bool isSketching() const { return mySketching; }
     OcctViewWidget* view() const { return myView; }
     class ItemsPanel* itemsPanel() const { return myItemsPanel; }
@@ -258,6 +318,12 @@ private slots:
     void onSelectionModeChanged();
     void onSelectionChanged();
     void onLockToFace();
+    // A plain double-click on a body in face or edge selection mode: switch to
+    // body selection and select that body, in one gesture. Routed through
+    // mySolidSelectAction rather than straight at the viewport, so the rail
+    // chip, the menu entry and the status label all follow - the mode is that
+    // action's checked state, and nothing else may write it.
+    void onBodyDoubleClicked(int solidId);
     // The end of a transform-gizmo drag. An identity delta is a cancel - the
     // user released where they started, or the snap rounded the whole gesture
     // away - and a cancel takes no checkpoint and says nothing. The viewport
@@ -277,11 +343,23 @@ private:
     // it. Must run after buildActions(), whose actions the bar mirrors.
     void buildAppBar(QMenuBar* menus);
     // Back to the angled view, and record it. The View menu's Axonometric
-    // entry and the app bar's view label button are both this, so neither
-    // carries its own copy of the pose.
+    // entry and its 0 shortcut are both this, so neither carries its own copy
+    // of the pose. Also drops any borrowed orthographic look - see the
+    // definition.
     void goAxonometric();
     void buildOverlay();
     void updateActions();
+
+    // Pushes both sketch constraints onto the viewport from the sketch's own
+    // points: the straight-continuation anchor (the last placed point and the
+    // direction of the segment that led into it, or nothing below two points)
+    // and the closing target (the first point, or nothing until the outline
+    // can close). One function, because the two are derived from the same
+    // list and must never describe different sketches. Called from every
+    // route that changes that list, for the same reason
+    // updateEdgeDimension() is: state only some of them refresh is state that
+    // is sometimes a lie.
+    void syncSketchConstraints();
     // Persistent right-hand readout: what mode we are in and what is possible.
     void updateStateLabel();
     // The grid-step length, through Measure, so the snap tooltip never goes
@@ -362,12 +440,53 @@ private:
     // the hint that teaches it.
     void recordViewChanged();
 
+    // The document ids of every outline right now, in list order. Taken
+    // before an undo or a redo so adoptRestoredOutline() can tell which one
+    // the move brought back.
+    std::vector<int> outlineIds() const;
+    // Makes an outline that has APPEARED since `before` the pending
+    // selection - the thing the user just took back, or put back. See its
+    // definition for why pendingOutlineId()'s "last in the list" fallback
+    // cannot answer this on its own.
+    void adoptRestoredOutline(const std::vector<int>& before);
+
+    // The Persp/Ortho toggle's one implementation. Sets the camera's BASE
+    // projection, persists it under the same guard as every other preference,
+    // and refreshes the bar's readout through updateActions().
+    //
+    // It deliberately does NOT recordViewChanged(): a projection flip is not a
+    // look in a named direction, and the hint that teaches the axis gizmo
+    // retires on that event. Letting this record it would retire the hint for
+    // something the user has not done - the precise defect CLAUDE.md's
+    // "a hint retires when its own trigger stops holding" rule exists to stop.
+    void setBaseProjection(bool orthographic);
+
+    // View -> Show notifications. Stores the preference under the same guard as
+    // every other one and calls updateActions(), which is what pushes it onto
+    // the toast host. Silences Kind::Note only - see ToastHost::show() for why
+    // a Failure is not this preference's to suppress.
+    void setShowNotifications(bool show);
+
+    // Flies the camera square onto a face: the eye moves onto the face's
+    // OUTWARD normal, the target to the face's centre, the distance out far
+    // enough to frame it, orthographic for as long as the user does not orbit.
+    // Called by lockToFace() only, and only once the lock has been ACCEPTED -
+    // a refused lock must fly nowhere, or the camera would move to a face the
+    // user is not going to be drawing on.
+    void flyOntoFace(const TopoDS_Face& face, const gp_Pln& plane);
+
     OcctViewWidget* myView = nullptr;
     DocumentModel myDocument;
     SketchController mySketch;
 
-    // Face produced by the last committed sketch, waiting to be extruded.
-    TopoDS_Face myPendingFace;
+    // Which outline item Extrude would consume, when the user has chosen one
+    // from the drawer. Not the pending face itself and not a cursor into the
+    // outline list: it is a document id, checked against the live list on
+    // every read (see pendingOutlineId()), so an undo that removes the outline
+    // it names silently falls back to the newest rather than resolving to
+    // something else. 0 means "whichever is newest", which is what the
+    // single-outline flow always wants.
+    int mySelectedOutlineId = 0;
     bool mySketching = false;
     // Derivable from the sketch plane, but named because two actions' enabled
     // state reads it and "is this plane the ground one" is a floating-point
@@ -409,6 +528,21 @@ private:
     QAction* myLockFaceAction = nullptr;
     QAction* myUnlockFaceAction = nullptr;
     QAction* myAppearanceAction = nullptr;
+    // Checkable, and the single source of the base projection's truth: the
+    // View menu entry, the O shortcut and the bar's readout button are all
+    // this one action, exactly as the unit chip is the Units entries.
+    QAction* myOrthographicAction = nullptr;
+    // Checkable, and the single source of the notification preference's truth,
+    // exactly as myOrthographicAction is for the projection.
+    QAction* myNotificationsAction = nullptr;
+    // What the stored setting said, read in the constructor before any action
+    // exists so the View entry is built already ticked correctly. Default true.
+    bool myShowNotifications = true;
+    // What the stored setting said, read in the constructor before the
+    // viewport exists and applied the moment it does. A plain bool rather
+    // than a second read, because QSettings is touched once per preference
+    // and only under myPersistProgress.
+    bool myStartOrthographic = false;
 
     AppBar* myAppBar = nullptr;
     class ViewportOverlay* myOverlay = nullptr;

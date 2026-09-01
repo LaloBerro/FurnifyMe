@@ -54,8 +54,27 @@ public:
     // changes, so the two views of the document never disagree.
     void showSelection(const std::vector<int>& ids);
 
+    // Highlights the outline row Extrude would consume. Pushed in from
+    // MainWindow::updateActions() - the single place that decides what is
+    // available - rather than derived here, exactly as the toast's Undo
+    // enabled state is: this panel has the document but not the notion of
+    // which outline is pending, and giving it one would be a second answer to
+    // a question MainWindow already answers.
+    //
+    // It wears the SAME accent inset a selected body row wears. Two outlines
+    // in the drawer and no mark on either is a choice the user cannot see -
+    // and clicking a row is how that choice is made, so the row is exactly
+    // where the feedback belongs.
+    void showPendingOutline(int id);
+
 signals:
     void solidActivated(int id);
+    // An outline row was clicked. A separate signal rather than one id
+    // channel with a kind flag: the two do genuinely different things -
+    // a body row changes the viewport selection, an outline row changes which
+    // outline Extrude will consume - and a receiver that had to branch on a
+    // flag could get the branch wrong in a way the compiler could not see.
+    void outlineActivated(int id);
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -94,6 +113,12 @@ private:
         class QLabel* size = nullptr;
         class QPushButton* eye = nullptr;
         int id = 0;
+        // Outline rows come first and are not part of the viewport selection -
+        // showSelection() must not highlight one, and the eye toggles a
+        // different channel. Carried on the row rather than derived by asking
+        // the document again, so a row can never be styled as one kind and
+        // toggled as the other.
+        bool isOutline = false;
         QString text;      // what rowTextAt() reports
     };
 
@@ -102,9 +127,20 @@ private:
     class QLabel* myTitle = nullptr;
     QVBoxLayout* myOuter = nullptr;
     QVBoxLayout* myRows = nullptr;
-    std::vector<Row> myRowList;   // parallel to the document's solids
+    // The document's outlines first, then its bodies - the order the rows are
+    // built in, which is what rowTextAt(index) reports against.
+    std::vector<Row> myRowList;
     // What the rows currently say, so refresh() can tell a call that would
     // rebuild them identically from one that would not. See refresh().
     QString myRowSignature;
     bool myRowsBuilt = false;
+
+    // The two things a row can be marked for, remembered so either can be
+    // restyled without the caller having to re-supply the other. Both are
+    // pushed in - the viewport's selection through showSelection(), the
+    // pending outline through showPendingOutline() - and restyleRows() is the
+    // one place either turns into a stylesheet.
+    std::vector<int> mySelectedIds;
+    int myPendingOutlineId = 0;
+    void restyleRows();
 };

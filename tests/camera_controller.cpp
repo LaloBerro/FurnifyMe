@@ -221,6 +221,161 @@ int main()
                   "deltas beyond a full turn reduce correctly");
     }
 
+    // --- projection: base, temporary, and what resolves ------------------------
+    // Two pieces of state, and the whole feature is which gestures move which.
+    {
+        CameraController cam;
+        check(cam.baseProjection() == CameraController::Projection::Perspective,
+              "the camera starts in perspective");
+        check(!cam.temporaryOrtho(), "with nothing borrowed");
+        check(!cam.effectiveOrtho(), "so nothing is drawn orthographically");
+
+        cam.setBaseProjection(CameraController::Projection::Orthographic);
+        check(cam.baseProjection() == CameraController::Projection::Orthographic,
+              "the base projection round-trips");
+        check(cam.effectiveOrtho(), "and orthographic base resolves orthographic");
+
+        cam.setBaseProjection(CameraController::Projection::Perspective);
+        cam.setTemporaryOrtho(true);
+        check(cam.baseProjection() == CameraController::Projection::Perspective,
+              "a borrowed orthographic look leaves the base mode alone");
+        check(cam.effectiveOrtho(), "but it is what gets drawn");
+    }
+
+    // --- an orbit hands the loan back, and nothing else does ------------------
+    {
+        CameraController cam;
+        cam.setTemporaryOrtho(true);
+        cam.pan(50.0, -20.0);
+        check(cam.effectiveOrtho(),
+              "panning across a face-on view keeps it - that is drafting, not orbiting");
+        cam.zoom(0.5);
+        check(cam.effectiveOrtho(), "and so does zooming in");
+        cam.zoomToward(gp_Pnt(30.0, 10.0, 0.0), 1.4);
+        check(cam.effectiveOrtho(), "and zooming toward a point");
+        cam.setPivot(gp_Pnt(10.0, 10.0, 0.0));
+        check(cam.effectiveOrtho(), "and re-pivoting");
+
+        Bnd_Box box;
+        box.Update(-100.0, -100.0, 0.0, 100.0, 100.0, 50.0);
+        cam.frame(box, 45.0);
+        check(cam.effectiveOrtho(), "and framing a box");
+
+        CameraState pose = cam.state();
+        pose.azimuthDeg = 12.0;
+        cam.setState(pose);
+        check(cam.effectiveOrtho(),
+              "and setState - which is how every snap flight lands, so clearing "
+              "there would mean no flight was ever orthographic at all");
+
+        cam.orbit(0.0, 0.0);
+        check(cam.effectiveOrtho(), "a move event that turns nothing keeps it too");
+
+        cam.orbit(3.0, 0.0);
+        check(!cam.effectiveOrtho(), "the first orbit that turns the camera hands it back");
+        check(cam.baseProjection() == CameraController::Projection::Perspective,
+              "leaving the base mode as it was");
+    }
+
+    // --- an orbit at the elevation clamp turns nothing, and keeps the loan -----
+    {
+        CameraController cam;
+        CameraState pose;
+        pose.elevationDeg = CameraController::kMaxElevation;
+        cam.setState(pose);
+        cam.setTemporaryOrtho(true);
+        cam.orbit(0.0, 10.0);
+        check(cam.effectiveOrtho(),
+              "a drag that only pushes further into the clamp changes no angle, "
+              "so it borrows nothing back");
+        cam.orbit(0.0, -10.0);
+        check(!cam.effectiveOrtho(), "the drag back out does");
+    }
+
+    // --- a chosen orthographic mode survives everything -----------------------
+    {
+        CameraController cam;
+        cam.setBaseProjection(CameraController::Projection::Orthographic);
+        cam.setTemporaryOrtho(true);
+        cam.orbit(20.0, 10.0);
+        check(cam.effectiveOrtho(),
+              "orbiting clears the loan but never the mode the user chose");
+    }
+
+    // --- setBaseProjection is state; dropping the loan is the toggle's job ----
+    // The split is deliberate and worth pinning. CameraController's setter
+    // moves ONE field, so a caller restoring a stored preference does not have
+    // to think about a loan that cannot exist yet. The user-facing toggle -
+    // OcctViewWidget::setBaseProjection, which gui_smoke covers - drops the
+    // loan as well, because a control whose whole subject is the projection
+    // must never be outvoted by one. Both halves are tested; only their
+    // composition is the shell's.
+    {
+        CameraController cam;
+        cam.setTemporaryOrtho(true);
+        cam.setBaseProjection(CameraController::Projection::Perspective);
+        check(cam.temporaryOrtho(),
+              "the bare setter leaves the loan alone - it is one field, not a policy");
+        cam.setTemporaryOrtho(false);
+        check(!cam.effectiveOrtho(),
+              "and with the loan handed back, perspective is what resolves");
+    }
+
+    // --- lookFrom aims the eye down a given direction -------------------------
+    // The whole of the face-lock flight: hand it a face's OUTWARD normal and
+    // the camera looks straight back along it.
+    {
+        CameraController cam;
+        cam.lookFrom(gp_Dir(1.0, 0.0, 0.0));
+        checkNear(cam.state().azimuthDeg, -90.0, 1e-9, "an eye on +X is azimuth -90");
+        checkNear(cam.state().elevationDeg, 0.0, 1e-9, "at elevation 0");
+        checkNear(cam.viewDirection().Dot(gp_Dir(1.0, 0.0, 0.0)), -1.0, 1e-9,
+                  "and the view direction is antiparallel to it");
+
+        cam.lookFrom(gp_Dir(0.0, 1.0, 0.0));
+        checkNear(cam.state().azimuthDeg, 0.0, 1e-9, "an eye on +Y is azimuth 0");
+        checkNear(cam.viewDirection().Dot(gp_Dir(0.0, 1.0, 0.0)), -1.0, 1e-9,
+                  "antiparallel again");
+
+        // A slanted face - nothing special about the axes.
+        const gp_Dir slanted(1.0, -2.0, 0.5);
+        cam.lookFrom(slanted);
+        checkNear(cam.viewDirection().Dot(slanted), -1.0, 1e-9,
+                  "an off-axis normal is met just as squarely");
+
+        // The distance and the target are the caller's business; lookFrom must
+        // not touch either.
+        CameraState pose;
+        pose.distance = 421.0;
+        pose.target = gp_Pnt(30.0, -40.0, 12.0);
+        cam.setState(pose);
+        cam.lookFrom(gp_Dir(0.0, -1.0, 0.0));
+        checkNear(cam.state().distance, 421.0, 1e-9, "lookFrom leaves the distance alone");
+        checkNear(cam.state().target.Distance(gp_Pnt(30.0, -40.0, 12.0)), 0.0, 1e-9,
+                  "and the target");
+    }
+
+    // --- lookFrom at the poles: clamped, and azimuth kept ---------------------
+    {
+        CameraController cam;
+        CameraState pose;
+        pose.azimuthDeg = 33.0;
+        cam.setState(pose);
+        cam.lookFrom(gp_Dir(0.0, 0.0, 1.0));
+        checkNear(cam.state().elevationDeg, CameraController::kMaxElevation, 1e-9,
+                  "a horizontal face is met at the elevation clamp, not at 90");
+        checkNear(cam.state().azimuthDeg, 33.0, 1e-9,
+                  "and a vertical direction leaves azimuth undefined, so it is kept");
+        // Two degrees off dead-on is the documented price of the no-roll
+        // invariant. Pinned so a change to the clamp cannot quietly widen it.
+        check(cam.viewDirection().Dot(gp_Dir(0.0, 0.0, 1.0)) < -0.999,
+              "which is still within a thousandth of antiparallel");
+
+        cam.lookFrom(gp_Dir(0.0, 0.0, -1.0));
+        checkNear(cam.state().elevationDeg, CameraController::kMinElevation, 1e-9,
+                  "and the floor clamps the same way");
+    }
+
     // --- the face-pull drag mapping -------------------------------------------
     // The whole of PullArrow's drag maths: where along the face's outward
     // normal is the cursor pointing? Qt-free and here rather than in the

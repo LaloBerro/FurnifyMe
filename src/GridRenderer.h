@@ -12,11 +12,13 @@
 // moves.
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_InteractiveObject.hxx>
+#include <Graphic3d_ZLayerId.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
 
 class GridRenderer {
 public:
+    // Also creates the Z-layer the grid is drawn in - see zLayer().
     void attach(const Handle(AIS_InteractiveContext)& context);
     // `plane` is the work plane the grid lies on - the ground plane by
     // default, a locked face's own plane while one is locked.
@@ -37,6 +39,41 @@ public:
     // update() does the work exactly once.
     void invalidate();
 
+    // The Z-layer the grid is displayed in: a layer of this class's own,
+    // inserted immediately AFTER Graphic3d_ZLayerId_Default, with depth
+    // testing ON and depth WRITING OFF. OcctViewWidget then puts every piece
+    // of sketch work - the outline, the markers, the pending face, the
+    // dimension - in a third layer after this one. The three-layer order is
+    // Default (bodies) -> grid -> sketch work.
+    //
+    // Why not the obvious underlay before Default. Three things have to hold
+    // at once and only this arrangement gets all three:
+    //
+    //  1. Sketch work draws over the grid, unconditionally. An outline is
+    //     EXACTLY coplanar with the grid it is drawn on, which is a
+    //     depth-buffer tie - and gridPlane()'s nudge toward the eye tips that
+    //     tie the grid's way, so depth alone always loses this. Draw order is
+    //     the only thing that can settle it: the sketch layer is rendered
+    //     after this one and this one writes no depth, so nothing the grid
+    //     draws can reject a sketch pixel.
+    //  2. A body in front of a sketch line still occludes it. So the sketch
+    //     layer keeps depth testing and does not clear depth - which is
+    //     exactly what Graphic3d_ZLayerId_Topmost would have done, and why it
+    //     is not used. Grid-under, not sketch-over-everything.
+    //  3. The grid on a LOCKED FACE still draws over that face. This is the
+    //     one an underlay cannot do: an underlay is rendered before the
+    //     bodies, so the face would simply paint over it and the locked-face
+    //     grid would vanish. Rendered after the bodies with depth testing on,
+    //     the nudge does its original job - the grid is a hair nearer than the
+    //     face, so it passes - while a body genuinely in front of the ground
+    //     grid still rejects it. Both mechanisms stay: the layer settles draw
+    //     ORDER, the nudge settles the DEPTH tie.
+    //
+    // Graphic3d_ZLayerId_UNKNOWN before attach(), or if the viewer refuses to
+    // make the layer - in which case the grid stays in the default layer and
+    // behaves exactly as it did before this existed.
+    Graphic3d_ZLayerId zLayer() const { return myLayer; }
+
     static double minorStepFor(double cameraDistance);
 
     // First line position at or below -limit on the absolute grid of `step`.
@@ -45,6 +82,7 @@ public:
 private:
     Handle(AIS_InteractiveContext) myContext;
     Handle(AIS_InteractiveObject) myGrid;
+    Graphic3d_ZLayerId myLayer = Graphic3d_ZLayerId_UNKNOWN;
     double myBuiltStep = 0.0;
     gp_Pnt myBuiltCenter{0.0, 0.0, 0.0};
     double myBuiltExtent = 0.0;

@@ -144,6 +144,14 @@ cmake --build --preset windows
 .\build\RelWithDebInfo\gui_smoke.exe <output-dir-for-snapshots>
 ```
 
+**The no-input law runs both ways.** `gui_smoke` installs an application-wide filter that
+drops every *spontaneous* mouse, wheel and key event, so the machine's own user cannot drive
+the app under test either. That is not belt-and-braces: Windows' "scroll inactive windows on
+hover" delivers real wheel events to whatever the resting cursor happens to sit over, with
+no focus and no click, and a single one of them moved the camera between `show()` and the
+`startup distance is 700mm` check — the 1.75× flake that cascaded to 43 failures, and
+scale-dependent because the window covers more screen at 1.75×.
+
 A window still appears - OCCT's `V3d_View` needs a real native window and a GL surface, so
 `-platform offscreen` cannot work - but it is shown with `WA_ShowWithoutActivating` and
 never takes focus. `gui_smoke` is deliberately **not** registered with ctest: it needs a GPU
@@ -244,8 +252,16 @@ a user who reads "Body 03 rounded" has no word to look for in the interface.
 `ModelingOps::BooleanKind::Fuse` and `::Cut` keep their kernel-facing names — the
 user never sees them, and renaming them would churn the geometry library and its
 tests for no visible gain. The enforced bans match the bare word (case-insensitive):
-`OCCT`, `Fuse`, `Solid`, `mm3`, `(s)`, `Merge`, and `Join` are forbidden everywhere
-in action text and widget tooltips, regardless of capitalization.
+`OCCT`, `Fuse`, `Solid`, `mm3`, `(s)`, `Merge`, `Join` and `bevel` are forbidden
+everywhere in action text and widget tooltips, regardless of capitalization.
+
+**`round` and `flatten` are banned too, but matched at a word boundary.** They are the
+Never column for Fillet and Chamfer and they shipped for a whole branch inside two Failure
+sentences ("will only round some of them") because the sweep could not see them — while
+substring matching would red-flag "background", "ground" and "surround", which this app is
+entitled to say. `gui_smoke`'s `usesBannedWord()` is the one matcher every sweep goes
+through, and its boundary rule is pinned in both directions: a rule living at one call site
+is not a rule.
 
 Numbers are formatted by `Measure` (`src/Measure.h`), never by hand at a call
 site: lengths as `340 mm` / `1,200 mm` / `18.5 mm`, sizes as `340 × 220 × 18 mm`.
@@ -517,6 +533,68 @@ Enter/Escape claim can therefore exist at a time. Gizmo previews go through the
   toward the notch — correct CAD behaviour with an inverted-looking gesture, documented
   rather than special-cased. Curved edges raise no arrow.
 
+**A bevel is clipped to the edges you picked.** `BRepFilletAPI`'s `Add()` is *documented*
+to build a **contour by propagation**: "edges of the shape which are tangential to one
+another and which delimit two series of tangential faces". A fillet strip made by an
+earlier operation is exactly such a series, so rounding an edge that *ends on one* pulls
+the strip's far neighbour into the same contour and bevels an edge nobody picked —
+measured on a 100×80×10 box, one `Add` produced a contour of **three** edges and removed
+13.8% more than the single-edge formula. Nothing in OCCT turns it off: `SetContinuity` at
+every continuity and tolerance, `ChFi3d_FilletShape`, and `ShapeUpgrade_UnifySameDomain`
+first were each measured and none changed the contour; `ChFiDS_Spine` has no way to remove
+an edge and `BRepFilletAPI_MakeFillet` keeps its builder private. So `filletEdges` detects
+the spread (walk `NbContours`/`NbEdges`/`Edge` and compare against what was asked for) and
+**clips** it: restore the material outside the picked edges' own extents, each extent being
+the slab between the two planes perpendicular to that edge at its endpoints. Propagation
+*enters and leaves through those endpoints*, which is why that is containment and not an
+approximation — the volume removed comes back to the single-edge formula to six figures.
+The clip runs **only when a spread is detected**, so the ordinary case takes the plain
+kernel path.
+
+Two limits, both on the header where callers read them, both found by review rather than by
+the suite. **When the picked extents already cover the body there is nothing to put back**,
+and the raw kernel result stands rather than being refused — one picked edge spanning the
+body in its own direction is enough, which a Shift-selection on a box reaches in two clicks,
+and refusing there told the user to "try a smaller size" when *no* size could work, because
+the geometry and not the radius decides whether the slabs cover the body. And the residual
+at a non-right-angled corner is **thin but not short**: on a skew prism at 80°, r=4, it is
+~6% of the operation's volume running the **full length** of the unpicked edge, so a 700 mm
+post gets a 700 mm sliver. Cutting it would cut the picked edge's own bevel short exactly
+where it should meet its neighbour. What the clip *does* remove is the case users report —
+a neighbouring edge rounded at the full radius along its whole length — and `gui_smoke`
+pins the difference by counting only strips longer than four radii.
+
+**Multi-edge bevels are one gesture, one build, one checkpoint, one toast.** Shift-click
+accumulates edges (`AIS_SelectionScheme_XOR`, the additive body pick's own path);
+`filletEdges`/`chamferEdges` take a `std::vector<TopoDS_Edge>` and the one-edge spellings
+delegate to them, so there is one implementation of every refusal. The refusal is
+**all-or-nothing** — one foreign, null or unbuildable edge refuses the whole call, because
+a partial bevel leaves the user working out which edges took. That is *enforced*, and
+`NbContours() > 0` is not the enforcement: `Add()` takes or drops each edge on its own (a
+cylinder's seam edge is an ordinary straight edge that yields no contour), so a three-edge
+list with one dropped leaves two contours and would build a body with two of the three
+bevelled. Every requested edge must appear in some contour before the build runs. Contours
+are **not** one per edge — two edges of one tangent chain share one, two far apart get one
+each — so counting them cannot answer it. A refusal of the *combination* rather than the
+size carries `BooleanResult::combinationRefused`, and the UI has a second sentence for it:
+"try them one at a time", because "try a smaller size" is false advice there — no size
+works, and the user shrinks the number until they give up. The arrow stands on the edge
+picked **last**, which `OcctViewWidget` has to *remember* (`myLastPickedEdge`, validated
+against the live selection on every read): OCCT's `InitSelected` order is the context's,
+not the user's. The chip names the count only when there is one — `Fillet — 3 edges`, with
+the value still `R 20 mm`, because a radius does not multiply — and the state label and the
+toast do the same, with the plural written out. The visibility predicate widened from
+"exactly one straight edge" to "one or more straight edges, **all on one body**": a
+selection spanning two bodies raises no arrow, since one gesture is one build on one shape.
+It still requires edge mode, so it stays disjoint from the face pull, the transform gizmo
+and `ExtrudePreview`, and the app-wide Enter/Escape claims still cannot collide.
+
+**A screen-space arrow hit test swallows a press before the picker sees it.** `arrowHit()`
+is a 14 px Qt-side test, not an AIS owner, so it does not *compete* for a pick — it takes
+the press outright. The bevel arrow stands on the last edge picked and the next edge is
+usually right beside it, so the press handler excludes Shift from the arrow branch. Same
+hazard the transform gizmo's `Deactivate` closes, one layer up and by a different mechanism.
+
 **`Theme` is spec-backed** since the Appearance panel: every colour accessor and the four
 derived fonts (badge = base−2, label = base−1, body = base, title = base+3 pt) read
 `Theme::Spec`; `defaultSpec()` is Graphite byte-for-byte and all 21 defaults are pinned to
@@ -637,10 +715,15 @@ The shell's composition, settled in Phase 5 against HTML mockups the user chose 
 - **The app bar** replaces the menu strip via `QMainWindow::setMenuWidget`. It holds the
   wordmark, the window's **real `QMenuBar`** (reparented in - menus, shortcuts, the
   generated sheet and the vocabulary sweep all keep working untouched), and the view
-  controls: the view label button (text from `OcctViewWidget::viewLabelText()`, the one
-  source; clicking goes through `MainWindow::goAxonometric()`, the one route), the unit
-  chip (triggers the *other* unit's existing action - it holds no state), Wireframe and
-  Fit All. `Save Screenshot` is menu-only.
+  controls: the **Persp/Ortho toggle** (Phase 7 - it triggers the checkable
+  `Orthographic` action and holds no state, exactly as the unit chip does; it does **not**
+  snap to Axonometric, which belongs to the gizmo, keys 0-3 and the View menu, and it
+  records no `view.changed`, because a projection flip is not a look in a named direction
+  and would otherwise retire the hint teaching the gizmo), the unit chip (triggers the
+  *other* unit's existing action - it holds no state), Wireframe and Fit All.
+  `Save Screenshot` is menu-only. `OcctViewWidget::viewDirectionName()` (once
+  `viewLabelText()`) still answers "which world axis is the camera square onto", and is
+  what the suite asserts snap flights against, but nothing paints it any more.
 - **The rail** is one `ToolCluster` in `ChipMode::IconOnly` at `Anchor::LeftEdge` -
   every tool as an icon button, labels and shortcuts in tooltips that auto-update from
   the actions. `MainWindow::buildOverlay()` sets the viewport's own minimum height from
@@ -736,7 +819,50 @@ Required `QWidget` setup — omitting any of these gives flicker or a black view
 `setAutoFillBackground(false)`, `setMouseTracking(true)` (needed for hover highlight), and
 `paintEngine()` overridden to return `nullptr`.
 
-Event wiring: `paintEvent`→`Redraw()`, `resizeEvent`→`MustBeResized()`, RMB drag→turntable orbit around the current view target (Unity-style, the user's explicit preference — no cursor-anchored pivoting), MMB drag→pan, wheel→zoomToward cursor; camera state lives in CameraController and is pushed via SetEye/SetCenter/SetUp; the projection is perspective (FOVy 45°).
+Event wiring: `paintEvent`→`Redraw()`, `resizeEvent`→`MustBeResized()`, RMB drag→turntable orbit around the current view target (Unity-style, the user's explicit preference — no cursor-anchored pivoting), MMB drag→pan, wheel→zoomToward cursor; camera state lives in CameraController and is pushed via SetEye/SetCenter/SetUp. FOVy is fixed at 45° for the life of the view; **which projection is drawn with it moves** — see below.
+
+#### Projection: a base mode and a loan
+
+`CameraController` holds **two** pieces of projection state. The **base** is what the user
+chose with the bar's toggle and is persisted; **temporary ortho** is a loan taken by a
+gesture that puts the camera square onto something (a gizmo arm, a locked face), because a
+face-on view with perspective convergence is not a face-on view. `effectiveOrtho()` —
+`temporary || base == Orthographic` — is what the renderer follows, written to the OCCT
+camera in the single site `applyCameraState()`.
+
+**Who hands the loan back:** `orbit()` does, but only when it actually *turned* the camera
+(measured before-against-after, so a drag pushing further into the elevation clamp, or a
+zero-delta move event, spends nothing). **The toggle does too** — a control whose entire
+subject is the projection must never be outvoted by a loan the user never asked for; keeping
+it made the button visibly do nothing twice in a row after a face lock. Pan, zoom,
+`setPivot`, `frame` and every `setState` route deliberately do **not**: panning across a
+face-on drawing is ordinary drafting, and snap flights land *through* `setState`, so
+clearing there would mean no flight was ever orthographic at all. Note the split — the bare
+`CameraController::setBaseProjection` moves one field; `OcctViewWidget::setBaseProjection`
+is the user-facing route that also drops the loan.
+
+**The `SetScale` order trap:** `SetScale()` on a camera still marked perspective moves the
+*distance* instead, so `applyCameraState()` sets `SetProjectionType` **first**, then the
+scale. And the orthographic half needs its scale set explicitly at all, because
+`Graphic3d_Camera` keeps `Scale` and `Distance` linked only for a perspective camera —
+switch the type alone and the parallel scale sits at its 1000 default and the scene jumps
+size.
+
+**The `worldPerPixel()` invariant:** one formula serves both projections, and that is
+*by construction*, not luck — `applyCameraState()` sets the parallel scale to exactly
+`2·distance·tan(FOVy/2)`, the perspective visible height at target depth. Every
+screen-sized thing in the scene rides on it: `DimensionRenderer`'s furniture and both drag
+arrows' pixels→millimetres mapping. If it is ever broken, this is the single place to
+branch. `OcctViewWidget::cameraViewHeightAtTarget()` exposes the live
+`Graphic3d_Camera::ViewDimensions()` so the suite can check what OCCT was *actually told*
+— comparing `worldPerPixel()` across a flip proves nothing, since it never reads the OCCT
+camera.
+
+One more ortho consequence: a parallel projection has **no horizon**, so
+`pointOnSketchPlane`/`pickWorldPoint` skip their behind-the-eye guard in ortho — every ray
+is the view direction, "behind" is only measured from wherever auto z-fit left the near
+plane, and the perspective rule would refuse perfectly visible clicks. `Convert` and
+`ConvertWithProj` themselves are projection-agnostic.
 
 ### Selection
 
@@ -759,6 +885,60 @@ Iterate with `InitSelected()`/`MoreSelected()`/`NextSelected()`, pull topology v
   model accumulates junk edges that make later selection miserable.
 - **STEP export:** `STEPControl_Writer` with
   `Interface_Static::SetCVal("write.step.schema", "AP214IS")`.
+
+### Outlines, layers and gestures (Phase 7)
+
+**A closed outline is a document item** — `Outline NN` in the drawer, one checkpoint on
+close, converted to a Body by extrude in **one** checkpoint so a single undo restores the
+outline and removes the body. `hasPendingFace()` is a **derived view** over the pending
+outline — its truth table at every gizmo predicate, `ExtrudePreview` and the plane-change
+guard is unchanged, and every outline carries **its own plane**, captured at close, so an
+extrude can never sweep along a plane the user changed afterwards (the Milestone-2 bug
+class, retired by construction). Outlines are not pickable viewport geometry; the drawer
+row is their handle, and the pending one wears the accent inset bar. Start Sketch no
+longer discards a waiting outline.
+
+**An outline has two exits, and Delete is the second one.** Extrude was the only one, and
+that was a trap: every direct-modeling gate (pull arrow, bevel arrow, transform gizmo,
+Lock to Face) refuses while an outline waits, while the operations that are *not* gated —
+booleans, Delete — push onto the undo stack. So "Ctrl+Z to take it back", which both
+refusals advised, stopped being the outline's undo the moment the user did anything else:
+close an outline, Union two bodies, and every gate is shut with no way to open one.
+`Delete Selected` therefore extends to the pending outline **when no body is selected** —
+the one state in which it had no work of its own, so the second meaning displaces nothing.
+One checkpoint, a `Deleted Outline 01` Note with Undo, and `updateActions()` — the single
+place that decides availability — owns both the enablement and the tooltip that says which
+of the two meanings is live. Refusal copy says **E-or-Delete**; never Ctrl+K, never Ctrl+Z.
+
+**`fitAll()` frames outlines too.** It walked `mySolids` alone, so an outline-only document
+fell to the ±250 fallback box and an outline drawn outside it was unreachable by the one
+control whose job is finding things. Both maps are what the widget displays.
+
+**The scene is three Z-layers**: Default (bodies) → grid (depth test on, depth **write**
+off) → sketch work (outline, markers, dimension, pending face, modeling preview). The
+grid hides behind bodies but never draws over sketch work; sketch lines still hide behind
+bodies because the sketch layer depth-tests against what Default wrote. The locked-face
+octave nudge stays — the layer settles draw order, the nudge settles the depth tie.
+Insert the grid layer **after** Default: inserted before, the locked-face grid vanishes
+under the face it decorates (measured: 0 of 5616 grid pixels).
+
+**Gestures, face and edge modes**: plain double-click selects the whole body and switches
+to body mode; **Ctrl+double-click on a face** locks the sketch plane (the old plain
+double-click route); `L`/`Shift+L`/menu unchanged. The Ctrl exemption from the
+pull-arrow's double-click guard applies **only** in the face-lock branch — widened, it
+lets Ctrl+double-click in edge mode yank the mode out from under a live bevel arrow.
+
+**Notes can be silenced, Failures cannot.** `View → Show notifications` drops
+`Toast::Kind::Note` only; a refusal that reports nowhere would violate the
+never-silent-failure law, so `Failure` bypasses the toggle unconditionally. Every Note is
+a success report carrying Undo; every refusal is a Failure — the taxonomy is load-bearing.
+
+**Sketching**: Shift snaps the cursor onto the previous segment's direction (parameter
+then grid-snapped along the line); the close-hit on the first point is tested on the RAW
+plane hit and outranks the straight constraint, with the radius in one place
+(`OcctViewWidget::sketchCloseTolerance()`). Ctrl+Z mid-sketch removes the last point
+through Backspace's one implementation; the toast's Undo pill deliberately keeps the
+document-only predicate.
 
 ## Pitfalls (read before debugging)
 
@@ -793,6 +973,20 @@ Iterate with `InitSelected()`/`MoreSelected()`/`NextSelected()`, pull topology v
   before `<windows.h>` where possible.
 - **Tessellate before display or STL export:** `BRepMesh_IncrementalMesh(shape, 0.1)`.
   Without it, curved faces render faceted or not at all.
+- **`AIS_Manipulator` is constructed with zoom persistence ON in OCCT 8.0** — undocumented
+  beside `AdjustSize`'s documented default. Its drawn size never follows the camera, so any
+  camera-derived sizing writes numbers that never reach a pixel, and a probe that reads
+  `Size()` back is a self-oracle that stays green. `SetZoomPersistence(false)` before
+  `Attach`, and measure gizmo pixels in a `Dump`, never the setter's own data.
+- **`near` and `far` are Windows SDK macros defined to nothing.** A parameter named `near`
+  silently becomes unnamed, `near + QPoint(...)` becomes unary plus, and the code compiles
+  clean while reading the wrong corner. Do not name anything `near` or `far`.
+- **`V3d_View::Dump` returns false when the output directory does not exist** and the
+  failure surfaces many checks later as unrelated-looking colour-probe failures. Create the
+  snapshot directory before running `gui_smoke`.
+- **`projectToScreen` answers in whole logical pixels** and is ~2 dump pixels out at 175%
+  scale — a pixel probe must FIND the mark it questions (scan a neighbourhood) rather than
+  sampling one projected point.
 - **Booleans fail on near-tangent geometry** — OCCT's known weak spot vs. Parasolid. Always
   check `IsDone()`; tune `SetFuzzyValue` when it fails. **Never surface a failed boolean as a
   success**, and do not silently continue past one.

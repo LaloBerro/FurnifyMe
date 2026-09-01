@@ -12,6 +12,7 @@
 // separate renderers.
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_InteractiveObject.hxx>
+#include <Graphic3d_ZLayerId.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
 
@@ -21,6 +22,15 @@
 class DimensionRenderer {
 public:
     void attach(const Handle(AIS_InteractiveContext)& context);
+
+    // The Z-layer the lines and the label are displayed in. An annotation is
+    // sketch work, so it belongs in the same layer as the outline and the
+    // markers - above the work-plane grid, still depth-tested against the
+    // bodies. Set once by OcctViewWidget after it has made that layer; left
+    // at Graphic3d_ZLayerId_UNKNOWN this class displays into the default
+    // layer, exactly as it did before layers existed here.
+    void setZLayer(Graphic3d_ZLayerId layer) { myLayer = layer; }
+    Graphic3d_ZLayerId zLayer() const { return myLayer; }
 
     // Draws the dimension for the segment from `from` to `to`, replacing
     // whatever was drawn before. `normal` orients the extension lines out of
@@ -54,6 +64,7 @@ public:
 private:
     Handle(AIS_InteractiveContext) myContext;
     std::vector<Handle(AIS_InteractiveObject)> myObjects;
+    Graphic3d_ZLayerId myLayer = Graphic3d_ZLayerId_UNKNOWN;
     std::string myLabelText;
 
     // The last span shown, kept only so refresh() can rebuild it. Meaningful

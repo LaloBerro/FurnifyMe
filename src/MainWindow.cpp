@@ -23,6 +23,8 @@
 
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepBndLib.hxx>
+#include <Bnd_Box.hxx>
 #include <ElSLib.hxx>
 #include <GeomAbs_CurveType.hxx>
 #include <GeomAbs_SurfaceType.hxx>
@@ -68,6 +70,21 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
             QStringLiteral("cm"))
             Measure::setDisplayUnit(Measure::Unit::Centimetres);
 
+        // The base projection, on the same terms as the unit above: a
+        // preference, read once, under the same guard, so the suite can never
+        // see the developer's own choice. It cannot be applied here - the
+        // viewport does not exist yet - so it is held until it does.
+        myStartOrthographic = settings.value(QStringLiteral("projection")).toString() ==
+                              QStringLiteral("ortho");
+
+        // Whether the app announces the things that went right. Same guard,
+        // same "read once before buildActions()" reason as the two above: the
+        // View menu entry is built with its checked state already correct
+        // rather than corrected afterwards. Defaults to ON - an app that
+        // started silent would look broken to a first-time user.
+        myShowNotifications =
+            settings.value(QStringLiteral("showNotifications"), true).toBool();
+
         // Before a single widget exists, for the same reason as the unit
         // above: every card measures itself with the type scale in its own
         // constructor, so installing the spec afterwards would leave the
@@ -82,7 +99,22 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
             Theme::setSpec(stored);
     }
 
+    // The title bar's and the taskbar's mark, painted rather than loaded - see
+    // IconSet::appIcon(). Set on the WINDOW rather than only on the
+    // application, so a window built by the suite (which never runs main.cpp)
+    // carries it too; QWidget::windowIcon() would otherwise fall back to an
+    // application icon nothing had set.
+    setWindowIcon(IconSet::appIcon());
+
     myView = new OcctViewWidget(this);
+    // Straight onto the camera rather than through setBaseProjection(): that
+    // one persists and calls updateActions(), and neither the settings store
+    // nor half the shell is ready to be asked anything yet. The viewport has
+    // not initialized its OCCT view either - it does that lazily on its first
+    // paint - and applyCameraState() reads this state then, so the very first
+    // frame is already drawn in the mode the user left.
+    if (myStartOrthographic)
+        myView->camera().setBaseProjection(CameraController::Projection::Orthographic);
     // Full bleed: the central widget is the viewport and nothing else. The
     // items panel used to take a splitter pane out of the window's width;
     // it is a floating drawer over the viewport now (see buildOverlay()),
@@ -102,6 +134,12 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     // lockToFace() - including its refusal - rather than one of them growing
     // its own copy of the rule.
     connect(myView, &OcctViewWidget::faceDoubleClicked, this, &MainWindow::lockToFace);
+    // The other double-click route: a plain one on a body while faces or edges
+    // are what is being picked means "select the whole body". The viewport
+    // reports the gesture; this window performs it, because the selection mode
+    // is a QAction's checked state and updateActions() is the single place that
+    // decides what is available.
+    connect(myView, &OcctViewWidget::bodyDoubleClicked, this, &MainWindow::onBodyDoubleClicked);
     // The transform gizmo reports the end of a drag; this window decides what
     // it means, exactly as it does for the face-pull arrow above.
     connect(myView, &OcctViewWidget::gizmoReleased, this, &MainWindow::onGizmoReleased);
@@ -175,6 +213,13 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     // Selection syncs both ways.
     connect(myItemsPanel, &ItemsPanel::solidActivated, this,
             [this](int id) { myView->setSelectedSolids({id}); });
+    // An outline row is the outline's only handle - it is not pickable in the
+    // viewport - so clicking one is what chooses which outline Extrude
+    // consumes. Routed through MainWindow rather than the panel writing the
+    // state itself: selectOutline() calls updateActions(), which is the single
+    // place that decides what is available.
+    connect(myItemsPanel, &ItemsPanel::outlineActivated, this,
+            [this](int id) { selectOutline(id); });
     connect(myView, &OcctViewWidget::selectionChanged, this,
             [this] { myItemsPanel->showSelection(myView->selectedSolidIds()); });
 
@@ -329,6 +374,43 @@ void MainWindow::buildActions()
     myAppearanceAction->setToolTip(tr("Choose the app's colours and text size (Ctrl+Alt+A)\n"
                                       "Every change is applied as you make it."));
 
+    // Whether the app says so when something goes RIGHT. Checkable and
+    // persisted, on the same terms as the projection and the unit below; its
+    // initial state is the one the constructor read from the store (default
+    // on), and updateActions() is what pushes it onto the toast host, so this
+    // preference obeys the same single authority every other one does.
+    //
+    // It cannot silence a refusal, by construction rather than by care here:
+    // ToastHost::show() drops Kind::Note only, and the label says notifications
+    // rather than messages for exactly that reason.
+    myNotificationsAction = new QAction(tr("Show &notifications"), this);
+    myNotificationsAction->setCheckable(true);
+    myNotificationsAction->setChecked(myShowNotifications);
+    myNotificationsAction->setToolTip(tr("Report the things that went right\n"
+                                         "Off, only refusals appear. Undo stays on the "
+                                         "Edit menu and on Ctrl+Z either way."));
+    connect(myNotificationsAction, &QAction::toggled, this, &MainWindow::setShowNotifications);
+
+    // The projection toggle. Checkable, because the mode is state the user
+    // chose and comes back next session; a QAction rather than a button that
+    // decides for itself, because the bar's readout, the View menu entry and
+    // the O shortcut all have to say the same thing - and because the
+    // generated shortcut sheet lists it for free the moment it carries a
+    // binding.
+    //
+    // Reads its initial state from the camera, which the constructor has
+    // already set from the stored preference, rather than from that
+    // preference a second time.
+    myOrthographicAction = new QAction(tr("&Orthographic"), this);
+    myOrthographicAction->setCheckable(true);
+    myOrthographicAction->setChecked(myView->camera().baseProjection() ==
+                                     CameraController::Projection::Orthographic);
+    myOrthographicAction->setShortcut(QKeySequence(Qt::Key_O));
+    myOrthographicAction->setToolTip(tr("Draw without perspective (O)\n"
+                                        "Parallel edges stay parallel, so a face seen "
+                                        "straight on reads at its true shape."));
+    connect(myOrthographicAction, &QAction::toggled, this, &MainWindow::setBaseProjection);
+
     myDisplayModeAction = new QAction(tr("Wireframe"), this);
     myDisplayModeAction->setCheckable(true);
     myDisplayModeAction->setToolTip(tr("Draw bodies as edges only\n"
@@ -445,6 +527,14 @@ QMenuBar* MainWindow::buildMenus()
     viewMenu->addSeparator();
     viewMenu->addAction(tr("&Axonometric"), QKeySequence(Qt::Key_0), this,
                         &MainWindow::goAxonometric);
+    // These three name a DIRECTION and nothing else: unlike a click on a gizmo
+    // tip, they deliberately do not borrow an orthographic look, so they leave
+    // the projection exactly as the user set it. The asymmetry is the brief's,
+    // and it is a real distinction rather than an oversight - the gizmo is a
+    // direct-manipulation gesture aimed at a face of a cube, where convergence
+    // is the thing being complained about, while these are a menu entry and a
+    // number key that mean "look from the top" and make no claim about how the
+    // scene should be drawn once you get there.
     viewMenu->addAction(tr("&Top"), QKeySequence(Qt::Key_1), this, [this] {
         myView->setViewTop();
         recordViewChanged();
@@ -458,12 +548,18 @@ QMenuBar* MainWindow::buildMenus()
         recordViewChanged();
     });
     viewMenu->addSeparator();
+    // Beside the named views, because it is the other half of "what am I
+    // looking at" - but below the separator, because it changes how the scene
+    // is drawn rather than where the camera stands.
+    viewMenu->addAction(myOrthographicAction);
+    viewMenu->addSeparator();
     viewMenu->addAction(mySnapAction);
     viewMenu->addSeparator();
     viewMenu->addAction(mySolidSelectAction);
     viewMenu->addAction(myFaceSelectAction);
     viewMenu->addAction(myEdgeSelectAction);
     viewMenu->addAction(myItemsPanelAction);
+    viewMenu->addAction(myNotificationsAction);
     viewMenu->addSeparator();
     QMenu* unitsMenu = viewMenu->addMenu(tr("Units"));
     unitsMenu->addAction(myUnitsMillimetresAction);
@@ -512,10 +608,17 @@ QMenuBar* MainWindow::buildMenus()
 
 void MainWindow::goAxonometric()
 {
-    // The one way back to the angled view. Both entry points - the View menu
-    // (and its 0 shortcut) and the app bar's view label button - call this,
-    // so the pose and the recorded event cannot drift apart the way they
-    // would if each site re-derived the camera state for itself.
+    // The one way back to the angled view. Its entry points - the View menu
+    // and its 0 shortcut - call this, so the pose and the recorded event
+    // cannot drift apart the way they would if each site re-derived the
+    // camera state for itself. The app bar's button used to be a third; that
+    // seat is the projection toggle now.
+    //
+    // The angled view is the opposite of a face-on one, so it hands back any
+    // borrowed orthographic look rather than carrying it into a pose nothing
+    // squared up for. A user who CHOSE Ortho keeps it - this clears the loan,
+    // not the mode.
+    myView->camera().setTemporaryOrtho(false);
     myView->setViewAxonometric();
     recordViewChanged();
 }
@@ -526,17 +629,16 @@ void MainWindow::buildAppBar(QMenuBar* menus)
     // The window takes ownership. Nothing may call menuBar() from here on.
     setMenuWidget(myAppBar);
 
-    myAppBar->setViewLabel(myView->viewLabelText());
+    myAppBar->setOrthographic(myOrthographicAction->isChecked());
     myAppBar->setUnitLabel(QString::fromStdString(Measure::unitSuffix()));
 
-    connect(myView, &OcctViewWidget::cameraChanged, myAppBar,
-            [this] { myAppBar->setViewLabel(myView->viewLabelText()); });
-
-    // Exactly what the gizmo's label chip did - and it is the View menu's
-    // Axonometric entry, not a second copy of the pose it applies. The button
-    // and the menu entry are the same route, so a user who only ever presses
-    // this button still retires the hint that teaches named views.
-    connect(myAppBar, &AppBar::viewLabelClicked, this, &MainWindow::goAxonometric);
+    // The button triggers the action rather than flipping anything itself -
+    // the same contract the unit chip has, and the reason the menu entry, the
+    // O shortcut and this button can never disagree. It no longer snaps to
+    // the axonometric pose: that is the gizmo's job, and the View menu's, and
+    // this seat now belongs to the projection.
+    connect(myAppBar, &AppBar::projectionClicked, this,
+            [this] { myOrthographicAction->trigger(); });
 
     // The button triggers the OTHER unit's existing action rather than
     // writing the unit itself: persistence, the items panel, the status bar
@@ -555,6 +657,11 @@ void MainWindow::buildAppBar(QMenuBar* menus)
     // back into updateActions().
     connect(this, &MainWindow::appStateChanged, myAppBar, [this] {
         myAppBar->setUnitLabel(QString::fromStdString(Measure::unitSuffix()));
+        // The BASE mode, off the action that owns it - not the camera's
+        // effective one. A gizmo arm or a face lock borrows orthographic for
+        // one orbit, and a readout that followed the loan would tell the user
+        // they had changed a setting they never touched.
+        myAppBar->setOrthographic(myOrthographicAction->isChecked());
     });
 }
 
@@ -672,8 +779,36 @@ void MainWindow::buildOverlay()
     // pushes that same enabled state onto the toast (see setUndoEnabled), so
     // the pill is dimmed and out of hit-testing rather than merely inert.
     connect(myToasts, &ToastHost::undoRequested, this, [this] {
+        // Two guards saying two different things. The first is scope: a toast
+        // names a change to the DOCUMENT, and since Ctrl+Z gained its
+        // mid-sketch meaning the action would otherwise take back a point
+        // under a message about a body. The second is availability, which
+        // updateActions() owns. The pill is already dimmed and out of
+        // hit-testing in both cases; this is the backstop for an event
+        // delivered straight at it.
+        if (mySketching) return;
         if (myUndoAction->isEnabled()) myUndoAction->trigger();
     });
+    // The Appearance card's two file outcomes. The card owns a look, not the
+    // way this app reports things, so it announces and the copy lives here
+    // with every other outcome - in cause-and-fix form, like each of them.
+    // Failures, so they are shown whether or not the user has notifications on
+    // (see ToastHost::show): a Load that changed nothing and said nothing would
+    // be indistinguishable from a colour file with nothing in it.
+    connect(myAppearancePanel, &AppearancePanel::colourSaveFailed, this,
+            [this](const QString& path) {
+                myToasts->show(tr("Couldn't write the colours to %1 — Check that the "
+                                  "folder exists and isn't read-only").arg(path),
+                              Toast::Kind::Failure, false);
+            });
+    connect(myAppearancePanel, &AppearancePanel::colourLoadRefused, this,
+            [this](const QString& path) {
+                myToasts->show(tr("%1 doesn't hold a look this app can read, so nothing "
+                                  "changed — Pick a file made with Save colours")
+                                   .arg(path),
+                              Toast::Kind::Failure, false);
+            });
+
     // A toast that offers to undo one operation must not survive that
     // operation - see ToastHost::documentMovedTo().
     connect(this, &MainWindow::documentChanged, this,
@@ -763,7 +898,7 @@ void MainWindow::updateActions()
     myUndoPointAction->setEnabled(mySketching && mySketch.pointCount() > 0);
     myCancelSketchAction->setEnabled(mySketching);
 
-    myExtrudeAction->setEnabled(!mySketching && !myPendingFace.IsNull());
+    myExtrudeAction->setEnabled(!mySketching && hasPendingFace());
 
     // Exactly one face, and a flat one: an outline needs a single plane to
     // live on, and a cylinder's side has no such plane. Both halves are
@@ -776,31 +911,106 @@ void MainWindow::updateActions()
     // canChangeSketchPlane() for what moving the plane out from under it does.
     // That is exactly canPullSelectedFace()'s rule too, so the two read the
     // same function rather than each carrying a copy of it.
-    const bool planeCanMove = !mySketching && myPendingFace.IsNull();
+    const bool planeCanMove = !mySketching && !hasPendingFace();
     const bool flatFaceSelected = canPullSelectedFace();
     myLockFaceAction->setEnabled(flatFaceSelected);
     myUnlockFaceAction->setEnabled(myFaceLocked && planeCanMove);
     // A disabled control that does not say why is a control the user reads as
     // broken. Same idea as snapTooltipText(): recomputed here rather than
     // frozen at buildActions() time, so the reason is current.
+    //
+    // Two reasons, and they are asked in the order planeCanMove combines
+    // them. hasPendingFace() is TRUE THROUGHOUT A SKETCH now - the waiting
+    // outline is a document item and the new sketch does not discard it - so
+    // an unguarded swap blamed the waiting outline while the sketch in
+    // progress was the actual blocker, and told the user to press E, which is
+    // disabled mid-sketch. The sketch takes precedence because it is the
+    // condition the user can act on first, and because it is the one that is
+    // true even with no outline anywhere.
+    //
+    // The outline reason names the remedies that WORK. "Ctrl+K to start a new
+    // one" was one of them until this phase - see canChangeSketchPlane() for
+    // why it stopped being one and why advice that does nothing is worse than
+    // none. "Ctrl+Z to take it back" went the same way for the same reason,
+    // one review later: it is only the outline's undo while the outline is
+    // the TOP of the stack, and nothing gates the operations that push onto
+    // it - close an outline, Union two bodies, and Ctrl+Z means the Union.
+    // Delete is the remedy that is always the outline's, whatever has
+    // happened since (see onDeleteSelected()).
+    const QString sketchReason =
+        tr("Unavailable while you're drawing — press Enter to close this outline, "
+           "or Esc to cancel it");
     const QString pendingReason =
         tr("Unavailable while an outline is waiting — press E to extrude it, "
-           "or Ctrl+K to start a new one");
-    myLockFaceAction->setToolTip(myPendingFace.IsNull() ? lockTooltipText() : pendingReason);
-    myUnlockFaceAction->setToolTip(myPendingFace.IsNull() ? unlockTooltipText()
-                                                          : pendingReason);
+           "or Delete to discard it");
+    const QString planeReason = mySketching ? sketchReason : pendingReason;
+    myLockFaceAction->setToolTip(planeCanMove ? lockTooltipText() : planeReason);
+    myUnlockFaceAction->setToolTip(planeCanMove ? unlockTooltipText() : planeReason);
 
     myUnionAction->setEnabled(booleanReady);
     mySubtractAction->setEnabled(booleanReady);
     myIntersectAction->setEnabled(booleanReady);
 
     myExportStepAction->setEnabled(myDocument.count() > 0);
-    myDeleteAction->setEnabled(!mySketching && selectedCount > 0);
-    myUndoAction->setEnabled(!mySketching && myDocument.canUndo());
-    // The toast's Undo pill is the same route as the action, so it obeys the
-    // same enabled state - decided here, in the one place that decides what
-    // is available, and pushed out rather than re-derived at the toast.
-    if (myToasts) myToasts->setUndoEnabled(myUndoAction->isEnabled());
+    // Delete has TWO meanings and one of them is new: bodies when bodies are
+    // selected, and the waiting outline when nothing is. It is the outline's
+    // only exit besides Extrude, and the whole reason it needed one is in
+    // onDeleteSelected() - the operations that push onto the undo stack are
+    // not gated on a waiting outline, so "Ctrl+Z to take it back" stops being
+    // true the moment the user does anything else. Which meaning applies is
+    // decided HERE, in the one place that decides what is available, and
+    // onDeleteSelected() asks the same question the same way.
+    const bool deleteTargetsOutline = selectedCount == 0 && hasPendingFace();
+    myDeleteAction->setEnabled(!mySketching && (selectedCount > 0 || hasPendingFace()));
+    // A control whose meaning moves has to say which meaning is live, or the
+    // user reads one label and gets the other - the same argument the Lock to
+    // Face tooltip above makes for a control that is disabled.
+    myDeleteAction->setToolTip(
+        deleteTargetsOutline
+            ? tr("Discard the outline that's waiting (Del) — nothing is selected, "
+                 "so Delete takes the outline instead of a body")
+            : tr("Delete the selected bodies (Del)"));
+    // Mid-sketch, Undo removes the last placed point (onUndo() reroutes to
+    // onUndoSketchPoint); outside a sketch it undoes a document change. The
+    // menu text stays "Undo" either way - the user's word for "take that
+    // back" does not change with the mode, and a menu entry whose label moved
+    // under them would be worse than one whose scope did.
+    //
+    // Redo has no mid-sketch counterpart - a removed point is gone, not
+    // parked on a stack - so it stays disabled while sketching. That
+    // asymmetry is deliberate: it is better than a Redo that silently means
+    // "redo a document change" while the user is looking at an outline.
+    myUndoAction->setEnabled(mySketching ? mySketch.pointCount() > 0
+                                         : myDocument.canUndo());
+    myUndoAction->setToolTip(mySketching
+                                 ? tr("Take back the last point you placed (Ctrl+Z)")
+                                 : tr("Undo the last change to your bodies (Ctrl+Z)"));
+    // The toast's Undo pill still triggers the action, but its availability
+    // is the DOCUMENT half of that predicate, not the action's whole enabled
+    // state. Until the reroute above the two were the same expression and
+    // this line could just read the action; they are not any more, and the
+    // pill has to keep the narrower one. A pill under "Deleted Body 02" that
+    // quietly took back a sketch point instead would be the label describing
+    // one change while the control performed another - the exact defect the
+    // revision guard in ToastHost was added to end. Still decided here, in
+    // the one place that decides what is available, and still pushed out
+    // rather than re-derived at the toast.
+    if (myToasts) myToasts->setUndoEnabled(!mySketching && myDocument.canUndo());
+    // View -> Show notifications, pushed the same way and for the same reason:
+    // this is the one place that decides it, and the host reads it rather than
+    // re-deriving it from an action it would otherwise have to know about.
+    // Note that Undo remains reachable with notifications off - the menu entry,
+    // the rail chip and Ctrl+Z are untouched by this; only the toast that would
+    // have offered a shortcut to it goes away.
+    if (myToasts && myNotificationsAction)
+        myToasts->setNotesEnabled(myNotificationsAction->isChecked());
+    // Which outline Extrude would consume, pushed onto the drawer the same
+    // way and for the same reason: this is the one place that decides it, and
+    // the drawer row is the only handle the user has on the choice, so a
+    // choice with no mark on it is a choice they cannot see. Refreshed here
+    // rather than at the click, so an undo or a redo that moves the pending
+    // outline moves the highlight with it.
+    if (myItemsPanel) myItemsPanel->showPendingOutline(pendingOutlineId());
     myRedoAction->setEnabled(!mySketching && myDocument.canRedo());
 
     // Not a slot on appStateChanged - part of updateActions() itself, same
@@ -824,6 +1034,36 @@ void MainWindow::recordViewChanged()
     updateActions();
 }
 
+void MainWindow::setBaseProjection(bool orthographic)
+{
+    myView->setBaseProjection(orthographic ? CameraController::Projection::Orthographic
+                                           : CameraController::Projection::Perspective);
+    if (myPersistProgress) {
+        QSettings settings;
+        settings.setValue(QStringLiteral("projection"),
+                          orthographic ? QStringLiteral("ortho") : QStringLiteral("persp"));
+    }
+    // Not recordProgress(), and specifically not recordViewChanged() - see the
+    // declaration in MainWindow.h. updateActions() ends by emitting
+    // appStateChanged(), which is what the bar's readout follows; no second
+    // refresh path.
+    updateActions();
+}
+
+void MainWindow::setShowNotifications(bool show)
+{
+    myShowNotifications = show;
+    if (myPersistProgress) {
+        QSettings settings;
+        settings.setValue(QStringLiteral("showNotifications"), show);
+    }
+    // Not recordProgress(): this is a display preference, not a learned
+    // capability. updateActions() is what actually pushes the state onto the
+    // toast host - this function only stores it - so the one place that
+    // decides what is available stays the one place that says it.
+    updateActions();
+}
+
 void MainWindow::setDisplayUnit(Measure::Unit unit)
 {
     Measure::setDisplayUnit(unit);
@@ -843,6 +1083,12 @@ void MainWindow::setDisplayUnit(Measure::Unit unit)
 
 void MainWindow::onThemeChanged()
 {
+    // The window icon is a QIcon rasterised once, which is exactly the kind of
+    // cached appearance value Theme's broadcast exists for (see Theme.h): it
+    // carries accent() and panel(), and nothing repaints it. Re-painted here so
+    // an edited palette reaches the title bar too.
+    setWindowIcon(IconSet::appIcon());
+
     // The status bar's font is SET, not inherited: Theme.cpp's stylesheet
     // reaches QStatusBar's own internal message label through a selector, and
     // this covers a plain QStatusBar with no matching rule. An explicitly set
@@ -968,8 +1214,12 @@ void MainWindow::recordProgress(const std::string& event)
 
 QString MainWindow::lockTooltipText() const
 {
+    // The gesture gained its Ctrl this phase, and the sentence has to say so:
+    // a plain double-click on a body now selects the whole body instead. A
+    // tooltip that still taught the old gesture would be teaching something
+    // that quietly does a different thing.
     return tr("Draw on the selected face instead of the ground (L)\n"
-              "Double-clicking a face does the same. Outlines drawn "
+              "Ctrl+double-clicking a face does the same. Outlines drawn "
               "there extrude square to it.");
 }
 
@@ -1002,8 +1252,15 @@ void MainWindow::updateStateLabel()
         } else {
             state = tr("Sketching — 2 points, 1 more to close");
         }
-    } else if (!myPendingFace.IsNull()) {
-        state = tr("Face ready — press E to extrude");
+    } else if (hasPendingFace()) {
+        // NAMED, not just "Face ready". Outlines accumulate now, and with two
+        // in the drawer a label that says only that leaves the user with no
+        // way to tell which one E is aimed at - the drawer's highlight and
+        // this name are the two halves of that answer, and they read the same
+        // pendingOutlineId() so they cannot point at different outlines.
+        state = tr("%1 ready — press E to extrude")
+                    .arg(QString::fromStdString(
+                        myDocument.outlineNameOf(pendingOutlineId())));
     } else if (canPullSelectedFace()) {
         // The gizmo is on screen and it is not obvious what to do with it -
         // an arrow with no words is a guess. Reads the same predicate the
@@ -1017,8 +1274,16 @@ void MainWindow::updateStateLabel()
         // The table's words, the same two the chip, the tooltips and the
         // refusals use. Saying "round or flatten" here and "Fillet"/"Chamfer"
         // everywhere else is two vocabularies for one pair of operations.
-        state = tr("Edge selected — drag in for a Fillet, out for a Chamfer, "
-                   "or type a size");
+        //
+        // The plural is written out, not parenthesised - the label has to be
+        // able to say that a Shift-click added a second edge, and "Edge(s)"
+        // is the exact spelling the vocabulary rules forbid.
+        const std::size_t picked = myView->selectedEdges().size();
+        state = (picked > 1 ? tr("%1 edges selected — drag in for a Fillet, out for a "
+                                 "Chamfer, or type a size")
+                                  .arg(QString::number(static_cast<int>(picked)))
+                            : tr("Edge selected — drag in for a Fillet, out for a "
+                                 "Chamfer, or type a size"));
     } else {
         const std::size_t selected = myView->selectedSolidIds().size();
         const std::size_t bodies = myDocument.count();
@@ -1058,12 +1323,40 @@ void MainWindow::resyncView()
     for (const DocumentModel::Solid& solid : myDocument.solids()) {
         myView->displaySolid(solid.id, solid.shape);
     }
+    // Outlines are document items, so undo and redo have to move them on
+    // screen exactly as they move bodies. Rebuilt wholesale for the same
+    // reason the bodies are: tracking the difference is more code than it
+    // saves, and this is the only way to be sure the two agree.
+    myView->clearOutlines();
+    for (const DocumentModel::Outline& outline : myDocument.outlines()) {
+        myView->displayOutline(outline.id, outline.face);
+    }
 }
 
 void MainWindow::onDeleteSelected()
 {
+    // BODIES when bodies are selected; the WAITING OUTLINE when nothing is.
+    //
+    // Outlines are not pickable viewport geometry, so no gesture can put one
+    // in this selection - which is exactly why they had no Delete route at
+    // all, and why they needed one. Every direct-modeling gate (the pull
+    // arrow, the bevel arrow, the transform gizmo, Lock to Face) refuses
+    // while an outline waits, and the operations that are NOT gated -
+    // booleans, Delete - push onto the undo stack. Close an outline, Union
+    // two bodies, and the advice those refusals used to give, "Ctrl+Z to take
+    // it back", undoes the Union instead: every gate shut and no way to open
+    // one. Extrude was the only exit, and "make a body you do not want" is
+    // not an exit.
+    //
+    // Nothing-selected is the one state in which Delete had no work of its
+    // own, so the second meaning displaces nothing. updateActions() decides
+    // which one is live and says so in the tooltip; this asks the same
+    // question the same way rather than keeping a second copy of the rule.
     const std::vector<int> ids = myView->selectedSolidIds();
-    if (ids.empty()) return;
+    if (ids.empty()) {
+        deletePendingOutline();
+        return;
+    }
 
     const std::string deletedName = ids.size() == 1 ? myDocument.nameOf(ids.front())
                                                     : std::string();
@@ -1085,11 +1378,66 @@ void MainWindow::onDeleteSelected()
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
 }
 
+bool MainWindow::deletePendingOutline()
+{
+    const int id = pendingOutlineId();
+    if (id == 0) return false;
+
+    // Read BEFORE the removal: once the outline is out of the document its
+    // name cannot be looked up, and a toast that named the wrong thing - or
+    // nothing - would be worse than no toast.
+    const QString name = QString::fromStdString(myDocument.outlineNameOf(id));
+
+    // One checkpoint, like every other change to the document, so one Ctrl+Z
+    // puts it back. The toast that reports it carries Undo for the same
+    // reason - CLAUDE.md's rule is that a change the user can see is a change
+    // they can take back from where it is reported.
+    myDocument.checkpoint();
+    myDocument.removeOutline(id);
+    myView->removeOutline(id);
+    // The drawer's choice went with it. Not strictly required -
+    // pendingOutlineId() validates its id against the live list on every read
+    // - but leaving a dead id behind means the NEXT outline could inherit the
+    // pending mark from an id that no longer exists if the counter ever
+    // reused one.
+    if (mySelectedOutlineId == id) mySelectedOutlineId = 0;
+    recordProgress("delete.used");
+
+    updateActions();
+    emit documentChanged();
+    // The same sentence shape the body half uses - "Deleted Body 02" and
+    // "Deleted Outline 01" are one message with one subject, not two messages
+    // the user has to learn separately.
+    const QString message = tr("Deleted %1").arg(name);
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    return true;
+}
+
 void MainWindow::onUndo()
 {
+    // Mid-sketch, Undo means the last POINT. One implementation with two
+    // triggers, not a second remove-last-point path: Backspace and Ctrl+Z
+    // both land in onUndoSketchPoint(), so the two can never drift.
+    //
+    // Rerouting rather than adding a branch to updateActions() alone: the
+    // enabled state (mySketching ? points > 0 : canUndo()) and the behaviour
+    // have to agree, and updateActions() stays the single place that decides
+    // availability. Everything that goes through myUndoAction follows for
+    // free - the menu entry, the rail chip, Ctrl+Z, and the toast's Undo
+    // pill, which triggers the action rather than calling this.
+    if (mySketching) {
+        onUndoSketchPoint();
+        return;
+    }
+
+    const std::vector<int> outlinesBefore = outlineIds();
     if (!myDocument.undo()) return;
     recordProgress("undo.used");
 
+    // An outline the undo handed back is the thing the user just took back,
+    // so it becomes the one Extrude will consume - see adoptRestoredOutline().
+    adoptRestoredOutline(outlinesBefore);
     myView->clearSelection();
     resyncView();
     updateActions();
@@ -1101,9 +1449,13 @@ void MainWindow::onUndo()
 
 void MainWindow::onRedo()
 {
+    const std::vector<int> outlinesBefore = outlineIds();
     if (!myDocument.redo()) return;
     recordProgress("undo.used");
 
+    // The same rule the other way: a redo that brings an outline back is the
+    // user putting it there, so it is the one they mean.
+    adoptRestoredOutline(outlinesBefore);
     myView->clearSelection();
     resyncView();
     updateActions();
@@ -1168,7 +1520,12 @@ void MainWindow::onSketchCursorMoved(const gp_Pnt& point)
 void MainWindow::onStartSketch()
 {
     mySketch.reset();
-    myPendingFace.Nullify();
+    // A waiting outline is NOT discarded here any more. It used to be, when
+    // it was a bare member and starting a sketch was the only way to be rid
+    // of it; it is a document item now, listed in the drawer and owned by the
+    // undo stack, and deleting one as a side effect of picking up the pencil
+    // would be the app throwing away work the user never asked it to. They
+    // accumulate; Extrude consumes the selected one and Ctrl+Z removes it.
     mySketching = true;
 
     // The ground plane by default, a locked face's own plane while one is
@@ -1186,9 +1543,12 @@ void MainWindow::onStartSketch()
 
 void MainWindow::onSketchPointPicked(const gp_Pnt& point)
 {
-    // Clicking the first point again closes the sketch, the way every CAD tool
-    // behaves. Half a grid step is a forgiving but unambiguous target.
-    const double closeTolerance = myView->snapEnabled() ? myView->snapStep() * 0.5 : 5.0;
+    // Clicking the first point again closes the sketch, the way every CAD
+    // tool behaves. The radius comes from the viewport rather than being
+    // recomputed here: Shift's straight constraint has to stand down inside
+    // exactly this distance (see OcctViewWidget::sketchCloseTolerance), and
+    // two copies of the formula would be two answers to the same question.
+    const double closeTolerance = myView->sketchCloseTolerance();
     if (mySketch.isNearFirstPoint(point, closeTolerance)) {
         onFinishSketch();
         return;
@@ -1197,6 +1557,7 @@ void MainWindow::onSketchPointPicked(const gp_Pnt& point)
     mySketch.addPoint(point);
     myView->setPreview(mySketch.previewShape());
     myView->setSketchPointMarkers(mySketch.points());
+    syncSketchConstraints();
     updateActions();
     statusBar()->showMessage(
         mySketch.pointCount() == 1
@@ -1206,21 +1567,113 @@ void MainWindow::onSketchPointPicked(const gp_Pnt& point)
 
 void MainWindow::onUndoSketchPoint()
 {
+    if (mySketch.pointCount() == 0) return;
+
+    // The SAME counter the document path records, and recorded here rather
+    // than in onUndo()'s reroute so Backspace earns it too. "Undo" is one
+    // thing the user learns, not two: somebody who has taken back three
+    // points by whichever key has learned to take things back, and a hint
+    // still teaching them that would be teaching a lesson already taken.
+    recordProgress("undo.used");
     mySketch.removeLastPoint();
     myView->setPreview(mySketch.previewShape());
     myView->setSketchPointMarkers(mySketch.points());
+    syncSketchConstraints();
     updateActions();
+}
+
+void MainWindow::syncSketchConstraints()
+{
+    gp_Dir dir;
+    if (mySketching && mySketch.lastSegmentDirection(dir))
+        myView->setSketchStraightAnchor(mySketch.points().back(), dir);
+    else
+        myView->clearSketchStraightAnchor();
+
+    // Only while clicking the first point would actually close the outline -
+    // the same canClose() rule isNearFirstPoint() carries, read from the same
+    // sketch, so the exemption cannot outlive the thing it exempts.
+    if (mySketching && mySketch.canClose())
+        myView->setSketchCloseTarget(mySketch.points().front());
+    else
+        myView->clearSketchCloseTarget();
 }
 
 void MainWindow::onCancelSketch()
 {
     mySketching = false;
     mySketch.reset();
-    myPendingFace.Nullify();
+    // Cancels THIS sketch, not the outline items already in the document -
+    // same reasoning as onStartSketch().
     myView->setSketchMode(false, mySketch.plane());
     myView->clearPreview();
+    syncSketchConstraints();
     updateActions();
     statusBar()->showMessage(tr("Sketch cancelled"));
+}
+
+int MainWindow::pendingOutlineId() const
+{
+    const std::vector<DocumentModel::Outline>& outlines = myDocument.outlines();
+    if (outlines.empty()) return 0;
+    // Checked against the live list rather than trusted: an undo can remove
+    // the outline the drawer last selected, and a stale id must fall back to
+    // the newest instead of leaving Extrude pointing at nothing.
+    if (mySelectedOutlineId != 0 && myDocument.containsOutline(mySelectedOutlineId))
+        return mySelectedOutlineId;
+    return outlines.back().id;
+}
+
+TopoDS_Face MainWindow::pendingFace() const
+{
+    return myDocument.outlineFace(pendingOutlineId());
+}
+
+std::vector<int> MainWindow::outlineIds() const
+{
+    std::vector<int> ids;
+    ids.reserve(myDocument.outlines().size());
+    for (const DocumentModel::Outline& outline : myDocument.outlines()) ids.push_back(outline.id);
+    return ids;
+}
+
+void MainWindow::adoptRestoredOutline(const std::vector<int>& before)
+{
+    // pendingOutlineId()'s fallback is the LAST outline in the list, which is
+    // the newest one only while outlines are being appended. An undo restores
+    // a removed outline AT ITS ORIGINAL POSITION, so undoing an extrude in a
+    // document that already held a later outline handed the user back the one
+    // they asked for and left Extrude aimed at the other: Ctrl+Z then E built
+    // a body from a different outline than the one that had just reappeared.
+    //
+    // The fix is to name it rather than to reorder the list or to make the
+    // fallback cleverer. An outline that appears across an undo or a redo is
+    // the thing the user just acted on, and that is exactly what "pending"
+    // means. Exactly one appearing is the only case worth claiming - a
+    // multi-outline jump has no single thing the user meant, and leaving the
+    // existing selection alone is the honest answer there.
+    int appeared = 0;
+    int candidate = 0;
+    for (const DocumentModel::Outline& outline : myDocument.outlines()) {
+        if (std::find(before.begin(), before.end(), outline.id) != before.end()) continue;
+        ++appeared;
+        candidate = outline.id;
+    }
+    if (appeared == 1) mySelectedOutlineId = candidate;
+}
+
+gp_Dir MainWindow::pendingSweepDirection() const
+{
+    gp_Pln plane = mySketch.plane();
+    myDocument.outlinePlane(pendingOutlineId(), plane);
+    return plane.Axis().Direction();
+}
+
+void MainWindow::selectOutline(int id)
+{
+    if (!myDocument.containsOutline(id)) return;
+    mySelectedOutlineId = id;
+    updateActions();
 }
 
 void MainWindow::onFinishSketch()
@@ -1234,32 +1687,67 @@ void MainWindow::onFinishSketch()
         return;
     }
 
-    myPendingFace = face;
+    // A closed outline is a DOCUMENT ITEM now, not a preview - so it takes a
+    // checkpoint like every other change to the document, appears in the
+    // drawer, and can be taken back with Ctrl+Z rather than only by being
+    // extruded or silently dropped by the next sketch.
+    myDocument.checkpoint();
+    const int id = myDocument.addOutline(face, mySketch.plane());
+    // The newest is what Extrude consumes by default, and saying so
+    // explicitly rather than leaning on pendingOutlineId()'s fallback means
+    // the drawer's highlight and the commit target agree from the first frame.
+    mySelectedOutlineId = id;
+
     recordProgress("sketch.completed");
     mySketching = false;
     myView->setSketchMode(false, mySketch.plane());
-    myView->setPreview(face, /*shaded=*/true);
+    // The in-progress polyline's channel, emptied - the closed outline is on
+    // screen through its own item now. There is exactly one way to display a
+    // closed outline, which is the whole point of the item replacing the
+    // pending-face preview rather than joining it.
+    myView->setPreview(TopoDS_Shape());
+    myView->displayOutline(id, face);
+    // The sketch's points have become an item; leaving them in the controller
+    // would let a second Finish Sketch close the same outline twice.
+    mySketch.reset();
+    syncSketchConstraints();
+
     updateActions();
-    statusBar()->showMessage(tr("Outline closed — press E to extrude it into a body"));
+    emit documentChanged();
+    const QString message =
+        tr("%1 created — %2")
+            .arg(QString::fromStdString(myDocument.outlineNameOf(id)),
+                 QString::fromStdString(Measure::formatFaceExtents(face, mySketch.plane())));
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
 }
 
 void MainWindow::onExtrude()
 {
-    if (myPendingFace.IsNull()) return;
+    const TopoDS_Face face = pendingFace();
+    if (face.IsNull()) return;
 
     // Opens a live preview over the viewport instead of a modal dialog - see
     // ExtrudePreview. It calls extrudePendingFace() itself once the user
-    // commits (Enter) or leaves the pending face alone if they back out
+    // commits (Enter) or leaves the pending outline alone if they back out
     // (Escape).
-    myExtrudePreview->begin(myPendingFace);
+    myExtrudePreview->begin(face);
 }
 
 bool MainWindow::extrudePendingFace(double height)
 {
-    if (myPendingFace.IsNull() || height == 0.0) return false;
+    const int outlineId = pendingOutlineId();
+    const TopoDS_Face face = myDocument.outlineFace(outlineId);
+    if (face.IsNull() || height == 0.0) return false;
 
-    const TopoDS_Shape solid =
-        ModelingOps::extrude(myPendingFace, mySketch.plane().Axis().Direction(), height);
+    // The OUTLINE'S OWN plane, not the sketch controller's current one.
+    // CLAUDE.md's rule is that a closed outline pins the plane it was drawn
+    // on; storing that plane on the item is what finally makes it true by
+    // construction rather than by refusing to move the plane in the meantime.
+    gp_Pln plane = mySketch.plane();
+    myDocument.outlinePlane(outlineId, plane);
+
+    const TopoDS_Shape solid = ModelingOps::extrude(face, plane.Axis().Direction(), height);
     if (solid.IsNull()) {
         myToasts->show(tr("This face couldn't be extruded into a body — "
                           "The outline may cross itself or be too small to have an "
@@ -1271,14 +1759,19 @@ bool MainWindow::extrudePendingFace(double height)
     // Frame the very first solid; after that leave the camera where the user
     // put it rather than yanking the view on every extrude.
     const bool wasEmpty = myDocument.count() == 0;
+    // ONE checkpoint around the whole conversion - the outline going and the
+    // body arriving are one change, so one Ctrl+Z puts the outline back and
+    // takes the body away. Two checkpoints would make the user press it twice
+    // and leave a document holding both in between.
     myDocument.checkpoint();
-    const int id = myDocument.addSolid(solid);
+    const int id = myDocument.convertOutlineToBody(outlineId, solid);
     recordProgress("extrude.completed");
     myView->clearPreview();
+    myView->removeOutline(outlineId);
     myView->displaySolid(id, solid);
     if (wasEmpty) myView->fitAll();
 
-    myPendingFace.Nullify();
+    mySelectedOutlineId = 0;
     mySketch.reset();
     updateActions();
     emit documentChanged();
@@ -1295,7 +1788,7 @@ bool MainWindow::canPullSelectedFace() const
     // No sketch in progress, and no closed outline waiting - see
     // canChangeSketchPlane() and the header for both halves. The pending-face
     // half is what keeps this and ExtrudePreview mutually exclusive.
-    if (mySketching || !myPendingFace.IsNull()) return false;
+    if (mySketching || hasPendingFace()) return false;
 
     // selectedFace() is deliberately "the ONE selected face", never the first
     // of several, so this cannot be a coin toss between two highlighted
@@ -1373,35 +1866,52 @@ int MainWindow::bodyIdForEdge(const TopoDS_Edge& edge) const
     return 0;
 }
 
-bool MainWindow::bevelTarget(TopoDS_Edge& edge, int& bodyId, gp_Pnt& centre,
-                             gp_Dir& outward) const
+bool MainWindow::bevelTarget(std::vector<TopoDS_Edge>& edges, TopoDS_Edge& edge, int& bodyId,
+                             gp_Pnt& centre, gp_Dir& outward) const
 {
     // The same two halves canPullSelectedFace() opens with, for the same
     // reasons - see its comment and the header.
-    if (mySketching || !myPendingFace.IsNull()) return false;
+    if (mySketching || hasPendingFace()) return false;
 
     // Edge mode explicitly, so this cannot be true at the same time as the
     // face pull's predicate or the transform gizmo's.
     if (myView->selectionMode() != OcctViewWidget::SelectionMode::Edge) return false;
 
-    // "The ONE selected edge", never the first of several - selectedEdge()'s
-    // own rule, so a bevel can never be a coin toss between two highlighted
-    // edges.
-    const TopoDS_Edge selected = myView->selectedEdge();
-    if (selected.IsNull()) return false;
+    const std::vector<TopoDS_Edge> selected = myView->selectedEdges();
+    if (selected.empty()) return false;
 
-    const int id = bodyIdForEdge(selected);
+    // ALL ON ONE BODY. Not "the body the first edge happens to belong to":
+    // one gesture is one kernel build on one shape, so a selection reaching
+    // across two bodies raises nothing at all rather than quietly bevelling
+    // whichever body won. The mixed case is a real one - Shift-click makes it
+    // in two clicks - and the honest answer to it is no arrow.
+    const int id = bodyIdForEdge(selected.front());
     const TopoDS_Shape body = myDocument.shapeOf(id);
     if (id <= 0 || body.IsNull()) return false;
+    for (const TopoDS_Edge& candidate : selected) {
+        if (bodyIdForEdge(candidate) != id) return false;
+    }
 
     // Straightness, the two adjacent faces and the outward bisector are all
     // ModelingOps::bevelAxis()'s to decide, and it decides them once for the
-    // predicate and the gizmo both.
+    // predicate and the gizmo both. EVERY edge has to pass, not just the one
+    // the arrow will stand on: the gesture commits all of them together, so a
+    // curved edge among them makes the whole selection unbevellable rather
+    // than silently dropping itself out of the build.
     gp_Pnt at;
     gp_Dir axis;
-    if (!ModelingOps::bevelAxis(body, selected, at, axis)) return false;
+    for (const TopoDS_Edge& candidate : selected) {
+        gp_Pnt ignoredPoint;
+        gp_Dir ignoredAxis;
+        if (!ModelingOps::bevelAxis(body, candidate, ignoredPoint, ignoredAxis)) return false;
+    }
 
-    edge = selected;
+    // The arrow stands on the edge picked LAST, which is where the hand is.
+    const TopoDS_Edge arrowEdge = myView->lastSelectedEdge();
+    if (arrowEdge.IsNull() || !ModelingOps::bevelAxis(body, arrowEdge, at, axis)) return false;
+
+    edges = selected;
+    edge = arrowEdge;
     bodyId = id;
     centre = at;
     outward = axis;
@@ -1410,11 +1920,12 @@ bool MainWindow::bevelTarget(TopoDS_Edge& edge, int& bodyId, gp_Pnt& centre,
 
 bool MainWindow::canBevelSelectedEdge() const
 {
+    std::vector<TopoDS_Edge> edges;
     TopoDS_Edge edge;
     int bodyId = 0;
     gp_Pnt centre;
     gp_Dir outward;
-    return bevelTarget(edge, bodyId, centre, outward);
+    return bevelTarget(edges, edge, bodyId, centre, outward);
 }
 
 QString MainWindow::bevelRefusalText(bool fillet)
@@ -1425,6 +1936,29 @@ QString MainWindow::bevelRefusalText(bool fillet)
                        "would eat a neighbouring face. Try a smaller size")
                   : tr("This edge can't take a chamfer that big — the flat "
                        "would eat a neighbouring face. Try a smaller size");
+}
+
+QString MainWindow::bevelCombinationRefusalText(bool fillet)
+{
+    // The OTHER refusal, and the reason it needed its own sentence: the size
+    // is not what was turned down here, so telling the user to shrink it
+    // sends them round a loop with no exit. What changes the outcome is the
+    // SELECTION, so that is what the sentence asks for. No trailing period,
+    // em dash between the clauses, like every other failure in this app.
+    //
+    // "will only round some of them" / "will only flatten some of them" is
+    // what this said until the whole-branch review found it: those are the
+    // Never column for Fillet and Chamfer, and a user who reads "round" has
+    // no control anywhere in the app spelled that way. The operation names
+    // itself instead. The sweep can see this pair now - `round` and `flatten`
+    // joined the banned list with word-boundary matching, so "background"
+    // stays legal and "rounded" does not.
+    return fillet ? tr("These edges can't take a fillet together — the geometry "
+                       "engine would build it on only some of them. Try them one "
+                       "at a time")
+                  : tr("These edges can't take a chamfer together — the geometry "
+                       "engine would build it on only some of them. Try them one "
+                       "at a time");
 }
 
 QString MainWindow::transformOperationName(const gp_Trsf& delta)
@@ -1466,17 +2000,27 @@ bool MainWindow::transformIsRotation(const gp_Trsf& delta)
     return std::fabs(angle) > 1.0e-9;
 }
 
-bool MainWindow::bevelEdgeBy(const TopoDS_Edge& edge, double size, bool fillet)
+bool MainWindow::bevelEdgesBy(const std::vector<TopoDS_Edge>& edges, double size, bool fillet)
 {
-    if (edge.IsNull() || size <= 0.0) return false;
+    if (edges.empty() || size <= 0.0) return false;
+    for (const TopoDS_Edge& edge : edges) {
+        if (edge.IsNull()) return false;
+    }
 
-    const int id = bodyIdForEdge(edge);
+    const int id = bodyIdForEdge(edges.front());
     const TopoDS_Shape body = myDocument.shapeOf(id);
     if (id <= 0 || body.IsNull()) return false;
+    // bevelTarget() already refuses a selection spanning two bodies, but this
+    // is the commit and it does not get to assume its caller checked: one
+    // build replaces ONE body, and an edge belonging to another would be
+    // rounded on a shape it is not part of.
+    for (const TopoDS_Edge& edge : edges) {
+        if (bodyIdForEdge(edge) != id) return false;
+    }
 
     const ModelingOps::BooleanResult result =
-        fillet ? ModelingOps::filletEdge(body, edge, size)
-               : ModelingOps::chamferEdge(body, edge, size);
+        fillet ? ModelingOps::filletEdges(body, edges, size)
+               : ModelingOps::chamferEdges(body, edges, size);
     if (!result.ok) {
         // Never present a failed kernel operation as a success, and never show
         // its error text: it is written for this file, not for the user. A
@@ -1484,7 +2028,15 @@ bool MainWindow::bevelEdgeBy(const TopoDS_Edge& edge, double size, bool fillet)
         // ModelingOps::filletEdge - so the sentence names the cause and the fix
         // rather than apologising.
         qWarning("Bevel failed: %s", result.error.c_str());
-        myToasts->show(bevelRefusalText(fillet), Toast::Kind::Failure, false);
+        // Two causes, two sentences. "Try a smaller size" is right for a
+        // radius the neighbouring face cannot give up, and FALSE for a
+        // combination of edges the kernel will not bevel together - no size
+        // works there, so a user following that advice shrinks the number
+        // until they give up. ModelingOps says which through
+        // combinationRefused; this never reads its error string.
+        myToasts->show(result.combinationRefused ? bevelCombinationRefusalText(fillet)
+                                                 : bevelRefusalText(fillet),
+                       Toast::Kind::Failure, false);
         statusBar()->showMessage(fillet ? tr("Fillet refused — nothing was changed")
                                         : tr("Chamfer refused — nothing was changed"));
         return false;
@@ -1507,10 +2059,19 @@ bool MainWindow::bevelEdgeBy(const TopoDS_Edge& edge, double size, bool fillet)
     // Led by the operation's own name. "Body 03 rounded" describes the result
     // in a word that appears nowhere else in the app - the chip, the tooltips,
     // the state label and the refusal all say Fillet or Chamfer.
+    //
+    // The count only appears when there is one to report. A single-edge bevel
+    // reads exactly as it always did, and "1 edge" is a number nobody needs.
+    // Written out rather than through "(s)", per the vocabulary rules.
+    const QString name = QString::fromStdString(myDocument.nameOf(id));
+    const QString extent = QString::fromStdString(Measure::formatDimensions(result.shape));
     const QString message =
-        (fillet ? tr("Fillet added to %1 — %2") : tr("Chamfer added to %1 — %2"))
-            .arg(QString::fromStdString(myDocument.nameOf(id)),
-                 QString::fromStdString(Measure::formatDimensions(result.shape)));
+        edges.size() > 1
+            ? (fillet ? tr("Fillet added to %1 — %2 edges — %3")
+                      : tr("Chamfer added to %1 — %2 edges — %3"))
+                  .arg(name, QString::number(static_cast<int>(edges.size())), extent)
+            : (fillet ? tr("Fillet added to %1 — %2") : tr("Chamfer added to %1 — %2"))
+                  .arg(name, extent);
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
     return true;
@@ -1521,7 +2082,7 @@ int MainWindow::transformableBodyId() const
     // The same two halves canPullSelectedFace() opens with, for the same
     // reasons: an outline in progress lives on a plane, and a body that moved
     // under it would take the plane's meaning with it.
-    if (mySketching || !myPendingFace.IsNull()) return 0;
+    if (mySketching || hasPendingFace()) return 0;
 
     // Body mode explicitly. selectedSolidIds() reports the owning body of a
     // selected FACE too, so without this the gizmo would appear over a face
@@ -1647,10 +2208,14 @@ bool MainWindow::applyBooleanToSelection(int kind)
 
     std::vector<int> ids = myView->selectedSolidIds();
     if (ids.size() != 2) {
+        // A FAILURE for the same reason canChangeSketchPlane()'s refusal is:
+        // this path returns false and changes nothing, and a refusal the
+        // notifications toggle could silence would be an operation that did
+        // nothing and said nothing. See ToastHost::show().
         myToasts->show(tr("%1 needs exactly two bodies — "
                           "Click one body, then Shift-click another")
                           .arg(operationName),
-                      Toast::Kind::Note, false);
+                      Toast::Kind::Failure, false);
         return false;
     }
 
@@ -1757,27 +2322,83 @@ void MainWindow::onSelectionModeChanged()
     updateActions();
 }
 
+void MainWindow::onBodyDoubleClicked(int solidId)
+{
+    if (solidId <= 0) return;
+
+    // The MODE first, and through the action - setChecked() alone would leave
+    // the QActionGroup right and the viewport wrong, and setSelectionMode() on
+    // the viewport alone would leave the chip, the menu tick and the status
+    // label all describing the mode the user just left. onSelectionModeChanged()
+    // is the one function that reads the group and pushes the answer out, and
+    // it ends in updateActions().
+    if (mySolidSelectAction && !mySolidSelectAction->isChecked()) {
+        mySolidSelectAction->setChecked(true);
+        onSelectionModeChanged();
+    }
+
+    // Then the body. Changing the mode clears the old sub-shape selection
+    // (setSelectionMode re-activates every displayed shape), so this has to
+    // follow it rather than lead - selecting first and switching after would
+    // throw the selection away again and leave the user in body mode with
+    // nothing picked, which is the gesture doing half of what it says.
+    //
+    // It announces itself: setSelectedSolids() emits selectionChanged(), which
+    // this window answers with onSelectionChanged() -> updateActions(). No
+    // second refresh path from here.
+    myView->setSelectedSolids({solidId});
+}
+
 bool MainWindow::canChangeSketchPlane()
 {
-    // A closed outline that has not been extruded yet still belongs to the
-    // plane it was drawn on, and both the commit (extrudePendingFace) and the
-    // live preview sweep it along whatever the sketch plane's normal happens
-    // to be AT THAT MOMENT. Move the plane in between and the outline is swept
-    // in a direction lying in its own plane: a body with no volume at all,
-    // which BRepPrimAPI_MakePrism reports as done. ModelingOps::extrude now
-    // refuses that sweep outright, so nothing degenerate can reach the
-    // document either way - but a refusal the user meets only after pressing E
-    // is not an explanation, so the plane simply does not move while an
-    // outline is waiting.
+    // This guard's ORIGINAL argument no longer holds, and saying so is worth
+    // more than quietly keeping the code. It used to be that both the commit
+    // and the live preview swept the outline along whatever the sketch
+    // plane's normal happened to be AT THAT MOMENT, so moving the plane in
+    // between swept it in a direction lying in its own plane - a body with no
+    // volume, which BRepPrimAPI_MakePrism reports as done. Phase 7 retired
+    // that whole class by construction: a DocumentModel::Outline stores the
+    // plane it was drawn on BY VALUE, and both extrudePendingFace() and
+    // ExtrudePreview sweep along THAT (see pendingSweepDirection()). Locking
+    // a face can no longer re-aim a waiting outline at all.
+    //
+    // What the guard protects now is narrower and still real: the sketch
+    // plane is where the NEXT outline lands, and moving it while one outline
+    // is already waiting leaves the user with two outlines on two planes and
+    // one status label describing whichever the app picked. Keeping the two
+    // in step - one waiting outline, one plane it was drawn on - is a
+    // legibility rule rather than a correctness one, and the toast says which
+    // ways out actually exist.
     //
     // Discarding the pending outline instead was the alternative, and it is
     // worse: it throws away work the user did without being asked.
-    if (myPendingFace.IsNull()) return true;
+    if (!hasPendingFace()) return true;
 
+    // The two remedies that WORK. "Ctrl+K to start a new outline" was one of
+    // them until this phase, and it stopped being one the moment an outline
+    // became a document item: starting a sketch no longer discards the
+    // waiting one, so following that advice left the action just as disabled
+    // as before. Advice that does nothing is worse than no advice - the user
+    // does the thing, nothing changes, and now they distrust the message too.
+    // "Ctrl+Z to take it back" was the second one to fail that test: nothing
+    // gates the operations that push onto the undo stack, so one Union later
+    // Ctrl+Z means the Union. Delete is the remedy that is always the
+    // outline's - see onDeleteSelected().
+    //
+    // A FAILURE, not a Note, and the reason is item 12's toggle: this is a
+    // refusal - the gesture the user just made did not happen - and a refusal
+    // that goes silent when notifications are off is a silent failure. It is
+    // reachable from the Ctrl+double-click route, which consults no action's
+    // enabled state, so "the action was disabled anyway" is not an answer here.
+    // See ToastHost::show() for the rule.
+    //
+    // Punctuation, per CLAUDE.md and per every other failure sentence in this
+    // file: no trailing period, an em dash between the clauses. This one
+    // carried a period and a full stop where the dash belonged.
     myToasts->show(tr("There's an outline waiting to be extruded, and it belongs to the "
-                      "plane it was drawn on. Press E to turn it into a body, or Ctrl+K "
-                      "to start a new outline, before you change the face you draw on."),
-                  Toast::Kind::Note, false);
+                      "plane it was drawn on — press E to turn it into a body, or Delete "
+                      "to discard it, before you change the face you draw on"),
+                  Toast::Kind::Failure, false);
     return false;
 }
 
@@ -1832,12 +2453,51 @@ bool MainWindow::lockToFace(const TopoDS_Face& face)
     // One call sets both where clicks land and where the grid is drawn; they
     // are the same value inside the viewport, so they cannot disagree.
     myView->setWorkPlane(plane);
+    // Only now, past every refusal above: a lock that was declined must leave
+    // the camera exactly where it was, or the user is looking at a face they
+    // are not going to be drawing on.
+    flyOntoFace(face, plane);
     recordProgress("faceLock.used");
 
     updateActions();
     statusBar()->showMessage(tr("Locked to this face — outlines you draw now sit on it, "
                                 "and extrude square to it"));
     return true;
+}
+
+void MainWindow::flyOntoFace(const TopoDS_Face& face, const gp_Pln& plane)
+{
+    // `plane` is the OUTWARD-oriented plane lockToFace() has already derived -
+    // reversed where the face is TopAbs_REVERSED, which is three faces in six
+    // on a plain box. Re-deriving it from the face here would be a second copy
+    // of that rule, and the wrong half of it is what sends a prism through the
+    // body it stands on (see lockToFace).
+    Bnd_Box box;
+    BRepBndLib::Add(face, box);
+    if (box.IsVoid()) return;
+
+    // frame() gives the target and a distance that fits it - the same framing
+    // a double-click on a body uses, so a face-on look is no closer or further
+    // than the app's one idea of "framed".
+    //
+    // The target is the BOUNDING BOX's centre, not the face's centre of mass.
+    // The two coincide on anything symmetric and separate on an L-shaped or
+    // tapered face, and the box centre is the right one here: the job is to
+    // put the whole face on screen, which is a question about its extent.
+    // Anything asserting where this lands must derive the box centre too -
+    // comparing against a centre of mass would be measuring a different point
+    // and calling the gap an error.
+    CameraController scratch = myView->camera();
+    scratch.frame(box, OcctViewWidget::kFovyDeg);
+    // ...and then the direction, which frame() leaves alone.
+    scratch.lookFrom(plane.Axis().Direction());
+
+    // Ortho before the flight, for the same reason the gizmo sets it before
+    // its own: applyCameraState() runs on the first animation frame, and a
+    // look that only squares up once it lands would flash. The user's first
+    // orbit hands it back.
+    myView->camera().setTemporaryOrtho(true);
+    myView->animateTo(scratch.state());
 }
 
 void MainWindow::unlockFace()

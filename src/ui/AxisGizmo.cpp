@@ -130,6 +130,13 @@ void AxisGizmo::snapToAxis(int axis, bool positive)
             goal.elevationDeg = s * 88.0;
             break;
     }
+    // An axis view IS a face-on view, and perspective convergence is exactly
+    // what stops one reading as square. Set before the flight, not after: the
+    // animation's very first frame already goes through applyCameraState(),
+    // and a look that only becomes orthographic once it lands would flash.
+    // It is a loan - the user's first orbit hands it back and their base
+    // projection returns (see CameraController::Projection).
+    myView->camera().setTemporaryOrtho(true);
     myView->animateTo(goal);
     emit viewSnapped();
 }

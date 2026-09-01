@@ -207,6 +207,7 @@ void DimensionRenderer::show(const gp_Pnt& from, const gp_Pnt& to, const gp_Dir&
     Handle(DimensionLines) linesObj = new DimensionLines();
     linesObj->lines = segs;
     linesObj->colour = toOcct(Theme::accent());
+    if (myLayer != Graphic3d_ZLayerId_UNKNOWN) linesObj->SetZLayer(myLayer);
     myContext->Display(linesObj, 0, -1, Standard_False);   // mode -1: feedback only, never pickable
     myObjects.push_back(linesObj);
 
@@ -240,6 +241,7 @@ void DimensionRenderer::show(const gp_Pnt& from, const gp_Pnt& to, const gp_Dir&
     // label" the brief calls for, at no extra geometry.
     label->SetDisplayType(Aspect_TODT_SUBTITLE);
     label->SetColorSubTitle(toOcct(Theme::panel()));
+    if (myLayer != Graphic3d_ZLayerId_UNKNOWN) label->SetZLayer(myLayer);
     myContext->Display(label, 0, -1, Standard_False);
     myObjects.push_back(label);
 

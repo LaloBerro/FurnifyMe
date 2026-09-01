@@ -6,6 +6,7 @@
 #include <AIS_Manipulator.hxx>
 #include <AIS_ManipulatorMode.hxx>
 #include <AIS_Shape.hxx>
+#include <Graphic3d_ZLayerSettings.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
@@ -51,6 +52,28 @@ public:
     // undo, because hiding something is not an edit.
     void setSolidVisible(int id, bool visible);
     bool isSolidVisible(int id) const;
+
+    // A closed outline that is a DOCUMENT ITEM (DocumentModel::Outline), not a
+    // preview - Phase 7, item 4. It gets a channel of its own for the reason
+    // setPreview()'s comment gives one paragraph down: that slot already has
+    // writers, and an item that survives sketches, undo and redo cannot share
+    // a slot with feedback that is wiped by the next gesture. The pending face
+    // used to be shown THROUGH setPreview, and this replaces that entirely -
+    // there is exactly one way to put a closed outline on screen.
+    //
+    // Displayed with selection mode -1: outlines are not pickable geometry
+    // this phase (the drawer row is their handle), so nothing in the viewport
+    // can hover, select or bevel one. They render in the sketch Z-layer, above
+    // the work-plane grid they lie flat on.
+    void displayOutline(int id, const TopoDS_Face& face);
+    void removeOutline(int id);
+    void clearOutlines();
+    bool hasOutline(int id) const;
+    int outlineCount() const { return static_cast<int>(myOutlines.size()); }
+    // Presentation state, exactly as setSolidVisible() is, and not captured by
+    // undo for the same reason.
+    void setOutlineVisible(int id, bool visible);
+    bool isOutlineVisible(int id) const;
 
     // Temporary, non-selectable feedback shape (the in-progress sketch).
     void setPreview(const TopoDS_Shape& shape, bool shaded = false);
@@ -148,6 +171,19 @@ public:
     // the body moves.
     bool manipulatorFrame(gp_Ax2& position, double& size) const;
 
+    // The share of the viewport's SMALLER dimension one arm of the transform
+    // gizmo may occupy on screen. AIS_Manipulator's own AdjustSize sizes it
+    // from the body's bounding box and then leaves it there, which is right at
+    // the zoom the body was selected at and wrong at every other: a wardrobe,
+    // or any body seen close up, gave a gizmo whose arms ran off all four
+    // edges of the viewport with the body invisible behind it.
+    //
+    // A CAP, not a target. The bounding-box size still wins whenever it is the
+    // smaller of the two, so a gizmo never grows to fill this - zooming out
+    // shrinks it with the body, exactly as it should - and the clamp only bites
+    // when the arms would otherwise be bigger than a hand can aim at.
+    static constexpr double kGizmoMaxViewportFraction = 0.15;
+
     // The manipulation mode hover detection has armed right now: 0 none,
     // 1 Move along an axis, 2 Rotate, 3 Scale, 4 Move in a plane - the values
     // of OCCT's own AIS_ManipulatorMode. A test hovers candidate points and
@@ -209,6 +245,66 @@ public:
     void setWorkPlane(const gp_Pln& plane);
     const gp_Pln& workPlane() const { return mySketchPlane; }
 
+    // The straight-continuation anchor: the last placed point and the
+    // direction of the segment that led into it. While Shift is held, a
+    // reported sketch point - the hover that drives the cursor marker, the
+    // status readout and the live dimension, and the click that places the
+    // next point - is projected onto that line, so all four agree by
+    // construction rather than by four call sites each remembering to snap.
+    //
+    // MainWindow owns the point list and so owns this: it sets the anchor from
+    // SketchController::lastSegmentDirection() whenever the list changes, and
+    // clears it when there is nothing to continue. Fewer than two points, or
+    // two coincident ones, means no anchor and Shift does nothing at all.
+    void setSketchStraightAnchor(const gp_Pnt& prev, const gp_Dir& dir);
+    void clearSketchStraightAnchor();
+    bool hasSketchStraightAnchor() const { return myHasStraightAnchor; }
+
+    // The point that CLOSES the outline - the first one - for as long as
+    // clicking it would close it, and nothing otherwise. Shift's straight
+    // constraint stands down within sketchCloseTolerance() of it, because a
+    // constraint that makes the outline impossible to finish is not a
+    // convenience: the projection moves the click off the very point it was
+    // aimed at, so the close never fires and the key silently disables the
+    // second of the two ways to finish a sketch. Set from the same place the
+    // anchor is, off the same point list, so the two cannot disagree about
+    // which sketch they describe.
+    void setSketchCloseTarget(const gp_Pnt& first);
+    void clearSketchCloseTarget();
+    bool hasSketchCloseTarget() const { return myHasCloseTarget; }
+
+    // How near the first point a click has to be to close the outline: half a
+    // grid step while snapping, a flat 5 mm without it. It lives here rather
+    // than in MainWindow because its inputs - mySnapEnabled and mySnapStep -
+    // do, and because the straight constraint above has to consult the same
+    // number MainWindow decides the close with. Two copies of it would be two
+    // answers to "is this click on the start point".
+    double sketchCloseTolerance() const;
+
+    // The Z-layer every piece of sketch work is displayed in - the in-progress
+    // outline and the pending face (setPreview), the direct-modeling preview,
+    // the point markers, the cursor marker and the dimension annotation.
+    //
+    // It is inserted immediately after GridRenderer::zLayer(), which is itself
+    // immediately after Graphic3d_ZLayerId_Default, giving the render order
+    // bodies -> grid -> sketch work. Depth testing stays ON and depth is NOT
+    // cleared, so a body in front of a sketch line still occludes it; the only
+    // thing the layer buys is that the grid, which writes no depth, can never
+    // reject a sketch pixel. See GridRenderer::zLayer() for the whole argument
+    // and for why Graphic3d_ZLayerId_Topmost is the wrong tool here.
+    Graphic3d_ZLayerId sketchZLayer() const { return mySketchLayer; }
+    // The grid's layer, forwarded so a test can assert the order of the three
+    // without reaching through to the renderer.
+    Graphic3d_ZLayerId gridZLayer() const { return myGridRenderer.zLayer(); }
+    // The viewer's layers in RENDER ORDER, lowest first. Exposed because two
+    // ids being different says nothing about which is drawn first, and draw
+    // order is the entire contract here. Empty before the viewer exists.
+    std::vector<Graphic3d_ZLayerId> zLayerOrder() const;
+    // What a layer actually promises - the grid's depth write off, the sketch
+    // layer's depth NOT cleared. Asserting the settings rather than the ids
+    // is what makes the Topmost refusal a check instead of a comment.
+    Graphic3d_ZLayerSettings zLayerSettings(Graphic3d_ZLayerId layer) const;
+
     // The single selected face, or a null face when the selection is not
     // exactly one face. Deliberately not "the first selected face": Lock to
     // Face is enabled off this, and locking one of several highlighted faces
@@ -217,8 +313,23 @@ public:
 
     // The single selected edge, or a null edge otherwise - the same rule as
     // selectedFace(), for the same reason. This is what the dimension falls
-    // back to when the cursor leaves an edge the user has selected.
+    // back to when the cursor leaves an edge the user has selected: a length
+    // annotation over two highlighted edges could only ever measure one of
+    // them, so it measures neither.
     TopoDS_Edge selectedEdge() const;
+
+    // EVERY selected edge, which a bevel - unlike the dimension - can act on
+    // all of at once. Shift-click accumulates them through the same
+    // AIS_SelectionScheme_XOR the additive body pick uses.
+    std::vector<TopoDS_Edge> selectedEdges() const;
+
+    // The one the bevel arrow stands on: the edge the user picked LAST, so a
+    // multi-edge gesture is measured where the hand last was rather than
+    // wherever OCCT happens to iterate first. Falls back to the last entry of
+    // selectedEdges() when the remembered edge is no longer selected (a
+    // Shift-click that toggled it back off, a rebuild), and is null when
+    // nothing is selected.
+    TopoDS_Edge lastSelectedEdge() const;
 
     // Redraws whatever dimension is on screen without changing which span it
     // measures - for a display-unit switch, which changes the label's text
@@ -256,6 +367,20 @@ public:
     // MainWindow, the hovered edge here) read this.
     double worldPerPixel() const;
 
+    // The height, in world units, that the LIVE OCCT camera actually shows at
+    // the target's depth - Graphic3d_Camera::ViewDimensions(), which answers
+    // correctly for both projections (perspective: the frustum's height at the
+    // focal distance; orthographic: the parallel Scale, at every depth).
+    //
+    // Exposed for one check, and it is the only oracle that can make that
+    // check mean anything. worldPerPixel() is computed from the turntable's
+    // own distance and never reads the OCCT camera, so comparing it to itself
+    // across a projection flip is true by arithmetic whatever OCCT was told.
+    // This reads what OCCT was actually told, so a dropped or mis-ordered
+    // SetScale() - which leaves the parallel camera at its 1000 default -
+    // shows up as the mismatch it is. Returns 0 before the view exists.
+    double cameraViewHeightAtTarget() const;
+
     // Document ids of the selected solids, deduplicated (face-mode selection can
     // hit several faces of one solid).
     std::vector<int> selectedSolidIds() const;
@@ -285,20 +410,38 @@ public:
     CameraController& camera() { return myCamera; }
     const CameraController& camera() const { return myCamera; }
 
-    // "Top", "Front", ... when the camera is axis-aligned; "Persp" otherwise.
-    // The ONE source of that string. It used to live in AxisGizmo, which
-    // painted it on a chip below the axes; the chip moved into the app bar
-    // and the logic came here, beside the camera it reads, rather than being
-    // copied to its new consumer. Anything that needs the name of the current
-    // view asks this.
-    QString viewLabelText() const;
+    // The user's chosen projection - the bar's Persp/Ortho toggle, and the one
+    // route to it. Sets the base mode, DROPS any borrowed orthographic look,
+    // and pushes both straight onto the OCCT camera.
+    //
+    // Dropping the loan is what makes the button always change what is on
+    // screen. It used to be kept, on the reasoning that the toggle should
+    // decide what a face-on look returns TO rather than end it early - which
+    // is coherent, and wrong at the only moment it matters: with a loan
+    // active, clicking Ortho->Persp left effectiveOrtho() true and the
+    // viewport unmoved, twice running. The loan exists for gestures that were
+    // not about projection; this gesture is nothing else.
+    void setBaseProjection(CameraController::Projection projection);
 
-    // Every string viewLabelText() can return. A consumer that must not
-    // resize as the camera turns - the app bar's view button reserves its
-    // width - sizes itself against this rather than repeating the seven
-    // names, so adding a named view cannot leave a second list behind.
-    // viewLabelText() returns entries OF this list, so the two cannot drift.
-    static const QStringList& viewLabelNames();
+    // Whether the camera is drawing orthographically RIGHT NOW - read off the
+    // live OCCT camera, not off CameraController's own flags. Exposed for
+    // gui_smoke for the same reason solidPresentationTransform() is: a check
+    // that asked our own state machine whether it had told OCCT something
+    // would be its own oracle, and the whole point of the write site in
+    // applyCameraState() is that the two agree.
+    bool viewIsOrthographic() const;
+
+    // "Top", "Front", ... when the camera is axis-aligned; "Persp" otherwise.
+    // The ONE source of that string.
+    //
+    // Nothing in the shell paints it any more - the bar's button showed it
+    // until the Persp/Ortho toggle took that seat, and the projection is what
+    // it reads now. It stays because it is the only place that answers "is the
+    // camera square onto a world axis, and which one", which is what the
+    // suite asserts a snap flight against; a check that recomputed that from
+    // azimuth and elevation itself would be a second copy of the tolerance.
+    // If a direction readout ever comes back, this is what it reads.
+    QString viewDirectionName() const;
 
     // Re-dresses everything on the OCCT side of the bridge from the current
     // Theme spec: the background the view clears to, the two highlight
@@ -335,9 +478,16 @@ signals:
     // rubber band and the coordinate readout.
     void sketchCursorMoved(const gp_Pnt& point);
     void selectionChanged();
-    // A face double-clicked in face-selection mode. MainWindow decides what
-    // that means (it locks it); this widget knows nothing about locking.
+    // A face CTRL+double-clicked in face-selection mode. MainWindow decides
+    // what that means (it locks it); this widget knows nothing about locking.
+    // The modifier is what leaves the plain double-click free for the body
+    // route below - see mouseDoubleClickEvent().
     void faceDoubleClicked(const TopoDS_Face& face);
+    // A body plainly double-clicked while its faces or edges were what was
+    // being picked. MainWindow answers by switching to body selection - through
+    // the same QAction the rail chip triggers, because the mode is that
+    // action's checked state and nothing else may write it.
+    void bodyDoubleClicked(int solidId);
 
     // A live face pull. `distance` is signed along the pulled face's outward
     // normal and measured from the press - positive grows, negative carves -
@@ -434,8 +584,19 @@ private:
     // Both the sketch unprojection and the pull-drag mapping start here, so
     // "where is the cursor pointing" cannot be answered two different ways.
     bool rayThroughPixel(int px, int py, gp_Lin& out) const;
-    bool pointOnSketchPlane(int px, int py, gp_Pnt& out) const;
+    // `straight` is Shift's straight-continuation request - see
+    // setSketchStraightAnchor(). It is a parameter rather than a member read
+    // because the modifier belongs to the event that asked, and the two
+    // callers (the sketch click, the sketch hover) each have one in hand;
+    // reading QGuiApplication::keyboardModifiers() instead would answer from
+    // the real keyboard, which no synthetic-event suite can drive.
+    bool pointOnSketchPlane(int px, int py, gp_Pnt& out, bool straight = false) const;
     bool pickWorldPoint(int px, int py, gp_Pnt& out) const;
+    // Puts `object` in mySketchLayer, if there is one. Called BEFORE Display,
+    // never after: SetZLayer stores the id on the object's drawer and Display
+    // reads it, so setting it first means the presentation is never computed
+    // into the default layer and moved a frame later.
+    void markInSketchLayer(const Handle(AIS_InteractiveObject)& object) const;
     // Whether `point` lands on `arrow`, tested in SCREEN space against the
     // arrow's own projected endpoints rather than through AIS - see the
     // comment on PullArrowLines in PullArrow.cpp for why these arrows must not
@@ -460,6 +621,18 @@ private:
     // additive pick has taken it out for the duration - so the list of modes
     // lives in one place rather than being repeated and drifting.
     void activateManipulatorModes();
+    // Re-derives the manipulator's world size from the camera so its on-screen
+    // arms stay inside kGizmoMaxViewportFraction of the viewport's smaller
+    // dimension - see that constant. Called from attachManipulator() and from
+    // applyCameraState(), because the zoom is half of the arithmetic and the
+    // camera is the only thing that moves it.
+    //
+    // Guarded twice. It does nothing while a gizmo drag is live - resizing the
+    // thing under the user's hand mid-gesture would move the handle away from
+    // the cursor that grabbed it - and it does not call SetSize() for a value
+    // the manipulator already holds, since that recomputes every one of its
+    // presentations and this runs on every frame of an orbit.
+    void updateManipulatorSize();
     // Reads the accumulated transform, puts the PRESENTATION back to where the
     // document says it should be, snaps, and emits gizmoReleased(). The
     // presentation reset is unconditional and happens here rather than in the
@@ -481,6 +654,10 @@ private:
     Handle(V3d_Viewer) myViewer;
     Handle(V3d_View) myView;
     Handle(AIS_InteractiveContext) myContext;
+    // See sketchZLayer(). Graphic3d_ZLayerId_UNKNOWN until the viewer exists,
+    // and if the viewer ever refuses the layer everything below simply
+    // displays into the default layer as it did before.
+    Graphic3d_ZLayerId mySketchLayer = Graphic3d_ZLayerId_UNKNOWN;
     Handle(AIS_Shape) myPreview;
     // The direct-modeling channel, kept strictly apart from myPreview above.
     Handle(AIS_Shape) myModelingPreview;
@@ -506,6 +683,11 @@ private:
     PullArrowRenderer myBevelArrow;
 
     std::map<int, Handle(AIS_Shape)> mySolids;
+    // The outline items - see displayOutline(). Keyed by the same document id
+    // space bodies use, and deliberately a SEPARATE map: nothing that walks
+    // mySolids (selection, the manipulator, the wireframe toggle, the
+    // selection-mode activation) should ever find an outline in it.
+    std::map<int, Handle(AIS_Shape)> myOutlines;
 
     bool myWireframe = false;
 
@@ -515,6 +697,14 @@ private:
     gp_Pln mySketchPlane;
     bool mySnapEnabled = true;
     double mySnapStep = 10.0;      // matches the drawn grid
+
+    // The straight-continuation anchor - see setSketchStraightAnchor().
+    bool myHasStraightAnchor = false;
+    gp_Pnt myStraightPrev{0.0, 0.0, 0.0};
+    gp_Dir myStraightDir{1.0, 0.0, 0.0};
+    // The outline's closing point - see setSketchCloseTarget().
+    bool myHasCloseTarget = false;
+    gp_Pnt myCloseTarget{0.0, 0.0, 0.0};
 
     gp_Pnt myLastHoverPoint{0.0, 0.0, 0.0};
     bool myHasLastHoverPoint = false;
@@ -537,6 +727,18 @@ private:
     // about - the rotation and the scale both leave it fixed.
     Handle(AIS_Manipulator) myManipulator;
     int myManipulatorSolid = -1;
+    // The size AIS_Manipulator's own AdjustSize derived from the body's
+    // bounding box at the moment of the attach, and the size actually installed
+    // by the last updateManipulatorSize(). The first is the ceiling the clamp
+    // never grows past; the second is the equal-guard, so an orbit that leaves
+    // the zoom alone costs no presentation rebuilds at all. Both are 0 while
+    // nothing is attached.
+    double myManipulatorNaturalSize = 0.0;
+    double myManipulatorAppliedSize = 0.0;
+    // Where the gizmo stands, from the body's own bounding box at the attach.
+    // The clamp needs its DEPTH, and AIS_Manipulator::Position() cannot answer
+    // that during the attach itself - see attachManipulator().
+    gp_Pnt myManipulatorCentre;
     bool myGizmoDragActive = false;
     gp_Trsf myGizmoDelta;
     gp_Ax2 myGizmoStartPosition;
@@ -548,6 +750,13 @@ private:
     // While true, updateEdgeDimension() draws nothing - see
     // setEdgeDimensionSuppressed().
     bool myEdgeDimensionSuppressed = false;
+
+    // The edge the last pick actually added to the selection. OCCT's
+    // InitSelected order is the context's, not the user's, so "the edge you
+    // picked last" cannot be read back out of the selection - it has to be
+    // remembered as it happens. Validated against the live selection on every
+    // read (see lastSelectedEdge()), never trusted across a rebuild.
+    TopoDS_Edge myLastPickedEdge;
 
     class QVariantAnimation* myCameraAnimation = nullptr;
     bool myAnimationsEnabled = true;

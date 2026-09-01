@@ -3,11 +3,16 @@
 #include "Theme.h"
 
 #include <QAbstractButton>
+#include <QAbstractItemView>
 #include <QColorDialog>
 #include <QComboBox>
+#include <QEvent>
+#include <QFile>
+#include <QFileDialog>
 #include <QFontDatabase>
 #include <QHBoxLayout>
 #include <QHash>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QPainter>
 #include <QPainterPath>
@@ -41,6 +46,14 @@ constexpr int kPad = 12;
 constexpr int kSwatchWidth = 46;
 constexpr int kSwatchHeight = 18;
 constexpr int kSwatchRadius = 4;
+
+// A colour file is a spec and nothing else - the same string QSettings holds -
+// so there is no size at which reading more of one is useful. A cap rather
+// than a trusting readAll(): Load colours takes a path from a file dialog,
+// which is to say from anywhere, and a serialised spec is a few hundred bytes.
+// Anything past this is not a colour file, and deserializeSpec() will refuse
+// the truncated head just as it would refuse the whole.
+constexpr qint64 kMaxColourFileBytes = 64 * 1024;
 
 // `background: transparent` on a child of this card is not decoration: the
 // app-wide stylesheet paints every QWidget chrome-black, so a label or a
@@ -264,8 +277,43 @@ AppearancePanel::AppearancePanel(QWidget* parent)
         if (mySyncing) return;
         setFontFamily(family);
     });
+    // LIVE while the list is open: `highlighted` fires for whichever row the
+    // keyboard or the cursor is on, before anything is chosen, so arrowing
+    // down the list re-dresses the app one family at a time. `activated`
+    // alone - which is all this had - meant a user picked a typeface from a
+    // list of names and only then found out what it looked like.
+    //
+    // It cannot loop: setFontFamily() lands in Theme::setSpec(), which is a
+    // no-op for a spec it already holds, and the applyTheme() it broadcasts
+    // writes the combo under mySyncing.
+    connect(myFamily, &QComboBox::highlighted, this, [this](int index) {
+        if (mySyncing || index < 0) return;
+        setFontFamily(myFamily->itemText(index));
+    });
+    // view() builds the popup container on first call, which is what makes it
+    // filterable here rather than at the moment it is first shown.
+    if (myFamily->view() && myFamily->view()->window())
+        myFamily->view()->window()->installEventFilter(this);
     familyLine->addWidget(myFamily, 1);
     outer->addWidget(familyRow);
+
+    // --- the look as a file -------------------------------------------------
+    auto* fileRow = new QWidget(this);
+    makeTransparent(fileRow, QStringLiteral("appearanceFileRow"));
+    auto* fileLine = new QHBoxLayout(fileRow);
+    fileLine->setContentsMargins(0, 0, 0, 0);
+    fileLine->setSpacing(8);
+    mySave = new QPushButton(tr("Save colours..."), fileRow);
+    mySave->setToolTip(tr("Write the colours and text size to a file\n"
+                          "Keep a look you like, or hand it to somebody else."));
+    connect(mySave, &QPushButton::clicked, this, &AppearancePanel::chooseSaveFile);
+    fileLine->addWidget(mySave, 1);
+    myLoad = new QPushButton(tr("Load colours..."), fileRow);
+    myLoad->setToolTip(tr("Read a look back out of a file\n"
+                          "Applied as soon as it is opened."));
+    connect(myLoad, &QPushButton::clicked, this, &AppearancePanel::chooseLoadFile);
+    fileLine->addWidget(myLoad, 1);
+    outer->addWidget(fileRow);
 
     myReset = new QPushButton(tr("Reset to the original look"), this);
     myReset->setToolTip(tr("Put every colour and the text size back the way "
@@ -344,6 +392,114 @@ void AppearancePanel::reset()
     Theme::setSpec(Theme::defaultSpec());
 }
 
+QString AppearancePanel::colourFileSuffix() { return QStringLiteral(".furnifytheme"); }
+
+QString AppearancePanel::colourFileFilter()
+{
+    return tr("FurnifyMe colours (*%1)").arg(colourFileSuffix());
+}
+
+bool AppearancePanel::saveColoursTo(const QString& path) const
+{
+    if (path.isEmpty()) return false;
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) return false;
+    const QByteArray payload = Theme::serializeSpec().toUtf8();
+    // Both halves checked: a write can come up short on a full disk without
+    // the open having failed, and a colour file that is half a spec is a file
+    // that will be refused on the way back in - better to say so now, while
+    // the user still knows which path they chose.
+    if (file.write(payload) != payload.size()) return false;
+    return file.flush();
+}
+
+bool AppearancePanel::loadColoursFrom(const QString& path)
+{
+    if (path.isEmpty()) return false;
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) return false;
+    const QString text = QString::fromUtf8(file.read(kMaxColourFileBytes));
+
+    // THE refusal, and it is deserializeSpec()'s rather than a second parser
+    // written here: its contract is that `loaded` is untouched when it says
+    // no, so there is no state in which half a bad file has been applied.
+    Theme::Spec loaded;
+    if (!Theme::deserializeSpec(text, loaded)) return false;
+
+    // Straight into the same broadcast every swatch click uses, so the panel
+    // re-reads itself, the viewport re-dresses and MainWindow's debounced
+    // write stores it - none of which this function has to know about.
+    Theme::setSpec(loaded);
+    return true;
+}
+
+void AppearancePanel::chooseSaveFile()
+{
+    // A NATIVE dialog, and the one place this app opens something modal on
+    // purpose. The no-modal law is about the app blocking the user to ask its
+    // own questions; choosing a path on disk is the operating system's
+    // question, asked in the operating system's own surface, and File ->
+    // Save Screenshot and Export STEP already ask it exactly this way. Writing
+    // an in-app file browser to avoid the word "modal" would be worse for the
+    // user and a great deal more code.
+    const QString path = QFileDialog::getSaveFileName(this, tr("Save colours"), QString(),
+                                                      colourFileFilter());
+    if (path.isEmpty()) return;   // cancelled - not a failure
+    if (!saveColoursTo(path)) emit colourSaveFailed(path);
+}
+
+void AppearancePanel::chooseLoadFile()
+{
+    // Native, for the reason spelled out in chooseSaveFile().
+    const QString path = QFileDialog::getOpenFileName(this, tr("Load colours"), QString(),
+                                                      colourFileFilter());
+    if (path.isEmpty()) return;
+    if (!loadColoursFrom(path)) emit colourLoadRefused(path);
+}
+
+void AppearancePanel::beginFamilyPreview()
+{
+    myFamilyBeforePreview = Theme::spec().fontFamily;
+}
+
+void AppearancePanel::cancelFamilyPreview()
+{
+    if (myFamilyBeforePreview.isEmpty()) return;
+    const QString restore = myFamilyBeforePreview;
+    // Cleared FIRST: setFontFamily() broadcasts, applyTheme() runs re-entrantly
+    // off that broadcast, and a preview that were still recorded here at that
+    // moment would describe a popup that has already been answered.
+    myFamilyBeforePreview.clear();
+    setFontFamily(restore);
+}
+
+bool AppearancePanel::eventFilter(QObject* watched, QEvent* event)
+{
+    if (myFamily && myFamily->view() && watched == myFamily->view()->window()) {
+        switch (event->type()) {
+            case QEvent::Show:
+                beginFamilyPreview();
+                break;
+            case QEvent::KeyPress:
+                // Escape is answered here and then LET THROUGH, so the popup
+                // still closes the way Qt closes it - this restores the
+                // family, it does not take over the key.
+                if (static_cast<QKeyEvent*>(event)->key() == Qt::Key_Escape)
+                    cancelFamilyPreview();
+                break;
+            case QEvent::Hide:
+                // A popup closed any other way - a click on a row, a click
+                // outside - keeps whatever the preview landed on, so this only
+                // drops the fallback rather than applying it.
+                myFamilyBeforePreview.clear();
+                break;
+            default:
+                break;
+        }
+    }
+    return QWidget::eventFilter(watched, event);
+}
+
 void AppearancePanel::openColourDialog(const QString& id)
 {
     QColor current;
@@ -400,6 +556,8 @@ QWidget* AppearancePanel::swatchFor(const QString& id) const
 }
 
 QWidget* AppearancePanel::resetButton() const { return myReset; }
+QWidget* AppearancePanel::saveButton() const { return mySave; }
+QWidget* AppearancePanel::loadButton() const { return myLoad; }
 
 QStringList AppearancePanel::paintedTexts() const
 {
@@ -408,7 +566,13 @@ QStringList AppearancePanel::paintedTexts() const
     for (const Row& row : myRows) texts << row.name;
     if (mySizeLabel) texts << mySizeLabel->text();
     if (myFamilyLabel) texts << myFamilyLabel->text();
+    if (mySave) texts << mySave->text();
+    if (myLoad) texts << myLoad->text();
     if (myReset) texts << myReset->text();
+    // The file dialogs' own filter string is copy too - it names the app and
+    // the file kind in a surface the user reads - and it is neither a QAction
+    // nor a tooltip, so nothing else would sweep it.
+    texts << colourFileFilter();
     return texts;
 }
 

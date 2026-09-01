@@ -23,15 +23,61 @@ public:
     static constexpr double kMinDistance = 1.0;
     static constexpr double kMaxDistance = 100000.0;
 
+    // How the scene is projected. Two pieces of state, not one, and the split
+    // is the whole feature:
+    //
+    //   - the BASE projection is what the user chose with the bar's toggle. It
+    //     persists across sessions and nothing but that toggle moves it.
+    //   - TEMPORARY ortho is engaged by a gesture that puts the camera square
+    //     onto something - a gizmo arm, a locked face - because a face-on view
+    //     with perspective convergence is not a face-on view. It is a loan,
+    //     not a mode: the first orbit hands it back and the base projection
+    //     returns. So does the toggle itself (see
+    //     OcctViewWidget::setBaseProjection) - a control whose whole subject
+    //     is the projection must never be outvoted by a loan the user did not
+    //     ask for.
+    //
+    // effectiveOrtho() is what the renderer follows. A user in perspective who
+    // clicks an arm gets one orthographic look and their perspective back the
+    // moment they orbit; a user who chose Ortho never leaves it.
+    enum class Projection { Perspective, Orthographic };
+
     const CameraState& state() const { return myState; }
     void setState(const CameraState& s);
 
+    void setBaseProjection(Projection p) { myBaseProjection = p; }
+    Projection baseProjection() const { return myBaseProjection; }
+    void setTemporaryOrtho(bool on) { myTemporaryOrtho = on; }
+    bool temporaryOrtho() const { return myTemporaryOrtho; }
+    bool effectiveOrtho() const
+    {
+        return myTemporaryOrtho || myBaseProjection == Projection::Orthographic;
+    }
+
+    // Clears the temporary flag when it actually turns the camera. Pan, zoom
+    // and every setState() route (the snap flights included) deliberately do
+    // NOT: panning across a face-on drawing is ordinary drafting, and a
+    // fly-to that cleared its own loan on the first animation frame would
+    // never be orthographic at all.
     void orbit(double dAzimuthDeg, double dElevationDeg);
 
     gp_Pnt eyePosition() const;
     gp_Dir viewDirection() const;   // eye -> target
     gp_Dir upVector() const;
     gp_Dir rightVector() const;
+
+    // Puts the eye on `towardEye` as seen from the target, without moving the
+    // target or changing the distance - the turntable's azimuth and elevation
+    // solved backwards from a direction. This is how a face lock flies square
+    // onto a face: hand it the face's OUTWARD normal and viewDirection() comes
+    // back antiparallel to it.
+    //
+    // Elevation is clamped like everything else, so a horizontal face lands at
+    // 88 degrees rather than 90 - two degrees off dead-on, the unavoidable
+    // price of the no-roll invariant (the same clamp setViewTop() meets). A
+    // vertical direction leaves azimuth undefined, and the previous azimuth is
+    // kept, exactly as setPivot() does.
+    void lookFrom(const gp_Dir& towardEye);
 
     void setPivot(const gp_Pnt& pivot);
     void pan(double rightUnits, double upUnits);
@@ -66,4 +112,6 @@ public:
 
 private:
     CameraState myState;
+    Projection myBaseProjection = Projection::Perspective;
+    bool myTemporaryOrtho = false;
 };

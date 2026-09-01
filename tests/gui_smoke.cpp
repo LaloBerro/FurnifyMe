@@ -69,6 +69,7 @@
 #include <QDockWidget>
 #include <QElapsedTimer>
 #include <QEnterEvent>
+#include <QFile>
 #include <QImage>
 #include <QKeyEvent>
 #include <QKeySequence>
@@ -85,10 +86,13 @@
 #include <QSplitter>
 #include <QStatusBar>
 #include <QString>
+#include <QWheelEvent>
 
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepGProp.hxx>
 #include <BRep_Tool.hxx>
@@ -138,6 +142,28 @@ int g_failures = 0;
 // happens and whether or not anybody remembered to pin it.
 int g_checks = 0;
 
+// Checks this run did not execute because the MACHINE could not offer what
+// they need - a second installed font family to preview, a composited window
+// capture off Windows. Counted, named on stdout, and added to g_checks before
+// the floor is compared.
+//
+// The floor had zero headroom and two environment-dependent blocks under it,
+// so a perfectly healthy run on a box with one font installed failed with
+// "checks 1267 < floor 1272" - a message that says "a guard stopped letting
+// its checks run" about a machine that simply has fewer fonts. The counter
+// exists so the two cases stop looking identical: a SILENT skip still drops
+// the total and still fails, while a skip that names itself is accounted for
+// and prints its reason. Never reach for this to quiet a guard whose
+// condition your own change made false - that is the drop the floor is for.
+int g_skippedByEnvironment = 0;
+
+void skipByEnvironment(int checks, const QString& why)
+{
+    g_skippedByEnvironment += checks;
+    std::printf("[skip] %d check%s not run - %s\n", checks, checks == 1 ? "" : "s",
+                qPrintable(why));
+}
+
 // The floor a full run must reach.
 //
 // HOW TO UPDATE IT: add your checks, run the suite at native scale, read the
@@ -146,10 +172,13 @@ int g_checks = 0;
 // times (checkNoBlackLine over however many captures a run takes) cannot make
 // it brittle.
 //
+// Compared against g_checks + g_skippedByEnvironment, not g_checks alone -
+// see skipByEnvironment() above for the difference that draws.
+//
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 965;
+constexpr int kCheckFloor = 1318;
 
 void check(bool condition, const QString& what)
 {
@@ -157,6 +186,52 @@ void check(bool condition, const QString& what)
     std::printf("%-6s %s\n", condition ? "[ ok ]" : "[FAIL]", qPrintable(what));
     if (!condition) ++g_failures;
 }
+
+// Drops every mouse, wheel and key event that arrives from the WINDOW SYSTEM
+// rather than from this file.
+//
+// Two reasons, and the second one is why it is not merely belt-and-braces.
+//
+// It enforces the law this harness was built around: nothing the suite does
+// goes through the OS input queue, so the machine stays usable while it runs
+// - and the converse has to hold too, or the machine's user is a second
+// driver of the app under test. `spontaneous()` is exactly that distinction:
+// true for anything the platform posted, false for every sendEvent() below.
+//
+// And it fixes the 1.75x flake. "startup distance is 700mm" failed
+// intermittently at that scale and cascaded to 43 downstream failures when it
+// did. The camera's distance is mutated by exactly one thing between show()
+// and that check - a wheel event - and Windows' "scroll inactive windows on
+// hover" delivers real ones to whatever the pointer happens to be over,
+// without focus and without a click. The window is parked at 40,40 and is
+// larger on screen at 1.75x, so it covers more of where a resting cursor
+// tends to sit: the same defect, more likely to be hit, which is precisely
+// the scale-dependence the flake showed. Determinism in both directions -
+// the suite does not touch the user's input, and the user's input does not
+// touch the suite.
+class SpontaneousInputBlocker : public QObject {
+public:
+    using QObject::QObject;
+
+protected:
+    bool eventFilter(QObject*, QEvent* event) override
+    {
+        if (!event->spontaneous()) return false;
+        switch (event->type()) {
+        case QEvent::MouseButtonPress:
+        case QEvent::MouseButtonRelease:
+        case QEvent::MouseButtonDblClick:
+        case QEvent::MouseMove:
+        case QEvent::Wheel:
+        case QEvent::KeyPress:
+        case QEvent::KeyRelease:
+        case QEvent::ShortcutOverride:
+            return true;   // eaten: it was not this suite's
+        default:
+            return false;
+        }
+    }
+};
 
 // RAII for the one probe below that needs to seed QSettings before
 // constructing a persistProgress=true MainWindow: saves the real
@@ -228,6 +303,33 @@ void clickAt(QWidget* target, const QPointF& pos,
     QCoreApplication::sendEvent(target, &release);
 
     settle(80);
+}
+
+// A double-click, delivered as Qt delivers a real one: the second press
+// arrives as QEvent::MouseButtonDblClick rather than as a second
+// MouseButtonPress, and the release that follows it is an ordinary one. Both
+// halves matter - a probe that sent only the DblClick would never notice a
+// handler that left the release to re-pick underneath it, which is the bug
+// WA_NoMousePropagation exists for one widget over.
+void doubleClickAt(QWidget* target, const QPointF& pos,
+                   Qt::KeyboardModifiers mods = Qt::NoModifier)
+{
+    const QPointF global = target->mapToGlobal(pos);
+
+    QMouseEvent press(QEvent::MouseButtonPress, pos, global,
+                      Qt::LeftButton, Qt::LeftButton, mods);
+    QCoreApplication::sendEvent(target, &press);
+    QMouseEvent release(QEvent::MouseButtonRelease, pos, global,
+                        Qt::LeftButton, Qt::NoButton, mods);
+    QCoreApplication::sendEvent(target, &release);
+    QMouseEvent second(QEvent::MouseButtonDblClick, pos, global,
+                       Qt::LeftButton, Qt::LeftButton, mods);
+    QCoreApplication::sendEvent(target, &second);
+    QMouseEvent secondRelease(QEvent::MouseButtonRelease, pos, global,
+                              Qt::LeftButton, Qt::NoButton, mods);
+    QCoreApplication::sendEvent(target, &secondRelease);
+
+    settle(150);
 }
 
 // A press at one point and a release at ANOTHER, with no move event between
@@ -346,6 +448,22 @@ void sketchQuad(MainWindow& window, double x0, double y0, double x1, double y1)
     clickAt(view, QPointF(x0 * w, y1 * h));
 }
 
+// The eye on the drawer's TOP row. Each row carries exactly one QPushButton
+// and outline rows come first, so the first visible one is the topmost row's.
+//
+// One implementation, because two places wanted precisely this scan and a
+// second copy is a scan that can drift into looking for something else - the
+// pair differed already: one pinned its result with a check and the other
+// silently did nothing when it found none.
+QPushButton* firstVisibleRowToggle(QWidget* drawer)
+{
+    if (!drawer) return nullptr;
+    for (QPushButton* button : drawer->findChildren<QPushButton*>()) {
+        if (button->isVisible()) return button;
+    }
+    return nullptr;
+}
+
 // Sketch-quad-then-extrude, for probes that only care about ending up with a
 // given number of bodies and would otherwise repeat this boilerplate inline.
 // The one copy of the banned list. Two blocks sweep with it now - the
@@ -357,10 +475,50 @@ QStringList bannedWords()
     // pair of operations (BevelArrow, bevelAxis) and it must never reach the
     // user, who is offered a Fillet that rounds an edge or a Chamfer that
     // flattens one - two operations with two names, not one vague one.
+    //
+    // "round" and "flatten" joined it after the whole-branch review found two
+    // Failure sentences saying "will only round some of them" / "will only
+    // flatten some of them" - the Never column for Fillet and Chamfer,
+    // shipped for a whole branch because the sweep could not see them. They
+    // are matched at a WORD BOUNDARY, not as substrings: the other seven are
+    // code words nothing legitimate contains, while "background", "ground"
+    // and "surround" are ordinary copy this app is entitled to use. See
+    // usesBannedWord().
     return {QStringLiteral("Fuse"),  QStringLiteral("Solid"),
             QStringLiteral("OCCT"),  QStringLiteral("mm3"),
             QStringLiteral("(s)"),   QStringLiteral("Merge"),
-            QStringLiteral("Join"),  QStringLiteral("bevel")};
+            QStringLiteral("Join"),  QStringLiteral("bevel"),
+            QStringLiteral("round"), QStringLiteral("flatten")};
+}
+
+// Which of the banned words are matched at a word boundary rather than as a
+// bare substring. Only the two English ones need it, and only at the FRONT of
+// the word: "rounded", "rounds" and "flattening" are all the ban's subject,
+// while "background" and "surround" are not.
+bool bannedWordNeedsBoundary(const QString& word)
+{
+    return word.compare(QStringLiteral("round"), Qt::CaseInsensitive) == 0 ||
+           word.compare(QStringLiteral("flatten"), Qt::CaseInsensitive) == 0;
+}
+
+// THE matcher. Every sweep in this file goes through it, so the boundary rule
+// cannot hold at one surface and not another - which is exactly how the two
+// refusal sentences above survived: a rule that lives at one call site is not
+// a rule.
+bool usesBannedWord(const QString& text, const QString& word)
+{
+    if (!bannedWordNeedsBoundary(word)) return text.contains(word, Qt::CaseInsensitive);
+
+    // Hand-rolled rather than a QRegularExpression, because the boundary this
+    // wants is one-sided (a preceding letter or digit disqualifies; a
+    // following one does not) and \b would need spelling out either way.
+    for (int at = text.indexOf(word, 0, Qt::CaseInsensitive); at >= 0;
+         at = text.indexOf(word, at + 1, Qt::CaseInsensitive)) {
+        if (at == 0) return true;
+        const QChar before = text.at(at - 1);
+        if (!before.isLetterOrNumber()) return true;
+    }
+    return false;
 }
 
 bool buildBody(MainWindow& window, double x0, double y0, double x1, double y1, double height)
@@ -465,7 +623,16 @@ void checkNoBlackLine(const QImage& shot, const QString& label)
     check(!shot.isNull() && shot.width() > kFrame * 4 && shot.height() > kFrame * 4,
           QStringLiteral("the %1 capture is a real window to sweep (%2x%3)")
               .arg(label).arg(shot.width()).arg(shot.height()));
-    if (shot.isNull()) return;
+    if (shot.isNull()) {
+        // The sweep below cannot run, and on a machine with no composited
+        // capture (printWindowCapture()'s non-Windows path, or a
+        // PrintWindow that came back empty) that is the environment, not a
+        // guard that went quiet. Accounted rather than silently missing -
+        // the check above has already reported it as a failure.
+        skipByEnvironment(1, QStringLiteral("no composited capture to sweep for the %1")
+                                 .arg(label));
+        return;
+    }
 
     QPoint at;
     const int run = longestBlackRun(shot, kFrame, at);
@@ -695,6 +862,11 @@ int main(int argc, char* argv[])
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) qputenv("QT_QPA_PLATFORM", "xcb");
 #endif
     QApplication app(argc, argv);
+    // Before anything is shown, so not one real mouse-move, wheel or keystroke
+    // can reach the app under test - see SpontaneousInputBlocker for the law
+    // it enforces and the 1.75x flake it closes.
+    SpontaneousInputBlocker inputBlocker;
+    app.installEventFilter(&inputBlocker);
     // Exercise what actually ships: main.cpp themes the app before building the
     // window, so the test must too, or it checks an app nobody runs.
     Theme::apply(app);
@@ -755,6 +927,36 @@ int main(int argc, char* argv[])
         }
     }
 
+    // --- the window carries the app's own mark --------------------------------
+    // Phase 7 item 16. Asserted on the WINDOW rather than on QApplication,
+    // because that is what a title bar and a taskbar button read - and because
+    // this suite never runs main.cpp, so a mark set only there would be a mark
+    // no check in this file could see. The pixel assertion is what stops an
+    // empty-but-non-null QIcon from passing: a QIcon with no pixmaps is not
+    // null, it simply draws nothing.
+    {
+        check(!window.windowIcon().isNull(), "the window carries an application icon");
+        const QPixmap mark = window.windowIcon().pixmap(64, 64);
+        check(!mark.isNull() && mark.width() >= 32 && mark.height() >= 32,
+              QStringLiteral("and it really has pixels at the size an OS asks for "
+                             "(%1x%2)").arg(mark.width()).arg(mark.height()));
+        // It is the shell's own palette, not a default: the accent colour has
+        // to actually appear in it. Sampled over the whole image rather than at
+        // one point, since the mark's position within the tile is the icon's
+        // business and not this check's.
+        const QImage markImage = mark.toImage().convertToFormat(QImage::Format_ARGB32);
+        int accentPixels = 0;
+        for (int y = 0; y < markImage.height(); ++y) {
+            for (int x = 0; x < markImage.width(); ++x) {
+                if (colorDistance(markImage.pixelColor(x, y), Theme::accent()) < 20.0)
+                    ++accentPixels;
+            }
+        }
+        check(accentPixels > 100,
+              QStringLiteral("and it is painted in this app's own accent (%1 px)")
+                  .arg(accentPixels));
+    }
+
     // --- the walkthrough appears for a newcomer -------------------------------
     {
         WalkthroughPanel* guide = window.findChild<WalkthroughPanel*>();
@@ -784,6 +986,57 @@ int main(int argc, char* argv[])
         check(std::fabs(cam.azimuthDeg - (-45.0)) < 1e-6, "startup azimuth is -45");
         check(std::fabs(cam.elevationDeg - 30.0) < 1e-6, "startup elevation is +30");
         check(std::fabs(cam.distance - 700.0) < 1e-6, "startup distance is 700mm");
+    }
+
+    // --- Fit All knows outlines exist -----------------------------------------
+    // Whole-branch review, Important 3. fitAll() walked mySolids alone, so a
+    // document holding only outlines fell straight through to the +/-250
+    // fallback box - and an outline drawn outside it could not be brought
+    // back by the one control whose entire job is to find things.
+    //
+    // Run HERE, before any body exists, because that is the state the defect
+    // lives in: with a body anywhere in the document the bodies' bounds carry
+    // the frame and the outline's absence from it is invisible. Driven at the
+    // viewport, whose map fitAll() actually reads, rather than through the
+    // document - the id is the viewport's own and is removed again below.
+    {
+        const CameraState beforeFit = view->camera().state();
+        BRepBuilderAPI_MakePolygon poly;
+        poly.Add(gp_Pnt(2800.0, 2800.0, 0.0));
+        poly.Add(gp_Pnt(3200.0, 2800.0, 0.0));
+        poly.Add(gp_Pnt(3200.0, 3200.0, 0.0));
+        poly.Add(gp_Pnt(2800.0, 3200.0, 0.0));
+        poly.Close();
+        const TopoDS_Face remote = BRepBuilderAPI_MakeFace(poly.Wire(), Standard_True);
+        check(!remote.IsNull(),
+              "a 400mm outline 3,000mm out, well outside the fallback box");
+        constexpr int kProbeOutlineId = 90001;
+        view->displayOutline(kProbeOutlineId, remote);
+        settle(150);
+        check(view->outlineCount() == 1 && window.document().count() == 0,
+              "the viewport is showing one outline and no body at all");
+
+        view->fitAll();
+        settle(250);
+        const gp_Pnt outlineCentre(3000.0, 3000.0, 0.0);
+        const double toOutline = view->camera().state().target.Distance(outlineCentre);
+        check(toOutline < 100.0,
+              QStringLiteral("Fit All frames it - the camera target lands on the "
+                             "outline's own centre (%1 mm away)").arg(toOutline));
+        // The other half, and the one that makes this RED rather than merely
+        // green: without the fix the target is the fallback box's centre, on
+        // the origin, ~4,240 mm from where the outline actually is.
+        const double toOrigin = view->camera().state().target.Distance(gp_Pnt(0.0, 0.0, 5.0));
+        check(toOrigin > 1000.0,
+              QStringLiteral("and not on the +/-250 fallback box the outline-only "
+                             "document used to fall to (%1 mm from the origin)")
+                  .arg(toOrigin));
+
+        view->removeOutline(kProbeOutlineId);
+        settle(120);
+        check(view->outlineCount() == 0, "and the probe leaves no outline behind it");
+        view->camera().setState(beforeFit);
+        settle(120);
     }
 
     // --- turntable input ------------------------------------------------------
@@ -829,8 +1082,9 @@ int main(int argc, char* argv[])
 
     // --- axis gizmo -----------------------------------------------------------
     // The gizmo is axes and tips only now: its painted label chip moved into
-    // the app bar, and the string it showed has one source,
-    // OcctViewWidget::viewLabelText(), which both this block and the bar read.
+    // the app bar, which shows the projection rather than the direction. The
+    // direction name has one source, OcctViewWidget::viewDirectionName(),
+    // which this block reads as its oracle for "square onto a world axis".
     {
         AxisGizmo* gizmo = window.findChild<AxisGizmo*>();
         check(gizmo != nullptr, "the viewport has an axis gizmo");
@@ -840,8 +1094,97 @@ int main(int argc, char* argv[])
             settle(150);
             check(std::fabs(view->camera().state().elevationDeg - 88.0) < 1e-3,
                   "clicking the +Z cone goes to Top");
-            check(view->viewLabelText() == QStringLiteral("Top"),
-                  "the view label reads Top when aligned");
+            check(view->viewDirectionName() == QStringLiteral("Top"),
+                  "the camera reads as square onto Top when aligned");
+
+            // An axis view is a face-on view, and a face-on view with
+            // perspective convergence is not one. The arm click borrows
+            // orthographic; the BASE mode is untouched, which is the whole
+            // distinction (see CameraController::Projection).
+            check(view->viewIsOrthographic(),
+                  "and clicking an arm lands the camera orthographic");
+            check(view->camera().baseProjection() ==
+                      CameraController::Projection::Perspective,
+                  "without changing the projection the user chose");
+            {
+                AppBar* projBar = qobject_cast<AppBar*>(window.menuWidget());
+                QAbstractButton* projButton =
+                    projBar ? qobject_cast<QAbstractButton*>(projBar->projectionButton())
+                            : nullptr;
+                check(projButton != nullptr &&
+                          projButton->text() == AppBar::projectionLabel(false),
+                      QStringLiteral("so the bar's readout still says Persp (\"%1\")")
+                          .arg(projButton ? projButton->text() : QStringLiteral("<none>")));
+            }
+
+            // ...and the first orbit hands it back. A right-button drag is the
+            // real route - the widget's own mouseMoveEvent, not a poke at
+            // CameraController - because the loan is cleared inside orbit()
+            // and pushed to the OCCT camera by applyCameraState(), and only
+            // the drag exercises both.
+            dragButton(view, QPointF(view->width() * 0.5, view->height() * 0.5),
+                       QPointF(view->width() * 0.5 + 40.0, view->height() * 0.5),
+                       Qt::RightButton);
+            settle(120);
+            check(!view->viewIsOrthographic(),
+                  "and the first orbit puts perspective back");
+
+            // Pan and zoom must NOT: panning across a face-on drawing is
+            // ordinary drafting. Back to Top first, since the orbit above
+            // spent the loan.
+            clickAt(gizmo, gizmo->tipCenter(2, true));
+            settle(150);
+            check(view->viewIsOrthographic(), "a second arm click borrows it again");
+            dragButton(view, QPointF(view->width() * 0.5, view->height() * 0.5),
+                       QPointF(view->width() * 0.5 + 40.0, view->height() * 0.5),
+                       Qt::MiddleButton);
+            settle(120);
+            check(view->viewIsOrthographic(), "and a pan keeps it");
+            {
+                QWheelEvent wheel(QPointF(view->width() * 0.5, view->height() * 0.5),
+                                  view->mapToGlobal(QPointF(view->width() * 0.5,
+                                                            view->height() * 0.5)),
+                                  QPoint(0, 0), QPoint(0, 120), Qt::NoButton,
+                                  Qt::NoModifier, Qt::NoScrollPhase, false);
+                QCoreApplication::sendEvent(view, &wheel);
+                settle(120);
+            }
+            check(view->viewIsOrthographic(), "and so does a wheel notch");
+
+            // --- the toggle always changes what you see ----------------------
+            // A loan is live right now, which is the state that used to make
+            // the Persp/Ortho button do visibly nothing: with the loan kept,
+            // the first click moved the base to Ortho (no visual change, since
+            // ortho was already on screen) and the SECOND click moved it back
+            // to Persp while the loan held effectiveOrtho() true - so the user
+            // clicked twice, watched the label change twice, and saw the
+            // viewport change never.
+            //
+            // The toggle drops the loan now. Driven through the real action,
+            // and read off the LIVE OCCT camera, not our own flag.
+            {
+                QAction* orthoNow = action(window, QStringLiteral("Orthographic"));
+                check(orthoNow != nullptr && !orthoNow->isChecked() &&
+                          view->camera().temporaryOrtho(),
+                      "the loan is live and the chosen mode is still perspective");
+                if (orthoNow) {
+                    orthoNow->trigger();
+                    settle(200);
+                    check(orthoNow->isChecked() && !view->camera().temporaryOrtho(),
+                          "one click adopts Ortho as the base AND hands the loan back");
+                    check(view->viewIsOrthographic(),
+                          "the view is orthographic because that is now the mode, "
+                          "not because anything is borrowed");
+
+                    orthoNow->trigger();
+                    settle(200);
+                    check(!view->viewIsOrthographic(),
+                          "and the next click actually returns to perspective - with the "
+                          "loan kept, this is the one that used to do nothing");
+                    check(!orthoNow->isChecked() && !view->camera().temporaryOrtho(),
+                          "leaving neither a chosen ortho nor a borrowed one");
+                }
+            }
 
             // Clicking the -Y ball views from behind.
             clickAt(gizmo, gizmo->tipCenter(1, false));
@@ -916,6 +1259,21 @@ int main(int argc, char* argv[])
                       .arg(gizmoNubs.isEmpty() ? QStringLiteral("all four solid viewport()")
                                                : gizmoNubs.join(QStringLiteral("; "))));
         }
+
+        // Restore the exact startup pose AND the projection, for the same
+        // reason the block above this one does: every later check clicks at
+        // fractions tuned for the startup camera, and this block has orbited,
+        // panned, zoomed and borrowed an orthographic look. The bar's view
+        // button used to put the pose back as a side effect of being clicked;
+        // it is the projection toggle now and snaps nothing, so the restore
+        // is explicit.
+        view->camera().setTemporaryOrtho(false);
+        view->camera().setState(CameraState{});
+        trigger(window, QStringLiteral("Axonometric"));
+        settle(200);
+        check(std::fabs(view->camera().state().azimuthDeg - (-45.0)) < 1e-3 &&
+                  !view->viewIsOrthographic(),
+              "camera and projection restored to the startup state after the gizmo block");
     }
 
     // --- the app bar owns the menu strip --------------------------------------
@@ -973,40 +1331,203 @@ int main(int argc, char* argv[])
                   "and no binding fell out of its menu group in the move");
         }
 
-        QAbstractButton* viewButton =
-            bar ? qobject_cast<QAbstractButton*>(bar->viewLabelButton()) : nullptr;
-        check(viewButton != nullptr, "the bar carries a view label button");
-        if (bar && viewButton) {
-            trigger(window, QStringLiteral("Top"));
-            settle(250);
-            check(view->viewLabelText() == QStringLiteral("Top") &&
-                      viewButton->text() == QStringLiteral("Top"),
-                  QStringLiteral("the bar's view label follows the camera (\"%1\")")
-                      .arg(viewButton->text()));
+        // The seat the view-direction readout used to hold is the Persp/Ortho
+        // toggle now. It no longer snaps to the axonometric pose (that lives
+        // on the gizmo, keys 0-3 and the View menu) and it deliberately does
+        // NOT record view.changed: a projection flip is not a look in a named
+        // direction, and the hint that teaches the gizmo retires on that
+        // event. Both halves of that are asserted here, because a control
+        // that quietly kept either behaviour would still show the right word.
+        QAbstractButton* projButton =
+            bar ? qobject_cast<QAbstractButton*>(bar->projectionButton()) : nullptr;
+        check(projButton != nullptr, "the bar carries a projection toggle");
+        if (bar && projButton) {
+            check(projButton->text() == AppBar::projectionLabel(false) &&
+                      !view->viewIsOrthographic(),
+                  QStringLiteral("it starts on the perspective the app ships with "
+                                 "(\"%1\")")
+                      .arg(projButton->text()));
 
             // A real hit test, not an event aimed at the widget we hope is
             // reachable: childAt() is the mechanism a user's click goes
             // through, and it is what caught an unreachable control once
             // already (see the walkthrough's skip control).
-            check(bar->childAt(viewButton->geometry().center()) == viewButton,
-                  "childAt() at the view label's centre finds the button itself");
+            check(bar->childAt(projButton->geometry().center()) == projButton,
+                  "childAt() at the toggle's centre finds the button itself");
 
             const int before = window.progress().count("view.changed");
-            clickAt(viewButton, QPointF(viewButton->width() / 2.0,
-                                        viewButton->height() / 2.0));
+            const double azBefore = view->camera().state().azimuthDeg;
+            const double elBefore = view->camera().state().elevationDeg;
+            // The scale invariant, sampled in perspective and compared in
+            // ortho below. Pinned on this side too, so the ortho comparison
+            // below is against a figure already known to be right rather than
+            // against whatever perspective happened to be doing.
+            const double wppBefore = view->worldPerPixel();
+            {
+                const double shown = view->cameraViewHeightAtTarget();
+                const double wanted = wppBefore * std::max(1, view->height());
+                check(wanted > 1.0e-6 &&
+                          std::fabs(shown - wanted) / wanted < 1.0e-6,
+                      QStringLiteral("the perspective camera shows the height "
+                                     "worldPerPixel() assumes (%1 mm against %2 mm)")
+                          .arg(shown, 0, 'f', 4)
+                          .arg(wanted, 0, 'f', 4));
+            }
+
+            clickAt(projButton, QPointF(projButton->width() / 2.0,
+                                        projButton->height() / 2.0));
             settle(300);
-            check(std::fabs(view->camera().state().azimuthDeg - (-45.0)) < 1e-3 &&
-                      std::fabs(view->camera().state().elevationDeg - 30.0) < 1e-3,
-                  "clicking it returns to the axonometric pose the gizmo's label "
-                  "chip used to");
-            check(view->viewLabelText() == QStringLiteral("Persp") &&
-                      viewButton->text() == QStringLiteral("Persp"),
-                  "and the pose it lands on is labelled Persp");
-            check(window.progress().count("view.changed") == before + 1,
-                  QStringLiteral("...and records view.changed exactly once "
-                                 "(%1 then %2)")
+            // The LIVE OCCT camera, not our own flag: the write site in
+            // applyCameraState() is the thing under test, and asking
+            // CameraController whether it had told OCCT something would be
+            // its own oracle.
+            check(view->viewIsOrthographic(),
+                  "clicking it flips the camera's actual projection to orthographic");
+            check(view->camera().baseProjection() ==
+                      CameraController::Projection::Orthographic,
+                  "and it is the BASE mode that moved, not a borrowed look");
+            check(projButton->text() == AppBar::projectionLabel(true),
+                  QStringLiteral("the button reads Ortho (\"%1\")")
+                      .arg(projButton->text()));
+            check(std::fabs(view->camera().state().azimuthDeg - azBefore) < 1e-9 &&
+                      std::fabs(view->camera().state().elevationDeg - elBefore) < 1e-9,
+                  "and the camera did not move - the toggle snaps to no pose");
+            check(window.progress().count("view.changed") == before,
+                  QStringLiteral("...and records no view.changed, so it cannot retire "
+                                 "the hint that teaches the gizmo (%1 then %2)")
                       .arg(before)
                       .arg(window.progress().count("view.changed")));
+
+            // The menu entry and the button are one action, so the menu must
+            // already show it checked - a second source of truth would show
+            // here first.
+            QAction* orthoAction = action(window, QStringLiteral("Orthographic"));
+            check(orthoAction != nullptr && orthoAction->isCheckable() &&
+                      orthoAction->isChecked(),
+                  "the View menu's Orthographic entry is the same state, already checked");
+
+            // --- the parallel-Scale invariant, asserted where it protects ----
+            // worldPerPixel() is ONE formula for both projections, and that
+            // holds only because applyCameraState() sets the orthographic
+            // camera's Scale to exactly the perspective visible height at
+            // target depth. Every screen-sized thing in the scene rides on it:
+            // the dimension arrowheads and gaps, and both drag arrows' mapping
+            // from pixels to millimetres.
+            //
+            // Nothing else in the suite can catch a mis-scaled ortho camera.
+            // The unprojection round trip cannot - it goes out and back
+            // through the same matrix, so a camera scaled 2x agrees with
+            // itself perfectly.
+            //
+            // And neither would comparing worldPerPixel() to itself across the
+            // flip: it is computed from the turntable's own distance and never
+            // reads the OCCT camera, so it is unchanged by arithmetic whatever
+            // OCCT was told. The oracle has to be what OCCT was ACTUALLY told,
+            // which is cameraViewHeightAtTarget() - the live
+            // Graphic3d_Camera::ViewDimensions(). Drop the SetScale line, or
+            // move it above the SetProjectionType that must precede it, and
+            // the parallel camera sits at its 1000 default and this fails.
+            const double wppAfter = view->worldPerPixel();
+            const double shownAfter = view->cameraViewHeightAtTarget();
+            const double wantedAfter = wppAfter * std::max(1, view->height());
+            check(std::fabs(wppAfter - wppBefore) < 1.0e-9,
+                  QStringLiteral("world-per-pixel is unchanged by the flip (%1 then %2 "
+                                 "mm/px)")
+                      .arg(wppBefore, 0, 'g', 12)
+                      .arg(wppAfter, 0, 'g', 12));
+            check(wantedAfter > 1.0e-6 &&
+                      std::fabs(shownAfter - wantedAfter) / wantedAfter < 1.0e-6,
+                  QStringLiteral("and the orthographic camera really shows that height - "
+                                 "its parallel scale is tied to the perspective framing, "
+                                 "not left at a default (shows %1 mm, wants %2 mm)")
+                      .arg(shownAfter, 0, 'f', 4)
+                      .arg(wantedAfter, 0, 'f', 4));
+
+            // Half of a side-by-side: the SAME camera pose, drawn both ways,
+            // which is the only comparison that shows what the mode does. The
+            // check above has just pinned that the toggle moved nothing but
+            // the projection, so the two frames differ in exactly one thing -
+            // and what the pair shows is the ground grid, which converges
+            // toward a horizon under perspective and is perfectly uniform
+            // under a parallel projection.
+            view->saveSnapshot(outDir + "/j-projection-ortho.png");
+
+            clickAt(projButton, QPointF(projButton->width() / 2.0,
+                                        projButton->height() / 2.0));
+            settle(300);
+            view->saveSnapshot(outDir + "/j-projection-persp.png");
+            check(!view->viewIsOrthographic() &&
+                      projButton->text() == AppBar::projectionLabel(false),
+                  "clicking again goes back to perspective");
+            check(orthoAction != nullptr && !orthoAction->isChecked(),
+                  "and the menu entry follows it back");
+
+            // --- the unprojection audit, proved rather than reasoned about ---
+            // Every pixel-to-world route in this app runs through
+            // OcctViewWidget::rayThroughPixel(), which asks
+            // V3d_View::ConvertWithProj for a ray. Under perspective that ray
+            // starts at the eye and fans out; under a parallel projection
+            // every ray is the view direction and the origin is the pixel
+            // itself. ConvertWithProj is documented to handle both, and this
+            // is the check that says so rather than the comment that assumes
+            // it - a wrong ray does not crash, it silently puts the point
+            // somewhere plausible and wrong.
+            //
+            // The proof is a ROUND TRIP: click a pixel, take the sketch point
+            // the app derived from it, project that point back, and land on
+            // the pixel that was clicked. A check that only asserted Z == 0
+            // would pass on any point of the ground plane, which is every
+            // wrong answer this could produce.
+            if (orthoAction) {
+                orthoAction->trigger();
+                settle(200);
+                check(view->viewIsOrthographic(), "in orthographic for the unprojection probe");
+
+                trigger(window, QStringLiteral("Start Sketch"));
+                const QPointF probes[3] = {
+                    QPointF(view->width() * 0.38, view->height() * 0.38),
+                    QPointF(view->width() * 0.61, view->height() * 0.40),
+                    QPointF(view->width() * 0.55, view->height() * 0.62)};
+                bool onPlane = true;
+                double worstPixel = 0.0;
+                for (int p = 0; p < 3; ++p) {
+                    clickAt(view, probes[p]);
+                    settle(40);
+                    if (window.sketch().pointCount() != static_cast<size_t>(p + 1)) {
+                        onPlane = false;
+                        break;
+                    }
+                    const gp_Pnt placed = window.sketch().points().back();
+                    // On the plane it was drawn on - the ground, since nothing
+                    // is locked here.
+                    onPlane = onPlane && std::fabs(placed.Z()) < 1.0e-6;
+                    QPoint back;
+                    onPlane = onPlane && view->projectToScreen(placed, back);
+                    // Snap to Grid is on by default, so the placed point is
+                    // rounded off the exact ray hit before it is stored; at
+                    // the startup framing one grid step is a handful of
+                    // pixels, which is the tolerance here. A projection that
+                    // did not understand parallel rays misses by a fraction of
+                    // the viewport, not by a grid step.
+                    worstPixel = std::max(
+                        worstPixel,
+                        std::hypot(back.x() - probes[p].x(), back.y() - probes[p].y()));
+                }
+                check(onPlane,
+                      "every point clicked in orthographic lands exactly on the "
+                      "sketch plane");
+                check(onPlane && worstPixel < 24.0,
+                      QStringLiteral("and projects back to the pixel it was clicked at, "
+                                     "so ConvertWithProj's parallel-projection ray is "
+                                     "right (worst miss %1 px)")
+                          .arg(worstPixel, 0, 'f', 1));
+
+                trigger(window, QStringLiteral("Cancel Sketch"));
+                orthoAction->trigger();
+                settle(200);
+                check(!view->viewIsOrthographic() && !window.isSketching(),
+                      "the probe leaves perspective and no sketch behind it");
+            }
         }
 
         QAbstractButton* unitButton =
@@ -1641,6 +2162,206 @@ int main(int argc, char* argv[])
         // fourth corner - what "look at it" asks for.
         view->saveSnapshot(outDir + "/i-sketch-markers.png");
 
+        // --- and the three marks are told apart by SHAPE, in pixels ------
+        //
+        // The count and childAt checks above prove three marker OBJECTS
+        // exist; they cannot tell a filled square from a ring from nothing
+        // at all, and this file has twice shipped a marker primitive that
+        // drew nothing (Aspect_TOM_POINT, Graphic3d_ArrayOfTriangles). So
+        // the styles are sampled off the OCCT dump: a filled accent square
+        // on the first point, a violet ring at the cursor with a hollow
+        // middle, and neither colour where the other one lives.
+        {
+            const QImage shot(outDir + "/i-sketch-markers.png");
+            const double scale =
+                shot.isNull() ? 0.0 : double(shot.width()) / std::max(1, view->width());
+            check(!shot.isNull() && scale > 0.5,
+                  QStringLiteral("the marker snapshot can be sampled (%1x%2, %3 px per "
+                                 "logical px)")
+                      .arg(shot.width()).arg(shot.height()).arg(scale));
+
+            // Logical viewport point -> pixel in the dump. The dump is in
+            // DEVICE pixels and projectToScreen answers in logical ones -
+            // CLAUDE.md's own rule that everything outside the two
+            // conversion helpers is logical - so the ratio is applied here
+            // rather than assumed to be 1. That is also what keeps this
+            // probe honest at 1.25x and 1.75x, where the markers stay the
+            // same number of DEVICE pixels and would look like they had
+            // shrunk if measured in logical ones.
+            auto toShot = [&](const gp_Pnt& world, QPoint& out) {
+                QPoint logical;
+                if (!view->projectToScreen(world, logical)) return false;
+                out = QPoint(int(std::lround(logical.x() * scale)),
+                             int(std::lround(logical.y() * scale)));
+                return shot.rect().adjusted(12, 12, -12, -12).contains(out);
+            };
+
+            // Pixels within `half` of `centre` that match `colour`, and the
+            // bounding box they occupy - enough to say "a filled patch about
+            // seven pixels across" rather than "some pixels were blue".
+            auto patch = [&](const QPoint& centre, const QColor& colour, int half,
+                             int& hits, int& boxW, int& boxH) {
+                hits = 0;
+                int minX = shot.width(), maxX = -1, minY = shot.height(), maxY = -1;
+                for (int dy = -half; dy <= half; ++dy) {
+                    for (int dx = -half; dx <= half; ++dx) {
+                        const QPoint p = centre + QPoint(dx, dy);
+                        if (!shot.rect().contains(p)) continue;
+                        if (colorDistance(shot.pixelColor(p), colour) > 42.0) continue;
+                        ++hits;
+                        minX = std::min(minX, p.x()); maxX = std::max(maxX, p.x());
+                        minY = std::min(minY, p.y()); maxY = std::max(maxY, p.y());
+                    }
+                }
+                boxW = maxX >= minX ? maxX - minX + 1 : 0;
+                boxH = maxY >= minY ? maxY - minY + 1 : 0;
+            };
+
+            // The centre of the mark itself - the middle of the pixels near
+            // `centre` that wear `colour` - rather than the projection of the
+            // world point it stands on.
+            //
+            // projectToScreen answers in whole LOGICAL pixels, so at 1.75x
+            // that answer is already up to two dump pixels out before any
+            // marker is drawn. Two out is nothing against a 19x19 count and
+            // everything against a question asked two pixels from the centre
+            // of a seven-pixel mark: the first version of the fill check read
+            // 8 of 8 at native scale and 4 of 8 at 1.75x, for no reason but
+            // that. Finding the mark first and asking afterwards removes the
+            // scale from the question entirely.
+            //
+            // The first parameter is `around` and not `near` on purpose:
+            // `near` is still a macro in the Windows SDK's minwindef.h,
+            // defined to NOTHING for 16-bit legacy. As `near` the parameter
+            // silently became unnamed and `near + QPoint(dx, dy)` became
+            // Qt's UNARY plus on QPoint - so this scanned a patch at the
+            // dump's top-left corner, compiled without a murmur, and failed
+            // at all three scales with "the mark cannot be found".
+            auto markCentre = [&](const QPoint& around, const QColor& colour, int half,
+                                  QPoint& out) {
+                long long sumX = 0, sumY = 0;
+                int found = 0;
+                for (int dy = -half; dy <= half; ++dy) {
+                    for (int dx = -half; dx <= half; ++dx) {
+                        const QPoint p = around + QPoint(dx, dy);
+                        if (!shot.rect().contains(p)) continue;
+                        if (colorDistance(shot.pixelColor(p), colour) > 42.0) continue;
+                        sumX += p.x(); sumY += p.y(); ++found;
+                    }
+                }
+                if (found < 4) return false;
+                out = QPoint(int(sumX / found), int(sumY / found));
+                return true;
+            };
+
+            const std::vector<gp_Pnt>& placed = window.sketch().points();
+            gp_Pnt cursorPoint;
+            QPoint firstAt, secondAt, cursorAt;
+            const bool haveAll = placed.size() >= 2 && view->lastHoverPoint(cursorPoint) &&
+                                 toShot(placed.front(), firstAt) &&
+                                 toShot(placed[1], secondAt) && toShot(cursorPoint, cursorAt);
+            check(haveAll,
+                  "the first point, a later point and the live cursor all project "
+                  "inside the dump, so the six style checks below cannot vanish quietly");
+            // The eight pixels ringing `centre` at `radius` that match
+            // `colour` - the honest way to ask "is the middle of this mark
+            // filled or hollow", since a single pixel answers for one point
+            // and an area count answers for neither.
+            auto ringAt = [&](const QPoint& centre, const QColor& colour, int radius) {
+                const QPoint offsets[8] = {{-radius, 0}, {radius, 0}, {0, -radius},
+                                           {0, radius},  {-radius, -radius}, {radius, -radius},
+                                           {-radius, radius}, {radius, radius}};
+                int found = 0;
+                for (const QPoint& o : offsets) {
+                    const QPoint p = centre + o;
+                    if (!shot.rect().contains(p)) continue;
+                    if (colorDistance(shot.pixelColor(p), colour) <= 42.0) ++found;
+                }
+                return found;
+            };
+
+            if (haveAll) {
+                int hits = 0, boxW = 0, boxH = 0;
+                patch(firstAt, Theme::accent(), 9, hits, boxW, boxH);
+                // A FILLED square, and "filled" has to be sampled INSIDE it -
+                // a count over a 19x19 window would pass just as happily for
+                // a ring of the same diameter, which is exactly what this
+                // mark replaced. So: the middle is not bare ground, and the
+                // pixels immediately around the middle are the fill.
+                //
+                // Not the centre pixel alone. The yellow outline leaves the
+                // point through the middle of the square, so that one pixel
+                // is legitimately contested - which is why the centre claim
+                // is the weaker "not the ground" and the fill claim is made
+                // two pixels out, well inside a seven-pixel square and well
+                // inside the hole of any ring this size.
+                QPoint squareAt = firstAt;
+                const bool foundSquare = markCentre(firstAt, Theme::accent(), 7, squareAt);
+                check(foundSquare,
+                      "the first point's mark can be found in the dump, so the two "
+                      "fill checks below have something to measure");
+                const QColor middle = shot.pixelColor(squareAt);
+                check(colorDistance(middle, Theme::viewport()) > 25.0,
+                      QStringLiteral("the first point's middle is painted, not bare ground "
+                                     "showing through a ring (%1)").arg(middle.name()));
+                const int filled = ringAt(squareAt, Theme::accent(), 2);
+                check(filled >= 5,
+                      QStringLiteral("and it is FILLED with the accent right up to its "
+                                     "middle - %1 of the 8 pixels two out are accent, "
+                                     "where a ring would have none").arg(filled));
+                check(hits >= 12,
+                      QStringLiteral("the first point is a filled accent patch, not an "
+                                     "outline (%1 accent px)").arg(hits));
+                check(boxW >= 4 && boxW <= 12 && boxH >= 4 && boxH <= 12,
+                      QStringLiteral("and it is a small square about seven pixels across "
+                                     "(%1x%2 px)").arg(boxW).arg(boxH));
+
+                patch(secondAt, Theme::accent(), 9, hits, boxW, boxH);
+                check(hits == 0,
+                      QStringLiteral("a LATER placed point wears none of that accent - the "
+                                     "square marks the start, not every point (%1 px)")
+                          .arg(hits));
+                patch(secondAt, Theme::sketchPointMarker(), 9, hits, boxW, boxH);
+                check(hits > 0,
+                      QStringLiteral("a later placed point is an ordinary sketch-coloured "
+                                     "dot (%1 px)").arg(hits));
+
+                patch(cursorAt, Theme::sketchPointMarker(), 12, hits, boxW, boxH);
+                check(hits >= 20 && boxW > 8,
+                      QStringLiteral("the live cursor is a much larger violet mark "
+                                     "(%1 px, %2 wide)").arg(hits).arg(boxW));
+                // A RING, not a dot - measured as an ANNULUS rather than as
+                // one pixel in a roughly three-pixel hole, which is a target
+                // small enough that a pixel of rounding could hit its rim and
+                // report a filled mark. Rim present at radius 5, hole empty
+                // across the whole 3x3 middle: a filled ball fails the second
+                // half outright, and neither half turns on a single sample.
+                QPoint ringAtPoint = cursorAt;
+                const bool foundRing =
+                    markCentre(cursorAt, Theme::sketchPointMarker(), 12, ringAtPoint);
+                check(foundRing,
+                      "the cursor's mark can be found in the dump, so the rim and hole "
+                      "checks below have something to measure");
+                const int rim = ringAt(ringAtPoint, Theme::sketchPointMarker(), 5);
+                int middleHits = 0;
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        const QPoint p = ringAtPoint + QPoint(dx, dy);
+                        if (!shot.rect().contains(p)) continue;
+                        if (colorDistance(shot.pixelColor(p), Theme::sketchPointMarker()) <= 42.0)
+                            ++middleHits;
+                    }
+                }
+                check(rim >= 6,
+                      QStringLiteral("the cursor mark has a rim all the way round "
+                                     "(%1 of 8 pixels at radius 5)").arg(rim));
+                check(middleHits == 0,
+                      QStringLiteral("and a hollow middle - it is a ring, not a ball "
+                                     "(%1 of the 9 middle pixels wear its colour)")
+                          .arg(middleHits));
+            }
+        }
+
         trigger(window, QStringLiteral("Undo Last Point"));
         check(view->sketchPointMarkerCount() == 2, "undoing a point drops its marker");
         check(view->hasSketchStartMarker(), "the start marker survives an undo above it");
@@ -1753,8 +2474,21 @@ int main(int argc, char* argv[])
         // this; a card over OCCT's GL surface does, and CLAUDE.md's rule is
         // that it is checked with childAt() against the actual control
         // pointer rather than by asserting an attribute.
+        // The first VISIBLE toggle, not the first QPushButton in the subtree.
+        // refresh() rebuilds rows wholesale and deleteLater()s the old ones,
+        // and settle() runs a nested event loop, which does not deliver
+        // DeferredDelete - so a dead row's button is still a child, still
+        // older than the live one, and findChild<QPushButton*>() hands it
+        // back first. That made this probe compare the live row's geometry
+        // against a hidden corpse's pointer the moment anything increased the
+        // number of rebuilds between here and the last one (outlines becoming
+        // document items did exactly that). isVisible() is also the honest
+        // question: the toggle under test is the one a user could click.
         auto firstEye = [&]() -> QPushButton* {
-            return drawer ? drawer->findChild<QPushButton*>() : nullptr;
+            if (!drawer) return nullptr;
+            for (QPushButton* button : drawer->findChildren<QPushButton*>())
+                if (button->isVisible()) return button;
+            return nullptr;
         };
         QPushButton* eye = firstEye();
         check(eye != nullptr, "the row carries a visibility toggle");
@@ -1813,7 +2547,13 @@ int main(int argc, char* argv[])
         // old row is still alive here and its visibility is the whole
         // question.
         if (drawer && drawer->rowCount() > 0) {
-            QPointer<QWidget> deadRow = drawer->findChild<QWidget*>(QStringLiteral("itemsRow"));
+            // The first LIVE row, for the reason firstEye() above spells out:
+            // a corpse from an earlier rebuild is an older child than the row
+            // on screen, so an unqualified findChild starts this probe on a
+            // widget that is already hidden and makes it vacuously true.
+            QPointer<QWidget> deadRow;
+            for (QWidget* row : drawer->findChildren<QWidget*>(QStringLiteral("itemsRow")))
+                if (row->isVisible()) { deadRow = row; break; }
             check(deadRow != nullptr && deadRow->isVisible(),
                   "a live row is visible before the rebuild that replaces it");
             drawer->refresh();
@@ -2032,6 +2772,474 @@ int main(int argc, char* argv[])
     check(window.document().count() == 1, "Undo again, back to one solid");
     settle(200);
 
+    // --- sketch work draws above the grid, and under the bodies ---------------
+    //
+    // Three Z-layers, in this order: the default layer (bodies), the grid's
+    // own, and the sketch work's. The structural half of the contract is
+    // asserted first - ids, order and settings - because a pixel probe that
+    // passed for the wrong reason would look identical to one that passed for
+    // the right one. See GridRenderer::zLayer() for the argument.
+    {
+        const Graphic3d_ZLayerId gridLayer = view->gridZLayer();
+        const Graphic3d_ZLayerId sketchLayer = view->sketchZLayer();
+        check(gridLayer != Graphic3d_ZLayerId_UNKNOWN &&
+                  gridLayer != Graphic3d_ZLayerId_Default,
+              QStringLiteral("the grid has a Z-layer of its own (%1)").arg(gridLayer));
+        check(sketchLayer != Graphic3d_ZLayerId_UNKNOWN &&
+                  sketchLayer != Graphic3d_ZLayerId_Default && sketchLayer != gridLayer,
+              QStringLiteral("and the sketch work has a second one, distinct from both "
+                             "(%1)").arg(sketchLayer));
+        // The refusal, as a check rather than a comment: Topmost renders with
+        // the depth buffer cleared, so an outline in it would draw straight
+        // through a body standing in front of it.
+        check(sketchLayer != Graphic3d_ZLayerId_Topmost &&
+                  !view->zLayerSettings(sketchLayer).ToClearDepth() &&
+                  view->zLayerSettings(sketchLayer).ToEnableDepthTest(),
+              "the sketch layer depth-tests and does not clear depth - it is not Topmost");
+        check(!view->zLayerSettings(gridLayer).ToEnableDepthWrite() &&
+                  view->zLayerSettings(gridLayer).ToEnableDepthTest(),
+              "the grid layer writes no depth, so it can never reject a sketch pixel, "
+              "and still depth-tests, so a body in front of it still hides it");
+
+        const std::vector<Graphic3d_ZLayerId> order = view->zLayerOrder();
+        auto indexOf = [&order](Graphic3d_ZLayerId id) {
+            for (std::size_t i = 0; i < order.size(); ++i)
+                if (order[i] == id) return static_cast<int>(i);
+            return -1;
+        };
+        const int iDefault = indexOf(Graphic3d_ZLayerId_Default);
+        const int iGrid = indexOf(gridLayer);
+        const int iSketch = indexOf(sketchLayer);
+        check(iDefault >= 0 && iGrid >= 0 && iSketch >= 0,
+              QStringLiteral("all three layers are in the viewer's render order "
+                             "(%1 layers)").arg(order.size()));
+        // Two ids being different says nothing about which is drawn first,
+        // and draw order is the whole contract.
+        check(iDefault < iGrid && iGrid < iSketch,
+              QStringLiteral("and the order really is bodies -> grid -> sketch work "
+                             "(%1, %2, %3)").arg(iDefault).arg(iGrid).arg(iSketch));
+    }
+
+    // The pixel half. One body, one sketch segment drawn straight through its
+    // footprint on the ground plane, and two dumps of the SAME camera - one
+    // with the sketch up, one after cancelling it. Sampling the same pixels in
+    // both is what makes each claim non-vacuous: a probe pixel that turns out
+    // not to have a body behind it, or a control pixel that turns out not to
+    // be clear of one, fails loudly here instead of quietly agreeing.
+    const CameraState savedCamera = view->camera().state();
+    if (window.document().count() == 1) {
+        trigger(window, QStringLiteral("Axonometric"));
+        settle(300);
+
+        GProp_GProps bodyProps;
+        const TopoDS_Shape probeBody = window.document().solids().front().shape;
+        BRepGProp::VolumeProperties(probeBody, bodyProps);
+        const gp_Pnt centre = bodyProps.CentreOfMass();
+        // The body's own extent decides where the segment runs and which
+        // stretch of it is clear ground. Guessing a margin instead is how the
+        // first pass of this probe sampled the stretch that was BEHIND the
+        // body and reported the body's grey as a missing outline.
+        Bnd_Box probeBox;
+        BRepBndLib::Add(probeBody, probeBox);
+        double bx0 = 0.0, by0 = 0.0, bz0 = 0.0, bx1 = 0.0, by1 = 0.0, bz1 = 0.0;
+        probeBox.Get(bx0, by0, bz0, bx1, by1, bz1);
+
+        // Everything below is built on the SNAP grid the clicks will land on,
+        // so a click aimed at a projected point comes back as that point
+        // rather than up to half a step away from it.
+        auto onGrid = [&](double v) { return std::round(v / view->snapStep()) * view->snapStep(); };
+        const double cy = onGrid(centre.Y());
+        // A segment along X through the ground point under the body's own
+        // centre of mass, starting well clear of the body and ending past it.
+        const gp_Pnt endA(onGrid(bx0 - 400.0), cy, 0.0);
+        const gp_Pnt endB(onGrid(bx1 + 120.0), cy, 0.0);
+
+        QPoint atA, atB;
+        const bool ends = view->projectToScreen(endA, atA) &&
+                          view->projectToScreen(endB, atB) &&
+                          view->rect().adjusted(20, 20, -20, -20).contains(atA) &&
+                          view->rect().adjusted(20, 20, -20, -20).contains(atB);
+        check(ends,
+              "both ends of the probe segment project inside the viewport, so the "
+              "layering checks below cannot vanish quietly");
+
+        if (ends) {
+            trigger(window, QStringLiteral("Start Sketch"));
+            clickAt(view, QPointF(atA));
+            clickAt(view, QPointF(atB));
+            // The cursor parked well off the segment, so neither the rubber
+            // band out to it nor its dimension annotation can reach the
+            // pixels being sampled.
+            QPoint parkAt;
+            if (view->projectToScreen(gp_Pnt(0.5 * (bx0 + bx1), cy - 500.0, 0.0), parkAt) &&
+                view->rect().contains(parkAt)) {
+                moveTo(view, QPointF(parkAt));
+            }
+            settle(200);
+            check(window.sketch().pointCount() == 2,
+                  "the probe segment is two placed points on the ground plane");
+
+            // Sampled off the points ACTUALLY placed, never off the ones
+            // aimed at: the snap grid, a rounded pixel and the unprojection
+            // each get a say, and a probe that samples where it hoped the
+            // line went is a probe that can miss the line and say nothing.
+            const std::vector<gp_Pnt> segment = window.sketch().points();
+            const QString afterPath = outDir + QStringLiteral("/k-sketch-above-grid.png");
+            const QString beforePath = outDir + QStringLiteral("/k-grid-without-sketch.png");
+            view->saveSnapshot(afterPath);
+            const QImage afterShot(afterPath);
+            const double scale = afterShot.isNull()
+                                     ? 0.0
+                                     : double(afterShot.width()) / std::max(1, view->width());
+
+            auto toShot = [&](const gp_Pnt& world, QPoint& out) {
+                QPoint logical;
+                if (!view->projectToScreen(world, logical)) return false;
+                out = QPoint(int(std::lround(logical.x() * scale)),
+                             int(std::lround(logical.y() * scale)));
+                return afterShot.rect().contains(out);
+            };
+            // A world X on the segment. The two placed points share a Y, so
+            // the drawn line IS the set of these - which is why this samples
+            // the points actually placed rather than the ones aimed at.
+            const double lineY = segment.size() == 2 ? segment.front().Y() : 0.0;
+            auto atX = [&](double x) { return gp_Pnt(x, lineY, 0.0); };
+            check(segment.size() == 2 &&
+                      std::fabs(segment.front().Y() - segment.back().Y()) < 1.0e-9 &&
+                      segment.front().X() < bx0 - 100.0 && segment.back().X() > bx1,
+                  "the placed segment runs along X, starts clear of the body and ends "
+                  "past it, so both halves of this probe have somewhere to look");
+
+            QPoint underAt, controlAt;
+            const bool probesLand = segment.size() == 2 && scale > 0.5 &&
+                                    toShot(atX(0.5 * (bx0 + bx1)), underAt) &&
+                                    toShot(atX(bx0 - 200.0), controlAt);
+            check(probesLand,
+                  QStringLiteral("the probe pixels land inside the dump (%1 px per logical "
+                                 "px)").arg(scale));
+
+            // Same camera, sketch gone - the reference for "was that pixel
+            // the body all along".
+            trigger(window, QStringLiteral("Cancel Sketch"));
+            settle(200);
+            view->saveSnapshot(beforePath);
+            const QImage beforeShot(beforePath);
+
+            const bool comparable = probesLand && !beforeShot.isNull() &&
+                                    beforeShot.size() == afterShot.size();
+            check(comparable,
+                  "the two dumps are the same size, so the same pixel means the same place");
+
+            if (comparable) {
+                const QColor outline(Qt::yellow);   // OcctViewWidget's preview colour
+                // A grid line, and NOT merely a dark pixel. The two are
+                // closer than they look: gridMinor (#3e3e44) is 12 away from
+                // the viewport ground (#45454b), because the grid is drawn to
+                // fade into it - so the generous tolerance this probe started
+                // with matched the empty background too and counted plain
+                // ground as grid. 8 excludes it.
+                auto isGridColour = [](const QColor& c) {
+                    return colorDistance(c, Theme::gridMinor()) < 8.0;
+                };
+                // Ground of any kind - the background or a grid line on it.
+                auto isGround = [](const QColor& c) {
+                    return colorDistance(c, Theme::viewport()) < 25.0;
+                };
+                const QColor bareUnder = beforeShot.pixelColor(underAt);
+                const QColor bareControl = beforeShot.pixelColor(controlAt);
+
+                // Non-vacuity, both directions, with no sketch on screen at
+                // all: the probe pixel must really have a body behind it and
+                // the control pixel must really not.
+                check(!isGround(bareUnder),
+                      QStringLiteral("the probe pixel has the body behind it (%1)")
+                          .arg(bareUnder.name()));
+                check(isGround(bareControl) && colorDistance(bareControl, bareUnder) > 60.0,
+                      QStringLiteral("and the control pixel is bare ground, nowhere near "
+                                     "the body's grey (%1 against %2)")
+                          .arg(bareControl.name(), bareUnder.name()));
+
+                // 1. The body still occludes the sketch line. THIS is the
+                //    check that forbids Graphic3d_ZLayerId_Topmost: in that
+                //    layer the outline would paint straight over the body.
+                const QColor drawnUnder = afterShot.pixelColor(underAt);
+                check(colorDistance(drawnUnder, outline) > 90.0,
+                      QStringLiteral("a body in front of a sketch line still occludes it "
+                                     "(%1)").arg(drawnUnder.name()));
+                check(colorDistance(drawnUnder, bareUnder) < 14.0,
+                      "and that pixel is untouched by the sketch - it is the body, not a "
+                      "line drawn through it");
+
+                // 2. The outline is UNBROKEN along the stretch of ground it
+                //    crosses, grid lines and coloured axis lines and all.
+                //    That is the whole of item 2: before the layer existed,
+                //    the grid - nudged a hair toward the eye, so it wins any
+                //    depth tie with the outline drawn on the same plane -
+                //    painted over the outline at every crossing and left it
+                //    stitched.
+                //
+                //    Scanned PERPENDICULAR to the line rather than sampled at
+                //    one pixel: projectToScreen answers in whole logical
+                //    pixels, so a sample can sit a pixel off a two-pixel line
+                //    and report a break that is really a rounding error. A
+                //    perpendicular scan cannot hide a real break, because a
+                //    grid line painting over the outline removes it in a band
+                //    ACROSS the line, which is exactly the direction this
+                //    scan looks in.
+                QPoint screenA, screenB;
+                const bool haveEnds = toShot(segment.front(), screenA) &&
+                                      toShot(segment.back(), screenB);
+                double perpX = 0.0, perpY = 0.0;
+                if (haveEnds) {
+                    const double dx = screenB.x() - screenA.x();
+                    const double dy = screenB.y() - screenA.y();
+                    const double len = std::sqrt(dx * dx + dy * dy);
+                    if (len > 1.0) { perpX = -dy / len; perpY = dx / len; }
+                }
+                check(haveEnds && (perpX != 0.0 || perpY != 0.0),
+                      "the segment has a screen direction to scan across");
+
+                int samples = 0, unbroken = 0;
+                // Only the stretch that is genuinely clear of the body - from
+                // just past the first placed point to just short of the
+                // body's near edge - so a break can only mean the grid won,
+                // never that the body did.
+                const double sweepFrom = segment.front().X() + 40.0;
+                const double sweepTo = bx0 - 40.0;
+                for (int i = 0; i <= 60 && haveEnds; ++i) {
+                    const double x = sweepFrom + (sweepTo - sweepFrom) * (i / 60.0);
+                    QPoint at;
+                    if (!toShot(atX(x), at)) continue;
+                    ++samples;
+                    bool found = false;
+                    for (int k = -3; k <= 3 && !found; ++k) {
+                        const QPoint p(at.x() + int(std::lround(perpX * k)),
+                                       at.y() + int(std::lround(perpY * k)));
+                        if (!afterShot.rect().contains(p)) continue;
+                        if (colorDistance(afterShot.pixelColor(p), outline) < 90.0) found = true;
+                    }
+                    if (found) ++unbroken;
+                }
+                check(samples >= 40,
+                      QStringLiteral("the outline was sampled along its length (%1 samples)")
+                          .arg(samples));
+                check(samples > 0 && unbroken == samples,
+                      QStringLiteral("and the outline is drawn at every one of them - the "
+                                     "grid never paints over it (%1 of %2)")
+                          .arg(unbroken).arg(samples));
+
+                // Non-vacuity for the grid half: the grid IS on screen in
+                // that same dump, and it crosses the stretch just sampled.
+                // Without this, a grid that had stopped drawing at all would
+                // turn the check above green.
+                int gridPixels = 0;
+                for (int y = 0; y < afterShot.height(); y += 3) {
+                    for (int x = 0; x < afterShot.width(); x += 3) {
+                        if (isGridColour(afterShot.pixelColor(x, y))) ++gridPixels;
+                    }
+                }
+                check(gridPixels > 400,
+                      QStringLiteral("the grid really is on screen in that same dump "
+                                     "(%1 sampled px)").arg(gridPixels));
+                int crossings = 0;
+                if (haveEnds) {
+                    for (int i = 0; i <= 60; ++i) {
+                        const double x = sweepFrom + (sweepTo - sweepFrom) * (i / 60.0);
+                        QPoint at;
+                        if (!toShot(atX(x), at)) continue;
+                        // Just off the line, where the grid is undisturbed.
+                        const QPoint p(at.x() + int(std::lround(perpX * 6)),
+                                       at.y() + int(std::lround(perpY * 6)));
+                        if (afterShot.rect().contains(p) &&
+                            isGridColour(afterShot.pixelColor(p))) ++crossings;
+                    }
+                }
+                check(crossings > 0,
+                      QStringLiteral("and it crosses the very stretch that was sampled, so "
+                                     "the unbroken outline is a result and not a stretch "
+                                     "of empty ground (%1 samples beside grid)")
+                          .arg(crossings));
+            }
+        }
+    }
+
+    // --- Shift continues the last segment straight ---------------------------
+    //
+    // SketchController::snapToDirection is proven headless; this is the wiring
+    // - that the modifier reaches the unprojection, that the point REPORTED
+    // (which is what the cursor marker, the status readout and the live
+    // dimension all draw) is the snapped one, and that a click places that
+    // same point rather than a second, differently-derived one.
+    {
+        trigger(window, QStringLiteral("Start Sketch"));
+        check(window.isSketching(), "sketch mode for the straight-continuation checks");
+        check(!view->hasSketchStraightAnchor(),
+              "a fresh sketch has nothing for Shift to continue");
+
+        const double w = view->width();
+        const double h = view->height();
+        trigger(window, QStringLiteral("Top"));
+        settle(300);
+
+        clickAt(view, QPointF(0.32 * w, 0.62 * h));
+        check(!view->hasSketchStraightAnchor(),
+              "and one point is still not a segment - Shift needs two");
+        clickAt(view, QPointF(0.62 * w, 0.62 * h));
+        check(view->hasSketchStraightAnchor(),
+              "two points give Shift a segment to continue");
+
+        auto collinearity = [&](const gp_Pnt& p) {
+            const std::vector<gp_Pnt>& pts = window.sketch().points();
+            const gp_Vec run(pts[pts.size() - 2], pts.back());
+            const gp_Vec out(pts.back(), p);
+            if (run.Magnitude() < 1.0e-9 || out.Magnitude() < 1.0e-9) return -1.0;
+            // Distance of `p` from the line, in millimetres - the honest
+            // reading of "collinear", and one a report can quote.
+            return run.Crossed(out).Magnitude() / run.Magnitude();
+        };
+
+        // A pixel a long way off the line the last segment runs along.
+        const QPointF offLine(0.80 * w, 0.30 * h);
+
+        moveTo(view, offLine);
+        gp_Pnt plain;
+        const bool havePlain = view->lastHoverPoint(plain);
+        check(havePlain && collinearity(plain) > 20.0,
+              QStringLiteral("without Shift that cursor is nowhere near the line "
+                             "(%1 mm off)").arg(havePlain ? collinearity(plain) : -1.0));
+
+        moveTo(view, offLine, Qt::ShiftModifier);
+        gp_Pnt held;
+        const bool haveHeld = view->lastHoverPoint(held);
+        check(haveHeld && collinearity(held) < 1.0e-6,
+              QStringLiteral("with Shift held the REPORTED cursor - the marker, the "
+                             "readout and the dimension all draw this one point - is on "
+                             "the line (%1 mm off)").arg(haveHeld ? collinearity(held) : -1.0));
+
+        // Shift wins the direction; Snap to Grid then rounds the distance
+        // ALONG it. Both constraints cannot be exact at once and the one the
+        // user is holding a key down for is the direction.
+        if (haveHeld) {
+            const std::vector<gp_Pnt>& pts = window.sketch().points();
+            const double along = pts.back().Distance(held);
+            check(view->snapEnabled() &&
+                      std::fabs(along - std::round(along / view->snapStep()) *
+                                            view->snapStep()) < 1.0e-6,
+                  QStringLiteral("and the distance along that line is a whole grid step, "
+                                 "so Shift composes with Snap to Grid rather than "
+                                 "replacing it (%1 mm)").arg(along));
+        }
+
+        clickAt(view, offLine, Qt::ShiftModifier);
+        check(window.sketch().pointCount() == 3, "a Shift-click places a point like any other");
+        if (window.sketch().pointCount() == 3) {
+            const std::vector<gp_Pnt>& pts = window.sketch().points();
+            const gp_Vec run(pts[0], pts[1]);
+            const gp_Vec seg(pts[1], pts[2]);
+            const double off = run.Crossed(seg).Magnitude() / std::max(1.0e-9, run.Magnitude());
+            check(off < 1.0e-6,
+                  QStringLiteral("and the point it places continues the previous segment "
+                                 "dead straight (%1 mm off)").arg(off));
+            check(haveHeld && pts.back().Distance(held) < 1.0e-6,
+                  "which is the very point the cursor was already promising");
+        }
+
+        // --- mid-sketch Undo (Ctrl+Z) ---------------------------------------
+        //
+        // One implementation, two triggers: Backspace and the Undo action both
+        // remove the last placed point while a sketch is open. The document
+        // must not move an inch while that happens.
+        {
+            QAction* undo = action(window, QStringLiteral("Undo"));
+            QAction* redo = action(window, QStringLiteral("Redo"));
+            const int bodies = window.document().count();
+            check(undo != nullptr && undo->text().remove(QLatin1Char('&')) ==
+                                         QStringLiteral("Undo"),
+                  "the menu entry is still called Undo mid-sketch, not renamed per mode");
+            check(undo != nullptr && undo->isEnabled(),
+                  "Undo is available mid-sketch, with points placed");
+            check(redo != nullptr && !redo->isEnabled(),
+                  "Redo is not - a removed point is gone, not parked on a stack");
+
+            const int markersBefore = view->sketchPointMarkerCount();
+            trigger(window, QStringLiteral("Undo"));
+            check(window.sketch().pointCount() == 2,
+                  "Undo mid-sketch removes the last placed point");
+            check(view->sketchPointMarkerCount() == markersBefore - 1,
+                  "and its marker goes with it");
+            check(window.document().count() == bodies,
+                  "while the document does not move - Undo did not reach past the sketch");
+            check(window.isSketching(), "and the sketch is still open");
+
+            trigger(window, QStringLiteral("Undo"));
+            trigger(window, QStringLiteral("Undo"));
+            check(window.sketch().pointCount() == 0, "it walks the points back to none");
+            check(undo != nullptr && !undo->isEnabled(),
+                  "and then disables itself - there is no point left to take back");
+            check(window.document().count() == bodies,
+                  "still without touching the document");
+
+            trigger(window, QStringLiteral("Cancel Sketch"));
+            settle(150);
+            check(undo != nullptr && undo->isEnabled() && window.document().canUndo(),
+                  "out of the sketch, Undo goes back to meaning the document");
+        }
+
+        // --- and Shift must not lock the user out of finishing ---------------
+        //
+        // Clicking the first point back is one of the two ways to close an
+        // outline, and the straight constraint projects a click off the very
+        // point it was aimed at - so holding Shift silently disabled that
+        // route. A modifier that removes a way out of the mode is worse than
+        // one that does nothing, hence the precedence: closing outranks
+        // continuing straight.
+        {
+            trigger(window, QStringLiteral("Start Sketch"));
+            const QPointF start(0.34 * w, 0.60 * h);
+            clickAt(view, start);
+            clickAt(view, QPointF(0.60 * w, 0.60 * h));
+            clickAt(view, QPointF(0.60 * w, 0.40 * h));
+            check(window.sketch().pointCount() == 3,
+                  "three points down, so clicking the first one would close the outline");
+            // Both constraints live at once - which is what makes this a real
+            // conflict rather than a case the anchor happened not to cover.
+            check(view->hasSketchCloseTarget() && view->hasSketchStraightAnchor(),
+                  "with both the closing target and a straight anchor live to fight "
+                  "over the next click");
+
+            moveTo(view, start, Qt::ShiftModifier);
+            gp_Pnt overStart;
+            const bool onStart =
+                view->lastHoverPoint(overStart) && window.sketch().pointCount() == 3 &&
+                overStart.Distance(window.sketch().points().front()) < 1.0e-6;
+            check(onStart,
+                  "with Shift held over the first point the cursor reports that point "
+                  "itself, not a projection of it onto the straight line");
+
+            clickAt(view, start, Qt::ShiftModifier);
+            check(!window.isSketching() && window.hasPendingFace(),
+                  "so a Shift-click on the first point still closes the outline - the "
+                  "click does what the cursor was promising");
+
+            // The outline is this block's litter, not the suite's state - and
+            // Undo is how it goes, which is itself the Phase-7 change. It used
+            // to be enough to start a sketch and cancel it, because a pending
+            // face was a bare member that starting a sketch nulled; an outline
+            // is a document item now and the app will not throw one away as a
+            // side effect of picking up the pencil.
+            trigger(window, QStringLiteral("Undo"));
+            settle(120);
+            check(!window.hasPendingFace() && !window.isSketching(),
+                  "and the probe leaves neither a sketch nor an outline behind it");
+        }
+
+        // Everything after this block inherits the camera, so put it back
+        // where these probes found it rather than leaving the suite in a top
+        // view that only this section wanted.
+        view->animateTo(savedCamera);
+        settle(250);
+    }
+
     // --- outcomes are reported without stopping the user ----------------------
     {
         ToastHost* toasts = window.findChild<ToastHost*>();
@@ -2121,11 +3329,44 @@ int main(int argc, char* argv[])
                 trigger(window, QStringLiteral("Start Sketch"));
                 settle(150);
                 QAction* undoAction = action(window, QStringLiteral("Undo"));
+                // NOT "disabled mid-sketch" any more, and saying so would
+                // contradict the mid-sketch Undo checks further up this same
+                // run. Since Ctrl+Z gained its remove-the-last-point meaning,
+                // what is true here is narrower: a sketch with NO points has
+                // nothing to take back, so the action is disabled for that
+                // reason rather than because a sketch is open.
                 check(undoAction != nullptr && !undoAction->isEnabled(),
-                      "the Undo action is disabled mid-sketch");
+                      "with a sketch open and no point placed yet, Undo has nothing "
+                      "to take back and is disabled");
                 QWidget* pill = toasts->undoControl();
                 check(pill != nullptr && !pill->isVisible(),
                       "and the toast's Undo control is unusable while it is");
+
+                // The corner the whole departure exists for, and it needs a
+                // PLACED POINT to exist at all: at zero points the action is
+                // disabled anyway, so this probe had no teeth - reverting
+                // both halves of the guard (MainWindow's "if (mySketching)
+                // return" and the narrowed setUndoEnabled) left it green.
+                //
+                // With a point down the action IS enabled, and it means
+                // "take back that point". The pill must still refuse: it sits
+                // under "Deleted Body 02 - Undo", and a control that took
+                // back a sketch point instead would be the label describing
+                // one change while the control performed another.
+                clickAt(view, QPointF(view->width() * 0.45, view->height() * 0.62));
+                settle(120);
+                const int pointsUnderToast = static_cast<int>(window.sketch().pointCount());
+                check(pointsUnderToast == 1,
+                      "a point is placed while the delete's toast is still up, so the "
+                      "pill guard below is tested where it can actually fail");
+                check(undoAction != nullptr && undoAction->isEnabled(),
+                      "Undo is now enabled - it means the point, not the body");
+                // Hidden, not disabled: Qt drops mouse events aimed at a
+                // DISABLED widget, which would have made the click below a
+                // no-op for the wrong reason.
+                check(pill != nullptr && !pill->isVisible(),
+                      "and the pill is still not offered, because the toast is about the "
+                      "document and Undo is not");
                 const int afterGuard = static_cast<int>(window.document().solids().size());
                 if (pill) {
                     // Straight at the control, the most generous thing a user
@@ -2135,6 +3376,9 @@ int main(int argc, char* argv[])
                 }
                 check(static_cast<int>(window.document().solids().size()) == afterGuard,
                       "clicking the toast's Undo mid-sketch undoes nothing");
+                check(static_cast<int>(window.sketch().pointCount()) == pointsUnderToast,
+                      "and it does not quietly take the sketch point either - the pill "
+                      "reaches neither meaning of Undo while a sketch is open");
                 check(window.isSketching(),
                       "and leaves the sketch the user was placing points in alone");
                 trigger(window, QStringLiteral("Cancel Sketch"));
@@ -2490,7 +3734,7 @@ int main(int argc, char* argv[])
         const QString labelText = QString::fromStdString(view->dimension().labelText());
         QStringList labelOffenders;
         for (const QString& word : bannedWords()) {
-            if (labelText.contains(word, Qt::CaseInsensitive)) labelOffenders << word;
+            if (usesBannedWord(labelText, word)) labelOffenders << word;
         }
         check(labelOffenders.isEmpty(),
               QStringLiteral("the dimension label uses no banned word (\"%1\"%2)")
@@ -2703,6 +3947,14 @@ int main(int argc, char* argv[])
         QPoint outlineCorners[4];
         // A fifth point on the plane, for the cursor-readout probe.
         QPoint hoverAt;
+        // The WORLD points those pixels came from, kept so they can be
+        // projected again. Locking a face now flies the camera square onto it
+        // (Phase 7's item 1), so every pixel computed before the lock is aimed
+        // at a camera that has since moved - and a stale pixel does not fail
+        // loudly, it clicks somewhere else and takes a plausible-looking wrong
+        // answer with it.
+        gp_Pnt outlineCornerPoints[4];
+        gp_Pnt hoverPoint;
         // Projecting a centre of mass says where a face WOULD be if nothing
         // stood in front of it; several bodies exist by now and any of them
         // can occlude any other. So each candidate is clicked and the result
@@ -2763,19 +4015,20 @@ int main(int argc, char* argv[])
                     const double du[4] = {-half,  half, half, -half};
                     const double dv[4] = {-half, -half, half,  half};
                     QPoint corners[4];
+                    gp_Pnt cornerPoints[4];
                     bool cornersUsable = true;
                     for (int c = 0; c < 4 && cornersUsable; ++c) {
-                        const gp_Pnt onPlane =
+                        cornerPoints[c] =
                             ElSLib::Value(cu0 + du[c], cv0 + dv[c], candidatePlane);
                         cornersUsable =
-                            view->projectToScreen(onPlane, corners[c]) &&
+                            view->projectToScreen(cornerPoints[c], corners[c]) &&
                             view->rect().adjusted(8, 8, -8, -8).contains(corners[c]);
                     }
                     if (!cornersUsable) continue;
                     QPoint hoverCandidate;
-                    if (!view->projectToScreen(
-                            ElSLib::Value(cu0 + half * 0.5, cv0 + half * 0.5, candidatePlane),
-                            hoverCandidate) ||
+                    const gp_Pnt hoverOnPlane =
+                        ElSLib::Value(cu0 + half * 0.5, cv0 + half * 0.5, candidatePlane);
+                    if (!view->projectToScreen(hoverOnPlane, hoverCandidate) ||
                         !view->rect().adjusted(8, 8, -8, -8).contains(hoverCandidate))
                         continue;
 
@@ -2796,7 +4049,9 @@ int main(int argc, char* argv[])
                     pickedCentre = props.CentreOfMass();
                     screen = at;
                     std::copy(corners, corners + 4, outlineCorners);
+                    std::copy(cornerPoints, cornerPoints + 4, outlineCornerPoints);
                     hoverAt = hoverCandidate;
+                    hoverPoint = hoverOnPlane;
                     break;
                 }
                 if (!picked.IsNull()) break;
@@ -2833,9 +4088,83 @@ int main(int argc, char* argv[])
 
             if (lock && lock->isEnabled()) {
                 const gp_Pln facePlane = BRepAdaptor_Surface(picked).Plane();
+                const gp_Dir faceOutward = outwardNormal(picked);
+                // The pose every pixel above was projected at. The lock flies
+                // the camera away from it (see below), and one probe further
+                // down draws on the GROUND while this face is unlocked -
+                // impossible from a camera squared onto a vertical face, where
+                // the ground plane is exactly edge-on and no ray meets it.
+                const CameraState poseBeforeLock = view->camera().state();
                 lock->trigger();
                 settle(200);
                 check(window.isFaceLocked(), "the face is locked");
+
+                // Phase 7 item 1: locking also FLIES the camera square onto
+                // the face, orthographic, so the face reads at its true shape
+                // before a single point is drawn on it. Asserted as the dot
+                // between the camera's view direction and the face's own
+                // outward normal - "square onto" is a direction, and a check
+                // that only compared azimuths would pass on a face whose
+                // normal happens to share one.
+                const double squareness =
+                    view->camera().viewDirection().Dot(faceOutward);
+                check(squareness < -0.999,
+                      QStringLiteral("the camera flies square onto the face - view "
+                                     "direction antiparallel to its outward normal "
+                                     "(dot %1)")
+                          .arg(squareness));
+                check(view->viewIsOrthographic(),
+                      "and lands orthographic, so nothing converges");
+                check(view->camera().baseProjection() ==
+                          CameraController::Projection::Perspective,
+                      "on loan - the mode the user chose is untouched");
+                // The BOUNDING BOX centre, which is what flyOntoFace() aims at
+                // (through CameraController::frame), not the centre of mass
+                // this block picked the face by. They coincide on a rectangle
+                // and separate on an L-shaped or tapered face, so deriving the
+                // oracle the way the code derives the target is what stops an
+                // asymmetric face reading as a targeting error - or, worse,
+                // hiding one behind a tolerance widened to accommodate it.
+                Bnd_Box faceBox;
+                BRepBndLib::Add(picked, faceBox);
+                Standard_Real bx0, by0, bz0, bx1, by1, bz1;
+                faceBox.Get(bx0, by0, bz0, bx1, by1, bz1);
+                const gp_Pnt faceBoxCentre((bx0 + bx1) / 2.0, (by0 + by1) / 2.0,
+                                           (bz0 + bz1) / 2.0);
+                check(view->camera().state().target.Distance(faceBoxCentre) < 1.0,
+                      QStringLiteral("aimed at the centre of the face's own extent "
+                                     "(%1 mm off)")
+                          .arg(view->camera().state().target.Distance(faceBoxCentre)));
+
+                // Every pixel this block computed before the lock was aimed at
+                // the camera the lock has just moved. Projected again from the
+                // world points they came from, and checked to still be inside
+                // the viewport - a click that lands outside it does nothing at
+                // all, and "did nothing" is not distinguishable from "did the
+                // wrong thing" three checks later.
+                bool reprojected = view->projectToScreen(pickedCentre, screen) &&
+                                   view->rect().adjusted(8, 8, -8, -8).contains(screen);
+                for (int c = 0; c < 4; ++c) {
+                    reprojected = reprojected &&
+                                  view->projectToScreen(outlineCornerPoints[c],
+                                                        outlineCorners[c]) &&
+                                  view->rect().adjusted(8, 8, -8, -8).contains(
+                                      outlineCorners[c]);
+                }
+                reprojected = reprojected &&
+                              view->projectToScreen(hoverPoint, hoverAt) &&
+                              view->rect().adjusted(8, 8, -8, -8).contains(hoverAt);
+                check(reprojected,
+                      "and the points this block clicks re-project inside the "
+                      "viewport at the camera the flight left");
+
+                // The lock flight's own result, captured at the camera it
+                // left rather than at a pose arranged for a picture. The face
+                // this block locks is a vertical one on a thin slab, so seen
+                // dead on it IS a thin strip - unflattering, and honest; the
+                // elevation pair near the end of this file is the readable
+                // demonstration.
+                view->saveSnapshot(outDir + "/j-locked-face-orthographic.png");
 
                 // The sketch plane must BE the face's plane, not merely something.
                 const gp_Pln sketchPlane = window.sketch().plane();
@@ -2872,6 +4201,91 @@ int main(int argc, char* argv[])
                 // The grid is drawn in the 3D view, so the viewport dump is
                 // the only place it can be seen at all.
                 view->saveSnapshot(outDir + "/h-locked-face-grid.png");
+
+                // And the dump is where it gets ASSERTED, not merely looked
+                // at. This is the case that decided the grid's Z-layer:
+                // "the grid renders beneath the scene" reads as an underlay
+                // inserted before the default layer, and an underlay is
+                // rendered before the bodies - so this face would paint
+                // straight over the grid drawn on it and the locked-face grid
+                // would silently vanish, with gridPlane()'s nudge reduced to
+                // decoration. Inserted AFTER the default layer instead, with
+                // depth testing on, the nudge does its original job and the
+                // grid wins the tie against the face by a hair. The argument
+                // is in two comments; without this it was in no check.
+                {
+                    const QImage lockedShot(outDir + "/h-locked-face-grid.png");
+                    const double lockScale =
+                        lockedShot.isNull()
+                            ? 0.0
+                            : double(lockedShot.width()) / std::max(1, view->width());
+                    // The face's own screen extent, from the eight corners of
+                    // the box already computed above - no in-plane arithmetic
+                    // and no guessed margin.
+                    int minX = 1 << 28, minY = 1 << 28, maxX = -(1 << 28), maxY = -(1 << 28);
+                    bool haveRect = !lockedShot.isNull() && lockScale > 0.5;
+                    const double cornerX[2] = {bx0, bx1};
+                    const double cornerY[2] = {by0, by1};
+                    const double cornerZ[2] = {bz0, bz1};
+                    for (int i = 0; i < 8 && haveRect; ++i) {
+                        QPoint logical;
+                        if (!view->projectToScreen(gp_Pnt(cornerX[i & 1], cornerY[(i >> 1) & 1],
+                                                          cornerZ[(i >> 2) & 1]),
+                                                   logical)) {
+                            haveRect = false;
+                            break;
+                        }
+                        const int px = int(std::lround(logical.x() * lockScale));
+                        const int py = int(std::lround(logical.y() * lockScale));
+                        minX = std::min(minX, px); maxX = std::max(maxX, px);
+                        minY = std::min(minY, py); maxY = std::max(maxY, py);
+                    }
+                    QRect inner;
+                    if (haveRect) {
+                        const QRect faceRect(QPoint(minX, minY), QPoint(maxX, maxY));
+                        // Inset so every sampled pixel is unambiguously the
+                        // face's interior rather than its outline or the
+                        // selection highlight tracing it.
+                        inner = faceRect
+                                    .adjusted(std::max(1, faceRect.width() / 8),
+                                              std::max(1, faceRect.height() / 5),
+                                              -std::max(1, faceRect.width() / 8),
+                                              -std::max(1, faceRect.height() / 5))
+                                    .intersected(lockedShot.rect());
+                    }
+                    check(haveRect && inner.width() > 40 && inner.height() >= 4,
+                          QStringLiteral("the locked face has an interior to sample "
+                                         "(%1x%2 px), so the two checks below cannot "
+                                         "vanish quietly")
+                              .arg(inner.width()).arg(inner.height()));
+
+                    if (haveRect && inner.width() > 40 && inner.height() >= 4) {
+                        int gridOverFace = 0, facePaint = 0;
+                        for (int y = inner.top(); y <= inner.bottom(); ++y) {
+                            for (int x = inner.left(); x <= inner.right(); ++x) {
+                                const QColor c = lockedShot.pixelColor(x, y);
+                                if (colorDistance(c, Theme::gridMinor()) < 8.0 ||
+                                    colorDistance(c, Theme::gridMajor()) < 8.0) {
+                                    ++gridOverFace;
+                                } else if (colorDistance(c, Theme::viewport()) > 25.0) {
+                                    ++facePaint;
+                                }
+                            }
+                        }
+                        const int total = inner.width() * inner.height();
+                        // Non-vacuity: the region really is the face, not a
+                        // patch of empty viewport the projection wandered on
+                        // to.
+                        check(facePaint * 2 > total,
+                              QStringLiteral("that interior really is the face's own paint "
+                                             "(%1 of %2 px)").arg(facePaint).arg(total));
+                        check(gridOverFace >= 40 && gridOverFace * 100 >= total,
+                              QStringLiteral("and the work-plane grid is drawn ON TOP of "
+                                             "the face it is locked to - an underlay would "
+                                             "be hidden behind it (%1 of %2 px)")
+                                  .arg(gridOverFace).arg(total));
+                    }
+                }
 
                 // The part that makes this a feature rather than a label:
                 // a point clicked now lands ON the face's plane, not on Z=0.
@@ -3010,11 +4424,24 @@ int main(int argc, char* argv[])
                               1.0e-6,
                       "the face stays locked after extruding on it");
 
-                // Put the document back where the rest of the suite expects it.
+                // Put the document back where the rest of the suite expects
+                // it. TWO undos, and that is the Phase-7 lifecycle rather
+                // than defensive extra clicking: extruding is a CONVERSION
+                // under one checkpoint, so the first undo removes the body
+                // and hands the outline back, and the second takes the
+                // outline away. Asserting the intermediate state here as
+                // well, because "two undos ends up empty" would pass just as
+                // happily if the first one had thrown the outline away.
                 trigger(window, QStringLiteral("Undo"));
                 settle(150);
                 check(window.document().count() == bodiesBefore,
                       "the shelf is undone, leaving the document as it was");
+                check(window.hasPendingFace(),
+                      "and the outline it was made from is back, waiting again");
+                trigger(window, QStringLiteral("Undo"));
+                settle(150);
+                check(!window.hasPendingFace(),
+                      "and a second undo takes that outline away too");
 
                 // A curved face has no single plane to draw on, and the
                 // refusal has to say so rather than silently doing nothing.
@@ -3064,6 +4491,14 @@ int main(int argc, char* argv[])
                     check(!stateLabelText(window).contains(QStringLiteral("locked face")),
                           QStringLiteral("and the state label stops saying so (\"%1\")")
                               .arg(stateLabelText(window)));
+                    // The GROUND grid is what this picture is for, and the
+                    // lock flight left the camera square onto a vertical face,
+                    // where the ground is exactly edge-on. Angled for the
+                    // snapshot; put back below, with everything else the box
+                    // probe disturbs.
+                    view->camera().setTemporaryOrtho(false);
+                    view->animateTo(CameraState{});
+                    settle(120);
                     view->saveSnapshot(outDir + "/h-unlocked-ground-grid.png");
                 }
 
@@ -3118,6 +4553,28 @@ int main(int argc, char* argv[])
                 // outline along a direction lying in its own plane - a body
                 // with no volume that BRepPrimAPI_MakePrism calls done.
                 {
+                    // Back to the angled pose this block started from, and
+                    // re-projected onto it. This probe draws its outline on
+                    // the GROUND, which is edge-on to the face-on camera the
+                    // lock flight leaves behind - no ray meets a plane it is
+                    // parallel to, so not one point would land.
+                    view->camera().setTemporaryOrtho(false);
+                    view->animateTo(poseBeforeLock);
+                    settle(120);
+                    bool angledAgain =
+                        view->projectToScreen(pickedCentre, screen) &&
+                        view->rect().adjusted(8, 8, -8, -8).contains(screen);
+                    for (int c = 0; c < 4; ++c) {
+                        angledAgain = angledAgain &&
+                                      view->projectToScreen(outlineCornerPoints[c],
+                                                            outlineCorners[c]) &&
+                                      view->rect().adjusted(8, 8, -8, -8).contains(
+                                          outlineCorners[c]);
+                    }
+                    check(angledAgain && !view->viewIsOrthographic(),
+                          "the camera is angled again, in perspective, with this "
+                          "block's click points back inside the viewport");
+
                     // Selected again first, so "unavailable" below means the
                     // pending outline rather than merely an empty selection.
                     clickAt(view, QPointF(screen));
@@ -3153,15 +4610,74 @@ int main(int argc, char* argv[])
                           QStringLiteral("and says why, rather than just looking broken "
                                          "(\"%1\")")
                               .arg(lockAgain ? lockAgain->toolTip() : QString()));
+                    // The REMEDIES, named. contains("outline") alone passed a
+                    // tooltip advising Ctrl+K - which used to unblock this and
+                    // stopped doing so the moment an outline became a document
+                    // item, because starting a sketch no longer discards the
+                    // waiting one. The user followed the advice and the action
+                    // stayed disabled. A copy check that cannot tell working
+                    // advice from stale advice is not checking the copy.
+                    const QString lockTip = lockAgain ? lockAgain->toolTip() : QString();
+                    check(lockTip.contains(QStringLiteral("E to extrude")) &&
+                              lockTip.contains(QStringLiteral("Delete to discard it")),
+                          QStringLiteral("naming the two remedies that actually work - "
+                                         "extrude it, or discard it (\"%1\")")
+                              .arg(lockTip));
+                    // Ctrl+K went first, then Ctrl+Z: Ctrl+Z is the outline's
+                    // undo only while the outline is the TOP of the stack, and
+                    // nothing gates the operations that push onto it. Both are
+                    // pinned OUT, because a copy check that cannot tell working
+                    // advice from stale advice is not checking the copy.
+                    check(!lockTip.contains(QStringLiteral("Ctrl+K")) &&
+                              !lockTip.contains(QStringLiteral("Ctrl+Z")),
+                          QStringLiteral("and neither of the two that no longer do "
+                                         "(\"%1\")").arg(lockTip));
 
                     // The double-click route never consults that enabled
                     // state, so the refusal has to live in lockToFace() too.
                     check(!window.lockToFace(picked),
                           "and the call the double-click route uses refuses as well");
-                    check(toasts != nullptr &&
-                              toasts->currentText().contains(QStringLiteral("outline")),
-                          QStringLiteral("naming the cause and the fix (\"%1\")")
-                              .arg(toasts ? toasts->currentText() : QString()));
+                    const QString refusal =
+                        toasts ? toasts->currentText() : QString();
+                    check(refusal.contains(QStringLiteral("outline")),
+                          QStringLiteral("naming the cause (\"%1\")").arg(refusal));
+                    // The same pinning on the toast, which carried the same
+                    // stale advice - Ctrl+K first, then Ctrl+Z.
+                    check(refusal.contains(QStringLiteral("press E")) &&
+                              refusal.contains(QStringLiteral("Delete to discard it")),
+                          QStringLiteral("and the fixes that work (\"%1\")").arg(refusal));
+                    check(!refusal.contains(QStringLiteral("Ctrl+K")) &&
+                              !refusal.contains(QStringLiteral("Ctrl+Z")),
+                          QStringLiteral("rather than starting a new outline or a Ctrl+Z "
+                                         "the next change takes over (\"%1\")")
+                              .arg(refusal));
+
+                    // Important 2: mid-sketch, hasPendingFace() is TRUE - the
+                    // waiting outline survives the new sketch - so an
+                    // unguarded tooltip swap blamed the outline while the
+                    // sketch was the actual blocker, and told the user to
+                    // press E, which is disabled while drawing.
+                    trigger(window, QStringLiteral("Start Sketch"));
+                    settle(150);
+                    check(window.isSketching() && window.hasPendingFace(),
+                          "mid-sketch with an outline still waiting - both blockers "
+                          "hold at once, which is what makes the next check mean "
+                          "something");
+                    const QString midSketchTip =
+                        lockAgain ? lockAgain->toolTip() : QString();
+                    check(midSketchTip.contains(QStringLiteral("drawing")),
+                          QStringLiteral("the tooltip blames the sketch, which is the "
+                                         "blocker the user can act on first (\"%1\")")
+                              .arg(midSketchTip));
+                    check(!midSketchTip.contains(QStringLiteral("E to extrude")),
+                          QStringLiteral("and does not tell them to press a key that is "
+                                         "disabled while drawing (\"%1\")")
+                              .arg(midSketchTip));
+                    trigger(window, QStringLiteral("Cancel Sketch"));
+                    settle(150);
+                    check(lockAgain && lockAgain->toolTip().contains(
+                                           QStringLiteral("E to extrude")),
+                          "and the outline reason comes back once the sketch is gone");
                     check(!window.isFaceLocked() &&
                               window.sketch().plane().Axis().Direction().IsEqual(
                                   waitingPlane.Axis().Direction(), 1.0e-9),
@@ -3177,10 +4693,16 @@ int main(int argc, char* argv[])
                               ModelingOps::volume(
                                   window.document().solids().back().shape) > 1.0,
                           "into a body with real volume, not a flat one");
+                    // Two undos again - the conversion, then the outline. See
+                    // the shelf block above.
                     trigger(window, QStringLiteral("Undo"));
                     settle(150);
                     check(window.document().count() == bodiesNow,
                           "which is undone again for the checks that follow");
+                    trigger(window, QStringLiteral("Undo"));
+                    settle(150);
+                    check(!window.hasPendingFace(),
+                          "and the outline it came back as is taken away too");
 
                     // The same refusal the other way round: locked, with an
                     // outline pending on the locked face, unlocking would
@@ -3211,13 +4733,15 @@ int main(int argc, char* argv[])
                     check(window.isFaceLocked(),
                           "and calling it directly leaves the face locked");
 
-                    // Starting another outline is the way out, and it brings
-                    // both actions back.
-                    trigger(window, QStringLiteral("Start Sketch"));
-                    trigger(window, QStringLiteral("Cancel Sketch"));
+                    // Undo is the way out, and it brings both actions back.
+                    // Phase 7 moved this: starting a fresh outline used to
+                    // drop the one that was waiting, and an outline that the
+                    // document owns is not something the next sketch may
+                    // silently delete.
+                    trigger(window, QStringLiteral("Undo"));
                     settle(120);
                     check(!window.hasPendingFace(),
-                          "starting a fresh outline drops the one that was waiting");
+                          "taking the waiting outline back with Undo clears it");
                     check(unlockAgain != nullptr && unlockAgain->isEnabled(),
                           "and Unlock Face is available again");
                     window.unlockFace();
@@ -3394,19 +4918,25 @@ int main(int argc, char* argv[])
               "and that cancel created no body");
         check(window.hasPendingFace(),
               "the pending face survives a cancel from the viewport too");
-        trigger(window, QStringLiteral("Start Sketch"));
-        trigger(window, QStringLiteral("Cancel Sketch"));
+        trigger(window, QStringLiteral("Undo"));
         settle(120);
     }
 
     // --- starting a new sketch closes an open extrude preview -----------------
-    // Fix round 1, Important 1: onStartSketch() nulls the pending face and
-    // resets the view's preview slot to empty, but that alone used to leave
+    // Fix round 1, Important 1: onStartSketch() nulled the pending face and
+    // reset the view's preview slot to empty, but that alone used to leave
     // the panel itself open and still believing it had a good preview - the
     // next keystroke redisplayed a body-shaped shape over the new outline,
     // and Enter reached commit(), where extrudePendingFace() silently failed
     // on the now-null pending face, so hide() never ran and the shape stayed
     // on screen: a body visible in the viewport that exists in no document.
+    //
+    // Phase 7 changed the MECHANISM and kept the requirement, which is the
+    // whole point of leaving this check where it is: starting a sketch no
+    // longer nulls anything, so a panel that closed only when the pending
+    // face went away would now stay open over a fresh outline. It closes on
+    // "the outline I was opened for is not the one Extrude would consume any
+    // more" instead - see ExtrudePreview::onAppStateChanged().
     {
         trigger(window, QStringLiteral("Start Sketch"));
         clickAt(view, QPointF(300, 300)); clickAt(view, QPointF(420, 300));
@@ -3428,8 +4958,14 @@ int main(int argc, char* argv[])
               "starting a new sketch closes the open extrude preview");
         check(!view->hasPreview(),
               "and leaves no ghost preview shape behind in the viewport");
+        // The outline the closed preview belonged to is STILL a document item
+        // - the new sketch closed the panel, it did not delete the user's
+        // outline - so it has to be taken back deliberately.
+        check(window.hasPendingFace(),
+              "the outline the preview was built from survives the new sketch");
 
         trigger(window, QStringLiteral("Cancel Sketch"));
+        trigger(window, QStringLiteral("Undo"));
         settle(150);
     }
 
@@ -3457,25 +4993,32 @@ int main(int argc, char* argv[])
         ExtrudePreview* afterEscape = window.findChild<ExtrudePreview*>();
         check(afterEscape == nullptr || !afterEscape->isVisible(),
               "Escape closes the preview");
-        // This check used to assert the OPPOSITE - that the viewport was left
-        // empty - which enshrined the bug rather than catching it.
-        // MainWindow::onFinishSketch() shows the closed face through the
-        // viewport's single preview slot; ExtrudePreview overwrites that same
-        // slot with the body it would build. Clearing it on cancel therefore
-        // erased the face, leaving an intact pending face, an enabled Extrude
-        // action and a status bar still saying "Outline closed" above an
-        // empty viewport - against Milestone 1's own criterion that closing an
-        // outline produces a VISIBLE filled face.
-        check(view->hasPreview(),
-              "Escape puts the closed face back on screen rather than clearing it");
-        // And it is the FACE, not the body the cancelled preview was showing:
-        // hasPreview() alone cannot tell the two apart, which is how one
-        // feature silently overwriting another's slot went unnoticed.
-        const TopoDS_Shape restored = view->previewShape();
+        // The REQUIREMENT here has never changed - Milestone 1's criterion is
+        // that a closed outline produces a VISIBLE filled face, and backing
+        // out of a height must not delete it - but Phase 7 moved where that
+        // face lives. It used to be shown through the viewport's single
+        // preview slot, which ExtrudePreview overwrote with the body it would
+        // build, so clearing that slot on cancel erased the face and left an
+        // intact pending face above an empty viewport; the fix then was to
+        // restore the face into the slot. A closed outline is a DOCUMENT ITEM
+        // now, on its own channel, so this asserts the state that replaced
+        // that arrangement: the preview slot is empty and the outline is still
+        // on screen as an item. Both halves, because "the slot is empty" alone
+        // is exactly what the original bug looked like.
+        check(!view->hasPreview(),
+              "Escape empties the preview slot - the body it was showing is gone");
+        check(view->outlineCount() == 1,
+              QStringLiteral("and the closed outline is still on screen as a document "
+                             "item rather than having been erased with it (%1)")
+                  .arg(view->outlineCount()));
+        check(window.pendingOutlineId() != 0 &&
+                  view->hasOutline(window.pendingOutlineId()),
+              "and it is the outline Extrude would still consume");
+        const TopoDS_Shape restored = window.pendingFace();
         check(!restored.IsNull() &&
                   !TopExp_Explorer(restored, TopAbs_SOLID).More() &&
                   TopExp_Explorer(restored, TopAbs_FACE).More(),
-              "and what is on screen is the face, not the body it would have built");
+              "which is a face, not the body the cancelled preview would have built");
         check(window.hasPendingFace(),
               "Escape leaves the pending face intact, so the user can retry");
 
@@ -3491,6 +5034,592 @@ int main(int argc, char* argv[])
         }
         check(static_cast<int>(window.document().solids().size()) == before + 1,
               "the pending face left behind by Escape can still be extruded");
+    }
+
+    // --- a closed outline is a document item ---------------------------------
+    // Phase 7, items 4 and 6b. The pending face stopped being a member of
+    // MainWindow and became something the document owns: it is listed in the
+    // drawer with its own name and its plane-local size, it is drawn in the
+    // viewport on its own eye-toggleable channel, extruding CONVERTS it under
+    // a single checkpoint, and undo/redo walk the whole lifecycle.
+    //
+    // This block restores the exact document it found: everything it builds it
+    // takes back, so the blocks after it are unaffected.
+    {
+        ItemsPanel* drawer = window.itemsPanel();
+        ToastHost* toasts = window.findChild<ToastHost*>();
+        check(drawer != nullptr && toasts != nullptr,
+              "the outline-item block has a drawer and a toast host");
+
+        trigger(window, QStringLiteral("Select Bodies"));
+        view->clearSelection();
+        settle(120);
+        const int bodiesAtStart = static_cast<int>(window.document().count());
+        const int rowsAtStart = drawer ? drawer->rowCount() : 0;
+        check(!window.hasPendingFace(),
+              "and it starts with no outline waiting, so its counts mean something");
+
+        // --- closing a sketch creates the item ---------------------------
+        trigger(window, QStringLiteral("Start Sketch"));
+        sketchQuad(window, 0.30, 0.30, 0.46, 0.46);
+        trigger(window, QStringLiteral("Finish Sketch"));
+        settle(200);
+
+        check(window.document().outlineCount() == 1,
+              "closing an outline puts ONE outline item in the document");
+        check(static_cast<int>(window.document().count()) == bodiesAtStart,
+              "and no body - an outline is not a body");
+        const int outlineId = window.pendingOutlineId();
+        check(outlineId != 0 && window.document().containsOutline(outlineId),
+              "the pending face IS that item");
+        check(window.hasPendingFace() &&
+                  !window.document().outlineFace(outlineId).IsNull(),
+              "so hasPendingFace() still answers exactly as it always has");
+
+        // The drawer lists it, ABOVE the bodies, with the vocabulary's name
+        // and its own plane-local size.
+        check(drawer && drawer->rowCount() == rowsAtStart + 1,
+              QStringLiteral("the drawer grows one row for it (%1, was %2)")
+                  .arg(drawer ? drawer->rowCount() : -1).arg(rowsAtStart));
+        const QString outlineRow = drawer ? drawer->rowTextAt(0) : QString();
+        check(outlineRow.contains(QStringLiteral("Outline ")),
+              QStringLiteral("and the FIRST row is the outline, above the bodies "
+                             "(\"%1\")").arg(outlineRow));
+        check(outlineRow.contains(QString::fromUtf8("\xC3\x97")) &&
+                  outlineRow.contains(QStringLiteral("mm")),
+              QStringLiteral("carrying its size the way a body row does (\"%1\")")
+                  .arg(outlineRow));
+        // Two numbers, not three: an outline is flat, and a row reading
+        // "340 x 220 x 0 mm" would be the world-axis box this deliberately
+        // does not use.
+        check(outlineRow.count(QString::fromUtf8("\xC3\x97")) == 1,
+              QStringLiteral("as TWO dimensions, not a body's three (\"%1\")")
+                  .arg(outlineRow));
+        check(!outlineRow.contains(QStringLiteral("Body")),
+              "and the outline row is not named as a body");
+
+        // It reports itself the way every other document change does: a Note
+        // that offers Undo, naming the item and its size.
+        check(toasts && toasts->isShowing() &&
+                  toasts->currentText().contains(QStringLiteral("Outline ")),
+              QStringLiteral("closing it raises a Note naming the outline (\"%1\")")
+                  .arg(toasts ? toasts->currentText() : QString()));
+        check(toasts && toasts->undoControl() && toasts->undoControl()->isVisible(),
+              "with an Undo control, like every other change to the document");
+
+        // --- and it is on screen, on its own channel ---------------------
+        check(view->hasOutline(outlineId) && view->outlineCount() == 1,
+              "the outline is displayed in the viewport as an item");
+        check(!view->hasPreview(),
+              "and NOT through the preview slot as well - one way to show one face");
+        check(view->isOutlineVisible(outlineId), "it starts visible");
+        // Not pickable: the drawer row is its handle this phase, and an
+        // outline that could be selected would make every gizmo predicate
+        // (which all read the viewport's selection) describe something the
+        // user cannot act on.
+        check(view->selectedSolidIds().empty(),
+              "and it is not in the viewport's selection");
+
+        // --- the eye really hides it, measured in pixels -----------------
+        {
+            const QString shown = outDir + QStringLiteral("/l-outline-visible.png");
+            const QString hidden = outDir + QStringLiteral("/l-outline-hidden.png");
+            view->saveSnapshot(shown);
+            const QImage shownShot(shown);
+            const double scale =
+                shownShot.isNull() ? 0.0
+                                   : double(shownShot.width()) / std::max(1, view->width());
+
+            // The outline's own centre, projected - never a hardcoded pixel,
+            // which stops meaning what it meant the moment the camera moves.
+            const Measure::Extents box =
+                Measure::extentsOf(window.document().outlineFace(outlineId));
+            Bnd_Box bounds;
+            BRepBndLib::Add(window.document().outlineFace(outlineId), bounds);
+            double xmin = 0, ymin = 0, zmin = 0, xmax = 0, ymax = 0, zmax = 0;
+            bounds.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+            const gp_Pnt centre(0.5 * (xmin + xmax), 0.5 * (ymin + ymax),
+                                0.5 * (zmin + zmax));
+            QPoint logical;
+            QPoint sample;
+            const bool projects = view->projectToScreen(centre, logical);
+            if (projects && scale > 0.5)
+                sample = QPoint(int(std::lround(logical.x() * scale)),
+                                int(std::lround(logical.y() * scale)));
+            const bool probeLands =
+                projects && scale > 0.5 && !shownShot.isNull() &&
+                shownShot.rect().contains(sample) && box.x > 1.0 && box.y > 1.0;
+            check(probeLands,
+                  QStringLiteral("the outline's own centre projects into the dump, so "
+                                 "the pixel probe has somewhere to look (%1 px per "
+                                 "logical px)").arg(scale));
+
+            if (probeLands) {
+                const QColor lit = shownShot.pixelColor(sample);
+                check(colorDistance(lit, QColor(Qt::yellow)) < 60.0,
+                      QStringLiteral("and the outline is actually painted there "
+                                     "(%1 from yellow)")
+                          .arg(colorDistance(lit, QColor(Qt::yellow))));
+
+                // The eye on its row, found the same way the body rows' is -
+                // the first VISIBLE toggle, which is the outline's because
+                // outline rows come first.
+                QPushButton* outlineEye = firstVisibleRowToggle(drawer);
+                check(outlineEye != nullptr, "the outline row carries a visibility toggle");
+                if (outlineEye) {
+                    const QPoint at =
+                        outlineEye->mapTo(view, QPoint(outlineEye->width() / 2,
+                                                       outlineEye->height() / 2));
+                    check(view->childAt(at) == outlineEye,
+                          "which a real click at its centre actually finds");
+                    clickAt(outlineEye, QPointF(outlineEye->width() / 2.0,
+                                                outlineEye->height() / 2.0));
+                    settle(200);
+                    check(!view->isOutlineVisible(outlineId),
+                          "and clicking it hides the outline");
+
+                    view->saveSnapshot(hidden);
+                    const QImage hiddenShot(hidden);
+                    check(!hiddenShot.isNull() && hiddenShot.size() == shownShot.size(),
+                          "the two dumps are the same size, so the same pixel means the "
+                          "same place");
+                    if (!hiddenShot.isNull() && hiddenShot.size() == shownShot.size()) {
+                        const QColor gone = hiddenShot.pixelColor(sample);
+                        check(colorDistance(gone, QColor(Qt::yellow)) > 60.0,
+                              QStringLiteral("and the pixel it filled is no longer the "
+                                             "outline's colour (%1 from yellow)")
+                                  .arg(colorDistance(gone, QColor(Qt::yellow))));
+                    }
+
+                    // Back on, so the rest of this block sees it. Re-found
+                    // rather than reused: restyleRows() rebuilds the rows on
+                    // a visibility change, so the pointer above can be a
+                    // corpse by now.
+                    QPushButton* again = firstVisibleRowToggle(drawer);
+                    // Pinned: `if (again)` with nothing asserting it takes the
+                    // check below with it - the toggle would simply never be
+                    // clicked and "clicking it again brings the outline back"
+                    // would be reporting on a click that never happened.
+                    check(again != nullptr,
+                          "the row still carries its toggle after the hide, to click back on");
+                    if (again)
+                        clickAt(again, QPointF(again->width() / 2.0, again->height() / 2.0));
+                    settle(200);
+                    check(view->isOutlineVisible(outlineId),
+                          "and clicking it again brings the outline back");
+                }
+            }
+        }
+
+        // The capture: the whole window, so the drawer's outline row above
+        // its body rows and the yellow outline in the viewport are in one
+        // frame. A V3d_View dump would show the viewport alone and could not
+        // prove the drawer lists it.
+        check(bodiesAtStart > 0,
+              "there is at least one body, so the capture really does show an "
+              "outline row ABOVE a body row rather than an outline alone");
+        printWindowCapture(&window, outDir + QStringLiteral("/l-outline-item.png"));
+
+        // --- a second outline accumulates, and the drawer chooses ---------
+        // Starting another sketch no longer throws the first one away: it is
+        // in the document and on the undo stack, and only Extrude or Ctrl+Z
+        // may remove it.
+        trigger(window, QStringLiteral("Start Sketch"));
+        sketchQuad(window, 0.60, 0.30, 0.74, 0.44);
+        trigger(window, QStringLiteral("Finish Sketch"));
+        settle(200);
+        check(window.document().outlineCount() == 2,
+              "a second closed outline accumulates rather than replacing the first");
+        const int secondId = window.pendingOutlineId();
+        check(secondId != 0 && secondId != outlineId,
+              "and the NEWEST is what Extrude would consume by default");
+        check(drawer && drawer->rowCount() == rowsAtStart + 2,
+              "the drawer lists both");
+
+        // Clicking the first outline's row makes it the pending one again -
+        // the drawer row IS the outline's handle.
+        {
+            QWidget* firstRow = nullptr;
+            int seen = 0;
+            for (QWidget* row : drawer->findChildren<QWidget*>(QStringLiteral("itemsRow"))) {
+                if (!row->isVisible()) continue;
+                if (seen++ == 0) firstRow = row;
+            }
+            check(firstRow != nullptr &&
+                      firstRow->property("outlineId").toInt() == outlineId,
+                  "the first live row is the first outline's");
+            // Which one is pending has to be VISIBLE before the click as
+            // well as after it - with two outlines in the drawer and no mark
+            // on either, the choice E acts on is one the user cannot see.
+            // The newest is pending on arrival, so its row is the marked one
+            // now.
+            QWidget* secondRow = nullptr;
+            {
+                int seen = 0;
+                for (QWidget* row :
+                     drawer->findChildren<QWidget*>(QStringLiteral("itemsRow"))) {
+                    if (!row->isVisible()) continue;
+                    if (seen++ == 1) secondRow = row;
+                }
+            }
+            // The same accent fill a selected body row wears - asserted as
+            // the token, not as "the stylesheet is non-empty", so a mark in
+            // some other colour fails rather than passes.
+            const QString marked =
+                QStringLiteral("background-color: %1").arg(Theme::chipActive().name());
+            check(secondRow != nullptr &&
+                      secondRow->styleSheet().contains(marked),
+                  QStringLiteral("the newest outline's row carries the pending mark "
+                                 "before any click (\"%1\")")
+                      .arg(secondRow ? secondRow->styleSheet() : QString()));
+            check(firstRow != nullptr && !firstRow->styleSheet().contains(marked),
+                  "and the other outline's row does not - only one is pending");
+            check(window.findChild<QLabel*>() != nullptr, "the shell has labels to read");
+
+            if (firstRow) {
+                clickAt(firstRow, QPointF(6.0, firstRow->height() / 2.0));
+                settle(150);
+                check(window.pendingOutlineId() == outlineId,
+                      "clicking its row makes it the outline Extrude will consume");
+                check(window.hasPendingFace(),
+                      "and a face is still pending either way");
+                // The mark FOLLOWS the click, both ways - a highlight that
+                // only ever arrived and never left would look right on this
+                // click and wrong on the next.
+                check(firstRow->styleSheet().contains(marked),
+                      QStringLiteral("the mark moves to the row that was clicked "
+                                     "(\"%1\")").arg(firstRow->styleSheet()));
+                check(secondRow != nullptr && !secondRow->styleSheet().contains(marked),
+                      "and leaves the row it was on");
+
+                // And the state label NAMES it, so the two halves of the
+                // answer agree. "Face ready" alone could not say which.
+                const QString expectedName =
+                    QString::fromStdString(window.document().outlineNameOf(outlineId));
+                QString stateText;
+                for (QLabel* label : window.findChildren<QLabel*>())
+                    if (label->text().contains(QStringLiteral("press E to extrude")))
+                        stateText = label->text();
+                check(!expectedName.isEmpty() && stateText.contains(expectedName),
+                      QStringLiteral("and the state label names the outline that was "
+                                     "clicked (\"%1\", expected \"%2\")")
+                          .arg(stateText, expectedName));
+            }
+        }
+
+        // --- extruding CONVERTS the selected outline ----------------------
+        const int revisionBeforeExtrude = window.document().revision();
+        check(window.extrudePendingFace(12.0),
+              "the outline chosen in the drawer extrudes");
+        settle(200);
+        check(window.document().outlineCount() == 1,
+              "the extruded outline is consumed, not left behind");
+        check(!window.document().containsOutline(outlineId),
+              "and it is the one that was selected that went");
+        check(window.document().containsOutline(secondId),
+              "the other outline is untouched");
+        check(static_cast<int>(window.document().count()) == bodiesAtStart + 1,
+              "and one body arrived in its place");
+        check(!view->hasOutline(outlineId) && view->outlineCount() == 1,
+              "the viewport followed - the outline's presentation went with it");
+        check(window.document().revision() == revisionBeforeExtrude + 1,
+              "the conversion counted as ONE change, so a toast naming it is "
+              "dismissed by it exactly once");
+
+        // --- undo walks the lifecycle backwards --------------------------
+        trigger(window, QStringLiteral("Undo"));
+        settle(200);
+        check(window.document().outlineCount() == 2 &&
+                  static_cast<int>(window.document().count()) == bodiesAtStart,
+              "ONE undo puts the outline back AND removes the body");
+        check(window.document().containsOutline(outlineId),
+              "and it is the same outline, by id");
+        check(view->hasOutline(outlineId) && view->outlineCount() == 2,
+              "with the viewport back in step - resyncView carries outlines too");
+
+        // Minor 4: the outline the undo handed back is the one E acts on.
+        // pendingOutlineId()'s fallback is the LAST entry in the list, and an
+        // undo re-inserts a restored outline AT ITS ORIGINAL POSITION - so
+        // with a later outline still present, Ctrl+Z then E used to build a
+        // body from a different outline than the one that had just
+        // reappeared. Checked by CONVERTING, not just by reading the id: the
+        // id is what the fix sets, and asserting it alone would be asserting
+        // the fix against itself.
+        check(window.pendingOutlineId() == outlineId,
+              "the outline the undo handed back is the pending one, not the later "
+              "one that happens to sit last in the list");
+        check(window.extrudePendingFace(9.0),
+              "and pressing E converts it");
+        settle(200);
+        check(!window.document().containsOutline(outlineId) &&
+                  window.document().containsOutline(secondId),
+              "the SAME outline the undo restored - not the other one");
+        trigger(window, QStringLiteral("Undo"));
+        settle(200);
+        check(window.document().containsOutline(outlineId),
+              "and that conversion undoes back to where this probe started");
+
+        trigger(window, QStringLiteral("Undo"));
+        settle(200);
+        check(window.document().outlineCount() == 1,
+              "the next undo takes the second outline away");
+        trigger(window, QStringLiteral("Undo"));
+        settle(200);
+        check(window.document().outlineCount() == 0 && !window.hasPendingFace(),
+              "and the next takes the first, leaving nothing pending");
+        check(view->outlineCount() == 0,
+              "and nothing of either on screen");
+
+        // --- redo walks it forwards again --------------------------------
+        trigger(window, QStringLiteral("Redo"));
+        trigger(window, QStringLiteral("Redo"));
+        settle(200);
+        check(window.document().outlineCount() == 2,
+              "two redos restore both outlines");
+        trigger(window, QStringLiteral("Redo"));
+        settle(200);
+        check(window.document().outlineCount() == 1 &&
+                  static_cast<int>(window.document().count()) == bodiesAtStart + 1,
+              "and the third re-runs the conversion in one step");
+        check(view->outlineCount() == 1 &&
+                  view->hasOutline(window.document().outlines().front().id),
+              "with the viewport in step again");
+
+        // --- a toast must not outlive the change it names ----------------
+        // The revision stamp, on the outline half of the document. Close an
+        // outline (Note + Undo), then undo by hand: the toast that offered to
+        // undo THAT has to go, rather than staying armed over a stack that
+        // has moved.
+        trigger(window, QStringLiteral("Start Sketch"));
+        sketchQuad(window, 0.62, 0.52, 0.72, 0.62);
+        trigger(window, QStringLiteral("Finish Sketch"));
+        settle(200);
+        check(toasts && toasts->isShowing() &&
+                  toasts->currentText().contains(QStringLiteral("Outline ")),
+              "closing another outline raises its own armed Note");
+        trigger(window, QStringLiteral("Undo"));
+        settle(250);
+        check(toasts && !toasts->isShowing(),
+              "and undoing that close dismisses it - the revision moved, so the "
+              "message stopped describing the document");
+
+        // --- put the document back exactly as this block found it ---------
+        while (window.document().outlineCount() > 0 ||
+               static_cast<int>(window.document().count()) > bodiesAtStart) {
+            if (!window.document().canUndo()) break;
+            trigger(window, QStringLiteral("Undo"));
+        }
+        settle(200);
+        check(static_cast<int>(window.document().count()) == bodiesAtStart &&
+                  window.document().outlineCount() == 0 && !window.hasPendingFace(),
+              "and the outline-item block leaves the document exactly as it found it");
+        check(drawer && drawer->rowCount() == rowsAtStart,
+              QStringLiteral("with the drawer back to its own row count (%1, expected %2)")
+                  .arg(drawer ? drawer->rowCount() : -1).arg(rowsAtStart));
+        view->clearSelection();
+        settle(120);
+    }
+
+    // --- the waiting outline has an exit, and Delete is it --------------------
+    // Whole-branch review, Important 1. Every direct-modeling gate refuses
+    // while an outline waits - the pull arrow, the bevel arrow, the transform
+    // gizmo, Lock to Face - while the operations that are NOT gated (booleans,
+    // Delete) push onto the undo stack. So the sequence below used to be a
+    // trap with no exit but Extrude: close an outline, Union two bodies, and
+    // "Ctrl+Z to take it back" - what both refusals advised - undid the Union.
+    //
+    // The whole scenario is driven, in order, rather than asserted piecewise:
+    // the defect was in the RELATIONSHIP between three things that each worked.
+    {
+        ToastHost* lockoutToasts = window.findChild<ToastHost*>();
+        check(lockoutToasts != nullptr, "there is a toast host for the lock-out probe");
+        const int bodiesBefore = static_cast<int>(window.document().count());
+        view->clearSelection();
+        settle(120);
+        check(window.document().outlineCount() == 0 && !window.hasPendingFace(),
+              "the lock-out probe starts with nothing waiting");
+
+        // Two overlapping bodies of its own, so the Union below is this
+        // block's change and not a rearrangement of an earlier block's.
+        check(buildBody(window, 0.24, 0.56, 0.36, 0.68, 20.0),
+              "a body for the Union that springs the trap");
+        check(buildBody(window, 0.30, 0.62, 0.42, 0.74, 20.0),
+              "and a second one overlapping it");
+        const std::vector<DocumentModel::Solid>& lockoutSolids = window.document().solids();
+        check(static_cast<int>(lockoutSolids.size()) == bodiesBefore + 2,
+              "both reached the document");
+        std::vector<int> unionPair;
+        if (lockoutSolids.size() >= 2) {
+            unionPair.push_back(lockoutSolids[lockoutSolids.size() - 2].id);
+            unionPair.push_back(lockoutSolids.back().id);
+        }
+
+        // THE outline that gets stranded.
+        trigger(window, QStringLiteral("Start Sketch"));
+        sketchQuad(window, 0.60, 0.56, 0.70, 0.66);
+        trigger(window, QStringLiteral("Finish Sketch"));
+        settle(200);
+        const int strandedId = window.pendingOutlineId();
+        const QString strandedName =
+            QString::fromStdString(window.document().outlineNameOf(strandedId));
+        check(strandedId != 0 && window.hasPendingFace() && !strandedName.isEmpty(),
+              QStringLiteral("an outline is closed and waiting (\"%1\")").arg(strandedName));
+
+        // The refusal copy, on both surfaces that carry it, BEFORE anything
+        // has been done to make the old advice wrong: it has to name the
+        // remedy that always works rather than the one that usually does.
+        QAction* lockAction = action(window, QStringLiteral("Lock to Face"));
+        check(lockAction != nullptr, "there is a Lock to Face action to read the reason off");
+        if (lockAction) {
+            const QString tip = lockAction->toolTip();
+            check(tip.contains(QStringLiteral("press E to extrude it")) &&
+                      tip.contains(QStringLiteral("Delete to discard it")),
+                  QStringLiteral("its disabled reason names both remedies that work "
+                                 "(\"%1\")").arg(tip));
+            check(!tip.contains(QStringLiteral("Ctrl+Z")),
+                  "and no longer sends the user to a Ctrl+Z that the next change takes over");
+        }
+        // The other surface: the Failure toast on the Ctrl+double-click route,
+        // which consults no action's enabled state. Any face reaches it - the
+        // pending-outline refusal is asked before the flatness test.
+        TopoDS_Face anyFace;
+        if (!window.document().solids().empty()) {
+            for (TopExp_Explorer it(window.document().solids().front().shape, TopAbs_FACE);
+                 it.More(); it.Next()) {
+                anyFace = TopoDS::Face(it.Current());
+                break;
+            }
+        }
+        check(!anyFace.IsNull(), "there is a face to aim the plane-change refusal at");
+        if (!anyFace.IsNull()) {
+            check(!window.lockToFace(anyFace),
+                  "locking a face is refused while an outline waits");
+            const QString refusal = lockoutToasts ? lockoutToasts->currentText() : QString();
+            check(lockoutToasts && lockoutToasts->isShowing() &&
+                      refusal.contains(QStringLiteral("press E to turn it into a body")) &&
+                      refusal.contains(QStringLiteral("Delete to discard it")),
+                  QStringLiteral("and the toast names the same two remedies (\"%1\")")
+                      .arg(refusal));
+            check(!refusal.contains(QStringLiteral("Ctrl+Z")),
+                  "not the Ctrl+Z that stops meaning the outline the moment anything "
+                  "else is done");
+            // Minor 4, in the same sentence: the punctuation every other
+            // failure in this app keeps.
+            check(!refusal.isEmpty() && !refusal.endsWith(QLatin1Char('.')) &&
+                      refusal.contains(QChar(0x2014)),
+                  QStringLiteral("with no trailing period and an em dash between the "
+                                 "clauses (\"%1\")").arg(refusal));
+        }
+
+        // The gate itself, shut.
+        trigger(window, QStringLiteral("Select Bodies"));
+        if (!unionPair.empty()) view->setSelectedSolids({unionPair.front()});
+        settle(150);
+        check(!window.canTransformSelectedBody(),
+              "with an outline waiting, a selected body raises no transform gizmo");
+
+        // The Union - ungated, and the thing that used to strand the outline
+        // for good by taking the top of the undo stack.
+        view->setSelectedSolids(unionPair);
+        settle(150);
+        check(view->selectedSolidIds().size() == 2, "two bodies selected for the Union");
+        check(window.applyBooleanToSelection(
+                  static_cast<int>(ModelingOps::BooleanKind::Fuse)),
+              "Union runs while the outline waits - booleans were never gated on it");
+        settle(250);
+        const int bodiesAfterUnion = static_cast<int>(window.document().count());
+        check(bodiesAfterUnion == bodiesBefore + 1, "the two operands became one");
+        check(window.hasPendingFace() && window.pendingOutlineId() == strandedId,
+              "and the outline is still waiting - now BEHIND the Union on the undo stack, "
+              "which is what made Ctrl+Z the wrong advice");
+
+        // THE EXIT. Nothing selected, so Delete means the outline.
+        view->clearSelection();
+        settle(150);
+        QAction* deleteAction = action(window, QStringLiteral("Delete Selected"));
+        check(deleteAction != nullptr && deleteAction->isEnabled(),
+              "Delete is available with no body selected, because an outline is waiting");
+        check(deleteAction != nullptr &&
+                  deleteAction->toolTip().contains(QStringLiteral("outline")),
+              QStringLiteral("and its tooltip says which of its two meanings is live "
+                             "(\"%1\")")
+                  .arg(deleteAction ? deleteAction->toolTip() : QString()));
+        const int revisionBeforeDiscard = window.document().revision();
+        trigger(window, QStringLiteral("Delete Selected"));
+        settle(250);
+        check(!window.hasPendingFace() && window.document().outlineCount() == 0,
+              "triggering it discards the waiting outline");
+        check(static_cast<int>(window.document().count()) == bodiesAfterUnion,
+              "without touching a single body");
+        check(!view->hasOutline(strandedId),
+              "and the viewport followed - no outline left on screen");
+        check(window.document().revision() == revisionBeforeDiscard + 1,
+              "as ONE change, so one Undo is all it takes back");
+        check(lockoutToasts && lockoutToasts->isShowing() &&
+                  lockoutToasts->currentText().contains(strandedName),
+              QStringLiteral("reported by a Note naming the outline that went (\"%1\")")
+                  .arg(lockoutToasts ? lockoutToasts->currentText() : QString()));
+        check(lockoutToasts && lockoutToasts->toast() != nullptr &&
+                  lockoutToasts->toast()->hasUndo(),
+              "which offers Undo, like every other change to the document");
+        check(lockoutToasts && lockoutToasts->remainingMs() < 5000,
+              QStringLiteral("as a Note rather than a Failure - it is a change, not a "
+                             "refusal (%1 ms)")
+                  .arg(lockoutToasts ? lockoutToasts->remainingMs() : -1));
+        printWindowCapture(&window, outDir + QStringLiteral("/outline-deleted-toast.png"));
+
+        // The gates it was holding shut are open.
+        if (!window.document().solids().empty())
+            view->setSelectedSolids({window.document().solids().back().id});
+        settle(150);
+        check(window.canTransformSelectedBody(),
+              "and a selected body raises the transform gizmo again - the discard freed "
+              "every gate the outline was holding");
+
+        // Undo puts it back, and only it.
+        view->clearSelection();
+        settle(120);
+        trigger(window, QStringLiteral("Undo"));
+        settle(250);
+        check(window.document().outlineCount() == 1 &&
+                  window.document().containsOutline(strandedId),
+              "Undo puts the outline back, by id");
+        check(view->hasOutline(strandedId), "on screen with it");
+        check(static_cast<int>(window.document().count()) == bodiesAfterUnion,
+              "with the Union still standing - the discard was its own checkpoint, not "
+              "a rewind of everything since");
+
+        // And the FIRST meaning is untouched: a body selected still means the
+        // body, and the waiting outline stays exactly where it is.
+        trigger(window, QStringLiteral("Select Bodies"));
+        if (!window.document().solids().empty())
+            view->setSelectedSolids({window.document().solids().back().id});
+        settle(150);
+        const int bodiesBeforeBodyDelete = static_cast<int>(window.document().count());
+        trigger(window, QStringLiteral("Delete Selected"));
+        settle(250);
+        check(static_cast<int>(window.document().count()) == bodiesBeforeBodyDelete - 1,
+              "Delete with a body selected still takes the body");
+        check(window.document().outlineCount() == 1 && window.hasPendingFace() &&
+                  window.document().containsOutline(strandedId),
+              "and leaves the waiting outline exactly where it was - the second meaning "
+              "displaces nothing");
+
+        // Back to where this block found the document.
+        while ((window.document().outlineCount() > 0 ||
+                static_cast<int>(window.document().count()) > bodiesBefore) &&
+               window.document().canUndo()) {
+            trigger(window, QStringLiteral("Undo"));
+        }
+        settle(200);
+        view->clearSelection();
+        settle(120);
+        check(static_cast<int>(window.document().count()) == bodiesBefore &&
+                  window.document().outlineCount() == 0,
+              QStringLiteral("and the lock-out probe leaves the document as it found it "
+                             "(%1 bodies, %2 outlines)")
+                  .arg(window.document().count())
+                  .arg(window.document().outlineCount()));
     }
 
     // --- pull a face: the headline direct-modeling gesture --------------------
@@ -4481,8 +6610,24 @@ int main(int argc, char* argv[])
                     closer.distance *= std::max(0.6, span / 44.0);
                     view->animateTo(closer);   // animations are off: immediate
                     settle(220);
+                    // RE-DERIVED, not re-projected. The gizmo's world size
+                    // follows the camera since item 11's clamp - it is capped
+                    // to a share of the SCREEN, so coming closer shrinks it in
+                    // millimetres - which means the handle's world point moves
+                    // when the camera does. Re-projecting the point captured
+                    // before the dolly landed off the arm, armed nothing, and
+                    // rolled the pass back: the loop then gave up at 2.3 mm to
+                    // the pixel and the drag below could no longer tell a free
+                    // landing from a snapped one. The frame is re-read too,
+                    // since it is the same thing one level up.
+                    gp_Ax2 movedFrame;
+                    double movedSize = 0.0;
                     QPoint probe;
-                    if (!armsTheZArm(probe)) {
+                    const bool stillOnTheArm =
+                        view->manipulatorFrame(movedFrame, movedSize) &&
+                        findHandle(1, 2, movedFrame.Direction(), handleAt, handleWorld) &&
+                        armsTheZArm(probe);
+                    if (!stillOnTheArm) {
                         view->animateTo(beforePass);
                         settle(220);
                         break;
@@ -5503,8 +7648,14 @@ int main(int argc, char* argv[])
             // tooltip that named the operation the chip is not about to
             // perform would be worse than none. Checked on both sides: the
             // flattening half is asserted after the outward drag below.
-            check(bevel->field()->toolTip().contains(QStringLiteral("rounds the edge")),
-                  QStringLiteral("and the field teaches what the rounding half does "
+            // The wording moved when `round` and `flatten` joined the banned
+            // list: the tooltip says what the EDGE becomes rather than naming
+            // the operation in a word the interface never uses. Pinned on the
+            // fillet-specific half of it, so a tooltip that stopped following
+            // the kind still fails.
+            check(bevel->field()->toolTip().contains(QStringLiteral("Fillet radius")) &&
+                      bevel->field()->toolTip().contains(QStringLiteral("becomes a curve")),
+                  QStringLiteral("and the field teaches what the fillet half does "
                                  "(\"%1\")").arg(bevel->field()->toolTip()));
             // The em dash, by codepoint. This file is UTF-8 with no BOM, the
             // way every other source here is, and the first version of it
@@ -5715,8 +7866,9 @@ int main(int argc, char* argv[])
             // The other half of the tooltip rule pinned above: it follows the
             // kind, so crossing zero has to have rewritten it.
             check(bevel->field() != nullptr &&
-                      bevel->field()->toolTip().contains(QStringLiteral("flattens the edge")),
-                  QStringLiteral("and the field now teaches flattening instead (\"%1\")")
+                      bevel->field()->toolTip().contains(QStringLiteral("Chamfer size")) &&
+                      bevel->field()->toolTip().contains(QStringLiteral("becomes a flat")),
+                  QStringLiteral("and the field now teaches the chamfer instead (\"%1\")")
                       .arg(bevel->field() ? bevel->field()->toolTip() : QString()));
             // Its em dash by codepoint too, and not because the fillet one was
             // checked: they are two separate literals in the source, each
@@ -5882,6 +8034,578 @@ int main(int argc, char* argv[])
               "the bevel probe leaves the document as it found it");
         view->clearSelection();
         view->animateTo(bevelCameraBefore);   // animations are off: immediate
+        settle(200);
+    }
+
+    // --- multi-edge bevels, and the spread that used to come with them --------
+    //
+    // Two user-reported defects, checked on the same body because they are two
+    // halves of one behaviour: what a bevel does to the edges NEXT to the one
+    // it was asked about.
+    //
+    // Item 8: rounding an edge that ends on an earlier fillet's strip also
+    // rounded an edge nobody picked - BRepFilletAPI builds a CONTOUR by
+    // propagation along tangent-continuous edges, and a fillet strip makes its
+    // neighbours tangent. Driven here exactly as the user did it: fillet one
+    // edge through the interface, then fillet the adjacent one, and assert the
+    // first strip is still there and no third one appeared.
+    //
+    // Item 9: Shift-click accumulates edges and ONE gesture bevels all of
+    // them - one build, one checkpoint, one toast.
+    //
+    // Both commit by typing into the chip's field and pressing Enter rather
+    // than by dragging. The drag is covered above; what these two are about is
+    // which edges the KERNEL touches, and a probe whose aim can miss by a snap
+    // step would report a spread that was really a mis-aimed drag.
+    {
+        const CameraState multiCameraBefore = view->camera().state();
+        const int multiBodiesBefore = static_cast<int>(window.document().count());
+        check(buildBody(window, 0.30, 0.32, 0.70, 0.64, 40.0),
+              "a fresh box for the multi-edge and spread probes");
+        const int multiId = window.document().solids().empty()
+                                ? -1
+                                : window.document().solids().back().id;
+        auto multiShape = [&window, multiId] { return window.document().shapeOf(multiId); };
+
+        // Framed on THIS body, not on the document. fitAll() frames every body
+        // the run has built, which by now leaves the probe box small and
+        // nearly edge-on - fine for a pick, useless for a capture, and the
+        // captures are what a reader judges "the neighbouring edge is
+        // untouched" by. The target is the body's own centre and the distance
+        // its own diagonal, so it frames the same way whatever else exists.
+        {
+            Bnd_Box probeBounds;
+            BRepBndLib::Add(multiShape(), probeBounds);
+            double bx0, by0, bz0, bx1, by1, bz1;
+            probeBounds.Get(bx0, by0, bz0, bx1, by1, bz1);
+            CameraState framed = view->camera().state();
+            framed.target = gp_Pnt(0.5 * (bx0 + bx1), 0.5 * (by0 + by1), 0.5 * (bz0 + bz1));
+            framed.azimuthDeg = -45.0;
+            framed.elevationDeg = 32.0;
+            framed.distance = 1.35 * gp_Pnt(bx0, by0, bz0).Distance(gp_Pnt(bx1, by1, bz1));
+            view->animateTo(framed);   // animations are off: immediate
+            settle(250);
+        }
+        trigger(window, QStringLiteral("Select Edges"));
+        settle(150);
+
+        auto multiVolume = [&] { return ModelingOps::volume(multiShape()); };
+        // How long each of the body's rounded strips runs, one entry per
+        // cylindrical face. A fillet makes one cylinder per edge it rounds, so
+        // this says WHICH edges the kernel actually touched - the assertion a
+        // volume figure cannot make, because a spread removes a perfectly
+        // plausible amount of material and only the strips say where from.
+        //
+        // The span is the cylinder's own V parameter range, which for a
+        // cylinder IS the length along its axis. A bounding box cannot answer
+        // this: buildBody draws its rectangle in SCREEN space, so the body's
+        // edges run at arbitrary angles and a 1,230 mm strip has an 881 mm box.
+        auto stripSpans = [&] {
+            std::vector<double> spans;
+            for (TopExp_Explorer it(multiShape(), TopAbs_FACE); it.More(); it.Next()) {
+                const BRepAdaptor_Surface surface(TopoDS::Face(it.Current()));
+                if (surface.GetType() != GeomAbs_Cylinder) continue;
+                spans.push_back(surface.LastVParameter() - surface.FirstVParameter());
+            }
+            std::sort(spans.begin(), spans.end(), std::greater<double>());
+            return spans;
+        };
+        // Strips that run along an EDGE, as opposed to the small patch a
+        // kernel leaves in a corner where two rounded edges meet. Anything
+        // shorter than a few radii is corner work, not a rounded edge - and
+        // the spread this probe exists for rounded a whole 1,000 mm edge, not
+        // a corner.
+        auto longStrips = [&](double radius) {
+            int found = 0;
+            for (double span : stripSpans())
+                if (span > radius * 4.0) ++found;
+            return found;
+        };
+        auto endsOf = [](const TopoDS_Edge& edge, gp_Pnt& a, gp_Pnt& b) {
+            TopoDS_Vertex v1, v2;
+            TopExp::Vertices(edge, v1, v2);
+            if (v1.IsNull() || v2.IsNull()) return false;
+            a = BRep_Tool::Pnt(v1);
+            b = BRep_Tool::Pnt(v2);
+            return true;
+        };
+
+        // Every straight edge of this body that a real click actually selects,
+        // with the pixel that selected it. Built by clicking rather than by
+        // projecting alone: an edge behind the body projects to a perfectly
+        // reachable pixel and picks something else entirely.
+        struct Reachable { TopoDS_Edge edge; QPoint at; double length = 0.0; };
+        std::vector<Reachable> reachable;
+        for (TopExp_Explorer it(multiShape(), TopAbs_EDGE); it.More(); it.Next()) {
+            const TopoDS_Edge candidate = TopoDS::Edge(it.Current());
+            gp_Pnt centre;
+            gp_Dir outward;
+            if (!ModelingOps::bevelAxis(multiShape(), candidate, centre, outward)) continue;
+            // TOP edges only, which is the arrangement both probes want and
+            // the one the user reported the spread on. A bottom edge's strip
+            // is hidden under the body, and a vertical one is only as tall as
+            // the box - neither gives the "one fillet ends on another's strip"
+            // geometry item 8 is about.
+            if (outward.Z() < 0.3) continue;
+            gp_Pnt a, b;
+            if (!endsOf(candidate, a, b)) continue;
+            QPoint at;
+            if (!view->projectToScreen(centre, at)) continue;
+            if (!view->rect().adjusted(50, 50, -50, -50).contains(at)) continue;
+
+            view->clearSelection();
+            settle(60);
+            clickAt(view, QPointF(at));
+            settle(120);
+            const TopoDS_Edge got = view->selectedEdge();
+            if (got.IsNull() || !got.IsSame(candidate)) continue;
+            reachable.push_back({candidate, at, a.Distance(b)});
+        }
+        check(reachable.size() >= 2,
+              QStringLiteral("at least two of the box's edges can be picked with a real "
+                             "click (%1 found)").arg(int(reachable.size())));
+
+        // A pair that shares NO vertex, so the two fillets cannot interact and
+        // the removed volume is exactly twice one edge's own closed form. An
+        // adjacent pair would round a corner between them and the arithmetic
+        // would stop being a clean multiple - which is a different assertion,
+        // and a weaker one.
+        int farA = -1;
+        int farB = -1;
+        for (std::size_t i = 0; i < reachable.size() && farA < 0; ++i) {
+            for (std::size_t j = i + 1; j < reachable.size(); ++j) {
+                gp_Pnt a1, a2, b1, b2;
+                if (!endsOf(reachable[i].edge, a1, a2)) continue;
+                if (!endsOf(reachable[j].edge, b1, b2)) continue;
+                const double gap = std::min({a1.Distance(b1), a1.Distance(b2),
+                                             a2.Distance(b1), a2.Distance(b2)});
+                // Comfortably more than the 20 mm radius, so the two strips
+                // cannot reach each other even through the corner.
+                if (gap < 120.0) continue;
+                farA = int(i);
+                farB = int(j);
+                break;
+            }
+        }
+        check(farA >= 0,
+              "two pickable edges that share no vertex, so two fillets on them cannot "
+              "interact");
+
+        BevelArrow* multi = window.findChild<BevelArrow*>();
+        check(multi != nullptr, "the round/flatten gizmo is still the window's");
+
+        if (farA >= 0 && multi) {
+            constexpr double kMultiSize = 20.0;
+            constexpr double kPi = 3.14159265358979323846;
+            const double startVolume = multiVolume();
+
+            view->clearSelection();
+            settle(80);
+            clickAt(view, QPointF(reachable[farA].at));
+            settle(150);
+            check(view->selectedEdges().size() == 1,
+                  "a plain click selects exactly one edge");
+            check(multi->isVisible() && multi->kindText() == QStringLiteral("Fillet"),
+                  QStringLiteral("and the chip names the operation alone, with no count "
+                                 "for one edge (\"%1\")").arg(multi->kindText()));
+
+            // THE Shift-click. Asserted at the pick, not at the outcome: a
+            // Shift-click that lands on the arrow's own 14 px hit region would
+            // start a drag instead, which is exactly the trap the additive
+            // body pick already documents one gizmo over.
+            clickAt(view, QPointF(reachable[farB].at), Qt::ShiftModifier);
+            settle(200);
+            check(view->selectedEdges().size() == 2,
+                  QStringLiteral("Shift-clicking a second edge ACCUMULATES it rather than "
+                                 "replacing the first (%1 selected)")
+                      .arg(int(view->selectedEdges().size())));
+            check(!view->lastSelectedEdge().IsNull() &&
+                      view->lastSelectedEdge().IsSame(reachable[farB].edge),
+                  "and the arrow's edge is the one picked LAST, where the hand is");
+            check(view->hasBevelArrow() && multi->isVisible(),
+                  "the arrow stays up over a two-edge selection");
+            check(multi->kindText() == QStringLiteral("Fillet — 2 edges"),
+                  QStringLiteral("and the chip now names the count (\"%1\")")
+                      .arg(multi->kindText()));
+            check(!view->dimension().isShowing(),
+                  "with the edge-length annotation still cleared - two edges is no more "
+                  "measurable by one label than one edge under a chip was");
+            check(stateLabelText(window) ==
+                      QStringLiteral("2 edges selected — drag in for a Fillet, out for a "
+                                     "Chamfer, or type a size"),
+                  QStringLiteral("and the state label says how many, with the plural "
+                                 "written out (\"%1\")")
+                      .arg(stateLabelText(window)));
+
+            // Pinned before it guards anything, exactly as the pull arrow's
+            // field is: `field()` is a QPointer, and an unasserted
+            // `if (multi->field())` deletes the twelve checks below without a
+            // single red line - CLAUDE.md's vacuous-probe shape.
+            check(multi->field() != nullptr,
+                  "the chip has a size field to type into, so the twelve multi-edge "
+                  "checks below cannot vanish quietly");
+            if (multi->field()) {
+                multi->field()->setText(QStringLiteral("20"));
+                settle(300);
+                check(multi->hasPreview() && view->hasModelingPreview(),
+                      "a typed size previews both edges through the dedicated channel");
+                check(multi->valueText() == QStringLiteral("R 20 mm"),
+                      QStringLiteral("and the value stays the radius, not a multiple of it "
+                                     "(\"%1\")").arg(multi->valueText()));
+
+                if (!outDir.isEmpty()) {
+                    printWindowCapture(&window,
+                                       outDir + QStringLiteral("/bevel-two-edges.png"));
+                    view->saveSnapshot(
+                        outDir + QStringLiteral("/bevel-two-edges-viewport.png"));
+                }
+
+                const std::size_t revisionBefore = window.document().count();
+                sendKeyTo(&window, Qt::Key_Return);
+                settle(400);
+                check(window.document().count() == revisionBefore,
+                      "committing replaces the body rather than adding one");
+
+                const double removed = startVolume - multiVolume();
+                const double expected = (1.0 - kPi / 4.0) * kMultiSize * kMultiSize *
+                                        (reachable[farA].length + reachable[farB].length);
+                check(std::fabs(removed - expected) < std::max(1.0, expected * 0.02),
+                      QStringLiteral("and removes exactly (1 - pi/4) r^2 over BOTH edges' "
+                                     "lengths (%1 vs %2)").arg(removed).arg(expected));
+                check(longStrips(kMultiSize) == 2,
+                      QStringLiteral("leaving exactly two rounded strips (%1)")
+                          .arg(longStrips(kMultiSize)));
+
+                ToastHost* multiToasts = window.findChild<ToastHost*>();
+                check(multiToasts != nullptr && multiToasts->isShowing() &&
+                          multiToasts->currentText().contains(QStringLiteral("2 edges")),
+                      QStringLiteral("reported by ONE toast that names the count (\"%1\")")
+                          .arg(multiToasts ? multiToasts->currentText() : QString()));
+                check(multiToasts != nullptr && multiToasts->toast() != nullptr &&
+                          multiToasts->toast()->hasUndo(),
+                      "which offers Undo, because it is one change");
+                if (!outDir.isEmpty())
+                    printWindowCapture(&window,
+                                       outDir + QStringLiteral("/bevel-two-edges-done.png"));
+
+                // ONE checkpoint for the whole gesture: a single Undo has to
+                // put BOTH edges back. Two checkpoints would leave the user
+                // pressing Ctrl+Z twice for one thing they did once.
+                trigger(window, QStringLiteral("Undo"));
+                settle(300);
+                check(std::fabs(multiVolume() - startVolume) < 1.0 &&
+                          stripSpans().empty(),
+                      QStringLiteral("and ONE Undo puts both edges back sharp (%1 strips "
+                                     "left)").arg(int(stripSpans().size())));
+            }
+
+            // --- item 8, through the interface -----------------------------
+            //
+            // Fillet one edge, then fillet the edge NEXT to it. Before the
+            // containment this rounded a third edge as well, shortened the
+            // first strip, and removed 13.8% more material than the second
+            // edge's own formula.
+            int firstIdx = -1;
+            int neighbourIdx = -1;
+            for (std::size_t i = 0; i < reachable.size() && firstIdx < 0; ++i) {
+                for (std::size_t j = 0; j < reachable.size(); ++j) {
+                    if (i == j) continue;
+                    gp_Pnt a1, a2, b1, b2;
+                    if (!endsOf(reachable[i].edge, a1, a2)) continue;
+                    if (!endsOf(reachable[j].edge, b1, b2)) continue;
+                    const double gap = std::min({a1.Distance(b1), a1.Distance(b2),
+                                                 a2.Distance(b1), a2.Distance(b2)});
+                    if (gap > 1.0e-6) continue;   // must actually share a corner
+                    firstIdx = int(i);
+                    neighbourIdx = int(j);
+                    break;
+                }
+            }
+            check(firstIdx >= 0,
+                  "two pickable edges that share a corner, which is the arrangement the "
+                  "spread needed");
+
+            if (firstIdx >= 0 && multi->field()) {
+                constexpr double kSpreadSize = 20.0;
+                constexpr double kPiHere = 3.14159265358979323846;
+
+                gp_Pnt f1, f2, n1, n2;
+                endsOf(reachable[firstIdx].edge, f1, f2);
+                endsOf(reachable[neighbourIdx].edge, n1, n2);
+                const gp_Dir neighbourWas(gp_Vec(n1, n2));
+
+                view->clearSelection();
+                settle(100);
+                clickAt(view, QPointF(reachable[firstIdx].at));
+                settle(150);
+                check(view->selectedEdges().size() == 1 && multi->isVisible() &&
+                          !view->selectedEdge().IsNull() &&
+                          view->selectedEdge().IsSame(reachable[firstIdx].edge),
+                      "the first of the two adjacent edges selects on its own - THAT edge, "
+                      "so what follows is filleted where this probe thinks it is");
+                multi->field()->setText(QStringLiteral("20"));
+                settle(300);
+                sendKeyTo(&window, Qt::Key_Return);
+                settle(400);
+                check(longStrips(kSpreadSize) == 1,
+                      QStringLiteral("filleting it leaves one strip (%1)")
+                          .arg(longStrips(kSpreadSize)));
+
+                const double afterFirst = multiVolume();
+
+                // The neighbour on the REBUILT body: the straight edge lying
+                // on the very line the neighbour occupied before, which is
+                // robust to the rebuild moving its endpoints. It is 20 mm
+                // shorter now, cut back by the strip it runs into - precisely
+                // the tangency the propagation used to walk through.
+                TopoDS_Edge neighbour;
+                double neighbourLength = 0.0;
+                gp_Pnt neighbourCentre;
+                for (TopExp_Explorer it(multiShape(), TopAbs_EDGE); it.More(); it.Next()) {
+                    const TopoDS_Edge candidate = TopoDS::Edge(it.Current());
+                    if (BRepAdaptor_Curve(candidate).GetType() != GeomAbs_Line) continue;
+                    gp_Pnt a, b;
+                    if (!endsOf(candidate, a, b)) continue;
+                    const gp_Vec now(a, b);
+                    if (now.Magnitude() < 1.0e-6) continue;
+                    if (std::fabs(std::fabs(gp_Dir(now).Dot(neighbourWas)) - 1.0) > 1.0e-6)
+                        continue;
+                    // On the same infinite line, not merely parallel to it.
+                    if (gp_Vec(n1, a).Crossed(gp_Vec(neighbourWas)).Magnitude() > 1.0e-4)
+                        continue;
+                    gp_Pnt centre;
+                    gp_Dir outward;
+                    if (!ModelingOps::bevelAxis(multiShape(), candidate, centre, outward))
+                        continue;
+                    if (a.Distance(b) <= neighbourLength) continue;
+                    neighbour = candidate;
+                    neighbourLength = a.Distance(b);
+                    neighbourCentre = centre;
+                }
+                check(!neighbour.IsNull(),
+                      "the neighbouring edge survives the first fillet, shortened by it");
+                // Shortened by about the radius. Not EXACTLY the radius: this
+                // body's corners are not right angles (buildBody draws its
+                // rectangle in screen space, so the ground-plane shape is a
+                // general quadrilateral), and how far a strip cuts a
+                // neighbour back depends on that angle. What matters is that
+                // the edge now ENDS on the new strip, which is the tangency
+                // the propagation used to walk through.
+                const double cutBack = reachable[neighbourIdx].length - neighbourLength;
+                check(cutBack > 1.0 && cutBack < kSpreadSize * 2.0,
+                      QStringLiteral("and really is cut back by roughly the radius - it "
+                                     "ENDS on the new strip now (%1 mm off a %2 mm edge)")
+                          .arg(cutBack).arg(reachable[neighbourIdx].length));
+
+                QPoint neighbourAt;
+                const bool aimed = !neighbour.IsNull() &&
+                                   view->projectToScreen(neighbourCentre, neighbourAt) &&
+                                   view->rect().adjusted(30, 30, -30, -30)
+                                       .contains(neighbourAt);
+                check(aimed, "and it projects somewhere a click can reach");
+                if (aimed) {
+                    view->clearSelection();
+                    settle(100);
+                    clickAt(view, QPointF(neighbourAt));
+                    settle(180);
+                    check(!view->selectedEdge().IsNull() &&
+                              view->selectedEdge().IsSame(neighbour),
+                          "clicking it selects that edge and no other");
+                    check(multi->isVisible(),
+                          "and raises the chip on it");
+
+                    multi->field()->setText(QStringLiteral("20"));
+                    settle(350);
+                    sendKeyTo(&window, Qt::Key_Return);
+                    settle(450);
+
+                    // The three assertions the spread failed, and it failed
+                    // all three: it removed 13.8% too much, it left THREE
+                    // strips, and it cut the first strip back.
+                    const double removedSecond = afterFirst - multiVolume();
+                    const double expectedSecond =
+                        (1.0 - kPiHere / 4.0) * kSpreadSize * kSpreadSize * neighbourLength;
+                    check(std::fabs(removedSecond - expectedSecond) <
+                              std::max(1.0, expectedSecond * 0.03),
+                          QStringLiteral("filleting it removes ONLY its own "
+                                         "(1 - pi/4) r^2 L - no neighbouring edge came "
+                                         "with it (%1 vs %2 over %3 mm)")
+                              .arg(removedSecond).arg(expectedSecond).arg(neighbourLength));
+                    check(longStrips(kSpreadSize) == 2,
+                          QStringLiteral("leaving exactly two rounded strips, not three "
+                                         "(%1) - the third was a whole 40 mm corner edge "
+                                         "rounded at r = 20 that nobody picked")
+                              .arg(longStrips(kSpreadSize)));
+
+                    // The FIRST strip, still the length it was built at. This
+                    // is the half a volume figure cannot report: the spread
+                    // cut this strip back by the second radius at the shared
+                    // corner while removing an amount of material that still
+                    // looked plausible. Measured through the cylinder's own V
+                    // range, never a bounding box - see stripSpans().
+                    //
+                    // A band, not an equality, and the band is one-sided on
+                    // purpose: the strip must not be SHORTER than the edge it
+                    // was built on (that is the defect), while running a
+                    // little past it into the corner blend is normal and
+                    // depends on the angle the two edges meet at.
+                    const std::vector<double> spans = stripSpans();
+                    auto spanNear = [&spans](double edgeLength, double radius) {
+                        for (double span : spans) {
+                            if (span >= edgeLength - 2.0 && span <= edgeLength + radius * 2.0)
+                                return true;
+                        }
+                        return false;
+                    };
+                    check(spanNear(reachable[firstIdx].length, kSpreadSize),
+                          QStringLiteral("and the FIRST strip still spans the whole edge "
+                                         "it was built on - %1 mm - rather than being cut "
+                                         "back at the shared corner (spans: %2)")
+                              .arg(reachable[firstIdx].length)
+                              .arg(spans.empty() ? 0.0 : spans.front()));
+                    // The SECOND strip is not asserted here: how far its own
+                    // fillet runs is already pinned, and pinned harder, by the
+                    // volume check above - which multiplies this edge's length
+                    // by the closed form and would move the moment the strip
+                    // did. A span check on it would be a second, weaker
+                    // measurement of the same fact.
+
+                    if (!outDir.isEmpty()) {
+                        printWindowCapture(
+                            &window, outDir + QStringLiteral("/bevel-adjacent-contained.png"));
+                        view->saveSnapshot(
+                            outDir +
+                            QStringLiteral("/bevel-adjacent-contained-viewport.png"));
+
+                        // And a close-up on the shared corner, which is where
+                        // the question actually is: a 20 mm radius on a
+                        // 1,400 mm body is a hairline at any framing that
+                        // shows the whole thing. Restored below with the rest
+                        // of the block's camera work.
+                        const gp_Pnt sharedCorner =
+                            std::min(n1.Distance(f1), n1.Distance(f2)) < 1.0e-6 ? n1 : n2;
+                        CameraState close = view->camera().state();
+                        close.target = sharedCorner;
+                        close.distance = kSpreadSize * 14.0;
+                        close.elevationDeg = 28.0;
+                        view->animateTo(close);
+                        settle(250);
+                        view->saveSnapshot(
+                            outDir + QStringLiteral("/bevel-adjacent-corner.png"));
+                    }
+                }
+            }
+        }
+
+        // --- an edge on each of TWO bodies raises no arrow ------------------
+        //
+        // The predicate refuses it (one gesture is one kernel build on one
+        // shape, and there is no honest way to draw one arrow for two), and
+        // until now nothing checked that it does. Shift-click makes this
+        // selection in two clicks, so it is a state a user reaches by
+        // accident rather than a theoretical one.
+        {
+            const int spanBodiesBefore = static_cast<int>(window.document().count());
+            check(buildBody(window, 0.24, 0.36, 0.44, 0.58, 30.0),
+                  "a second body, beside the first, for the two-body probe");
+            const int secondId = window.document().solids().empty()
+                                     ? -1
+                                     : window.document().solids().back().id;
+            view->fitAll();
+            settle(250);
+
+            auto edgeBelongsTo = [&window](int id, const TopoDS_Edge& edge) {
+                if (edge.IsNull() || id <= 0) return false;
+                const TopoDS_Shape shape = window.document().shapeOf(id);
+                if (shape.IsNull()) return false;
+                for (TopExp_Explorer it(shape, TopAbs_EDGE); it.More(); it.Next())
+                    if (it.Current().IsSame(edge)) return true;
+                return false;
+            };
+            // One clickable edge on each body, found by clicking - the same
+            // rule the probe above uses, because an edge behind a body
+            // projects to a perfectly reachable pixel and picks something
+            // else entirely.
+            auto findEdgeOn = [&](int id, QPoint& at) {
+                const TopoDS_Shape shape = window.document().shapeOf(id);
+                for (TopExp_Explorer it(shape, TopAbs_EDGE); it.More(); it.Next()) {
+                    const TopoDS_Edge candidate = TopoDS::Edge(it.Current());
+                    gp_Pnt centre;
+                    gp_Dir outward;
+                    if (!ModelingOps::bevelAxis(shape, candidate, centre, outward)) continue;
+                    if (outward.Z() < 0.3) continue;
+                    QPoint pixel;
+                    if (!view->projectToScreen(centre, pixel)) continue;
+                    if (!view->rect().adjusted(40, 40, -40, -40).contains(pixel)) continue;
+                    view->clearSelection();
+                    settle(60);
+                    clickAt(view, QPointF(pixel));
+                    settle(120);
+                    if (view->selectedEdge().IsNull() ||
+                        !view->selectedEdge().IsSame(candidate))
+                        continue;
+                    at = pixel;
+                    return true;
+                }
+                return false;
+            };
+
+            QPoint onFirst, onSecond;
+            const bool bothFound =
+                findEdgeOn(multiId, onFirst) && findEdgeOn(secondId, onSecond);
+            check(bothFound,
+                  "one clickable edge found on each of the two bodies, so the two checks "
+                  "below cannot vanish quietly");
+            if (bothFound) {
+                view->clearSelection();
+                settle(80);
+                clickAt(view, QPointF(onFirst));
+                settle(150);
+                check(view->hasBevelArrow(),
+                      "one edge on one body raises the arrow, as ever");
+                clickAt(view, QPointF(onSecond), Qt::ShiftModifier);
+                settle(200);
+                check(view->selectedEdges().size() == 2,
+                      QStringLiteral("Shift-clicking an edge on the OTHER body still "
+                                     "accumulates it (%1 selected)")
+                          .arg(int(view->selectedEdges().size())));
+                check(edgeBelongsTo(multiId, view->selectedEdges().front()) !=
+                          edgeBelongsTo(secondId, view->selectedEdges().front()),
+                      "and the two really are on different bodies, so this is the mixed "
+                      "case and not two edges of one");
+                check(!view->hasBevelArrow(),
+                      "but the arrow goes: one gesture is one build on one body, and there "
+                      "is no honest arrow for a selection spanning two");
+                BevelArrow* spanning = window.findChild<BevelArrow*>();
+                check(spanning == nullptr || !spanning->isVisible(),
+                      "and its value chip goes with it");
+            }
+
+            view->clearSelection();
+            settle(100);
+            trigger(window, QStringLiteral("Select Bodies"));
+            settle(150);
+            view->setSelectedSolids({secondId});
+            settle(150);
+            trigger(window, QStringLiteral("Delete Selected"));
+            settle(200);
+            check(static_cast<int>(window.document().count()) == spanBodiesBefore,
+                  "and the two-body probe takes its own body away again");
+            trigger(window, QStringLiteral("Select Edges"));
+            settle(150);
+        }
+
+        // Leave the document as this block found it.
+        trigger(window, QStringLiteral("Select Bodies"));
+        settle(150);
+        view->setSelectedSolids({multiId});
+        settle(150);
+        trigger(window, QStringLiteral("Delete Selected"));
+        settle(200);
+        check(static_cast<int>(window.document().count()) == multiBodiesBefore,
+              "the multi-edge probe leaves the document as it found it");
+        view->clearSelection();
+        view->animateTo(multiCameraBefore);
         settle(200);
     }
 
@@ -6425,13 +9149,37 @@ int main(int argc, char* argv[])
         // A documented vocabulary drifts the moment someone is in a hurry. An
         // asserted one cannot.
         const QStringList banned = bannedWords();
+
+        // THE MATCHER, pinned in both directions before anything is swept
+        // with it. "round" and "flatten" are ordinary English as well as the
+        // Never column for Fillet and Chamfer, so they are matched at a word
+        // boundary - and a boundary rule that is too loose bans "background",
+        // while one that is too tight lets "rounded" through. A sweep whose
+        // matcher is untested reports "none" with equal confidence either way.
+        check(usesBannedWord(QStringLiteral("Body 03 rounded"),
+                             QStringLiteral("round")) &&
+                  usesBannedWord(QStringLiteral("Round this edge"),
+                                 QStringLiteral("round")) &&
+                  usesBannedWord(QStringLiteral("it flattens the edge"),
+                                 QStringLiteral("flatten")),
+              "the boundary matcher catches the banned word and its inflections");
+        check(!usesBannedWord(QStringLiteral("the background grid"),
+                              QStringLiteral("round")) &&
+                  !usesBannedWord(QStringLiteral("faces that surround it"),
+                                  QStringLiteral("round")) &&
+                  !usesBannedWord(QStringLiteral("the ground plane"),
+                                  QStringLiteral("round")),
+              "and leaves the ordinary English the app is entitled to use");
+        check(usesBannedWord(QStringLiteral("the Fused result"), QStringLiteral("Fuse")) &&
+                  usesBannedWord(QStringLiteral("1 body(s)"), QStringLiteral("(s)")),
+              "while the code words it was already matching stay bare substrings");
         QStringList offenders;
         for (QAction* candidate : window.findChildren<QAction*>()) {
             const QString text = candidate->text().remove(QLatin1Char('&'));
             const QString tip = candidate->toolTip();
             for (const QString& word : banned) {
-                if (text.contains(word, Qt::CaseInsensitive) ||
-                    tip.contains(word, Qt::CaseInsensitive)) {
+                if (usesBannedWord(text, word) ||
+                    usesBannedWord(tip, word)) {
                     offenders << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
                 }
             }
@@ -6446,7 +9194,7 @@ int main(int argc, char* argv[])
             const QString tip = widget->toolTip();
             if (tip.isEmpty()) continue;
             for (const QString& word : banned) {
-                if (tip.contains(word, Qt::CaseInsensitive))
+                if (usesBannedWord(tip, word))
                     tipOffenders << (tip.left(30) + QStringLiteral("…"));
             }
         }
@@ -6454,6 +9202,43 @@ int main(int argc, char* argv[])
               QStringLiteral("no widget tooltip uses a banned word (%1)")
                   .arg(tipOffenders.isEmpty() ? QStringLiteral("none")
                                               : tipOffenders.join(QStringLiteral(", "))));
+
+        // The drawer's rows. Neither sweep above reaches them: a row is a
+        // plain QLabel pair with no QAction and no tooltip of its own, so
+        // every item name and every dimension string the user reads down the
+        // left-hand side of the app has been outside the vocabulary contract
+        // all along. It matters more now than it did - "Outline NN" is a
+        // vocabulary word this phase introduced, and it is generated in
+        // DocumentModel rather than typed into a .ui file where anyone would
+        // think to look.
+        //
+        // Swept through rowTextAt(), which is exactly what the rows paint,
+        // rather than by walking child labels - the same rule
+        // WalkthroughPanel::paintedTexts() follows, so the sweep can never be
+        // guarding a different copy from the one on screen. Vacuity is the
+        // real risk with a sweep over live content, so the row count is
+        // asserted non-zero first: a drawer that happened to be empty here
+        // would pass this in perfect silence.
+        ItemsPanel* sweptDrawer = window.itemsPanel();
+        check(sweptDrawer != nullptr && sweptDrawer->rowCount() > 0,
+              QStringLiteral("the drawer has rows to sweep, so this is not vacuous "
+                             "(%1)")
+                  .arg(sweptDrawer ? sweptDrawer->rowCount() : -1));
+        QStringList rowOffenders;
+        if (sweptDrawer) {
+            for (int i = 0; i < sweptDrawer->rowCount(); ++i) {
+                const QString rowText = sweptDrawer->rowTextAt(i);
+                for (const QString& word : banned) {
+                    if (usesBannedWord(rowText, word))
+                        rowOffenders << (rowText + QStringLiteral(" [") + word +
+                                         QStringLiteral("]"));
+                }
+            }
+        }
+        check(rowOffenders.isEmpty(),
+              QStringLiteral("no drawer row - outline or body - uses a banned word (%1)")
+                  .arg(rowOffenders.isEmpty() ? QStringLiteral("none")
+                                              : rowOffenders.join(QStringLiteral(", "))));
 
         // The app bar's wordmark and its buttons' labels are painted, and the
         // two readouts carry no QAction of their own, so neither sweep above
@@ -6469,7 +9254,7 @@ int main(int argc, char* argv[])
             QStringList barOffenders;
             for (const QString& text : barTexts) {
                 for (const QString& word : banned) {
-                    if (text.contains(word, Qt::CaseInsensitive))
+                    if (usesBannedWord(text, word))
                         barOffenders << (text + QStringLiteral(" [") + word +
                                          QStringLiteral("]"));
                 }
@@ -6489,7 +9274,7 @@ int main(int argc, char* argv[])
         for (WalkthroughPanel* panel : window.findChildren<WalkthroughPanel*>()) {
             for (const QString& text : panel->paintedTexts()) {
                 for (const QString& word : banned) {
-                    if (text.contains(word, Qt::CaseInsensitive))
+                    if (usesBannedWord(text, word))
                         walkthroughOffenders << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
                 }
             }
@@ -6506,7 +9291,7 @@ int main(int argc, char* argv[])
         for (HintBalloon* hint : window.findChildren<HintBalloon*>()) {
             for (const QString& text : hint->paintedTexts()) {
                 for (const QString& word : banned) {
-                    if (text.contains(word, Qt::CaseInsensitive))
+                    if (usesBannedWord(text, word))
                         hintOffenders << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
                 }
             }
@@ -6576,6 +9361,45 @@ int main(int argc, char* argv[])
             copyHost->show(MainWindow::bevelRefusalText(false), Toast::Kind::Failure, false,
                            kCopyStamp);
             settle(60);
+            // The OTHER bevel refusal - the one for a set of edges the kernel
+            // will only bevel some of. Reachable in the app only from a
+            // selection that geometry, not this suite, decides is possible,
+            // so it is shown here or it is swept by nothing at all. Both
+            // halves, because only one of the two is ever the live one.
+            check(!MainWindow::bevelCombinationRefusalText(true).endsWith(QLatin1Char('.')) &&
+                      !MainWindow::bevelCombinationRefusalText(false)
+                           .endsWith(QLatin1Char('.')),
+                  "the combination refusal ends without a period, like every other failure "
+                  "sentence in this app");
+            check(MainWindow::bevelCombinationRefusalText(true).contains(QChar(0x2014)) &&
+                      MainWindow::bevelCombinationRefusalText(true)
+                          .contains(QStringLiteral("one at a time")),
+                  QStringLiteral("and it asks for a different SELECTION rather than a "
+                                 "smaller size, which no size would fix (\"%1\")")
+                      .arg(MainWindow::bevelCombinationRefusalText(true)));
+            check(!MainWindow::bevelCombinationRefusalText(true).contains(
+                      QStringLiteral("smaller size")),
+                  "and never repeats the size advice the other sentence gives");
+            // Whole-branch review, Important 2. Both halves of this pair said
+            // "will only round some of them" / "will only flatten some of
+            // them" for a whole branch - the Never column for Fillet and
+            // Chamfer - because the sweep could not see either word. Asserted
+            // here as well as swept below: the sweep proves no CURRENT string
+            // offends, this proves the two that did have actually been
+            // rewritten rather than merely moved somewhere the sweep misses.
+            check(!usesBannedWord(MainWindow::bevelCombinationRefusalText(true),
+                                  QStringLiteral("round")) &&
+                      !usesBannedWord(MainWindow::bevelCombinationRefusalText(false),
+                                      QStringLiteral("flatten")),
+                  QStringLiteral("and neither half names the operation in a word the "
+                                 "interface never uses (\"%1\")")
+                      .arg(MainWindow::bevelCombinationRefusalText(true)));
+            copyHost->show(MainWindow::bevelCombinationRefusalText(true),
+                           Toast::Kind::Failure, false, kCopyStamp);
+            settle(60);
+            copyHost->show(MainWindow::bevelCombinationRefusalText(false),
+                           Toast::Kind::Failure, false, kCopyStamp);
+            settle(60);
             copyHost->show(MainWindow::transformRefusalText(rotated), Toast::Kind::Failure,
                            false, kCopyStamp);
             settle(60);
@@ -6604,7 +9428,7 @@ int main(int argc, char* argv[])
         for (Toast* toastWidget : window.findChildren<Toast*>()) {
             for (const QString& text : toastWidget->paintedTexts()) {
                 for (const QString& word : banned) {
-                    if (text.contains(word, Qt::CaseInsensitive))
+                    if (usesBannedWord(text, word))
                         toastOffenders << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
                 }
             }
@@ -6621,7 +9445,7 @@ int main(int argc, char* argv[])
         for (ExtrudePreview* preview : window.findChildren<ExtrudePreview*>()) {
             for (const QString& text : preview->paintedTexts()) {
                 for (const QString& word : banned) {
-                    if (text.contains(word, Qt::CaseInsensitive))
+                    if (usesBannedWord(text, word))
                         extrudePreviewOffenders
                             << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
                 }
@@ -6639,7 +9463,7 @@ int main(int argc, char* argv[])
         for (PullArrow* pull : window.findChildren<PullArrow*>()) {
             for (const QString& text : pull->paintedTexts()) {
                 for (const QString& word : banned) {
-                    if (text.contains(word, Qt::CaseInsensitive))
+                    if (usesBannedWord(text, word))
                         pullArrowOffenders
                             << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
                 }
@@ -6666,7 +9490,7 @@ int main(int argc, char* argv[])
         for (BevelArrow* arrow : window.findChildren<BevelArrow*>()) {
             for (const QString& text : arrow->paintedTexts()) {
                 for (const QString& word : banned) {
-                    if (text.contains(word, Qt::CaseInsensitive))
+                    if (usesBannedWord(text, word))
                         bevelOffenders
                             << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
                 }
@@ -6803,8 +9627,8 @@ int main(int argc, char* argv[])
             // The pose the Axonometric view leaves behind is precisely the one
             // the gizmo calls "Persp", which is why the old pose-based
             // condition could never retire this hint from this route.
-            check(axoProbe.view()->viewLabelText() == QStringLiteral("Persp"),
-                  "and the camera it leaves is still one the view label calls Persp");
+            check(axoProbe.view()->viewDirectionName() == QStringLiteral("Persp"),
+                  "and the camera it leaves is still one no named direction fits");
             check(!axoHint->isVisible() && axoHint->currentHint().isEmpty(),
                   "the hint retires all the same - it reads the recorded event, "
                   "not the camera pose");
@@ -6981,7 +9805,7 @@ int main(int argc, char* argv[])
                 QStringList sheetOffenders;
                 for (const QString& text : painted) {
                     for (const QString& word : bannedWords()) {
-                        if (text.contains(word, Qt::CaseInsensitive))
+                        if (usesBannedWord(text, word))
                             sheetOffenders << (text + QStringLiteral(" [") + word +
                                                QStringLiteral("]"));
                     }
@@ -8054,6 +10878,14 @@ int main(int argc, char* argv[])
                 const QImage noteImg = renderExact(toastWidget);
                 const QPoint stripePoint(body.left() + 1, body.center().y());
                 const QColor noteStripe = noteImg.pixelColor(stripePoint);
+                // The WIDTH, pinned rather than assumed. The stripe went from
+                // 3px to 6px this phase, and the probe above would have read
+                // the same colour at either - it samples one pixel one column
+                // in from the edge, which is inside both. This second point at
+                // +4 is inside a 6px stripe and outside a 3px one, so a
+                // silent revert fails here instead of passing everywhere.
+                const QPoint widePoint(body.left() + 4, body.center().y());
+                const QColor noteWide = noteImg.pixelColor(widePoint);
 
                 toasts->show(QStringLiteral("Graphite family probe - failure"),
                             Toast::Kind::Failure, false);
@@ -8061,6 +10893,7 @@ int main(int argc, char* argv[])
                 const QImage failureImg = renderExact(toastWidget);
                 failureImg.save(outDir + QStringLiteral("/toast_failure.png"));
                 const QColor failureStripe = failureImg.pixelColor(stripePoint);
+                const QColor failureWide = failureImg.pixelColor(widePoint);
 
                 check(colorDistance(noteStripe, failureStripe) > 15.0,
                       "a Failure toast's stripe reads as a different colour "
@@ -8071,6 +10904,20 @@ int main(int argc, char* argv[])
                 check(colorDistance(failureStripe, Theme::danger()) <
                           colorDistance(failureStripe, Theme::accent()),
                       "the Failure toast's stripe reads closer to danger()");
+
+                // Four columns in is still stripe, on both kinds - which is
+                // only true of the 6px stripe. The comparison is against
+                // panel(), the colour that pixel would be if the stripe had
+                // gone back to 3.
+                check(colorDistance(noteWide, Theme::accent()) <
+                          colorDistance(noteWide, Theme::panel()),
+                      QStringLiteral("the Note stripe is still accent() 4 columns in, "
+                                     "so it is 6px wide rather than 3 (%1)")
+                          .arg(noteWide.name()));
+                check(colorDistance(failureWide, Theme::danger()) <
+                          colorDistance(failureWide, Theme::panel()),
+                      QStringLiteral("and the Failure stripe likewise (%1)")
+                          .arg(failureWide.name()));
             }
         }
 
@@ -8331,7 +11178,7 @@ int main(int argc, char* argv[])
             QStringList offenders;
             for (const QString& text : painted) {
                 for (const QString& word : bannedWords()) {
-                    if (text.contains(word, Qt::CaseInsensitive))
+                    if (usesBannedWord(text, word))
                         offenders << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
                 }
                 // Code names must not leak either - the whole point of
@@ -8345,6 +11192,195 @@ int main(int argc, char* argv[])
                   QStringLiteral("no Appearance panel text uses a banned or code word (%1)")
                       .arg(offenders.isEmpty() ? QStringLiteral("none")
                                                : offenders.join(QStringLiteral(", "))));
+        }
+
+        // --- a look, saved to a file and read back (item 7) -------------------
+        //
+        // The two BUTTONS are checked for reachability and the two FILE
+        // FUNCTIONS for behaviour, because the buttons open native file
+        // dialogs, which cannot be answered from inside the event loop that
+        // raised them - the same reason MainWindow splits every operation from
+        // the dialog that asks for its parameters. What the buttons call is
+        // what is driven here, so there is no second path being tested.
+        if (panel && panel->isVisible()) {
+            QWidget* save = panel->saveButton();
+            QWidget* load = panel->loadButton();
+            check(save != nullptr && save->isVisible() && load != nullptr &&
+                      load->isVisible(),
+                  "the Appearance panel offers Save colours and Load colours");
+            if (save && load) {
+                // Real hit-testing through the viewport, walking up from the
+                // hit the way every other control over the GL surface is
+                // checked - a button nested in the card is found as itself or
+                // as one of its own children, never as the card.
+                auto reachable = [&](QWidget* button) {
+                    const QPoint centre = button->mapTo(
+                        view, QPoint(button->width() / 2, button->height() / 2));
+                    for (QWidget* w = view->childAt(centre); w; w = w->parentWidget()) {
+                        if (w == button) return true;
+                        if (w == view) break;
+                    }
+                    return false;
+                };
+                check(reachable(save) && reachable(load),
+                      "and both are reachable by a real click, not merely present");
+            }
+
+            const QString colourPath = QDir::tempPath() +
+                                       QStringLiteral("/furnifyme-gui_smoke-look") +
+                                       AppearancePanel::colourFileSuffix();
+            QFile::remove(colourPath);
+
+            // A look worth telling apart from both Graphite and whatever the
+            // next edit makes, so neither end of the round trip can pass by
+            // accident.
+            const QColor savedAccent(QStringLiteral("#ff6600"));
+            const QColor savedPanel(QStringLiteral("#101820"));
+            panel->setTokenColour(QStringLiteral("accent"), savedAccent);
+            panel->setTokenColour(QStringLiteral("panel"), savedPanel);
+            panel->setBaseSize(12);
+            settle(120);
+            check(Theme::accent() == savedAccent && Theme::panel() == savedPanel,
+                  "a look is set up to be written to a file");
+
+            check(panel->saveColoursTo(colourPath),
+                  QStringLiteral("Save colours writes the file (%1)").arg(colourPath));
+            check(QFile::exists(colourPath) && QFile(colourPath).size() > 0,
+                  "and the file it wrote is not empty");
+
+            // Move the spec somewhere else entirely, so a load that did
+            // nothing at all would be caught rather than mistaken for a
+            // successful restore.
+            panel->setTokenColour(QStringLiteral("accent"), QColor(QStringLiteral("#00ff88")));
+            panel->setBaseSize(9);
+            settle(120);
+            check(Theme::accent() != savedAccent,
+                  "the live look is then moved away from what was saved");
+
+            check(panel->loadColoursFrom(colourPath),
+                  "Load colours accepts the file it just wrote");
+            check(Theme::accent() == savedAccent && Theme::panel() == savedPanel,
+                  QStringLiteral("and every colour comes back (%1, %2)")
+                      .arg(Theme::accent().name(), Theme::panel().name()));
+            check(std::fabs(Theme::spec().basePt - 12.0) < 1e-9,
+                  QStringLiteral("and the text size with them (%1 pt)")
+                      .arg(Theme::spec().basePt));
+            // Applied LIVE, not merely stored: the panel's own controls follow
+            // the load through the same broadcast a swatch click uses.
+            check(panel->sizeControl() != nullptr && panel->sizeControl()->value() == 12,
+                  "and the panel's own controls followed the load");
+
+            // A file that is not a look at all. deserializeSpec() refuses it,
+            // and the contract this leans on is that a refusal leaves the live
+            // spec untouched - so the assertion is about what did NOT happen.
+            const QString junkPath = QDir::tempPath() +
+                                     QStringLiteral("/furnifyme-gui_smoke-junk") +
+                                     AppearancePanel::colourFileSuffix();
+            {
+                QFile junk(junkPath);
+                check(junk.open(QIODevice::WriteOnly | QIODevice::Truncate),
+                      "a deliberately bad colour file can be written for the probe");
+                junk.write("this is not a look, it is a sentence\n\x01\x02\x03");
+                junk.close();
+            }
+            const Theme::Spec beforeJunk = Theme::spec();
+            check(!panel->loadColoursFrom(junkPath),
+                  "Load colours refuses a file that is not a look");
+            check(Theme::spec() == beforeJunk,
+                  "and the live look is untouched by the refusal - not half applied");
+            // A path that does not exist is refused the same way, and is the
+            // case a user reaches by typing rather than picking.
+            check(!panel->loadColoursFrom(QDir::tempPath() +
+                                          QStringLiteral("/furnifyme-no-such-look.furnifytheme")),
+                  "and refuses a file that is not there at all");
+            check(Theme::spec() == beforeJunk, "leaving the look untouched again");
+
+            // The refusal REPORTS, and it reports as a Failure - which is what
+            // makes it survive View -> Show notifications being off. Driven
+            // through the signal the button's own handler emits, since the
+            // dialog half cannot be driven here.
+            ToastHost* colourToasts = window.findChild<ToastHost*>();
+            check(colourToasts != nullptr, "there is a toast host for the colour-file refusal");
+            if (colourToasts) {
+                emit panel->colourLoadRefused(junkPath);
+                settle(150);
+                check(colourToasts->isShowing() &&
+                          colourToasts->currentText().contains(junkPath),
+                      QStringLiteral("a refused colour file is reported by name (\"%1\")")
+                          .arg(colourToasts->currentText()));
+                const int refusalMs = colourToasts->remainingMs();
+                check(refusalMs > 7500,
+                      QStringLiteral("as a Failure, which is the kind the notifications "
+                                     "toggle can never silence (%1 ms)").arg(refusalMs));
+                emit panel->colourSaveFailed(colourPath);
+                settle(150);
+                check(colourToasts->isShowing() &&
+                          colourToasts->currentText().contains(colourPath),
+                      "and a colour file that could not be written is reported too");
+            }
+
+            QFile::remove(colourPath);
+            QFile::remove(junkPath);
+            Theme::setSpec(Theme::defaultSpec());
+            settle(120);
+        }
+
+        // --- the font previews while the list is open (item 10) ---------------
+        if (panel && panel->isVisible() && panel->familyControl()) {
+            QComboBox* family = panel->familyControl();
+            const QString startFamily = Theme::spec().fontFamily;
+            // A family that is genuinely something else. Every machine has a
+            // different font list, so this is picked from the combo itself
+            // rather than named - and the check that one was found is a check,
+            // not a silent guard.
+            int other = -1;
+            for (int i = 0; i < family->count() && other < 0; ++i) {
+                if (family->itemText(i) != startFamily) other = i;
+            }
+            check(other >= 0,
+                  QStringLiteral("this machine offers a second font to preview (%1 in the "
+                                 "list)").arg(family->count()));
+            if (other >= 0) {
+                const QString previewFamily = family->itemText(other);
+                // The popup cannot be opened from inside the event loop that
+                // would drive it, so the two halves the popup triggers are
+                // driven directly: beginFamilyPreview() is what its Show hooks
+                // and highlighted() is what arrowing down it emits.
+                panel->beginFamilyPreview();
+                check(panel->familyBeforePreview() == startFamily,
+                      "opening the font list records the family to fall back to");
+
+                emit family->highlighted(other);
+                settle(150);
+                check(Theme::spec().fontFamily == previewFamily,
+                      QStringLiteral("merely highlighting a family applies it live "
+                                     "(\"%1\")").arg(Theme::spec().fontFamily));
+                // LIVE means the application font, not just the stored spec -
+                // the whole point is that the user sees the app re-set itself
+                // before choosing.
+                check(QApplication::font().family() == previewFamily,
+                      QStringLiteral("and the application really is set in it (\"%1\")")
+                          .arg(QApplication::font().family()));
+
+                panel->cancelFamilyPreview();
+                settle(150);
+                check(Theme::spec().fontFamily == startFamily,
+                      QStringLiteral("Escape puts back the family the list opened over "
+                                     "(\"%1\")").arg(Theme::spec().fontFamily));
+                check(panel->familyBeforePreview().isEmpty(),
+                      "and the fallback is spent, so a second Escape restores nothing");
+            } else {
+                // A machine with exactly one font family installed cannot
+                // preview a second one, and that is not a guard going quiet -
+                // the check above already went red for it. Accounted so the
+                // FLOOR does not fail a second time with a message about
+                // guards that would send the reader looking for a defect that
+                // is not there.
+                skipByEnvironment(5, QStringLiteral("this machine offers no second font "
+                                                    "family to preview"));
+            }
+            Theme::setSpec(Theme::defaultSpec());
+            settle(120);
         }
 
         // --- the application stylesheet is built from the spec, not frozen --
@@ -9100,6 +12136,698 @@ int main(int argc, char* argv[])
               "the appearance block leaves the app back at Graphite with the panel closed");
     }
 
+    // --- double-click routes (item 13) ---------------------------------------
+    //
+    // Two gestures on the same pixel, told apart by one modifier: plain means
+    // "give me the whole body", Ctrl means "let me draw on this face". The
+    // plain one used to be the lock, and the checks below are what make the
+    // move deliberate rather than a silent change of meaning.
+    {
+        // The lock is refused while an outline is waiting (canChangeSketchPlane),
+        // and the Ctrl route consults no action's enabled state, so the
+        // precondition is CLEARED and then pinned rather than assumed.
+        if (window.hasPendingFace()) {
+            trigger(window, QStringLiteral("Undo"));
+            settle(200);
+        }
+        check(!window.hasPendingFace(),
+              "the double-click probe starts with no outline waiting");
+        check(!window.document().solids().empty(),
+              "and with bodies to double-click");
+
+        if (!window.hasPendingFace() && !window.document().solids().empty()) {
+            view->setSelectedSolids({});
+            trigger(window, QStringLiteral("Select Bodies"));
+            trigger(window, QStringLiteral("Fit All"));
+            settle(350);
+
+            // A pixel over a body, derived from the model rather than guessed:
+            // a body's centre of mass projects to a point that is over that
+            // body from any angle it is not edge-on at.
+            QPoint at;
+            bool haveTarget = false;
+            for (const DocumentModel::Solid& solid : window.document().solids()) {
+                GProp_GProps props;
+                BRepGProp::VolumeProperties(solid.shape, props);
+                QPoint candidate;
+                if (!view->projectToScreen(props.CentreOfMass(), candidate)) continue;
+                if (!view->rect().adjusted(40, 40, -40, -40).contains(candidate)) continue;
+                at = candidate;
+                haveTarget = true;
+                break;
+            }
+            check(haveTarget,
+                  "a body's centre projects to a clickable point in the viewport");
+
+            if (haveTarget) {
+                // Face mode, and a face genuinely picked there - the OWNER of
+                // that face is the oracle for what the double-click must
+                // select, since occlusion can put a different body under the
+                // cursor than the one whose centre was projected.
+                trigger(window, QStringLiteral("Select Faces"));
+                settle(150);
+                clickAt(view, QPointF(at));
+                settle(150);
+                const TopoDS_Face under = view->selectedFace();
+                check(!under.IsNull(), "clicking there in face mode selects a face");
+                const int owner = under.IsNull() ? 0 : window.bodyIdForFace(under);
+                check(owner > 0, "and that face belongs to a body in the document");
+
+                if (owner > 0) {
+                    const bool lockedBefore = window.isFaceLocked();
+
+                    // --- plain: the whole body, and the mode follows ---------
+                    //
+                    // Aimed CLEAR OF THE PULL ARROW, which the first click of
+                    // any double-click in face mode raises at the selected
+                    // face's own centre. An unmodified click on that arrow
+                    // belongs to the arrow (see mouseDoubleClickEvent), so a
+                    // probe that ignored it would be asserting a gesture the
+                    // app deliberately does not offer there. The point is
+                    // searched for rather than nudged by a fixed offset: which
+                    // pixels are over this body depends on the pose, and a
+                    // hardcoded offset is the exact shape of probe that stops
+                    // hitting what it meant to.
+                    auto arrowDistance = [&](const QPoint& p) -> double {
+                        if (!view->hasPullArrow()) return 1.0e9;
+                        const TopoDS_Face f = view->selectedFace();
+                        if (f.IsNull()) return 1.0e9;
+                        GProp_GProps fp;
+                        BRepGProp::SurfaceProperties(f, fp);
+                        gp_Pnt headWorld;
+                        QPoint tail, head;
+                        if (!view->projectToScreen(fp.CentreOfMass(), tail)) return 1.0e9;
+                        if (!view->pullArrowHead(headWorld) ||
+                            !view->projectToScreen(headWorld, head))
+                            return 1.0e9;
+                        const double dx = head.x() - tail.x();
+                        const double dy = head.y() - tail.y();
+                        const double lengthSquared = dx * dx + dy * dy;
+                        double t = 0.0;
+                        if (lengthSquared > 1.0e-9) {
+                            t = ((p.x() - tail.x()) * dx + (p.y() - tail.y()) * dy) /
+                                lengthSquared;
+                            t = std::clamp(t, 0.0, 1.0);
+                        }
+                        return std::hypot(tail.x() + dx * t - p.x(),
+                                          tail.y() + dy * t - p.y());
+                    };
+
+                    QPoint clearOfArrow;
+                    bool haveClear = false;
+                    const int radii[3] = {45, 70, 95};
+                    for (int r = 0; r < 3 && !haveClear; ++r) {
+                        for (int i = 0; i < 8 && !haveClear; ++i) {
+                            const double angle = i * 3.14159265358979323846 / 4.0;
+                            const QPoint candidate(
+                                at.x() + int(std::cos(angle) * radii[r]),
+                                at.y() + int(std::sin(angle) * radii[r]));
+                            if (!view->rect().adjusted(30, 30, -30, -30).contains(candidate))
+                                continue;
+                            clickAt(view, QPointF(candidate));
+                            settle(100);
+                            const TopoDS_Face f = view->selectedFace();
+                            if (f.IsNull() || window.bodyIdForFace(f) != owner) continue;
+                            // Measured against the arrow raised by THIS click,
+                            // which stands on whichever face was just picked -
+                            // not the one the earlier click raised.
+                            if (arrowDistance(candidate) < 25.0) continue;
+                            clearOfArrow = candidate;
+                            haveClear = true;
+                        }
+                    }
+                    check(haveClear,
+                          "a point over the body and clear of its pull arrow can be found "
+                          "for the plain double-click");
+                    if (!haveClear) clearOfArrow = at;
+
+                    doubleClickAt(view, QPointF(clearOfArrow));
+                    settle(200);
+                    check(view->selectionMode() == OcctViewWidget::SelectionMode::Solid,
+                          "a plain double-click in face mode switches to body selection");
+                    QAction* bodiesAction = action(window, QStringLiteral("Select Bodies"));
+                    check(bodiesAction != nullptr && bodiesAction->isChecked(),
+                          "and the action that owns that mode is checked, so the rail "
+                          "chip and the menu agree with the viewport");
+                    const std::vector<int> selected = view->selectedSolidIds();
+                    check(selected.size() == 1 && selected.front() == owner,
+                          QStringLiteral("and the body under the cursor is the one "
+                                         "selected (%1 selected)").arg(selected.size()));
+                    check(window.isFaceLocked() == lockedBefore,
+                          "and the sketch plane is left exactly as it was - the plain "
+                          "gesture no longer locks");
+
+                    // --- Ctrl: the lock, on the same pixel -------------------
+                    trigger(window, QStringLiteral("Select Faces"));
+                    settle(150);
+                    clickAt(view, QPointF(at));
+                    settle(150);
+                    const TopoDS_Face again = view->selectedFace();
+                    check(!again.IsNull() && again.IsSame(under),
+                          "the same face is picked again for the Ctrl route");
+                    if (!again.IsNull() && again.IsSame(under)) {
+                        check(BRepAdaptor_Surface(again).GetType() == GeomAbs_Plane,
+                              "and it is flat, so the lock has something to accept");
+                        doubleClickAt(view, QPointF(at), Qt::ControlModifier);
+                        settle(300);
+                        check(window.isFaceLocked(),
+                              "Ctrl+double-clicking a face locks the sketch plane onto it");
+                    }
+
+                    // Back to the ground and the startup pose - locking flies
+                    // the camera square onto the face and borrows an
+                    // orthographic look, exactly as the lock probes further up
+                    // restore for themselves.
+                    if (window.isFaceLocked()) {
+                        trigger(window, QStringLiteral("Unlock Face"));
+                        settle(150);
+                    }
+
+                    // --- the exemption is the LOCK's, not Ctrl's -------------
+                    //
+                    // The exemption that lets Ctrl through the arrow guard was
+                    // written as "Ctrl is held" first, and in that shape a
+                    // Ctrl+double-click in EDGE mode fell past the face branch
+                    // and into the whole-body route - switching the selection
+                    // mode out from under a live bevel arrow, which is the
+                    // exact thing the guard exists to stop, reachable by
+                    // holding a key that means nothing in edge mode.
+                    trigger(window, QStringLiteral("Select Edges"));
+                    view->setSelectedSolids({});
+                    settle(150);
+                    // An edge of the body, picked by clicking its projected
+                    // midpoint - the bevel arrow then stands on that edge, and
+                    // the probe aims at the arrow's own tail.
+                    TopoDS_Edge probeEdge;
+                    QPoint edgeAt;
+                    bool haveEdge = false;
+                    for (const DocumentModel::Solid& solid : window.document().solids()) {
+                        if (solid.id != owner) continue;
+                        for (TopExp_Explorer it(solid.shape, TopAbs_EDGE);
+                             it.More() && !haveEdge; it.Next()) {
+                            const TopoDS_Edge candidate = TopoDS::Edge(it.Current());
+                            BRepAdaptor_Curve curve(candidate);
+                            if (curve.GetType() != GeomAbs_Line) continue;
+                            GProp_GProps props;
+                            BRepGProp::LinearProperties(candidate, props);
+                            QPoint atEdge;
+                            if (!view->projectToScreen(props.CentreOfMass(), atEdge)) continue;
+                            if (!view->rect().adjusted(30, 30, -30, -30).contains(atEdge))
+                                continue;
+                            clickAt(view, QPointF(atEdge));
+                            settle(120);
+                            if (view->selectedEdge().IsNull()) continue;
+                            probeEdge = candidate;
+                            edgeAt = atEdge;
+                            haveEdge = true;
+                        }
+                        break;
+                    }
+                    check(haveEdge, "an edge of that body can be selected for the "
+                                    "edge-mode Ctrl probe");
+                    if (haveEdge) {
+                        check(view->hasBevelArrow(),
+                              "and selecting it raises the bevel arrow the guard "
+                              "protects");
+                        const OcctViewWidget::SelectionMode modeBefore =
+                            view->selectionMode();
+                        doubleClickAt(view, QPointF(edgeAt), Qt::ControlModifier);
+                        settle(200);
+                        check(view->selectionMode() == modeBefore,
+                              "Ctrl+double-clicking on a live bevel arrow leaves the "
+                              "selection mode alone - the exemption belongs to the "
+                              "lock, not to the modifier");
+                        check(!window.isFaceLocked(),
+                              "and locks nothing either, there being no face in it");
+                    }
+                    view->setSelectedSolids({});
+                    settle(120);
+                    check(!window.isFaceLocked(), "the probe leaves the ground plane in use");
+                    view->camera().setTemporaryOrtho(false);
+                    view->setSelectedSolids({});
+                    trigger(window, QStringLiteral("Select Bodies"));
+                    trigger(window, QStringLiteral("Axonometric"));
+                    settle(250);
+                }
+            }
+        }
+    }
+
+    // --- the transform gizmo stays a size a hand can aim at (item 11) ---------
+    //
+    // AIS_Manipulator sized itself from the body's bounding box and then stayed
+    // there, so a large body - or any body seen close up - gave a gizmo whose
+    // arms ran off every edge of the viewport. The cap is derived from the
+    // camera, so the property to check is a SCREEN one, measured at two very
+    // different zooms and in both projections.
+    {
+        check(!window.document().solids().empty(),
+              "there are bodies for the gizmo-size probe");
+        if (!window.document().solids().empty()) {
+            trigger(window, QStringLiteral("Select Bodies"));
+            trigger(window, QStringLiteral("Fit All"));
+            settle(300);
+            const int gizmoBody = window.document().solids().front().id;
+            view->setSelectedSolids({gizmoBody});
+            settle(250);
+            check(view->hasManipulator(),
+                  "one body selected in body mode raises the transform gizmo");
+
+            // MEASURED OFF THE RENDERED PIXELS, and the first version of this
+            // probe was not - it projected AIS_Manipulator::Size(), which is
+            // the very number the clamp had just written. That is a self-
+            // oracle: it reported 103 px against a 110 px budget while the
+            // gizmo on screen spanned 538 px and ran off the viewport's edge,
+            // because SetSize() only marks the object ToBeUpdated and nothing
+            // was recomputing the presentation. A probe that asks the code for
+            // the code's own opinion can only ever confirm it.
+            //
+            // The gizmo is found by its three axis hues - saturated red, green
+            // and blue, each with the other two channels low. Calibrated
+            // against a real dump: the arrows read (183,0,0), (0,195,0) and
+            // (0,0,195); the SELECTED body is orange (225,145,0) and fails the
+            // red test on its green channel; grey bodies, the viewport ground
+            // and the grid's own muted axis tints fail all three. The hover
+            // cyan is deliberately not counted - it tints whole bodies, not
+            // just the gizmo's ring - which only ever makes this measure
+            // smaller, never larger.
+            auto gizmoReachPx = [&](const QString& dumpName, int& litPixels) -> double {
+                litPixels = 0;
+                const QString path = outDir + QStringLiteral("/") + dumpName;
+                if (!view->saveSnapshot(path)) return -1.0;
+                const QImage dump(path);
+                if (dump.isNull() || view->width() <= 0) return -1.0;
+
+                gp_Ax2 frame;
+                double size = 0.0;
+                if (!view->manipulatorFrame(frame, size)) return -1.0;
+                QPoint centreLogical;
+                if (!view->projectToScreen(frame.Location(), centreLogical)) return -1.0;
+
+                // V3d_View::Dump writes DEVICE pixels; every limit here is in
+                // Qt's logical ones. The ratio is read off the dump itself
+                // rather than from devicePixelRatioF(), so the two cannot
+                // disagree about which space this measurement is in.
+                const double pxPerLogical = dump.width() / double(view->width());
+                const QPointF centre(centreLogical.x() * pxPerLogical,
+                                     centreLogical.y() * pxPerLogical);
+
+                double worst = 0.0;
+                for (int y = 0; y < dump.height(); ++y) {
+                    for (int x = 0; x < dump.width(); ++x) {
+                        const QColor c = dump.pixelColor(x, y);
+                        const bool axisHue =
+                            (c.red() > 100 && c.green() < 70 && c.blue() < 70) ||
+                            (c.green() > 100 && c.red() < 70 && c.blue() < 70) ||
+                            (c.blue() > 100 && c.red() < 70 && c.green() < 70);
+                        if (!axisHue) continue;
+                        ++litPixels;
+                        worst = std::max(worst, std::hypot(x - centre.x(), y - centre.y()));
+                    }
+                }
+                return worst / pxPerLogical;
+            };
+            auto gizmoLimitPx = [&]() {
+                return OcctViewWidget::kGizmoMaxViewportFraction *
+                       std::min(view->width(), view->height());
+            };
+            // Six logical pixels of slack. The budget is the assembly's outer
+            // radius, and what is measured is painted geometry: a ring has a
+            // stroke width and antialiasing spreads it another pixel or two.
+            // It is nowhere near enough slack to hide the failure this probe
+            // exists for, which was five times the budget.
+            const double slack = 6.0;
+
+            int framedPixels = 0;
+            const double framedReach =
+                gizmoReachPx(QStringLiteral("k-gizmo-framed.png"), framedPixels);
+            // NON-VACUITY, and it is not a formality: "no gizmo-coloured pixel
+            // is far from the centre" is exactly as true of a dump with no
+            // gizmo in it at all, which is what a failed snapshot or a
+            // detached manipulator would produce.
+            check(framedPixels > 200,
+                  QStringLiteral("the dump really contains a gizmo to measure, so the "
+                                 "reach below is not vacuous (%1 lit pixels)")
+                      .arg(framedPixels));
+            check(framedReach > 0.0,
+                  QStringLiteral("the gizmo's painted reach can be measured at the "
+                                 "framed zoom (%1 px)").arg(framedReach, 0, 'f', 1));
+            check(framedReach <= gizmoLimitPx() + slack,
+                  QStringLiteral("and it is inside %1% of the viewport's smaller side "
+                                 "(%2 px, limit %3 px)")
+                      .arg(int(OcctViewWidget::kGizmoMaxViewportFraction * 100))
+                      .arg(framedReach, 0, 'f', 1)
+                      .arg(gizmoLimitPx(), 0, 'f', 1));
+
+            // CLOSE UP, which is the case the user reported: at this zoom the
+            // unclamped gizmo was several times the viewport.
+            for (int i = 0; i < 12; ++i) {
+                QWheelEvent zoom(QPointF(view->width() / 2.0, view->height() / 2.0),
+                                 view->mapToGlobal(QPointF(view->width() / 2.0,
+                                                           view->height() / 2.0)),
+                                 QPoint(0, 0), QPoint(0, 120), Qt::NoButton,
+                                 Qt::NoModifier, Qt::NoScrollPhase, false);
+                QCoreApplication::sendEvent(view, &zoom);
+            }
+            settle(250);
+            int closePixels = 0;
+            const double closeReach =
+                gizmoReachPx(QStringLiteral("k-gizmo-clamped.png"), closePixels);
+            check(closePixels > 200,
+                  QStringLiteral("the close-zoom dump contains a gizmo too (%1 lit "
+                                 "pixels)").arg(closePixels));
+            check(closeReach > 0.0,
+                  QStringLiteral("the gizmo is still there and measurable zoomed in "
+                                 "(%1 px)").arg(closeReach, 0, 'f', 1));
+            check(closeReach <= gizmoLimitPx() + slack,
+                  QStringLiteral("and the clamp holds at a close zoom, which is where "
+                                 "it used to fill the screen (%1 px, limit %2 px)")
+                      .arg(closeReach, 0, 'f', 1)
+                      .arg(gizmoLimitPx(), 0, 'f', 1));
+
+            // ORTHOGRAPHIC: the frustum is built differently and worldPerPixel()
+            // is the one formula both modes share, so the clamp has to survive
+            // the flip without a branch of its own.
+            QAction* orthoForGizmo = action(window, QStringLiteral("Orthographic"));
+            check(orthoForGizmo != nullptr, "there is a projection toggle for the probe");
+            if (orthoForGizmo) {
+                const bool wasOrtho = orthoForGizmo->isChecked();
+                if (!wasOrtho) orthoForGizmo->trigger();
+                settle(250);
+                check(view->viewIsOrthographic(),
+                      "the gizmo probe really is in a parallel projection");
+                int orthoPixels = 0;
+                const double orthoReach =
+                    gizmoReachPx(QStringLiteral("k-gizmo-ortho.png"), orthoPixels);
+                check(orthoPixels > 200,
+                      QStringLiteral("the ortho dump contains a gizmo (%1 lit pixels)")
+                          .arg(orthoPixels));
+                check(orthoReach > 0.0,
+                      QStringLiteral("the gizmo measures in ortho too (%1 px)")
+                          .arg(orthoReach, 0, 'f', 1));
+                check(orthoReach <= gizmoLimitPx() + slack,
+                      QStringLiteral("and the clamp holds there as well (%1 px, limit "
+                                     "%2 px)")
+                          .arg(orthoReach, 0, 'f', 1)
+                          .arg(gizmoLimitPx(), 0, 'f', 1));
+                if (!wasOrtho) orthoForGizmo->trigger();
+                settle(200);
+            }
+
+            // The three dumps above ARE the captures - k-gizmo-clamped.png is
+            // written by the close-zoom measurement itself, so the picture
+            // presented and the picture measured are the same file rather than
+            // two renders that could differ.
+
+            view->setSelectedSolids({});
+            trigger(window, QStringLiteral("Fit All"));
+            trigger(window, QStringLiteral("Axonometric"));
+            settle(250);
+        }
+    }
+
+    // --- View -> Show notifications (item 12) --------------------------------
+    //
+    // Off, the app stops saying what went right; it never stops saying what was
+    // refused, and Undo never stops being reachable. All three are checked,
+    // because the first two are the preference and the third is the thing the
+    // preference must not quietly cost the user.
+    {
+        QAction* notes = action(window, QStringLiteral("Show notifications"));
+        check(notes != nullptr, "there is a Show notifications entry");
+        ToastHost* noteHost = window.findChild<ToastHost*>();
+        check(noteHost != nullptr, "and a toast host for it to govern");
+        if (notes && noteHost) {
+            check(notes->isCheckable() && notes->isChecked(),
+                  "it is checkable and the app ships with notifications on");
+            check(noteHost->notesEnabled(),
+                  "and the host has been told so by updateActions(), not left to guess");
+
+            // Make a body to delete, so the probe is not at the mercy of what
+            // the run happens to have left in the document.
+            trigger(window, QStringLiteral("Select Bodies"));
+            trigger(window, QStringLiteral("Start Sketch"));
+            sketchQuad(window, 0.55, 0.30, 0.66, 0.40);
+            trigger(window, QStringLiteral("Finish Sketch"));
+            const bool built = window.extrudePendingFace(30.0);
+            check(built, "the notifications probe builds a body of its own");
+
+            if (built) {
+                const int bodies = static_cast<int>(window.document().solids().size());
+                const int victim = window.document().solids().back().id;
+
+                notes->setChecked(false);
+                settle(150);
+                check(!noteHost->notesEnabled(),
+                      "unticking the entry silences notes at the host");
+
+                view->setSelectedSolids({victim});
+                settle(150);
+                trigger(window, QStringLiteral("Delete Selected"));
+                settle(200);
+                check(static_cast<int>(window.document().solids().size()) == bodies - 1,
+                      "a delete with notifications off still deletes");
+                check(!noteHost->isShowing(),
+                      QStringLiteral("and says nothing about it (\"%1\")")
+                          .arg(noteHost->currentText()));
+
+                // The route the toast's pill would have offered is still there.
+                // This is the whole reason a Note may be dropped at all: it is
+                // a convenience over the menu, never the only way back.
+                QAction* undoAction = action(window, QStringLiteral("Undo"));
+                check(undoAction != nullptr && undoAction->isEnabled(),
+                      "Undo is still offered on the menu with notifications off");
+                if (undoAction && undoAction->isEnabled()) {
+                    undoAction->trigger();
+                    settle(250);
+                    check(static_cast<int>(window.document().solids().size()) == bodies,
+                          "and it still brings the body back");
+                }
+
+                // A REFUSAL, with notifications off. Two bodies are required
+                // for a Union and one is selected, so this is the app's own
+                // path rather than a toast posted by the probe.
+                view->setSelectedSolids({victim});
+                settle(150);
+                const bool refused =
+                    !window.applyBooleanToSelection(
+                        static_cast<int>(ModelingOps::BooleanKind::Fuse));
+                check(refused, "a Union with one body selected is refused");
+                check(noteHost->isShowing(),
+                      QStringLiteral("and the refusal is reported even with notifications "
+                                     "off - a refusal that reports nowhere is a silent "
+                                     "failure (\"%1\")").arg(noteHost->currentText()));
+
+                notes->setChecked(true);
+                settle(150);
+                check(noteHost->notesEnabled(),
+                      "ticking it again lets the app speak up about successes");
+
+                // And a Note really does come back, so the check above is about
+                // the toggle rather than about a message that stopped existing.
+                view->setSelectedSolids({victim});
+                settle(150);
+                trigger(window, QStringLiteral("Delete Selected"));
+                settle(200);
+                check(noteHost->isShowing() && !noteHost->currentText().isEmpty(),
+                      QStringLiteral("a delete with notifications on reports it again "
+                                     "(\"%1\")").arg(noteHost->currentText()));
+                trigger(window, QStringLiteral("Undo"));
+                settle(250);
+            }
+            view->setSelectedSolids({});
+            settle(120);
+        }
+    }
+
+    // --- and the preference comes back (item 12, persistence) ----------------
+    // On exactly the terms the projection and the unit are on, and checked the
+    // same way: a window that must not write, one that must, and one that reads
+    // it back. A preference that is stored and never read looks identical to
+    // one that was never stored.
+    {
+        ScopedTestSettings scopedSettings;
+        {
+            QSettings clean;
+            clean.remove(QStringLiteral("showNotifications"));
+        }
+
+        {
+            MainWindow quiet(nullptr, /*persistProgress=*/false);
+            quiet.setAttribute(Qt::WA_ShowWithoutActivating);
+            quiet.resize(900, 700);
+            quiet.show();
+            settle(250);
+            QAction* quietNotes = action(quiet, QStringLiteral("Show notifications"));
+            check(quietNotes != nullptr && quietNotes->isChecked(),
+                  "a fresh window ships with notifications on");
+            if (quietNotes) quietNotes->setChecked(false);
+            settle(150);
+            {
+                QSettings after;
+                check(!after.contains(QStringLiteral("showNotifications")),
+                      "but a persistProgress=false window stores nothing");
+            }
+            quiet.close();
+            settle(120);
+        }
+
+        {
+            MainWindow persisting(nullptr, /*persistProgress=*/true);
+            persisting.setAttribute(Qt::WA_ShowWithoutActivating);
+            persisting.resize(900, 700);
+            persisting.show();
+            settle(250);
+            QAction* persistNotes = action(persisting, QStringLiteral("Show notifications"));
+            if (persistNotes) persistNotes->setChecked(false);
+            settle(150);
+            QSettings written;
+            check(written.contains(QStringLiteral("showNotifications")) &&
+                      !written.value(QStringLiteral("showNotifications")).toBool(),
+                  "a persisting window stores the choice");
+            persisting.close();
+            settle(120);
+        }
+
+        {
+            MainWindow returning(nullptr, /*persistProgress=*/true);
+            returning.setAttribute(Qt::WA_ShowWithoutActivating);
+            returning.resize(900, 700);
+            returning.show();
+            settle(250);
+            QAction* returnedNotes = action(returning, QStringLiteral("Show notifications"));
+            check(returnedNotes != nullptr && !returnedNotes->isChecked(),
+                  "a returning window comes back with notifications off");
+            // And the host was actually told, rather than the tick merely
+            // coming back - the failure a checked-state-only assertion misses.
+            ToastHost* returnedHost = returning.findChild<ToastHost*>();
+            check(returnedHost != nullptr && !returnedHost->notesEnabled(),
+                  "and the toast host is silenced before the first message");
+            returning.close();
+            settle(120);
+        }
+    }
+
+    // --- the picture the whole item is for -----------------------------------
+    // A populated document seen dead on in a parallel projection: an
+    // ELEVATION, the drawing a furniture maker actually works from. The same
+    // scene is captured in perspective at the same pose immediately after, so
+    // the pair shows the one difference and nothing else.
+    //
+    // Front rather than the angled pose, because convergence is hardest to
+    // argue about when it is the vertical edges of a body that either stay
+    // parallel or do not - the ground grid tells the same story, but a body
+    // is what the user asked to see.
+    {
+        QAction* orthoForShot = action(window, QStringLiteral("Orthographic"));
+        check(!window.document().solids().empty(),
+              "the document still holds bodies for the elevation capture");
+        if (orthoForShot && !window.document().solids().empty()) {
+            view->setSelectedSolids({});
+            trigger(window, QStringLiteral("Front"));
+            settle(300);
+            trigger(window, QStringLiteral("Fit All"));
+            settle(300);
+
+            if (!orthoForShot->isChecked()) orthoForShot->trigger();
+            settle(250);
+            check(view->viewIsOrthographic(),
+                  "the elevation capture really is taken in a parallel projection");
+            view->saveSnapshot(outDir + "/j-elevation-ortho.png");
+
+            orthoForShot->trigger();
+            settle(250);
+            check(!view->viewIsOrthographic(),
+                  "and its perspective twin at the very same pose");
+            view->saveSnapshot(outDir + "/j-elevation-persp.png");
+
+            // Back to the startup pose for whatever follows, exactly as the
+            // gizmo block restores its own.
+            view->camera().setTemporaryOrtho(false);
+            trigger(window, QStringLiteral("Axonometric"));
+            settle(250);
+        }
+    }
+
+    // --- the base projection is a preference, and it comes back --------------
+    // On exactly the terms the display unit and the theme spec are on: written
+    // only under persistProgress, read once in the constructor, and applied
+    // before the first frame is drawn. Both halves are checked, because a
+    // preference that is stored and never read looks identical to one that was
+    // never stored, and the guard is only worth having if the write it
+    // suppresses actually happens without it.
+    {
+        ScopedTestSettings scopedSettings;
+        {
+            QSettings clean;
+            clean.remove(QStringLiteral("projection"));
+        }
+
+        // A window that must not write.
+        {
+            MainWindow quiet(nullptr, /*persistProgress=*/false);
+            quiet.setAttribute(Qt::WA_ShowWithoutActivating);
+            quiet.resize(900, 700);
+            quiet.show();
+            settle(250);
+            QAction* quietOrtho = action(quiet, QStringLiteral("Orthographic"));
+            check(quietOrtho != nullptr && !quietOrtho->isChecked(),
+                  "a fresh window starts in the perspective the app ships with");
+            if (quietOrtho) quietOrtho->trigger();
+            settle(200);
+            check(quietOrtho != nullptr && quietOrtho->isChecked(),
+                  "and a persistProgress=false window still applies the flip");
+            {
+                QSettings after;
+                check(!after.contains(QStringLiteral("projection")),
+                      QStringLiteral("but stores nothing (\"%1\")")
+                          .arg(after.value(QStringLiteral("projection")).toString()));
+            }
+            quiet.close();
+            settle(120);
+        }
+
+        // ...and one that must, so the check above is about the guard rather
+        // than about a write that never happens at all.
+        {
+            MainWindow persisting(nullptr, /*persistProgress=*/true);
+            persisting.setAttribute(Qt::WA_ShowWithoutActivating);
+            persisting.resize(900, 700);
+            persisting.show();
+            settle(250);
+            QAction* orthoAgain = action(persisting, QStringLiteral("Orthographic"));
+            if (orthoAgain) orthoAgain->trigger();
+            settle(200);
+            QSettings written;
+            check(written.value(QStringLiteral("projection")).toString() ==
+                      QStringLiteral("ortho"),
+                  QStringLiteral("a persisting window stores the base projection (\"%1\")")
+                      .arg(written.value(QStringLiteral("projection")).toString()));
+            persisting.close();
+            settle(120);
+        }
+
+        // The returning user: the stored mode is on the camera before the
+        // window has drawn anything, which is the half a write-only check
+        // cannot see. The LIVE camera is the oracle, not the action's tick -
+        // an action that came back checked over a perspective viewport is
+        // precisely the failure this reads for.
+        {
+            MainWindow returning(nullptr, /*persistProgress=*/true);
+            returning.setAttribute(Qt::WA_ShowWithoutActivating);
+            returning.resize(900, 700);
+            returning.show();
+            settle(300);
+            QAction* returnedOrtho = action(returning, QStringLiteral("Orthographic"));
+            check(returnedOrtho != nullptr && returnedOrtho->isChecked(),
+                  "a returning window comes back with Orthographic checked");
+            check(returning.view() != nullptr && returning.view()->viewIsOrthographic(),
+                  "and the camera is actually drawing that way, not merely ticked");
+            returning.close();
+            settle(120);
+        }
+    }
+
     // --- Show tips again restores the walkthrough for a returning user too ---
     {
         // Every walkthrough check above uses persistProgress=false, so
@@ -9217,16 +12945,27 @@ int main(int argc, char* argv[])
     // about how many checks ran must not be one of the checks it counts, or
     // the number it reports and the number it tests are two different things.
     // Reported the same way trigger()'s own failure is.
-    if (g_checks < kCheckFloor) {
-        std::printf("[FAIL] the run executed %d checks, below the floor of %d - "
-                    "a guard has stopped letting its checks run; find the guard, "
-                    "do not lower the floor\n",
-                    g_checks, kCheckFloor);
+    //
+    // Environment skips are ADDED IN, and the difference that draws is the
+    // point: a check that vanished because a guard's condition quietly went
+    // false still drops the total and still fails here, while a check that
+    // could not run because this machine has one font family installed - or
+    // no PrintWindow - is counted, named on stdout by skipByEnvironment(),
+    // and does not turn a healthy run red with a message about guards.
+    const int accounted = g_checks + g_skippedByEnvironment;
+    if (accounted < kCheckFloor) {
+        std::printf("[FAIL] the run executed %d checks (+%d skipped by the "
+                    "environment = %d), below the floor of %d - a guard has "
+                    "stopped letting its checks run; find the guard, do not lower "
+                    "the floor\n",
+                    g_checks, g_skippedByEnvironment, accounted, kCheckFloor);
         ++g_failures;
     }
 
-    std::printf("\n%s (%d failure%s, %d checks, floor %d)  volumes: A=%.1f B=%.1f\n",
+    std::printf("\n%s (%d failure%s, %d checks, %d skipped by the environment, "
+                "floor %d)  volumes: A=%.1f B=%.1f\n",
                 g_failures == 0 ? "PASS" : "FAIL", g_failures,
-                g_failures == 1 ? "" : "s", g_checks, kCheckFloor, volumeA, volumeB);
+                g_failures == 1 ? "" : "s", g_checks, g_skippedByEnvironment,
+                kCheckFloor, volumeA, volumeB);
     return g_failures == 0 ? 0 : 1;
 }

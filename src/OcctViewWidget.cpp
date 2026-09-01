@@ -19,6 +19,8 @@
 #include <Graphic3d_NameOfMaterial.hxx>
 #include <Graphic3d_TransformPers.hxx>
 #include <Graphic3d_Vec2.hxx>
+#include <Graphic3d_ZLayerSettings.hxx>
+#include <NCollection_HArray1.hxx>
 #include <OpenGl_GraphicDriver.hxx>
 #include <Prs3d_Drawer.hxx>
 #include <Prs3d_LineAspect.hxx>
@@ -129,6 +131,37 @@ Handle(SketchPointMarker) makeMarker(const gp_Pnt& point, Aspect_TypeOfMarker ty
     marker->aspect = new Graphic3d_AspectMarker3d(type, colour, scale);
     return marker;
 }
+
+// The first point's marker: a FILLED square, which no Aspect_TypeOfMarker
+// offers. Every stock type is a dot, a ring or a stroke glyph, so the square
+// has to come from Graphic3d_AspectMarker3d's bitmap constructor - a
+// monochrome stamp, sized in pixels and tinted by the colour argument, so it
+// stays a Theme token exactly like the dots and the ring.
+//
+// The bitmap is glBitmap's classic layout: one bit per pixel, rows padded to
+// whole bytes. Seven pixels wide fits inside one byte per row, and every bit
+// is set, so whether the driver reads the row most- or least-significant-bit
+// first the result is the same solid square - which matters here, because
+// this file has twice found a primitive that was "obviously" fine drawing
+// nothing at all (Aspect_TOM_POINT, Graphic3d_ArrayOfTriangles). The suite
+// samples the middle of this square for the fill colour rather than trusting
+// that it renders.
+constexpr int kStartMarkerPx = 7;
+
+Handle(SketchPointMarker) makeFilledSquareMarker(const gp_Pnt& point,
+                                                 const Quantity_Color& colour)
+{
+    Handle(SketchPointMarker) marker = new SketchPointMarker();
+    marker->point = point;
+
+    Handle(NCollection_HArray1<uint8_t>) bits =
+        new NCollection_HArray1<uint8_t>(0, kStartMarkerPx - 1);
+    for (int row = 0; row < kStartMarkerPx; ++row) bits->SetValue(row, 0xFF);
+
+    marker->aspect =
+        new Graphic3d_AspectMarker3d(colour, kStartMarkerPx, kStartMarkerPx, bits);
+    return marker;
+}
 }  // namespace
 
 OcctViewWidget::OcctViewWidget(QWidget* parent)
@@ -186,15 +219,38 @@ void OcctViewWidget::initializeViewer()
     applyTheme();
 
     myGridRenderer.attach(myContext);
+    // The third layer of the three - see sketchZLayer() in the header. It has
+    // to be created AFTER the grid's, because it is positioned relative to it:
+    // bodies (default) -> grid -> sketch work. If the grid renderer could not
+    // make its own layer, this one goes straight after the default layer, so
+    // sketch work is still drawn after the grid rather than silently losing
+    // the ordering along with it.
+    {
+        Graphic3d_ZLayerSettings settings;
+        settings.SetName("FurnifyMe sketch work");
+        settings.SetEnableDepthTest(Standard_True);
+        settings.SetEnableDepthWrite(Standard_True);
+        // Emphatically NOT SetClearDepth(true): that is what
+        // Graphic3d_ZLayerId_Topmost does, and it would let the outline draw
+        // straight through a body standing in front of it.
+        settings.SetClearDepth(Standard_False);
+        const Graphic3d_ZLayerId after = myGridRenderer.zLayer() != Graphic3d_ZLayerId_UNKNOWN
+                                             ? myGridRenderer.zLayer()
+                                             : Graphic3d_ZLayerId_Default;
+        Graphic3d_ZLayerId layer = Graphic3d_ZLayerId_UNKNOWN;
+        if (myViewer->InsertLayerAfter(layer, settings, after)) mySketchLayer = layer;
+    }
     myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane());
     myDimension.attach(myContext);
+    myDimension.setZLayer(mySketchLayer);
     myPullArrow.attach(myContext);
     myBevelArrow.attach(myContext);
 
-    // Perspective projection: the turntable model is distance-based, and OCCT's
-    // default orthographic camera zooms by scale, which would make
-    // zoom-toward-cursor meaningless.
-    myView->Camera()->SetProjectionType(Graphic3d_Camera::Projection_Perspective);
+    // The field of view is fixed for the life of the view; WHICH projection is
+    // drawn with it moves, so applyCameraState() owns that and this does not
+    // set it here as well. See applyCameraState() for how the orthographic
+    // scale is kept tied to the turntable's distance, which is what lets one
+    // distance-based camera model serve both projections.
     myView->Camera()->SetFOVy(kFovyDeg);
     applyCameraState();
     myView->MustBeResized();
@@ -320,6 +376,108 @@ bool OcctViewWidget::isSolidVisible(int id) const
     return myContext->IsDisplayed(it->second);
 }
 
+void OcctViewWidget::displayOutline(int id, const TopoDS_Face& face)
+{
+    initializeViewer();
+    if (myContext.IsNull() || face.IsNull()) return;
+
+    removeOutline(id);
+
+    ModelingOps::tessellate(face, 0.1);
+
+    Handle(AIS_Shape) presentation = new AIS_Shape(face);
+    // The same yellow every piece of sketch work wears - setPreview() and
+    // setModelingPreview() both use it. An outline is a document item, but it
+    // is a FLAT one that is not a body yet, and giving it the bodies' grey
+    // would say it was one.
+    presentation->SetColor(Quantity_Color(Quantity_NOC_YELLOW));
+    presentation->SetWidth(2.0);
+    // Above the work-plane grid it lies exactly on top of - see sketchZLayer().
+    markInSketchLayer(presentation);
+    // Selection mode -1: never pickable. Outlines are handled from the drawer
+    // this phase, and a shape the user can select but cannot Union, Pull or
+    // bevel would be a selection that makes every gizmo predicate lie.
+    myContext->Display(presentation, AIS_Shaded, -1, Standard_False);
+    myOutlines[id] = presentation;
+
+    myContext->UpdateCurrentViewer();
+}
+
+void OcctViewWidget::removeOutline(int id)
+{
+    const auto it = myOutlines.find(id);
+    if (it == myOutlines.end() || myContext.IsNull()) return;
+
+    myContext->Remove(it->second, Standard_False);
+    myOutlines.erase(it);
+    myContext->UpdateCurrentViewer();
+}
+
+void OcctViewWidget::clearOutlines()
+{
+    if (myContext.IsNull()) return;
+
+    for (auto& entry : myOutlines) myContext->Remove(entry.second, Standard_False);
+    myOutlines.clear();
+    myContext->UpdateCurrentViewer();
+}
+
+bool OcctViewWidget::hasOutline(int id) const
+{
+    return myOutlines.find(id) != myOutlines.end();
+}
+
+void OcctViewWidget::setOutlineVisible(int id, bool visible)
+{
+    const auto it = myOutlines.find(id);
+    if (it == myOutlines.end() || myContext.IsNull()) return;
+
+    if (visible) {
+        // The same mode and the same -1 it was displayed with, not
+        // Display(obj, false), which would fall back to the object's default
+        // wireframe mode and silently change how a hidden-then-shown outline
+        // looks.
+        myContext->Display(it->second, AIS_Shaded, -1, Standard_False);
+    } else {
+        myContext->Erase(it->second, Standard_False);
+    }
+    // No selectionChanged() either way, unlike setSolidVisible(): an outline is
+    // not selectable, so hiding one cannot have dropped anything from the
+    // selection.
+    myContext->UpdateCurrentViewer();
+}
+
+bool OcctViewWidget::isOutlineVisible(int id) const
+{
+    const auto it = myOutlines.find(id);
+    if (it == myOutlines.end() || myContext.IsNull()) return false;
+    return myContext->IsDisplayed(it->second);
+}
+
+std::vector<Graphic3d_ZLayerId> OcctViewWidget::zLayerOrder() const
+{
+    std::vector<Graphic3d_ZLayerId> order;
+    if (myViewer.IsNull()) return order;
+
+    NCollection_Sequence<int> layers;
+    myViewer->GetAllZLayers(layers);
+    for (int i = layers.Lower(); i <= layers.Upper(); ++i) order.push_back(layers.Value(i));
+    return order;
+}
+
+Graphic3d_ZLayerSettings OcctViewWidget::zLayerSettings(Graphic3d_ZLayerId layer) const
+{
+    if (myViewer.IsNull() || layer == Graphic3d_ZLayerId_UNKNOWN)
+        return Graphic3d_ZLayerSettings();
+    return myViewer->ZLayerSettings(layer);
+}
+
+void OcctViewWidget::markInSketchLayer(const Handle(AIS_InteractiveObject)& object) const
+{
+    if (object.IsNull() || mySketchLayer == Graphic3d_ZLayerId_UNKNOWN) return;
+    object->SetZLayer(mySketchLayer);
+}
+
 void OcctViewWidget::setPreview(const TopoDS_Shape& shape, bool shaded)
 {
     initializeViewer();
@@ -333,6 +491,9 @@ void OcctViewWidget::setPreview(const TopoDS_Shape& shape, bool shaded)
     myPreview = new AIS_Shape(shape);
     myPreview->SetColor(Quantity_Color(Quantity_NOC_YELLOW));
     myPreview->SetWidth(2.0);
+    // The in-progress outline and the closed face are drawn above the
+    // work-plane grid they sit exactly on top of - see sketchZLayer().
+    markInSketchLayer(myPreview);
     // Selection mode -1: feedback only, never pickable.
     myContext->Display(myPreview, shaded ? AIS_Shaded : AIS_WireFrame, -1, Standard_False);
     myContext->UpdateCurrentViewer();
@@ -376,6 +537,11 @@ void OcctViewWidget::setModelingPreview(const TopoDS_Shape& shape, int replacesS
     // it was pulling.
     myModelingPreview->SetColor(Quantity_Color(Quantity_NOC_YELLOW));
     myModelingPreview->SetWidth(2.0);
+    // In the sketch-work layer with the rest of the feedback: a pull or a
+    // bevel preview carving a body sitting on the ground grid is exactly the
+    // shape the grid must not paint over. Depth testing is on in that layer,
+    // so it still hides behind whatever is genuinely in front of it.
+    markInSketchLayer(myModelingPreview);
     // Selection mode -1: feedback only, never pickable - the same rule the
     // sketch preview and every marker follows. A shape the user can select
     // that exists in no document is the worst thing a preview can produce.
@@ -578,8 +744,50 @@ void OcctViewWidget::attachManipulator(int solidId)
     // selecting a part replaces the body selection that raised the gizmo in
     // the first place: the gizmo would vanish under the hand reaching for it.
     myManipulator->SetModeActivationOnDetection(Standard_True);
-    // Sized and placed from the body it serves, so a 40 mm shelf and a 2 m
-    // wardrobe both get a gizmo you can actually grab.
+    // PLAIN WORLD SPACE. OCCT 8.0 constructs AIS_Manipulator with zoom
+    // persistence ON - the header documents OptionsForAttach::AdjustSize as
+    // defaulting to false and says nothing about this one, and it cost the best
+    // part of a fix round to find. In that mode the manipulator's presentation
+    // is anchored to the screen: its drawn size tracks SetSize() but ignores
+    // the camera entirely, so every camera-derived correction below wrote a
+    // number that could not reach a pixel. The measurements said so plainly
+    // once they were taken from a dump rather than from the code's own
+    // opinion - the painted size per unit came out 1.08 px at one zoom and
+    // 1.10 px at another, across a 4.2x change in world-per-pixel.
+    //
+    // Turned off rather than accommodated, for three reasons: worldPerPixel()
+    // is how everything else in this file relates world units to pixels and it
+    // is verified in both projections; manipulatorFrame()'s size becomes an
+    // honest world measurement, which is what every probe that projects a
+    // point from it already assumes; and accommodating it would mean carrying
+    // a screen-space constant nobody can derive from the API.
+    //
+    // It must be set BEFORE Attach() - the header's own warning is that
+    // enabling this mode overrides transform-persistence flags and the local
+    // transformation, which is exactly the machinery the drag path uses.
+    myManipulator->SetZoomPersistence(Standard_False);
+
+    // The body's own measurements, which the clamp needs and which nothing
+    // else can answer for it. The SIZING itself happens at the END of this
+    // function - see the comment there for why it cannot happen here.
+    Bnd_Box box;
+    BRepBndLib::Add(it->second->Shape(), box);
+    if (!box.IsVoid()) {
+        Standard_Real x0, y0, z0, x1, y1, z1;
+        box.Get(x0, y0, z0, x1, y1, z1);
+        // The longest side - SetSize() documents its argument as the side of
+        // the manipulator's cubic bounding box, so a side is the like measure.
+        myManipulatorNaturalSize = std::max({x1 - x0, y1 - y0, z1 - z0});
+        // And where it stands, which the clamp needs in order to know how deep
+        // the gizmo is. From the BODY's box rather than from
+        // AIS_Manipulator::Position(), which cannot answer until AdjustPosition
+        // has run inside Attach() - asked before that it says the world origin,
+        // and a depth measured to the origin made the budget 2.5x too generous.
+        myManipulatorCentre = gp_Pnt(0.5 * (x0 + x1), 0.5 * (y0 + y1), 0.5 * (z0 + z1));
+    }
+    // AdjustSize stays ON as the fallback the clamp narrows a moment later: if
+    // the body's box ever comes back void, a gizmo framed from the object is a
+    // better answer than OCCT's bare default.
     AIS_Manipulator::OptionsForAttach options;
     options.SetAdjustPosition(Standard_True);
     options.SetAdjustSize(Standard_True);
@@ -603,8 +811,167 @@ void OcctViewWidget::attachManipulator(int solidId)
         gizmoAspect->SetMaterial(material);
     }
 
+    // TOPMOST, and it is the clamp below that makes this necessary. A
+    // manipulator stands at its body's own centre, and once its arms are
+    // capped to a share of the SCREEN they are routinely shorter than the body
+    // is wide - which in the default layer means a gizmo drawn inside the solid
+    // it belongs to, depth-tested away and invisible at exactly the zoom the
+    // clamp exists for. A manipulator is a control rather than geometry, and
+    // every CAD application draws one over the model for this reason.
+    //
+    // CLAUDE.md rejects this layer for the ground GRID, and that ruling stands:
+    // the layer clears depth, so a grid in it would paint over every body
+    // standing on it. Here painting over the body IS the requirement. Depth
+    // still applies within the layer, so the gizmo's own three arms occlude
+    // each other correctly.
+    //
+    // It DOES change picking, and saying otherwise would be convenient rather
+    // than true: SelectMgr_SortCriterion::IsCloserDepth ranks ZLayerPosition
+    // ahead of depth, so a manipulator part now wins picks against a body in
+    // front of it that it would previously have lost. That is the right
+    // outcome for a control the user can see and reach - a handle that is
+    // drawn on top and picks underneath is worse than either - and it costs
+    // nothing already relied on: the one place a body MUST outrank the gizmo
+    // is the additive Shift pick, which Deactivates the manipulator around the
+    // MoveTo/SelectDetected pair rather than trusting the ordering.
+    myContext->SetZLayer(myManipulator, Graphic3d_ZLayerId_Topmost);
+
     myManipulatorSolid = solidId;
+    // ON SCREEN FIRST, THEN SIZED, and the order is the whole fix rather than
+    // fussiness. Measured three ways: with the clamp applied before or during
+    // the attach, AIS_Manipulator reported the clamped size while the viewport
+    // drew the bounding-diagonal one - 731 mm painted against a 256 mm budget -
+    // because the presentation is computed once, inside Attach(), and a
+    // Redisplay() issued before the object has been through a redraw does not
+    // dislodge it. The identical call one frame later does. So the update runs
+    // after this first UpdateCurrentViewer(), which is what puts the
+    // manipulator on screen, and the second one carries the resized
+    // presentation out.
+    //
+    // The cost is one extra viewer update per attach - once per selection, not
+    // per frame - and the alternative is a gizmo that is the right size only
+    // after the user touches the camera, which is never the frame they are
+    // shown first.
     myContext->UpdateCurrentViewer();
+    myManipulatorAppliedSize = 0.0;   // nothing of ours installed yet: force it
+    applyCameraState();
+}
+
+void OcctViewWidget::updateManipulatorSize()
+{
+    if (myManipulator.IsNull() || myView.IsNull()) return;
+    // Never mid-gesture: AIS_Manipulator's drag maths is anchored on the arm
+    // the press landed on, and resizing that arm under the cursor moves the
+    // handle away from the hand holding it.
+    if (myGizmoDragActive) return;
+    if (myManipulatorNaturalSize <= 0.0) return;
+
+    // worldPerPixel() is ONE formula for both projections here (see its
+    // definition - the orthographic scale is set to exactly the perspective
+    // frustum's height at the target), so this needs no branch on the
+    // projection and is correct the moment the Persp/Ortho toggle flips.
+    //
+    // The smaller viewport dimension, because a gizmo that fits a wide
+    // viewport's width can still run off the top and bottom of a short one.
+    // Both are logical pixels, which is what worldPerPixel() divides by.
+    const double smallerSide = std::min(std::max(1, width()), std::max(1, height()));
+
+    // Two things separate a screen budget from a world size, and both of them
+    // are perspective. Neither exists in a parallel projection, where a world
+    // length projects to the same pixels at every depth - so both fall out to
+    // 1 there by construction rather than by a branch that could go stale.
+    //
+    // FIRST, DEPTH. worldPerPixel() answers for the camera TARGET's plane,
+    // which is the right question for the ground grid and for a dimension the
+    // user is looking straight at. A gizmo stands wherever its body stands, and
+    // a body nearer than the target projects larger than that number says.
+    //
+    // SECOND, THE ARM ITSELF. An arm pointing towards the eye ends nearer than
+    // it starts, so its tip projects further out than a flat depth-scaled
+    // estimate - measured at 9% over budget at 175% zoomed in, which is not a
+    // rounding error and is not fixed by the depth term alone. Requiring the
+    // NEAREST point of the gizmo to fit rather than its centre means solving
+    //     side / (k * (depth - side)) <= limitPixels,  k = worldPerPixel/depth
+    // for side, which is the closed form below - no iteration, and it collapses
+    // to the flat budget whenever the gizmo is small against its own depth.
+    double depthRatio = 1.0;
+    double gizmoDepth = 0.0;
+    const bool perspective = !myCamera.effectiveOrtho();
+    if (perspective) {
+        const gp_Pnt eye = myCamera.eyePosition();
+        const gp_Dir viewDir = myCamera.viewDirection();
+        // Along the view axis, never the straight-line distance: it is the
+        // depth that scales a perspective projection, and an off-centre gizmo
+        // is further away without being any deeper.
+        gizmoDepth = gp_Vec(eye, myManipulatorCentre).Dot(gp_Vec(viewDir));
+        const double targetDepth = myCamera.state().distance;
+        if (gizmoDepth > 1.0e-6 && targetDepth > 1.0e-6) depthRatio = gizmoDepth / targetDepth;
+    }
+
+    const double flatBudget =
+        kGizmoMaxViewportFraction * smallerSide * worldPerPixel() * depthRatio;
+    const double maxWorld = (perspective && gizmoDepth > 1.0e-6)
+                                ? flatBudget / (1.0 + flatBudget / gizmoDepth)
+                                : flatBudget;
+    if (maxWorld <= 0.0) return;
+
+    const double wanted = std::min(myManipulatorNaturalSize, maxWorld);
+    // The equal-guard, in the shape the view label's is: this runs on every
+    // frame of an orbit and a pan, and SetSize() recomputes all seven of the
+    // manipulator's presentations. Relative, not absolute, because the same
+    // gizmo is legitimately 3 mm on a drawer front and 3 m on a wardrobe.
+    //
+    // It keys on `wanted`, which is a pure function of the camera and the
+    // body - NOT on what the manipulator reports afterwards - so a call that
+    // does not return early always performs exactly the same work below, and
+    // the correction cannot ratchet across frames.
+    if (std::fabs(wanted - myManipulatorAppliedSize) <= 1.0e-3 * std::fabs(wanted)) return;
+
+    myManipulatorAppliedSize = wanted;
+
+    // Installed, then CORRECTED, because Size() is not SetSize()'s own unit
+    // (see the attach): what it reports is the assembly's outer reach, and that
+    // is the number which actually has to fit inside the fraction. Scaling the
+    // side length by the overshoot very nearly lands it but not exactly - the
+    // relation is affine with an offset, since the gap between the parts does
+    // not always scale with the whole - so it is applied until the reach is
+    // inside budget rather than assumed to converge in one. Two passes is the
+    // observed worst case; the bound is a bound, not a schedule, and the
+    // equal-guard above means none of this runs again until the camera or the
+    // body actually moves.
+    double side = wanted;
+    myManipulator->SetSize(static_cast<float>(side));
+    for (int pass = 0; pass < 4; ++pass) {
+        const double reported = myManipulator->Size();
+        if (reported <= maxWorld || reported <= 1.0e-9) break;
+        side *= maxWorld / reported;
+        myManipulator->SetSize(static_cast<float>(side));
+    }
+
+    // AND THEN REDRAWN, which is the whole difference between a number and a
+    // gizmo. SetSize() writes the axes' parameters and marks the object
+    // ToBeUpdated; it does NOT recompute the presentation, so without this the
+    // manipulator kept drawing at whatever AdjustSize() gave it on attach while
+    // Size() cheerfully reported the clamped value. Everything above was
+    // arithmetically correct and reached no pixel: the first capture of this
+    // work shows a gizmo 538 px across a 110 px budget, taken from a build
+    // whose own probe read 103 px, because that probe asked the code for the
+    // number the code had just written.
+    // Only once it is on screen. Before the attach there is no presentation to
+    // rebuild - the size set above is simply the one the first Compute will
+    // use - and asking the context to redisplay an object it does not yet hold
+    // is at best a no-op.
+    if (!myContext.IsNull() && myContext->IsDisplayed(myManipulator))
+        myContext->Redisplay(myManipulator, Standard_False);
+
+    // OCCT's own SetZoomPersistence(true) would hold a FIXED screen size
+    // instead, and was rejected rather than missed: it overrides the local
+    // transformation and the transform-persistence flags of every
+    // sub-presentation, which is precisely the machinery the drag path here
+    // already leans on (see endGizmoDrag and the presentation reset it
+    // performs). A cap that is re-derived from the camera keeps the drag maths
+    // untouched, and it also lets a small body keep a small gizmo instead of
+    // giving every body the same one.
 }
 
 void OcctViewWidget::activateManipulatorModes()
@@ -647,6 +1014,8 @@ void OcctViewWidget::detachManipulator()
     }
     myManipulator.Nullify();
     myManipulatorSolid = -1;
+    myManipulatorNaturalSize = 0.0;
+    myManipulatorAppliedSize = 0.0;
 }
 
 bool OcctViewWidget::manipulatorFrame(gp_Ax2& position, double& size) const
@@ -755,26 +1124,29 @@ void OcctViewWidget::setSketchPointMarkers(const std::vector<gp_Pnt>& points)
     for (const gp_Pnt& p : points) {
         Handle(SketchPointMarker) dot =
             makeMarker(p, Aspect_TOM_BALL, toOcctColor(Theme::sketchPointMarker()), 1.5);
+        markInSketchLayer(dot);
         myContext->Display(dot, 0, -1, Standard_False);
         myPlacedMarkers.push_back(dot);
     }
 
-    // The first point additionally gets a ring around its dot - "a ring, or
-    // a larger dot" - because clicking it back is what closes the outline,
-    // and that has to be visibly true, not just structurally true: a first
-    // pass used the same colour as the ordinary dots and only a modest
-    // scale bump (2.2 against 1.5), and pixel-sampling the two side by side
-    // showed IDENTICAL marker geometry - whatever this driver does with the
-    // scale argument at these small deltas, it was not visible. Scale 4.0
-    // against 1.5 does clear that threshold (confirmed by the same
-    // pixel-sampling, and it is dramatically bigger - see the crop
-    // comparison in the branch's report), but Theme::focusRing() (amber, a
-    // hue no other placed-point marker or the cursor dot carries) is the
-    // difference this does not have to hope survives a rendering quirk.
-    Handle(SketchPointMarker) ring =
-        makeMarker(points.front(), Aspect_TOM_RING1, toOcctColor(Theme::focusRing()), 4.0);
-    myContext->Display(ring, 0, -1, Standard_False);
-    myFirstPointMarker = ring;
+    // The first point additionally gets a small FILLED SQUARE on top of its
+    // dot, because clicking it back is what closes the outline and that has
+    // to be visibly true, not just structurally true.
+    //
+    // The square replaced an amber ring, and the change is a shape change as
+    // much as a colour one - which is the point. The three sketch marks are
+    // now told apart by SHAPE first: a square starts the outline, a dot is a
+    // placed point, a ring is where the cursor is. That matters because this
+    // file has already been burned once by leaning on size alone (scale 2.2
+    // against 1.5 pixel-sampled IDENTICAL on this driver), and once more by
+    // assuming a primitive draws at all. Theme::accent() is the app's own
+    // "this is the interactive thing" colour and no other sketch mark wears
+    // it, so colour still carries the distinction independently.
+    Handle(SketchPointMarker) square =
+        makeFilledSquareMarker(points.front(), toOcctColor(Theme::accent()));
+    markInSketchLayer(square);
+    myContext->Display(square, 0, -1, Standard_False);
+    myFirstPointMarker = square;
 
     myContext->UpdateCurrentViewer();
 }
@@ -806,13 +1178,19 @@ void OcctViewWidget::setSketchCursorMarker(const gp_Pnt& point)
     if (myContext.IsNull()) return;
 
     clearSketchCursorMarker();
-    // Same marker family as the placed dots (Aspect_TOM_BALL, proven above
-    // to actually render), but larger and in Theme::accent() - already the
-    // viewport's own colour for "here's the interactive thing", via
-    // DimensionRenderer's annotation lines - so the live cursor is never
-    // mistaken for a point already committed.
+    // A RING, and a big one - the third of the three shapes, against the
+    // first point's filled square and the placed points' dots. Its violet is
+    // Theme::sketchPointMarker(), the palette's own sketch hue, which the
+    // small placed dots also wear: the cursor is told apart from them by
+    // being an open ring four times the size, the one size delta this file
+    // has actually measured to be visible (1.5 against 4.0 - see
+    // setSketchPointMarkers()). Sharing the hue is deliberate rather than
+    // conceded: the live cursor is the same KIND of thing as the points it is
+    // about to become, while the square that closes the outline is not, and
+    // that is the distinction accent() is spent on.
     Handle(SketchPointMarker) cursor =
-        makeMarker(point, Aspect_TOM_BALL, toOcctColor(Theme::accent()), 2.0);
+        makeMarker(point, Aspect_TOM_RING1, toOcctColor(Theme::sketchPointMarker()), 4.0);
+    markInSketchLayer(cursor);
     myContext->Display(cursor, 0, -1, Standard_False);
     myCursorMarker = cursor;
     myContext->UpdateCurrentViewer();
@@ -828,6 +1206,36 @@ void OcctViewWidget::clearSketchCursorMarker()
 bool OcctViewWidget::hasSketchCursorMarker() const
 {
     return !myCursorMarker.IsNull();
+}
+
+void OcctViewWidget::setSketchStraightAnchor(const gp_Pnt& prev, const gp_Dir& dir)
+{
+    myStraightPrev = prev;
+    myStraightDir = dir;
+    myHasStraightAnchor = true;
+}
+
+void OcctViewWidget::clearSketchStraightAnchor()
+{
+    myHasStraightAnchor = false;
+}
+
+void OcctViewWidget::setSketchCloseTarget(const gp_Pnt& first)
+{
+    myCloseTarget = first;
+    myHasCloseTarget = true;
+}
+
+void OcctViewWidget::clearSketchCloseTarget()
+{
+    myHasCloseTarget = false;
+}
+
+double OcctViewWidget::sketchCloseTolerance() const
+{
+    // Half a grid step is forgiving but unambiguous - it cannot reach the
+    // next grid intersection - and 5 mm is the free-hand equivalent.
+    return mySnapEnabled && mySnapStep > 0.0 ? mySnapStep * 0.5 : 5.0;
 }
 
 void OcctViewWidget::applySelectionMode(const Handle(AIS_Shape)& shape)
@@ -901,6 +1309,14 @@ QPoint OcctViewWidget::fromDevicePixels(int px, int py) const
                   static_cast<int>(std::lround(py / ratio)));
 }
 
+double OcctViewWidget::cameraViewHeightAtTarget() const
+{
+    if (myView.IsNull()) return 0.0;
+    // gp_XYZ of (width, height, depth) at the focal distance. Y is the height,
+    // which is the one worldPerPixel() divides by the viewport's own height.
+    return myView->Camera()->ViewDimensions().Y();
+}
+
 bool OcctViewWidget::projectToScreen(const gp_Pnt& world, QPoint& out) const
 {
     if (myView.IsNull()) return false;
@@ -927,6 +1343,10 @@ void OcctViewWidget::setSketchMode(bool enabled, const gp_Pln& plane)
     // entry, so nothing from a previous sketch can survive into this one.
     clearSketchPointMarkers();
     clearSketchCursorMarker();
+    // And the same rule for the two sketch constraints: each names a point in
+    // the sketch that is ending or has not started yet.
+    clearSketchStraightAnchor();
+    clearSketchCloseTarget();
 }
 
 gp_Pln OcctViewWidget::gridPlane() const
@@ -935,6 +1355,14 @@ gp_Pln OcctViewWidget::gridPlane() const
     // shaded face, and two coplanar surfaces are a depth-buffer tie: the grid
     // stipples through the face and flickers as the camera moves. So the grid
     // is displaced a hair toward whichever side of the plane the eye is on.
+    //
+    // The grid's Z-layer does NOT replace this, and the two solve different
+    // halves of the same picture: the layer settles draw ORDER (the grid is
+    // rendered after the bodies and before the sketch work, and writes no
+    // depth), while this nudge settles the DEPTH TIE that decides whether the
+    // locked face or the grid drawn on it wins. Drop the nudge and the
+    // locked-face grid stipples again; drop the layer and the nudge makes the
+    // grid win against the outline too. See GridRenderer::zLayer().
     //
     // Not Graphic3d_ZLayerId_Topmost: that layer draws with the depth buffer
     // cleared, so the GROUND grid would then paint over every body standing
@@ -980,17 +1408,65 @@ bool OcctViewWidget::rayThroughPixel(int px, int py, gp_Lin& out) const
     return true;
 }
 
-bool OcctViewWidget::pointOnSketchPlane(int px, int py, gp_Pnt& out) const
+bool OcctViewWidget::pointOnSketchPlane(int px, int py, gp_Pnt& out, bool straight) const
 {
     gp_Lin ray;
     if (!rayThroughPixel(px, py, ray)) return false;
 
     if (!SketchController::intersectRayWithPlane(ray, mySketchPlane, out)) return false;
-    // A perspective camera has a horizon: an intersection with the sketch plane
+    // A PERSPECTIVE camera has a horizon: an intersection with the sketch plane
     // can lie BEHIND the eye when the cursor is above it. Such a hit is not a
     // point the user can see - reject it.
-    const gp_Vec toHit(ray.Location(), out);
-    if (toHit.Dot(gp_Vec(ray.Direction())) <= 0.0) return false;
+    //
+    // A parallel projection has no horizon. Every ray is the view direction, so
+    // either they all meet the plane or none of them do, and "behind" is only
+    // measured from wherever OCCT's near plane happens to sit - which auto
+    // z-fit moves with the scene. Applying the perspective rule there would
+    // refuse clicks that are perfectly visible, so the guard is skipped rather
+    // than trusted to be harmless. ConvertWithProj itself needs no branch: it
+    // unprojects the pixel at both depths and subtracts, which is projection
+    // agnostic.
+    if (!myCamera.effectiveOrtho()) {
+        const gp_Vec toHit(ray.Location(), out);
+        if (toHit.Dot(gp_Vec(ray.Direction())) <= 0.0) return false;
+    }
+
+    // Shift's straight continuation, and how it composes with Snap to Grid.
+    //
+    // The composition is: SHIFT WINS THE DIRECTION, then the grid snaps the
+    // distance ALONG that direction. Snapping to the plane grid first and
+    // projecting afterwards would land off the grid; projecting first and
+    // then snapping to the plane grid would land off the line. Only one of
+    // the two constraints can be exact, and the direction is the one the user
+    // is holding a key down to get - a segment that is 3 mm off straight is
+    // the failure Shift exists to prevent, while a length of 47 mm instead of
+    // 50 is not. Rounding the line parameter keeps both whenever the anchor
+    // itself is on the grid and the direction is axis-aligned, which is the
+    // ordinary case.
+    //
+    // One exemption, and it is not a special case so much as a precedence:
+    // CLOSING THE OUTLINE OUTRANKS CONTINUING IT STRAIGHT. Clicking the first
+    // point back is one of the two ways to finish a sketch, and the
+    // projection moves the click off the very point it was aimed at - so with
+    // Shift held that route silently stopped working, and a modifier that
+    // disables a way out of the mode is worse than one that does nothing.
+    // Tested on the RAW plane hit, before any snapping: what the user aimed
+    // at, not where a constraint would have put it. Falling through then
+    // takes the ordinary grid snap, which lands the click exactly on the
+    // first point - so a Shift-click on the start point behaves precisely
+    // like a plain one, rather than merely closing by a different route.
+    const bool closing =
+        myHasCloseTarget && out.Distance(myCloseTarget) <= sketchCloseTolerance();
+
+    if (straight && myHasStraightAnchor && !closing) {
+        out = SketchController::snapToDirection(myStraightPrev, myStraightDir, out);
+        if (mySnapEnabled && mySnapStep > 0.0) {
+            const gp_Vec along(myStraightDir);
+            const double t = gp_Vec(myStraightPrev, out).Dot(along);
+            out = myStraightPrev.Translated(along * (std::round(t / mySnapStep) * mySnapStep));
+        }
+        return true;
+    }
 
     if (mySnapEnabled) {
         out = SketchController::snapToPlaneGrid(out, mySketchPlane, mySnapStep);
@@ -1018,11 +1494,13 @@ bool OcctViewWidget::pickWorldPoint(int px, int py, gp_Pnt& out) const
     if (!rayThroughPixel(px, py, ray)) return false;
     const gp_Pln ground(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
     if (!SketchController::intersectRayWithPlane(ray, ground, out)) return false;
-    // A perspective camera has a horizon: an intersection with the ground can
-    // lie BEHIND the eye when the cursor is above it. Such a hit is not a
-    // point the user can see - reject it.
-    const gp_Vec toHit(ray.Location(), out);
-    if (toHit.Dot(gp_Vec(ray.Direction())) <= 0.0) return false;
+    // Same rule, and the same ortho exemption, as pointOnSketchPlane() above -
+    // see there. A wheel notch over the sky in ortho would otherwise fall back
+    // to a plain zoom rather than zooming toward the ground under the cursor.
+    if (!myCamera.effectiveOrtho()) {
+        const gp_Vec toHit(ray.Location(), out);
+        if (toHit.Dot(gp_Vec(ray.Direction())) <= 0.0) return false;
+    }
     return true;
 }
 
@@ -1035,8 +1513,18 @@ bool OcctViewWidget::lastHoverPoint(gp_Pnt& out) const
 
 double OcctViewWidget::worldPerPixel() const
 {
-    // World units per pixel at target depth, for a perspective camera - the
-    // same maths panning already used inline.
+    // World units per pixel at target depth - the same maths panning already
+    // used inline.
+    //
+    // ONE formula for both projections, and that is a property of how
+    // applyCameraState() builds the orthographic frustum rather than a
+    // coincidence. For perspective this is the visible height at the target's
+    // depth divided by the viewport's height. For orthographic the visible
+    // height is the camera's parallel Scale, at every depth - and
+    // applyCameraState() sets that Scale to exactly this height, so the two
+    // agree by construction. If that ever stops being true, every screen-sized
+    // piece of furniture in the scene (dimension arrowheads and gaps, both
+    // drag arrows) is wrong in ortho, and this is the single place to branch.
     return 2.0 * myCamera.state().distance *
            std::tan(0.5 * kFovyDeg * 3.14159265358979323846 / 180.0) /
            std::max(1, height());
@@ -1059,6 +1547,37 @@ TopoDS_Edge OcctViewWidget::selectedEdge() const
         found = TopoDS::Edge(shape);
     }
     return found;
+}
+
+std::vector<TopoDS_Edge> OcctViewWidget::selectedEdges() const
+{
+    std::vector<TopoDS_Edge> edges;
+    if (myContext.IsNull()) return edges;
+
+    for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
+        if (!myContext->HasSelectedShape()) continue;
+        const TopoDS_Shape shape = myContext->SelectedShape();
+        if (shape.IsNull() || shape.ShapeType() != TopAbs_EDGE) continue;
+        edges.push_back(TopoDS::Edge(shape));
+    }
+    return edges;
+}
+
+TopoDS_Edge OcctViewWidget::lastSelectedEdge() const
+{
+    const std::vector<TopoDS_Edge> edges = selectedEdges();
+    if (edges.empty()) return TopoDS_Edge();
+
+    // Remembered, but never trusted: a Shift-click that toggled it back off,
+    // or a rebuild that replaced the topology, leaves a stale edge here that
+    // is no longer part of the selection. Falling back to the last entry
+    // keeps the arrow on SOME selected edge rather than on none.
+    if (!myLastPickedEdge.IsNull()) {
+        for (const TopoDS_Edge& edge : edges) {
+            if (edge.IsSame(myLastPickedEdge)) return edge;
+        }
+    }
+    return edges.back();
 }
 
 void OcctViewWidget::updateEdgeDimension()
@@ -1141,6 +1660,7 @@ void OcctViewWidget::clearSelection()
     if (myContext.IsNull()) return;
 
     myContext->ClearSelected(Standard_True);
+    myLastPickedEdge.Nullify();   // nothing is selected, so nothing was picked last
     updateEdgeDimension();   // nothing selected, so nothing left for it to fall back to
     emit selectionChanged();
 }
@@ -1180,7 +1700,36 @@ void OcctViewWidget::applyCameraState()
     cam->SetEye(eye);
     cam->SetCenter(at);
     cam->SetUp(up);
+
+    // The projection, from the ONE piece of state that decides it. There is no
+    // second camera and no second turntable: the eye, the target and the up
+    // vector above are the same in both modes, and only how the frustum is
+    // built changes.
+    //
+    // The orthographic half needs its half-height set explicitly, because
+    // Graphic3d_Camera keeps `Scale` and `Distance` linked only for a
+    // perspective camera - switching the type alone would leave the parallel
+    // scale at whatever it last was (1000 by default) and the scene would jump
+    // in size. Tying it to 2*distance*tan(FOVy/2) is what makes the two modes
+    // frame the target identically, which in turn is what lets worldPerPixel()
+    // stay one formula for both (see there).
+    //
+    // ORDER MATTERS: SetScale() on a camera still marked perspective moves the
+    // DISTANCE instead, so the type is set first.
+    if (myCamera.effectiveOrtho()) {
+        cam->SetProjectionType(Graphic3d_Camera::Projection_Orthographic);
+        cam->SetScale(worldPerPixel() * std::max(1, height()));
+    } else {
+        cam->SetProjectionType(Graphic3d_Camera::Projection_Perspective);
+    }
+
     myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane());
+    // The transform gizmo is sized in world units and judged in screen ones,
+    // so the zoom is half of its arithmetic - re-derived here, before the
+    // redraw below carries it, rather than from a slot on cameraChanged()
+    // that would need its own UpdateCurrentViewer(). Its own guards make this
+    // free on a camera move that does not change the scale.
+    updateManipulatorSize();
     // Slots FIRST, redraw second. A slot on cameraChanged() that changes the
     // scene - PullArrow rebuilds its 3D arrow, which is sized in screen
     // pixels and so has to be rebuilt whenever the camera moves - was
@@ -1200,8 +1749,23 @@ void OcctViewWidget::fitAll()
 
     // Frame everything we display ourselves (the grid and view cube are
     // presentation furniture, not content).
+    //
+    // OUTLINES COUNT. They are document items since Phase 7, and this walked
+    // mySolids alone - so a document holding only outlines fell straight to
+    // the +/-250 fallback below, and an outline drawn outside that box could
+    // not be brought back by the one control whose entire job is to find
+    // things. Both maps hold what this widget displays; a visibility toggle
+    // erases the presentation without removing the entry, so Fit All frames
+    // the whole document rather than the currently-visible part of it - which
+    // is the behaviour the bodies have always had, and the two should not
+    // differ on the same question.
     Bnd_Box box;
     for (const auto& entry : mySolids) {
+        Bnd_Box b;
+        BRepBndLib::Add(entry.second->Shape(), b);
+        box.Add(b);
+    }
+    for (const auto& entry : myOutlines) {
         Bnd_Box b;
         BRepBndLib::Add(entry.second->Shape(), b);
         box.Add(b);
@@ -1266,26 +1830,54 @@ void OcctViewWidget::animateTo(const CameraState& goal)
 }
 
 namespace {
-// Positions in OcctViewWidget::viewLabelNames(). Naming them keeps
-// viewLabelText() readable while it returns entries OF that list rather than
-// its own copies of the same seven literals.
+// Positions in viewDirectionNames(). Naming them keeps viewDirectionName()
+// readable while it returns entries OF that list rather than its own copies of
+// the same seven literals.
 enum ViewName { NamePersp = 0, NameTop, NameBottom, NameFront, NameBack, NameRight, NameLeft };
-}  // namespace
 
-const QStringList& OcctViewWidget::viewLabelNames()
+// File-local since the app bar's button stopped reserving its width against
+// these: the button shows the projection now, and the only remaining consumer
+// of the names is the function immediately below them.
+const QStringList& viewDirectionNames()
 {
-    // Built once. viewLabelText() runs on every camera frame, so this must not
-    // allocate a seven-string list per orbit step.
+    // Built once. viewDirectionName() can run on every camera frame, so this
+    // must not allocate a seven-string list per orbit step.
     static const QStringList names = {
         QStringLiteral("Persp"),  QStringLiteral("Top"),   QStringLiteral("Bottom"),
         QStringLiteral("Front"),  QStringLiteral("Back"),  QStringLiteral("Right"),
         QStringLiteral("Left")};
     return names;
 }
+}  // namespace
 
-QString OcctViewWidget::viewLabelText() const
+void OcctViewWidget::setBaseProjection(CameraController::Projection projection)
 {
-    const QStringList& names = viewLabelNames();
+    myCamera.setBaseProjection(projection);
+    // ...and the loan is handed back, so the toggle ALWAYS changes what is on
+    // screen. Without this, clicking it during a borrowed orthographic look -
+    // which is exactly the state a face lock or a gizmo arm leaves behind -
+    // flips the label Ortho->Persp while effectiveOrtho() stays true and the
+    // viewport does not move. Twice in a row, since the base was perspective
+    // to begin with. A control that visibly does nothing is broken to the
+    // person clicking it, whatever the state machine underneath believes; the
+    // loan is a convenience for gestures that did not ask about projection,
+    // and this is the one gesture that is entirely about it.
+    myCamera.setTemporaryOrtho(false);
+    // Straight onto the OCCT camera through the one write site, which also
+    // redraws and tells every camera-following overlay.
+    applyCameraState();
+}
+
+bool OcctViewWidget::viewIsOrthographic() const
+{
+    if (myView.IsNull()) return myCamera.effectiveOrtho();
+    return myView->Camera()->ProjectionType() ==
+           Graphic3d_Camera::Projection_Orthographic;
+}
+
+QString OcctViewWidget::viewDirectionName() const
+{
+    const QStringList& names = viewDirectionNames();
     const CameraState& state = myCamera.state();
     const double el = state.elevationDeg;
     // Azimuth normalized to (-180, 180] for comparison.
@@ -1422,7 +2014,17 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
     // The pull arrow owns LEFT drags that start on it, and nothing else -
     // RMB orbit and MMB pan pass straight through above, so grabbing the
     // arrow never costs the user the camera.
-    if (event->button() == Qt::LeftButton && !mySketchMode && arrowHit(myPullArrow, myLastPos)) {
+    // Ctrl in FACE mode is the lock gesture and is not a grab, scoped exactly as
+    // mouseDoubleClickEvent() scopes the same exemption. Without it the lock's
+    // first press armed a pull drag on the way past: the release ended a drag
+    // that had moved nothing, which fell through to an ordinary pick and
+    // deselected the very face the gesture was aimed at. The exemption names
+    // face mode rather than the modifier alone, so the bevel arrow one branch
+    // down - where Ctrl means nothing - keeps its guard whole.
+    const bool lockGesture = (event->modifiers() & Qt::ControlModifier) &&
+                             mySelectionMode == SelectionMode::Face;
+    if (event->button() == Qt::LeftButton && !mySketchMode && !lockGesture &&
+        arrowHit(myPullArrow, myLastPos)) {
         // The press CLAIMS the gesture whether or not the drag maths can
         // measure it yet. It used to claim it only when
         // axisParameterForRay() resolved - so with the arrow near edge-on to
@@ -1440,7 +2042,18 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
     // gesture at an angle the maths refuses. The two arrows are never up at
     // once (face mode against edge mode), so the order of these two blocks is
     // not load-bearing.
-    if (event->button() == Qt::LeftButton && !mySketchMode && arrowHit(myBevelArrow, myLastPos)) {
+    //
+    // Shift is excluded, and that exclusion is the arrow's half of multi-edge
+    // selection. arrowHit() is a 14 px SCREEN-SPACE test, so the arrow does
+    // not compete for the pick the way AIS_ManipulatorOwner does - it does
+    // something worse: it silently swallows the press before the picker ever
+    // sees it. The arrow stands on the last edge picked and a second edge is
+    // usually right beside it, so without this a Shift-click meant to
+    // accumulate would start a drag on the edge already chosen instead. Same
+    // hazard the transform gizmo's Deactivate() closes below, one layer up.
+    const bool additivePress = (event->modifiers() & Qt::ShiftModifier) != 0;
+    if (event->button() == Qt::LeftButton && !mySketchMode && !additivePress &&
+        arrowHit(myBevelArrow, myLastPos)) {
         beginAxisDrag(myBevelDrag, myBevelArrow.axis(), myLastPos);
         return;
     }
@@ -1449,8 +2062,7 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
     // only those. RMB orbit and MMB pan returned above; a Shift-click is the
     // "add this body to the selection" gesture and must reach the picker even
     // when it lands on an arm of the gizmo standing on the first body.
-    const bool additive = (event->modifiers() & Qt::ShiftModifier) != 0;
-    if (event->button() == Qt::LeftButton && !mySketchMode && !additive &&
+    if (event->button() == Qt::LeftButton && !mySketchMode && !additivePress &&
         !myManipulator.IsNull() && !myContext.IsNull() && !myView.IsNull()) {
         // Detection is what arms a mode (SetModeActivationOnDetection), so the
         // press asks for it at its own pixel rather than trusting whatever the
@@ -1513,8 +2125,12 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
     const QPoint pos = event->position().toPoint();
 
     if (mySketchMode) {
+        // Shift here means "continue the last segment straight", not the
+        // additive-selection Shift below: nothing is selectable while
+        // sketching, so the two can never be asked for at once.
+        const bool straight = (event->modifiers() & Qt::ShiftModifier) != 0;
         gp_Pnt hit;
-        if (pointOnSketchPlane(pos.x(), pos.y(), hit)) emit sketchPointPicked(hit);
+        if (pointOnSketchPlane(pos.x(), pos.y(), hit, straight)) emit sketchPointPicked(hit);
         return;   // no selection while sketching
     }
 
@@ -1547,9 +2163,21 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
     // and the gizmo would erase itself. It cannot be detected at all on the
     // additive path above, which is the point of that branch.
     const bool onGizmo = detectedIsManipulator();
+    // Read BEFORE SelectDetected, because a Replace clears the detection's
+    // relationship to the selection and an XOR may have just removed it.
+    TopoDS_Edge justPicked;
+    if (!onGizmo && myContext->HasDetectedShape() &&
+        myContext->DetectedShape().ShapeType() == TopAbs_EDGE) {
+        justPicked = TopoDS::Edge(myContext->DetectedShape());
+    }
     if (!onGizmo) {
         myContext->SelectDetected(additive ? AIS_SelectionScheme_XOR
                                            : AIS_SelectionScheme_Replace);
+        // "The edge you picked last" - remembered here because it cannot be
+        // read back out of the selection afterwards (see lastSelectedEdge()).
+        // A click on nothing clears it, so the arrow cannot linger on an edge
+        // the user has just dropped.
+        myLastPickedEdge = justPicked;
     }
 
     // Straight back into the picker, before anything can return. Unconditional
@@ -1615,8 +2243,12 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
     } else if (mySketchMode) {
         // Report where the next point would land, so the rubber band and the
         // coordinate readout track the cursor before anything is committed.
+        // The SAME straight-continuation rule the click uses, from the same
+        // function, so the marker cannot promise one point and the click
+        // place another.
+        const bool straight = (event->modifiers() & Qt::ShiftModifier) != 0;
         gp_Pnt onPlane;
-        if (pointOnSketchPlane(pos.x(), pos.y(), onPlane)) {
+        if (pointOnSketchPlane(pos.x(), pos.y(), onPlane, straight)) {
             myLastHoverPoint = onPlane;
             myHasLastHoverPoint = true;
             emit sketchCursorMoved(onPlane);
@@ -1663,9 +2295,31 @@ void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
     if (event->button() != Qt::LeftButton || mySketchMode || myContext.IsNull()) return;
 
     const QPoint pos = event->position().toPoint();
-    // A second click on either arrow is another drag, not a request to frame
-    // the body or lock the face underneath it.
-    if (arrowHit(myPullArrow, pos) || arrowHit(myBevelArrow, pos)) return;
+    const bool onArrow = arrowHit(myPullArrow, pos) || arrowHit(myBevelArrow, pos);
+
+    // A second click on either arrow belongs to the arrow, not to whatever the
+    // double-click would otherwise mean - the same rule every control over the
+    // viewport follows. It matters most for the two gestures that would move
+    // something the user is not looking at: framing the body, and selecting the
+    // whole body out from under a face or an edge they are mid-drag on.
+    //
+    // ONE gesture is exempt, and only one: Ctrl+double-click in FACE mode, the
+    // lock. An arrow's tail sits at the centre of the face it belongs to, which
+    // is exactly where a user aims when they want to draw on that face - so
+    // with no exemption the lock was unreachable at the most obvious pixel on
+    // its own target, and reaching it meant aiming at a corner. That gesture is
+    // also the one thing on this arrow that no sequence of drags can produce by
+    // accident, which is what the guard is protecting against.
+    //
+    // The exemption is deliberately NOT "Ctrl held": it was written that way
+    // first, and it let Ctrl+double-click in EDGE mode fall through to the
+    // whole-body route below, which switches the selection mode out from under
+    // a live bevel arrow - precisely the case the guard exists for, reachable
+    // by holding a key the edge-mode gesture does not even use. The exemption
+    // names the branch it exists for, so nothing else can inherit it.
+    const bool ctrlHeld = (event->modifiers() & Qt::ControlModifier) != 0;
+    const bool lockGesture = ctrlHeld && mySelectionMode == SelectionMode::Face;
+    if (onArrow && !lockGesture) return;
     const QPoint device = toDevicePixels(pos);
     myContext->MoveTo(device.x(), device.y(), myView, Standard_False);
     if (!myContext->HasDetected()) return;
@@ -1673,12 +2327,18 @@ void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
     // the body underneath it - the same rule the pull arrow keeps above.
     if (detectedIsManipulator()) return;
 
-    // In face mode a double-click means "sketch on this" - the second route
-    // to Lock to Face, alongside the action. Framing the body instead would
-    // be the one gesture that takes the camera away from the face the user
-    // just chose to work on. The refusal for a non-planar face lives in
-    // MainWindow, which owns the toast, not here.
-    if (mySelectionMode == SelectionMode::Face && myContext->HasDetectedShape() &&
+    // CTRL+double-click in face mode means "sketch on this" - the second route
+    // to Lock to Face, alongside the action and its L shortcut. It carried no
+    // modifier until this phase, and it had to give the plain gesture up: a
+    // user working on a face or an edge who wants the whole body back reaches
+    // for a double-click first, and locking the sketch plane instead is a mode
+    // change they did not ask for. Framing the body would be no better - it is
+    // the one gesture that takes the camera away from the face just chosen -
+    // which is why locking keeps the gesture and only gains the modifier.
+    //
+    // The refusal for a non-planar face, and the pending-outline guard, both
+    // live in MainWindow, which owns the toast, not here.
+    if (lockGesture && myContext->HasDetectedShape() &&
         myContext->DetectedShape().ShapeType() == TopAbs_FACE) {
         // Select it too, so the actions agree with what was just locked.
         myContext->SelectDetected(AIS_SelectionScheme_Replace);
@@ -1688,7 +2348,35 @@ void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
         return;
     }
 
+    // Past the one exempt branch, an arrow hit is an arrow hit again. A
+    // Ctrl+double-click that got this far is one whose detection was not a
+    // face after all - a body, an edge, the ground - and there is no reason
+    // the modifier should buy it the whole-body route the guard would refuse
+    // to an unmodified click on the same pixel.
+    if (onArrow) return;
+
     const Handle(AIS_InteractiveObject) hit = myContext->DetectedInteractive();
+
+    // A PLAIN double-click on a body while picking its parts means "give me
+    // the whole thing" - one gesture that both changes the selection mode and
+    // selects the body, so a user who drilled into faces or edges gets back
+    // out without going to the rail for it.
+    //
+    // Announced rather than performed: the selection MODE is a QAction's
+    // checked state and updateActions() is the single place that decides what
+    // is available, so a viewport that switched its own mode would leave the
+    // rail chip, the menu entry and the status label all describing the mode
+    // the user just left. MainWindow answers this by triggering the same
+    // action a click on the chip does.
+    if (mySelectionMode != SelectionMode::Solid) {
+        for (const auto& entry : mySolids) {
+            if (entry.second.get() != hit.get()) continue;
+            emit bodyDoubleClicked(entry.first);
+            return;
+        }
+        return;   // nothing of ours under the cursor
+    }
+
     for (const auto& entry : mySolids) {
         if (entry.second.get() != hit.get()) continue;
         Bnd_Box box;

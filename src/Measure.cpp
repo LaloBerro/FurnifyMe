@@ -1,8 +1,14 @@
 #include "Measure.h"
 
 #include <BRepBndLib.hxx>
+#include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
+#include <ElSLib.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopoDS.hxx>
+#include <TopoDS_Vertex.hxx>
 
+#include <algorithm>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
@@ -171,6 +177,43 @@ std::string formatDimensions(const TopoDS_Shape& shape)
 
     return bare(formatLength(e.x)) + " " + kTimes + " " + bare(formatLength(e.y)) +
            " " + kTimes + " " + formatLength(e.z);
+}
+
+std::string formatFaceExtents(const TopoDS_Shape& face, const gp_Pln& plane)
+{
+    if (face.IsNull()) return std::string();
+
+    // The face's own vertices, projected into the plane's (u, v) through the
+    // SAME ElSLib::Parameters call SketchController::snapToPlaneGrid and the
+    // cursor readout use - so the drawer, the grid and the status bar cannot
+    // disagree about which way is which. Vertices rather than a triangulated
+    // bounding box because an outline is a polygon: its corners are its
+    // extremes exactly, with no tessellation tolerance in the answer.
+    bool any = false;
+    double uMin = 0.0, uMax = 0.0, vMin = 0.0, vMax = 0.0;
+    for (TopExp_Explorer it(face, TopAbs_VERTEX); it.More(); it.Next()) {
+        const gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(it.Current()));
+        Standard_Real u = 0.0, v = 0.0;
+        ElSLib::Parameters(plane, p, u, v);
+        if (!any) {
+            uMin = uMax = u;
+            vMin = vMax = v;
+            any = true;
+        } else {
+            uMin = std::min(uMin, static_cast<double>(u));
+            uMax = std::max(uMax, static_cast<double>(u));
+            vMin = std::min(vMin, static_cast<double>(v));
+            vMax = std::max(vMax, static_cast<double>(v));
+        }
+    }
+    if (!any) return std::string();
+
+    auto bare = [](const std::string& withUnit) {
+        const std::size_t space = withUnit.rfind(' ');
+        return space == std::string::npos ? withUnit : withUnit.substr(0, space);
+    };
+    return bare(formatLength(uMax - uMin)) + " " + kTimes + " " +
+           formatLength(vMax - vMin);
 }
 
 }  // namespace Measure
