@@ -23,7 +23,10 @@ class OcctViewWidget;
 class PullArrow;
 class QAction;
 class QMenuBar;
+class QSplitter;
+class SaveVersionCard;
 class ToastHost;
+class VersionsPanel;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -335,6 +338,67 @@ public:
     InitScreen* initScreen() const { return myInitScreen; }
     FurnitureStore& furnitureStore() { return myStore; }
 
+    // --- versions and the side-by-side compare (Milestone 3) ---------------
+    //
+    // File -> Save version... 's commit path - the one place saveVersion()
+    // reaches the store: a duplicate name is FurnitureStore::saveVersion()'s
+    // one real refusal here (an unknown furniture id cannot happen - this
+    // guards on a real, open one first), reported with a Failure toast
+    // naming the clash; SaveVersionCard stays open on that refusal so the
+    // user can retype. Versions are file data, not document state - no
+    // checkpoint, no Undo on the Note toast that reports success.
+    bool saveVersion(const QString& name);
+
+    // VersionsPanel's Restore button. Closes any open compare FIRST (a
+    // restore replaces the very document a stale compare pane would still
+    // be showing half of), then replaces the WHOLE live document - bodies,
+    // outlines, names, visibility - through ONE checkpoint
+    // (DocumentModel::checkpoint() then restoreFrom(), never
+    // fromSerialized(), which clears undo history outright - see
+    // DocumentModel.h) so a single Ctrl+Z brings back everything this
+    // replaced. Note toast `Restored version "<name>"` with Undo. The
+    // version itself is unchanged - this only ever READS it.
+    bool restoreVersion(const QString& name);
+
+    // VersionsPanel's Delete, called once its own two-click confirmation has
+    // fired. Final and carries no Undo - a version is file data, and
+    // "Ctrl+Z brings back a deleted file" is not a promise this app makes
+    // anywhere else either. Closes an open compare of exactly this version
+    // first, so a stale read-only pane can never outlive the file it reads.
+    bool deleteVersionByName(const QString& name);
+
+    // Opens the side-by-side compare: swaps the central widget to a
+    // QSplitter holding the live view and a second, VIEWER-ONLY
+    // OcctViewWidget showing `name`'s own saved shapes, read-only. Camera
+    // orbit/pan/zoom on EITHER view is mirrored onto the other - see
+    // syncCamera() - until closeCompare() (the badge's own control, or a
+    // Restore) ends it. Compare is VIEW state, not document state: no
+    // checkpoint, no dirty star, and the live document is untouched by it.
+    // Opening a different version while one is already open replaces the
+    // pane rather than stacking a second one.
+    bool openCompare(const QString& name);
+    // Returns to the full-bleed single viewport. A no-op when compare is
+    // not open.
+    void closeCompare();
+    bool isCompareOpen() const { return myCompareView != nullptr; }
+    OcctViewWidget* compareView() const { return myCompareView; }
+    QString compareVersionName() const { return myCompareVersionName; }
+
+    // THE predicate behind File -> Save version...: a furniture is open, no
+    // sketch is in progress, and none of the three OTHER application-wide
+    // Enter/Escape claims is live (ExtrudePreview, the pull arrow, the bevel
+    // arrow) - see SaveVersionCard.h for why that is what makes the four
+    // claims mutually exclusive by construction. updateActions() gates the
+    // action on this and nothing else; SaveVersionCard reads it a second
+    // time on appStateChanged, to close itself if it goes false while open.
+    bool canOpenSaveVersion() const;
+
+    // Fixed copy the compare badge paints, exposed statically - like
+    // bevelRefusalText() and friends above - so the vocabulary sweep can
+    // check it without a live compare pane, and so it has exactly one
+    // implementation the badge's own construction reads too.
+    static QString compareBadgeCloseLabel();
+
 signals:
     // DocumentModel is Qt-free by design, so the window announces its changes.
     void documentChanged();
@@ -399,6 +463,12 @@ private slots:
     // has already put its presentation back by the time this runs (see
     // OcctViewWidget::endGizmoDrag), so there is nothing to undo here either.
     void onGizmoReleased(int solidId, const gp_Trsf& delta);
+
+    // File -> Save version...: opens SaveVersionCard. Split from the panel
+    // itself on the same terms onExtrude()/ExtrudePreview are - the action's
+    // enabled state is canOpenSaveVersion(), and this is only ever reachable
+    // once that already holds.
+    void onSaveVersion();
 
 private:
     void buildActions();
@@ -574,6 +644,19 @@ private:
     // user is not going to be drawing on.
     void flyOntoFace(const TopoDS_Face& face, const gp_Pln& plane);
 
+    // The no-recursion camera sync: copies `from`'s CameraState onto `to`
+    // ONLY when the two differ by more than a tight epsilon, then pushes it
+    // straight onto `to`'s OCCT camera through setCameraStateNow() - which
+    // itself unconditionally emits cameraChanged() again. That second
+    // emission is what closes the loop rather than opening an infinite one:
+    // by the time it reaches the OTHER direction's own equality check, the
+    // two states already agree (this call just made them), so that check
+    // returns without copying anything further. Wired both ways - myView's
+    // cameraChanged to sync into myCompareView, and (only once one exists)
+    // myCompareView's cameraChanged to sync into myView - so orbiting
+    // either view moves both.
+    void syncCamera(OcctViewWidget* from, OcctViewWidget* to);
+
     OcctViewWidget* myView = nullptr;
     DocumentModel myDocument;
     SketchController mySketch;
@@ -689,4 +772,24 @@ private:
     ExtrudePreview* myExtrudePreview = nullptr;
     PullArrow* myPullArrow = nullptr;
     BevelArrow* myBevelArrow = nullptr;
+
+    // --- versions and the side-by-side compare (Milestone 3) ---------------
+    QAction* myVersionsPanelAction = nullptr;   // View -> Versions - the drawer's law
+    QAction* mySaveVersionAction = nullptr;     // File -> Save version...
+    VersionsPanel* myVersionsPanel = nullptr;
+    SaveVersionCard* mySaveVersionCard = nullptr;
+
+    // Non-null only while compare is open. mySplitter owns myView and
+    // myCompareView as its two panes for that interval; myView is
+    // reparented BACK to being the plain central widget the moment compare
+    // closes (see closeCompare()) - it is never left inside a torn-down
+    // splitter, and setCentralWidget(myView) is what performs that move.
+    QSplitter* mySplitter = nullptr;
+    OcctViewWidget* myCompareView = nullptr;
+    QString myCompareVersionName;   // user text - see the badge's own rule
+    // The badge and its Close-compare control, parented to myCompareView -
+    // owned by Qt's parent-child cascade (destroyed with myCompareView),
+    // kept only so closeCompare() need not search for them and the badge's
+    // name can be updated without a second lookup if that is ever wanted.
+    class QWidget* myCompareBadge = nullptr;
 };

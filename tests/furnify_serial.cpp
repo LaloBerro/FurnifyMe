@@ -9,10 +9,12 @@
 #include "FurnifySerial.h"
 #include "ModelingOps.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <sstream>
 #include <string>
+#include <vector>
 
 #include <BinTools.hxx>
 #include <BinTools_ShapeSet.hxx>
@@ -341,6 +343,79 @@ int main()
         check(!doc.fromSerialized(ok, mismatched),
               "fromSerialized refuses when names/visible vectors don't match the shape count");
         check(doc.count() == 1, "still untouched");
+    }
+
+    // --- DocumentModel::restoreFrom - the "restore a version in place" path -
+    // Milestone 3's Restore: one checkpoint, one undo brings back the WHOLE
+    // pre-restore document, unlike fromSerialized() which clears history
+    // outright (that is the "open a different furniture" path).
+    {
+        DocumentModel doc;
+        const int before1 = doc.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 5.0, 5.0, 5.0));
+        const int before2 = doc.addSolid(ModelingOps::makeBox(gp_Pnt(10.0, 0.0, 0.0), 6.0, 6.0, 6.0));
+        doc.setItemName(before1, "Pre-restore A");
+        doc.setItemName(before2, "Pre-restore B");
+        check(doc.count() == 2, "the document starts with two bodies");
+
+        // A "version" - a separate DocumentModel, exactly the shape
+        // FurnitureStore::loadVersion hands back (its own ids counting again
+        // from 1).
+        DocumentModel version;
+        const int vId = version.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 1.0, 1.0, 1.0));
+        version.setItemName(vId, "Version Body");
+        check(!doc.canUndo(), "nothing checkpointed yet");
+
+        doc.checkpoint();   // the caller's own checkpoint - restoreFrom() takes none of its own
+        doc.restoreFrom(version);
+        check(doc.count() == 1 && doc.solids().front().name == "Version Body",
+              "restoreFrom replaces the whole document with the snapshot's content");
+        check(doc.canUndo(), "the checkpoint taken before restoreFrom is still on the stack - "
+                              "restoreFrom must NOT clear undo history the way fromSerialized does");
+
+        check(doc.undo(), "one undo...");
+        check(doc.count() == 2, "...brings back BOTH pre-restore bodies");
+        bool foundA = false, foundB = false;
+        for (const DocumentModel::Solid& s : doc.solids()) {
+            if (s.name == "Pre-restore A") foundA = true;
+            if (s.name == "Pre-restore B") foundB = true;
+        }
+        check(foundA && foundB, "...by name, not just by count");
+
+        // Never-shrink id counters: create a NEW body after landing back on
+        // the pre-restore state and confirm its id collides with nothing
+        // already on the undo/redo stack (the pre-restore ids, and the
+        // version's own low ids that briefly lived in `doc`).
+        std::vector<int> seenIds;
+        for (const DocumentModel::Solid& s : doc.solids()) seenIds.push_back(s.id);
+        doc.checkpoint();
+        const int freshId = doc.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 2.0, 2.0, 2.0));
+        check(std::find(seenIds.begin(), seenIds.end(), freshId) == seenIds.end(),
+              "a body created after undoing a restore gets an id that never collides "
+              "with an id already on the undo/redo stack");
+    }
+    {
+        // Never-shrink the OTHER direction: a document with very little prior
+        // history restoring from a version that has MORE items than this
+        // document ever held must not let a later addSolid() collide with an
+        // id the restore just introduced.
+        DocumentModel doc;   // myNextId == 1, nothing created yet
+
+        DocumentModel version;
+        for (int i = 0; i < 5; ++i) {
+            const int id = version.addSolid(ModelingOps::makeBox(
+                gp_Pnt(double(i) * 20.0, 0.0, 0.0), 3.0, 3.0, 3.0));
+            version.setItemName(id, "V" + std::to_string(i));
+        }
+        check(version.count() == 5, "the version holds five bodies, ids 1..5");
+
+        doc.checkpoint();
+        doc.restoreFrom(version);
+        check(doc.count() == 5, "all five arrived");
+
+        const int freshId = doc.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 1.0, 1.0, 1.0));
+        check(doc.contains(freshId) && doc.count() == 6,
+              "a body added after restoring from a larger version gets a genuinely fresh id "
+              "(the document now holds six distinct bodies, not a collision)");
     }
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures,

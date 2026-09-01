@@ -303,3 +303,21 @@ bool DocumentModel::fromSerialized(const FurnifySerial::SerializedDocument& seri
 
     return true;
 }
+
+void DocumentModel::restoreFrom(const DocumentModel& snapshot)
+{
+    mySolids = snapshot.mySolids;
+    myOutlines = snapshot.myOutlines;
+    myVisibility = snapshot.myVisibility;
+    // Never shrink: `this`'s own counters may already be ahead of
+    // `snapshot`'s (this document had more history before the restore than
+    // the version ever saw), and `snapshot`'s may be ahead of `this`'s (the
+    // version has more items than this document has ever held). Only the
+    // larger of the two is safe - see the header comment.
+    myNextId = std::max(myNextId, snapshot.myNextId);
+    myNextName = std::max(myNextName, snapshot.myNextName);
+    myNextOutlineName = std::max(myNextOutlineName, snapshot.myNextOutlineName);
+    // Undo/redo are deliberately untouched - the caller's own checkpoint()
+    // is what this mutation sits behind.
+    ++myRevision;
+}

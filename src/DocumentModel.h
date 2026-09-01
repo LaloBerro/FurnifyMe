@@ -190,6 +190,27 @@ public:
     // whose length does not match its shapes vector.
     bool fromSerialized(const FurnifySerial::SerializedDocument& serial, const DocumentMeta& meta);
 
+    // Replaces the whole document's content - bodies, outlines, names,
+    // visibility - with `snapshot`'s, WITHOUT touching undo/redo history.
+    // This is the "restore a version IN PLACE" path (Milestone 3's Restore),
+    // as opposed to fromSerialized()'s "open a different furniture" path,
+    // which clears history outright because nothing before it should be
+    // undoable there. The caller checkpoints FIRST, exactly as every other
+    // commit path in this app does - checkpoint() then mutate - so this is
+    // the mutation that sits behind that checkpoint: one undo brings back
+    // everything this replaced.
+    //
+    // `snapshot` is typically a freshly loaded scratch document (the same
+    // shape FurnitureStore::loadVersion hands back), whose own ids count
+    // again from 1 - copying them in verbatim could collide with ids this
+    // document's own undo stack still references (see the header note above
+    // on why undo never rolls myNextId back). The id/name counters therefore
+    // advance to cover whichever of the two is larger, never shrink; `this`'s
+    // solids/outlines/visibility are replaced outright since `snapshot` is
+    // trusted to already be internally consistent (it came from a successful
+    // fromSerialized() or an equally-valid live document).
+    void restoreFrom(const DocumentModel& snapshot);
+
 private:
     // Everything a checkpoint restores. One struct rather than two parallel
     // stacks: two stacks could be pushed to in different numbers by two

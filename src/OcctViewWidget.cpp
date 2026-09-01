@@ -167,9 +167,10 @@ Handle(SketchPointMarker) makeFilledSquareMarker(const gp_Pnt& point,
 }
 }  // namespace
 
-OcctViewWidget::OcctViewWidget(QWidget* parent)
+OcctViewWidget::OcctViewWidget(QWidget* parent, bool viewerOnly)
     : QWidget(parent)
     , mySketchPlane(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0))
+    , myViewerOnly(viewerOnly)
 {
     // Omit any of these and the viewport flickers or renders black.
     setAttribute(Qt::WA_PaintOnScreen);
@@ -221,7 +222,11 @@ void OcctViewWidget::initializeViewer()
     // the Theme spec exists to end.
     applyTheme();
 
-    myGridRenderer.attach(myContext);
+    // No grid in viewer-only mode - see the header. GridRenderer::update()
+    // (called from applyCameraState() and setWorkPlane() unconditionally,
+    // every camera move) is already a safe no-op with no context attached,
+    // so skipping the attach here is the one change this needs.
+    if (!myViewerOnly) myGridRenderer.attach(myContext);
     // The third layer of the three - see sketchZLayer() in the header. It has
     // to be created AFTER the grid's, because it is positioned relative to it:
     // bodies (default) -> grid -> sketch work. If the grid renderer could not
@@ -302,7 +307,10 @@ void OcctViewWidget::displaySolid(int id, const TopoDS_Shape& shape)
     myContext->Display(presentation, myWireframe ? AIS_WireFrame : AIS_Shaded,
                        kSelectionModeWholeShape, Standard_False);
     mySolids[id] = presentation;
-    applySelectionMode(presentation);
+    // No picking in viewer-only mode - see the header. Leaving the
+    // presentation's selection mode deactivated is the literal version of
+    // "never pickable", on the same terms an outline already is.
+    if (!myViewerOnly) applySelectionMode(presentation);
 
     myContext->UpdateCurrentViewer();
 }
@@ -359,7 +367,7 @@ void OcctViewWidget::setSolidVisible(int id, bool visible)
         // again. Pass the mode the viewport is actually in.
         myContext->Display(it->second, myWireframe ? AIS_WireFrame : AIS_Shaded,
                            kSelectionModeWholeShape, Standard_False);
-        applySelectionMode(it->second);
+        if (!myViewerOnly) applySelectionMode(it->second);
         myContext->UpdateCurrentViewer();
     } else {
         // Erase also drops it from the selection, which is what we want: acting
@@ -1765,6 +1773,12 @@ void OcctViewWidget::applyCameraState()
     myView->Redraw();
 }
 
+void OcctViewWidget::setCameraStateNow(const CameraState& state)
+{
+    myCamera.setState(state);
+    applyCameraState();
+}
+
 void OcctViewWidget::fitAll()
 {
     if (myView.IsNull()) return;
@@ -2115,6 +2129,15 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
     if (event->button() == Qt::RightButton)  myOrbiting = false;
     if (event->button() == Qt::MiddleButton) myPanningDrag = false;
 
+    // No picking in viewer-only mode - see the header. Orbit and pan are
+    // both handled above (unconditionally, since neither depends on the
+    // picker), so a left click in the compare pane simply does nothing
+    // rather than selecting whatever is under it. None of the drag flags
+    // below can be true here either: nothing ever calls showPullArrow(),
+    // showBevelArrow() or attachManipulator() on a viewer-only widget, so
+    // mousePressEvent() never arms one in the first place.
+    if (myViewerOnly) return;
+
     // The end of a pull. This widget picks NOTHING on this release: the press
     // that started the drag was aimed at the arrow, and re-picking here would
     // replace the face selection that raised the arrow in the first place -
@@ -2275,9 +2298,11 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
             myHasLastHoverPoint = true;
             emit sketchCursorMoved(onPlane);
         }
-    } else if (!myContext.IsNull()) {
+    } else if (!myViewerOnly && !myContext.IsNull()) {
         // Hover highlight. Suppressed while sketching so the in-progress wire
-        // does not fight the highlighter for attention.
+        // does not fight the highlighter for attention. Suppressed
+        // altogether in viewer-only mode - see the header: no picking means
+        // no hover highlight either.
         const QPoint device = toDevicePixels(pos);
         myContext->MoveTo(device.x(), device.y(), myView, Standard_True);
         // The manipulator arms a manipulation mode when one of its parts is
@@ -2314,7 +2339,8 @@ void OcctViewWidget::wheelEvent(QWheelEvent* event)
 
 void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
 {
-    if (event->button() != Qt::LeftButton || mySketchMode || myContext.IsNull()) return;
+    if (event->button() != Qt::LeftButton || mySketchMode || myContext.IsNull() || myViewerOnly)
+        return;
 
     const QPoint pos = event->position().toPoint();
     const bool onArrow = arrowHit(myPullArrow, pos) || arrowHit(myBevelArrow, pos);

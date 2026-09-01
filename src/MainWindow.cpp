@@ -14,12 +14,14 @@
 #include "InitScreen.h"
 #include "ItemsPanel.h"
 #include "PullArrow.h"
+#include "SaveVersionCard.h"
 #include "ShortcutSheet.h"
 #include "Theme.h"
 #include "Toast.h"
 #include "ToolChip.h"
 #include "ToolCluster.h"
 #include "ViewportOverlay.h"
+#include "VersionsPanel.h"
 #include "WalkthroughPanel.h"
 
 #include <BRepAdaptor_Curve.hxx>
@@ -40,10 +42,15 @@
 #include <QAction>
 #include <QActionGroup>
 #include <QFileDialog>
+#include <QFontMetrics>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QMenuBar>
 #include <QCloseEvent>
+#include <QPainter>
+#include <QPushButton>
 #include <QSettings>
+#include <QSplitter>
 #include <QStandardPaths>
 #include <QStatusBar>
 #include <QTimer>
@@ -101,6 +108,111 @@ QString resolveLibraryRoot(const QString& injected)
     }
     return injected;
 }
+
+// The no-recursion camera sync's own epsilon compare - see
+// MainWindow::syncCamera()'s declaration for the whole argument. Tight on
+// purpose: the two widgets are meant to be pushed to EXACTLY the same
+// CameraState by that function, so this only has to absorb floating-point
+// noise, not genuine disagreement, and a loose epsilon would let a real
+// follow (an orbit that moved the camera by less than the epsilon) go
+// silently unsynced. CameraController.h gains nothing new for this - every
+// field it needs is already public on CameraState.
+bool camerasApproximatelyEqual(const CameraState& a, const CameraState& b)
+{
+    constexpr double kPosEps = 1.0e-6;     // mm
+    constexpr double kAngleEps = 1.0e-6;   // degrees
+    constexpr double kDistEps = 1.0e-6;    // mm
+    return a.target.Distance(b.target) < kPosEps &&
+           std::abs(a.azimuthDeg - b.azimuthDeg) < kAngleEps &&
+           std::abs(a.elevationDeg - b.elevationDeg) < kAngleEps &&
+           std::abs(a.distance - b.distance) < kDistEps;
+}
+
+// The compare view's corner badge: a family card (Theme::paintSurface,
+// opaque, WA_NoMousePropagation) naming the version being compared, with a
+// Close-compare control on it - ItemsPanel's own composition, not the
+// sibling-widget trick ExtrudePreview/Toast need. Those two exist because
+// their cards must let a click through to the model everywhere EXCEPT one
+// small interactive area; this badge has no such requirement - it is a
+// small, bounded card in a corner, exactly like ItemsPanel's own drawer -
+// so its Close button can be an ordinary CHILD, hit-tested by Qt the normal
+// way, with nothing to route around.
+//
+// No Q_OBJECT: it declares no signals of its own, and connecting an
+// existing Qt signal (QPushButton::clicked, Theme::Notifier::changed) to a
+// lambda needs no moc on the RECEIVING object - only on a class that
+// declares its own signals or slots. MainWindow reads the button back
+// through closeButton() and wires its own connection to closeCompare(),
+// rather than this class knowing MainWindow exists.
+class CompareBadge : public QWidget {
+public:
+    explicit CompareBadge(QWidget* parent)
+        : QWidget(parent)
+    {
+        setAttribute(Qt::WA_NoSystemBackground);
+        setAttribute(Qt::WA_NoMousePropagation);
+
+        myName = new QLabel(this);
+        myClose = new QPushButton(MainWindow::compareBadgeCloseLabel(), this);
+        myClose->setFixedHeight(22);
+
+        auto* layout = new QHBoxLayout(this);
+        layout->setContentsMargins(kPad, kPad, kPad, kPad);
+        layout->setSpacing(10);
+        layout->addWidget(myName, 1);
+        layout->addWidget(myClose);
+
+        applyTheme();
+        connect(Theme::notifier(), &Theme::Notifier::changed, this,
+                [this] { applyTheme(); });
+    }
+
+    // The version's name is USER TEXT - painted here raw and unmangled
+    // (never truncated to a fixed banned-word-safe alphabet - CLAUDE.md's
+    // point is that the user's own words are not this app's copy to
+    // police), and deliberately not exposed through any paintedTexts()-style
+    // accessor the vocabulary sweep would walk. See VersionsPanel.h's class
+    // comment for the same rule applied to a row.
+    void setVersionName(const QString& name)
+    {
+        const QFontMetrics fm(Theme::bodyFont());
+        myName->setText(fm.elidedText(name, Qt::ElideRight, kMaxNameWidth));
+        myName->setToolTip(name);
+        adjustSize();
+    }
+
+    QPushButton* closeButton() const { return myClose; }
+
+protected:
+    void paintEvent(QPaintEvent* /*event*/) override
+    {
+        QPainter painter(this);
+        Theme::paintSurface(painter, rect(), 8);
+    }
+
+private:
+    static constexpr int kPad = 10;
+    static constexpr int kMaxNameWidth = 160;
+
+    void applyTheme()
+    {
+        myName->setStyleSheet(QStringLiteral("background: transparent; color: %1; font-size: %2pt;")
+                                  .arg(Theme::text().name())
+                                  .arg(Theme::bodyFont().pointSizeF()));
+        myClose->setStyleSheet(
+            QStringLiteral("QPushButton { background-color: %1; color: %2; border: none; "
+                          "border-radius: 4px; font-size: %3pt; padding: 2px 8px; } "
+                          "QPushButton:hover { background-color: %4; }")
+                .arg(Theme::chip().name(), Theme::text().name())
+                .arg(Theme::labelFont().pointSizeF())
+                .arg(Theme::chipHover().name()));
+        update();
+    }
+
+    QLabel* myName = nullptr;
+    QPushButton* myClose = nullptr;
+};
+
 }  // namespace
 
 MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& libraryRoot)
@@ -218,6 +330,10 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // touches no document but still has to reread every dimension the panel
     // shows (see setDisplayUnit()).
     connect(this, &MainWindow::appStateChanged, myItemsPanel, &ItemsPanel::refresh);
+    // The versions drawer, on the same terms - built in buildOverlay(),
+    // which has already run by this point in the constructor.
+    if (myVersionsPanel)
+        connect(this, &MainWindow::appStateChanged, myVersionsPanel, &VersionsPanel::refresh);
 
     // Connected AFTER the refresh above, so it runs after it: a row added or
     // removed changes the drawer's height, and the drawer's rectangle is one
@@ -243,6 +359,8 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         // show will happily undo one.
         if (myAppearancePanel)
             myAppearancePanel->setVisible(myAppearanceAction->isChecked());
+        if (myVersionsPanel)
+            myVersionsPanel->setVisible(myVersionsPanelAction->isChecked());
         if (myOverlay) myOverlay->relayout();
     });
 
@@ -303,6 +421,13 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // geometry, so it cannot recurse back into updateActions().
     connect(myItemsPanelAction, &QAction::toggled, this, [this](bool shown) {
         myItemsPanel->setVisible(shown);
+        if (myOverlay) myOverlay->relayout();
+    });
+
+    // The versions drawer, on the same terms - see the items drawer's
+    // toggle above.
+    connect(myVersionsPanelAction, &QAction::toggled, this, [this](bool shown) {
+        if (myVersionsPanel) myVersionsPanel->setVisible(shown);
         if (myOverlay) myOverlay->relayout();
     });
 
@@ -417,6 +542,16 @@ void MainWindow::buildActions()
     connect(myCloseFurnitureAction, &QAction::triggered, this,
             &MainWindow::closeCurrentFurniture);
 
+    // File -> Save version... Enabled state is canOpenSaveVersion() - see
+    // its own declaration for the disjointness this buys against
+    // ExtrudePreview and the two drag gizmos' own application-wide key
+    // claims.
+    mySaveVersionAction = new QAction(tr("Save &version..."), this);
+    mySaveVersionAction->setToolTip(tr("Keep a named snapshot of this furniture\n"
+                                       "Come back to it later with Restore, or open it "
+                                       "beside the live one with Compare."));
+    connect(mySaveVersionAction, &QAction::triggered, this, &MainWindow::onSaveVersion);
+
     mySolidSelectAction = new QAction(tr("Select &Bodies"), this);
     mySolidSelectAction->setCheckable(true);
     mySolidSelectAction->setChecked(true);
@@ -453,6 +588,19 @@ void MainWindow::buildActions()
     myItemsPanelAction->setChecked(true);
     myItemsPanelAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Alt+S")));
     myItemsPanelAction->setToolTip(tr("Show or hide the list of bodies (Ctrl+Alt+S)"));
+
+    // View -> Versions - the drawer's visibility is DERIVED from this
+    // action's checked state, both directions, exactly as the items
+    // drawer's is from myItemsPanelAction. Starts UNCHECKED, unlike Items:
+    // most furniture never has a saved version at all, and a second drawer
+    // open by default beside one that is almost always empty is clutter the
+    // Items drawer does not have to earn.
+    myVersionsPanelAction = new QAction(tr("Versions"), this);
+    myVersionsPanelAction->setCheckable(true);
+    myVersionsPanelAction->setChecked(false);
+    myVersionsPanelAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Alt+V")));
+    myVersionsPanelAction->setToolTip(tr("Show or hide this furniture's saved versions "
+                                         "(Ctrl+Alt+V)"));
 
     // Menu only, and deliberately: the rail stays at thirteen tools. Choosing
     // colours is not a modelling tool and does not belong in the spine the
@@ -588,6 +736,7 @@ QMenuBar* MainWindow::buildMenus()
     QMenu* fileMenu = bar->addMenu(tr("&File"));
     fileMenu->addAction(myFileSaveAction);
     fileMenu->addAction(myAutosaveAction);
+    fileMenu->addAction(mySaveVersionAction);
     fileMenu->addAction(myCloseFurnitureAction);
     fileMenu->addSeparator();
     fileMenu->addAction(myExportStepAction);
@@ -654,6 +803,7 @@ QMenuBar* MainWindow::buildMenus()
     viewMenu->addAction(myFaceSelectAction);
     viewMenu->addAction(myEdgeSelectAction);
     viewMenu->addAction(myItemsPanelAction);
+    viewMenu->addAction(myVersionsPanelAction);
     viewMenu->addAction(myNotificationsAction);
     viewMenu->addSeparator();
     QMenu* unitsMenu = viewMenu->addMenu(tr("Units"));
@@ -829,6 +979,17 @@ void MainWindow::buildOverlay()
     // guide step around it without any of them naming this widget.
     myOverlay->addWidget(myItemsPanel, ViewportOverlay::Anchor::TopLeft);
 
+    // The versions drawer, same anchor - TopLeft entries stack downward in
+    // the order they are added (see ViewportOverlay::relayout()), so this
+    // lands beside the rail and below the items drawer for free. Starts
+    // hidden: myVersionsPanelAction starts unchecked (see buildActions()),
+    // and addWidget() shows whatever it anchors UNLESS the widget has
+    // already made its own explicit hide decision - hide() here, before
+    // adding it, is what makes this one of those.
+    myVersionsPanel = new VersionsPanel(this, myView, myView);
+    myVersionsPanel->hide();
+    myOverlay->addWidget(myVersionsPanel, ViewportOverlay::Anchor::TopLeft);
+
     // Wireframe and Fit All are buttons in the app bar, and Save Screenshot -
     // the least used of the three, and absent from the design's bar and rail
     // alike - is reachable from the File menu.
@@ -963,6 +1124,22 @@ void MainWindow::buildOverlay()
     // appStateChanged. Nothing here shows or hides it.
     myBevelArrow = new BevelArrow(this, myView);
 
+    // File -> Save version...'s panel - ExtrudePreview's exact key-claim
+    // contract, on the same terms as the three gizmos above: it parents
+    // itself to the viewport and positions itself (top-centre, the same
+    // spot ExtrudePreview stands - the two predicates are disjoint by
+    // construction, so they can never collide), so it needs no overlay
+    // anchor either.
+    mySaveVersionCard = new SaveVersionCard(this, myView);
+
+    // The live view's half of the compare camera sync - see syncCamera()'s
+    // declaration. A no-op for as long as myCompareView is null, which is
+    // most of this window's life; wired once, here, rather than re-wired
+    // every time compare opens.
+    connect(myView, &OcctViewWidget::cameraChanged, this, [this] {
+        if (myCompareView) syncCamera(myView, myCompareView);
+    });
+
     // Always built, even for a user who has already learned this - it
     // decides its own visibility in its constructor (see WalkthroughPanel's
     // refresh()) and hides itself immediately in that case. Gating
@@ -1000,6 +1177,7 @@ void MainWindow::buildOverlay()
     connect(myOverlay, &ViewportOverlay::laidOut, myExtrudePreview, &ExtrudePreview::replace);
     connect(myOverlay, &ViewportOverlay::laidOut, myPullArrow, &PullArrow::replace);
     connect(myOverlay, &ViewportOverlay::laidOut, myBevelArrow, &BevelArrow::replace);
+    connect(myOverlay, &ViewportOverlay::laidOut, mySaveVersionCard, &SaveVersionCard::replace);
 }
 
 void MainWindow::updateActions()
@@ -1159,6 +1337,11 @@ void MainWindow::updateActions()
     if (myFileSaveAction) myFileSaveAction->setEnabled(!atInit);
     if (myAutosaveAction) myAutosaveAction->setEnabled(!atInit);
     if (myCloseFurnitureAction) myCloseFurnitureAction->setEnabled(!atInit);
+    // File -> Save version...: see canOpenSaveVersion()'s own declaration for
+    // the full predicate - a furniture open, no sketch, and none of the
+    // three OTHER application-wide key claims live.
+    if (mySaveVersionAction) mySaveVersionAction->setEnabled(canOpenSaveVersion());
+    if (myVersionsPanelAction) myVersionsPanelAction->setEnabled(!atInit);
 
     updateStateLabel();
     updateWindowTitle();
@@ -1397,6 +1580,11 @@ void MainWindow::buildInitScreen()
 
 void MainWindow::showInitScreen()
 {
+    // A compare pane reads a version of the furniture that is about to stop
+    // being open at all - closing it here, before anything else, is what
+    // keeps the splitter from outliving the furniture it was comparing.
+    if (myCompareView) closeCompare();
+
     // Flush whatever furniture is currently open before leaving it - the
     // same rule closeCurrentFurniture() follows, reached here too (a
     // furniture can be left behind by more than one route, and this is the
@@ -1437,6 +1625,10 @@ void MainWindow::showInitScreen()
 
 bool MainWindow::openFurniture(const QString& id)
 {
+    // Same reasoning as showInitScreen(): a compare pane belongs to
+    // whichever furniture is currently open, and that is about to change.
+    if (myCompareView) closeCompare();
+
     QString error;
     DocumentModel loaded;
     if (!myStore.loadFurniture(id, loaded, &error)) {
@@ -1598,6 +1790,236 @@ void MainWindow::closeCurrentFurniture()
     }
 
     showInitScreen();
+}
+
+bool MainWindow::canOpenSaveVersion() const
+{
+    // Every OTHER application-wide Enter/Escape claim this app can have
+    // live at once, named explicitly rather than folded into one flag -
+    // see the declaration for why this is what keeps the four claims
+    // mutually exclusive by construction.
+    return !myShowingInitScreen && !mySketching && !hasPendingFace() &&
+           !canPullSelectedFace() && !canBevelSelectedEdge() && !canTransformSelectedBody();
+}
+
+void MainWindow::onSaveVersion()
+{
+    if (mySaveVersionCard) mySaveVersionCard->begin();
+}
+
+bool MainWindow::saveVersion(const QString& name)
+{
+    if (myShowingInitScreen || myFurnitureId.isEmpty()) return false;
+
+    // The only refusal reachable here: a real, open furniture cannot be an
+    // unknown id, so a false from the store means the name is a duplicate -
+    // see FurnitureStore::saveVersion()'s own contract.
+    if (!myStore.saveVersion(myFurnitureId, name, myDocument)) {
+        myToasts->show(tr("Couldn't save version \"%1\" — a version by that name "
+                          "already exists").arg(name),
+                      Toast::Kind::Failure, false);
+        return false;
+    }
+
+    updateActions();   // refreshes the drawer through VersionsPanel::refresh
+    const QString message = tr("Version \"%1\" saved").arg(name);
+    statusBar()->showMessage(message);
+    // No Undo - versions are file data, not a document edit; there is
+    // nothing on the undo stack for a pill to take back.
+    myToasts->show(message, Toast::Kind::Note, false);
+    return true;
+}
+
+bool MainWindow::restoreVersion(const QString& name)
+{
+    if (myShowingInitScreen || myFurnitureId.isEmpty()) return false;
+
+    // Closed FIRST: a restore is about to replace the very document a
+    // compare pane may still be showing half of, and a stale read-only pane
+    // sitting beside a document that just moved on is confusing at best.
+    if (myCompareView) closeCompare();
+
+    DocumentModel loaded;
+    if (!myStore.loadVersion(myFurnitureId, name, loaded)) {
+        myToasts->show(tr("Couldn't restore \"%1\" — its file is missing or damaged")
+                          .arg(name),
+                      Toast::Kind::Failure, false);
+        return false;
+    }
+
+    // ONE checkpoint around the whole replacement - DocumentModel::checkpoint()
+    // then restoreFrom(), never fromSerialized() (which clears undo history
+    // outright; see DocumentModel.h) - so a single Ctrl+Z brings back
+    // everything this replaced, not just part of it.
+    myDocument.checkpoint();
+    myDocument.restoreFrom(loaded);
+    myView->clearSelection();
+    mySelectedOutlineId = 0;
+    resyncView();
+
+    recordProgress("version.restored");
+    updateActions();
+    emit documentChanged();
+    const QString message = tr("Restored version \"%1\"").arg(name);
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    return true;
+}
+
+bool MainWindow::deleteVersionByName(const QString& name)
+{
+    if (myShowingInitScreen || myFurnitureId.isEmpty()) return false;
+
+    if (!myStore.deleteVersion(myFurnitureId, name)) {
+        myToasts->show(tr("Couldn't delete \"%1\" — it may already be gone").arg(name),
+                      Toast::Kind::Failure, false);
+        return false;
+    }
+
+    // Comparing the version just removed would leave a stale pane reading a
+    // file that no longer exists - close it first, same as a restore does.
+    if (myCompareView && myCompareVersionName == name) closeCompare();
+
+    updateActions();   // refreshes the drawer
+    const QString message = tr("Deleted version \"%1\"").arg(name);
+    statusBar()->showMessage(message);
+    // No Undo - final. Versions are file data, and "Ctrl+Z brings back a
+    // deleted file" is not a promise this app makes anywhere else either;
+    // the two-click confirmation on the row itself is what stands in for it.
+    myToasts->show(message, Toast::Kind::Note, false);
+    return true;
+}
+
+QString MainWindow::compareBadgeCloseLabel()
+{
+    return tr("Close compare");
+}
+
+bool MainWindow::openCompare(const QString& name)
+{
+    if (myShowingInitScreen || myFurnitureId.isEmpty()) return false;
+
+    DocumentModel loaded;
+    if (!myStore.loadVersion(myFurnitureId, name, loaded)) {
+        myToasts->show(tr("Couldn't compare \"%1\" — its file is missing or damaged")
+                          .arg(name),
+                      Toast::Kind::Failure, false);
+        return false;
+    }
+
+    // Only one compare pane at a time - opening a different version replaces
+    // it rather than stacking a second one.
+    if (myCompareView) closeCompare();
+
+    // The live view's PARENT never changes here - only the compare pane is
+    // ever newly parented, so there is no risk to the live view's own OCCT
+    // bridge from this call. mySplitter takes myView as its first pane
+    // (reparenting it OUT of being the window's plain central widget, in)
+    // and myCompareView, freshly constructed straight into the splitter, as
+    // its second - see closeCompare() for the reverse move.
+    mySplitter = new QSplitter(Qt::Horizontal);
+    mySplitter->addWidget(myView);
+    myCompareView = new OcctViewWidget(mySplitter, /*viewerOnly=*/true);
+    mySplitter->addWidget(myCompareView);
+    setCentralWidget(mySplitter);
+
+    for (const DocumentModel::Solid& solid : loaded.solids()) {
+        myCompareView->displaySolid(solid.id, solid.shape);
+        myCompareView->setSolidVisible(solid.id, loaded.isVisible(solid.id));
+    }
+    for (const DocumentModel::Outline& outline : loaded.outlines()) {
+        myCompareView->displayOutline(outline.id, outline.face);
+        myCompareView->setOutlineVisible(outline.id, loaded.isVisible(outline.id));
+    }
+
+    // Seeded from the live view's own current pose rather than fitAll()'d
+    // fresh, so the two start in lockstep - the first camera-sync round
+    // trip that orbiting either one triggers is already at equilibrium.
+    myCompareView->setCameraStateNow(myView->camera().state());
+    // The compare pane's own half of the sync - see syncCamera(). Torn down
+    // automatically with myCompareView on closeCompare().
+    connect(myCompareView, &OcctViewWidget::cameraChanged, this, [this] {
+        if (myCompareView) syncCamera(myCompareView, myView);
+    });
+
+    myCompareVersionName = name;
+    auto* badge = new CompareBadge(myCompareView);
+    badge->setVersionName(name);
+    badge->move(16, 16);
+    badge->show();
+    badge->raise();
+    // Deferred by one event-loop turn, deliberately - see closeCompare()'s
+    // own comment on why it deletes synchronously. This button is a
+    // descendant of everything that delete destroys (button -> badge ->
+    // myCompareView -> mySplitter), so calling closeCompare() straight from
+    // this click would destroy the very widget whose signal is still on the
+    // call stack. QTimer::singleShot(0, ...) runs it on the next turn
+    // instead, by which point this click has finished being handled and
+    // nothing is executing inside the object about to be deleted.
+    connect(badge->closeButton(), &QPushButton::clicked, this,
+            [this] { QTimer::singleShot(0, this, &MainWindow::closeCompare); });
+    myCompareBadge = badge;
+
+    updateActions();
+    statusBar()->showMessage(tr("Comparing %1").arg(name));
+    return true;
+}
+
+void MainWindow::closeCompare()
+{
+    if (!myCompareView) return;
+
+    // Pulls the live view back OUT of the splitter and back to being the
+    // window's plain central widget - the same reparenting openCompare()
+    // did in reverse, and the one QMainWindow::setCentralWidget() already
+    // knows how to perform on a widget it does not currently own.
+    setCentralWidget(myView);
+
+    // A SYNCHRONOUS delete, not deleteLater(). QMainWindow keeps the
+    // REPLACED central widget referenced in its own internal layout state
+    // (QMainWindowLayout's own bookkeeping for the widget it just stopped
+    // showing) even once it is no longer parented as the current central
+    // widget - and a QObject::deleteLater() event posted for an object that
+    // internal state still holds onto is never actually delivered by
+    // QCoreApplication::sendPostedEvents(), however many times or how long a
+    // caller pumps the event loop afterward. Measured, not theorised: a
+    // QPointer watching mySplitter stayed non-null through a full 500ms of
+    // repeated processEvents() calls. An immediate delete has no such
+    // dependency - the object is simply gone, right here.
+    //
+    // The one call site this makes genuinely risky is the compare badge's
+    // own Close button, whose click would otherwise be destroying an
+    // ancestor of itself (this splitter owns myCompareView owns the badge
+    // owns that very button) while still on that button's own call stack -
+    // see the badge's own connect() in openCompare() for how that specific
+    // route defers through QTimer::singleShot(0, ...) instead of calling
+    // this directly, so by the time this function's delete actually runs,
+    // nothing is still executing inside the object being destroyed. Every
+    // OTHER caller here (VersionsPanel's Compare/Restore buttons by way of
+    // restoreVersion()/openCompare(), and a direct call from a test) is not
+    // itself a descendant of what this deletes, so no such deferral is
+    // needed for them.
+    myCompareBadge = nullptr;   // a child of myCompareView - goes with it below
+    delete myCompareView;
+    myCompareView = nullptr;
+    myCompareVersionName.clear();
+    delete mySplitter;
+    mySplitter = nullptr;
+
+    updateActions();
+}
+
+void MainWindow::syncCamera(OcctViewWidget* from, OcctViewWidget* to)
+{
+    if (!from || !to) return;
+    // The no-recursion guard: see the declaration for the whole argument.
+    // Skipping the copy when the two already agree is what stops this from
+    // being an infinite ping-pong rather than merely a fast-converging one -
+    // setCameraStateNow() unconditionally emits cameraChanged() again, and
+    // THIS check is what the other direction's own call finds already
+    // satisfied.
+    if (camerasApproximatelyEqual(from->camera().state(), to->camera().state())) return;
+    to->setCameraStateNow(from->camera().state());
 }
 
 void MainWindow::updateWindowTitle()

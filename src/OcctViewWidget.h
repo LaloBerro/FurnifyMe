@@ -39,8 +39,31 @@ class OcctViewWidget : public QWidget {
 public:
     enum class SelectionMode { Solid, Face, Edge };
 
-    explicit OcctViewWidget(QWidget* parent = nullptr);
+    // `viewerOnly` is Milestone 3's compare pane: a second, read-only view
+    // of a loaded version alongside the live one. It still gets a real
+    // V3d_View/AIS_InteractiveContext - it displays real AIS_Shape
+    // presentations - and RMB orbit / MMB pan / wheel zoom all still work
+    // (it is a VIEWER, not a picture), but it never activates a selection
+    // mode on anything it displays, never runs the hover-highlight MoveTo,
+    // and never builds a work-plane grid - see initializeViewer(),
+    // displaySolid(), setSolidVisible(), mouseMoveEvent() and
+    // mouseReleaseEvent() for the four places that read this flag. A body
+    // clicked in this view is therefore never added to
+    // selectedSolidIds() - there is no picking to select it with.
+    explicit OcctViewWidget(QWidget* parent = nullptr, bool viewerOnly = false);
     ~OcctViewWidget() override;
+
+    bool isViewerOnly() const { return myViewerOnly; }
+
+    // Sets the camera state immediately - no animation, no tween - and
+    // pushes it straight onto the OCCT camera through the one function that
+    // does that (applyCameraState(), which is what actually emits
+    // cameraChanged()). animateTo() is the ordinary route for anything the
+    // USER asked for (Fit All, a view snap); this is for the compare pane's
+    // bidirectional camera sync, where a 250ms tween on every follow-frame
+    // of an orbit would make the second view visibly lag the first one it
+    // is supposed to be locked to.
+    void setCameraStateNow(const CameraState& state);
 
     // Qt must not paint here or it fights OpenGL for the surface.
     QPaintEngine* paintEngine() const override { return nullptr; }
@@ -770,4 +793,7 @@ private:
 
     class QVariantAnimation* myCameraAnimation = nullptr;
     bool myAnimationsEnabled = true;
+
+    // See the constructor's own comment - the compare pane's flag.
+    bool myViewerOnly = false;
 };

@@ -48,6 +48,7 @@
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
 #include "PullArrow.h"
+#include "SaveVersionCard.h"
 #include "SketchController.h"
 #include "AppBar.h"
 #include "AxisGizmo.h"
@@ -58,6 +59,7 @@
 #include "ToolChip.h"
 #include "ToolCluster.h"
 #include "UserProgress.h"
+#include "VersionsPanel.h"
 #include "ViewportOverlay.h"
 #include "WalkthroughPanel.h"
 
@@ -183,7 +185,7 @@ void skipByEnvironment(int checks, const QString& why)
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 1462;
+constexpr int kCheckFloor = 1535;
 
 void check(bool condition, const QString& what)
 {
@@ -13997,6 +13999,424 @@ int main(int argc, char* argv[])
             const QVector<FurnitureStore::FurnitureInfo> listed = store.listFurniture();
             check(listed.front().id == chairId,
                   "and it now sorts first again, ahead of the table");
+        }
+    }
+
+    // --- Milestone 3, item 4: named versions and the side-by-side compare ---
+    // Everything here runs on an ISOLATED probe, not the shared `window` -
+    // Task 2's own precedent (the save/autosave/close probes) for the same
+    // reason: this exercises new toasts, a new panel and a new central-widget
+    // arrangement that the shared window's later ~40 checks (walkthrough,
+    // hints, the "no splitter" regression guard a few thousand lines above)
+    // must never see disturbed.
+    {
+        double versionVolumeA = 0.0;
+        double versionVolumeB = 0.0;
+        RequiredTempDir versionsLib;
+        MainWindow probe(nullptr, /*persistProgress=*/false, versionsLib.path());
+        probe.setAttribute(Qt::WA_ShowWithoutActivating);
+        probe.resize(1000, 700);
+        probe.show();
+        settle(200);
+        probe.view()->setAnimationsEnabled(false);
+
+        enterFreshFurniture(probe);
+
+        // --- Save version: the panel, its two keys, the duplicate refusal --
+        QAction* saveVersionAction = action(probe, QStringLiteral("Save version..."));
+        check(saveVersionAction != nullptr, "the Save version... action exists");
+
+        // Body A: a real 10mm cube through the real sketch/extrude gesture -
+        // the same volume oracle every other probe in this file uses.
+        trigger(probe, QStringLiteral("Start Sketch"));
+        sketchQuad(probe, 0.35, 0.35, 0.55, 0.55);
+        trigger(probe, QStringLiteral("Finish Sketch"));
+        check(probe.extrudePendingFace(10.0), "body A committed");
+        check(probe.document().count() == 1, "one body so far");
+        const int bodyAId = probe.document().solids().front().id;
+        {
+            GProp_GProps props;
+            BRepGProp::VolumeProperties(probe.document().shapeOf(bodyAId), props);
+            versionVolumeA = props.Mass();
+        }
+
+        check(saveVersionAction != nullptr && saveVersionAction->isEnabled(),
+              "Save version... is enabled: a furniture is open, no sketch, no other "
+              "application-wide key claim is live");
+
+        trigger(probe, QStringLiteral("Save version..."));
+        SaveVersionCard* saveCard = probe.findChild<SaveVersionCard*>();
+        check(saveCard != nullptr && saveCard->isVisible(),
+              "Save version... opens a panel, not a dialog");
+        check(probe.findChildren<QDialog*>().isEmpty(), "and it is genuinely not a QDialog");
+        check(saveCard != nullptr && saveCard->field() != nullptr,
+              "the panel carries its own name field");
+
+        // Enter on an empty field refuses silently - the card stays open
+        // rather than saving something unnamed.
+        if (saveCard && saveCard->field()) {
+            QKeyEvent emptyCommit(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+            QCoreApplication::sendEvent(saveCard->field(), &emptyCommit);
+            settle(120);
+        }
+        check(saveCard != nullptr && saveCard->isVisible(),
+              "an empty name is refused rather than saving an unnamed version");
+
+        ToastHost* toasts = probe.findChild<ToastHost*>();
+
+        if (saveCard && saveCard->field()) {
+            saveCard->field()->setText(QStringLiteral("Original"));
+            QKeyEvent commit(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+            QCoreApplication::sendEvent(saveCard->field(), &commit);
+            settle(150);
+        }
+        check(saveCard != nullptr && !saveCard->isVisible(),
+              "a real name commits and closes the card");
+        check(probe.furnitureStore().versions(probe.currentFurnitureId()).size() == 1,
+              "one version is now saved");
+        check(toasts != nullptr &&
+                  toasts->currentText() == QStringLiteral("Version \"Original\" saved"),
+              QStringLiteral("the Note toast names the version (\"%1\")")
+                  .arg(toasts ? toasts->currentText() : QString()));
+        check(toasts != nullptr && toasts->toast() != nullptr && !toasts->toast()->hasUndo(),
+              "and offers no Undo - a version is file data, not a document edit");
+
+        // Duplicate name: a Failure toast naming the clash, card stays open.
+        trigger(probe, QStringLiteral("Save version..."));
+        saveCard = probe.findChild<SaveVersionCard*>();
+        if (saveCard && saveCard->field()) {
+            saveCard->field()->setText(QStringLiteral("Original"));
+            QKeyEvent commit(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+            QCoreApplication::sendEvent(saveCard->field(), &commit);
+            settle(150);
+        }
+        check(saveCard != nullptr && saveCard->isVisible(),
+              "a duplicate name refuses - the card stays open so the user can retype");
+        check(toasts != nullptr && toasts->currentText().contains(QStringLiteral("already exists")),
+              QStringLiteral("the Failure toast names the clash (\"%1\")")
+                  .arg(toasts ? toasts->currentText() : QString()));
+        if (saveCard && saveCard->field()) {
+            QKeyEvent esc(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+            QCoreApplication::sendEvent(saveCard->field(), &esc);
+            settle(120);
+        }
+        check(saveCard != nullptr && !saveCard->isVisible(), "Escape cancels the retry");
+
+        // --- the drawer ------------------------------------------------------
+        trigger(probe, QStringLiteral("Versions"));
+        VersionsPanel* panel = probe.findChild<VersionsPanel*>();
+        check(panel != nullptr && panel->isVisible(), "View -> Versions opens the drawer");
+        check(panel != nullptr && panel->rowCount() == 1, "one row for the one saved version");
+        check(panel != nullptr && panel->rowNameAt(0) == QStringLiteral("Original"),
+              "named by the version itself");
+        if (panel) {
+            QPushButton* compareBtn = panel->compareButtonAt(0);
+            check(compareBtn != nullptr &&
+                      panel->childAt(compareBtn->mapTo(panel, compareBtn->rect().center())) ==
+                          compareBtn,
+                  "childAt() at Compare's centre finds the button itself - not buried");
+        }
+
+        // --- Compare: the splitter, a real viewer-only second view -----------
+        check(probe.centralWidget() == probe.view(),
+              "before compare, the viewport alone is central - full bleed");
+        check(probe.findChildren<QSplitter*>().isEmpty(), "and no splitter exists yet");
+
+        check(probe.openCompare(QStringLiteral("Original")),
+              "Compare opens against the saved version");
+        check(probe.isCompareOpen(), "isCompareOpen() agrees");
+        OcctViewWidget* compareView = probe.compareView();
+        check(compareView != nullptr && compareView->isViewerOnly(),
+              "the second view is constructed viewer-only");
+        check(probe.centralWidget() != nullptr && probe.centralWidget() != probe.view(),
+              "the central widget is now the splitter, not the plain viewport");
+        check(probe.view()->parentWidget() == probe.centralWidget(),
+              "the LIVE view is reparented under the new central widget...");
+        check(compareView != nullptr && compareView->parentWidget() == probe.centralWidget(),
+              "...and so is the compare view - both panes share it");
+        settle(250);   // let the second OCCT view actually initialize and lay out
+
+        QPushButton* closeCompareBtn = nullptr;
+        if (compareView) {
+            for (QPushButton* b : compareView->findChildren<QPushButton*>()) {
+                if (b->text() == MainWindow::compareBadgeCloseLabel()) { closeCompareBtn = b; break; }
+            }
+        }
+        check(closeCompareBtn != nullptr, "the compare badge's Close compare control exists");
+        if (closeCompareBtn && compareView) {
+            const QPoint centre = closeCompareBtn->rect().center();
+            check(compareView->childAt(closeCompareBtn->mapTo(compareView, centre)) ==
+                      closeCompareBtn,
+                  "childAt() at Close compare's centre finds the button itself, not "
+                  "buried under the badge's own card");
+        }
+        if (compareView && probe.centralWidget()) {
+            const QPoint farCorner(compareView->width() - 5, compareView->height() - 5);
+            check(probe.centralWidget()->childAt(
+                      compareView->mapTo(probe.centralWidget(), farCorner)) == compareView,
+                  "and the compare pane ITSELF is reachable through childAt() from the "
+                  "splitter, not merely constructed");
+        }
+
+        // No picking in the compare view: a click where the body plainly is
+        // selects nothing.
+        check(compareView != nullptr && compareView->selectedSolidIds().empty(),
+              "nothing selected in the compare view to start");
+        if (compareView) {
+            QPoint bodyPixel;
+            GProp_GProps props;
+            BRepGProp::VolumeProperties(probe.document().shapeOf(bodyAId), props);
+            if (compareView->projectToScreen(props.CentreOfMass(), bodyPixel))
+                clickAt(compareView, QPointF(bodyPixel));
+        }
+        check(compareView != nullptr && compareView->selectedSolidIds().empty(),
+              "...and clicking where the body is still selects nothing - viewer-only "
+              "truly has no picking");
+
+        // --- camera sync, both directions, no oscillation ---------------------
+        auto statesMatch = [](const CameraState& a, const CameraState& b) {
+            return a.target.Distance(b.target) < 1.0e-3 &&
+                   std::fabs(a.azimuthDeg - b.azimuthDeg) < 1.0e-3 &&
+                   std::fabs(a.elevationDeg - b.elevationDeg) < 1.0e-3 &&
+                   std::fabs(a.distance - b.distance) < 1.0e-3;
+        };
+        check(compareView != nullptr &&
+                  statesMatch(probe.view()->camera().state(), compareView->camera().state()),
+              "the two views start in lockstep - the compare pane was seeded from the "
+              "live camera the moment it opened");
+
+        // Three round trips, alternating which view is dragged. Each is a
+        // real RMB orbit gesture; the sync itself is synchronous, direct
+        // signal delivery (not queued through the event loop), so a genuine
+        // infinite ping-pong would overflow the stack INSIDE this very call
+        // rather than merely hang - reaching the check after each drag is
+        // therefore part of the proof, not just its measurement.
+        for (int round = 0; round < 3 && compareView; ++round) {
+            QWidget* driver = (round % 2 == 0) ? static_cast<QWidget*>(probe.view())
+                                               : static_cast<QWidget*>(compareView);
+            const QPointF centre(driver->width() / 2.0, driver->height() / 2.0);
+            dragButton(driver, centre, centre + QPointF(35.0 + round * 8, 22.0),
+                      Qt::RightButton);
+            settle(100);
+            check(statesMatch(probe.view()->camera().state(), compareView->camera().state()),
+                  QStringLiteral("round trip %1: orbiting %2 leaves both views in agreement")
+                      .arg(round + 1)
+                      .arg(round % 2 == 0 ? QStringLiteral("the live view")
+                                          : QStringLiteral("the compare view")));
+        }
+
+        // --- closing compare leaves the live viewport intact -------------------
+        // Tracked through a QPointer, not just absence from probe's own
+        // findChildren() list - closeCompare() deletes synchronously (see
+        // its own comment for why deleteLater() measurably does not work
+        // here: QMainWindowLayout keeps its own reference to a replaced
+        // central widget, and a deferred-delete event posted for an object
+        // that internal state still holds onto is never actually delivered,
+        // however long a caller pumps the event loop afterward), so the
+        // object is gone the instant closeCompare() returns - no settle()
+        // needed for this part at all.
+        QPointer<QWidget> splitterBeforeClose = compareView ? compareView->parentWidget() : nullptr;
+        probe.closeCompare();
+        check(!probe.isCompareOpen(), "closeCompare() clears the flag");
+        check(probe.centralWidget() == probe.view(),
+              "and the plain viewport is central again - full bleed, exactly as before "
+              "compare opened");
+        check(splitterBeforeClose.isNull(),
+              "the splitter object was genuinely destroyed, not merely detached");
+        check(probe.findChildren<QSplitter*>().isEmpty(), "no splitter is left behind");
+
+        // The reparenting risk CLAUDE.md's own task brief flagged explicitly:
+        // does the live view's native GL window survive being moved into the
+        // splitter and back? A fresh snapshot proves it still renders...
+        const QString snapDir = versionsLib.path() + QStringLiteral("/snap");
+        QDir().mkpath(snapDir);
+        check(probe.view()->saveSnapshot(snapDir + QStringLiteral("/after-compare.png")),
+              "the live view still renders after compare closes - the reparent round "
+              "trip did not break its native window");
+        // ...and a real click still picks the body - selection survived too.
+        probe.view()->clearSelection();
+        {
+            QPoint bodyPixel;
+            GProp_GProps props;
+            BRepGProp::VolumeProperties(probe.document().shapeOf(bodyAId), props);
+            if (probe.view()->projectToScreen(props.CentreOfMass(), bodyPixel))
+                clickAt(probe.view(), QPointF(bodyPixel));
+        }
+        check(probe.view()->selectedSolidIds().size() == 1,
+              "and picking on the live view still works after the round trip");
+        probe.view()->clearSelection();
+
+        // --- Restore: one checkpoint, undo returns the whole pre-restore document
+        trigger(probe, QStringLiteral("Start Sketch"));
+        sketchQuad(probe, 0.60, 0.15, 0.85, 0.35);
+        trigger(probe, QStringLiteral("Finish Sketch"));
+        check(probe.extrudePendingFace(20.0),
+              "body B committed - the live document now diverges from the version");
+        check(probe.document().count() == 2, "two bodies now, A and B");
+        int bodyBId = 0;
+        for (const DocumentModel::Solid& s : probe.document().solids())
+            if (s.id != bodyAId) bodyBId = s.id;
+        check(bodyBId != 0, "body B's own id was found");
+        {
+            GProp_GProps props;
+            BRepGProp::VolumeProperties(probe.document().shapeOf(bodyBId), props);
+            versionVolumeB = props.Mass();
+        }
+
+        check(probe.restoreVersion(QStringLiteral("Original")), "Restore succeeds");
+        check(probe.document().count() == 1,
+              "the document is back to the version's ONE body");
+        if (probe.document().count() == 1) {
+            GProp_GProps props;
+            BRepGProp::VolumeProperties(probe.document().solids().front().shape, props);
+            check(std::fabs(props.Mass() - versionVolumeA) < 1.0,
+                  QStringLiteral("and it is body A's own volume (%1 vs %2)")
+                      .arg(props.Mass())
+                      .arg(versionVolumeA));
+        }
+        check(toasts != nullptr &&
+                  toasts->currentText() == QStringLiteral("Restored version \"Original\""),
+              QStringLiteral("the Note toast names the restored version (\"%1\")")
+                  .arg(toasts ? toasts->currentText() : QString()));
+        check(toasts != nullptr && toasts->toast() != nullptr && toasts->toast()->hasUndo(),
+              "...and offers Undo - one checkpoint, one Undo");
+
+        check(trigger(probe, QStringLiteral("Undo")), "Undo's own action triggers");
+        check(probe.document().count() == 2,
+              "ONE undo brings back BOTH pre-restore bodies, not just one of them");
+        bool foundA = false, foundB = false;
+        for (const DocumentModel::Solid& s : probe.document().solids()) {
+            GProp_GProps props;
+            BRepGProp::VolumeProperties(s.shape, props);
+            if (std::fabs(props.Mass() - versionVolumeA) < 1.0) foundA = true;
+            if (std::fabs(props.Mass() - versionVolumeB) < 1.0) foundB = true;
+        }
+        check(foundA && foundB,
+              "...and both are genuinely the pre-restore bodies, by volume, not just by count");
+
+        // Restore closes an open compare first - proven properly, not just by
+        // an absent guard: open compare again, then restore, and check it
+        // closed.
+        check(probe.openCompare(QStringLiteral("Original")), "compare re-opens for this check");
+        check(probe.isCompareOpen(), "...and is open");
+        check(probe.restoreVersion(QStringLiteral("Original")), "restoring again");
+        check(!probe.isCompareOpen(), "...closed the compare pane first, as documented");
+
+        // --- Delete: two clicks, final, no Undo ---------------------------------
+        trigger(probe, QStringLiteral("Save version..."));
+        saveCard = probe.findChild<SaveVersionCard*>();
+        if (saveCard && saveCard->field()) {
+            saveCard->field()->setText(QStringLiteral("ToDelete"));
+            QKeyEvent commit(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+            QCoreApplication::sendEvent(saveCard->field(), &commit);
+            settle(150);
+        }
+        check(probe.furnitureStore().versions(probe.currentFurnitureId()).size() == 2,
+              "a second version now exists");
+
+        panel = probe.findChild<VersionsPanel*>();
+        check(panel != nullptr && panel->rowCount() == 2, "two rows now");
+        int deleteIndex = -1;
+        for (int i = 0; panel && i < panel->rowCount(); ++i)
+            if (panel->rowNameAt(i) == QStringLiteral("ToDelete")) deleteIndex = i;
+        check(deleteIndex >= 0, "the row for the new version exists");
+
+        QPushButton* deleteBtn =
+            (panel && deleteIndex >= 0) ? panel->deleteButtonAt(deleteIndex) : nullptr;
+        check(deleteBtn != nullptr, "its Delete button exists");
+        if (deleteBtn) clickAt(deleteBtn, QPointF(deleteBtn->rect().width() / 2.0,
+                                                  deleteBtn->rect().height() / 2.0));
+        check(probe.furnitureStore().versions(probe.currentFurnitureId()).size() == 2,
+              "one click leaves it listed - nothing deleted yet");
+        check(panel != nullptr &&
+                  panel->deleteArmedMsFor(QStringLiteral("ToDelete")) > 0 &&
+                  panel->deleteArmedMsFor(QStringLiteral("ToDelete")) <=
+                      VersionsPanel::kDeleteConfirmMs,
+              QStringLiteral("the second click is armed with a LIVE countdown (%1 of %2 ms) "
+                             "- asserted directly, never waited out")
+                  .arg(panel ? panel->deleteArmedMsFor(QStringLiteral("ToDelete")) : -1)
+                  .arg(VersionsPanel::kDeleteConfirmMs));
+        check(deleteBtn != nullptr && deleteBtn->text() == QStringLiteral("Delete — click again"),
+              "and the button itself says so");
+
+        if (deleteBtn) clickAt(deleteBtn, QPointF(deleteBtn->rect().width() / 2.0,
+                                                  deleteBtn->rect().height() / 2.0));
+        // deleteBtn is not touched again below this point - the second click
+        // deletes the version for real, which rebuilds this drawer's rows
+        // (VersionsPanel::refresh()) synchronously inside clickAt()'s own
+        // settle(), and the widget this pointer named no longer exists.
+        check(probe.furnitureStore().versions(probe.currentFurnitureId()).size() == 1,
+              "the second click within the window actually deletes it - final");
+        check(toasts != nullptr && toasts->toast() != nullptr && !toasts->toast()->hasUndo(),
+              "the Note toast for a version delete offers no Undo - versions carry none");
+
+        // --- a version named with a banned word: the row shows it unmangled, -
+        // and the drawer's real sweep still passes, because a version's own
+        // name is user text and this panel's paintedTexts() never includes it
+        // (VersionsPanel.h's own rule, the same one InitScreen's furniture
+        // names already established). The mirrored assertion proves that is
+        // an EXEMPTION being exercised, not merely an accident: the exact
+        // same string, fed to the sweep's own matcher as if it WERE app copy,
+        // trips it every time.
+        const QString bannedName = QStringLiteral("Fuse Edition");
+        trigger(probe, QStringLiteral("Save version..."));
+        saveCard = probe.findChild<SaveVersionCard*>();
+        if (saveCard && saveCard->field()) {
+            saveCard->field()->setText(bannedName);
+            QKeyEvent commit(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+            QCoreApplication::sendEvent(saveCard->field(), &commit);
+            settle(150);
+        }
+        panel = probe.findChild<VersionsPanel*>();
+        int bannedIndex = -1;
+        for (int i = 0; panel && i < panel->rowCount(); ++i)
+            if (panel->rowNameAt(i) == bannedName) bannedIndex = i;
+        check(bannedIndex >= 0,
+              "the version with a banned-word name really saved and really lists - the "
+              "row shows the user's own words, unmangled");
+
+        QStringList versionsOffenders;
+        const QStringList banned = bannedWords();
+        if (panel) {
+            for (const QString& text : panel->paintedTexts()) {
+                for (const QString& word : banned) {
+                    if (usesBannedWord(text, word))
+                        versionsOffenders << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
+                }
+            }
+        }
+        check(versionsOffenders.isEmpty(),
+              QStringLiteral("the versions drawer's real sweep passes even with a "
+                             "banned-word version genuinely saved (%1)")
+                  .arg(versionsOffenders.isEmpty() ? QStringLiteral("none")
+                                                   : versionsOffenders.join(QStringLiteral(", "))));
+
+        // The mirrored assertion: the SAME string, used the way app copy is
+        // checked, does trip the matcher - proving the row's silence above is
+        // the user-data exemption at work, not a coincidence of what this
+        // panel happens to paint.
+        check(usesBannedWord(bannedName, QStringLiteral("Fuse")),
+              "the version's own name WOULD trip the sweep if it were treated as app copy");
+        check(!usesBannedWord(bannedName, QStringLiteral("Fuse"), /*isUserData=*/true),
+              "...but the user-data exemption clears the identical string");
+
+        // The same pair, pinned against the REAL composed toast message this
+        // feature actually produces (not a hand-typed example) - the Toast
+        // class's own sweep is generic (every message shown this run, with no
+        // per-string exemption), so this run deliberately never shows that
+        // toast on the SHARED `window` below; here, on an isolated probe the
+        // shared sweep never reaches, is where the real string is captured
+        // and proven.
+        check(toasts != nullptr &&
+                  toasts->currentText() == QStringLiteral("Version \"%1\" saved").arg(bannedName),
+              QStringLiteral("the real toast for this save reads \"%1\"")
+                  .arg(toasts ? toasts->currentText() : QString()));
+        if (toasts) {
+            const QString realMessage = toasts->currentText();
+            check(usesBannedWord(realMessage, QStringLiteral("Fuse")),
+                  "the REAL toast text would trip the sweep if it were app copy");
+            check(!usesBannedWord(realMessage, QStringLiteral("Fuse"), /*isUserData=*/true),
+                  "...and the same exemption clears that real string too");
         }
     }
 
