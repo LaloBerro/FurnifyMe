@@ -13,6 +13,7 @@
 #include <V3d_View.hxx>
 #include <V3d_Viewer.hxx>
 #include <gp_Ax2.hxx>
+#include <gp_Dir.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
@@ -304,6 +305,15 @@ public:
     // number MainWindow decides the close with. Two copies of it would be two
     // answers to "is this click on the start point".
     double sketchCloseTolerance() const;
+
+    // The symmetry plane indicator (Milestone 3): a faint outline in the
+    // sketch-work layer, screen-sized via worldPerPixel() (GridRenderer's own
+    // idiom - a constant APPARENT size rather than a fixed number of
+    // millimetres that shrinks to nothing as the camera pulls back), shown
+    // for as long as symmetry is on. `plane` is captured BY VALUE, the same
+    // rule every other work plane in this app follows.
+    void setSymmetryIndicator(bool on, const gp_Pln& plane);
+    bool symmetryIndicatorShown() const { return mySymmetryIndicatorOn; }
 
     // The Z-layer every piece of sketch work is displayed in - the in-progress
     // outline and the pending face (setPreview), the direct-modeling preview,
@@ -666,6 +676,12 @@ private:
     // the manipulator already holds, since that recomputes every one of its
     // presentations and this runs on every frame of an orbit.
     void updateManipulatorSize();
+    // Rebuilds the symmetry plane indicator from myCamera's current distance
+    // (screen-sized, so it has to follow zoom the way updateManipulatorSize()
+    // follows it) - guarded the same way, against rebuilding on a camera move
+    // that would not visibly change its size. A no-op while the indicator is
+    // off.
+    void updateSymmetryIndicator();
     // Reads the accumulated transform, puts the PRESENTATION back to where the
     // document says it should be, snaps, and emits gizmoReleased(). The
     // presentation reset is unconditional and happens here rather than in the
@@ -793,6 +809,14 @@ private:
 
     class QVariantAnimation* myCameraAnimation = nullptr;
     bool myAnimationsEnabled = true;
+
+    // The symmetry plane indicator - see setSymmetryIndicator().
+    bool mySymmetryIndicatorOn = false;
+    gp_Pln mySymmetryIndicatorPlane{gp_Pnt(0.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0)};
+    Handle(AIS_InteractiveObject) mySymmetryIndicator;
+    // The world half-span it was last built at - 0 forces the next
+    // updateSymmetryIndicator() to rebuild regardless of the equal-guard.
+    double mySymmetryIndicatorBuiltHalfSpan = 0.0;
 
     // See the constructor's own comment - the compare pane's flag.
     bool myViewerOnly = false;

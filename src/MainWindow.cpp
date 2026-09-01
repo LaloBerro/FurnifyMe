@@ -40,6 +40,7 @@
 #include <gp_Vec.hxx>
 
 #include <QAction>
+#include <QSignalBlocker>
 #include <QActionGroup>
 #include <QFileDialog>
 #include <QFontMetrics>
@@ -564,6 +565,27 @@ void MainWindow::buildActions()
     myUnlockFaceAction->setToolTip(unlockTooltipText());
     connect(myUnlockFaceAction, &QAction::triggered, this, &MainWindow::unlockFace);
 
+    // Symmetry (Milestone 3). Checkable, and its checked state IS
+    // document().symmetryOn() - updateActions() reads that back onto it,
+    // never the reverse, the same rule the projection toggle follows.
+    mySymmetryAction = new QAction(tr("&Symmetry"), this);
+    mySymmetryAction->setCheckable(true);
+    // No "(S)" here - the banned-word sweep matches "(s)" as a bare
+    // substring, case-insensitive, for the vocabulary rule against a typed
+    // plural marker, and this shortcut's own letter collides with it.
+    mySymmetryAction->setToolTip(tr("Mirror every new body across a plane as you build — "
+                                    "shortcut S\n"
+                                    "Extrude makes both halves at once, and later edits "
+                                    "follow across."));
+    mySymmetryAction->setShortcut(QKeySequence(Qt::Key_S));
+    connect(mySymmetryAction, &QAction::toggled, this, &MainWindow::setSymmetryEnabled);
+
+    mySetSymmetryPlaneAction = new QAction(tr("Set Symmetry &Plane"), this);
+    mySetSymmetryPlaneAction->setToolTip(tr("Mirror across this face instead of the middle\n"
+                                            "Pick one flat face - the plane it lies on "
+                                            "becomes the mirror."));
+    connect(mySetSymmetryPlaneAction, &QAction::triggered, this, &MainWindow::onSetSymmetryPlane);
+
     myExportStepAction = new QAction(tr("Export &STEP..."), this);
     // Ctrl+S is Save's now - the platform standard key and a furniture SAVE
     // is what it should mean the moment a library exists to save into.
@@ -815,6 +837,11 @@ QMenuBar* MainWindow::buildMenus()
     modelMenu->addAction(myUnionAction);
     modelMenu->addAction(mySubtractAction);
     modelMenu->addAction(myIntersectAction);
+    modelMenu->addSeparator();
+    // Menu-only - see mySymmetryAction's own declaration for why no rail
+    // chip.
+    modelMenu->addAction(mySymmetryAction);
+    modelMenu->addAction(mySetSymmetryPlaneAction);
 
     QMenu* viewMenu = bar->addMenu(tr("&View"));
     viewMenu->addAction(myFitAction);
@@ -1301,6 +1328,21 @@ void MainWindow::updateActions()
     const QString planeReason = mySketching ? sketchReason : pendingReason;
     myLockFaceAction->setToolTip(planeCanMove ? lockTooltipText() : planeReason);
     myUnlockFaceAction->setToolTip(planeCanMove ? unlockTooltipText() : planeReason);
+
+    // Symmetry (Milestone 3). The checked state is DOCUMENT state - undo,
+    // redo, opening a different furniture and restoring a version can all
+    // change myDocument.symmetryOn() without going through this action's own
+    // toggle - so it is resynced here rather than trusted to stay in step on
+    // its own, the way the pure UI preferences (autosave, projection) are.
+    // Blocked so resyncing it can never re-fire setSymmetryEnabled().
+    if (mySymmetryAction) {
+        const QSignalBlocker blocker(mySymmetryAction);
+        mySymmetryAction->setChecked(myDocument.symmetryOn());
+    }
+    if (mySymmetryAction) mySymmetryAction->setEnabled(!atInit);
+    // The same pick as Lock to Face - one flat face, no sketch, no pending
+    // outline.
+    if (mySetSymmetryPlaneAction) mySetSymmetryPlaneAction->setEnabled(flatFaceSelected);
 
     myUnionAction->setEnabled(booleanReady);
     mySubtractAction->setEnabled(booleanReady);
@@ -2273,6 +2315,11 @@ void MainWindow::updateStateLabel()
     // where the next outline will land governs how to read everything after
     // it.
     if (myFaceLocked) state = tr("On a locked face — %1").arg(state);
+    // Symmetry LEADS - CLAUDE.md's own words for this label - because
+    // whether the next body gets a mirrored twin governs how to read
+    // everything after it, the same argument the face lock makes one layer
+    // in.
+    if (myDocument.symmetryOn()) state = tr("Symmetry on — %1").arg(state);
 
     myStateLabel->setText(state);
 }
@@ -2305,6 +2352,13 @@ void MainWindow::resyncView()
         myView->setSolidVisible(solid.id, myDocument.isVisible(solid.id));
     for (const DocumentModel::Outline& outline : myDocument.outlines())
         myView->setOutlineVisible(outline.id, myDocument.isVisible(outline.id));
+
+    // Same reconciliation, for the same reason: symmetryOn()/symmetryPlane()
+    // can change from underneath the view through undo, redo, opening a
+    // different furniture or restoring a version, none of which go through
+    // setSymmetryEnabled()/setSymmetryPlaneFromFace() - this is the one place
+    // every one of those already rebuilds the viewport wholesale.
+    myView->setSymmetryIndicator(myDocument.symmetryOn(), myDocument.symmetryPlane());
 }
 
 void MainWindow::onDeleteSelected()
@@ -2332,12 +2386,26 @@ void MainWindow::onDeleteSelected()
         return;
     }
 
-    const std::string deletedName = ids.size() == 1 ? myDocument.nameOf(ids.front())
-                                                    : std::string();
+    // Symmetry: deleting either half of a pair takes both, in the SAME
+    // checkpoint - a twin left standing with nothing to mirror is a symmetry
+    // the document no longer describes. Expanded BEFORE anything is removed,
+    // so the message and the single undo agree with what actually happened.
+    std::vector<int> toDelete = ids;
+    for (int id : ids) {
+        const int twin = myDocument.twinOf(id);
+        if (twin > 0 && std::find(toDelete.begin(), toDelete.end(), twin) == toDelete.end())
+            toDelete.push_back(twin);
+    }
+    const bool isTwinPair = toDelete.size() == 2 && myDocument.twinOf(toDelete[0]) == toDelete[1];
+
+    const std::string deletedName = toDelete.size() == 1 ? myDocument.nameOf(toDelete.front())
+                                                          : std::string();
+    const std::string twinNameA = isTwinPair ? myDocument.nameOf(toDelete[0]) : std::string();
+    const std::string twinNameB = isTwinPair ? myDocument.nameOf(toDelete[1]) : std::string();
 
     myDocument.checkpoint();
     myView->clearSelection();
-    for (int id : ids) {
+    for (int id : toDelete) {
         myDocument.removeSolid(id);
         myView->removeSolid(id);
     }
@@ -2346,8 +2414,12 @@ void MainWindow::onDeleteSelected()
     updateActions();
     emit documentChanged();
     const QString message =
-        ids.size() == 1 ? tr("Deleted %1").arg(QString::fromStdString(deletedName))
-                        : tr("Deleted %1 bodies").arg(ids.size());
+        toDelete.size() == 1
+            ? tr("Deleted %1").arg(QString::fromStdString(deletedName))
+        : isTwinPair
+            ? tr("Deleted %1 and %2").arg(QString::fromStdString(twinNameA),
+                                          QString::fromStdString(twinNameB))
+            : tr("Deleted %1 bodies").arg(toDelete.size());
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
 }
@@ -2745,13 +2817,43 @@ bool MainWindow::extrudePendingFace(double height)
     myView->displaySolid(id, solid);
     if (wasEmpty) myView->fitAll();
 
+    // Symmetry (Milestone 3): creation pairs. A body whose own bounding box
+    // straddles the plane stays unpaired - mirroring it would build a twin
+    // overlapping the body itself, not a second piece of furniture. This
+    // sits in the SAME checkpoint as the conversion above (nothing has
+    // called updateActions()/documentChanged() yet), so one undo removes the
+    // outline's replacement body AND its twin together.
+    int twinId = 0;
+    if (id > 0 && myDocument.symmetryOn() &&
+        !ModelingOps::boundingBoxStraddlesPlane(solid, myDocument.symmetryPlane())) {
+        const ModelingOps::BooleanResult mirrored =
+            ModelingOps::mirrorShape(solid, myDocument.symmetryPlane());
+        if (mirrored.ok) {
+            twinId = myDocument.addSolid(mirrored.shape);
+            if (twinId > 0) {
+                myDocument.pairBodies(id, twinId);
+                myView->displaySolid(twinId, mirrored.shape);
+            }
+        } else {
+            qWarning("Symmetry: creation-pair mirror failed: %s", mirrored.error.c_str());
+        }
+    }
+
     mySelectedOutlineId = 0;
     mySketch.reset();
     updateActions();
     emit documentChanged();
-    const QString message = tr("%1 created — %2")
-                                .arg(QString::fromStdString(myDocument.nameOf(id)),
-                                     QString::fromStdString(Measure::formatDimensions(solid)));
+    // Paired: names both, no dimensions - a twin repeats the same size, and
+    // "Body 03 and Body 04 created" is the whole point (the brief's own
+    // words). Unpaired: the ordinary single-body message, unchanged.
+    const QString message =
+        twinId > 0
+            ? tr("%1 and %2 created")
+                  .arg(QString::fromStdString(myDocument.nameOf(id)),
+                       QString::fromStdString(myDocument.nameOf(twinId)))
+            : tr("%1 created — %2")
+                  .arg(QString::fromStdString(myDocument.nameOf(id)),
+                       QString::fromStdString(Measure::formatDimensions(solid)));
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
     return true;
@@ -2784,6 +2886,36 @@ int MainWindow::bodyIdForFace(const TopoDS_Face& face) const
     return 0;
 }
 
+void MainWindow::commitReplaceBody(int id, const TopoDS_Shape& newShape, bool& twinFollowed)
+{
+    twinFollowed = false;
+    if (id <= 0 || newShape.IsNull()) return;
+
+    myDocument.checkpoint();
+    myDocument.replaceSolid(id, newShape);
+    myView->displaySolid(id, newShape);
+
+    // Symmetry (Milestone 3): the whole reason this function exists rather
+    // than staying three copies of "checkpoint, replace, display" - one
+    // twin-follow rule instead of one per gizmo. A mirror failure here (not
+    // expected to be reachable in practice - mirrorShape only refuses a null
+    // shape or a kernel exception, and `newShape` just came from a
+    // successful edit) leaves the twin untouched rather than turning a
+    // successful primary edit into a reported failure.
+    const int twin = myDocument.twinOf(id);
+    if (twin > 0) {
+        const ModelingOps::BooleanResult mirrored =
+            ModelingOps::mirrorShape(newShape, myDocument.symmetryPlane());
+        if (mirrored.ok) {
+            myDocument.replaceSolid(twin, mirrored.shape);
+            myView->displaySolid(twin, mirrored.shape);
+            twinFollowed = true;
+        } else {
+            qWarning("Symmetry: twin mirror failed: %s", mirrored.error.c_str());
+        }
+    }
+}
+
 bool MainWindow::pullFaceBy(const TopoDS_Face& face, double distance)
 {
     if (face.IsNull() || distance == 0.0) return false;
@@ -2806,8 +2938,6 @@ bool MainWindow::pullFaceBy(const TopoDS_Face& face, double distance)
         return false;
     }
 
-    myDocument.checkpoint();
-    myDocument.replaceSolid(id, result.shape);
     // The preview and the arrow both describe the face that is about to stop
     // existing; the selection holds that face too. All three go before the
     // body is redisplayed, in that order, so nothing is left pointing at
@@ -2815,15 +2945,18 @@ bool MainWindow::pullFaceBy(const TopoDS_Face& face, double distance)
     myView->clearModelingPreview();
     myView->clearPullArrow();
     myView->clearSelection();
-    myView->displaySolid(id, result.shape);
+
+    bool twinFollowed = false;
+    commitReplaceBody(id, result.shape, twinFollowed);
     recordProgress("pull.completed");
 
     updateActions();
     emit documentChanged();
-    const QString message =
+    QString message =
         tr("%1 pulled — %2")
             .arg(QString::fromStdString(myDocument.nameOf(id)),
                  QString::fromStdString(Measure::formatDimensions(result.shape)));
+    if (twinFollowed) message += tr(" — twin followed");
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
     return true;
@@ -3016,8 +3149,6 @@ bool MainWindow::bevelEdgesBy(const std::vector<TopoDS_Edge>& edges, double size
         return false;
     }
 
-    myDocument.checkpoint();
-    myDocument.replaceSolid(id, result.shape);
     // The preview, the arrow and the selection all describe the edge that is
     // about to stop existing. All three go before the body is redisplayed, in
     // that order, so nothing is left pointing at topology from before the
@@ -3025,7 +3156,9 @@ bool MainWindow::bevelEdgesBy(const std::vector<TopoDS_Edge>& edges, double size
     myView->clearModelingPreview();
     myView->clearBevelArrow();
     myView->clearSelection();
-    myView->displaySolid(id, result.shape);
+
+    bool twinFollowed = false;
+    commitReplaceBody(id, result.shape, twinFollowed);
     recordProgress("bevel.completed");
 
     updateActions();
@@ -3039,13 +3172,14 @@ bool MainWindow::bevelEdgesBy(const std::vector<TopoDS_Edge>& edges, double size
     // Written out rather than through "(s)", per the vocabulary rules.
     const QString name = QString::fromStdString(myDocument.nameOf(id));
     const QString extent = QString::fromStdString(Measure::formatDimensions(result.shape));
-    const QString message =
+    QString message =
         edges.size() > 1
             ? (fillet ? tr("Fillet added to %1 — %2 edges — %3")
                       : tr("Chamfer added to %1 — %2 edges — %3"))
                   .arg(name, QString::number(static_cast<int>(edges.size())), extent)
             : (fillet ? tr("Fillet added to %1 — %2") : tr("Chamfer added to %1 — %2"))
                   .arg(name, extent);
+    if (twinFollowed) message += tr(" — twin followed");
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
     return true;
@@ -3138,9 +3272,8 @@ bool MainWindow::transformBody(int id, const gp_Trsf& delta)
         return false;
     }
 
-    myDocument.checkpoint();
-    myDocument.replaceSolid(id, result.shape);
-    myView->displaySolid(id, result.shape);
+    bool twinFollowed = false;
+    commitReplaceBody(id, result.shape, twinFollowed);
     // Selected again on purpose, unlike the face pull's clearSelection(): the
     // body is still the same body, and keeping it selected is what leaves the
     // gizmo standing on it for a second drag. displaySolid() detached the
@@ -3154,11 +3287,12 @@ bool MainWindow::transformBody(int id, const gp_Trsf& delta)
 
     // The same derivation the refusals above use - one source for all three
     // outcomes, and it stays right if a gesture ever combines two of them.
-    const QString message =
+    QString message =
         tr("%1 %2 — %3")
             .arg(QString::fromStdString(myDocument.nameOf(id)),
                  transformPastVerb(delta),
                  QString::fromStdString(Measure::formatDimensions(result.shape)));
+    if (twinFollowed) message += tr(" — twin followed");
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
     return true;
@@ -3219,26 +3353,70 @@ bool MainWindow::applyBooleanToSelection(int kind)
         return false;
     }
 
-    myDocument.checkpoint();
-    myView->clearSelection();
-    for (int id : ids) {
-        myDocument.removeSolid(id);
-        myView->removeSolid(id);
+    // Symmetry: an operand pair that IS each other's own twin collapses to
+    // ONE unpaired result (the plan's own ruling - the symmetric whole no
+    // longer needs a mirror, since it already contains both halves). A
+    // paired operand combined with something unrelated instead KEEPS that
+    // operand's own id, so its twin can be replaced with the mirrored
+    // result rather than left standing for a body that no longer exists.
+    // Determined BEFORE anything is removed, from the two ids the boolean
+    // actually consumed.
+    const bool operandsAreTwins = myDocument.twinOf(ids[0]) == ids[1];
+    int survivingId = 0;
+    if (!operandsAreTwins) {
+        if (myDocument.twinOf(ids[0]) > 0) survivingId = ids[0];
+        else if (myDocument.twinOf(ids[1]) > 0) survivingId = ids[1];
     }
 
-    const int id = myDocument.addSolid(result.shape);
+    myDocument.checkpoint();
+    myView->clearSelection();
+
+    int id = 0;
+    bool twinFollowed = false;
+    if (survivingId > 0) {
+        const int otherId = (survivingId == ids[0]) ? ids[1] : ids[0];
+        myDocument.removeSolid(otherId);
+        myView->removeSolid(otherId);
+        myDocument.replaceSolid(survivingId, result.shape);
+        myView->displaySolid(survivingId, result.shape);
+        id = survivingId;
+
+        const int twin = myDocument.twinOf(id);
+        if (twin > 0) {
+            const ModelingOps::BooleanResult mirrored =
+                ModelingOps::mirrorShape(result.shape, myDocument.symmetryPlane());
+            if (mirrored.ok) {
+                myDocument.replaceSolid(twin, mirrored.shape);
+                myView->displaySolid(twin, mirrored.shape);
+                twinFollowed = true;
+            } else {
+                qWarning("Symmetry: twin mirror failed: %s", mirrored.error.c_str());
+            }
+        }
+    } else {
+        // Both unpaired, or the two operands were each other's own twin -
+        // either way the result is a single, freshly unpaired body.
+        // removeSolid() below drops each removed id's own pairing entries,
+        // so the "own twin" case leaves nothing pointing at a ghost id.
+        for (int rid : ids) {
+            myDocument.removeSolid(rid);
+            myView->removeSolid(rid);
+        }
+        id = myDocument.addSolid(result.shape);
+        myView->displaySolid(id, result.shape);
+    }
     recordProgress("boolean.completed");
-    myView->displaySolid(id, result.shape);
 
     updateActions();
     emit documentChanged();
-    const QString message = tr("%1 — %2 and %3 → %4 — %5")
-                                .arg(operationName,
-                                     QString::fromStdString(nameA),
-                                     QString::fromStdString(nameB),
-                                     QString::fromStdString(myDocument.nameOf(id)),
-                                     QString::fromStdString(
-                                         Measure::formatDimensions(result.shape)));
+    QString message = tr("%1 — %2 and %3 → %4 — %5")
+                          .arg(operationName,
+                               QString::fromStdString(nameA),
+                               QString::fromStdString(nameB),
+                               QString::fromStdString(myDocument.nameOf(id)),
+                               QString::fromStdString(
+                                   Measure::formatDimensions(result.shape)));
+    if (twinFollowed) message += tr(" — twin followed");
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
     return true;
@@ -3486,6 +3664,68 @@ void MainWindow::unlockFace()
 
     updateActions();
     statusBar()->showMessage(tr("Back to the ground — outlines are drawn flat again"));
+}
+
+void MainWindow::setSymmetryEnabled(bool on)
+{
+    // Whatever plane document() already holds - the constructed default
+    // (world YZ through the origin) the very first time this ever fires, or
+    // whatever setSymmetryPlaneFromFace() last set. Turning it off unpairs
+    // everything (DocumentModel::setSymmetry()'s own rule) but takes no
+    // checkpoint - a mode switch, not an edit - so it is not itself
+    // undoable; it still bumps revision(), which is what tells autosave and
+    // the dirty star that the manifest's own "symmetry" block changed.
+    myDocument.setSymmetry(on, myDocument.symmetryPlane());
+    myView->setSymmetryIndicator(on, myDocument.symmetryPlane());
+
+    updateActions();
+    emit documentChanged();
+    statusBar()->showMessage(
+        on ? tr("Symmetry on — new bodies get a mirrored twin")
+           : tr("Symmetry off — bodies keep their own shape now"));
+}
+
+bool MainWindow::setSymmetryPlaneFromFace(const TopoDS_Face& face)
+{
+    if (face.IsNull()) return false;
+
+    const BRepAdaptor_Surface surface(face);
+    if (surface.GetType() != GeomAbs_Plane) {
+        myToasts->show(tr("This face isn't flat, so it can't hold the symmetry plane. "
+                          "Pick a flat face and try again."),
+                      Toast::Kind::Failure, false);
+        return false;
+    }
+
+    // The same outward-orientation fix lockToFace() carries, for the same
+    // reason: BRepAdaptor_Surface never applies TopAbs_Orientation, and on a
+    // plain box three of six faces are REVERSED with their raw plane normal
+    // pointing into the body. It does not actually change what the MIRROR
+    // does here - SetMirror(gp_Ax2) treats a plane and its own reverse
+    // identically - but a plane captured with an arbitrarily-flipped normal
+    // is a needless inconsistency the next reader of this value would have
+    // to rediscover is harmless.
+    gp_Pln plane = surface.Plane();
+    if (face.Orientation() == TopAbs_REVERSED) {
+        plane = gp_Pln(gp_Ax3(plane.Location(), plane.Axis().Direction().Reversed(),
+                              plane.Position().XDirection()));
+    }
+
+    myDocument.setSymmetry(true, plane);
+    myView->setSymmetryIndicator(true, plane);
+    if (mySymmetryAction && !mySymmetryAction->isChecked()) mySymmetryAction->setChecked(true);
+
+    updateActions();
+    emit documentChanged();
+    statusBar()->showMessage(tr("Symmetry plane set to this face"));
+    return true;
+}
+
+void MainWindow::onSetSymmetryPlane()
+{
+    const TopoDS_Face face = myView->selectedFace();
+    if (face.IsNull()) return;
+    setSymmetryPlaneFromFace(face);
 }
 
 void MainWindow::onSelectionChanged()

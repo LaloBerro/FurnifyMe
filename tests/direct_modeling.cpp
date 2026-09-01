@@ -944,6 +944,111 @@ int main()
               "a drag the 10 mm snap rounds away reads as no change at all");
     }
 
+    // --- mirrorShape (Milestone 3: live symmetry) --------------------------
+    {
+        const gp_Pln yz(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0));   // world YZ, x = 0
+        const TopoDS_Shape offsetBox = makeBox(gp_Pnt(10.0, 5.0, 0.0), 20.0, 15.0, 8.0);
+        check(!offsetBox.IsNull(), "offset box for the mirror tests built");
+        const double offsetVolume = volume(offsetBox);
+
+        const BooleanResult mirrored = mirrorShape(offsetBox, yz);
+        check(mirrored.ok, "mirroring across the world YZ plane succeeds" +
+                            (mirrored.ok ? std::string() : ": " + mirrored.error));
+        if (mirrored.ok) {
+            checkNear(volume(mirrored.shape), offsetVolume, 1.0e-6,
+                      "the mirror preserves volume exactly");
+            check(volume(mirrored.shape) > 0.0,
+                  "and the volume comes back POSITIVE - a mirror is a negative-determinant "
+                  "transform, and BRepBuilderAPI_Transform must correct the orientation for it");
+            check(countSolids(mirrored.shape) == 1, "still one solid");
+
+            const gp_Pnt original = centreOfMass(offsetBox);
+            const gp_Pnt reflected = centreOfMass(mirrored.shape);
+            checkNear(reflected.X(), -original.X(), 1.0e-6,
+                      "the centre of mass reflects exactly across X (10..30 -> -30..-10)");
+            checkNear(reflected.Y(), original.Y(), 1.0e-6, "Y is untouched by an X-normal mirror");
+            checkNear(reflected.Z(), original.Z(), 1.0e-6, "so is Z");
+
+            // Involution: mirroring the mirror lands back on the original,
+            // volume and centre of mass both.
+            const BooleanResult twice = mirrorShape(mirrored.shape, yz);
+            check(twice.ok, "mirroring twice succeeds");
+            if (twice.ok) {
+                checkNear(volume(twice.shape), offsetVolume, 1.0e-6,
+                          "mirror-of-mirror preserves volume");
+                const gp_Pnt back = centreOfMass(twice.shape);
+                checkNear(back.X(), original.X(), 1.0e-6,
+                          "mirror twice is the identity - the centre of mass lands back where "
+                          "it started (X)");
+                checkNear(back.Y(), original.Y(), 1.0e-6, "...and Y");
+                checkNear(back.Z(), original.Z(), 1.0e-6, "...and Z");
+            }
+        }
+
+        check(!mirrorShape(TopoDS_Shape(), yz).ok, "mirroring a null shape is refused");
+
+        // edit-then-mirror == mirror-then-edit: pulling a face 20mm and then
+        // mirroring the result must land on the exact same volume as
+        // mirroring first and pulling the CORRESPONDING face of the mirrored
+        // body by the same 20mm - this is the whole justification for
+        // MainWindow::commitReplaceBody mirroring the EDITED result rather
+        // than re-deriving the twin from scratch on every edit.
+        {
+            const TopoDS_Face faceToPull = faceAtZ(offsetBox, 8.0);
+            check(!faceToPull.IsNull(), "top face of the offset box found, for the commute check");
+
+            const BooleanResult editedThenMirrored = [&]() -> BooleanResult {
+                const BooleanResult pulled = pullFace(offsetBox, faceToPull, 20.0);
+                if (!pulled.ok) return pulled;
+                return mirrorShape(pulled.shape, yz);
+            }();
+            check(editedThenMirrored.ok, "pull-then-mirror succeeds");
+
+            const BooleanResult mirroredThenEdited = [&]() -> BooleanResult {
+                const BooleanResult mirroredFirst = mirrorShape(offsetBox, yz);
+                if (!mirroredFirst.ok) return mirroredFirst;
+                const TopoDS_Face mirroredFace = faceAtZ(mirroredFirst.shape, 8.0);
+                if (mirroredFace.IsNull()) return BooleanResult{};
+                return pullFace(mirroredFirst.shape, mirroredFace, 20.0);
+            }();
+            check(mirroredThenEdited.ok, "mirror-then-pull-the-corresponding-face succeeds");
+
+            if (editedThenMirrored.ok && mirroredThenEdited.ok) {
+                checkNear(volume(editedThenMirrored.shape), volume(mirroredThenEdited.shape),
+                          1.0e-6,
+                          "pull-then-mirror and mirror-then-pull land on the same volume - "
+                          "the order the twin is built in cannot matter");
+                // Directly pins the regression this caught: a "grow" pull
+                // (positive distance) on a MIRRORED body's own face must
+                // still grow OUTWARD (here, +Z), not net inward - the centre
+                // of mass has to rise, exactly the ground-truth check
+                // outwardPlane() now runs via BRepClass3d_SolidClassifier.
+                check(centreOfMass(mirroredThenEdited.shape).Z() > centreOfMass(offsetBox).Z(),
+                      "pulling a mirrored twin's own top face by +20 raises its centre of "
+                      "mass - a flag-only outward guess landed this net inward instead");
+            }
+        }
+    }
+
+    // --- boundingBoxStraddlesPlane -------------------------------------------
+    {
+        const gp_Pln yz(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0));
+        const TopoDS_Shape clear = makeBox(gp_Pnt(10.0, 0.0, 0.0), 20.0, 10.0, 10.0);
+        check(!boundingBoxStraddlesPlane(clear, yz),
+              "a box entirely at x in [10, 30] does not straddle the x=0 plane");
+
+        const TopoDS_Shape straddling = makeBox(gp_Pnt(-5.0, 0.0, 0.0), 20.0, 10.0, 10.0);
+        check(boundingBoxStraddlesPlane(straddling, yz),
+              "a box spanning x in [-5, 15] straddles the x=0 plane");
+
+        const TopoDS_Shape touching = makeBox(gp_Pnt(0.0, 0.0, 0.0), 20.0, 10.0, 10.0);
+        check(!boundingBoxStraddlesPlane(touching, yz),
+              "a box with its min corner exactly ON the plane does not straddle it - "
+              "the tolerance keeps a face-flush body from being called ambiguous");
+
+        check(!boundingBoxStraddlesPlane(TopoDS_Shape(), yz), "a null shape never straddles");
+    }
+
     std::printf("\n%s (%d failure%s)\n",
                 g_failures == 0 ? "PASS" : "FAIL",
                 g_failures, g_failures == 1 ? "" : "s");

@@ -59,6 +59,10 @@ bool DocumentModel::removeSolid(int id)
     if (it == mySolids.end()) return false;
 
     mySolids.erase(it);
+    // Keep the pairing map consistent with what actually exists - a removed
+    // body's twin must read back unpaired (twinOf() == -1), not point at an
+    // id nothing in the document owns any more.
+    unpairInternal(id);
     ++myRevision;
     return true;
 }
@@ -67,8 +71,43 @@ void DocumentModel::clear()
 {
     mySolids.clear();
     myOutlines.clear();
+    myTwin.clear();
     ++myRevision;
     // Ids are not reused: a stale id must never silently resolve to a new solid.
+}
+
+void DocumentModel::setSymmetry(bool on, const gp_Pln& plane)
+{
+    mySymmetryOn = on;
+    mySymmetryPlane = plane;
+    if (!on) myTwin.clear();
+    ++myRevision;
+}
+
+void DocumentModel::unpairInternal(int id)
+{
+    const auto it = myTwin.find(id);
+    if (it == myTwin.end()) return;
+    const int other = it->second;
+    myTwin.erase(id);
+    myTwin.erase(other);
+}
+
+void DocumentModel::pairBodies(int idA, int idB)
+{
+    if (idA <= 0 || idB <= 0 || idA == idB) return;
+    if (!contains(idA) || !contains(idB)) return;
+
+    unpairInternal(idA);
+    unpairInternal(idB);
+    myTwin[idA] = idB;
+    myTwin[idB] = idA;
+}
+
+int DocumentModel::twinOf(int id) const
+{
+    const auto it = myTwin.find(id);
+    return it == myTwin.end() ? -1 : it->second;
 }
 
 int DocumentModel::addOutline(const TopoDS_Face& face, const gp_Pln& plane)
@@ -162,7 +201,7 @@ bool DocumentModel::contains(int id) const
 
 void DocumentModel::checkpoint()
 {
-    myUndo.push_back(State{mySolids, myOutlines});
+    myUndo.push_back(State{mySolids, myOutlines, mySymmetryOn, mySymmetryPlane, myTwin});
     if (myUndo.size() > kMaxHistory) myUndo.erase(myUndo.begin());
 
     // Anything redoable described a future that no longer follows from here.
@@ -173,9 +212,12 @@ bool DocumentModel::undo()
 {
     if (myUndo.empty()) return false;
 
-    myRedo.push_back(State{mySolids, myOutlines});
+    myRedo.push_back(State{mySolids, myOutlines, mySymmetryOn, mySymmetryPlane, myTwin});
     mySolids = myUndo.back().solids;
     myOutlines = myUndo.back().outlines;
+    mySymmetryOn = myUndo.back().symmetryOn;
+    mySymmetryPlane = myUndo.back().symmetryPlane;
+    myTwin = myUndo.back().twin;
     myUndo.pop_back();
     ++myRevision;
     return true;
@@ -185,9 +227,12 @@ bool DocumentModel::redo()
 {
     if (myRedo.empty()) return false;
 
-    myUndo.push_back(State{mySolids, myOutlines});
+    myUndo.push_back(State{mySolids, myOutlines, mySymmetryOn, mySymmetryPlane, myTwin});
     mySolids = myRedo.back().solids;
     myOutlines = myRedo.back().outlines;
+    mySymmetryOn = myRedo.back().symmetryOn;
+    mySymmetryPlane = myRedo.back().symmetryPlane;
+    myTwin = myRedo.back().twin;
     myRedo.pop_back();
     ++myRevision;
     return true;
@@ -261,6 +306,24 @@ FurnifySerial::SerializedDocument DocumentModel::toSerialized(DocumentMeta& meta
         meta.outlineVisible.push_back(isVisible(o.id));
     }
 
+    // Symmetry: plane and on/off travel as-is; pairs are re-expressed as
+    // POSITIONS into serial.bodies (see DocumentMeta's own comment for why -
+    // ids are never persisted). Each pair is emitted once, from the lower
+    // id's own position, walking mySolids in the same order they were just
+    // pushed above so the positions agree with what was actually written.
+    meta.symmetryOn = mySymmetryOn;
+    meta.symmetryPlane = mySymmetryPlane;
+    std::unordered_map<int, std::size_t> positionOfId;
+    for (std::size_t i = 0; i < mySolids.size(); ++i) positionOfId[mySolids[i].id] = i;
+    for (std::size_t i = 0; i < mySolids.size(); ++i) {
+        const int id = mySolids[i].id;
+        const int twin = twinOf(id);
+        if (twin <= 0 || twin >= id) continue;   // emit once - only from the HIGHER id of the pair
+        const auto twinPos = positionOfId.find(twin);
+        if (twinPos == positionOfId.end()) continue;
+        meta.symmetryPairs.push_back({static_cast<int>(twinPos->second), static_cast<int>(i)});
+    }
+
     return serial;
 }
 
@@ -289,16 +352,34 @@ bool DocumentModel::fromSerialized(const FurnifySerial::SerializedDocument& seri
     myVisibility.clear();
     ++myRevision;
 
+    std::vector<int> bodyIds;
+    bodyIds.reserve(serial.bodies.size());
     for (std::size_t i = 0; i < serial.bodies.size(); ++i) {
         const int id = addSolid(serial.bodies[i]);
         setItemName(id, meta.bodyNames[i]);
         setVisible(id, meta.bodyVisible[i]);
+        bodyIds.push_back(id);
     }
     for (std::size_t i = 0; i < serial.outlineFaces.size(); ++i) {
         const TopoDS_Face face = TopoDS::Face(serial.outlineFaces[i]);
         const int id = addOutline(face, serial.outlinePlanes[i]);
         setItemName(id, meta.outlineNames[i]);
         setVisible(id, meta.outlineVisible[i]);
+    }
+
+    // Symmetry: setSymmetry() first (it clears myTwin outright when off, and
+    // does nothing to it when on), THEN translate meta's position-based
+    // pairs back into the ids addSolid() just assigned. A pair whose
+    // position falls outside bodyIds - a corrupt or hand-edited file - is
+    // skipped rather than refusing the whole load; everything else about the
+    // document is still good.
+    setSymmetry(meta.symmetryOn, meta.symmetryPlane);
+    if (meta.symmetryOn) {
+        for (const std::pair<int, int>& pair : meta.symmetryPairs) {
+            if (pair.first < 0 || pair.first >= static_cast<int>(bodyIds.size())) continue;
+            if (pair.second < 0 || pair.second >= static_cast<int>(bodyIds.size())) continue;
+            pairBodies(bodyIds[pair.first], bodyIds[pair.second]);
+        }
     }
 
     return true;
@@ -309,6 +390,13 @@ void DocumentModel::restoreFrom(const DocumentModel& snapshot)
     mySolids = snapshot.mySolids;
     myOutlines = snapshot.myOutlines;
     myVisibility = snapshot.myVisibility;
+    // Symmetry travels with the rest of the document - `snapshot`'s ids are
+    // copied in VERBATIM (unlike fromSerialized(), which reassigns fresh
+    // ones), so its pairing map's ids already match snapshot.mySolids and
+    // need no translation.
+    mySymmetryOn = snapshot.mySymmetryOn;
+    mySymmetryPlane = snapshot.mySymmetryPlane;
+    myTwin = snapshot.myTwin;
     // Never shrink: `this`'s own counters may already be ahead of
     // `snapshot`'s (this document had more history before the restore than
     // the version ever saw), and `snapshot`'s may be ahead of `this`'s (the

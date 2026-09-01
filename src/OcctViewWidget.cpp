@@ -29,6 +29,8 @@
 #include <Bnd_Box.hxx>
 #include <BRepBndLib.hxx>
 #include <Graphic3d_ArrayOfPoints.hxx>
+#include <Graphic3d_ArrayOfSegments.hxx>
+#include <Graphic3d_AspectLine3d.hxx>
 #include <Graphic3d_AspectMarker3d.hxx>
 #include <Graphic3d_Camera.hxx>
 #include <Graphic3d_Group.hxx>
@@ -57,6 +59,7 @@
 #include <TopoDS_Vertex.hxx>
 #include <BRep_Tool.hxx>
 #include <V3d_TypeOfVisualization.hxx>
+#include <gp_Ax3.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Lin.hxx>
 #include <gp_Vec.hxx>
@@ -97,6 +100,34 @@ Quantity_Color toOcctColor(const QColor& c)
 {
     return Quantity_Color(c.redF(), c.greenF(), c.blueF(), Quantity_TOC_sRGB);
 }
+
+// The symmetry plane indicator's own presentation - GridRenderer's aspect
+// idiom (GridObject in GridRenderer.cpp), one pre-built segment array drawn
+// with a single Graphic3d_AspectLine3d, never pickable. A much lighter shape
+// than a grid: this is an INDICATOR, not a work surface, so it draws a
+// rectangle outline and a cross through the origin rather than a field of
+// lines.
+class SymmetryPlaneObject : public AIS_InteractiveObject {
+public:
+    Handle(Graphic3d_ArrayOfSegments) segments;
+    Quantity_Color colour;
+
+    void Compute(const Handle(PrsMgr_PresentationManager)&,
+                 const Handle(Prs3d_Presentation)& presentation, const Standard_Integer) override
+    {
+        if (segments.IsNull()) return;
+        Handle(Graphic3d_Group) group = presentation->NewGroup();
+        Handle(Graphic3d_AspectLine3d) aspect =
+            new Graphic3d_AspectLine3d(colour, Aspect_TOL_SOLID, 1.2);
+        group->SetGroupPrimitivesAspect(aspect);
+        group->AddPrimitiveArray(segments);
+    }
+
+    void ComputeSelection(const Handle(SelectMgr_Selection)&, const Standard_Integer) override
+    {
+        // Never pickable - an indicator, not a body.
+    }
+};
 
 // One tiny point in world space, drawn as a marker whose size lives in
 // screen pixels - Graphic3d_AspectMarker3d/Prs3d_PointAspect's own documented
@@ -1037,6 +1068,87 @@ void OcctViewWidget::updateManipulatorSize()
     // giving every body the same one.
 }
 
+void OcctViewWidget::setSymmetryIndicator(bool on, const gp_Pln& plane)
+{
+    initializeViewer();
+
+    mySymmetryIndicatorOn = on;
+    mySymmetryIndicatorPlane = plane;
+
+    if (!on) {
+        if (!myContext.IsNull() && !mySymmetryIndicator.IsNull()) {
+            myContext->Remove(mySymmetryIndicator, Standard_False);
+            myContext->UpdateCurrentViewer();
+        }
+        mySymmetryIndicator.Nullify();
+        mySymmetryIndicatorBuiltHalfSpan = 0.0;
+        return;
+    }
+
+    // Force a rebuild: the plane may have changed even if the half-span
+    // (which is all the equal-guard inside updateSymmetryIndicator() checks)
+    // has not.
+    mySymmetryIndicatorBuiltHalfSpan = 0.0;
+    updateSymmetryIndicator();
+}
+
+void OcctViewWidget::updateSymmetryIndicator()
+{
+    if (!mySymmetryIndicatorOn || myContext.IsNull()) return;
+
+    // Screen-sized - DimensionRenderer's own idiom, one call site up: a
+    // constant APPARENT extent rather than a fixed number of millimetres
+    // that shrinks to nothing as the camera pulls back. ~220 px half-span
+    // reads as a generous plane without swallowing a small body.
+    const double halfSpan = worldPerPixel() * 220.0;
+    // The equal-guard updateManipulatorSize() uses, one call site over: this
+    // runs on every frame of an orbit, and a rebuild is a real allocation.
+    if (mySymmetryIndicatorBuiltHalfSpan > 0.0 &&
+        halfSpan < mySymmetryIndicatorBuiltHalfSpan * 1.1 &&
+        halfSpan > mySymmetryIndicatorBuiltHalfSpan * 0.9) {
+        return;
+    }
+
+    const gp_Ax3 frame = mySymmetryIndicatorPlane.Position();
+    const gp_Pnt origin = mySymmetryIndicatorPlane.Location();
+    const gp_Dir u = frame.XDirection();
+    const gp_Dir v = frame.YDirection();
+    const auto at = [&](double du, double dv) {
+        return origin.Translated(gp_Vec(u) * du + gp_Vec(v) * dv);
+    };
+
+    // A rectangle outline plus a cross through the origin - enough to read
+    // as a PLANE rather than a single line, without the density of a work
+    // grid; this is an indicator, not a surface to click on.
+    Handle(Graphic3d_ArrayOfSegments) array = new Graphic3d_ArrayOfSegments(10);
+    array->AddVertex(at(-halfSpan, -halfSpan));
+    array->AddVertex(at(halfSpan, -halfSpan));
+    array->AddVertex(at(halfSpan, -halfSpan));
+    array->AddVertex(at(halfSpan, halfSpan));
+    array->AddVertex(at(halfSpan, halfSpan));
+    array->AddVertex(at(-halfSpan, halfSpan));
+    array->AddVertex(at(-halfSpan, halfSpan));
+    array->AddVertex(at(-halfSpan, -halfSpan));
+    array->AddVertex(at(0.0, -halfSpan));
+    array->AddVertex(at(0.0, halfSpan));
+
+    Handle(SymmetryPlaneObject) indicator = new SymmetryPlaneObject();
+    indicator->segments = array;
+    // A fixed, faint, untokenised colour - the same scope ruling CLAUDE.md
+    // already makes for the gizmo's axis hues and the OCCT body/preview
+    // materials: this is scene decoration on the OCCT side of the bridge,
+    // not a Theme surface.
+    indicator->colour = Quantity_Color(0.55, 0.55, 0.65, Quantity_TOC_sRGB);
+    markInSketchLayer(indicator);
+
+    if (!mySymmetryIndicator.IsNull()) myContext->Remove(mySymmetryIndicator, Standard_False);
+    mySymmetryIndicator = indicator;
+    // Selection mode -1: an indicator, never pickable.
+    myContext->Display(mySymmetryIndicator, 0, -1, Standard_False);
+    myContext->UpdateCurrentViewer();
+    mySymmetryIndicatorBuiltHalfSpan = halfSpan;
+}
+
 void OcctViewWidget::activateManipulatorModes()
 {
     if (myManipulator.IsNull()) return;
@@ -1812,6 +1924,8 @@ void OcctViewWidget::applyCameraState()
     // that would need its own UpdateCurrentViewer(). Its own guards make this
     // free on a camera move that does not change the scale.
     updateManipulatorSize();
+    // Screen-sized the same way - see its own header comment.
+    updateSymmetryIndicator();
     // Slots FIRST, redraw second. A slot on cameraChanged() that changes the
     // scene - PullArrow rebuilds its 3D arrow, which is sized in screen
     // pixels and so has to be rebuilt whenever the camera moves - was

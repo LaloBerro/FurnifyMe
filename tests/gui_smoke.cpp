@@ -119,6 +119,7 @@
 #include <TopoDS_Vertex.hxx>
 #include <gp_Ax1.hxx>
 #include <gp_Ax2.hxx>
+#include <gp_Ax3.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Trsf.hxx>
@@ -185,7 +186,7 @@ void skipByEnvironment(int checks, const QString& why)
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 1545;
+constexpr int kCheckFloor = 1607;
 
 void check(bool condition, const QString& what)
 {
@@ -14569,6 +14570,304 @@ int main(int argc, char* argv[])
             check(usesBannedWord(toasts->currentText(), QStringLiteral("Fuse")),
                   "...and that real toast text genuinely does use the banned word - Toast "
                   "carries no user-data exemption of its own, so this is expected, not a bug");
+        }
+    }
+
+    // --- Milestone 3, item 3: live symmetry via mirror twins -----------------
+    // An isolated probe, on the same terms as the versions/compare block just
+    // above: this exercises a new action, a new document mutation path
+    // (extrude/pull/delete/boolean all gain a twin-following branch) and a
+    // new persisted manifest key, and none of it should be able to disturb
+    // the shared `window`'s own later checks.
+    {
+        RequiredTempDir symmetryLib;
+        MainWindow probe(nullptr, /*persistProgress=*/false, symmetryLib.path());
+        probe.setAttribute(Qt::WA_ShowWithoutActivating);
+        probe.resize(1000, 700);
+        probe.show();
+        settle(200);
+        probe.view()->setAnimationsEnabled(false);
+
+        enterFreshFurniture(probe);
+        // A TRUE top view, not the angled default: a top-down camera is what
+        // makes a WORLD point project straight down onto its own (X, Y) on
+        // screen, with no perspective skew. `fitAll()` moves the camera's
+        // TARGET onto whatever is on screen (the first extrude's own
+        // bounding box, in particular), so this block never assumes a
+        // fraction-of-the-viewport maps to a fixed world coordinate - every
+        // click below is placed by projecting the WORLD point it actually
+        // wants, through projectToScreen(), fresh each time.
+        probe.view()->setViewTop();
+        settle(150);
+
+        OcctViewWidget* symView = probe.view();
+        const auto worldToScreen = [&](double x, double y) -> QPointF {
+            QPoint out;
+            symView->projectToScreen(gp_Pnt(x, y, 0.0), out);
+            return QPointF(out);
+        };
+        // Draws a quad by its own WORLD corners - sketchQuad()'s shape, but
+        // immune to the camera target drifting after fitAll(). Frames
+        // everything already on screen first (and once more after the top
+        // view, since fitAll() itself does not choose a direction) so a
+        // quad placed well away from existing bodies still projects onto
+        // the visible viewport.
+        const auto sketchQuadWorld = [&](double x0, double y0, double x1, double y1) {
+            symView->fitAll();
+            symView->setViewTop();
+            settle(120);
+            clickAt(symView, worldToScreen(x0, y0));
+            clickAt(symView, worldToScreen(x1, y0));
+            clickAt(symView, worldToScreen(x1, y1));
+            clickAt(symView, worldToScreen(x0, y1));
+        };
+
+        QAction* symmetryAction = action(probe, QStringLiteral("Symmetry"));
+        check(symmetryAction != nullptr, "the Symmetry action exists");
+        check(symmetryAction != nullptr && !symmetryAction->isChecked(), "symmetry starts off");
+        check(!probe.document().symmetryOn(), "and document() agrees");
+        check(!probe.view()->symmetryIndicatorShown(), "no plane indicator while off");
+
+        trigger(probe, QStringLiteral("Symmetry"));
+        check(symmetryAction != nullptr && symmetryAction->isChecked(),
+              "the Symmetry action checks itself on");
+        check(probe.document().symmetryOn(), "and document() agrees");
+        check(probe.view()->symmetryIndicatorShown(), "the faint plane indicator appears");
+        check(probe.statusBar()->currentMessage().contains(QStringLiteral("Symmetry on")),
+              QStringLiteral("the status label leads with \"Symmetry on\" (\"%1\")")
+                  .arg(probe.statusBar()->currentMessage()));
+
+        ToastHost* symToasts = probe.findChild<ToastHost*>();
+
+        // --- creation pairs: extrude while on adds a mirrored twin, in ONE
+        // checkpoint, with centres of mass reflected across the plane -------
+        trigger(probe, QStringLiteral("Start Sketch"));
+        // Comfortably to one side of x=0 (the default plane) so the extruded
+        // body cannot straddle it.
+        sketchQuadWorld(-150.0, -30.0, -90.0, 30.0);
+        trigger(probe, QStringLiteral("Finish Sketch"));
+        // Captured AFTER Finish Sketch, not before Start Sketch: closing an
+        // outline into a document item takes its OWN checkpoint (see
+        // onFinishSketch()) - what this section pins is that the CREATION
+        // PAIR itself (the outline -> body conversion, plus its twin) is one
+        // more checkpoint, not two.
+        const std::size_t undoDepthBeforeCreate = probe.document().undoDepth();
+        check(probe.extrudePendingFace(10.0), "extrude with symmetry on succeeds");
+        check(probe.document().count() == 2, "two bodies exist - the body and its twin");
+        check(probe.document().undoDepth() == undoDepthBeforeCreate + 1,
+              "...in exactly ONE checkpoint, whichever body arrived");
+
+        const int idA = probe.document().solids()[0].id;
+        const int idB = probe.document().solids()[1].id;
+        check(probe.document().twinOf(idA) == idB, "the two are paired");
+        check(probe.document().twinOf(idB) == idA, "...both directions");
+        const QString nameA = QString::fromStdString(probe.document().nameOf(idA));
+        const QString nameB = QString::fromStdString(probe.document().nameOf(idB));
+        check(symToasts != nullptr &&
+                  symToasts->currentText() == QStringLiteral("%1 and %2 created").arg(nameA, nameB),
+              QStringLiteral("the toast names both bodies, no dimensions (\"%1\")")
+                  .arg(symToasts ? symToasts->currentText() : QString()));
+
+        {
+            GProp_GProps propsA, propsB;
+            BRepGProp::VolumeProperties(probe.document().shapeOf(idA), propsA);
+            BRepGProp::VolumeProperties(probe.document().shapeOf(idB), propsB);
+            const gp_Pnt comA = propsA.CentreOfMass();
+            const gp_Pnt comB = propsB.CentreOfMass();
+            check(std::fabs(comA.X() + comB.X()) < 1.0e-6,
+                  "the two centres of mass reflect across X (the default plane's normal)");
+            check(std::fabs(comA.Y() - comB.Y()) < 1.0e-6, "Y is untouched");
+            check(std::fabs(comA.Z() - comB.Z()) < 1.0e-6, "so is Z");
+            check((comA.X() > 0.0) != (comB.X() > 0.0),
+                  "and the two bodies genuinely sit on opposite sides of the plane");
+        }
+
+        // --- a body whose bounding box straddles the plane stays unpaired --
+        trigger(probe, QStringLiteral("Start Sketch"));
+        sketchQuadWorld(-30.0, -130.0, 30.0, -70.0);   // spans x = -30..30 -> straddles x=0
+        trigger(probe, QStringLiteral("Finish Sketch"));
+        const std::size_t bodiesBeforeStraddle = probe.document().count();
+        check(probe.extrudePendingFace(8.0), "extrude of a straddling outline still succeeds");
+        check(probe.document().count() == bodiesBeforeStraddle + 1,
+              "...but adds only ONE body - a straddling body gets no twin");
+        const int idStraddle = probe.document().solids().back().id;
+        check(probe.document().twinOf(idStraddle) == -1, "and it reads back unpaired");
+
+        // --- every edit propagates: pull one body, the twin follows, in ONE
+        // checkpoint - RED-verified by undoing it and checking BOTH volumes
+        // revert together, not just the primary body's --------------------
+        const std::size_t undoDepthBeforePull = probe.document().undoDepth();
+        const double volABeforePull = ModelingOps::volume(probe.document().shapeOf(idA));
+        const double volBBeforePull = ModelingOps::volume(probe.document().shapeOf(idB));
+        TopoDS_Face faceOfA;
+        for (TopExp_Explorer it(probe.document().shapeOf(idA), TopAbs_FACE); it.More(); it.Next()) {
+            faceOfA = TopoDS::Face(it.Current());
+            break;   // any face of the box is a valid probe for this check
+        }
+        check(!faceOfA.IsNull(), "a face of body A was found for the pull");
+        check(probe.pullFaceBy(faceOfA, 4.0), "pulling body A's face succeeds");
+        check(probe.document().undoDepth() == undoDepthBeforePull + 1,
+              "the pull took exactly ONE checkpoint, even though two bodies changed shape");
+
+        const double volAAfterPull = ModelingOps::volume(probe.document().shapeOf(idA));
+        const double volBAfterPull = ModelingOps::volume(probe.document().shapeOf(idB));
+        check(std::fabs(volAAfterPull - volABeforePull) > 1.0,
+              "body A's own volume actually changed");
+        check(std::fabs((volAAfterPull - volABeforePull) - (volBAfterPull - volBBeforePull)) <
+                  1.0e-6,
+              "the twin's volume changed by exactly the same amount - the SAME edit, mirrored");
+        check(symToasts != nullptr && symToasts->currentText().contains(QStringLiteral("twin followed")),
+              QStringLiteral("the toast says the twin followed (\"%1\")")
+                  .arg(symToasts ? symToasts->currentText() : QString()));
+
+        // RED verification: undo this ONE checkpoint and confirm BOTH bodies'
+        // volumes revert together, not just the one the gesture named.
+        trigger(probe, QStringLiteral("Undo"));
+        check(std::fabs(ModelingOps::volume(probe.document().shapeOf(idA)) - volABeforePull) <
+                  1.0e-6,
+              "one undo restores body A's pre-pull volume");
+        check(std::fabs(ModelingOps::volume(probe.document().shapeOf(idB)) - volBBeforePull) <
+                  1.0e-6,
+              "...and body B's, in the SAME undo - a twin-follows edit is one checkpoint, "
+              "not two");
+        trigger(probe, QStringLiteral("Redo"));
+        check(std::fabs(ModelingOps::volume(probe.document().shapeOf(idA)) - volAAfterPull) <
+                  1.0e-6,
+              "redo brings the pull back for both");
+
+        // --- boolean: A and B are each other's own twin, so combining them
+        // collapses to ONE unpaired result - the symmetric whole ------------
+        probe.view()->setSelectionMode(OcctViewWidget::SelectionMode::Solid);
+        probe.view()->setSelectedSolids({idA, idB});
+        settle(80);
+        const std::size_t bodiesBeforeUnion = probe.document().count();
+        trigger(probe, QStringLiteral("Union"));
+        check(probe.document().count() == bodiesBeforeUnion - 1,
+              "unioning a twin pair collapses it to one body");
+        check(!probe.document().contains(idA) && !probe.document().contains(idB),
+              "both original ids are gone");
+        const int unionedId = probe.document().solids().back().id;
+        check(probe.document().twinOf(unionedId) == -1,
+              "...and the result is UNPAIRED - the symmetric whole needs no mirror");
+
+        // --- delete: one half of a pair takes both, in ONE checkpoint ------
+        trigger(probe, QStringLiteral("Start Sketch"));
+        sketchQuadWorld(-220.0, 60.0, -170.0, 110.0);
+        trigger(probe, QStringLiteral("Finish Sketch"));
+        check(probe.extrudePendingFace(6.0), "a fresh pair extrudes, for the delete check");
+        const auto& solidsForDelete = probe.document().solids();
+        const int idC = solidsForDelete[solidsForDelete.size() - 2].id;
+        const int idD = solidsForDelete[solidsForDelete.size() - 1].id;
+        check(probe.document().twinOf(idC) == idD, "the fresh pair is paired");
+
+        probe.view()->setSelectedSolids({idC});
+        settle(80);
+        const std::size_t bodiesBeforeDelete = probe.document().count();
+        const std::size_t undoDepthBeforeDelete = probe.document().undoDepth();
+        trigger(probe, QStringLiteral("Delete Selected"));
+        check(!probe.document().contains(idC) && !probe.document().contains(idD),
+              "deleting one half of a pair removes both");
+        check(probe.document().count() == bodiesBeforeDelete - 2, "exactly two bodies are gone");
+        check(probe.document().undoDepth() == undoDepthBeforeDelete + 1,
+              "...in exactly ONE checkpoint");
+        check(symToasts != nullptr &&
+                  symToasts->currentText().contains(QStringLiteral(" and ")) &&
+                  !symToasts->currentText().contains(QStringLiteral("bodies")),
+              QStringLiteral("the toast names both bodies, not a count (\"%1\")")
+                  .arg(symToasts ? symToasts->currentText() : QString()));
+
+        // RED verification: ONE undo brings back BOTH deleted bodies.
+        trigger(probe, QStringLiteral("Undo"));
+        check(probe.document().contains(idC) && probe.document().contains(idD),
+              "one undo restores both deleted bodies");
+        check(probe.document().twinOf(idC) == idD, "...still paired with each other");
+
+        // --- toggle off: edits stop propagating -----------------------------
+        trigger(probe, QStringLiteral("Symmetry"));
+        check(!probe.document().symmetryOn(), "symmetry is off now");
+        check(probe.document().twinOf(idC) == -1, "...and C/D are unpaired - turning off unpairs");
+        check(!probe.view()->symmetryIndicatorShown(), "the plane indicator goes away");
+
+        const double volDBeforeThirdPull = ModelingOps::volume(probe.document().shapeOf(idD));
+        TopoDS_Face faceOfC;
+        for (TopExp_Explorer it(probe.document().shapeOf(idC), TopAbs_FACE); it.More(); it.Next()) {
+            faceOfC = TopoDS::Face(it.Current());
+            break;
+        }
+        check(!faceOfC.IsNull(), "a face of C was found for the toggle-off check");
+        check(probe.pullFaceBy(faceOfC, 2.0), "pulling C succeeds with symmetry off");
+        check(std::fabs(ModelingOps::volume(probe.document().shapeOf(idD)) - volDBeforeThirdPull) <
+                  1.0e-9,
+              "D's volume is UNCHANGED - the edit did not propagate with symmetry off");
+        check(symToasts != nullptr && !symToasts->currentText().contains(QStringLiteral("twin followed")),
+              "and the toast does not claim a twin followed");
+
+        // --- state survives save/load: on/off, plane and pairing all persist
+        trigger(probe, QStringLiteral("Symmetry"));   // back on
+        check(probe.document().symmetryOn(), "symmetry back on, for the save/load check");
+        check(probe.document().twinOf(idC) == -1,
+              "re-enabling does NOT re-pair what turning off unpaired");
+
+        trigger(probe, QStringLiteral("Start Sketch"));
+        sketchQuadWorld(120.0, 60.0, 170.0, 110.0);
+        trigger(probe, QStringLiteral("Finish Sketch"));
+        check(probe.extrudePendingFace(5.0), "a fourth pair extrudes, for the save/load check");
+        const auto& solidsForSave = probe.document().solids();
+        const int idE = solidsForSave[solidsForSave.size() - 2].id;
+        const int idF = solidsForSave[solidsForSave.size() - 1].id;
+        check(probe.document().twinOf(idE) == idF, "the new pair is paired before saving");
+        const std::string nameE = probe.document().nameOf(idE);
+        const std::string nameF = probe.document().nameOf(idF);
+
+        check(probe.saveCurrentFurniture(), "Save succeeds");
+        const QString savedFurnitureId = probe.currentFurnitureId();
+        probe.showInitScreen();
+        check(probe.openFurniture(savedFurnitureId), "reopening the same furniture succeeds");
+        check(probe.document().symmetryOn(), "symmetry (on/off) survives the save/load round trip");
+
+        int reloadedE = 0, reloadedF = 0;
+        for (const DocumentModel::Solid& s : probe.document().solids()) {
+            if (s.name == nameE) reloadedE = s.id;
+            if (s.name == nameF) reloadedF = s.id;
+        }
+        check(reloadedE != 0 && reloadedF != 0, "both reloaded bodies found by name");
+        check(probe.document().twinOf(reloadedE) == reloadedF,
+              "...and the pairing survives, translated onto the freshly-assigned ids");
+
+        // --- "Set symmetry plane": the Lock to Face idiom, called directly
+        // (this proves the wiring, not viewport face-projection, which
+        // canPullSelectedFace()'s own gui_smoke coverage already owns). Last
+        // in this block on purpose: it moves the plane to one of body E's
+        // own faces, and nothing checked past this point depends on the
+        // plane being the world default any more.
+        {
+            TopoDS_Face someFace;
+            for (TopExp_Explorer it(probe.document().shapeOf(reloadedE), TopAbs_FACE);
+                it.More(); it.Next()) {
+                someFace = TopoDS::Face(it.Current());
+                break;
+            }
+            check(!someFace.IsNull(), "a face of body E was found for the plane-pick check");
+
+            BRepAdaptor_Surface someSurface(someFace);
+            gp_Pln expectedPlane = someSurface.Plane();
+            if (someFace.Orientation() == TopAbs_REVERSED) {
+                expectedPlane = gp_Pln(gp_Ax3(expectedPlane.Location(),
+                                              expectedPlane.Axis().Direction().Reversed(),
+                                              expectedPlane.Position().XDirection()));
+            }
+
+            check(probe.setSymmetryPlaneFromFace(someFace),
+                  "Set symmetry plane succeeds on a flat face");
+            check(probe.document().symmetryPlane().Axis().Direction().IsEqual(
+                      expectedPlane.Axis().Direction(), 1.0e-9) &&
+                      probe.document().symmetryPlane().Location().Distance(
+                          expectedPlane.Location()) < 1.0e-9,
+                  "the symmetry plane exactly matches the picked face's own outward plane");
+            check(probe.document().symmetryOn(), "and symmetry is still on");
+            check(symmetryAction != nullptr && symmetryAction->isChecked(),
+                  "the Symmetry action's checked state follows document() (resynced by "
+                  "updateActions(), not by this call)");
         }
     }
 

@@ -418,6 +418,187 @@ int main()
               "(the document now holds six distinct bodies, not a collision)");
     }
 
+    // --- DocumentModel symmetry: pairing, undo, and serialization round trip
+    // (Milestone 3, live symmetry) --------------------------------------------
+    {
+        DocumentModel doc;
+        check(!doc.symmetryOn(), "symmetry starts off");
+        check(doc.twinOf(1) == -1, "twinOf on an unknown id is -1, not a crash");
+
+        const gp_Pln yz(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0));
+        doc.setSymmetry(true, yz);
+        check(doc.symmetryOn(), "setSymmetry(true, ...) turns it on");
+        check(doc.symmetryPlane().Axis().Direction().IsEqual(gp_Dir(1.0, 0.0, 0.0), 1.0e-9),
+              "and captures the plane by value");
+
+        const int idA = doc.addSolid(ModelingOps::makeBox(gp_Pnt(10.0, 0.0, 0.0), 5.0, 5.0, 5.0));
+        const int idB = doc.addSolid(ModelingOps::makeBox(gp_Pnt(-15.0, 0.0, 0.0), 5.0, 5.0, 5.0));
+        const int idC = doc.addSolid(ModelingOps::makeBox(gp_Pnt(30.0, 0.0, 0.0), 5.0, 5.0, 5.0));
+
+        doc.pairBodies(idA, idB);
+        check(doc.twinOf(idA) == idB, "pairBodies pairs both directions - A -> B");
+        check(doc.twinOf(idB) == idA, "...and B -> A");
+        check(doc.twinOf(idC) == -1, "a third, unpaired body stays unpaired");
+
+        // Re-pairing either half drops its OLD pairing first - a body can
+        // never belong to two pairs at once.
+        doc.pairBodies(idA, idC);
+        check(doc.twinOf(idA) == idC, "re-pairing A moves its pairing to the new partner");
+        check(doc.twinOf(idC) == idA, "...both directions");
+        check(doc.twinOf(idB) == -1, "...and B's old pairing is gone, not left dangling");
+
+        // pairBodies() refuses nonsense rather than corrupting the map.
+        doc.pairBodies(idA, idA);
+        check(doc.twinOf(idA) == idC, "pairing a body with itself is a no-op");
+        doc.pairBodies(idB, 999999);
+        check(doc.twinOf(idB) == -1, "pairing against an unknown id is a no-op");
+
+        // Turning symmetry off unpairs everything, without a checkpoint.
+        check(!doc.canUndo(), "nothing has been checkpointed yet");
+        doc.setSymmetry(false, yz);
+        check(!doc.symmetryOn(), "setSymmetry(false, ...) turns it off");
+        check(doc.twinOf(idA) == -1 && doc.twinOf(idC) == -1,
+              "and unpairs A/C - turning symmetry off drops every pairing");
+        check(!doc.canUndo(), "...without taking a checkpoint - this is a mode switch, not an edit");
+
+        // Re-enabling does NOT re-pair.
+        doc.setSymmetry(true, yz);
+        check(doc.twinOf(idA) == -1, "re-enabling symmetry does not restore the old pairing");
+
+        // removeSolid() keeps the pairing map consistent: a removed body's
+        // twin must read back unpaired, not point at a ghost id.
+        doc.pairBodies(idA, idC);
+        doc.removeSolid(idA);
+        check(doc.twinOf(idC) == -1,
+              "removing one half of a pair leaves the surviving half unpaired");
+    }
+
+    // --- DocumentModel symmetry: undo/redo restore the pairing map ----------
+    {
+        DocumentModel doc;
+        const gp_Pln yz(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0));
+        const int idA = doc.addSolid(ModelingOps::makeBox(gp_Pnt(10.0, 0.0, 0.0), 5.0, 5.0, 5.0));
+        const int idB = doc.addSolid(ModelingOps::makeBox(gp_Pnt(-15.0, 0.0, 0.0), 5.0, 5.0, 5.0));
+        doc.setSymmetry(true, yz);
+
+        doc.checkpoint();
+        doc.pairBodies(idA, idB);
+        check(doc.twinOf(idA) == idB, "the pair exists after the checkpointed commit");
+
+        check(doc.undo(), "undo succeeds");
+        check(doc.twinOf(idA) == -1 && doc.twinOf(idB) == -1,
+              "...and restores the PRE-pairing state - pairing is snapshotted by undo State "
+              "exactly like a name, not treated as presentation state the way visibility is");
+
+        check(doc.redo(), "redo succeeds");
+        check(doc.twinOf(idA) == idB, "...and brings the pairing back");
+    }
+
+    // --- DocumentModel symmetry: toSerialized()/fromSerialized() round trip -
+    {
+        DocumentModel doc;
+        const gp_Pln plane(gp_Pnt(3.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0));
+        doc.setSymmetry(true, plane);
+
+        const int idA = doc.addSolid(ModelingOps::makeBox(gp_Pnt(10.0, 0.0, 0.0), 5.0, 5.0, 5.0));
+        const int idB = doc.addSolid(ModelingOps::makeBox(gp_Pnt(-15.0, 0.0, 0.0), 5.0, 5.0, 5.0));
+        const int idC = doc.addSolid(ModelingOps::makeBox(gp_Pnt(40.0, 0.0, 0.0), 3.0, 3.0, 3.0));
+        doc.setItemName(idA, "Left Wing");
+        doc.setItemName(idB, "Right Wing");
+        doc.setItemName(idC, "Centre Post");
+        doc.pairBodies(idA, idB);
+
+        DocumentModel::DocumentMeta meta;
+        const FurnifySerial::SerializedDocument serial = doc.toSerialized(meta);
+        check(meta.symmetryOn, "toSerialized carries symmetryOn");
+        check(meta.symmetryPlane.Location().Distance(plane.Location()) < 1.0e-9,
+              "and the plane's origin");
+        check(meta.symmetryPlane.Axis().Direction().IsEqual(plane.Axis().Direction(), 1.0e-9),
+              "and the plane's normal");
+        check(meta.symmetryPairs.size() == 1, "exactly one pair - the unpaired body adds nothing");
+
+        DocumentModel loaded;
+        check(loaded.fromSerialized(serial, meta), "fromSerialized succeeds");
+        check(loaded.symmetryOn(), "the loaded document is symmetric");
+        check(loaded.symmetryPlane().Location().Distance(plane.Location()) < 1.0e-9,
+              "with the same plane origin");
+
+        // Matched by NAME, not by id - fromSerialized() assigns fresh ids.
+        int loadedA = 0, loadedB = 0, loadedC = 0;
+        for (const DocumentModel::Solid& s : loaded.solids()) {
+            if (s.name == "Left Wing") loadedA = s.id;
+            if (s.name == "Right Wing") loadedB = s.id;
+            if (s.name == "Centre Post") loadedC = s.id;
+        }
+        check(loadedA != 0 && loadedB != 0 && loadedC != 0, "all three bodies came back");
+        check(loaded.twinOf(loadedA) == loadedB,
+              "the pairing survives the round trip, translated onto the fresh ids");
+        check(loaded.twinOf(loadedC) == -1, "the unpaired body stays unpaired");
+
+        // Re-serializing the round-tripped document reproduces the same
+        // symmetry block - the same "byte-identical" discipline the shape
+        // blob itself is held to a few blocks up.
+        DocumentModel::DocumentMeta meta2;
+        loaded.toSerialized(meta2);
+        check(meta2.symmetryOn == meta.symmetryOn, "on/off survives a second round trip");
+        check(meta2.symmetryPairs.size() == meta.symmetryPairs.size(),
+              "and the pair count");
+    }
+
+    // --- DocumentModel symmetry: a version saved before this task loads as
+    // symmetry-off, and setSymmetry(false) leaves no pairs to serialize -----
+    {
+        DocumentModel doc;
+        doc.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 5.0, 5.0, 5.0));
+        DocumentModel::DocumentMeta meta;
+        doc.toSerialized(meta);
+        check(!meta.symmetryOn, "a document that never turned symmetry on serializes it off");
+        check(meta.symmetryPairs.empty(), "and carries no pairs");
+
+        // A meta with the symmetry fields left at their DEFAULTS - exactly
+        // what a pre-Task-4 manifest decodes to, since FurnitureStore's
+        // reader leaves DocumentMeta untouched when the "symmetry" key is
+        // absent - must load as symmetry-off, per the brief's own ruling.
+        DocumentModel::DocumentMeta bareMeta;   // default-constructed: symmetryOn == false
+        FurnifySerial::SerializedDocument bareSerial;
+        bareSerial.bodies.push_back(ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 2.0, 2.0, 2.0));
+        bareMeta.bodyNames.push_back("Old Body");
+        bareMeta.bodyVisible.push_back(true);
+        DocumentModel preTask4;
+        check(preTask4.fromSerialized(bareSerial, bareMeta),
+              "a meta with no symmetry data (the pre-Task-4 shape) loads fine");
+        check(!preTask4.symmetryOn(),
+              "...and defaults to symmetry OFF, per the brief's future-proofing ruling");
+    }
+
+    // --- DocumentModel symmetry: restoreFrom() carries pairing and plane ----
+    {
+        DocumentModel doc;
+        const int before = doc.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 5.0, 5.0, 5.0));
+        doc.setItemName(before, "Before");
+        check(!doc.symmetryOn(), "the live document starts asymmetric");
+
+        DocumentModel version;
+        const gp_Pln versionPlane(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0));
+        version.setSymmetry(true, versionPlane);
+        const int vA = version.addSolid(ModelingOps::makeBox(gp_Pnt(10.0, 0.0, 0.0), 4.0, 4.0, 4.0));
+        const int vB = version.addSolid(ModelingOps::makeBox(gp_Pnt(-14.0, 0.0, 0.0), 4.0, 4.0, 4.0));
+        version.pairBodies(vA, vB);
+
+        doc.checkpoint();
+        doc.restoreFrom(version);
+        check(doc.symmetryOn(), "restoreFrom() carries the version's symmetry state");
+        check(doc.symmetryPlane().Axis().Direction().IsEqual(gp_Dir(1.0, 0.0, 0.0), 1.0e-9),
+              "...and its plane");
+        // restoreFrom() copies snapshot ids VERBATIM (unlike fromSerialized),
+        // so the version's own ids (vA, vB) are exactly what `doc` now holds.
+        check(doc.twinOf(vA) == vB, "...and the pairing, on the SAME ids restoreFrom() copied in");
+
+        check(doc.undo(), "one undo...");
+        check(!doc.symmetryOn(), "...restores the PRE-restore symmetry state (off)");
+        check(doc.contains(before), "...and the pre-restore body");
+    }
+
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;

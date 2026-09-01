@@ -14,6 +14,9 @@
 #include <QJsonValue>
 #include <QUuid>
 
+#include <gp_Dir.hxx>
+#include <gp_Pnt.hxx>
+
 namespace {
 
 // A body/outline's names + visibility as one JSON object:
@@ -58,6 +61,78 @@ bool jsonToItemMeta(const QJsonObject& obj, std::vector<std::string>& names, std
     names = std::move(parsedNames);
     visible = std::move(parsedVisible);
     return true;
+}
+
+// Task 1 reserved the "symmetry" manifest key; this task is what actually
+// writes and reads it: {"on": bool, "plane": {"origin": [x,y,z],
+// "normal": [x,y,z]}, "pairs": [[i,j], ...]}. Pairs are the SAME
+// position-based indices DocumentModel::DocumentMeta::symmetryPairs already
+// carries - see its own comment for why ids cannot be persisted directly.
+//
+// The plane is stored as origin + normal only, not a full placement the way
+// FurnifySerial stores an outline's plane - gp_Trsf::SetMirror(gp_Ax2) and
+// the straddle check both only ever read a gp_Pln's location and normal, so
+// there is nothing else here worth a third pair of numbers to round-trip.
+QJsonObject symmetryToJson(const DocumentModel::DocumentMeta& meta)
+{
+    QJsonObject obj;
+    obj[QStringLiteral("on")] = meta.symmetryOn;
+
+    const gp_Pnt origin = meta.symmetryPlane.Location();
+    const gp_Dir normal = meta.symmetryPlane.Axis().Direction();
+    QJsonObject planeObj;
+    planeObj[QStringLiteral("origin")] =
+        QJsonArray{origin.X(), origin.Y(), origin.Z()};
+    planeObj[QStringLiteral("normal")] =
+        QJsonArray{normal.X(), normal.Y(), normal.Z()};
+    obj[QStringLiteral("plane")] = planeObj;
+
+    QJsonArray pairsArr;
+    for (const std::pair<int, int>& pair : meta.symmetryPairs) {
+        pairsArr.append(QJsonArray{pair.first, pair.second});
+    }
+    obj[QStringLiteral("pairs")] = pairsArr;
+    return obj;
+}
+
+// The inverse. Absent entirely - every furniture created before this task,
+// and every version saved before it - decodes to symmetry OFF with
+// `meta` otherwise untouched (its DEFAULT plane), per the brief's own
+// future-proofing ruling: "loader must default symmetry-off when absent".
+// Never refuses the load outright; a corrupt or missing plane simply leaves
+// the default in place, and a corrupt pair entry is skipped - the rest of
+// the document is still good.
+void jsonToSymmetry(const QJsonObject& obj, DocumentModel::DocumentMeta& meta)
+{
+    if (!obj.contains(QStringLiteral("on"))) {
+        meta.symmetryOn = false;
+        return;
+    }
+    meta.symmetryOn = obj.value(QStringLiteral("on")).toBool(false);
+
+    const QJsonObject planeObj = obj.value(QStringLiteral("plane")).toObject();
+    const QJsonArray originArr = planeObj.value(QStringLiteral("origin")).toArray();
+    const QJsonArray normalArr = planeObj.value(QStringLiteral("normal")).toArray();
+    if (originArr.size() == 3 && normalArr.size() == 3) {
+        const double nx = normalArr.at(0).toDouble(1.0);
+        const double ny = normalArr.at(1).toDouble(0.0);
+        const double nz = normalArr.at(2).toDouble(0.0);
+        // A zero-magnitude normal is corrupt data, not a valid plane -
+        // gp_Dir's constructor throws on one, so this guards it rather than
+        // crashing on a hand-edited manifest.
+        if (nx * nx + ny * ny + nz * nz > 1.0e-12) {
+            const gp_Pnt origin(originArr.at(0).toDouble(0.0), originArr.at(1).toDouble(0.0),
+                                originArr.at(2).toDouble(0.0));
+            meta.symmetryPlane = gp_Pln(origin, gp_Dir(nx, ny, nz));
+        }
+    }
+
+    const QJsonArray pairsArr = obj.value(QStringLiteral("pairs")).toArray();
+    for (const QJsonValue& v : pairsArr) {
+        const QJsonArray pair = v.toArray();
+        if (pair.size() != 2) continue;
+        meta.symmetryPairs.push_back({pair.at(0).toInt(-1), pair.at(1).toInt(-1)});
+    }
 }
 
 }  // namespace
@@ -168,8 +243,10 @@ QString FurnitureStore::createFurniture(const QString& name)
     manifest[QStringLiteral("bodies")] = itemMetaToJson({}, {});
     manifest[QStringLiteral("outlines")] = itemMetaToJson({}, {});
     manifest[QStringLiteral("versions")] = QJsonArray();
-    // "symmetry" is deliberately absent - reserved for a later task to
-    // write; every reader here tolerates its absence.
+    // Task 1 reserved this key; Task 4 is what actually writes it. A fresh
+    // furniture starts symmetric-off, at DocumentModel's own default plane -
+    // exactly what DocumentModel::DocumentMeta{} already default-constructs.
+    manifest[QStringLiteral("symmetry")] = symmetryToJson(DocumentModel::DocumentMeta{});
 
     if (!writeManifestObject(id, manifest)) return QString();
 
@@ -196,6 +273,7 @@ bool FurnitureStore::saveFurniture(const QString& id, const DocumentModel& doc, 
     manifest[QStringLiteral("lastEdited")] = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
     manifest[QStringLiteral("bodies")] = itemMetaToJson(meta.bodyNames, meta.bodyVisible);
     manifest[QStringLiteral("outlines")] = itemMetaToJson(meta.outlineNames, meta.outlineVisible);
+    manifest[QStringLiteral("symmetry")] = symmetryToJson(meta);
     if (!writeManifestObject(id, manifest)) return false;
 
     // A null/empty thumbnail is not a failure - the caller may not have
@@ -240,6 +318,9 @@ bool FurnitureStore::loadFurniture(const QString& id, DocumentModel& doc, QStrin
                         meta.outlineVisible)) {
         return fail(QStringLiteral("the manifest's outline names/visibility are corrupt"));
     }
+    // Absent entirely for any furniture created before this task - decodes
+    // to symmetry OFF, never a refusal. See jsonToSymmetry()'s own comment.
+    jsonToSymmetry(manifest.value(QStringLiteral("symmetry")).toObject(), meta);
 
     // Scratch, then swap - never half-load, per the standing contract.
     DocumentModel scratch;
@@ -309,6 +390,11 @@ bool FurnitureStore::saveVersion(const QString& id, const QString& name, const D
     entry[QStringLiteral("file")] = file;
     entry[QStringLiteral("bodies")] = itemMetaToJson(meta.bodyNames, meta.bodyVisible);
     entry[QStringLiteral("outlines")] = itemMetaToJson(meta.outlineNames, meta.outlineVisible);
+    // A version snapshots the WHOLE document, per the plan's own ruling
+    // (pairings must survive a restore or a stale live document could break
+    // symmetry after an undo-of-restore) - so its symmetry state travels
+    // with it exactly as the current furniture's does.
+    entry[QStringLiteral("symmetry")] = symmetryToJson(meta);
     versionsArr.append(entry);
     manifest[QStringLiteral("versions")] = versionsArr;
     return writeManifestObject(id, manifest);
@@ -339,6 +425,10 @@ bool FurnitureStore::loadVersion(const QString& id, const QString& name, Documen
                             meta.outlineVisible)) {
             return false;
         }
+        // Absent for a version saved before this task existed - decodes to
+        // symmetry OFF, same rule as loadFurniture()'s own current-document
+        // read above.
+        jsonToSymmetry(entry.value(QStringLiteral("symmetry")).toObject(), meta);
 
         DocumentModel scratch;
         if (!scratch.fromSerialized(serial, meta)) return false;

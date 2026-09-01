@@ -214,6 +214,27 @@ public:
     static QString transformPastVerb(const gp_Trsf& delta);
     static QString transformRefusalText(const gp_Trsf& delta);
 
+    // --- symmetry (Milestone 3: live mirror twins) --------------------------
+    //
+    // The Symmetry action's own handler: checking it turns the mode on at
+    // WHATEVER plane document() already holds (the constructed default,
+    // world YZ through the origin, the first time this ever fires); the
+    // face-pick route below is the only thing that changes the plane.
+    // Unchecking it unpairs everything - see DocumentModel::setSymmetry()
+    // for why that carries no checkpoint but still marks the furniture
+    // dirty.
+    void setSymmetryEnabled(bool on);
+    bool symmetryEnabled() const { return myDocument.symmetryOn(); }
+
+    // "Set symmetry plane": the Lock to Face pick idiom, aimed at
+    // DocumentModel's plane instead of the sketch plane. Turns symmetry ON
+    // at `face`'s own outward-oriented plane - captured BY VALUE, the same
+    // rule lockToFace() follows and for the same reason (face indices are
+    // not stable across a rebuild). Refuses a non-flat face with a Failure
+    // toast; unlike lockToFace() this has no pending-outline conflict to
+    // refuse, since it does not touch the sketch plane at all.
+    bool setSymmetryPlaneFromFace(const TopoDS_Face& face);
+
     bool lockToFace(const TopoDS_Face& face);
     // Back to the ground plane. The ground plane is the default and is never
     // itself "locked", so this is not a toggle of the same state. Refused,
@@ -451,6 +472,12 @@ private slots:
     void onSelectionModeChanged();
     void onSelectionChanged();
     void onLockToFace();
+    // "Set symmetry plane": reads the current face selection and calls
+    // setSymmetryPlaneFromFace() - the Lock to Face idiom, one gizmo over.
+    // The checkable Symmetry action itself needs no slot of its own: its
+    // toggled(bool) connects straight to setSymmetryEnabled(), exactly as
+    // myAutosaveAction connects to setAutosaveEnabled().
+    void onSetSymmetryPlane();
     // A plain double-click on a body in face or edge selection mode: switch to
     // body selection and select that body, in one gesture. Routed through
     // mySolidSelectAction rather than straight at the viewport, so the rail
@@ -572,6 +599,30 @@ private:
     static bool transformIsScale(const gp_Trsf& delta);
     static bool transformIsRotation(const gp_Trsf& delta);
     void runBoolean(int kind);   // ModelingOps::BooleanKind as int, to keep it out of the header
+
+    // THE one place every pull/bevel/transform commit lands - see the task-4
+    // brief's own words: "if today they land in several places, this task's
+    // first refactor is to route them through one". Before this, all three
+    // hand-rolled their own `checkpoint(); replaceSolid(); displaySolid();`
+    // sequence, which is exactly three places the twin-follows rule could be
+    // forgotten as a fourth gizmo arrived.
+    //
+    // Takes the undo checkpoint, replaces `id`'s shape and redisplays it,
+    // then - if `id` has a mirror twin - replaces the twin too, with
+    // `ModelingOps::mirrorShape(newShape, myDocument.symmetryPlane())`, in
+    // the SAME checkpoint, so a single Ctrl+Z reverts both. `twinFollowed`
+    // reports whether that actually happened - false, and the twin left
+    // completely untouched, both when `id` is unpaired and on the (expected
+    // to be unreachable in practice) case the mirror itself fails, since a
+    // failed twin-mirror must never turn a successful primary edit into a
+    // reported failure.
+    //
+    // Callers still do their OWN gizmo cleanup (clearModelingPreview,
+    // clearPullArrow/clearBevelArrow, clearSelection) - that has to happen
+    // before the body they describe is replaced, and it differs per gizmo -
+    // so this owns only the part that is genuinely identical three times
+    // over: the checkpoint, the replace, and the twin.
+    void commitReplaceBody(int id, const TopoDS_Shape& newShape, bool& twinFollowed);
     // The one place "the camera was moved to a named direction" is recorded.
     // Every route to that - the four View menu entries and a click on the
     // axis gizmo - goes through here, so no route can record the event
@@ -740,6 +791,11 @@ private:
     QAction* myUnitsCentimetresAction = nullptr;
     QAction* myLockFaceAction = nullptr;
     QAction* myUnlockFaceAction = nullptr;
+    // Symmetry (Milestone 3) - menu-only, per the ledger note: the rail is
+    // at its height floor and a fourteenth chip is the rework CLAUDE.md
+    // already says it wants before it gets there.
+    QAction* mySymmetryAction = nullptr;
+    QAction* mySetSymmetryPlaneAction = nullptr;
     QAction* myAppearanceAction = nullptr;
     // File -> Save / Save automatically / Close furniture - see the public
     // methods above, which every one of these three triggers into.
