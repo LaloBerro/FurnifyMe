@@ -246,10 +246,8 @@ bool contourReachesBeyond(const BRepFilletAPI_LocalOperation& op,
 }
 
 // Put back everything `raw` removed outside the picked edges' own extents.
-// Refuses rather than approximating: a picked edge with no perpendicular
-// pair (curved, degenerate) cannot be clipped, and neither can a set of
-// edges whose extents already span the whole body - in both cases there is
-// no honest way to hand back a shape that bevels only what was asked for.
+// Refuses only where there is no honest answer at all: a picked edge with no
+// perpendicular pair (curved, degenerate) gives nothing to clip against.
 BooleanResult clipBevelToPickedEdges(const TopoDS_Shape& body, const TopoDS_Shape& raw,
                                      const std::vector<TopoDS_Edge>& requested,
                                      const std::string& what)
@@ -273,9 +271,19 @@ BooleanResult clipBevelToPickedEdges(const TopoDS_Shape& body, const TopoDS_Shap
         if (restore.IsNull() || countSolids(restore) == 0) break;
     }
 
+    // NOTHING OUTSIDE THE PICKED EXTENTS - so nothing to put back, and the
+    // kernel's own result is the answer. This is not a failure and must never
+    // be reported as one: one picked edge that spans the body in its own
+    // direction is enough to make the slabs cover it, which a Shift-selection
+    // on a box reaches in two clicks. Every propagated edge is then inside
+    // some picked edge's extent, and the shape that comes back is exactly the
+    // one this app shipped before the clip existed. Refusing here told the
+    // user to try a smaller size when no size could ever work - the geometry
+    // decides whether the slabs cover the body, not the radius. See the
+    // header.
     if (restore.IsNull() || countSolids(restore) == 0) {
-        out.error = what + ": the kernel spread this onto neighbouring edges and the "
-                           "picked edges leave nothing to put back";
+        out.ok = true;
+        out.shape = raw;
         return out;
     }
 
@@ -287,6 +295,24 @@ BooleanResult clipBevelToPickedEdges(const TopoDS_Shape& body, const TopoDS_Shap
     out.ok = true;
     out.shape = rejoined.shape;
     return out;
+}
+
+// Every requested edge, present in some contour the builder made? See
+// filletEdges()' header: Add() takes or drops each edge on its own, so a list
+// with one dropped edge still builds - and bevels the rest, silently.
+bool everyRequestedEdgeWasTaken(const BRepFilletAPI_LocalOperation& op,
+                                const std::vector<TopoDS_Edge>& requested)
+{
+    for (const TopoDS_Edge& edge : requested) {
+        bool taken = false;
+        for (int contour = 1; contour <= op.NbContours() && !taken; ++contour) {
+            for (int index = 1; index <= op.NbEdges(contour); ++index) {
+                if (op.Edge(contour, index).IsSame(edge)) { taken = true; break; }
+            }
+        }
+        if (!taken) return false;
+    }
+    return true;
 }
 
 // One body for fillet and chamfer both: they differ only in which OCCT
@@ -324,11 +350,23 @@ BooleanResult bevelEdgesWith(const TopoDS_Shape& body, const std::vector<TopoDS_
     try {
         Builder builder(body);
         for (const TopoDS_Edge& edge : edges) builder.Add(size, edge);
-        // A builder that took none of them would go on to hand back the body
-        // unchanged, which is the "failure surfaced as success" this file
-        // exists to prevent.
+        // ALL-OR-NOTHING, enforced here and nowhere else. NbContours() == 0
+        // alone catches only "took none of them": Add() decides per edge, so
+        // a three-edge list with one dropped leaves two contours, builds, and
+        // returns a body with two of the three bevelled - a partial result
+        // reported as a success, which is the exact shape of failure this
+        // file exists to prevent. Both cases carry combinationRefused,
+        // because the answer to them is a different edge selection and never
+        // a different size.
         if (builder.NbContours() == 0) {
+            out.combinationRefused = true;
             out.error = what + ": the kernel accepted none of these edges";
+            return out;
+        }
+        if (!everyRequestedEdgeWasTaken(builder, edges)) {
+            out.combinationRefused = true;
+            out.error = what + ": the kernel accepted only some of these edges, and a "
+                               "partial bevel is not an outcome this offers";
             return out;
         }
         const bool spread = contourReachesBeyond(builder, edges);

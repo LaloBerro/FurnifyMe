@@ -177,6 +177,10 @@ public:
     // accepts every gp_Trsf a gesture can build). The suite shows both once
     // through these, which is the only honest way to cover them.
     static QString bevelRefusalText(bool fillet);
+    // The refusal that is NOT about the size - a set of edges the kernel will
+    // only bevel some of. Separate copy because "try a smaller size" is false
+    // advice there: no size works. See ModelingOps' combinationRefused.
+    static QString bevelCombinationRefusalText(bool fillet);
 
     // Which of Move / Rotate / Scale a delta is, in the two forms the copy
     // needs - "Rotate" for a sentence that leads with the operation, "rotated"

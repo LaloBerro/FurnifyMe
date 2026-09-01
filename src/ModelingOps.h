@@ -33,6 +33,20 @@ struct BooleanResult {
     bool ok = false;
     TopoDS_Shape shape;
     std::string error;
+
+    // Set only by filletEdges/chamferEdges, and only on a refusal: true when
+    // what was refused is this COMBINATION of edges rather than the size
+    // asked for - the kernel took none of them, or took only some. Every
+    // other operation leaves it false.
+    //
+    // It exists because the two cases need opposite advice. "Try a smaller
+    // size" is the right sentence for a radius that would eat a neighbouring
+    // face; said about a combination the kernel will not bevel together it is
+    // simply false, because no size works, and the user shrinks the number
+    // until they give up. `error` cannot serve: it is written for this file,
+    // never shown, and a caller matching substrings of it would break the
+    // first time a sentence was reworded.
+    bool combinationRefused = false;
 };
 
 struct StepResult {
@@ -93,6 +107,18 @@ BooleanResult pullFace(const TopoDS_Shape& body, const TopoDS_Face& face,
 // or changes nothing at all, and the caller can rely on `!ok` implying
 // `shape.IsNull()`.
 //
+// That is ENFORCED, not merely intended, and the enforcement is not
+// `NbContours() > 0`. BRepFilletAPI's Add() accepts or drops each edge on its
+// own - a cylinder's seam edge, for one, is a perfectly ordinary straight
+// edge that yields no contour at all - so a three-edge list with one dropped
+// leaves two contours, builds happily, and would hand back a body with two of
+// the three bevelled and no word about the third. Every requested edge must
+// therefore turn up in some contour before the build is allowed to run, and
+// the refusal carries `combinationRefused` so the caller can say "try them
+// one at a time" instead of "try a smaller size". Contours are NOT one per
+// edge (two edges of one tangent chain share a contour, two far apart get
+// one each), so counting them cannot answer this.
+//
 // CONTAINMENT - the fix for the spreading bevel. BRepFilletAPI's Add() is
 // documented to build a CONTOUR by propagation: "the contour is composed of
 // edges of the shape which are tangential to one another and which delimit
@@ -116,17 +142,34 @@ BooleanResult pullFace(const TopoDS_Shape& body, const TopoDS_Face& face,
 // is REFUSED rather than answered with a shape that quietly bevels more than
 // was asked for.
 //
-// WHAT THE CLIP DOES NOT REMOVE, stated rather than hidden: at a corner where
+// WHEN THE CLIP HAS NOTHING TO PUT BACK, the raw kernel result stands. If the
+// picked edges' extents between them already cover the whole body - which one
+// edge spanning the body in its own direction is enough to do, and a
+// Shift-selection of two or three edges on a box reaches easily - then
+// `body minus the slabs` is empty and there is no material outside the picked
+// extents to restore. Every propagated edge is then inside some picked edge's
+// extent: material within the reach of what the user asked to bevel. Refusing
+// there was worse than useless, because the only sentence the UI had for it
+// was "try a smaller size" and NO size works - the geometry, not the number,
+// is what makes the slabs cover the body. So the call succeeds with what the
+// kernel built, which is exactly what this app shipped before the clip
+// existed. It is a weaker answer, not a wrong one, and it is bounded: the
+// clip still contains every case where there IS something to put back.
+//
+// WHAT THE CLIP DOES NOT REMOVE, stated rather than hidden. At a corner where
 // the picked edge meets its neighbour at anything other than a right angle,
 // the part of the propagated strip lying on the picked edge's OWN side of
-// that end plane survives, as a patch a fraction of the bevel size across. It
-// cannot be cut away without cutting the picked edge's own bevel short at
-// exactly the corner where it should run right up to the neighbour, and a
-// bevel that stops short of its own corner is the worse of the two. What the
-// clip removes is the whole-edge case the bug was about - a neighbouring edge
-// rounded along its entire length. gui_smoke pins this by counting only
-// strips longer than four radii, which is the difference between a rounded
-// edge and a corner.
+// that end plane survives. It is THIN but not SHORT: measured on a skew prism
+// whose faces meet at 80 degrees, r = 4, the remnant is a cylindrical sliver
+// about 6% of the operation's volume that runs the FULL LENGTH of the
+// unpicked corner edge - so on a 700 mm post it is a 700 mm sliver, not a
+// patch near the corner. It cannot be cut away without cutting the picked
+// edge's own bevel short at exactly the corner where it should run right up
+// to its neighbour, and a bevel that stops short of its own corner is the
+// worse of the two. What the clip does remove is the case the bug was about:
+// a neighbouring edge rounded at the FULL radius along its entire length,
+// which is what a user sees and reports. gui_smoke pins the difference by
+// counting only strips longer than four radii.
 BooleanResult filletEdges(const TopoDS_Shape& body,
                           const std::vector<TopoDS_Edge>& edges, double radius);
 BooleanResult chamferEdges(const TopoDS_Shape& body,

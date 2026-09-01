@@ -150,7 +150,7 @@ int g_checks = 0;
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 1181;
+constexpr int kCheckFloor = 1192;
 
 void check(bool condition, const QString& what)
 {
@@ -8000,6 +8000,104 @@ int main(int argc, char* argv[])
             }
         }
 
+        // --- an edge on each of TWO bodies raises no arrow ------------------
+        //
+        // The predicate refuses it (one gesture is one kernel build on one
+        // shape, and there is no honest way to draw one arrow for two), and
+        // until now nothing checked that it does. Shift-click makes this
+        // selection in two clicks, so it is a state a user reaches by
+        // accident rather than a theoretical one.
+        {
+            const int spanBodiesBefore = static_cast<int>(window.document().count());
+            check(buildBody(window, 0.24, 0.36, 0.44, 0.58, 30.0),
+                  "a second body, beside the first, for the two-body probe");
+            const int secondId = window.document().solids().empty()
+                                     ? -1
+                                     : window.document().solids().back().id;
+            view->fitAll();
+            settle(250);
+
+            auto edgeBelongsTo = [&window](int id, const TopoDS_Edge& edge) {
+                if (edge.IsNull() || id <= 0) return false;
+                const TopoDS_Shape shape = window.document().shapeOf(id);
+                if (shape.IsNull()) return false;
+                for (TopExp_Explorer it(shape, TopAbs_EDGE); it.More(); it.Next())
+                    if (it.Current().IsSame(edge)) return true;
+                return false;
+            };
+            // One clickable edge on each body, found by clicking - the same
+            // rule the probe above uses, because an edge behind a body
+            // projects to a perfectly reachable pixel and picks something
+            // else entirely.
+            auto findEdgeOn = [&](int id, QPoint& at) {
+                const TopoDS_Shape shape = window.document().shapeOf(id);
+                for (TopExp_Explorer it(shape, TopAbs_EDGE); it.More(); it.Next()) {
+                    const TopoDS_Edge candidate = TopoDS::Edge(it.Current());
+                    gp_Pnt centre;
+                    gp_Dir outward;
+                    if (!ModelingOps::bevelAxis(shape, candidate, centre, outward)) continue;
+                    if (outward.Z() < 0.3) continue;
+                    QPoint pixel;
+                    if (!view->projectToScreen(centre, pixel)) continue;
+                    if (!view->rect().adjusted(40, 40, -40, -40).contains(pixel)) continue;
+                    view->clearSelection();
+                    settle(60);
+                    clickAt(view, QPointF(pixel));
+                    settle(120);
+                    if (view->selectedEdge().IsNull() ||
+                        !view->selectedEdge().IsSame(candidate))
+                        continue;
+                    at = pixel;
+                    return true;
+                }
+                return false;
+            };
+
+            QPoint onFirst, onSecond;
+            const bool bothFound =
+                findEdgeOn(multiId, onFirst) && findEdgeOn(secondId, onSecond);
+            check(bothFound,
+                  "one clickable edge found on each of the two bodies, so the two checks "
+                  "below cannot vanish quietly");
+            if (bothFound) {
+                view->clearSelection();
+                settle(80);
+                clickAt(view, QPointF(onFirst));
+                settle(150);
+                check(view->hasBevelArrow(),
+                      "one edge on one body raises the arrow, as ever");
+                clickAt(view, QPointF(onSecond), Qt::ShiftModifier);
+                settle(200);
+                check(view->selectedEdges().size() == 2,
+                      QStringLiteral("Shift-clicking an edge on the OTHER body still "
+                                     "accumulates it (%1 selected)")
+                          .arg(int(view->selectedEdges().size())));
+                check(edgeBelongsTo(multiId, view->selectedEdges().front()) !=
+                          edgeBelongsTo(secondId, view->selectedEdges().front()),
+                      "and the two really are on different bodies, so this is the mixed "
+                      "case and not two edges of one");
+                check(!view->hasBevelArrow(),
+                      "but the arrow goes: one gesture is one build on one body, and there "
+                      "is no honest arrow for a selection spanning two");
+                BevelArrow* spanning = window.findChild<BevelArrow*>();
+                check(spanning == nullptr || !spanning->isVisible(),
+                      "and its value chip goes with it");
+            }
+
+            view->clearSelection();
+            settle(100);
+            trigger(window, QStringLiteral("Select Bodies"));
+            settle(150);
+            view->setSelectedSolids({secondId});
+            settle(150);
+            trigger(window, QStringLiteral("Delete Selected"));
+            settle(200);
+            check(static_cast<int>(window.document().count()) == spanBodiesBefore,
+                  "and the two-body probe takes its own body away again");
+            trigger(window, QStringLiteral("Select Edges"));
+            settle(150);
+        }
+
         // Leave the document as this block found it.
         trigger(window, QStringLiteral("Select Bodies"));
         settle(150);
@@ -8741,6 +8839,31 @@ int main(int argc, char* argv[])
             constexpr int kCopyStamp = 1000000;
             copyHost->show(MainWindow::bevelRefusalText(false), Toast::Kind::Failure, false,
                            kCopyStamp);
+            settle(60);
+            // The OTHER bevel refusal - the one for a set of edges the kernel
+            // will only bevel some of. Reachable in the app only from a
+            // selection that geometry, not this suite, decides is possible,
+            // so it is shown here or it is swept by nothing at all. Both
+            // halves, because only one of the two is ever the live one.
+            check(!MainWindow::bevelCombinationRefusalText(true).endsWith(QLatin1Char('.')) &&
+                      !MainWindow::bevelCombinationRefusalText(false)
+                           .endsWith(QLatin1Char('.')),
+                  "the combination refusal ends without a period, like every other failure "
+                  "sentence in this app");
+            check(MainWindow::bevelCombinationRefusalText(true).contains(QChar(0x2014)) &&
+                      MainWindow::bevelCombinationRefusalText(true)
+                          .contains(QStringLiteral("one at a time")),
+                  QStringLiteral("and it asks for a different SELECTION rather than a "
+                                 "smaller size, which no size would fix (\"%1\")")
+                      .arg(MainWindow::bevelCombinationRefusalText(true)));
+            check(!MainWindow::bevelCombinationRefusalText(true).contains(
+                      QStringLiteral("smaller size")),
+                  "and never repeats the size advice the other sentence gives");
+            copyHost->show(MainWindow::bevelCombinationRefusalText(true),
+                           Toast::Kind::Failure, false, kCopyStamp);
+            settle(60);
+            copyHost->show(MainWindow::bevelCombinationRefusalText(false),
+                           Toast::Kind::Failure, false, kCopyStamp);
             settle(60);
             copyHost->show(MainWindow::transformRefusalText(rotated), Toast::Kind::Failure,
                            false, kCopyStamp);

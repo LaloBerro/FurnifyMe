@@ -533,19 +533,36 @@ the slab between the two planes perpendicular to that edge at its endpoints. Pro
 *enters and leaves through those endpoints*, which is why that is containment and not an
 approximation — the volume removed comes back to the single-edge formula to six figures.
 The clip runs **only when a spread is detected**, so the ordinary case takes the plain
-kernel path. What it cannot remove is stated on the header: at a corner that is not a right
-angle, the part of the propagated strip on the picked edge's own side of the end plane
-survives as a patch a fraction of the bevel size across — cutting it would cut the picked
-edge's bevel short exactly where it should meet its neighbour. `gui_smoke` therefore counts
-only strips longer than four radii, which is the difference between a rounded edge and a
-corner.
+kernel path.
+
+Two limits, both on the header where callers read them, both found by review rather than by
+the suite. **When the picked extents already cover the body there is nothing to put back**,
+and the raw kernel result stands rather than being refused — one picked edge spanning the
+body in its own direction is enough, which a Shift-selection on a box reaches in two clicks,
+and refusing there told the user to "try a smaller size" when *no* size could work, because
+the geometry and not the radius decides whether the slabs cover the body. And the residual
+at a non-right-angled corner is **thin but not short**: on a skew prism at 80°, r=4, it is
+~6% of the operation's volume running the **full length** of the unpicked edge, so a 700 mm
+post gets a 700 mm sliver. Cutting it would cut the picked edge's own bevel short exactly
+where it should meet its neighbour. What the clip *does* remove is the case users report —
+a neighbouring edge rounded at the full radius along its whole length — and `gui_smoke`
+pins the difference by counting only strips longer than four radii.
 
 **Multi-edge bevels are one gesture, one build, one checkpoint, one toast.** Shift-click
 accumulates edges (`AIS_SelectionScheme_XOR`, the additive body pick's own path);
 `filletEdges`/`chamferEdges` take a `std::vector<TopoDS_Edge>` and the one-edge spellings
 delegate to them, so there is one implementation of every refusal. The refusal is
 **all-or-nothing** — one foreign, null or unbuildable edge refuses the whole call, because
-a partial bevel leaves the user working out which edges took. The arrow stands on the edge
+a partial bevel leaves the user working out which edges took. That is *enforced*, and
+`NbContours() > 0` is not the enforcement: `Add()` takes or drops each edge on its own (a
+cylinder's seam edge is an ordinary straight edge that yields no contour), so a three-edge
+list with one dropped leaves two contours and would build a body with two of the three
+bevelled. Every requested edge must appear in some contour before the build runs. Contours
+are **not** one per edge — two edges of one tangent chain share one, two far apart get one
+each — so counting them cannot answer it. A refusal of the *combination* rather than the
+size carries `BooleanResult::combinationRefused`, and the UI has a second sentence for it:
+"try them one at a time", because "try a smaller size" is false advice there — no size
+works, and the user shrinks the number until they give up. The arrow stands on the edge
 picked **last**, which `OcctViewWidget` has to *remember* (`myLastPickedEdge`, validated
 against the live selection on every read): OCCT's `InitSelected` order is the context's,
 not the user's. The chip names the count only when there is one — `Fillet — 3 edges`, with

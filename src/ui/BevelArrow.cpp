@@ -180,9 +180,24 @@ void BevelArrow::refresh()
 
 bool BevelArrow::sameEdges(const std::vector<TopoDS_Edge>& edges) const
 {
+    // As SETS, not as sequences. The order is OCCT's - these come from
+    // AIS_InteractiveContext's own selection iteration, which is under no
+    // obligation to hand the same edges back in the same order twice. A
+    // positional comparison would report "different" for a selection nothing
+    // had happened to, which restarts the gesture: the size field is zeroed,
+    // a preview the user was judging vanishes, and none of it is visible in a
+    // test that only ever selects in one order.
     if (edges.size() != myEdges.size()) return false;
-    for (std::size_t i = 0; i < edges.size(); ++i) {
-        if (!edges[i].IsSame(myEdges[i])) return false;
+
+    std::vector<bool> matched(myEdges.size(), false);
+    for (const TopoDS_Edge& edge : edges) {
+        bool found = false;
+        for (std::size_t i = 0; i < myEdges.size() && !found; ++i) {
+            if (matched[i] || !edge.IsSame(myEdges[i])) continue;
+            matched[i] = true;   // one-to-one, so a repeat cannot pair twice
+            found = true;
+        }
+        if (!found) return false;
     }
     return true;
 }

@@ -1775,6 +1775,19 @@ QString MainWindow::bevelRefusalText(bool fillet)
                        "would eat a neighbouring face. Try a smaller size");
 }
 
+QString MainWindow::bevelCombinationRefusalText(bool fillet)
+{
+    // The OTHER refusal, and the reason it needed its own sentence: the size
+    // is not what was turned down here, so telling the user to shrink it
+    // sends them round a loop with no exit. What changes the outcome is the
+    // SELECTION, so that is what the sentence asks for. No trailing period,
+    // em dash between the clauses, like every other failure in this app.
+    return fillet ? tr("These edges can't take a fillet together — the geometry "
+                       "engine will only round some of them. Try them one at a time")
+                  : tr("These edges can't take a chamfer together — the geometry "
+                       "engine will only flatten some of them. Try them one at a time");
+}
+
 QString MainWindow::transformOperationName(const gp_Trsf& delta)
 {
     return transformIsScale(delta)      ? tr("Scale")
@@ -1842,7 +1855,15 @@ bool MainWindow::bevelEdgesBy(const std::vector<TopoDS_Edge>& edges, double size
         // ModelingOps::filletEdge - so the sentence names the cause and the fix
         // rather than apologising.
         qWarning("Bevel failed: %s", result.error.c_str());
-        myToasts->show(bevelRefusalText(fillet), Toast::Kind::Failure, false);
+        // Two causes, two sentences. "Try a smaller size" is right for a
+        // radius the neighbouring face cannot give up, and FALSE for a
+        // combination of edges the kernel will not bevel together - no size
+        // works there, so a user following that advice shrinks the number
+        // until they give up. ModelingOps says which through
+        // combinationRefused; this never reads its error string.
+        myToasts->show(result.combinationRefused ? bevelCombinationRefusalText(fillet)
+                                                 : bevelRefusalText(fillet),
+                       Toast::Kind::Failure, false);
         statusBar()->showMessage(fillet ? tr("Fillet refused — nothing was changed")
                                         : tr("Chamfer refused — nothing was changed"));
         return false;
