@@ -8,6 +8,7 @@
 #include <BinTools_ShapeSet.hxx>
 #include <Standard_Failure.hxx>
 #include <TopAbs_ShapeEnum.hxx>
+#include <TopExp_Explorer.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
@@ -15,6 +16,28 @@
 namespace FurnifySerial {
 
 namespace {
+
+// Does `s` look like something this app would actually store as a body?
+// A fresh box or extrude (BRepPrimAPI_Make*) hands back a bare
+// TopAbs_SOLID; a boolean result does not - BRepAlgoAPI_BooleanOperation's
+// own Shape(), even for a single topologically-connected result, is a
+// TopAbs_COMPOUND (confirmed empirically against this app's own
+// applyBoolean/pullFace/filletEdges paths, not merely assumed), and
+// ShapeUpgrade_UnifySameDomain does not unwrap that container. So both
+// top-level types are legitimate - but what an in-range-but-wrong shape-set
+// index can also land on is a lone sub-shape from BinTools_ShapeSet's
+// shared pool (a stray vertex or edge left over from some face's own
+// topology), and THAT must never pass as a body. Requiring a
+// COMPOUND/COMPSOLID to actually contain at least one TopAbs_SOLID is what
+// tells the two apart; a bare SOLID needs no further check.
+bool looksLikeABody(const TopoDS_Shape& s)
+{
+    const TopAbs_ShapeEnum type = s.ShapeType();
+    if (type == TopAbs_SOLID) return true;
+    if (type != TopAbs_COMPSOLID && type != TopAbs_COMPOUND) return false;
+    for (TopExp_Explorer it(s, TopAbs_SOLID); it.More(); it.Next()) return true;
+    return false;
+}
 
 void putPlane(std::ostream& out, const gp_Pln& plane)
 {
@@ -165,8 +188,12 @@ SerialResult readShapes(std::istream& in, SerializedDocument& doc)
         if (!in.good() && !in.eof()) {
             return {false, "truncated shape data"};
         }
-        for (const TopoDS_Shape& s : result.bodies) {
-            if (s.IsNull()) return {false, "a decoded body shape is null - file is corrupt"};
+        for (std::size_t i = 0; i < result.bodies.size(); ++i) {
+            const TopoDS_Shape& s = result.bodies[i];
+            if (s.IsNull() || !looksLikeABody(s)) {
+                return {false, "decoded body at index " + std::to_string(i) +
+                                   " is not a solid body - file is corrupt"};
+            }
         }
         for (const TopoDS_Shape& s : result.outlineFaces) {
             if (s.IsNull() || s.ShapeType() != TopAbs_FACE) {

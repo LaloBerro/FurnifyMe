@@ -15,6 +15,7 @@
 #include <string>
 
 #include <BinTools.hxx>
+#include <BinTools_ShapeSet.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
@@ -174,6 +175,41 @@ int main()
         check(doc.bodies.empty(), "and leaves `doc` empty");
     }
 
+    // --- refusal: a body index that lands on the wrong sub-shape ------------
+    // Review finding (Task 1 fix round 1): the body loop only checked
+    // IsNull(), while the outline loop already checked ShapeType() == FACE.
+    // An IN-RANGE index that happens to point at a face/edge/vertex from
+    // BinTools_ShapeSet's shared sub-shape pool - rather than at a top-level
+    // body - passed straight through as a "body" and would have reached
+    // DocumentModel::addSolid unchecked: a corrupt file surfacing as a
+    // successful load. Built by hand-assembling a stream with the SAME
+    // primitives writeShapes uses (exactly like the future-format case
+    // above), but pointing the one recorded body index at a FACE that was
+    // added to the same shape set, never at the SOLID that was also added.
+    {
+        BinTools_ShapeSet shapeSet;
+        const TopoDS_Shape solid = ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 10.0, 10.0, 10.0);
+        const TopoDS_Shape face = makeSquareFace(0.0, 0.0, 10.0, ground);
+        shapeSet.Add(solid);
+        const int faceIndex = shapeSet.Add(face);
+
+        std::ostringstream out(std::ios::binary);
+        out.write(FurnifySerial::kMagic, 8);
+        BinTools::PutInteger(out, FurnifySerial::kFormatVersion);
+        BinTools::PutInteger(out, 1);  // bodyCount = 1
+        BinTools::PutInteger(out, 0);  // outlineCount = 0
+        BinTools::PutInteger(out, faceIndex);  // the corruption: a FACE claimed as the body
+        shapeSet.Write(out);
+
+        FurnifySerial::SerializedDocument doc;
+        std::istringstream in(out.str(), std::ios::binary);
+        const FurnifySerial::SerialResult result = FurnifySerial::readShapes(in, doc);
+        check(!result.ok,
+              "readShapes refuses a body index that resolves to a face, not a solid");
+        check(!result.error.empty(), "and explains why");
+        check(doc.bodies.empty(), "and leaves `doc` empty rather than handing back a fake body");
+    }
+
     // --- DocumentModel: names are stored per item, not just generated -------
     {
         DocumentModel doc;
@@ -186,6 +222,29 @@ int main()
         check(doc.setItemName(outlineId, "Base Outline"), "setItemName renames an outline too");
         check(doc.outlineNameOf(outlineId) == "Base Outline", "and it sticks");
         check(!doc.setItemName(99999, "Nope"), "setItemName refuses an unknown id");
+    }
+
+    // --- DocumentModel: names ARE snapshotted by the existing undo State ----
+    // The brief's own claim ("snapshotted by the existing undo State") had
+    // no assertion pinning it - review finding, Task 1 fix round 1. Unlike
+    // visibility (deliberately EXCLUDED from State, checked just below),
+    // a name is document content: setItemName -> checkpoint -> rename again
+    // -> undo must restore the FIRST name, not merely undo the structural
+    // change around it.
+    {
+        DocumentModel doc;
+        const TopoDS_Shape box = ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 3.0, 3.0, 3.0);
+        const int id = doc.addSolid(box);
+        doc.setItemName(id, "First Name");
+
+        doc.checkpoint();
+        doc.setItemName(id, "Second Name");
+        check(doc.nameOf(id) == "Second Name", "the rename after the checkpoint sticks");
+
+        check(doc.undo(), "undo succeeds");
+        check(doc.nameOf(id) == "First Name",
+              "and restores the name as it stood AT the checkpoint - names are "
+              "document state, not presentation state");
     }
 
     // --- DocumentModel: visibility is presentation state, not undo-tracked --
