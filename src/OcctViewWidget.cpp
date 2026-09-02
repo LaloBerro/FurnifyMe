@@ -817,25 +817,6 @@ bool OcctViewWidget::advanceAxisDrag(AxisDrag& drag, const gp_Lin& axis, const Q
     return true;
 }
 
-// Task 5 fix round 1: SlimAxisManipulator, a subclass that widened access to
-// AIS_Manipulator's protected `myAxes[3]` so Axis::SetAxisRadius() (public on
-// Axis, confirmed reachable this way) could be driven from here, was BUILT
-// and MEASURED against real Dump pixels - three independent methodologies,
-// several scale factors, at points OCCT's own hover detection confirmed were
-// genuinely on the X translation arm. Every measurement moved the WRONG way:
-// the arm's rendered cross-section GREW as the radius shrank (34 px stock to
-// 40 px at a 0.3 scale to 80 px at 0.02, a reproducible, monotonic trend, not
-// noise), most likely because the shrinking shaft was revealing an adjacent
-// manipulator part - the rotation ring or the hub cluster - that shares the
-// exact same uniform matte material this file already applies, so a thinner
-// shaft did not read as "less grey" anywhere the probe could isolate it.
-// Reverted rather than shipped: CLAUDE.md's zoom-persistence lesson is to
-// trust a measured pixel over a setter's own claim, and here the measurement
-// - taken seriously, not skipped - said the setter's name did not describe
-// what actually reached the screen. The manipulator therefore keeps OCCT's
-// stock proportions as well as its stock per-axis hues; see the colour
-// paragraph below for the boundary that IS real and holds regardless.
-
 void OcctViewWidget::attachManipulator(int solidId)
 {
     initializeViewer();
