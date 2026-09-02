@@ -465,8 +465,15 @@ private slots:
     void onIntersect();
 
     void onDeleteSelected();
+    void onRenameSelected();
     void onUndo();
     void onRedo();
+
+    // The Items drawer's own rename gesture (double-click or F2) landed on a
+    // row - see ItemsPanel::renameCommitted(). One checkpoint, one setItemName
+    // call, one Note toast with Undo - the shape every other checkpointed
+    // commit in this file follows.
+    void onItemRenameCommitted(int id, bool isOutline, QString newName);
 
     void onExportStep();
     void onSelectionModeChanged();
@@ -657,6 +664,17 @@ private:
     // a Failure is not this preference's to suppress.
     void setShowNotifications(bool show);
 
+    // View -> Show bottom bar. Same shape as setShowNotifications() - stores
+    // the preference under the same guard, calls updateActions(), which is
+    // what derives statusBar()'s visibility from it (the same
+    // appStateChanged-driven block that derives the items/versions/appearance
+    // drawers' own visibility from their actions, so a QWidget::show() this
+    // file did not intend to survive cannot leave the bar stuck on). It hides
+    // only the BAR - a Failure toast is unrelated chrome, parented to
+    // OcctViewWidget rather than to the status bar, and stays reachable
+    // exactly as CLAUDE.md's never-silent-failure law requires.
+    void setShowBottomBar(bool show);
+
     // Builds myInitScreen and wires its two signals - see the header for why
     // it is a state rather than a dialog. Called once, from the
     // constructor, after buildOverlay() so it can be raised above every
@@ -780,6 +798,13 @@ private:
     QAction* myEdgeSelectAction = nullptr;
     QAction* mySnapAction = nullptr;
     QAction* myDeleteAction = nullptr;
+    // F2, and (like Delete) two meanings decided in ONE place - updateActions().
+    // Unlike Delete, the two meanings never fall back on each other: renaming
+    // is a single-item gesture (InlineRename edits one name), so this is
+    // enabled for exactly one selected body, or for the waiting outline when
+    // no body is selected - never for a multi-body selection, where Delete
+    // stays available but this does not.
+    QAction* myRenameAction = nullptr;
     QAction* myUndoAction = nullptr;
     QAction* myRedoAction = nullptr;
     QAction* myItemsPanelAction = nullptr;
@@ -812,6 +837,17 @@ private:
     // What the stored setting said, read in the constructor before any action
     // exists so the View entry is built already ticked correctly. Default true.
     bool myShowNotifications = true;
+    // Checkable, and the single source of the bottom bar's own visibility,
+    // exactly as myItemsPanelAction is for the drawer - statusBar()'s shown
+    // state is DERIVED from this action's checked state, both directions, in
+    // the same appStateChanged-driven block that derives the drawers' own.
+    QAction* myBottomBarAction = nullptr;
+    // What the stored setting said, read in the constructor before any action
+    // exists, on the same terms as myShowNotifications above. Default true -
+    // an app that started with no status bar would look broken to a
+    // first-time user, the same reasoning myShowNotifications's own comment
+    // gives.
+    bool myShowBottomBar = true;
     // What the stored setting said, read in the constructor before the
     // viewport exists and applied the moment it does. A plain bool rather
     // than a second read, because QSettings is touched once per preference

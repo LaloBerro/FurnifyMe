@@ -299,6 +299,12 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         myShowNotifications =
             settings.value(QStringLiteral("showNotifications"), true).toBool();
 
+        // View -> Show bottom bar. Same guard, same "read before
+        // buildActions()" reason as the notifications preference just above:
+        // the View entry's initial checked state has to agree with what was
+        // last chosen. Default ON, for the same reason.
+        myShowBottomBar = settings.value(QStringLiteral("showBottomBar"), true).toBool();
+
         // File -> Save automatically. Same guard, same "read before
         // buildActions()" reason: the menu entry's initial checked state has
         // to agree with what was last chosen rather than being corrected
@@ -412,6 +418,11 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
             myAppearancePanel->setVisible(myAppearanceAction->isChecked());
         if (myVersionsPanel)
             myVersionsPanel->setVisible(myVersionsPanelAction->isChecked());
+        // The status bar's own shown state, on the same derived-not-stored
+        // terms - View -> Show bottom bar's checked state IS the answer,
+        // never a one-shot hide()/show() called from the toggle handler
+        // alone.
+        if (myBottomBarAction) statusBar()->setVisible(myBottomBarAction->isChecked());
         if (myOverlay) myOverlay->relayout();
     });
 
@@ -450,6 +461,11 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
             [this](int id) { selectOutline(id); });
     connect(myView, &OcctViewWidget::selectionChanged, this,
             [this] { myItemsPanel->showSelection(myView->selectedSolidIds()); });
+    // A row's rename gesture (double-click, or F2 through onRenameSelected())
+    // committed. MainWindow does the checkpoint/setItemName/toast, exactly as
+    // the panel's own header says - see onItemRenameCommitted().
+    connect(myItemsPanel, &ItemsPanel::renameCommitted, this,
+            &MainWindow::onItemRenameCommitted);
 
     // The Items rail button, the menu entry and Ctrl+Alt+S all drive the one
     // action, and the drawer's shown state is read off that action rather
@@ -639,6 +655,15 @@ void MainWindow::buildActions()
     myDeleteAction->setToolTip(tr("Delete the selected bodies (Del)"));
     connect(myDeleteAction, &QAction::triggered, this, &MainWindow::onDeleteSelected);
 
+    // Renames the Items drawer's selected row - see the header for why this
+    // is exactly one item, never a multi-body selection. F2 is the row's
+    // keyboard route; double-click on a row is its mouse route, wired
+    // straight into ItemsPanel rather than through this action (see
+    // buildOverlay()'s connection to renameCommitted()).
+    myRenameAction = new QAction(tr("Re&name..."), this);
+    myRenameAction->setShortcut(QKeySequence(Qt::Key_F2));
+    connect(myRenameAction, &QAction::triggered, this, &MainWindow::onRenameSelected);
+
     myUndoAction = new QAction(tr("&Undo"), this);
     myUndoAction->setShortcut(QKeySequence::Undo);
     myUndoAction->setToolTip(tr("Undo the last change to your bodies (Ctrl+Z)"));
@@ -701,6 +726,19 @@ void MainWindow::buildActions()
                                          "Off, only refusals appear. Undo stays on the "
                                          "Edit menu and on Ctrl+Z either way."));
     connect(myNotificationsAction, &QAction::toggled, this, &MainWindow::setShowNotifications);
+
+    // Whether the status bar along the bottom edge is shown at all. Checkable
+    // and persisted on the same terms as the preference above; a Failure
+    // toast is unrelated chrome (parented to OcctViewWidget, not to the
+    // status bar) and stays reachable with this off - the tooltip says so,
+    // because a control that hides a place messages appear has to say what
+    // still gets through.
+    myBottomBarAction = new QAction(tr("Show &bottom bar"), this);
+    myBottomBarAction->setCheckable(true);
+    myBottomBarAction->setChecked(myShowBottomBar);
+    myBottomBarAction->setToolTip(tr("Show or hide the status bar along the bottom edge\n"
+                                     "Off, a Failure toast still reaches you - only the bar hides."));
+    connect(myBottomBarAction, &QAction::toggled, this, &MainWindow::setShowBottomBar);
 
     // The projection toggle. Checkable, because the mode is state the user
     // chose and comes back next session; a QAction rather than a button that
@@ -830,6 +868,7 @@ QMenuBar* MainWindow::buildMenus()
     editMenu->addAction(myRedoAction);
     editMenu->addSeparator();
     editMenu->addAction(myDeleteAction);
+    editMenu->addAction(myRenameAction);
 
     QMenu* modelMenu = bar->addMenu(tr("&Model"));
     modelMenu->addAction(myExtrudeAction);
@@ -882,6 +921,7 @@ QMenuBar* MainWindow::buildMenus()
     viewMenu->addAction(myItemsPanelAction);
     viewMenu->addAction(myVersionsPanelAction);
     viewMenu->addAction(myNotificationsAction);
+    viewMenu->addAction(myBottomBarAction);
     viewMenu->addSeparator();
     QMenu* unitsMenu = viewMenu->addMenu(tr("Units"));
     unitsMenu->addAction(myUnitsMillimetresAction);
@@ -1367,6 +1407,21 @@ void MainWindow::updateActions()
             ? tr("Discard the outline that's waiting (Del) — nothing is selected, "
                  "so Delete takes the outline instead of a body")
             : tr("Delete the selected bodies (Del)"));
+    // Rename has the same two targets Delete does, but never falls back to a
+    // "whichever, in bulk" meaning: InlineRename edits exactly one name, so
+    // this is live for exactly one selected body, or for the waiting outline
+    // when nothing is selected - never for two or more bodies, where Delete
+    // stays enabled and this does not.
+    const bool renameTargetsOutline = selectedCount == 0 && hasPendingFace();
+    const bool canRename =
+        !mySketching && !atInit && (selectedCount == 1 || renameTargetsOutline);
+    myRenameAction->setEnabled(canRename);
+    myRenameAction->setToolTip(
+        renameTargetsOutline
+            ? tr("Rename the outline that's waiting (F2)")
+            : selectedCount == 1
+                  ? tr("Rename the selected body (F2)")
+                  : tr("Select exactly one body to rename it (F2)"));
     // Mid-sketch, Undo removes the last placed point (onUndo() reroutes to
     // onUndoSketchPoint); outside a sketch it undoes a document change. The
     // menu text stays "Undo" either way - the user's word for "take that
@@ -1478,6 +1533,21 @@ void MainWindow::setShowNotifications(bool show)
     // capability. updateActions() is what actually pushes the state onto the
     // toast host - this function only stores it - so the one place that
     // decides what is available stays the one place that says it.
+    updateActions();
+}
+
+void MainWindow::setShowBottomBar(bool show)
+{
+    myShowBottomBar = show;
+    if (myPersistProgress) {
+        QSettings settings;
+        settings.setValue(QStringLiteral("showBottomBar"), show);
+    }
+    // Not recordProgress(): a display preference, not a learned capability -
+    // the same reasoning setShowNotifications() gives just above. The actual
+    // statusBar()->setVisible() call lives in the appStateChanged-driven
+    // block this triggers, alongside every other drawer's own derived
+    // visibility, rather than here - see that block's own comment.
     updateActions();
 }
 
@@ -2469,6 +2539,45 @@ bool MainWindow::deletePendingOutline()
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
     return true;
+}
+
+void MainWindow::onRenameSelected()
+{
+    // The same target updateActions() just decided myRenameAction's enabled
+    // state from - asked the same way, rather than kept as a second copy of
+    // the rule (onDeleteSelected()'s own comment makes the identical
+    // argument for Delete's two targets).
+    const std::vector<int> ids = myView->selectedSolidIds();
+    if (ids.size() == 1) {
+        myItemsPanel->beginRenameForItem(ids.front(), /*isOutline=*/false);
+        return;
+    }
+    if (ids.empty() && hasPendingFace())
+        myItemsPanel->beginRenameForItem(pendingOutlineId(), /*isOutline=*/true);
+}
+
+void MainWindow::onItemRenameCommitted(int id, bool isOutline, QString newName)
+{
+    // InlineRename already trimmed the text and refused an empty/whitespace
+    // commit silently - see its header - so this is only ever reached with a
+    // real, non-empty name. The id is checked live BEFORE checkpointing,
+    // rather than after: this app is single-threaded and the drawer's row
+    // does not rebuild between opening the edit and committing it (refresh()'s
+    // signature comment explains why), so nothing can invalidate `id` between
+    // this check and setItemName() below - but checking first means a
+    // checkpoint is never pushed for a mutation that was always going to
+    // refuse, which a check-after-the-fact could not promise.
+    if (!(isOutline ? myDocument.containsOutline(id) : myDocument.contains(id))) return;
+
+    myDocument.checkpoint();
+    myDocument.setItemName(id, newName.trimmed().toStdString());
+    recordProgress("rename.used");
+
+    updateActions();
+    emit documentChanged();
+    const QString message = tr("Renamed to \"%1\"").arg(newName.trimmed());
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
 }
 
 void MainWindow::onUndo()

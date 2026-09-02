@@ -62,6 +62,12 @@ Spec graphite()
     s.gridMajor         = QColor("#4d4d55");
     s.axisX             = QColor("#7a4a4a");   // muted red
     s.axisY             = QColor("#4a7a4a");   // muted green
+    // The gizmo's own three hues - Unity's convention, byte-identical to what
+    // AxisGizmo carried as a local hardcoded array before this task. See
+    // Theme.h for why these are not named axisX/axisY/axisZ.
+    s.gizmoAxisX        = QColor("#e0564a");   // vivid red
+    s.gizmoAxisY        = QColor("#7fc84e");   // vivid green
+    s.gizmoAxisZ        = QColor("#4a80e0");   // vivid blue
     s.sketchPointMarker = QColor("#ff4fc3");   // magenta - unclaimed by any
                                                // other viewport hue
     s.danger            = QColor("#e0564a");   // invalid input, failures
@@ -212,6 +218,9 @@ const QVector<ColourToken>& colourTokens()
         {QStringLiteral("gridMajor"), &Spec::gridMajor},
         {QStringLiteral("axisX"), &Spec::axisX},
         {QStringLiteral("axisY"), &Spec::axisY},
+        {QStringLiteral("gizmoAxisX"), &Spec::gizmoAxisX},
+        {QStringLiteral("gizmoAxisY"), &Spec::gizmoAxisY},
+        {QStringLiteral("gizmoAxisZ"), &Spec::gizmoAxisZ},
         {QStringLiteral("highlightHover"), &Spec::highlightHover},
         {QStringLiteral("highlightSelected"), &Spec::highlightSelected},
         {QStringLiteral("sketchPointMarker"), &Spec::sketchPointMarker},
@@ -353,6 +362,9 @@ QColor gridMinor()    { return spec().gridMinor; }
 QColor gridMajor()    { return spec().gridMajor; }
 QColor axisX()        { return spec().axisX; }
 QColor axisY()        { return spec().axisY; }
+QColor gizmoAxisX()   { return spec().gizmoAxisX; }
+QColor gizmoAxisY()   { return spec().gizmoAxisY; }
+QColor gizmoAxisZ()   { return spec().gizmoAxisZ; }
 QColor sketchPointMarker() { return spec().sketchPointMarker; }
 QColor danger()       { return spec().danger; }
 QColor focusRing()    { return spec().focusRing; }

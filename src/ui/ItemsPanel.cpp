@@ -2,6 +2,7 @@
 
 #include "DocumentModel.h"
 #include "IconSet.h"
+#include "InlineRename.h"
 #include "Measure.h"
 #include "OcctViewWidget.h"
 #include "Theme.h"
@@ -10,6 +11,7 @@
 #include <QFontMetrics>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPainter>
 #include <QPushButton>
 #include <QVBoxLayout>
@@ -278,6 +280,14 @@ void ItemsPanel::refresh()
         auto* name = new QLabel(itemName, row);
         name->setStyleSheet(QStringLiteral("background: transparent; color: %1;")
                                 .arg(Theme::text().name()));
+        // Mouse-TRANSPARENT - Task 5's own fix, the same trap CLAUDE.md
+        // documents for InitCardWidget: Qt delivers a click to the DEEPEST
+        // widget under the cursor, not to an ancestor whose eventFilter
+        // happens to be watching for one, so without this a click landing on
+        // the name's own text - exactly where a double-click-to-rename
+        // gesture is aimed - never reached this row's eventFilter at all.
+        // Neither label has an interactive child of its own to lose by this.
+        name->setAttribute(Qt::WA_TransparentForMouseEvents);
         layout->addWidget(name, 1);
 
         auto* size = new QLabel(sizeText, row);
@@ -286,6 +296,7 @@ void ItemsPanel::refresh()
                                            "font-size: %2pt;")
                                 .arg(Theme::textMuted().name())
                                 .arg(Theme::labelFont().pointSizeF()));
+        size->setAttribute(Qt::WA_TransparentForMouseEvents);
         layout->addWidget(size);
 
         auto* eye = new QPushButton(row);
@@ -397,6 +408,26 @@ bool ItemsPanel::eventFilter(QObject* watched, QEvent* event)
             return true;
         }
     }
+    // Double-click renames - the FIRST press above already ran the single-
+    // click activation (select the body, or make the outline pending), which
+    // is harmless here: neither writes anything checkpointed, and refresh()
+    // does not rebuild rows over a selection-only change (see its own
+    // signature comment), so the row this rename opens over is still the
+    // live widget the press just fired on. The release that follows the
+    // dblclick is swallowed by the branch below, on the same terms every
+    // other release on a row already is.
+    if (event->type() == QEvent::MouseButtonDblClick) {
+        const QVariant outline = watched->property("outlineId");
+        if (outline.isValid()) {
+            beginRenameForItem(outline.toInt(), /*isOutline=*/true);
+            return true;
+        }
+        const QVariant id = watched->property("solidId");
+        if (id.isValid()) {
+            beginRenameForItem(id.toInt(), /*isOutline=*/false);
+            return true;
+        }
+    }
     // A widget that accepts a press must accept the release too - CLAUDE.md's
     // rule, learned from HintBalloon letting one through and having the
     // viewport re-pick underneath it. WA_NoMousePropagation on this panel
@@ -410,6 +441,17 @@ bool ItemsPanel::eventFilter(QObject* watched, QEvent* event)
     return QWidget::eventFilter(watched, event);
 }
 
+QStringList ItemsPanel::paintedTexts() const
+{
+    // Fixed app copy ONLY - never a row's name, which is the user's own
+    // text. Same boundary InitScreen::paintedTexts() and
+    // VersionsPanel::paintedTexts() already draw for their own user-supplied
+    // names.
+    return {tr("Items"), tr("Show or hide this body"), tr("Show or hide this outline"),
+            tr("No bodies yet.\n\nPress Ctrl+K and click points on "
+               "the ground to draw your first outline.")};
+}
+
 void ItemsPanel::showSelection(const std::vector<int>& ids)
 {
     mySelectedIds = ids;
@@ -420,6 +462,35 @@ void ItemsPanel::showPendingOutline(int id)
 {
     myPendingOutlineId = id;
     restyleRows();
+}
+
+void ItemsPanel::beginRenameForItem(int id, bool isOutline)
+{
+    // Re-entrancy guard: F2 is a plain QAction shortcut, which fires
+    // regardless of what currently holds focus - including the QLineEdit an
+    // earlier call to this very function just opened, since that edit claims
+    // only Enter/Escape (InlineRename's own filter), never F2. Without this,
+    // F2 pressed twice - or F2 then a double-click on the same row - stacks a
+    // SECOND independent QLineEdit on top of the first, each with its own
+    // commit callback racing the other's. One rename gesture live on this
+    // panel at a time, full stop.
+    if (findChild<QLineEdit*>()) return;
+
+    for (const Row& row : myRowList) {
+        if (row.id != id || row.isOutline != isOutline) continue;
+        if (!row.name) return;
+        const QString current = row.name->text();
+        // The name label's own geometry, in row.widget's coordinates - the
+        // "text cell" InlineRename opens over. Not the whole row: the size
+        // readout beside it is derived, not editable, and the eye button is
+        // its own control.
+        const QRect cellRect = row.name->geometry();
+        InlineRename::beginRename(row.widget, cellRect, current,
+                                  [this, id, isOutline](QString newName) {
+                                      emit renameCommitted(id, isOutline, newName);
+                                  });
+        return;
+    }
 }
 
 void ItemsPanel::restyleRows()

@@ -895,6 +895,30 @@ void OcctViewWidget::attachManipulator(int solidId)
     // language anyway - tinting all three to one accent would cost more than
     // it bought. What this does reach is the material, so the gizmo reads as
     // part of this app's matte surface family rather than a glossy default.
+    //
+    // CONFIRMED, not assumed - Task 5 (Theme::gizmoAxisX/Y/Z, the 2D
+    // AxisGizmo's own restyle) went looking for a way to carry those same
+    // three tokens onto THIS manipulator too, and read AIS_Manipulator.hxx
+    // end to end rather than trust the paragraph above at face value. The
+    // boundary is real and total: SetPart(axisIndex, mode, enabled) only
+    // toggles a part's VISIBILITY, not its colour, despite the name reading
+    // like a styling call; AIS_Manipulator::Axis::Color() is a const getter
+    // with no matching setter; the Axis objects themselves live in
+    // `protected Axis myAxes[3]` with no public accessor to reach one from
+    // outside the class, so even a hypothetical subclass could not repaint
+    // them (myColor is protected to Axis's OWN hierarchy, not
+    // AIS_Manipulator's); and Attributes()->ShadingAspect(), the hook used
+    // below, is the ONE material for the whole object - every Axis::Compute()
+    // call shares it, which is why tinting it recolours all three arms
+    // uniformly and could never single out "the uniform-scale handle" the
+    // way a token-per-part restyle would need. SetGap() is genuinely public,
+    // but it has no matching getter to read back, and CLAUDE.md's own
+    // zoom-persistence lesson is to measure a rendered pixel rather than
+    // trust a setter - a spacing tweak this file cannot verify against a
+    // Dump was left alone rather than shipped unverified. So the manipulator
+    // stays OCCT's stock proportions and stock per-axis hues; only the
+    // matte material below, and the AxisGizmo widget beside it, actually
+    // wear this app's tokens.
     const Handle(Prs3d_ShadingAspect) gizmoAspect =
         myManipulator->Attributes()->ShadingAspect();
     if (!gizmoAspect.IsNull()) {

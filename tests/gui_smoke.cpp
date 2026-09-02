@@ -186,7 +186,7 @@ void skipByEnvironment(int checks, const QString& why)
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 1630;
+constexpr int kCheckFloor = 1693;
 
 void check(bool condition, const QString& what)
 {
@@ -11933,6 +11933,12 @@ int main(int argc, char* argv[])
                 {QStringLiteral("gridMajor"), QStringLiteral("#4d4d55")},
                 {QStringLiteral("axisX"), QStringLiteral("#7a4a4a")},
                 {QStringLiteral("axisY"), QStringLiteral("#4a7a4a")},
+                // The gizmo's own three hues - Milestone 3, Task 5. Byte-
+                // identical to what AxisGizmo carried as a hardcoded array
+                // before the tokens existed.
+                {QStringLiteral("gizmoAxisX"), QStringLiteral("#e0564a")},
+                {QStringLiteral("gizmoAxisY"), QStringLiteral("#7fc84e")},
+                {QStringLiteral("gizmoAxisZ"), QStringLiteral("#4a80e0")},
                 {QStringLiteral("sketchPointMarker"), QStringLiteral("#ff4fc3")},
                 {QStringLiteral("danger"), QStringLiteral("#e0564a")},
                 {QStringLiteral("focusRing"), QStringLiteral("#ffca4a")},
@@ -11966,7 +11972,7 @@ int main(int argc, char* argv[])
                       .arg(Theme::colourTokens().size()).arg(pinned).arg(shipped.size()));
             check(drifted.isEmpty(),
                   QStringLiteral("and defaultSpec() is Graphite byte for byte (%1)")
-                      .arg(drifted.isEmpty() ? QStringLiteral("all 21 exact")
+                      .arg(drifted.isEmpty() ? QStringLiteral("all 24 exact")
                                              : drifted.join(QStringLiteral(", "))));
             check(std::fabs(shippedSpec.basePt - 10.0) < 1e-9,
                   QStringLiteral("and the shipped base size is still 10pt (%1)")
@@ -13016,11 +13022,102 @@ int main(int argc, char* argv[])
             settle(150);
         }
 
+        // --- gizmo restyle (Milestone 3, item 6): the axis tokens on -------
+        // AxisGizmo. AIS_Manipulator itself cannot wear these - see
+        // OcctViewWidget::attachManipulator()'s own comment for the boundary
+        // this task confirmed by reading AIS_Manipulator.hxx end to end
+        // (SetPart only toggles a part's VISIBILITY, Axis::Color() has no
+        // public setter, and the Axis objects themselves are unreachable
+        // outside the class - a total, not a partial, boundary). What DOES
+        // wear the tokens is the 2D orientation widget; this is the
+        // Dump-pixel probe the brief asks for, aimed at the surface that can
+        // actually answer it.
+        {
+            AxisGizmo* axisGizmo = window.findChild<AxisGizmo*>();
+            check(axisGizmo != nullptr, "the viewport has an axis gizmo to probe");
+            if (axisGizmo) {
+                // A find-the-mark scan, never a single point - the zoom-
+                // persistence lesson applies here too: measure the rendered
+                // pixel, never trust that a setter did what it says.
+                auto findMark = [](const QImage& image, const QPoint& centre,
+                                   const QColor& colour, int half) {
+                    for (int dy = -half; dy <= half; ++dy) {
+                        for (int dx = -half; dx <= half; ++dx) {
+                            const QPoint p = centre + QPoint(dx, dy);
+                            if (!image.rect().contains(p)) continue;
+                            if (colorDistance(image.pixelColor(p), colour) <= 24.0) return true;
+                        }
+                    }
+                    return false;
+                };
+
+                // Snap the camera down the Z axis - the gizmo's own Z+ tip,
+                // the same click the earlier axis-gizmo block already
+                // exercises. Deterministic, and it puts X and Y in the VIEW
+                // PLANE, so neither tip is darkened by AxisGizmo's own
+                // far-side dimming (paintEvent()'s `tip->depth > 0.15` rule);
+                // Z itself points at or away from the camera in this pose and
+                // is checked from a second one below.
+                clickAt(axisGizmo, axisGizmo->tipCenter(2, true));
+                settle(500);
+
+                QImage shot = renderExact(axisGizmo);
+                check(!shot.isNull(), "the gizmo renders for the probe");
+
+                const QPoint xTip = axisGizmo->tipCenter(0, true).toPoint();
+                const QPoint yTip = axisGizmo->tipCenter(1, true).toPoint();
+                check(findMark(shot, xTip, Theme::gizmoAxisX(), 10),
+                      QStringLiteral("the X arm wears Theme::gizmoAxisX() (%1) near its tip")
+                          .arg(Theme::gizmoAxisX().name()));
+                check(findMark(shot, yTip, Theme::gizmoAxisY(), 10),
+                      QStringLiteral("the Y arm wears Theme::gizmoAxisY() (%1) near its tip")
+                          .arg(Theme::gizmoAxisY().name()));
+
+                // Snap along X instead, which puts Y and Z in the view plane -
+                // checks the one token the pose above could not.
+                clickAt(axisGizmo, axisGizmo->tipCenter(0, true));
+                settle(500);
+                shot = renderExact(axisGizmo);
+                const QPoint zTip = axisGizmo->tipCenter(2, true).toPoint();
+                check(findMark(shot, zTip, Theme::gizmoAxisZ(), 10),
+                      QStringLiteral("the Z arm wears Theme::gizmoAxisZ() (%1) near its tip")
+                          .arg(Theme::gizmoAxisZ().name()));
+
+                // --- repeats after an Appearance edit of gizmoAxisX --------
+                // Measured pixels, never setter data - the same discipline
+                // CLAUDE.md's zoom-persistence lesson demands, and no widget
+                // may cache a colour across themeChanged (Theme.h's own
+                // Notifier rule) - the gizmo counts.
+                const QColor editedX(QStringLiteral("#33cc99"));
+                if (panel) {
+                    panel->setTokenColour(QStringLiteral("gizmoAxisX"), editedX);
+                    settle(200);
+                }
+                check(Theme::gizmoAxisX() == editedX, "the token itself took the edit");
+
+                clickAt(axisGizmo, axisGizmo->tipCenter(2, true));
+                settle(500);
+                shot = renderExact(axisGizmo);
+                const QPoint xTipAfter = axisGizmo->tipCenter(0, true).toPoint();
+                check(findMark(shot, xTipAfter, editedX, 10),
+                      QStringLiteral("...and the gizmo's X arm re-styles to the EDITED "
+                                     "colour (%1), not the shipped one it started with")
+                          .arg(editedX.name()));
+                check(!findMark(shot, xTipAfter, QColor(QStringLiteral("#e0564a")), 10),
+                      "the shipped hue is genuinely gone from the X arm, not still "
+                      "underneath the edited one");
+            }
+        }
+
         // Back to Graphite for everything that follows, and the action back to
         // unchecked so the shell is as the next block expects to find it.
         Theme::setSpec(Theme::defaultSpec());
         if (appearance && appearance->isChecked()) appearance->trigger();
-        settle(200);
+        // And the camera back to the app's own default, on the same terms
+        // the earlier axis-gizmo block restores it - the gizmo probe above
+        // snapped it twice and nothing after this block should inherit that.
+        trigger(window, QStringLiteral("Axonometric"));
+        settle(300);
         check(Theme::spec() == Theme::defaultSpec() && panel && !panel->isVisible(),
               "the appearance block leaves the app back at Graphite with the panel closed");
     }
@@ -13598,6 +13695,478 @@ int main(int argc, char* argv[])
             returning.close();
             settle(120);
         }
+    }
+
+    // --- View -> Show bottom bar (Milestone 3, Task 5, item 7) ----------------
+    //
+    // Off hides statusBar() outright; a Failure toast is unrelated chrome
+    // (ToastHost is parented to OcctViewWidget, not to the status bar) and
+    // keeps reaching the user regardless - CLAUDE.md's never-silent-failure
+    // law applies to this preference exactly as it does to Show notifications.
+    // The viewport's own minimum-height floor is asserted unchanged, because
+    // it is derived from the rail and the overlay margins (buildOverlay()'s
+    // own comment), never from the status bar - a regression there would be
+    // this toggle quietly moving a floor nothing about it should touch.
+    {
+        QAction* bottomBar = action(window, QStringLiteral("Show bottom bar"));
+        check(bottomBar != nullptr, "there is a Show bottom bar entry");
+        if (bottomBar) {
+            check(bottomBar->isCheckable() && bottomBar->isChecked(),
+                  "it is checkable and the app ships with the bar on");
+            check(window.statusBar()->isVisible(), "and the bar itself is shown");
+
+            const int floorBefore = window.view()->minimumHeight();
+
+            bottomBar->setChecked(false);
+            settle(150);
+            check(!window.statusBar()->isVisible(), "unticking it hides statusBar()");
+            check(window.view()->minimumHeight() == floorBefore,
+                  QStringLiteral("the viewport's minimum-height floor is untouched (%1 -> %2)")
+                      .arg(floorBefore).arg(window.view()->minimumHeight()));
+
+            // A REFUSAL, with the bar hidden - the same "force the app's own
+            // path, not a toast this probe posts" shape the notifications
+            // block above uses. Selecting one body and asking for a Union
+            // (which needs two) is refused by MainWindow's own guard.
+            ToastHost* barHost = window.findChild<ToastHost*>();
+            check(barHost != nullptr, "a toast host exists to carry the refusal");
+            if (barHost && !window.document().solids().empty()) {
+                const int victim = window.document().solids().back().id;
+                view->setSelectedSolids({victim});
+                settle(150);
+                const bool refused =
+                    !window.applyBooleanToSelection(
+                        static_cast<int>(ModelingOps::BooleanKind::Fuse));
+                check(refused, "a Union with one body selected is refused, bar or no bar");
+                check(barHost->isShowing(),
+                      QStringLiteral("...and a Failure toast still reaches the user with the "
+                                     "bottom bar hidden (\"%1\")").arg(barHost->currentText()));
+                view->setSelectedSolids({});
+                settle(120);
+            }
+
+            bottomBar->setChecked(true);
+            settle(150);
+            check(window.statusBar()->isVisible(), "ticking it again shows the bar");
+            check(window.view()->minimumHeight() == floorBefore,
+                  "and the floor is still exactly what it was before either toggle");
+        }
+    }
+
+    // --- and the bottom-bar preference persists (item 7, persistence) --------
+    // Same three-window shape as Show notifications' own persistence block.
+    {
+        ScopedTestSettings scopedSettings;
+        {
+            QSettings clean;
+            clean.remove(QStringLiteral("showBottomBar"));
+        }
+
+        {
+            RequiredTempDir quietBarLib;
+            MainWindow quiet(nullptr, /*persistProgress=*/false, quietBarLib.path());
+            quiet.setAttribute(Qt::WA_ShowWithoutActivating);
+            quiet.resize(900, 700);
+            quiet.show();
+            settle(250);
+            QAction* quietBottomBar = action(quiet, QStringLiteral("Show bottom bar"));
+            check(quietBottomBar != nullptr && quietBottomBar->isChecked(),
+                  "a fresh window ships with the bottom bar on");
+            if (quietBottomBar) quietBottomBar->setChecked(false);
+            settle(150);
+            {
+                QSettings after;
+                check(!after.contains(QStringLiteral("showBottomBar")),
+                      "but a persistProgress=false window stores nothing");
+            }
+            quiet.close();
+            settle(120);
+        }
+
+        {
+            RequiredTempDir persistingBarLib;
+            MainWindow persisting(nullptr, /*persistProgress=*/true, persistingBarLib.path());
+            persisting.setAttribute(Qt::WA_ShowWithoutActivating);
+            persisting.resize(900, 700);
+            persisting.show();
+            settle(250);
+            QAction* persistBottomBar = action(persisting, QStringLiteral("Show bottom bar"));
+            if (persistBottomBar) persistBottomBar->setChecked(false);
+            settle(150);
+            QSettings written;
+            check(written.contains(QStringLiteral("showBottomBar")) &&
+                      !written.value(QStringLiteral("showBottomBar")).toBool(),
+                  "a persisting window stores the choice");
+            persisting.close();
+            settle(120);
+        }
+
+        {
+            RequiredTempDir returningBarLib;
+            MainWindow returning(nullptr, /*persistProgress=*/true, returningBarLib.path());
+            returning.setAttribute(Qt::WA_ShowWithoutActivating);
+            returning.resize(900, 700);
+            returning.show();
+            settle(250);
+            QAction* returnedBottomBar = action(returning, QStringLiteral("Show bottom bar"));
+            check(returnedBottomBar != nullptr && !returnedBottomBar->isChecked(),
+                  "a returning window comes back with the bottom bar off");
+            check(!returning.statusBar()->isVisible(),
+                  "and the bar itself is actually hidden, not just the tick coming back - "
+                  "the failure a checked-state-only assertion misses");
+            returning.close();
+            settle(120);
+        }
+    }
+
+    // --- Milestone 3, item 1: inline rename on the Items drawer (Task 5) -----
+    // Double-click OR F2 on a drawer row - body or outline - opens InlineRename
+    // (ui/InlineRename, Task 2's own shared gesture) over the row's text cell.
+    // Enter commits through ONE checkpoint and a Note toast with Undo;
+    // Escape/empty leaves the old name standing, silently - InlineRename's own
+    // contract, proved again here through MainWindow's checkpoint/toast path
+    // rather than a store's rename call. An isolated probe, on the same terms
+    // as the symmetry and versions blocks: renaming bumps the document's
+    // revision and takes checkpoints that must not disturb `window`'s own
+    // later state.
+    {
+        RequiredTempDir renameLib;
+        MainWindow renameProbe(nullptr, /*persistProgress=*/false, renameLib.path());
+        renameProbe.setAttribute(Qt::WA_ShowWithoutActivating);
+        renameProbe.resize(1000, 700);
+        renameProbe.show();
+        settle(200);
+        renameProbe.view()->setAnimationsEnabled(false);
+        enterFreshFurniture(renameProbe);
+
+        // A body (extruded) and a pending outline (closed, not yet extruded) -
+        // one gesture proves the same call serves both kinds.
+        trigger(renameProbe, QStringLiteral("Start Sketch"));
+        sketchQuad(renameProbe, 0.30, 0.30, 0.46, 0.44);
+        trigger(renameProbe, QStringLiteral("Finish Sketch"));
+        const bool renameBodyBuilt = renameProbe.extrudePendingFace(40.0);
+        check(renameBodyBuilt, "the rename probe has a body to rename");
+
+        trigger(renameProbe, QStringLiteral("Start Sketch"));
+        sketchQuad(renameProbe, 0.55, 0.55, 0.68, 0.68);
+        trigger(renameProbe, QStringLiteral("Finish Sketch"));
+        check(renameProbe.hasPendingFace(), "...and a pending outline to rename too");
+
+        ItemsPanel* items = renameProbe.itemsPanel();
+        check(items != nullptr && items->rowCount() == 2,
+              QStringLiteral("the drawer lists both - the outline and the body (%1 rows)")
+                  .arg(items ? items->rowCount() : -1));
+
+        // Re-derived fresh every time it is needed, never cached across a
+        // rename: a committed rename changes the row's own signature (its
+        // name is part of it - see ItemsPanel::refresh()), which rebuilds
+        // every row widget. A pointer captured before one commit is a
+        // dangling pointer after it.
+        auto findRow = [items](int id, bool isOutline) -> QWidget* {
+            if (!items) return nullptr;
+            for (int i = 0; i < items->rowCount(); ++i) {
+                if (items->rowIdAt(i) == id && items->rowIsOutlineAt(i) == isOutline)
+                    return items->rowWidgetAt(i);
+            }
+            return nullptr;
+        };
+
+        int bodyId = 0, outlineId = 0;
+        if (items) {
+            for (int i = 0; i < items->rowCount(); ++i) {
+                if (items->rowIsOutlineAt(i)) outlineId = items->rowIdAt(i);
+                else bodyId = items->rowIdAt(i);
+            }
+        }
+        check(bodyId != 0 && outlineId != 0, "one row is the body's, one is the outline's");
+
+        // --- a REAL double-click, through REAL hit-testing, on the row's ----
+        // text cell - the name label's own pixels, not the row's bare margin.
+        // sendEvent() straight at the row would pass even if the label were
+        // silently swallowing every click aimed at it - CLAUDE.md's
+        // childAt()-vs-sendEvent trap, the exact one InitCardWidget's own
+        // labels needed WA_TransparentForMouseEvents for. ItemsPanel's rows
+        // carried the identical gap until this task (see ItemsPanel.cpp's
+        // addRow()); this is the check that would have caught it.
+        QWidget* bodyRow = findRow(bodyId, false);
+        check(bodyRow != nullptr, "the body's row widget is reachable for the suite");
+        if (bodyRow && items) {
+            const QPoint overText =
+                bodyRow->mapTo(items, QPoint(bodyRow->width() / 3, bodyRow->height() / 2));
+            QWidget* realHit = items->childAt(overText);
+            check(realHit != nullptr,
+                  "childAt() over the row's text cell finds a real widget to send to");
+            const int checkpointsBefore = static_cast<int>(renameProbe.document().undoDepth());
+            if (realHit) {
+                const QPoint hitLocal = realHit->mapFrom(items, overText);
+                doubleClickAt(realHit, QPointF(hitLocal));
+            }
+            QLineEdit* edit = bodyRow->findChild<QLineEdit*>();
+            check(edit != nullptr,
+                  QStringLiteral("a REAL double-click on the row's text cell opens the inline "
+                                 "editor (real hit was %1)")
+                      .arg(realHit ? QString::fromLatin1(realHit->metaObject()->className())
+                                   : QStringLiteral("null")));
+            if (edit) {
+                check(edit->text() ==
+                          QString::fromStdString(renameProbe.document().nameOf(bodyId)),
+                      QStringLiteral("pre-filled with the body's current name (\"%1\")")
+                          .arg(edit->text()));
+                edit->setText(QStringLiteral("Table Top"));
+                sendKeyTo(edit, Qt::Key_Return);
+                settle(200);
+            }
+            check(renameProbe.document().nameOf(bodyId) == "Table Top",
+                  QStringLiteral("Enter commits it through the document (\"%1\")")
+                      .arg(QString::fromStdString(renameProbe.document().nameOf(bodyId))));
+            check(static_cast<int>(renameProbe.document().undoDepth()) == checkpointsBefore + 1,
+                  "...in exactly ONE checkpoint");
+
+            // The FIRST press of the double-click already ran the row's
+            // single-click activation (select the body) before the second
+            // click was even recognised - real Qt event ordering, not a
+            // simplification. That side effect must not have broken the
+            // edit that followed it. Checked HERE, before Undo/Redo below
+            // touch the selection of their own accord (onUndo()/onRedo()
+            // both clearSelection()) - this is what the double-click itself
+            // left behind, not a coincidence of what ran after it.
+            check(std::find(renameProbe.view()->selectedSolidIds().begin(),
+                             renameProbe.view()->selectedSolidIds().end(),
+                             bodyId) != renameProbe.view()->selectedSolidIds().end(),
+                  "the double-click's first press also selected the body, as an ordinary "
+                  "click would - and that selection did not derail the rename that followed");
+
+            ToastHost* renameToasts = renameProbe.findChild<ToastHost*>();
+            check(renameToasts != nullptr && renameToasts->isShowing() &&
+                      renameToasts->currentText() == QStringLiteral("Renamed to \"Table Top\""),
+                  QStringLiteral("...and a Note toast reports it (\"%1\")")
+                      .arg(renameToasts ? renameToasts->currentText() : QString()));
+            check(renameToasts != nullptr && renameToasts->toast() != nullptr &&
+                      renameToasts->toast()->hasUndo(),
+                  "the toast carries Undo, like every other checkpointed commit");
+            if (renameToasts && renameToasts->toast() && renameToasts->toast()->hasUndo()) {
+                trigger(renameProbe, QStringLiteral("Undo"));
+                settle(200);
+                check(renameProbe.document().nameOf(bodyId) != "Table Top",
+                      "and Undo genuinely takes the rename back");
+                trigger(renameProbe, QStringLiteral("Redo"));
+                settle(200);
+                check(renameProbe.document().nameOf(bodyId) == "Table Top",
+                      "redo brings it back - left renamed for the checks below");
+            }
+        }
+
+        // --- F2 on the SELECTED body row ------------------------------------
+        renameProbe.view()->setSelectedSolids({bodyId});
+        settle(150);
+        QAction* renameAction = action(renameProbe, QStringLiteral("Rename..."));
+        check(renameAction != nullptr && renameAction->isEnabled(),
+              "Rename is enabled with exactly one body selected");
+        if (renameAction) renameAction->trigger();
+        settle(150);
+        QWidget* bodyRowForF2 = findRow(bodyId, false);
+        QLineEdit* f2Edit = bodyRowForF2 ? bodyRowForF2->findChild<QLineEdit*>() : nullptr;
+        check(f2Edit != nullptr, "F2 opens the inline editor over the SELECTED row");
+
+        // F2 again, WHILE the edit from the first press is still open. F2 is
+        // a plain QAction shortcut with no ties to focus, and the open
+        // QLineEdit claims only Enter/Escape (InlineRename's own filter) -
+        // nothing stops a second F2 reaching onRenameSelected() again unless
+        // beginRenameForItem() itself refuses a second gesture. Without the
+        // guard this stacks a second QLineEdit on the same row, each with
+        // its own commit callback.
+        if (renameAction) renameAction->trigger();
+        settle(120);
+        check(bodyRowForF2 != nullptr &&
+                  bodyRowForF2->findChildren<QLineEdit*>().size() == 1,
+              QStringLiteral("a second F2 while the editor is already open does not stack "
+                             "a second one (%1 editors on the row)")
+                  .arg(bodyRowForF2 ? bodyRowForF2->findChildren<QLineEdit*>().size() : -1));
+
+        if (f2Edit) {
+            f2Edit->setText(QStringLiteral("Leg"));
+            sendKeyTo(f2Edit, Qt::Key_Return);
+            settle(200);
+        }
+        check(renameProbe.document().nameOf(bodyId) == "Leg",
+              QStringLiteral("F2 renames the row the selection names, not some other one "
+                             "(\"%1\")")
+                  .arg(QString::fromStdString(renameProbe.document().nameOf(bodyId))));
+
+        // --- F2's OTHER meaning: the waiting outline, nothing selected ------
+        renameProbe.view()->setSelectedSolids({});
+        settle(150);
+        check(renameAction != nullptr && renameAction->isEnabled(),
+              "with nothing selected and an outline waiting, Rename targets the outline "
+              "instead - the same two-meanings shape Delete already has");
+        if (renameAction) renameAction->trigger();
+        settle(150);
+        QWidget* outlineRowForF2 = findRow(outlineId, true);
+        QLineEdit* outlineF2Edit =
+            outlineRowForF2 ? outlineRowForF2->findChild<QLineEdit*>() : nullptr;
+        check(outlineF2Edit != nullptr, "F2 opens the editor over the waiting outline's row");
+        if (outlineF2Edit) {
+            outlineF2Edit->setText(QStringLiteral("Shelf Outline"));
+            sendKeyTo(outlineF2Edit, Qt::Key_Return);
+            settle(200);
+        }
+        check(renameProbe.document().outlineNameOf(outlineId) == "Shelf Outline",
+              "and the outline's own name changed, not the body's");
+        // The status label already reads outlineNameOf(pendingOutlineId())
+        // live (updateStateLabel()'s own comment: "NAMED, not just 'Face
+        // ready'") - verified here, not rewired, on the brief's own
+        // instruction that every surface naming an item already reads
+        // DocumentModel.
+        check(stateLabelText(renameProbe).contains(QStringLiteral("Shelf Outline")),
+              QStringLiteral("...and the status label picks up the renamed outline too "
+                             "(\"%1\")").arg(stateLabelText(renameProbe)));
+
+        // --- Rename is disabled with zero or several bodies selected, and --
+        // no outline waiting to fall back on. The outline is extruded first,
+        // specifically to remove that fallback - Delete's own two-meanings
+        // predicate (onDeleteSelected()'s comment) is exactly why "nothing
+        // selected" alone cannot be the disabled case while an outline still
+        // waits.
+        renameProbe.view()->setSelectedSolids({});
+        settle(120);
+        const bool secondBodyBuilt = renameProbe.extrudePendingFace(25.0);
+        check(secondBodyBuilt && !renameProbe.hasPendingFace(),
+              "the outline is extruded - no outline left waiting for Rename to fall back on");
+        check(renameAction != nullptr && !renameAction->isEnabled(),
+              "...so with nothing selected and no outline pending, Rename is disabled");
+
+        std::vector<int> twoBodies;
+        for (const DocumentModel::Solid& s : renameProbe.document().solids())
+            twoBodies.push_back(s.id);
+        check(static_cast<int>(twoBodies.size()) == 2,
+              "exactly two bodies exist for the several-selected case");
+        if (twoBodies.size() == 2) {
+            renameProbe.view()->setSelectedSolids(twoBodies);
+            settle(120);
+            check(!renameAction->isEnabled(),
+                  "and with two bodies selected, Rename stays disabled - InlineRename edits "
+                  "exactly one name, unlike Delete's own bulk meaning");
+        }
+        renameProbe.view()->setSelectedSolids({bodyId});
+        settle(120);
+        check(renameAction->isEnabled(), "back to exactly one selected, Rename re-enables");
+        renameProbe.view()->setSelectedSolids({});
+        settle(150);
+
+        // --- Escape cancels outright - the old name stands ------------------
+        if (items) items->beginRenameForItem(bodyId, /*isOutline=*/false);
+        settle(120);
+        QWidget* escapeRow = findRow(bodyId, false);
+        QLineEdit* escapeEdit = escapeRow ? escapeRow->findChild<QLineEdit*>() : nullptr;
+        check(escapeEdit != nullptr, "beginRenameForItem() opens the same inline editor");
+        const int checkpointsBeforeEscape =
+            static_cast<int>(renameProbe.document().undoDepth());
+        if (escapeEdit) {
+            escapeEdit->setText(QStringLiteral("Should not stick"));
+            sendKeyTo(escapeEdit, Qt::Key_Escape);
+            settle(150);
+        }
+        check(renameProbe.document().nameOf(bodyId) == "Leg",
+              "Escape cancels outright - the old name stands");
+        check(static_cast<int>(renameProbe.document().undoDepth()) == checkpointsBeforeEscape,
+              "...and no checkpoint was taken for a rename that never happened");
+
+        // --- an empty/whitespace commit is refused silently -----------------
+        if (items) items->beginRenameForItem(bodyId, /*isOutline=*/false);
+        settle(120);
+        QWidget* blankRow = findRow(bodyId, false);
+        QLineEdit* blankEdit = blankRow ? blankRow->findChild<QLineEdit*>() : nullptr;
+        const int checkpointsBeforeBlank = static_cast<int>(renameProbe.document().undoDepth());
+        if (blankEdit) {
+            blankEdit->setText(QStringLiteral("   "));
+            sendKeyTo(blankEdit, Qt::Key_Return);
+            settle(150);
+        }
+        check(renameProbe.document().nameOf(bodyId) == "Leg",
+              "a whitespace-only commit is refused silently - the old name stands");
+        check(static_cast<int>(renameProbe.document().undoDepth()) == checkpointsBeforeBlank,
+              "...with no checkpoint, no toast - a mind changed, not a failure");
+
+        // --- names flow to the surfaces that already read DocumentModel -----
+        // Verified, not rewired: the status label and the toast already read
+        // through DocumentModel::nameOf()/outlineNameOf(), so a rename
+        // reaching them is a consequence of THAT plumbing, not new code.
+        renameProbe.view()->setSelectedSolids({bodyId});
+        settle(150);
+        trigger(renameProbe, QStringLiteral("Delete Selected"));
+        settle(200);
+        ToastHost* afterRenameToasts = renameProbe.findChild<ToastHost*>();
+        check(afterRenameToasts != nullptr &&
+                  afterRenameToasts->currentText() == QStringLiteral("Deleted Leg"),
+              QStringLiteral("a later toast about this body uses its RENAMED name, not its "
+                             "original one (\"%1\")")
+                  .arg(afterRenameToasts ? afterRenameToasts->currentText() : QString()));
+        trigger(renameProbe, QStringLiteral("Undo"));
+        settle(150);
+
+        // --- the vocabulary sweep: user data is exempt, both directions -----
+        // The SAME mechanism InitScreen's furniture names and VersionsPanel's
+        // version names already established: a user-typed name is never
+        // flagged by ItemsPanel::paintedTexts() (this task's own boundary),
+        // while the identical string, fed to the sweep's own matcher as if it
+        // WERE app copy, trips it every time - proving the row's silence is a
+        // real exemption and not an accident of a word that was never
+        // dangerous.
+        const QString bannedName = QStringLiteral("Fuse My Table");
+        renameProbe.view()->setSelectedSolids({bodyId});
+        settle(120);
+        if (items) items->beginRenameForItem(bodyId, /*isOutline=*/false);
+        settle(120);
+        QWidget* bannedRow = findRow(bodyId, false);
+        QLineEdit* bannedEdit = bannedRow ? bannedRow->findChild<QLineEdit*>() : nullptr;
+        if (bannedEdit) {
+            bannedEdit->setText(bannedName);
+            sendKeyTo(bannedEdit, Qt::Key_Return);
+            settle(150);
+        }
+        check(renameProbe.document().nameOf(bodyId) == bannedName.toStdString(),
+              "the body really renamed to the banned-word string - the row shows the "
+              "user's own words, unmangled");
+
+        QStringList itemsOffenders;
+        const QStringList renameBanned = bannedWords();
+        if (items) {
+            for (const QString& text : items->paintedTexts()) {
+                for (const QString& word : renameBanned) {
+                    if (usesBannedWord(text, word))
+                        itemsOffenders << (text + QStringLiteral(" [") + word +
+                                           QStringLiteral("]"));
+                }
+            }
+        }
+        check(items != nullptr && !items->paintedTexts().isEmpty(),
+              "the drawer has fixed copy to sweep, so this is not vacuous");
+        check(itemsOffenders.isEmpty(),
+              QStringLiteral("the drawer's real sweep passes even with a banned-word body "
+                             "name genuinely renamed (%1)")
+                  .arg(itemsOffenders.isEmpty() ? QStringLiteral("none")
+                                                : itemsOffenders.join(QStringLiteral(", "))));
+        check(usesBannedWord(bannedName, QStringLiteral("Fuse")),
+              "the SAME string WOULD trip the sweep if it were treated as app copy - the "
+              "row's silence above is a real exemption, not an accident");
+
+        // The real, live-captured toast for this rename DOES contain the
+        // banned word, genuinely - Toast carries no user-data exemption of
+        // its own (only ItemsPanel's row/paintedTexts() does), the same
+        // honest outcome VersionsPanel's own save-toast sweep documents.
+        ToastHost* bannedToasts = renameProbe.findChild<ToastHost*>();
+        check(bannedToasts != nullptr &&
+                  bannedToasts->currentText() ==
+                      QStringLiteral("Renamed to \"%1\"").arg(bannedName),
+              QStringLiteral("the real toast for this rename reads \"%1\"")
+                  .arg(bannedToasts ? bannedToasts->currentText() : QString()));
+        if (bannedToasts) {
+            check(usesBannedWord(bannedToasts->currentText(), QStringLiteral("Fuse")),
+                  "...and that real toast text genuinely uses the banned word, as expected");
+        }
+
+        renameProbe.close();
+        settle(150);
     }
 
     // --- the picture the whole item is for -----------------------------------

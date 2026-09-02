@@ -278,6 +278,49 @@ int main()
         check(undoDoc.nameOf(1) == "Renamed", "undo restores the name with the solid");
     }
 
+    // --- setItemName (Milestone 3, Task 5: the Items drawer's rename) --------
+    {
+        DocumentModel doc;
+        const TopoDS_Shape box = ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 5.0, 5.0, 5.0);
+        const gp_Pln ground(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
+        SketchController itemNameSketch;
+        itemNameSketch.addPoint(gp_Pnt(0.0, 0.0, 0.0));
+        itemNameSketch.addPoint(gp_Pnt(1.0, 0.0, 0.0));
+        itemNameSketch.addPoint(gp_Pnt(1.0, 1.0, 0.0));
+        itemNameSketch.addPoint(gp_Pnt(0.0, 1.0, 0.0));
+        const TopoDS_Face face = itemNameSketch.closedFace();
+        check(!face.IsNull(), "the fixture outline for the setItemName block closes");
+
+        const int bodyId = doc.addSolid(box);
+        const int outlineId = doc.addOutline(face, ground);
+
+        // setItemName is "the one setter both a UI rename and a file load go
+        // through" (DocumentModel.h's own comment) - it has to reach whichever
+        // kind of item the id names, body or outline, through the SAME call.
+        check(doc.setItemName(bodyId, "Table Top"), "renames a body through setItemName");
+        check(doc.nameOf(bodyId) == "Table Top", "the body's new name sticks");
+        check(doc.setItemName(outlineId, "Side Panel"),
+              "renames an outline through setItemName");
+        check(doc.outlineNameOf(outlineId) == "Side Panel", "the outline's new name sticks");
+        check(!doc.setItemName(9999, "Nope"), "setItemName fails for an unknown id");
+
+        // The revision bump - Task 5's fix. Every OTHER mutator in this file
+        // bumps myRevision (see revision()'s own comment); setItemName did
+        // not, which left a rename invisible to the dirty star, autosave's
+        // arm and a toast's own revision guard. Both branches (body and
+        // outline) have to bump it, and a failed rename must not.
+        const int beforeBodyRename = doc.revision();
+        doc.setItemName(bodyId, "Renamed Again");
+        check(doc.revision() > beforeBodyRename, "renaming a body bumps the revision");
+        const int beforeOutlineRename = doc.revision();
+        doc.setItemName(outlineId, "Renamed Again Too");
+        check(doc.revision() > beforeOutlineRename, "renaming an outline bumps the revision");
+        const int beforeFailedRename = doc.revision();
+        doc.setItemName(9999, "Nope");
+        check(doc.revision() == beforeFailedRename,
+              "a rename that fails (unknown id) does not bump the revision");
+    }
+
     // --- undo / redo of document state --------------------------------------
     {
         DocumentModel doc;

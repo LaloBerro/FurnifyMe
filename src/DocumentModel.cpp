@@ -265,11 +265,24 @@ bool DocumentModel::renameSolid(int id, const std::string& name)
 
 bool DocumentModel::setItemName(int id, const std::string& name)
 {
-    if (renameSolid(id, name)) return true;
+    // Both branches bump myRevision - Task 5's addition. Every other mutator
+    // in this file does; this one did not, which left a rename invisible to
+    // the dirty star, autosave's arm, and a toast's own revision-guard
+    // (documentMovedTo()) - a renamed body would not mark the furniture dirty
+    // and a rename toast's Undo pill could survive a change that came after
+    // it. The bump lives HERE rather than inside renameSolid() itself:
+    // renameSolid() is also called directly by the headless suite
+    // (unrelated to this task, and predating it), and leaving it revision-free
+    // keeps that surface's behaviour exactly as it was.
+    if (renameSolid(id, name)) {
+        ++myRevision;
+        return true;
+    }
 
     for (Outline& o : myOutlines) {
         if (o.id == id) {
             o.name = name;
+            ++myRevision;
             return true;
         }
     }

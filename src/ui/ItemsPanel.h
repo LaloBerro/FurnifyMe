@@ -25,6 +25,7 @@
 // set from anywhere else; see MainWindow's constructor.
 #include <QSize>
 #include <QString>
+#include <QStringList>
 #include <QWidget>
 
 #include <vector>
@@ -54,6 +55,29 @@ public:
         return index >= 0 && index < static_cast<int>(myRowList.size()) ? myRowList[index].text
                                                                        : QString();
     }
+    // The row's own QWidget, id and whether it is an outline row - a read
+    // accessor for the suite, on the same terms rowTextAt() is: it lets a
+    // test hit-test the REAL widget with childAt()/doubleClickAt() rather
+    // than sending an event straight at a pointer it merely hopes is
+    // reachable (CLAUDE.md's childAt()-vs-sendEvent trap). Null/0/false for
+    // an out-of-range index.
+    QWidget* rowWidgetAt(int index) const
+    {
+        return index >= 0 && index < static_cast<int>(myRowList.size())
+                   ? myRowList[index].widget
+                   : nullptr;
+    }
+    int rowIdAt(int index) const
+    {
+        return index >= 0 && index < static_cast<int>(myRowList.size()) ? myRowList[index].id
+                                                                        : 0;
+    }
+    bool rowIsOutlineAt(int index) const
+    {
+        return index >= 0 && index < static_cast<int>(myRowList.size())
+                   ? myRowList[index].isOutline
+                   : false;
+    }
 
     // Highlights the rows for these solids. Called when the viewport selection
     // changes, so the two views of the document never disagree.
@@ -72,6 +96,31 @@ public:
     // where the feedback belongs.
     void showPendingOutline(int id);
 
+    // Opens the inline rename gesture (ui/InlineRename) over `id`'s row -
+    // whichever kind it is, body or outline. The caller (MainWindow, for F2)
+    // supplies `isOutline` rather than this panel guessing it from the id
+    // space, because ids alone cannot say which list an id belongs to and a
+    // wrong guess would open the edit over the wrong row. A no-op if `id`
+    // does not name a live row - the row this task's own double-click path
+    // hands in always does, since it reads the id straight off the row it
+    // just hit-tested.
+    //
+    // Renaming itself is NOT done here: this panel writes DocumentModel's
+    // VISIBILITY directly (the eye button always has), but a rename is a
+    // checkpointed document change that reports through a toast, and this
+    // panel has neither a checkpoint stack nor a toast host of its own -
+    // MainWindow does both, and is the single place every other checkpointed
+    // commit in this app goes through. renameCommitted() is the handoff.
+    void beginRenameForItem(int id, bool isOutline);
+
+    // The fixed app copy this panel paints, for the vocabulary sweep -
+    // title, tooltips, the empty-state message. Item NAMES are deliberately
+    // excluded, on the same terms InitScreen's furniture names and
+    // VersionsPanel's version names already are: they are the user's own
+    // words, not this app's, and a sweep that flagged them would be
+    // flagging content this panel is required to show unmangled.
+    QStringList paintedTexts() const;
+
 signals:
     void solidActivated(int id);
     // An outline row was clicked. A separate signal rather than one id
@@ -80,6 +129,11 @@ signals:
     // outline Extrude will consume - and a receiver that had to branch on a
     // flag could get the branch wrong in a way the compiler could not see.
     void outlineActivated(int id);
+    // A rename was committed - InlineRename already trimmed the text and
+    // refused an empty/whitespace one silently, so `newName` here is always
+    // non-empty. MainWindow is what actually checkpoints, writes the name and
+    // reports the toast; this panel only ran the UI gesture.
+    void renameCommitted(int id, bool isOutline, QString newName);
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
