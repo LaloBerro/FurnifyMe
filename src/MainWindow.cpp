@@ -371,6 +371,12 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // The transform gizmo reports the end of a drag; this window decides what
     // it means, exactly as it does for the face-pull arrow above.
     connect(myView, &OcctViewWidget::gizmoReleased, this, &MainWindow::onGizmoReleased);
+    // Render mode's own exit gesture - "a pick press in the viewport". The
+    // viewport already swallowed the press (see its own mousePressEvent()),
+    // so this window's only job is to turn the mode off through the single
+    // authority every other exit routes through.
+    connect(myView, &OcctViewWidget::renderModeExitRequested, this,
+            [this] { setRenderModeEnabled(false); });
 
     buildActions();
     buildAppBar(buildMenus());
@@ -409,20 +415,35 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // Only reads state and moves geometry, so it cannot recurse back into
     // updateActions().
     connect(this, &MainWindow::appStateChanged, this, [this] {
-        myItemsPanel->setVisible(myItemsPanelAction->isChecked());
+        // Render mode (Milestone 3, item 5) hides every one of these outright,
+        // regardless of its own action's checked state - "&& !myRenderModeOn"
+        // on each line below rather than a separate branch, so turning render
+        // mode off needs no restore logic of its own: the very next
+        // appStateChanged (updateActions() ends by emitting it) re-derives
+        // every line from the SAME action states it always has, which is
+        // CLAUDE.md's sibling-visibility law applied to a fourth surface
+        // rather than a new mechanism.
+        const bool hiddenForRenderMode = myRenderModeOn;
+        myItemsPanel->setVisible(myItemsPanelAction->isChecked() && !hiddenForRenderMode);
         // Derived on every state change from the action, exactly as the
         // drawer above is and for exactly the same reason - a one-shot hide
         // is not a state, and QWidget::showChildren() on the window's first
         // show will happily undo one.
         if (myAppearancePanel)
-            myAppearancePanel->setVisible(myAppearanceAction->isChecked());
+            myAppearancePanel->setVisible(myAppearanceAction->isChecked() && !hiddenForRenderMode);
         if (myVersionsPanel)
-            myVersionsPanel->setVisible(myVersionsPanelAction->isChecked());
+            myVersionsPanel->setVisible(myVersionsPanelAction->isChecked() && !hiddenForRenderMode);
         // The status bar's own shown state, on the same derived-not-stored
         // terms - View -> Show bottom bar's checked state IS the answer,
         // never a one-shot hide()/show() called from the toggle handler
         // alone.
-        if (myBottomBarAction) statusBar()->setVisible(myBottomBarAction->isChecked());
+        if (myBottomBarAction)
+            statusBar()->setVisible(myBottomBarAction->isChecked() && !hiddenForRenderMode);
+        // The rail and the axis gizmo card have no action of their own to be
+        // derived FROM - they are always on outside render mode - so this is
+        // simply their whole predicate rather than one term of it.
+        if (myRail) myRail->setVisible(!hiddenForRenderMode);
+        if (myAxisGizmo) myAxisGizmo->setVisible(!hiddenForRenderMode);
         if (myOverlay) myOverlay->relayout();
     });
 
@@ -744,6 +765,22 @@ void MainWindow::buildActions()
                                      "Off, a Failure toast still reaches you - only the bar hides."));
     connect(myBottomBarAction, &QAction::toggled, this, &MainWindow::setShowBottomBar);
 
+    // Render mode (Milestone 3, item 5) - strips the viewport to the
+    // furniture alone. Checkable, but deliberately NOT initialised from
+    // QSettings the way every toggle above it is: CLAUDE.md's own words for
+    // this one are "the app always starts in modeling", so it always starts
+    // unchecked regardless of how a previous session left it.
+    //
+    // toggled(bool) connects straight to the public setRenderModeEnabled(),
+    // exactly as myAutosaveAction connects to setAutosaveEnabled() - but
+    // this is also the one action in this file that gets un-checked from
+    // CODE as often as from the user, since every exit gesture calls
+    // setRenderModeEnabled(false) directly (see its own declaration).
+    myRenderModeAction = new QAction(tr("&Render mode"), this);
+    myRenderModeAction->setCheckable(true);
+    myRenderModeAction->setChecked(false);
+    connect(myRenderModeAction, &QAction::toggled, this, &MainWindow::setRenderModeEnabled);
+
     // The projection toggle. Checkable, because the mode is state the user
     // chose and comes back next session; a QAction rather than a button that
     // decides for itself, because the bar's readout, the View menu entry and
@@ -926,6 +963,7 @@ QMenuBar* MainWindow::buildMenus()
     viewMenu->addAction(myVersionsPanelAction);
     viewMenu->addAction(myNotificationsAction);
     viewMenu->addAction(myBottomBarAction);
+    viewMenu->addAction(myRenderModeAction);
     viewMenu->addSeparator();
     QMenu* unitsMenu = viewMenu->addMenu(tr("Units"));
     unitsMenu->addAction(myUnitsMillimetresAction);
@@ -1057,6 +1095,10 @@ void MainWindow::buildOverlay()
     // screen's own height becomes the real ceiling this derivation cannot
     // push past).
     auto* rail = new ToolCluster(myView);
+    // Kept as a member - render mode's own visibility lambda (see the
+    // constructor) needs to reach it, and findChild<>() on every
+    // appStateChanged is a lookup this class already has a real pointer for.
+    myRail = rail;
     auto tool = [rail](QAction* action, IconSet::Glyph glyph) {
         rail->addChip(new ToolChip(action, glyph, ToolChip::ChipMode::IconOnly));
     };
@@ -1118,6 +1160,9 @@ void MainWindow::buildOverlay()
     // The orientation gizmo. Its own label chip and the unit readout that sat
     // under it are in the app bar; only the axes stay over the viewport.
     auto* gizmo = new AxisGizmo(myView, myView);
+    // Kept as a member on the same terms as myRail above - render mode
+    // hides this card too.
+    myAxisGizmo = gizmo;
     // Clicking an arm of the gizmo is the other way to look from a named
     // direction, and the hint that teaches the gizmo is retired by
     // view.changed - so a user who only ever used the gizmo used to dismiss
@@ -1515,6 +1560,31 @@ void MainWindow::updateActions()
     if (mySaveVersionAction) mySaveVersionAction->setEnabled(canOpenSaveVersion());
     if (myVersionsPanelAction) myVersionsPanelAction->setEnabled(!atInit);
 
+    // Render mode (Milestone 3, item 5). "|| myRenderModeOn" is what keeps a
+    // control whose entire subject is this mode from ever being outvoted by
+    // a state that changed underneath it - the same rule the Persp/Ortho
+    // toggle's own comment makes; without it a stray state change while the
+    // mode was already on could disable the one control that turns it back
+    // off. In practice every one of canOpenRenderMode()'s four conditions is
+    // kept true for as long as myRenderModeOn is (every route that could
+    // make one false forces the mode off FIRST - see checkpointDocument(),
+    // onStartSketch(), openCompare()), so this is defence in depth rather
+    // than a state this file expects to actually reach.
+    if (myRenderModeAction) {
+        const bool canRender = canOpenRenderMode();
+        myRenderModeAction->setEnabled(canRender || myRenderModeOn);
+        myRenderModeAction->setToolTip(
+            canRender || myRenderModeOn
+                ? tr("Strip the viewport to the furniture alone, with real shadows")
+                : myShowingInitScreen
+                      ? tr("Open a furniture first")
+                      : isCompareOpen()
+                            ? tr("Unavailable while comparing versions")
+                            : mySketching
+                                  ? sketchReason
+                                  : pendingReason);
+    }
+
     updateStateLabel();
     updateWindowTitle();
     emit appStateChanged();
@@ -1767,6 +1837,14 @@ void MainWindow::buildInitScreen()
 
 void MainWindow::showInitScreen()
 {
+    // Render mode's own gate requires a furniture open - and this function is
+    // how one stops being open, however it was reached (Close furniture,
+    // opening a different card). Exiting first, rather than leaving
+    // updateActions()'s "|| myRenderModeOn" defence to paper over it, is what
+    // keeps the gallery from appearing underneath a hidden rail and a studio
+    // backdrop that has nothing left to render mode a shot OF.
+    if (myRenderModeOn) setRenderModeEnabled(false);
+
     // A compare pane reads a version of the furniture that is about to stop
     // being open at all - closing it here, before anything else, is what
     // keeps the splitter from outliving the furniture it was comparing.
@@ -1979,6 +2057,60 @@ void MainWindow::closeCurrentFurniture()
     showInitScreen();
 }
 
+bool MainWindow::canOpenRenderMode() const
+{
+    // The four conditions this task's own ruling names: a furniture open, no
+    // compare open, not sketching, no outline waiting. Unlike
+    // canOpenSaveVersion() this does not also exclude the three gizmo
+    // predicates - render mode is not a text field with an Enter/Escape
+    // claim of its own, it is a toggle that HIDES those gizmos the instant
+    // it turns on, so there is nothing for it to collide with.
+    return !myShowingInitScreen && !isCompareOpen() && !mySketching && !hasPendingFace();
+}
+
+void MainWindow::setRenderModeEnabled(bool on)
+{
+    if (myRenderModeOn == on) return;
+    myRenderModeOn = on;
+    // The single source of truth for the menu entry's checked state, kept in
+    // step in BOTH directions - the user unchecking the box arrives here
+    // already in sync (QAction::toggled already changed it), but every OTHER
+    // caller (checkpointDocument(), onStartSketch(), the viewport press,
+    // openCompare()) flips this flag from code, and the box has to follow.
+    // Blocked so that setChecked() cannot re-enter this function through
+    // toggled().
+    if (myRenderModeAction) {
+        const QSignalBlocker blocker(myRenderModeAction);
+        myRenderModeAction->setChecked(on);
+    }
+
+    myView->setRenderMode(on);
+
+    // The one Note toast render mode raises on entry, naming the tier the
+    // viewport just settled on - read AFTER setRenderMode(on) returns, since
+    // the first activation this session is what actually runs the probe.
+    // Copy uses none of the banned words (CLAUDE.md's vocabulary sweep reads
+    // it for free through Toast::paintedTexts(), which records every message
+    // actually shown this run - no separate static accessor needed, unlike
+    // bevelRefusalText() and friends, because this toast is always reachable
+    // from a real render-mode entry rather than gated behind a refusal that
+    // might never fire).
+    if (on) {
+        QString text;
+        switch (myView->renderModeTier()) {
+            case OcctViewWidget::RenderTier::RayTracing: text = tr("Render mode — ray tracing"); break;
+            case OcctViewWidget::RenderTier::Shadows:    text = tr("Render mode — shadows"); break;
+            case OcctViewWidget::RenderTier::Plain:      text = tr("Render mode"); break;
+        }
+        myToasts->show(text, Toast::Kind::Note, false);
+    }
+
+    // The single authority: rail, drawers, the axis gizmo card and the three
+    // gizmo predicates all re-derive themselves off myRenderModeOn from the
+    // appStateChanged this ends by emitting.
+    updateActions();
+}
+
 bool MainWindow::canOpenSaveVersion() const
 {
     // Every OTHER application-wide Enter/Escape claim this app can have
@@ -2050,7 +2182,7 @@ bool MainWindow::restoreVersion(const QString& name)
     // then restoreFrom(), never fromSerialized() (which clears undo history
     // outright; see DocumentModel.h) - so a single Ctrl+Z brings back
     // everything this replaced, not just part of it.
-    myDocument.checkpoint();
+    checkpointDocument();
     myDocument.restoreFrom(loaded);
     myView->clearSelection();
     mySelectedOutlineId = 0;
@@ -2097,6 +2229,13 @@ QString MainWindow::compareBadgeCloseLabel()
 bool MainWindow::openCompare(const QString& name)
 {
     if (myShowingInitScreen || myFurnitureId.isEmpty()) return false;
+
+    // Render mode's own gate is "no compare open" (canOpenRenderMode()), and
+    // this is the structural half of that: even with the versions drawer
+    // hidden while render mode is on, the drawer's own row-click is not the
+    // only way to reach this - App Bar/File menu routes stay reachable, so
+    // opening a compare exits render mode first rather than refusing.
+    if (myRenderModeOn) setRenderModeEnabled(false);
 
     DocumentModel loaded;
     if (!myStore.loadVersion(myFurnitureId, name, loaded)) {
@@ -2509,7 +2648,7 @@ void MainWindow::onDeleteSelected()
     const std::string twinNameA = isTwinPair ? myDocument.nameOf(toDelete[0]) : std::string();
     const std::string twinNameB = isTwinPair ? myDocument.nameOf(toDelete[1]) : std::string();
 
-    myDocument.checkpoint();
+    checkpointDocument();
     myView->clearSelection();
     for (int id : toDelete) {
         myDocument.removeSolid(id);
@@ -2544,7 +2683,7 @@ bool MainWindow::deletePendingOutline()
     // puts it back. The toast that reports it carries Undo for the same
     // reason - CLAUDE.md's rule is that a change the user can see is a change
     // they can take back from where it is reported.
-    myDocument.checkpoint();
+    checkpointDocument();
     myDocument.removeOutline(id);
     myView->removeOutline(id);
     // The drawer's choice went with it. Not strictly required -
@@ -2594,7 +2733,7 @@ void MainWindow::onItemRenameCommitted(int id, bool isOutline, QString newName)
     // refuse, which a check-after-the-fact could not promise.
     if (!(isOutline ? myDocument.containsOutline(id) : myDocument.contains(id))) return;
 
-    myDocument.checkpoint();
+    checkpointDocument();
     myDocument.setItemName(id, newName.trimmed().toStdString());
     recordProgress("rename.used");
 
@@ -2607,6 +2746,12 @@ void MainWindow::onItemRenameCommitted(int id, bool isOutline, QString newName)
 
 void MainWindow::onUndo()
 {
+    // A document-changing gesture in every sense that matters here, even
+    // though it does not run through checkpointDocument() (undo does not
+    // take a NEW checkpoint) - so render mode's own exit rule is enforced
+    // explicitly rather than piggy-backing on that choke point.
+    if (myRenderModeOn) setRenderModeEnabled(false);
+
     // Mid-sketch, Undo means the last POINT. One implementation with two
     // triggers, not a second remove-last-point path: Backspace and Ctrl+Z
     // both land in onUndoSketchPoint(), so the two can never drift.
@@ -2640,6 +2785,9 @@ void MainWindow::onUndo()
 
 void MainWindow::onRedo()
 {
+    // See onUndo()'s own comment - the same reasoning applies here.
+    if (myRenderModeOn) setRenderModeEnabled(false);
+
     const std::vector<int> outlinesBefore = outlineIds();
     if (!myDocument.redo()) return;
     recordProgress("undo.used");
@@ -2710,6 +2858,12 @@ void MainWindow::onSketchCursorMoved(const gp_Pnt& point)
 
 void MainWindow::onStartSketch()
 {
+    // Render mode's own exit gesture, named explicitly in CLAUDE.md's
+    // contract ("Start Sketch... leaves render mode first"). Ctrl+K and the
+    // Sketch menu entry both stay reachable while render mode hides the
+    // rail, so this is not merely defensive - it is a real route in.
+    if (myRenderModeOn) setRenderModeEnabled(false);
+
     mySketch.reset();
     // A waiting outline is NOT discarded here any more. It used to be, when
     // it was a bare member and starting a sketch was the only way to be rid
@@ -2882,7 +3036,7 @@ void MainWindow::onFinishSketch()
     // checkpoint like every other change to the document, appears in the
     // drawer, and can be taken back with Ctrl+Z rather than only by being
     // extruded or silently dropped by the next sketch.
-    myDocument.checkpoint();
+    checkpointDocument();
     const int id = myDocument.addOutline(face, mySketch.plane());
     // The newest is what Extrude consumes by default, and saying so
     // explicitly rather than leaning on pendingOutlineId()'s fallback means
@@ -2954,7 +3108,7 @@ bool MainWindow::extrudePendingFace(double height)
     // body arriving are one change, so one Ctrl+Z puts the outline back and
     // takes the body away. Two checkpoints would make the user press it twice
     // and leave a document holding both in between.
-    myDocument.checkpoint();
+    checkpointDocument();
     const int id = myDocument.convertOutlineToBody(outlineId, solid);
     recordProgress("extrude.completed");
     myView->clearPreview();
@@ -3012,7 +3166,14 @@ bool MainWindow::canPullSelectedFace() const
     // No sketch in progress, and no closed outline waiting - see
     // canChangeSketchPlane() and the header for both halves. The pending-face
     // half is what keeps this and ExtrudePreview mutually exclusive.
-    if (mySketching || hasPendingFace()) return false;
+    //
+    // Render mode adds a third: it clears the selection and deactivates
+    // every solid's own selection modes the moment it turns on (see
+    // OcctViewWidget::setRenderMode()), so selectedFace() below would answer
+    // null on its own - this term is defence in depth, named explicitly so a
+    // future selection route cannot silently reach this predicate before the
+    // viewport's own suppression does.
+    if (mySketching || hasPendingFace() || myRenderModeOn) return false;
 
     // selectedFace() is deliberately "the ONE selected face", never the first
     // of several, so this cannot be a coin toss between two highlighted
@@ -3034,12 +3195,25 @@ int MainWindow::bodyIdForFace(const TopoDS_Face& face) const
     return 0;
 }
 
+void MainWindow::checkpointDocument()
+{
+    // Render mode's own exit rule: "any document-changing action leaves
+    // render mode first". Every commit in this file that takes a checkpoint
+    // now calls THIS rather than myDocument.checkpoint() directly (eight call
+    // sites, before this task), which is what makes the rule structural
+    // rather than eight separate reminders scattered across the file to add
+    // one - and it runs before the checkpoint below, exactly as the brief's
+    // own word "first" asks for.
+    if (myRenderModeOn) setRenderModeEnabled(false);
+    myDocument.checkpoint();
+}
+
 void MainWindow::commitReplaceBody(int id, const TopoDS_Shape& newShape, bool& twinFollowed)
 {
     twinFollowed = false;
     if (id <= 0 || newShape.IsNull()) return;
 
-    myDocument.checkpoint();
+    checkpointDocument();
     myDocument.replaceSolid(id, newShape);
     myView->displaySolid(id, newShape);
 
@@ -3130,9 +3304,9 @@ int MainWindow::bodyIdForEdge(const TopoDS_Edge& edge) const
 bool MainWindow::bevelTarget(std::vector<TopoDS_Edge>& edges, TopoDS_Edge& edge, int& bodyId,
                              gp_Pnt& centre, gp_Dir& outward) const
 {
-    // The same two halves canPullSelectedFace() opens with, for the same
+    // The same three terms canPullSelectedFace() opens with, for the same
     // reasons - see its comment and the header.
-    if (mySketching || hasPendingFace()) return false;
+    if (mySketching || hasPendingFace() || myRenderModeOn) return false;
 
     // Edge mode explicitly, so this cannot be true at the same time as the
     // face pull's predicate or the transform gizmo's.
@@ -3341,10 +3515,10 @@ bool MainWindow::bevelEdgesBy(const std::vector<TopoDS_Edge>& edges, double size
 
 int MainWindow::transformableBodyId() const
 {
-    // The same two halves canPullSelectedFace() opens with, for the same
+    // The same three terms canPullSelectedFace() opens with, for the same
     // reasons: an outline in progress lives on a plane, and a body that moved
     // under it would take the plane's meaning with it.
-    if (mySketching || hasPendingFace()) return 0;
+    if (mySketching || hasPendingFace() || myRenderModeOn) return 0;
 
     // Body mode explicitly. selectedSolidIds() reports the owning body of a
     // selected FACE too, so without this the gizmo would appear over a face
@@ -3528,7 +3702,7 @@ bool MainWindow::applyBooleanToSelection(int kind)
         else if (myDocument.twinOf(ids[1]) > 0) survivingId = ids[1];
     }
 
-    myDocument.checkpoint();
+    checkpointDocument();
     myView->clearSelection();
 
     int id = 0;

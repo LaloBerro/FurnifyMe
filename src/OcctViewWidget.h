@@ -513,6 +513,49 @@ public:
     // myWireframe itself was never touched.
     bool isSolidWireframe(int id) const;
 
+    // --- Render mode (Milestone 3, item 5) ----------------------------------
+    //
+    // Strips this viewport down to the raw scene: clears and suppresses
+    // selection (a real ClearSelected() plus every solid's own selection
+    // modes taken out of the context's pick candidates - see the .cpp), hides
+    // the work-plane grid, switches the rendering pipeline to the best tier
+    // this GPU sustains interactively, and swaps the flat viewport colour for
+    // a soft studio gradient. Session-only: MainWindow never persists this
+    // action's checked state, so the app always starts in modeling however it
+    // was left.
+    //
+    // This class owns only the OCCT-side scene: the grid, selection, the
+    // rendering params, the backdrop. Every Qt-side surface CLAUDE.md's
+    // contract also hides - the rail, the drawers, the axis gizmo card, the
+    // three gizmos - is MainWindow's, and is derived off the SAME predicates
+    // that already govern them (canPullSelectedFace(), bevelTarget(),
+    // transformableBodyId() all refuse while render mode is on, and the
+    // rail/drawer visibility lambda reads it directly) rather than pushed
+    // from here - CLAUDE.md's sibling-visibility law: derive, never set.
+    //
+    // A no-op on the compare pane (myViewerOnly) and a no-op when already in
+    // the requested state.
+    void setRenderMode(bool on);
+    bool renderModeActive() const { return myRenderModeActive; }
+
+    // The three tiers the first activation each session probes between, best
+    // first - see setRenderMode()'s .cpp comment for how each is measured.
+    enum class RenderTier { RayTracing, Shadows, Plain };
+    // The tier chosen at the FIRST activation this session, and reused on
+    // every activation after that ("cache the tier for the session" - the
+    // brief's own words) - Plain before any activation has happened, which is
+    // also RenderTier's own zero-cost default should nothing ever probe it.
+    // MainWindow reads this the moment setRenderMode(true) returns, to name
+    // it in the one Note toast render mode raises on entry.
+    RenderTier renderModeTier() const { return myRenderTier; }
+    bool renderModeTierProbed() const { return myRenderTierProbed; }
+
+    // ~100 ms - the brief's own number for "is ray tracing still
+    // interactive on this GPU", measured against a single redraw. A session
+    // constant, not a setting: CLAUDE.md's ruling for this task is that nothing
+    // about the tier probe is user-configurable.
+    static constexpr int kRenderTierProbeThresholdMs = 100;
+
 signals:
     void sketchPointPicked(const gp_Pnt& point);
     // Fired on every camera change so overlays (the axis gizmo) can repaint.
@@ -563,6 +606,16 @@ signals:
     // way, so a consumer that ignores this signal entirely still leaves the
     // viewport agreeing with the document.
     void gizmoReleased(int solidId, const gp_Trsf& delta);
+
+    // A LEFT press landed in the viewport while render mode is active - the
+    // brief's "a pick press in the viewport" exit. This widget does not know
+    // what leaving render mode means beyond its own scene (MainWindow owns
+    // the QAction, the toast and the rest of the chrome, and updateActions()
+    // is the single authority that un-checks it), so it asks rather than
+    // acts - see mousePressEvent(), which swallows the press unconditionally
+    // once it emits this, so the click that exits never also performs
+    // whatever pick or gesture it would ordinarily have started.
+    void renderModeExitRequested();
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -700,6 +753,36 @@ private:
     // them refresh is an annotation that is sometimes a lie.
     void updateEdgeDimension();
 
+    // --- Render mode's own private machinery --------------------------------
+    //
+    // The tier probe itself: ray tracing timed against one redraw, falling
+    // back to a shadow-mapped directional light, falling back to plain
+    // rasterization - see the .cpp for the full argument on each step and
+    // why each is measured rather than trusted as setter data.
+    RenderTier probeRenderTier();
+    // Writes `tier`'s rendering params (Method, IsShadowEnabled, which
+    // lights cast shadows) onto the live view WITHOUT timing or Dump-probing
+    // anything - the cheap reapplication path a cached tier uses on every
+    // activation after the first.
+    void applyRenderTier(RenderTier tier);
+    // Every directional light this viewer owns, told to cast shadows or not.
+    // One place, because both the tier-2 probe and applyRenderTier() need it.
+    void setLightsCastShadows(bool cast);
+    // Two real Dump()s - shadows off, then on - compared pixel by pixel.
+    // CLAUDE.md's zoom-persistence lesson: Graphic3d_CLight::SetCastShadows()
+    // succeeding is not proof a shadow actually reached the screen, so this
+    // is the ONLY thing that accepts tier 2. False on any failure to render
+    // or compare, which is what sends the probe on to plain rasterization.
+    bool probeShadowPixelsDiffer();
+    // The flat viewport colour outside render mode, the studio gradient
+    // while it is on - one function, called from setRenderMode() on both
+    // edges and from applyTheme(), which is what "re-derived on
+    // themeChanged while active" (the brief's own words) actually is: a
+    // theme edit repaints through applyTheme() regardless of render mode,
+    // and this is the one place that reads myRenderModeActive to pick which
+    // background that repaint means.
+    void applyBackgroundForMode();
+
     Handle(V3d_Viewer) myViewer;
     Handle(V3d_View) myView;
     Handle(AIS_InteractiveContext) myContext;
@@ -820,4 +903,12 @@ private:
 
     // See the constructor's own comment - the compare pane's flag.
     bool myViewerOnly = false;
+
+    // Render mode (Milestone 3, item 5) - see setRenderMode(). Session-only
+    // in the sense that matters: nothing here is ever read from or written
+    // to QSettings, so a fresh OcctViewWidget always starts with all three
+    // false/Plain regardless of what a previous session left.
+    bool myRenderModeActive = false;
+    bool myRenderTierProbed = false;
+    RenderTier myRenderTier = RenderTier::Plain;
 };

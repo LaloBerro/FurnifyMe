@@ -186,7 +186,7 @@ void skipByEnvironment(int checks, const QString& why)
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 1709;
+constexpr int kCheckFloor = 1751;
 
 void check(bool condition, const QString& what)
 {
@@ -15709,6 +15709,270 @@ int main(int argc, char* argv[])
                   QStringLiteral("...and the Note toast says so (\"%1\")")
                       .arg(symToasts ? symToasts->currentText() : QString()));
         }
+    }
+
+    // --- Render mode (Milestone 3, item 5) --------------------------------
+    // A dedicated probe, on the same terms the versions and symmetry blocks
+    // above use one: this needs its own furniture, its own toast history to
+    // sweep, and a scene left in render mode at the end of some sub-block
+    // must never bleed into whatever runs after it.
+    {
+        RequiredTempDir renderLib;
+        MainWindow probe(nullptr, /*persistProgress=*/false, renderLib.path());
+        probe.setAttribute(Qt::WA_ShowWithoutActivating);
+        probe.resize(1200, 800);
+        probe.move(40, 40);
+        probe.show();
+        settle(400);
+        probe.view()->setAnimationsEnabled(false);
+        OcctViewWidget* rview = probe.view();
+
+        QAction* renderAction = action(probe, QStringLiteral("Render mode"));
+        check(renderAction != nullptr, "there is a Render mode action");
+
+        // Disabled on the init screen too - the same gate every other
+        // furniture-only action opens with.
+        check(renderAction == nullptr || !renderAction->isEnabled(),
+              "Render mode is unavailable on the init screen, before any "
+              "furniture is open");
+
+        enterFreshFurniture(probe);
+        check(buildBody(probe, 0.30, 0.30, 0.55, 0.55, 40.0),
+              "a body for render mode to strip the viewport down to");
+        const int bodyId = probe.document().solids().empty()
+                               ? -1
+                               : probe.document().solids().back().id;
+        check(bodyId > 0, "the body reached the document");
+        rview->setSelectedSolids({bodyId});
+        settle(200);
+        check(rview->hasManipulator(),
+              "the transform gizmo is up on the selected body before render "
+              "mode, so its detach below proves something");
+
+        ToolCluster* rail = rview->findChild<ToolCluster*>();
+        ItemsPanel* drawer = probe.itemsPanel();
+        AxisGizmo* gizmoCard = rview->findChild<AxisGizmo*>();
+        check(rail != nullptr && rail->isVisible(), "the rail is up before render mode");
+        check(drawer != nullptr && drawer->isVisible(),
+              "the items drawer is up before render mode (checked by default)");
+        check(gizmoCard != nullptr && gizmoCard->isVisible(),
+              "the axis gizmo card is up before render mode");
+
+        const QPoint railCentre =
+            rail ? rail->mapTo(rview, rail->rect().center()) : QPoint();
+        check(rail != nullptr && rview->childAt(railCentre) != nullptr &&
+                  (rview->childAt(railCentre) == rail ||
+                   rail->isAncestorOf(rview->childAt(railCentre))),
+              "and a real click on it would land on the rail, not merely on "
+              "a widget that happens to report isVisible()");
+
+        check(renderAction != nullptr && renderAction->isEnabled(),
+              "Render mode is available with a furniture open, no sketch and "
+              "no compare");
+
+        // Show bottom bar hides the status bar, which is a QMainWindow
+        // layout component - unlike the rail/drawers/gizmo card (all
+        // children of the viewport itself, floating over it), hiding it
+        // actually GROWS the viewport's own device-pixel size by
+        // reclaiming the bar's height. Render mode hides the bar too (the
+        // rail/drawer visibility lambda), so a "before" dump taken with the
+        // bar still showing is not the same viewport size the "after" dump
+        // is - which would make the 2x check compare two different bases.
+        // Turned off HERE, once, before either dump, so both are measured
+        // against the identical viewport geometry render mode itself will
+        // use.
+        QAction* bottomBarAction = action(probe, QStringLiteral("Show bottom bar"));
+        check(bottomBarAction != nullptr, "there is a Show bottom bar action to pin the "
+                                          "viewport size with");
+        if (bottomBarAction && bottomBarAction->isChecked()) {
+            bottomBarAction->trigger();
+            settle(150);
+        }
+
+        // A grid-colour scan. "A known grid line" is the default ground
+        // grid's own minor/major lines, which the startup camera pose always
+        // frames; the probe records WHERE it found them so the after-shot
+        // can check those SAME positions rather than re-scanning the whole
+        // image, which the studio backdrop's own grey gradient can - and, in
+        // an earlier round of this test, did - pass close enough to
+        // gridMinor()/gridMajor() at some row to register as a false grid
+        // hit. Checking the exact positions the grid used to occupy is
+        // immune to that: the gradient's colour at ANY row is not the
+        // question, only whether grid pixels remain at the rows and columns
+        // that used to carry them.
+        auto isGridColour = [](const QColor& c) {
+            return colorDistance(c, Theme::gridMinor()) < 8.0 ||
+                   colorDistance(c, Theme::gridMajor()) < 8.0;
+        };
+        struct GridSample { int x; int y; };
+        auto findGridSamples = [&](const QImage& shot) {
+            std::vector<GridSample> samples;
+            for (int y = 0; y < shot.height() && samples.size() < 300; y += 3) {
+                for (int x = 0; x < shot.width() && samples.size() < 300; x += 3) {
+                    if (isGridColour(shot.pixelColor(x, y))) samples.push_back({x, y});
+                }
+            }
+            return samples;
+        };
+
+        const QString beforePath = outDir + QStringLiteral("/render-mode-before.png");
+        check(rview->saveSnapshot(beforePath),
+              "a normal snapshot is taken before render mode");
+        const QImage beforeShot(beforePath);
+        check(!beforeShot.isNull(), "and it loads back");
+        const std::vector<GridSample> gridSamplesBefore =
+            beforeShot.isNull() ? std::vector<GridSample>() : findGridSamples(beforeShot);
+        check(gridSamplesBefore.size() > 50,
+              QStringLiteral("the ground grid is really on screen before render mode "
+                             "(%1 sampled px)")
+                  .arg(gridSamplesBefore.size()));
+
+        // --- entry --------------------------------------------------------
+        Toast* toast = probe.findChild<Toast*>();
+        ToastHost* toastHost = probe.findChild<ToastHost*>();
+        renderAction->trigger();
+        settle(250);
+
+        check(renderAction->isChecked(), "Render mode is now on");
+        check(probe.renderModeEnabled(), "and the window's own flag agrees");
+        check(rview->renderModeActive(), "and the viewport's own flag agrees too");
+
+        // The one Note toast, naming ONE of the three tiers - the probe
+        // itself is environment-dependent (this task's own ruling: all three
+        // are passes, never a skip), so the assertion is that a tier was
+        // chosen and reported, not which one.
+        const QString tierText = toastHost ? toastHost->currentText() : QString();
+        const bool namesATier = tierText == QStringLiteral("Render mode — ray tracing") ||
+                                tierText == QStringLiteral("Render mode — shadows") ||
+                                tierText == QStringLiteral("Render mode");
+        check(namesATier,
+              QStringLiteral("the tier toast names one of the three tiers (\"%1\")")
+                  .arg(tierText));
+        const OcctViewWidget::RenderTier tier = rview->renderModeTier();
+        check((tier == OcctViewWidget::RenderTier::RayTracing &&
+                  tierText == QStringLiteral("Render mode — ray tracing")) ||
+                  (tier == OcctViewWidget::RenderTier::Shadows &&
+                   tierText == QStringLiteral("Render mode — shadows")) ||
+                  (tier == OcctViewWidget::RenderTier::Plain &&
+                   tierText == QStringLiteral("Render mode")),
+              "and the toast names the SAME tier the viewport actually chose, "
+              "not a mismatched pair");
+        check(rview->renderModeTierProbed(), "the tier is now cached for the session");
+
+        // Vocabulary sweep, scoped to this probe's own toast history - the
+        // same mechanism the versions/rename probe above uses, since this is
+        // a SEPARATE ToastHost from the shared `window`'s own sweep.
+        check(toast != nullptr && !toast->paintedTexts().isEmpty(),
+              "this probe has a toast to sweep, so the vocabulary check below "
+              "is not vacuous");
+        QStringList renderToastOffenders;
+        for (Toast* widget : probe.findChildren<Toast*>()) {
+            for (const QString& text : widget->paintedTexts()) {
+                for (const QString& word : bannedWords()) {
+                    if (usesBannedWord(text, word))
+                        renderToastOffenders
+                            << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
+                }
+            }
+        }
+        check(renderToastOffenders.isEmpty(),
+              QStringLiteral("none of the tier toast's copy uses a banned word (%1)")
+                  .arg(renderToastOffenders.isEmpty()
+                           ? QStringLiteral("none")
+                           : renderToastOffenders.join(QStringLiteral(", "))));
+
+        // Hidden: rail, drawer, axis gizmo card, the transform gizmo.
+        check(rail != nullptr && !rail->isVisible(), "the rail is hidden");
+        check(rview->childAt(railCentre) != rail &&
+                  (rail == nullptr || !rail->isAncestorOf(rview->childAt(railCentre))),
+              "and nothing is clickable where it used to be");
+        check(drawer != nullptr && !drawer->isVisible(), "the items drawer is hidden");
+        check(gizmoCard != nullptr && !gizmoCard->isVisible(),
+              "the axis gizmo card is hidden");
+        check(!rview->hasManipulator(),
+              "the transform gizmo is detached, even though the body is still "
+              "selected underneath");
+
+        // Screenshot doubling AND the grid, off the same doubled dump.
+        const QString afterPath = outDir + QStringLiteral("/render-mode-after.png");
+        check(rview->saveSnapshot(afterPath),
+              "a snapshot is taken while render mode is on");
+        const QImage afterShot(afterPath);
+        check(!afterShot.isNull(), "and it loads back");
+        check(!beforeShot.isNull() && !afterShot.isNull() &&
+                  afterShot.width() == beforeShot.width() * 2 &&
+                  afterShot.height() == beforeShot.height() * 2,
+              QStringLiteral("the render-mode dump is exactly 2x the normal dump's own "
+                             "dimensions (%1x%2 against %3x%4)")
+                  .arg(afterShot.width())
+                  .arg(afterShot.height())
+                  .arg(beforeShot.width() * 2)
+                  .arg(beforeShot.height() * 2));
+        // Every position that carried a grid pixel in the before-shot,
+        // mapped onto the doubled after-shot (an exact x2, since the two
+        // dumps now share the same viewport geometry - see the bottom-bar
+        // pin above) and re-tested at the SAME spot. This is the "known
+        // grid line" probe: it cannot be fooled by the studio gradient
+        // reading close to gridMinor()/gridMajor() somewhere else in the
+        // image, because it never looks anywhere else.
+        int stillGridAfter = 0;
+        for (const GridSample& sample : gridSamplesBefore) {
+            const QPoint mapped(sample.x * 2, sample.y * 2);
+            if (afterShot.rect().contains(mapped) && isGridColour(afterShot.pixelColor(mapped)))
+                ++stillGridAfter;
+        }
+        check(!gridSamplesBefore.empty() && stillGridAfter == 0,
+              QStringLiteral("and the ground grid is gone - none of the %1 positions that "
+                             "carried a grid pixel before render mode still do (%2 still do)")
+                  .arg(gridSamplesBefore.size())
+                  .arg(stillGridAfter));
+
+        // --- orbit does NOT exit --------------------------------------------
+        dragButton(rview, QPointF(rview->width() * 0.5, rview->height() * 0.5),
+                  QPointF(rview->width() * 0.5 + 60.0, rview->height() * 0.5),
+                  Qt::RightButton);
+        check(renderAction->isChecked() && rview->renderModeActive(),
+              "orbiting the camera does not exit render mode - you are framing a shot");
+
+        // --- a viewport press DOES exit, and restores the rail --------------
+        clickAt(rview, QPointF(rview->width() * 0.5, rview->height() * 0.5));
+        settle(200);
+        check(!renderAction->isChecked(), "a plain viewport press exits render mode");
+        check(!rview->renderModeActive(), "and the viewport's own flag follows");
+        check(rail != nullptr && rail->isVisible(), "the rail is back");
+        QWidget* hitAfterExit = rail ? rview->childAt(railCentre) : nullptr;
+        check(hitAfterExit != nullptr &&
+                  (hitAfterExit == rail || rail->isAncestorOf(hitAfterExit)),
+              "and a real click on it would land on the rail again - childAt(), "
+              "not merely isVisible()");
+        check(drawer != nullptr && drawer->isVisible(), "the items drawer is back too");
+        check(gizmoCard != nullptr && gizmoCard->isVisible(),
+              "and so is the axis gizmo card");
+
+        // --- Start Sketch also exits ----------------------------------------
+        renderAction->trigger();
+        settle(200);
+        check(renderAction->isChecked() && rview->renderModeActive(),
+              "back in render mode, for the Start Sketch exit");
+        trigger(probe, QStringLiteral("Start Sketch"));
+        check(!renderAction->isChecked() && !rview->renderModeActive(),
+              "Start Sketch leaves render mode first, exactly as the brief names it");
+        trigger(probe, QStringLiteral("Cancel Sketch"));
+        settle(150);
+
+        // --- a document-changing commit also exits ---------------------------
+        renderAction->trigger();
+        settle(200);
+        check(renderAction->isChecked() && rview->renderModeActive(),
+              "back in render mode, for the checkpointDocument() exit");
+        rview->setSelectedSolids({bodyId});
+        settle(150);
+        trigger(probe, QStringLiteral("Delete Selected"));
+        check(!renderAction->isChecked() && !rview->renderModeActive(),
+              "deleting a body - a document-changing commit - leaves render mode "
+              "first too");
+        trigger(probe, QStringLiteral("Undo"));
+        settle(150);
     }
 
     // The coverage floor, asserted OUTSIDE check() on purpose: an assertion

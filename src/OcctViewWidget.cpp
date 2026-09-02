@@ -25,6 +25,7 @@
 #include <AIS_DisplayMode.hxx>
 #include <AIS_SelectionScheme.hxx>
 #include <Aspect_DisplayConnection.hxx>
+#include <Aspect_GradientFillMethod.hxx>
 #include <Aspect_TypeOfMarker.hxx>
 #include <Bnd_Box.hxx>
 #include <BRepBndLib.hxx>
@@ -33,12 +34,15 @@
 #include <Graphic3d_AspectLine3d.hxx>
 #include <Graphic3d_AspectMarker3d.hxx>
 #include <Graphic3d_Camera.hxx>
+#include <Graphic3d_CLight.hxx>
 #include <Graphic3d_Group.hxx>
 #include <Graphic3d_MaterialAspect.hxx>
 #include <Graphic3d_NameOfMaterial.hxx>
+#include <Graphic3d_RenderingParams.hxx>
 #include <Graphic3d_TransformPers.hxx>
 #include <Graphic3d_Vec2.hxx>
 #include <Graphic3d_ZLayerSettings.hxx>
+#include <Image_AlienPixMap.hxx>
 #include <NCollection_HArray1.hxx>
 #include <OpenGl_GraphicDriver.hxx>
 #include <Prs3d_Drawer.hxx>
@@ -50,6 +54,7 @@
 #include <Quantity_Color.hxx>
 #include <Quantity_NameOfColor.hxx>
 #include <SelectMgr_Selection.hxx>
+#include <Standard_Failure.hxx>
 #include <StdSelect_ViewerSelector3d.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopExp.hxx>
@@ -58,6 +63,7 @@
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Vertex.hxx>
 #include <BRep_Tool.hxx>
+#include <V3d_DirectionalLight.hxx>
 #include <V3d_TypeOfVisualization.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Dir.hxx>
@@ -72,7 +78,9 @@
 
 #include <QDir>
 #include <QEasingCurve>
+#include <QElapsedTimer>
 #include <QFile>
+#include <QImage>
 #include <QMouseEvent>
 #include <QPaintEvent>
 #include <QResizeEvent>
@@ -1919,7 +1927,19 @@ bool OcctViewWidget::saveSnapshot(const QString& path)
     if (myView.IsNull()) return false;
 
     myView->Redraw();
-    return myView->Dump(path.toUtf8().constData()) == Standard_True;
+
+    if (!myRenderModeActive) return myView->Dump(path.toUtf8().constData()) == Standard_True;
+
+    // Render mode doubles the export - the view's own DEVICE-pixel size
+    // (toDevicePixels()'s own conversion, so a 150% display's screenshot is
+    // 2x its OWN already-scaled pixel count, not 2x the logical widget
+    // size), through ToPixMap() rather than Dump(): it renders an offscreen
+    // buffer of the requested target size directly, with no window resize
+    // needed - Dump() has no size parameter of its own to hand it one.
+    const QPoint deviceSize = toDevicePixels(QPoint(width(), height()));
+    Image_AlienPixMap pixmap;
+    if (!myView->ToPixMap(pixmap, deviceSize.x() * 2, deviceSize.y() * 2)) return false;
+    return pixmap.Save(path.toUtf8().constData());
 }
 
 QImage OcctViewWidget::captureThumbnail()
@@ -2189,9 +2209,13 @@ void OcctViewWidget::applyTheme()
 {
     if (myView.IsNull() || myContext.IsNull()) return;
 
-    const QColor bg = Theme::viewport();
-    myView->SetBackgroundColor(Quantity_Color(bg.redF(), bg.greenF(), bg.blueF(),
-                                              Quantity_TOC_sRGB));
+    // The flat colour outside render mode, the studio gradient while it is
+    // on - one function so a theme edit re-derives whichever is live rather
+    // than always repainting the flat one underneath an active gradient.
+    // This is what makes render mode's backdrop "re-derived on themeChanged
+    // while active" true: this call already runs on every theme edit
+    // (onThemeChanged() below), so render mode needed no second broadcast.
+    applyBackgroundForMode();
 
     // OCCT's default highlight barely reads against a shaded body. Make hover
     // and selection unmistakable - not being able to tell what is selected was
@@ -2234,6 +2258,196 @@ void OcctViewWidget::applyTheme()
     update();
 }
 
+void OcctViewWidget::applyBackgroundForMode()
+{
+    if (myView.IsNull()) return;
+
+    const QColor base = Theme::viewport();
+    if (!myRenderModeActive) {
+        myView->SetBackgroundColor(toOcctColor(base));
+        return;
+    }
+
+    // Studio backdrop: a soft vertical gradient derived from the SAME
+    // viewport token the flat colour above reads, rather than a second,
+    // untokenised colour pair - lighter top, darker bottom, the brief's own
+    // words. This is OCCT-side (SetBgGradientColors on the live camera's
+    // clear), not a Qt translucency, so the opaque-paint-family law is
+    // untouched.
+    const QColor top = base.lighter(140);
+    const QColor bottom = base.darker(140);
+    myView->SetBgGradientColors(toOcctColor(top), toOcctColor(bottom),
+                                Aspect_GradientFillMethod_Vertical, Standard_True);
+}
+
+void OcctViewWidget::setLightsCastShadows(bool cast)
+{
+    if (myViewer.IsNull()) return;
+    // Every directional light this viewer's SetDefaultLights() gave it -
+    // Graphic3d_CLight::SetCastShadows() is what OCCT 8.0 actually offers
+    // for a shadow-mapped RASTERIZATION light (checked against the real
+    // header under vcpkg's opencascade include tree; V3d_DirectionalLight
+    // itself carries no shadow API of its own, it inherits this one). An
+    // ambient light (also part of SetDefaultLights()) is not a
+    // V3d_DirectionalLight and DownCast() simply skips it.
+    for (const Handle(Graphic3d_CLight)& light : myViewer->ActiveLights()) {
+        const Handle(V3d_DirectionalLight) directional =
+            Handle(V3d_DirectionalLight)::DownCast(light);
+        if (!directional.IsNull()) directional->SetCastShadows(cast);
+    }
+}
+
+void OcctViewWidget::applyRenderTier(RenderTier tier)
+{
+    if (myView.IsNull()) return;
+    Graphic3d_RenderingParams& params = myView->ChangeRenderingParams();
+    params.Method = (tier == RenderTier::RayTracing) ? Graphic3d_RM_RAYTRACING
+                                                      : Graphic3d_RM_RASTERIZATION;
+    if (tier == RenderTier::RayTracing) params.IsShadowEnabled = true;
+    setLightsCastShadows(tier == RenderTier::Shadows);
+}
+
+bool OcctViewWidget::probeShadowPixelsDiffer()
+{
+    // Real Dump() pixels, not the setter's own claim - CLAUDE.md's
+    // zoom-persistence lesson, restated for this task: SetCastShadows(true)
+    // returning does not mean a shadow actually reached the screen, and a
+    // driver that silently ignores the flag is a real possibility this probe
+    // exists to catch. Two full dumps, shadows off then on, compared pixel
+    // by pixel; any real difference is accepted as proof the effect rendered.
+    if (myView.IsNull()) return false;
+
+    QTemporaryFile beforeFile(QDir::tempPath() +
+                              QStringLiteral("/furnifyme-shadow-before-XXXXXX.png"));
+    QTemporaryFile afterFile(QDir::tempPath() +
+                             QStringLiteral("/furnifyme-shadow-after-XXXXXX.png"));
+    if (!beforeFile.open() || !afterFile.open()) return false;
+    const QString beforePath = beforeFile.fileName();
+    const QString afterPath = afterFile.fileName();
+    // Closed rather than left open - same reasoning captureThumbnail() gives:
+    // Dump() opens the path itself, and a handle already open on it is
+    // another way for that to fail besides a missing directory.
+    beforeFile.close();
+    afterFile.close();
+
+    setLightsCastShadows(false);
+    myView->Redraw();
+    const bool dumpedBefore = myView->Dump(beforePath.toUtf8().constData()) == Standard_True;
+
+    setLightsCastShadows(true);
+    myView->Redraw();
+    const bool dumpedAfter = myView->Dump(afterPath.toUtf8().constData()) == Standard_True;
+
+    bool differ = false;
+    if (dumpedBefore && dumpedAfter) {
+        const QImage before(beforePath);
+        const QImage after(afterPath);
+        if (!before.isNull() && !after.isNull() && before.size() == after.size()) {
+            // Sampled, not exhaustive - this runs once per session, but a
+            // full-resolution nested loop over a live viewport is still real
+            // work for what is fundamentally a yes/no question.
+            constexpr int kStride = 4;
+            for (int y = 0; y < before.height() && !differ; y += kStride) {
+                for (int x = 0; x < before.width(); x += kStride) {
+                    if (before.pixel(x, y) != after.pixel(x, y)) { differ = true; break; }
+                }
+            }
+        }
+    }
+
+    QFile::remove(beforePath);
+    QFile::remove(afterPath);
+    return differ;
+}
+
+OcctViewWidget::RenderTier OcctViewWidget::probeRenderTier()
+{
+    if (myView.IsNull()) return RenderTier::Plain;
+
+    // Tier 1: GPU ray tracing with shadows, timed against a single redraw -
+    // the brief's own method, not an average over several frames (a warm-up
+    // redraw would hide exactly the shader-compilation cost a slow GPU also
+    // pays on every later one). Wrapped in try/catch per this task's own
+    // ruling: a driver that cannot do this is expected to REFUSE cleanly
+    // rather than take the app down, and OCCT reports that refusal as a
+    // Standard_Failure here rather than a bool return.
+    bool rayTracingFast = false;
+    try {
+        applyRenderTier(RenderTier::RayTracing);
+        QElapsedTimer timer;
+        timer.start();
+        myView->Redraw();
+        rayTracingFast = timer.elapsed() <= kRenderTierProbeThresholdMs;
+    } catch (const Standard_Failure&) {
+        rayTracingFast = false;
+    }
+    if (rayTracingFast) return RenderTier::RayTracing;
+
+    // Ray tracing was refused, or too slow to be interactive - rasterization
+    // from here down. Tier 2: a shadow-mapped directional light, accepted
+    // only once a real Dump() shows a pixel actually moved.
+    applyRenderTier(RenderTier::Shadows);
+    if (probeShadowPixelsDiffer()) return RenderTier::Shadows;
+
+    // Neither held up - stand plain, and undo the shadow flag probeShadow-
+    // PixelsDiffer() may have left set.
+    applyRenderTier(RenderTier::Plain);
+    return RenderTier::Plain;
+}
+
+void OcctViewWidget::setRenderMode(bool on)
+{
+    // Never on the compare pane - it is read-only furniture from a saved
+    // version, not a scene anyone renders a shot of, and this widget's own
+    // header says so. A no-op when already in the requested state, so a
+    // caller need not guard the call itself.
+    if (myViewerOnly || on == myRenderModeActive) return;
+    initializeViewer();
+    if (myContext.IsNull() || myView.IsNull()) return;
+
+    myRenderModeActive = on;
+
+    if (on) {
+        // Suppress hover and selection highlight - a REAL ClearSelected(),
+        // reusing clearSelection() rather than a second copy of its body, so
+        // the edge-length dimension it clears and the selectionChanged() it
+        // emits stay the one implementation. Every solid's own selection
+        // modes then come OUT of the context's pick candidates -
+        // Deactivate() is what actually suppresses both a future hover
+        // highlight and a future pick, not merely today's selection; a
+        // plain LEFT press exits render mode instead of picking anything
+        // (see mousePressEvent()), and reactivating them on the way out
+        // below is what makes picking work again once it does.
+        clearSelection();
+        for (auto& entry : mySolids) myContext->Deactivate(entry.second);
+
+        myGridRenderer.setVisible(false);
+
+        // Cache the tier for the session - the brief's own words. The first
+        // activation pays for the probe (a timed redraw, and possibly two
+        // full Dump()s); every later one just reapplies what was already
+        // found.
+        if (!myRenderTierProbed) {
+            myRenderTier = probeRenderTier();
+            myRenderTierProbed = true;
+        } else {
+            applyRenderTier(myRenderTier);
+        }
+    } else {
+        for (auto& entry : mySolids) applySelectionMode(entry.second);
+        myGridRenderer.setVisible(true);
+        // Ordinary modeling never ray-traces or shadow-maps - both would be
+        // an interactivity hazard mid-edit, and neither is part of the look
+        // this app had before this feature existed. Plain rasterization
+        // restores that exactly, whichever tier was live a moment ago.
+        applyRenderTier(RenderTier::Plain);
+    }
+
+    applyBackgroundForMode();
+    myContext->UpdateCurrentViewer();
+    myView->Redraw();
+}
+
 void OcctViewWidget::setWireframe(bool wireframe)
 {
     if (myWireframe == wireframe) return;
@@ -2255,6 +2469,20 @@ bool OcctViewWidget::isSolidWireframe(int id) const
 
 void OcctViewWidget::mousePressEvent(QMouseEvent* event)
 {
+    // Render mode's own exit gesture - "a pick press in the viewport" in
+    // CLAUDE.md's words. Checked FIRST and unconditionally for a LEFT press:
+    // every gizmo this widget could otherwise grab is already cleared or
+    // detached while render mode is active (see setRenderMode()), so there
+    // is nothing here for the rest of this function to do differently - the
+    // press is swallowed outright rather than falling through to an ordinary
+    // pick, so the click that exits render mode never also selects whatever
+    // happens to be underneath it. RMB orbit and MMB pan are NOT gated here:
+    // the brief is explicit that framing a shot does not exit.
+    if (myRenderModeActive && event->button() == Qt::LeftButton) {
+        emit renderModeExitRequested();
+        return;
+    }
+
     stopCameraAnimation();
     initializeViewer();
     myLastPos = event->position().toPoint();

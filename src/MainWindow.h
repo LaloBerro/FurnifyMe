@@ -16,6 +16,7 @@
 
 class AppBar;
 class AppearancePanel;
+class AxisGizmo;
 class BevelArrow;
 class ExtrudePreview;
 class InitScreen;
@@ -26,6 +27,7 @@ class QMenuBar;
 class QSplitter;
 class SaveVersionCard;
 class ToastHost;
+class ToolCluster;
 class VersionsPanel;
 
 class MainWindow : public QMainWindow {
@@ -420,6 +422,37 @@ public:
     // implementation the badge's own construction reads too.
     static QString compareBadgeCloseLabel();
 
+    // --- Render mode (Milestone 3, item 5) ----------------------------------
+    //
+    // View -> Render mode: strips the viewport to the furniture alone -
+    // grid, drawers, rail, the axis gizmo card, every live gizmo and the
+    // dimension all hidden or suppressed - and switches to the best
+    // rendering tier this GPU sustains interactively (see
+    // OcctViewWidget::setRenderMode() for the three-tier probe). Checkable,
+    // and unlike every OTHER View toggle in this file, deliberately NEVER
+    // persisted: CLAUDE.md's own words are "the app always starts in
+    // modeling", so this never touches QSettings the way
+    // setShowBottomBar()/setAutosaveEnabled() and friends do.
+    //
+    // Also the one place that flips myRenderModeAction's checked state, in
+    // BOTH directions - the user unchecking the box calls this through the
+    // action's own toggled(bool), and every exit gesture (a viewport pick,
+    // Start Sketch, any document-changing commit - see checkpointDocument())
+    // calls it directly, which is what un-checks the box FOR them. Ends by
+    // calling updateActions(), the single authority every other toggle in
+    // this file already answers to.
+    void setRenderModeEnabled(bool on);
+    bool renderModeEnabled() const { return myRenderModeOn; }
+
+    // THE predicate behind View -> Render mode's own enabled state: a
+    // furniture open, no compare open, not sketching, no outline waiting -
+    // the four conditions named in this task's own ruling. Render mode
+    // raises no application-wide Enter/Escape claim of its own (it is a
+    // toggle, not a text field), so unlike canOpenSaveVersion() it does not
+    // need to exclude the three gizmo predicates - it hides them itself the
+    // moment it turns on.
+    bool canOpenRenderMode() const;
+
 signals:
     // DocumentModel is Qt-free by design, so the window announces its changes.
     void documentChanged();
@@ -630,6 +663,15 @@ private:
     // so this owns only the part that is genuinely identical three times
     // over: the checkpoint, the replace, and the twin.
     void commitReplaceBody(int id, const TopoDS_Shape& newShape, bool& twinFollowed);
+
+    // THE single choke point every document-changing commit's checkpoint()
+    // call now goes through, in place of calling myDocument.checkpoint()
+    // directly (eight call sites, before this) - which is what makes render
+    // mode's own exit rule ("any document-changing action leaves render mode
+    // FIRST") structural rather than eight separate reminders to add one.
+    // Exits through setRenderModeEnabled(false), the single authority that
+    // un-checks the action, before the checkpoint it guards ever lands.
+    void checkpointDocument();
     // The one place "the camera was moved to a named direction" is recorded.
     // Every route to that - the four View menu entries and a click on the
     // axis gizmo - goes through here, so no route can record the event
@@ -878,6 +920,21 @@ private:
     // splitter, and setCentralWidget(myView) is what performs that move.
     QSplitter* mySplitter = nullptr;
     OcctViewWidget* myCompareView = nullptr;
+    // --- Render mode (Milestone 3, item 5) ----------------------------------
+    // The one flag every predicate and every appStateChanged-driven
+    // visibility block below reads - never persisted, never read back from
+    // OcctViewWidget::renderModeActive() at a second call site, so the
+    // viewport's own state and this window's idea of it cannot
+    // independently drift. setRenderModeEnabled() is the only writer.
+    bool myRenderModeOn = false;
+    QAction* myRenderModeAction = nullptr;
+    // The rail and the axis gizmo card, kept here rather than found with
+    // findChild<>() on demand - both are constructed as locals inside
+    // buildOverlay() otherwise, and both need to be reached from the
+    // appStateChanged-driven visibility lambda that already hides the three
+    // drawers and the status bar the same way.
+    ToolCluster* myRail = nullptr;
+    AxisGizmo* myAxisGizmo = nullptr;
     QString myCompareVersionName;   // user text - see the badge's own rule
     // The badge and its Close-compare control, parented to myCompareView -
     // owned by Qt's parent-child cascade (destroyed with myCompareView),
