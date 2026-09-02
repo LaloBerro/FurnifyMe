@@ -192,7 +192,7 @@ SerialResult readShapes(std::istream& in, SerializedDocument& doc)
             const TopoDS_Shape& s = result.bodies[i];
             if (s.IsNull() || !looksLikeABody(s)) {
                 return {false, "decoded body at index " + std::to_string(i) +
-                                   " is not a solid body - file is corrupt"};
+                                   " is not a body - file is corrupt"};
             }
         }
         for (const TopoDS_Shape& s : result.outlineFaces) {

@@ -186,7 +186,7 @@ void skipByEnvironment(int checks, const QString& why)
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 1781;
+constexpr int kCheckFloor = 1818;
 
 void check(bool condition, const QString& what)
 {
@@ -1219,6 +1219,13 @@ int main(int argc, char* argv[])
                       .arg(loadedProps.Mass(), 0, 'f', 1)
                       .arg(seededVolume, 0, 'f', 1));
         }
+        // Fix-wave item (c): undo can never cross furnitures. openFurniture()
+        // replaces the whole document with a freshly-loaded one rather than
+        // merging into the live one, so a furniture that starts with an empty
+        // undo stack on disk must open with an empty one on screen too -
+        // never a leftover checkpoint from whatever was open before.
+        check(libraryProbe.document().undoDepth() == 0,
+              "opening a furniture starts with an empty undo stack");
         check(!libraryProbe.isFurnitureDirty(), "a freshly opened furniture is not dirty");
         check(!libraryProbe.windowTitle().contains(QLatin1Char('*')),
               "and its title carries no dirty star");
@@ -1326,6 +1333,78 @@ int main(int argc, char* argv[])
               QStringLiteral("renameFurniture's refusal is reported as a Failure toast too "
                              "(\"%1\")")
                   .arg(renameFailToasts ? renameFailToasts->currentText() : QString()));
+    }
+
+    // --- a hand-corrupted shapes.bin: the Failure toast is swept too ----------
+    // Fix-wave item 2. FurnifySerial's decode-refusal strings reach the user
+    // VERBATIM through FurnitureStore::loadFurniture()'s *error and
+    // MainWindow::openFurniture()'s Failure toast - one of them ("...is not a
+    // solid body - file is corrupt") shipped with the banned word "Solid" in
+    // it because nothing on this path was ever swept. This drives the real
+    // corrupt-load refusal end to end through the UI and sweeps whatever text
+    // actually lands in the toast, so a banned word anywhere in
+    // FurnifySerial's error strings fails here exactly as it would on any
+    // other painted surface.
+    {
+        RequiredTempDir corruptDir;
+        QString corruptId;
+        {
+            FurnitureStore corruptStore(corruptDir.path());
+            corruptId = corruptStore.createFurniture(QStringLiteral("Corrupt Me"));
+            check(!corruptId.isEmpty(), "corrupt-load probe: seeding a furniture succeeds");
+
+            DocumentModel corruptDoc;
+            corruptDoc.addSolid(BRepPrimAPI_MakeBox(10.0, 10.0, 10.0).Shape());
+            check(corruptStore.saveFurniture(corruptId, corruptDoc, QImage()),
+                  "corrupt-load probe: seeding writes a real body straight to disk");
+        }
+
+        // Hand-corrupt shapes.bin - truncated to fewer than the 8-byte magic,
+        // the same "not a FurnifyMe shape blob" refusal FurnifySerial's own
+        // headless suite pins, reached here through the real UI path instead.
+        QString corruptShapesPath;
+        {
+            FurnitureStore corruptLookup(corruptDir.path());
+            for (const FurnitureStore::FurnitureInfo& info : corruptLookup.listFurniture()) {
+                if (info.id == corruptId)
+                    corruptShapesPath = info.filePath + QStringLiteral("/shapes.bin");
+            }
+        }
+        check(!corruptShapesPath.isEmpty(), "corrupt-load probe: the shapes.bin path is found");
+        {
+            QFile shapesFile(corruptShapesPath);
+            check(shapesFile.open(QIODevice::WriteOnly | QIODevice::Truncate),
+                  "corrupt-load probe: shapes.bin is reopened for hand-corruption");
+            shapesFile.write("bad");
+        }
+
+        MainWindow corruptProbe(nullptr, /*persistProgress=*/false, corruptDir.path());
+        corruptProbe.setAttribute(Qt::WA_ShowWithoutActivating);
+        corruptProbe.resize(900, 600);
+        corruptProbe.show();
+        settle(300);
+
+        ToastHost* corruptToasts = corruptProbe.findChild<ToastHost*>();
+        check(!corruptProbe.openFurniture(corruptId),
+              "openFurniture refuses a hand-corrupted shapes.bin");
+        check(corruptProbe.isShowingInitScreen(),
+              "...and the window stays on the gallery rather than opening a broken document");
+        check(corruptToasts != nullptr &&
+                  corruptToasts->currentText().contains(QStringLiteral("Couldn't open")),
+              QStringLiteral("...reported as a Failure toast (\"%1\")")
+                  .arg(corruptToasts ? corruptToasts->currentText() : QString()));
+
+        if (corruptToasts) {
+            const QString toastText = corruptToasts->currentText();
+            QStringList offenders;
+            for (const QString& word : bannedWords()) {
+                if (usesBannedWord(toastText, word)) offenders << word;
+            }
+            check(offenders.isEmpty(),
+                  QStringLiteral("the corrupt-load Failure toast uses no banned word "
+                                 "(\"%1\", found: %2)")
+                      .arg(toastText, offenders.join(QStringLiteral(", "))));
+        }
     }
 
     // --- Save, the dirty star, autosave, and Close furniture ------------------
@@ -14709,6 +14788,168 @@ int main(int argc, char* argv[])
             check(listed.front().id == chairId,
                   "and it now sorts first again, ahead of the table");
         }
+    }
+
+    // --- atomic saves: a failed write must never corrupt what was there ------
+    // Fix-wave Critical. saveFurniture() used to std::ios::trunc shapes.bin
+    // straight onto the live file and QIODevice::Truncate the manifest, both
+    // with an unchecked flush - a flush-time failure could report "Saved"
+    // over a corrupt file, and autosave reopens that window every 400 ms.
+    // Both are now write-to-temp-then-replace
+    // (FurnitureStore::writeShapesFileAtomic() for the shapes blob, QSaveFile
+    // for the manifest) - this drives both failure modes for real and checks
+    // that the OLD file survives, not just that the call returns false.
+    {
+        RequiredTempDir atomicDir;
+        FurnitureStore atomicStore(atomicDir.path());
+        const QString atomicId = atomicStore.createFurniture(QStringLiteral("Atomic"));
+        check(!atomicId.isEmpty(), "atomic-save probe: createFurniture succeeds");
+
+        DocumentModel goodDoc;
+        goodDoc.addSolid(BRepPrimAPI_MakeBox(50.0, 50.0, 50.0).Shape());
+        check(atomicStore.saveFurniture(atomicId, goodDoc, QImage()),
+              "atomic-save probe: an initial good save succeeds");
+
+        QString atomicDirPath;
+        for (const FurnitureStore::FurnitureInfo& info : atomicStore.listFurniture()) {
+            if (info.id == atomicId) atomicDirPath = info.filePath;
+        }
+        check(!atomicDirPath.isEmpty(), "atomic-save probe: the furniture's own directory is found");
+        const QString atomicShapesPath = atomicDirPath + QStringLiteral("/shapes.bin");
+        const QString atomicManifestPath = atomicDirPath + QStringLiteral("/manifest.json");
+
+        QByteArray goodShapesBytes;
+        {
+            QFile f(atomicShapesPath);
+            check(f.open(QIODevice::ReadOnly),
+                  "atomic-save probe: the good shapes.bin opens for reading");
+            goodShapesBytes = f.readAll();
+        }
+        check(!goodShapesBytes.isEmpty(), "atomic-save probe: the good shapes.bin is non-empty");
+
+        // --- shapes.bin: block the TEMP file's own write, not the live file -
+        // A directory sitting at the exact ".tmp" path the atomic write needs
+        // makes std::ofstream's open() fail outright, before the live
+        // shapes.bin is EVER touched - no permission twiddling, and no
+        // window where the old file could be gone before the new one lands.
+        const QString atomicShapesTmp = atomicShapesPath + QStringLiteral(".tmp");
+        check(QDir().mkpath(atomicShapesTmp),
+              "atomic-save probe: a directory blocks the shapes temp file");
+
+        DocumentModel badDoc;
+        badDoc.addSolid(BRepPrimAPI_MakeBox(9.0, 9.0, 9.0).Shape());
+        badDoc.addSolid(BRepPrimAPI_MakeBox(3.0, 3.0, 3.0).Shape());
+        check(!atomicStore.saveFurniture(atomicId, badDoc, QImage()),
+              "saveFurniture returns false when the shapes temp file cannot be written");
+
+        {
+            QFile f(atomicShapesPath);
+            check(f.open(QIODevice::ReadOnly),
+                  "atomic-save probe: shapes.bin still opens after the refusal");
+            check(f.readAll() == goodShapesBytes,
+                  "...and its bytes are EXACTLY what the good save wrote - untouched by the "
+                  "failed one");
+        }
+        {
+            DocumentModel reloaded;
+            QString error;
+            check(atomicStore.loadFurniture(atomicId, reloaded, &error) && reloaded.count() == 1,
+                  QStringLiteral("loadFurniture still reads the OLD document (1 body), not the "
+                                 "failed save's 2 (%1)")
+                      .arg(error));
+        }
+        check(QDir(atomicShapesTmp).removeRecursively(),
+              "atomic-save probe: the blocking directory is cleared for the next probe");
+
+        // --- manifest.json: a read-only target blocks QSaveFile's own open()
+        // Marking the FILE (not its directory) read-only is the one
+        // permission trick this suite trusts on Windows - verified by direct
+        // experiment against this exact machine's QSaveFile, unlike blocking
+        // DIRECTORY creation via permissions, which the create-refusal probe
+        // above avoids for being unreliable there. QSaveFile::open() refuses
+        // outright against a read-only target before any temp file is even
+        // created, so renameFurniture() - a pure manifest mutation, nothing
+        // else touched - is what isolates this from the shapes.bin question
+        // above.
+        check(QFile::setPermissions(atomicManifestPath,
+                                    QFileDevice::ReadOwner | QFileDevice::ReadUser |
+                                        QFileDevice::ReadGroup | QFileDevice::ReadOther),
+              "atomic-save probe: manifest.json is marked read-only");
+
+        check(!atomicStore.renameFurniture(atomicId, QStringLiteral("Should Not Stick")),
+              "renameFurniture (writeManifestObject()) returns false against a read-only manifest");
+        check(!atomicStore.saveFurniture(atomicId, goodDoc, QImage()),
+              "and saveFurniture refuses too, through the same shared write path");
+
+        bool nameUnchanged = false;
+        for (const FurnitureStore::FurnitureInfo& info : atomicStore.listFurniture()) {
+            if (info.id == atomicId) nameUnchanged = (info.name == QStringLiteral("Atomic"));
+        }
+        check(nameUnchanged, "the furniture's name is unchanged - the refused rename never landed");
+
+        check(QFile::setPermissions(atomicManifestPath,
+                                    QFileDevice::ReadOwner | QFileDevice::WriteOwner |
+                                        QFileDevice::ReadUser | QFileDevice::WriteUser |
+                                        QFileDevice::ReadGroup | QFileDevice::ReadOther),
+              "atomic-save probe: the read-only manifest is restored to writable for cleanup");
+        check(atomicStore.renameFurniture(atomicId, QStringLiteral("Atomic Again")),
+              "atomic-save probe: after restoring write access, renameFurniture succeeds normally");
+    }
+
+    // --- saveVersion: a failed manifest write leaves no orphan blob ----------
+    // Fix-wave Critical, disclosed sibling: saveVersion() writes the version's
+    // blob to versions/<uuid>.bin BEFORE it writes the manifest entry that
+    // names it - so a manifest write failure used to leave that blob on disk
+    // forever, referenced by nothing. saveVersion() now deletes it on that
+    // exact path.
+    {
+        RequiredTempDir orphanDir;
+        FurnitureStore orphanStore(orphanDir.path());
+        const QString orphanId = orphanStore.createFurniture(QStringLiteral("Orphan Probe"));
+        check(!orphanId.isEmpty(), "orphan-blob probe: createFurniture succeeds");
+
+        DocumentModel orphanDoc;
+        orphanDoc.addSolid(BRepPrimAPI_MakeBox(6.0, 6.0, 6.0).Shape());
+        check(orphanStore.saveFurniture(orphanId, orphanDoc, QImage()),
+              "orphan-blob probe: an initial save succeeds");
+
+        QString orphanDirPath;
+        for (const FurnitureStore::FurnitureInfo& info : orphanStore.listFurniture()) {
+            if (info.id == orphanId) orphanDirPath = info.filePath;
+        }
+        check(!orphanDirPath.isEmpty(), "orphan-blob probe: the furniture's directory is found");
+        const QString orphanManifestPath = orphanDirPath + QStringLiteral("/manifest.json");
+        const QString orphanVersionsDir = orphanDirPath + QStringLiteral("/versions");
+
+        check(QDir(orphanVersionsDir).entryList(QDir::Files).isEmpty(),
+              "orphan-blob probe: no version blobs exist yet");
+
+        // Block ONLY the manifest write - the versions/ directory stays
+        // writable, so saveVersion()'s blob write succeeds and only the
+        // step that records its existence fails, which is exactly the
+        // ordering the fix has to handle.
+        check(QFile::setPermissions(orphanManifestPath,
+                                    QFileDevice::ReadOwner | QFileDevice::ReadUser |
+                                        QFileDevice::ReadGroup | QFileDevice::ReadOther),
+              "orphan-blob probe: manifest.json is marked read-only");
+
+        check(!orphanStore.saveVersion(orphanId, QStringLiteral("V1"), orphanDoc),
+              "saveVersion returns false when the manifest write fails");
+
+        const QStringList orphanBlobs = QDir(orphanVersionsDir).entryList(QDir::Files);
+        check(orphanBlobs.isEmpty(),
+              QStringLiteral("...and leaves NO orphan blob in versions/ (found: %1)")
+                  .arg(orphanBlobs.join(QStringLiteral(", "))));
+        check(orphanStore.versions(orphanId).isEmpty(), "...and no version is listed either");
+
+        check(QFile::setPermissions(orphanManifestPath,
+                                    QFileDevice::ReadOwner | QFileDevice::WriteOwner |
+                                        QFileDevice::ReadUser | QFileDevice::WriteUser |
+                                        QFileDevice::ReadGroup | QFileDevice::ReadOther),
+              "orphan-blob probe: manifest.json restored to writable");
+        check(orphanStore.saveVersion(orphanId, QStringLiteral("V1"), orphanDoc),
+              "orphan-blob probe: after restoring write access, saveVersion succeeds normally");
+        check(orphanStore.versions(orphanId).size() == 1, "and exactly one version is now listed");
     }
 
     // --- Milestone 3, item 4: named versions and the side-by-side compare ---

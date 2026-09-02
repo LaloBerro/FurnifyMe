@@ -28,6 +28,9 @@
 #include <QVector>
 
 class DocumentModel;
+namespace FurnifySerial {
+struct SerializedDocument;
+}
 
 class FurnitureStore {
 public:
@@ -138,5 +141,18 @@ private:
     // furniture here" via the file-existence checks they already make
     // before calling this.
     QJsonObject readManifestObject(const QString& id) const;
+    // Atomic manifest write: QSaveFile temp-file-then-commit, never a
+    // truncate onto the live manifest.json. False (and the OLD manifest left
+    // standing) on any failure - see the .cpp's own comment.
     bool writeManifestObject(const QString& id, const QJsonObject& manifest) const;
+
+    // Atomic shapes-blob write, shared by saveFurniture() and the version
+    // blob saveVersion() writes: serializes `serial` to a temp file beside
+    // `targetPath`, verifies the stream actually flushed at close(), and
+    // only then replaces the live file with QFile::rename() - never a
+    // std::ios::trunc write straight onto it. False (and the OLD file at
+    // `targetPath`, if any, left standing) on any failure - see the .cpp's
+    // own comment.
+    bool writeShapesFileAtomic(const QString& targetPath,
+                               const FurnifySerial::SerializedDocument& serial) const;
 };

@@ -12,6 +12,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonValue>
+#include <QSaveFile>
 #include <QUuid>
 
 #include <gp_Dir.hxx>
@@ -174,15 +175,63 @@ QJsonObject FurnitureStore::readManifestObject(const QString& id) const
     return parsed.object();
 }
 
+bool FurnitureStore::writeShapesFileAtomic(const QString& targetPath,
+                                           const FurnifySerial::SerializedDocument& serial) const
+{
+    // Write to a TEMP file beside the target, verify the stream actually
+    // flushed cleanly, and only then replace the live file - never truncate
+    // it in place. A flush-time failure (a full disk, a dropped network
+    // drive) must leave the OLD shapes.bin standing, not a half-written one
+    // reported as "Saved" - see CLAUDE.md's never-lie-about-saving law.
+    const QString tmpPath = targetPath + QStringLiteral(".tmp");
+    {
+        std::ofstream out(tmpPath.toStdString(), std::ios::binary | std::ios::trunc);
+        if (!out || !FurnifySerial::writeShapes(serial, out).ok) {
+            QFile::remove(tmpPath);
+            return false;
+        }
+        out.close();
+        // The write calls above can all report success while the FINAL
+        // flush at close() still fails - exactly the failure a plain
+        // std::ios::trunc write onto the live file would have hidden behind
+        // a "Saved" toast. Caught here, before the temp file ever touches
+        // the target.
+        if (!out) {
+            QFile::remove(tmpPath);
+            return false;
+        }
+    }
+
+    QFile::remove(targetPath);  // drop the stale target, if any, before the rename -
+                                 // QFile::rename() refuses to replace an existing file
+    if (!QFile::rename(tmpPath, targetPath)) {
+        QFile::remove(tmpPath);
+        return false;
+    }
+    return true;
+}
+
 bool FurnitureStore::writeManifestObject(const QString& id, const QJsonObject& manifest) const
 {
     if (!QDir().mkpath(furnitureDir(id))) return false;
 
-    QFile file(manifestPath(id));
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) return false;
+    // Atomic: QSaveFile writes to a temp file beside manifest.json and only
+    // replaces it on commit() - never QIODevice::Truncate straight onto the
+    // live file. A flush that fails partway (a full disk, a dropped network
+    // drive) must leave the OLD manifest standing, not a half-written one
+    // sitting under a "Saved" toast - see CLAUDE.md's never-lie-about-saving
+    // law. QSaveFile is used rather than a hand-rolled temp+rename (the
+    // shapes blob's own approach, below) because it already gets the
+    // Windows replace-an-existing-file quirks right; a manifest is small
+    // JSON, not a stream FurnifySerial has to write incrementally, so
+    // nothing here needs the lower-level control an ofstream gives the blob.
+    QSaveFile file(manifestPath(id));
+    if (!file.open(QIODevice::WriteOnly)) return false;
 
     const QJsonDocument doc(manifest);
-    return file.write(doc.toJson(QJsonDocument::Indented)) >= 0;
+    const QByteArray bytes = doc.toJson(QJsonDocument::Indented);
+    if (file.write(bytes) != bytes.size()) return false;  // commit() never called - temp discarded
+    return file.commit();
 }
 
 QVector<FurnitureStore::FurnitureInfo> FurnitureStore::listFurniture() const
@@ -264,9 +313,11 @@ bool FurnitureStore::saveFurniture(const QString& id, const DocumentModel& doc, 
     DocumentModel::DocumentMeta meta;
     const FurnifySerial::SerializedDocument serial = doc.toSerialized(meta);
 
-    std::ofstream shapesOut(shapesPath(id).toStdString(), std::ios::binary | std::ios::trunc);
-    if (!shapesOut || !FurnifySerial::writeShapes(serial, shapesOut).ok) return false;
-    shapesOut.close();
+    // Atomic: never truncate the live shapes.bin in place - see
+    // writeShapesFileAtomic()'s own comment for why a flush failure must
+    // leave the OLD document loadable rather than a half-written one
+    // standing under a "Saved" toast.
+    if (!writeShapesFileAtomic(shapesPath(id), serial)) return false;
 
     QJsonObject manifest = readManifestObject(id);
     if (manifest.isEmpty()) return false;  // manifest existed but is unreadable - do not paper over it
@@ -379,10 +430,8 @@ bool FurnitureStore::saveVersion(const QString& id, const QString& name, const D
     // is exactly the "a name reappearing on different content" trap
     // DocumentModel's own id/name counters were written to avoid.
     const QString file = QUuid::createUuid().toString(QUuid::WithoutBraces) + QStringLiteral(".bin");
-    std::ofstream out((versionsDir(id) + QStringLiteral("/") + file).toStdString(),
-                      std::ios::binary | std::ios::trunc);
-    if (!out || !FurnifySerial::writeShapes(serial, out).ok) return false;
-    out.close();
+    const QString blobPath = versionsDir(id) + QStringLiteral("/") + file;
+    if (!writeShapesFileAtomic(blobPath, serial)) return false;
 
     QJsonObject entry;
     entry[QStringLiteral("name")] = name;
@@ -397,7 +446,16 @@ bool FurnitureStore::saveVersion(const QString& id, const QString& name, const D
     entry[QStringLiteral("symmetry")] = symmetryToJson(meta);
     versionsArr.append(entry);
     manifest[QStringLiteral("versions")] = versionsArr;
-    return writeManifestObject(id, manifest);
+    if (!writeManifestObject(id, manifest)) {
+        // The blob is already on disk (writeShapesFileAtomic() above
+        // succeeded) but the manifest never learned its filename - an
+        // orphan nothing will ever load or list. Delete it rather than
+        // leaving versions/ quietly accumulate a dangling file every time
+        // this fails.
+        QFile::remove(blobPath);
+        return false;
+    }
+    return true;
 }
 
 bool FurnitureStore::loadVersion(const QString& id, const QString& name, DocumentModel& doc)

@@ -613,6 +613,54 @@ int main()
               "and the pair count");
     }
 
+    // --- DocumentModel symmetry: fromSerialized() on a REUSED document
+    // clears the OLD pairing map outright, not just the ids it is about to
+    // reassign - fix-wave finding (minor a). MainWindow::openFurniture()
+    // loads a second furniture's data into the SAME DocumentModel instance
+    // rather than reconstructing one, and setSymmetry(true, ...) deliberately
+    // leaves myTwin untouched (correct mid-document, wrong here) - so without
+    // an unconditional clear at the top of fromSerialized(), a document
+    // opened once with symmetry on and then reopened onto a DIFFERENT,
+    // also-symmetric furniture would carry the FIRST furniture's stale
+    // pairing entries forward alongside the second's.
+    {
+        DocumentModel doc;
+        doc.setSymmetry(true, gp_Pln(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0)));
+        const int oldA = doc.addSolid(ModelingOps::makeBox(gp_Pnt(10.0, 0.0, 0.0), 4.0, 4.0, 4.0));
+        const int oldB = doc.addSolid(ModelingOps::makeBox(gp_Pnt(-10.0, 0.0, 0.0), 4.0, 4.0, 4.0));
+        doc.pairBodies(oldA, oldB);
+        check(doc.twinOf(oldA) == oldB, "setup: the reused document starts with a live pairing");
+
+        // A SECOND document's data, also symmetry-on, with its own pair -
+        // fromSerialized() assigns fresh ids, so oldA/oldB can never collide
+        // with these (ids are never reused), but a leftover myTwin entry for
+        // them would still be reachable through the very ids this test just
+        // captured.
+        DocumentModel::DocumentMeta meta2;
+        meta2.symmetryOn = true;
+        meta2.symmetryPlane = gp_Pln(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 1.0, 0.0));
+        meta2.bodyNames = {"New Left", "New Right"};
+        meta2.bodyVisible = {true, true};
+        meta2.symmetryPairs.push_back({0, 1});
+        FurnifySerial::SerializedDocument serial2;
+        serial2.bodies.push_back(ModelingOps::makeBox(gp_Pnt(5.0, 0.0, 0.0), 2.0, 2.0, 2.0));
+        serial2.bodies.push_back(ModelingOps::makeBox(gp_Pnt(-5.0, 0.0, 0.0), 2.0, 2.0, 2.0));
+
+        check(doc.fromSerialized(serial2, meta2),
+              "loading a second, also-symmetric document into the same instance succeeds");
+
+        int newA = 0, newB = 0;
+        for (const DocumentModel::Solid& s : doc.solids()) {
+            if (s.name == "New Left") newA = s.id;
+            if (s.name == "New Right") newB = s.id;
+        }
+        check(newA != 0 && newB != 0, "both new bodies came back");
+        check(doc.twinOf(newA) == newB, "the new document's own pairing is established");
+        check(doc.twinOf(oldA) == -1 && doc.twinOf(oldB) == -1,
+              "and the FIRST document's stale pairing is gone - fromSerialized() cleared "
+              "myTwin outright rather than leaving it to setSymmetry(true, ...), which does not");
+    }
+
     // --- DocumentModel symmetry: a version saved before this task loads as
     // symmetry-off, and setSymmetry(false) leaves no pairs to serialize -----
     {

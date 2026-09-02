@@ -371,6 +371,17 @@ bool DocumentModel::fromSerialized(const FurnifySerial::SerializedDocument& seri
     myUndo.clear();
     myRedo.clear();
     myVisibility.clear();
+    // Unconditionally, not left to setSymmetry() below - setSymmetry(true, ...)
+    // deliberately leaves myTwin untouched (see its own comment), which is
+    // correct when it is called mid-document but wrong here: loading a
+    // SECOND document into a REUSED DocumentModel (MainWindow::openFurniture()
+    // switching furniture without reconstructing its own document, or a
+    // second loadFurniture()/loadVersion() call onto the same instance) must
+    // not carry the OLD document's pairing map forward. Ids are never
+    // reused, so a stale entry can never mispair a live body - but it is
+    // still stale state this function's own job is to replace wholesale, not
+    // merge onto.
+    myTwin.clear();
     ++myRevision;
 
     std::vector<int> bodyIds;

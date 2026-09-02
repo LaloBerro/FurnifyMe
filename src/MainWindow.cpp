@@ -1964,7 +1964,16 @@ bool MainWindow::performSave(bool announce)
     // header. A failed capture (a null image) is not itself a save failure;
     // saveFurniture() already treats a null thumbnail as "nothing to write
     // there yet" rather than as a reason to refuse.
-    const QImage thumb = myView->captureThumbnail();
+    //
+    // Fix-wave item (b): NOT while render mode is on. The render-mode
+    // viewport is a studio shot of the scene, not a picture of the
+    // FURNITURE, and Ctrl+S must not silently replace the gallery's card
+    // image with it. Skipping the capture leaves the OLD thumbnail exactly
+    // where saveFurniture() already treats a null image - untouched, not
+    // deleted (see its own comment) - while the save itself still writes
+    // shapes and manifest either way: data safety does not depend on which
+    // picture is showing.
+    const QImage thumb = myRenderModeOn ? QImage() : myView->captureThumbnail();
     if (!myStore.saveFurniture(myFurnitureId, myDocument, thumb)) {
         // A refusal reports here whether or not the caller wanted an
         // announcement - CLAUDE.md's law that a Failure is never silenced
