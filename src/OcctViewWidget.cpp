@@ -2544,13 +2544,23 @@ void OcctViewWidget::setRenderMode(bool on)
         // updateSymmetryIndicator() reads once render mode lets it run again.
         if (!mySymmetryIndicator.IsNull()) myContext->Erase(mySymmetryIndicator, Standard_False);
 
-        // A render is never a wireframe. The bodies are forced shaded for
-        // the duration; myWireframe itself is untouched, and the exit path
-        // below re-applies whatever it says - so the user's toggle survives
-        // a round trip through render mode exactly as they left it.
-        if (myWireframe)
-            for (auto& entry : mySolids)
+        // A render is never a wireframe, and it wears no edge ink either.
+        // The bodies are forced shaded for the duration AND their face
+        // boundary lines - the GRAY30 edges displaySolid() draws so shape
+        // edges stay readable while modeling - are switched off, which is
+        // what the user actually noticed as "still seeing the wireframe"
+        // on an already-shaded body. myWireframe itself is untouched, and
+        // the exit path below re-applies whatever it says - so the user's
+        // toggle survives a round trip through render mode exactly as they
+        // left it. Redisplay is what makes a drawer change take effect; it
+        // recomputes an erased (hidden) body's presentation without showing
+        // it, so the visibility toggles are respected for free.
+        for (auto& entry : mySolids) {
+            entry.second->Attributes()->SetFaceBoundaryDraw(Standard_False);
+            if (myWireframe)
                 myContext->SetDisplayMode(entry.second, AIS_Shaded, Standard_False);
+            myContext->Redisplay(entry.second, Standard_False);
+        }
 
         // The studio key light: every directional light is angled off the
         // vertical so the shadow falls BESIDE the furniture - the default
@@ -2612,8 +2622,11 @@ void OcctViewWidget::setRenderMode(bool on)
         }
         myRenderSavedLights.clear();
         const Standard_Integer mode = myWireframe ? AIS_WireFrame : AIS_Shaded;
-        for (auto& entry : mySolids)
+        for (auto& entry : mySolids) {
+            entry.second->Attributes()->SetFaceBoundaryDraw(Standard_True);
             myContext->SetDisplayMode(entry.second, mode, Standard_False);
+            myContext->Redisplay(entry.second, Standard_False);
+        }
         myGridRenderer.setVisible(true);
         // Restored from the one piece of state that says whether it should
         // be up at all (mySymmetryIndicatorOn) - derived, not a remembered

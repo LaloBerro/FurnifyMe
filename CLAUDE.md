@@ -895,9 +895,11 @@ always starts in modeling) strips the viewport down to the furniture and nothing
   straight down, the whole shadow hides under the body; **OCCT's default directional light
   is a HEADLIGHT whose direction is read in VIEW space**, so `SetHeadlight(false)` must come
   first or the "studio key" silently follows the camera — a doubled intensity changed no
-  pixel on the top face until that flag fell, which is how it was found), **forced shaded**
-  (a render is never a wireframe; `myWireframe` is untouched, `setWireframe()`
-  records-without-repainting while active, and exit re-applies the flag unconditionally),
+  pixel on the top face until that flag fell, which is how it was found), **forced shaded with no edge ink**
+  (a render is never a wireframe and draws no face boundary lines — the GRAY30 edges
+  `displaySolid()` puts on shaded bodies read as "still wireframe" in a shot; `myWireframe`
+  is untouched, `setWireframe()` records-without-repainting while active, and exit
+  re-applies flag and boundaries unconditionally),
   and `ShadowMapResolution` at 4096 on the Shadows tier only. The floor's material is
   **calibrated against sampled Dump() pixels, not derived from the lighting equations**
   (trust the pixel): the default rig is too weak for any lit diffuse to reach the backdrop
