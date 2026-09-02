@@ -106,6 +106,12 @@ public:
     // block - rendering the label in isolation would show nothing at all,
     // proving neither case.
     QRect thumbnailRectAt(int index) const;
+    // The name label's own rect, in cardAt(index)'s LOCAL coordinates - the
+    // same mapping thumbnailRectAt() uses, so a test can compare it
+    // directly against a button's own mapTo(cardAt(index), ...) rect
+    // (fix round 2 - the review's own ask: prove a hover button's geometry
+    // never overlaps the name it sits beside).
+    QRect nameRectAt(int index) const;
 
     QPushButton* compareButtonAt(int index) const;
     QPushButton* restoreButtonAt(int index) const;

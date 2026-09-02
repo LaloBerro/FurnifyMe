@@ -44,6 +44,32 @@ constexpr int kMinHeight = 160;
 constexpr int kButtonHeight = 22;
 // 16:10-ish, per the picked mockup.
 constexpr double kThumbAspect = 10.0 / 16.0;
+// fix round 2 (review, Important 1): keeps every child of a card - the
+// thumbnail most of all - clear of the card's own crisp 1px border rather
+// than flush with it. A card's paintEvent() (VersionCardWidget below)
+// paints the WHOLE rounded shape - ground, panel fill, border - and Qt
+// then paints children ON TOP; a thumbnail with a real pixmap fills its
+// own label's full rect edge to edge, which is EXACTLY the rect the
+// border occupies along the top row and the left/right columns for the
+// thumbnail's own height, so a real photo painted flush overwrote the
+// border there while the placeholder (a transparent label with no
+// pixmap, painting nothing) never touched it - the two states looked
+// like two different cards. A few px of inset is invisible at this
+// card's size and keeps the border the SAME regardless of what a child
+// paints inside it.
+constexpr int kCardBorderInset = 3;
+// fix round 2 (review, Important 2): Compare/Restore/Delete measured at
+// 29px wide against a 70/60/54px sizeHint when they shared the name bar's
+// own row with the name/date column - three buttons plus a name column
+// simply do not fit side by side at this card's ~216px inner width (see
+// this task's report for the numbers). Given their own row below the bar
+// instead - right-aligned, matching the picked mockup's "actions at the
+// bar's right" as closely as the width allows - which comfortably holds
+// all three at their natural size. Always present at this FIXED height
+// (never hidden itself - only the buttons inside it toggle), so revealing
+// them on hover does not grow the card and shove every row below it down
+// the drawer.
+constexpr int kActionsRowHeight = 34;
 
 // One version's own card - the thumbnail-plus-bar shape both a real,
 // already-saved row and the in-progress "create" gesture share. A plain
@@ -306,6 +332,18 @@ QRect VersionsPanel::thumbnailRectAt(int index) const
     return myRows[index].thumb->geometry();
 }
 
+QRect VersionsPanel::nameRectAt(int index) const
+{
+    if (index < 0 || index >= static_cast<int>(myRows.size())) return QRect();
+    const Row& row = myRows[index];
+    if (!row.name || !row.widget) return QRect();
+    // Unlike thumb (a direct child of the card), name's own parent is
+    // textCol - mapTo() is what makes this comparable, in the SAME
+    // coordinate space, against cardAt(index)'s own rect and a button's
+    // own mapTo(cardAt(index), ...) rect.
+    return QRect(row.name->mapTo(row.widget, QPoint(0, 0)), row.name->size());
+}
+
 QPushButton* VersionsPanel::compareButtonAt(int index) const
 {
     return index >= 0 && index < static_cast<int>(myRows.size()) ? myRows[index].compare
@@ -449,16 +487,23 @@ void VersionsPanel::buildRealRow(const QString& name, const QDateTime& saved, bo
 {
     auto* card = new VersionCardWidget(this);
     auto* cardLayout = new QVBoxLayout(card);
-    cardLayout->setContentsMargins(0, 0, 0, 0);
+    // kCardBorderInset on every side - see its own comment: nothing this
+    // card lays out may ever be flush with the rect the crisp border
+    // paints along, or a real thumbnail's own full-bleed pixmap erases it.
+    cardLayout->setContentsMargins(kCardBorderInset, kCardBorderInset, kCardBorderInset,
+                                   kCardBorderInset);
     cardLayout->setSpacing(0);
 
-    // The full-width thumbnail. A transparent QLabel with no pixmap shows
-    // the card's OWN paintSurface() ground through it unmangled - that flat
-    // fill IS the "flat neutral placeholder block" the mockup calls for,
-    // not a second thing this code has to paint - see thumbnailRectAt()'s
-    // own comment for why a test has to render the CARD to see it.
+    // The full-width thumbnail (full width of the INSET content area, not
+    // of the card's own outer rect - see kCardBorderInset). A transparent
+    // QLabel with no pixmap shows the card's OWN paintSurface() ground
+    // through it unmangled - that flat fill IS the "flat neutral
+    // placeholder block" the mockup calls for, not a second thing this
+    // code has to paint - see thumbnailRectAt()'s own comment for why a
+    // test has to render the CARD to see it.
+    const int contentWidth = cardInnerWidth() - 2 * kCardBorderInset;
     auto* thumb = new QLabel(card);
-    thumb->setFixedHeight(thumbHeightFor(cardInnerWidth()));
+    thumb->setFixedHeight(thumbHeightFor(contentWidth));
     thumb->setAlignment(Qt::AlignCenter);
     thumb->setStyleSheet(QStringLiteral("background: transparent; border: none;"));
     thumb->setAttribute(Qt::WA_TransparentForMouseEvents);
@@ -479,7 +524,6 @@ void VersionsPanel::buildRealRow(const QString& name, const QDateTime& saved, bo
     bar->setStyleSheet(QStringLiteral("background: transparent;"));
     auto* barLayout = new QHBoxLayout(bar);
     barLayout->setContentsMargins(10, 8, 10, 8);
-    barLayout->setSpacing(6);
 
     auto* textCol = new QWidget(bar);
     textCol->setStyleSheet(QStringLiteral("background: transparent;"));
@@ -504,9 +548,26 @@ void VersionsPanel::buildRealRow(const QString& name, const QDateTime& saved, bo
     metaLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
     textLayout->addWidget(metaLabel);
 
-    barLayout->addWidget(textCol, 1);
+    // The name/date column is the ONLY thing in this row now - see
+    // kActionsRowHeight's own comment for why the three buttons moved to
+    // a row of their own below rather than sharing this one.
+    barLayout->addWidget(textCol);
+    cardLayout->addWidget(bar);
 
-    auto* actions = new QWidget(bar);
+    // The actions row - ALWAYS present, at a fixed height, so revealing
+    // its buttons on hover never changes the card's own size (which would
+    // shove every row below it down the drawer). Right-aligned via the
+    // leading stretch, the closest this width can come to the picked
+    // mockup's "actions at the bar's right" once they no longer share the
+    // bar itself.
+    auto* actionsRow = new QWidget(card);
+    actionsRow->setStyleSheet(QStringLiteral("background: transparent;"));
+    actionsRow->setFixedHeight(kActionsRowHeight);
+    auto* actionsRowLayout = new QHBoxLayout(actionsRow);
+    actionsRowLayout->setContentsMargins(10, 6, 10, 6);
+    actionsRowLayout->addStretch(1);
+
+    auto* actions = new QWidget(actionsRow);
     actions->setStyleSheet(QStringLiteral("background: transparent;"));
     auto* actionsLayout = new QHBoxLayout(actions);
     actionsLayout->setContentsMargins(0, 0, 0, 0);
@@ -527,12 +588,13 @@ void VersionsPanel::buildRealRow(const QString& name, const QDateTime& saved, bo
     remove->setEnabled(enabled);
     actionsLayout->addWidget(remove);
 
-    // Hidden at rest - "revealed on ROW HOVER only" is the mockup's own
-    // words. See eventFilter() for what shows it again.
-    actions->setVisible(false);
-    barLayout->addWidget(actions);
+    actionsRowLayout->addWidget(actions);
 
-    cardLayout->addWidget(bar);
+    // Hidden at rest - "revealed on ROW HOVER only" is the mockup's own
+    // words. See eventFilter() for what shows it again. Only `actions`
+    // toggles, never `actionsRow` itself - see kActionsRowHeight's comment.
+    actions->setVisible(false);
+    cardLayout->addWidget(actionsRow);
 
     card->setProperty("versionCardKey", name);
     card->setAttribute(Qt::WA_Hover);
@@ -611,7 +673,13 @@ QWidget* VersionsPanel::buildPendingCard(const QString& defaultName)
 {
     auto* card = new VersionCardWidget(this);
     auto* cardLayout = new QVBoxLayout(card);
-    cardLayout->setContentsMargins(0, 0, 0, 0);
+    // Same kCardBorderInset as buildRealRow() - the pending card wears no
+    // real thumbnail today (see its own comment below), but nothing about
+    // that is a promise this card's layout gets to rely on going forward,
+    // and the two cards should look identical in every way that is not
+    // literally the create-gesture itself.
+    cardLayout->setContentsMargins(kCardBorderInset, kCardBorderInset, kCardBorderInset,
+                                   kCardBorderInset);
     cardLayout->setSpacing(0);
 
     // A placeholder thumbnail - the pending card has no saved snapshot yet
@@ -619,7 +687,7 @@ QWidget* VersionsPanel::buildPendingCard(const QString& defaultName)
     // captured by MainWindow::saveVersion() itself the moment Enter
     // actually persists this version.
     auto* thumb = new QLabel(card);
-    thumb->setFixedHeight(thumbHeightFor(cardInnerWidth()));
+    thumb->setFixedHeight(thumbHeightFor(cardInnerWidth() - 2 * kCardBorderInset));
     thumb->setStyleSheet(QStringLiteral("background: transparent; border: none;"));
     thumb->setAttribute(Qt::WA_TransparentForMouseEvents);
     cardLayout->addWidget(thumb);

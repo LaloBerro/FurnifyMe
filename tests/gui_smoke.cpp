@@ -15375,6 +15375,85 @@ int main(int argc, char* argv[])
         check(compareBtn && restoreBtn && deleteBtnRow0 && compareBtn->isVisible() &&
                   restoreBtn->isVisible() && deleteBtnRow0->isVisible(),
               "hovering the card reveals all three");
+
+        // --- fix round 2 (review), Important 2: geometry AND legibility -----
+        // pinned by measurement. The real defect (see this task's report):
+        // all three buttons used to share the name bar's own row with the
+        // name/date column, which measured 216px wide against a 184px
+        // three-button minimum PLUS the name column - Compare was squeezed
+        // to 29px against a 70px sizeHint, clipping "Compare" down to a
+        // sliver. They now sit in their own row below the bar.
+        if (card0) {
+            const QRect cardRect = card0->rect();
+            const QRect nameRect = panel->nameRectAt(0);
+            check(!nameRect.isEmpty(), "the name label's own rect is real, for the "
+                                       "overlap check below - not vacuous");
+            for (QPushButton* btn : {compareBtn, restoreBtn, deleteBtnRow0}) {
+                if (!btn) continue;
+                const QRect btnRect(btn->mapTo(card0, QPoint(0, 0)), btn->size());
+                check(cardRect.contains(btnRect),
+                      QStringLiteral("%1's geometry is fully inside the card (%2,%3 "
+                                     "%4x%5 within %6x%7)")
+                          .arg(btn->text())
+                          .arg(btnRect.x())
+                          .arg(btnRect.y())
+                          .arg(btnRect.width())
+                          .arg(btnRect.height())
+                          .arg(cardRect.width())
+                          .arg(cardRect.height()));
+                check(!btnRect.intersects(nameRect),
+                      QStringLiteral("...and does not overlap the name label's own rect "
+                                     "(button %1 vs name %2)")
+                          .arg(QStringLiteral("%1,%2 %3x%4")
+                                   .arg(btnRect.x())
+                                   .arg(btnRect.y())
+                                   .arg(btnRect.width())
+                                   .arg(btnRect.height()),
+                               QStringLiteral("%1,%2 %3x%4")
+                                   .arg(nameRect.x())
+                                   .arg(nameRect.y())
+                                   .arg(nameRect.width())
+                                   .arg(nameRect.height())));
+                // Not squeezed below what its own text needs - the exact
+                // measurement that caught the original defect (29px
+                // against a 70/60/54px sizeHint).
+                check(btn->width() >= btn->sizeHint().width() - 4,
+                      QStringLiteral("%1 is not squeezed below the width its own text "
+                                     "needs (%2px against a %3px sizeHint)")
+                          .arg(btn->text())
+                          .arg(btn->width())
+                          .arg(btn->sizeHint().width()));
+            }
+        }
+        // Legibility: sample the button's own background CORNER (clear of
+        // any glyph and of the 1px border) against the average of its
+        // centre band, which mixes in whatever text pixels are actually
+        // painted there. Real, measured variation - not the button's
+        // text() string existing, which says nothing about whether it is
+        // actually visible against its own ground.
+        auto buttonTextReadsAgainstGround = [](QPushButton* btn) -> bool {
+            if (!btn) return false;
+            const QImage img = renderExact(btn);
+            if (img.isNull() || img.width() < 10 || img.height() < 10) return false;
+            const QColor corner = img.pixelColor(3, 3);
+            double sum = 0.0;
+            int n = 0;
+            for (int y = img.height() / 2 - 2; y <= img.height() / 2 + 2; ++y) {
+                for (int x = 4; x < img.width() - 4; ++x) {
+                    if (!img.rect().contains(x, y)) continue;
+                    sum += colorDistance(img.pixelColor(x, y), corner);
+                    ++n;
+                }
+            }
+            return n > 0 && (sum / n) > 8.0;
+        };
+        check(buttonTextReadsAgainstGround(compareBtn),
+              "Compare's own text reads against its ground - measured pixel variation, "
+              "not merely a string on the button");
+        check(buttonTextReadsAgainstGround(restoreBtn),
+              "...and the same is true of Restore");
+        check(buttonTextReadsAgainstGround(deleteBtnRow0), "...and of Delete");
+
         check(compareBtn != nullptr &&
                   panel->childAt(compareBtn->mapTo(panel, compareBtn->rect().center())) ==
                       compareBtn,
@@ -15463,6 +15542,54 @@ int main(int argc, char* argv[])
         if (QWidget* c = panel->cardAt(originalIndex)) {
             checkFamilySurface(c, QPoint(0, c->height() / 2), c->rect().adjusted(4, 4, -4, -4),
                                Theme::border(), QStringLiteral("VersionsPanel row card"));
+        }
+
+        // --- fix round 2 (review), Important 1: the crisp border swept -----
+        // all the way around a card's REAL perimeter, on the row that has
+        // an actual thumbnail (the harder case - the placeholder card's
+        // border was never actually at risk, since nothing paints over it
+        // there). checkFamilySurface() above samples ONE edge point;
+        // that single point happened to already fall inside the region a
+        // real thumbnail used to erase, but a one-point sample cannot rule
+        // out a border missing on just one side, which is exactly the
+        // shape of the original defect (the top edge and the sides
+        // alongside the thumbnail were gone; only the strip beside the
+        // bar remained). This sweeps several points along all four edges
+        // instead.
+        if (QWidget* c = panel->cardAt(originalIndex)) {
+            const QImage img = renderExact(c);
+            check(!img.isNull() && img.width() > 20 && img.height() > 20,
+                  "the thumbnailed card's own render is real, so the perimeter sweep "
+                  "below is not vacuous");
+            QStringList offenders;
+            auto sampleEdge = [&](int x, int y, const QString& where) {
+                if (!img.rect().contains(x, y)) return;
+                const double d = colorDistance(img.pixelColor(x, y), Theme::border());
+                if (d > 24.0)
+                    offenders << QStringLiteral("%1 (dist %2)").arg(where).arg(d, 0, 'f', 1);
+            };
+            const int w = img.width();
+            const int h = img.height();
+            for (int i = 1; i <= 4; ++i) {
+                const int x = (w * i) / 5;
+                sampleEdge(x, 0, QStringLiteral("top@%1").arg(x));
+                sampleEdge(x, h - 1, QStringLiteral("bottom@%1").arg(x));
+            }
+            // The sides: sampled in the thumbnail's own vertical span (the
+            // top ~60% of the card) as well as beside the bar - the exact
+            // region the flush-thumbnail defect erased was the sides
+            // alongside the thumbnail, not the whole side.
+            for (int frac : {1, 2, 3, 4}) {
+                const int y = (h * frac) / 6;
+                sampleEdge(0, y, QStringLiteral("left@%1").arg(y));
+                sampleEdge(w - 1, y, QStringLiteral("right@%1").arg(y));
+            }
+            check(offenders.isEmpty(),
+                  QStringLiteral("the thumbnailed card's crisp border is visible all the "
+                                 "way around its real perimeter, not just on the strip a "
+                                 "full-bleed thumbnail happened not to cover (%1)")
+                      .arg(offenders.isEmpty() ? QStringLiteral("clean")
+                                               : offenders.join(QStringLiteral(", "))));
         }
 
         // --- every visible widget in the drawer uses the four-size type -----
