@@ -25,10 +25,10 @@
 #include <AIS_DisplayMode.hxx>
 #include <AIS_SelectionScheme.hxx>
 #include <Aspect_DisplayConnection.hxx>
-#include <Aspect_GradientFillMethod.hxx>
 #include <Aspect_TypeOfMarker.hxx>
 #include <Bnd_Box.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_MakeFace.hxx>
 #include <Graphic3d_ArrayOfPoints.hxx>
 #include <Graphic3d_ArrayOfSegments.hxx>
 #include <Graphic3d_AspectLine3d.hxx>
@@ -2286,26 +2286,105 @@ void OcctViewWidget::applyTheme()
     update();
 }
 
+QColor OcctViewWidget::renderBackdropColour() const
+{
+    // A light warm grey - the user's own reference shot, not a taste call -
+    // blended 4:1 toward the viewport token so an Appearance edit still
+    // shifts it while the resting look stays a studio neutral. A gradient
+    // was tried first and rejected by the user: a studio shot's floor has
+    // to dissolve into its background, and only a flat colour shared with
+    // the floor can make that seam actually invisible.
+    const QColor base = Theme::viewport();
+    constexpr int kWarmR = 226, kWarmG = 222, kWarmB = 214;
+    return QColor((kWarmR * 4 + base.red()) / 5,
+                  (kWarmG * 4 + base.green()) / 5,
+                  (kWarmB * 4 + base.blue()) / 5);
+}
+
 void OcctViewWidget::applyBackgroundForMode()
 {
     if (myView.IsNull()) return;
 
-    const QColor base = Theme::viewport();
     if (!myRenderModeActive) {
-        myView->SetBackgroundColor(toOcctColor(base));
+        myView->SetBackgroundColor(toOcctColor(Theme::viewport()));
         return;
     }
 
-    // Studio backdrop: a soft vertical gradient derived from the SAME
-    // viewport token the flat colour above reads, rather than a second,
-    // untokenised colour pair - lighter top, darker bottom, the brief's own
-    // words. This is OCCT-side (SetBgGradientColors on the live camera's
-    // clear), not a Qt translucency, so the opaque-paint-family law is
-    // untouched.
-    const QColor top = base.lighter(140);
-    const QColor bottom = base.darker(140);
-    myView->SetBgGradientColors(toOcctColor(top), toOcctColor(bottom),
-                                Aspect_GradientFillMethod_Vertical, Standard_True);
+    myView->SetBackgroundColor(toOcctColor(renderBackdropColour()));
+    // The floor wears the same colour, so a theme edit landing here while
+    // render mode is up has to re-dress it too - rebuilt outright, the same
+    // way the grid is rebuilt on a theme edit, because its colour is baked
+    // into the displayed material rather than read live.
+    if (!myRenderFloor.IsNull()) showRenderFloor();
+}
+
+void OcctViewWidget::showRenderFloor()
+{
+    hideRenderFloor();
+    if (myContext.IsNull()) return;
+
+    // The floor stands under what is actually on screen - a hidden body must
+    // not stretch it, and must not decide where "under" is.
+    Bnd_Box box;
+    for (const auto& entry : mySolids) {
+        if (!myContext->IsDisplayed(entry.second)) continue;
+        Bnd_Box b;
+        BRepBndLib::Add(entry.second->Shape(), b);
+        box.Add(b);
+    }
+    if (box.IsVoid()) return;
+
+    Standard_Real xmin = 0.0, ymin = 0.0, zmin = 0.0, xmax = 0.0, ymax = 0.0, zmax = 0.0;
+    box.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+    // Big enough that its edge stays out of frame at any orbit that looks
+    // down on the furniture at all - only a near-horizontal camera ever sees
+    // a horizon, and a studio shot is not taken lying on the floor.
+    const double half = std::max({xmax - xmin, ymax - ymin, 100.0}) * 4.0;
+    const gp_Pnt centre((xmin + xmax) / 2.0, (ymin + ymax) / 2.0,
+                        // A hair below the lowest body, not exactly at it: a
+                        // body resting at Z = 0 would otherwise be coplanar
+                        // with the floor across its whole underside, and a
+                        // depth tie is a coin toss per pixel.
+                        zmin - 0.1);
+    const TopoDS_Face face =
+        BRepBuilderAPI_MakeFace(gp_Pln(centre, gp_Dir(0.0, 0.0, 1.0)),
+                                -half, half, -half, half)
+            .Face();
+
+    myRenderFloor = new AIS_Shape(face);
+    // The floor has to render AT the backdrop colour or the seam between the
+    // two reads as a horizon - and measured pixels showed the default light
+    // rig is too weak for any lit material to reach that tone (a full-white
+    // diffuse floor topped out well short of it). So the tone is carried by
+    // EMISSIVE, which no light can dim, at 87.5% of the backdrop; the white
+    // diffuse layer on top adds the remaining brightness under the doubled
+    // key light and is exactly what the shadow map subtracts, giving the
+    // shadow its ~25% contrast against a floor that still blends into the
+    // background. Ambient and specular are off outright - ambient would
+    // double-count the tone, and a glossy floor is a second light source.
+    // All four factors are calibrated against sampled Dump() pixels, not
+    // derived from the lighting equations - trust the pixel.
+    const QColor floorColour = renderBackdropColour();
+    Graphic3d_MaterialAspect material(Graphic3d_NameOfMaterial_UserDefined);
+    material.SetAmbientColor(toOcctColor(QColor(0, 0, 0)));
+    material.SetDiffuseColor(toOcctColor(QColor(118, 118, 118)));
+    material.SetSpecularColor(toOcctColor(QColor(0, 0, 0)));
+    material.SetEmissiveColor(
+        toOcctColor(QColor(static_cast<int>(floorColour.red() * 0.875),
+                           static_cast<int>(floorColour.green() * 0.875),
+                           static_cast<int>(floorColour.blue() * 0.875))));
+    myRenderFloor->SetMaterial(material);
+    // Selection mode -1, the previews' own never-pickable path - hover can
+    // never highlight it and no pick can ever land on it, which also keeps
+    // it out of the exit-click's way.
+    myContext->Display(myRenderFloor, AIS_Shaded, -1, Standard_False);
+}
+
+void OcctViewWidget::hideRenderFloor()
+{
+    if (myRenderFloor.IsNull()) return;
+    if (!myContext.IsNull()) myContext->Remove(myRenderFloor, Standard_False);
+    myRenderFloor.Nullify();
 }
 
 void OcctViewWidget::setLightsCastShadows(bool cast)
@@ -2332,6 +2411,11 @@ void OcctViewWidget::applyRenderTier(RenderTier tier)
     params.Method = (tier == RenderTier::RayTracing) ? Graphic3d_RM_RAYTRACING
                                                       : Graphic3d_RM_RASTERIZATION;
     if (tier == RenderTier::RayTracing) params.IsShadowEnabled = true;
+    // 4x the 1024 default while shadow-mapping, put back for every other
+    // tier. At 1024 the shadow's edge on the floor is visibly blocky - the
+    // map is stretched across the whole scene including the floor, so the
+    // floor is exactly what made the default resolution stop being enough.
+    params.ShadowMapResolution = (tier == RenderTier::Shadows) ? 4096 : 1024;
     setLightsCastShadows(tier == RenderTier::Shadows);
 }
 
@@ -2460,6 +2544,48 @@ void OcctViewWidget::setRenderMode(bool on)
         // updateSymmetryIndicator() reads once render mode lets it run again.
         if (!mySymmetryIndicator.IsNull()) myContext->Erase(mySymmetryIndicator, Standard_False);
 
+        // A render is never a wireframe. The bodies are forced shaded for
+        // the duration; myWireframe itself is untouched, and the exit path
+        // below re-applies whatever it says - so the user's toggle survives
+        // a round trip through render mode exactly as they left it.
+        if (myWireframe)
+            for (auto& entry : mySolids)
+                myContext->SetDisplayMode(entry.second, AIS_Shaded, Standard_False);
+
+        // The studio key light: every directional light is angled off the
+        // vertical so the shadow falls BESIDE the furniture - the default
+        // straight-down light hides the entire shadow underneath the body
+        // it belongs to, which on a floor reads as no shadow at all. Saved
+        // first and restored on exit, because the modeling look outside
+        // render mode is not this feature's to change.
+        myRenderSavedLights.clear();
+        if (!myViewer.IsNull()) {
+            const gp_Dir studioKey(-0.45, 0.35, -0.82);
+            for (const Handle(Graphic3d_CLight)& light : myViewer->ActiveLights()) {
+                if (light->Type() != Graphic3d_TypeOfLightSource_Directional) continue;
+                myRenderSavedLights.push_back(
+                    {light, light->Direction(), light->Intensity(), light->IsHeadlight()});
+                // World-space, or the studio direction below is silently read
+                // in VIEW space and the "key light" follows the camera - the
+                // first calibration round's top face stayed dark through a
+                // doubled intensity precisely because of this flag.
+                light->SetHeadlight(false);
+                light->SetDirection(studioKey);
+                // Doubled, by measurement: under the default rig at unit
+                // strength the fully lit floor could not reach the backdrop
+                // tone even painted full white - the whole scene photographs
+                // dim, floor and furniture both.
+                light->SetIntensity(light->Intensity() * 2.0f);
+            }
+        }
+
+        // Before the tier probe, deliberately: the floor is the surface the
+        // shadow lands on, so the tier-2 pixel probe measures the scene the
+        // user will actually be shown - with no floor a straight-down shadow
+        // could touch no pixel and the probe would fall to Plain on hardware
+        // that shadow-maps fine.
+        showRenderFloor();
+
         // Cache the tier for the session - the brief's own words. The first
         // activation pays for the probe (a timed redraw, and possibly two
         // full Dump()s); every later one just reapplies what was already
@@ -2472,6 +2598,22 @@ void OcctViewWidget::setRenderMode(bool on)
         }
     } else {
         for (auto& entry : mySolids) applySelectionMode(entry.second);
+        hideRenderFloor();
+        // The two restorations that mirror the entry edits above: the lights
+        // back to the directions they stood at, the bodies back to whatever
+        // the wireframe toggle says - which may have been flipped WHILE
+        // render mode was up (setWireframe() records but does not repaint
+        // then), so this is applied unconditionally rather than only when
+        // entry forced a change.
+        for (auto& saved : myRenderSavedLights) {
+            saved.light->SetHeadlight(saved.headlight);
+            saved.light->SetDirection(saved.direction);
+            saved.light->SetIntensity(saved.intensity);
+        }
+        myRenderSavedLights.clear();
+        const Standard_Integer mode = myWireframe ? AIS_WireFrame : AIS_Shaded;
+        for (auto& entry : mySolids)
+            myContext->SetDisplayMode(entry.second, mode, Standard_False);
         myGridRenderer.setVisible(true);
         // Restored from the one piece of state that says whether it should
         // be up at all (mySymmetryIndicatorOn) - derived, not a remembered
@@ -2499,6 +2641,11 @@ void OcctViewWidget::setWireframe(bool wireframe)
     myWireframe = wireframe;
 
     if (myContext.IsNull()) return;   // state kept; re-applied once the viewer initialises
+    // Render mode forces the bodies shaded regardless of this toggle - the
+    // flag is recorded (just above) and setRenderMode(false) applies it
+    // unconditionally on the way out, so the flip is honoured the moment
+    // it can be seen rather than tearing a wireframe through a studio shot.
+    if (myRenderModeActive) return;
 
     const Standard_Integer mode = wireframe ? AIS_WireFrame : AIS_Shaded;
     for (auto& entry : mySolids) myContext->SetDisplayMode(entry.second, mode, Standard_False);

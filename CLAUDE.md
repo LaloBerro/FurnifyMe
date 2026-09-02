@@ -884,9 +884,30 @@ always starts in modeling) strips the viewport down to the furniture and nothing
   session** — probed once, at first activation — and reported in a **Note** toast, which means
   it goes quiet with `View → Show notifications` off: Notes can be silenced, Failures cannot,
   and a tier announcement is a Note by that same taxonomy, not a refusal.
-- A neutral studio gradient backdrop replaces the flat viewport colour while active, derived
-  from the same function `applyTheme()` uses, so a live Appearance edit re-derives it for
-  free. `Save Screenshot` exports at 2× device pixels while render mode is on.
+- **The studio dressing (2026-09-02, user-directed rework):** a flat light warm-grey backdrop
+  (`renderBackdropColour()` — the user's reference shot, blended 4:1 toward the viewport
+  token so Appearance edits still move it; the original gradient was rejected because only a
+  flat colour shared with the floor makes the floor's seam invisible), a **shadow-catcher
+  floor** (`showRenderFloor()` — a large matte plane a hair below the lowest *displayed*
+  body, backdrop-coloured, selection mode −1 so it can never be picked or hovered, rebuilt
+  on a theme edit, absent on an empty document), an **angled key light** (every directional
+  light's direction, intensity and headlight flag saved at entry and restored at exit —
+  straight down, the whole shadow hides under the body; **OCCT's default directional light
+  is a HEADLIGHT whose direction is read in VIEW space**, so `SetHeadlight(false)` must come
+  first or the "studio key" silently follows the camera — a doubled intensity changed no
+  pixel on the top face until that flag fell, which is how it was found), **forced shaded**
+  (a render is never a wireframe; `myWireframe` is untouched, `setWireframe()`
+  records-without-repainting while active, and exit re-applies the flag unconditionally),
+  and `ShadowMapResolution` at 4096 on the Shadows tier only. The floor's material is
+  **calibrated against sampled Dump() pixels, not derived from the lighting equations**
+  (trust the pixel): the default rig is too weak for any lit diffuse to reach the backdrop
+  tone, so EMISSIVE carries 87.5% of it — shadow-immune, which is what makes the seam
+  invisible — and the white diffuse layer on top is exactly what the shadow map subtracts,
+  landing the lit floor within 3/255 of the backdrop and the shadow ~25% under it. The
+  floor goes up **before** the tier probe, deliberately: the tier-2 pixel probe must measure
+  the scene the user will see — with no floor, a straight-down shadow could touch no pixel
+  and the probe would fall to Plain on hardware that shadow-maps fine. `Save Screenshot`
+  exports at 2× device pixels while render mode is on.
 
 ### Qt plugin deployment - do not remove
 

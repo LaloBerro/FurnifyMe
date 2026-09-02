@@ -6,6 +6,7 @@
 #include <AIS_Manipulator.hxx>
 #include <AIS_ManipulatorMode.hxx>
 #include <AIS_Shape.hxx>
+#include <Graphic3d_CLight.hxx>
 #include <Graphic3d_ZLayerSettings.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
@@ -30,6 +31,7 @@
 #include <QWidget>
 
 #include <map>
+#include <utility>
 #include <vector>
 
 // The Qt <-> OCCT bridge. Hosts a V3d_View on this widget's native window and
@@ -523,14 +525,19 @@ public:
 
     // --- Render mode (Milestone 3, item 5) ----------------------------------
     //
-    // Strips this viewport down to the raw scene: clears and suppresses
-    // selection (a real ClearSelected() plus every solid's own selection
-    // modes taken out of the context's pick candidates - see the .cpp), hides
-    // the work-plane grid, switches the rendering pipeline to the best tier
-    // this GPU sustains interactively, and swaps the flat viewport colour for
-    // a soft studio gradient. Session-only: MainWindow never persists this
-    // action's checked state, so the app always starts in modeling however it
-    // was left.
+    // Strips this viewport down to the raw scene and dresses it as a studio
+    // shot: clears and suppresses selection (a real ClearSelected() plus
+    // every solid's own selection modes taken out of the context's pick
+    // candidates - see the .cpp), hides the work-plane grid, forces the
+    // bodies shaded whatever the wireframe toggle says (a render is never a
+    // wireframe; the toggle's own state is untouched and honoured again on
+    // exit), lays a matte shadow-catcher floor under the furniture, angles
+    // the key light so the shadow falls beside the bodies instead of hiding
+    // underneath them, switches the rendering pipeline to the best tier this
+    // GPU sustains interactively, and swaps the flat viewport colour for a
+    // flat light studio backdrop the floor blends into. Session-only:
+    // MainWindow never persists this action's checked state, so the app
+    // always starts in modeling however it was left.
     //
     // This class owns only the OCCT-side scene: the grid, selection, the
     // rendering params, the backdrop. Every Qt-side surface CLAUDE.md's
@@ -790,6 +797,22 @@ private:
     // and this is the one place that reads myRenderModeActive to pick which
     // background that repaint means.
     void applyBackgroundForMode();
+    // The flat studio colour render mode paints behind AND beneath the
+    // furniture - one derivation serving the background and the floor, so
+    // the two cannot drift apart and the floor's edge stays invisible.
+    // Blended from the viewport token toward a warm white, so an Appearance
+    // edit still moves it while the resting look stays the light neutral a
+    // studio shot reads against.
+    QColor renderBackdropColour() const;
+    // The shadow-catcher: a large matte plane a hair under the bodies'
+    // lowest point, painted the backdrop colour, displayed with selection
+    // mode -1 (the previews' own never-pickable path) for exactly as long
+    // as render mode is on. This is the piece the first cut of render mode
+    // was missing: a shadow needs a surface to land on, and outside render
+    // mode this app deliberately has none. No-ops on an empty document -
+    // a floor with nothing standing on it is just a wrong-coloured band.
+    void showRenderFloor();
+    void hideRenderFloor();
 
     Handle(V3d_Viewer) myViewer;
     Handle(V3d_View) myView;
@@ -919,4 +942,23 @@ private:
     bool myRenderModeActive = false;
     bool myRenderTierProbed = false;
     RenderTier myRenderTier = RenderTier::Plain;
+    // See showRenderFloor(). Null whenever render mode is off.
+    Handle(AIS_Shape) myRenderFloor;
+    // Every directional light's direction and intensity as they stood at
+    // entry, restored on exit - render mode swaps in one angled studio key
+    // direction and doubles the strength (the default rig is tuned for flat
+    // modeling legibility and reads dim as a photograph), and the modeling
+    // look outside render mode must come back exactly as it was.
+    struct SavedLight {
+        Handle(Graphic3d_CLight) light;
+        gp_Dir direction;
+        Standard_ShortReal intensity;
+        // OCCT's default directional light is a HEADLIGHT - its direction is
+        // read in view space and follows the camera, which is what keeps the
+        // modeling view legible from every angle. A studio key has to stand
+        // still in the world while the camera orbits the shot, so render
+        // mode turns the flag off and this remembers it was on.
+        bool headlight;
+    };
+    std::vector<SavedLight> myRenderSavedLights;
 };
