@@ -1132,9 +1132,13 @@ never-silent-failure law, so `Failure` bypasses the toggle unconditionally. Ever
 a success report carrying Undo; every refusal is a Failure — the taxonomy is load-bearing.
 
 **Sketching**: Shift snaps the cursor onto the previous segment's direction (parameter
-then grid-snapped along the line); the close-hit on the first point is tested on the RAW
-plane hit and outranks the straight constraint, with the radius in one place
-(`OcctViewWidget::sketchCloseTolerance()`). Ctrl+Z mid-sketch removes the last point
+then grid-snapped along the line); the close-hit on the first point is tested on the
+plane hit **snapped first when Snap to Grid is on** (raw otherwise) and outranks the
+straight constraint, with the radius in one place
+(`OcctViewWidget::sketchCloseTolerance()`). The raw-only comparison it replaced was the
+Milestone 3 whole-branch review's 1.25× find: `myCloseTarget` is the SNAPPED first point,
+so a raw probe could sit up to √2/2·step from it while the tolerance is step/2 — whether
+hovering the first point closed depended on where in the grid cell the ray landed. Ctrl+Z mid-sketch removes the last point
 through Backspace's one implementation; the toast's Undo pill deliberately keeps the
 document-only predicate.
 
