@@ -1160,7 +1160,17 @@ void OcctViewWidget::setSymmetryIndicator(bool on, const gp_Pln& plane)
 
 void OcctViewWidget::updateSymmetryIndicator()
 {
-    if (!mySymmetryIndicatorOn || myContext.IsNull()) return;
+    // Render mode (Milestone 3, item 5): "the viewport is the furniture
+    // alone" is not just the grid and the gizmos - the symmetry plane is
+    // scene decoration too. This single guard is what keeps it hidden
+    // across every camera move while render mode is active, since
+    // applyCameraState() calls this function on every one of them; without
+    // it, orbiting during render mode would silently rebuild and redisplay
+    // the plane the moment its screen-sized half-span crossed the equal-
+    // guard below. setRenderMode() handles the two edges - erasing it
+    // immediately on entry if it was already up, and forcing this function
+    // to rebuild and redisplay it on exit if symmetry is still on.
+    if (!mySymmetryIndicatorOn || myContext.IsNull() || myRenderModeActive) return;
 
     // Screen-sized - DimensionRenderer's own idiom, one call site up: a
     // constant APPARENT extent rather than a fixed number of millimetres
@@ -2422,6 +2432,15 @@ void OcctViewWidget::setRenderMode(bool on)
         for (auto& entry : mySolids) myContext->Deactivate(entry.second);
 
         myGridRenderer.setVisible(false);
+        // The symmetry plane indicator, on the same terms as the grid - it
+        // may already be up (symmetry was on before render mode was
+        // entered), and updateSymmetryIndicator()'s own new guard only stops
+        // it being REBUILT while active, not the presentation already on
+        // screen. Erased outright rather than merely marked, because Erase
+        // is what a Dump actually stops drawing; mySymmetryIndicatorOn
+        // itself is untouched, so it is still the one source of truth
+        // updateSymmetryIndicator() reads once render mode lets it run again.
+        if (!mySymmetryIndicator.IsNull()) myContext->Erase(mySymmetryIndicator, Standard_False);
 
         // Cache the tier for the session - the brief's own words. The first
         // activation pays for the probe (a timed redraw, and possibly two
@@ -2436,6 +2455,14 @@ void OcctViewWidget::setRenderMode(bool on)
     } else {
         for (auto& entry : mySolids) applySelectionMode(entry.second);
         myGridRenderer.setVisible(true);
+        // Restored from the one piece of state that says whether it should
+        // be up at all (mySymmetryIndicatorOn) - derived, not a remembered
+        // "it was showing" flag. Forcing the half-span guard to miss is what
+        // makes updateSymmetryIndicator() actually rebuild and redisplay
+        // rather than trust a cached size that may itself be stale after
+        // however long render mode was up.
+        mySymmetryIndicatorBuiltHalfSpan = 0.0;
+        updateSymmetryIndicator();
         // Ordinary modeling never ray-traces or shadow-maps - both would be
         // an interactivity hazard mid-edit, and neither is part of the look
         // this app had before this feature existed. Plain rasterization

@@ -114,4 +114,14 @@ private:
     // reset while one is still around would re-complete the guide on the
     // spot instead of genuinely restoring it.
     int myBodyBaseline = 0;
+
+    // Render mode (Milestone 3, item 5): true for exactly the span of
+    // refresh() calls where THIS panel's own hide() was for "the viewport is
+    // the furniture alone", not for any of the reasons every OTHER hide() in
+    // refresh() means - finished, not learned yet, the init screen showing.
+    // Those all use isHidden() itself as "was showing, now is not - restart
+    // fresh" (see myBodyBaseline's own comment on why a restore needs a new
+    // baseline), and a render-mode hide is not that: the walkthrough must
+    // resume exactly where it was, not restart. See refresh()'s own comment.
+    bool myHiddenForRenderMode = false;
 };

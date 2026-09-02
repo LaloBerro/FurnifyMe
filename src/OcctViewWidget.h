@@ -313,7 +313,15 @@ public:
     // for as long as symmetry is on. `plane` is captured BY VALUE, the same
     // rule every other work plane in this app follows.
     void setSymmetryIndicator(bool on, const gp_Pln& plane);
-    bool symmetryIndicatorShown() const { return mySymmetryIndicatorOn; }
+    // Whether the indicator is genuinely ON SCREEN right now - not merely
+    // whether symmetry itself is on. The two differ for as long as render
+    // mode is active (Milestone 3, item 5, fix round 1): "the viewport is
+    // the furniture alone" applies to this indicator too, and
+    // updateSymmetryIndicator() suppresses it structurally while
+    // myRenderModeActive - see setRenderMode(). mySymmetryIndicatorOn alone
+    // (the mode's own on/off, untouched by render mode) is what
+    // setRenderMode() reads to decide whether to bring it back on exit.
+    bool symmetryIndicatorShown() const { return mySymmetryIndicatorOn && !myRenderModeActive; }
 
     // The Z-layer every piece of sketch work is displayed in - the in-progress
     // outline and the pending face (setPreview), the direct-modeling preview,

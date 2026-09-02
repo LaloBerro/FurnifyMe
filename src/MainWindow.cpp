@@ -1555,9 +1555,23 @@ void MainWindow::updateActions()
     if (myAutosaveAction) myAutosaveAction->setEnabled(!atInit);
     if (myCloseFurnitureAction) myCloseFurnitureAction->setEnabled(!atInit);
     // File -> Save version...: see canOpenSaveVersion()'s own declaration for
-    // the full predicate - a furniture open, no sketch, and none of the
-    // three OTHER application-wide key claims live.
-    if (mySaveVersionAction) mySaveVersionAction->setEnabled(canOpenSaveVersion());
+    // the full predicate - a furniture open, no sketch, no render mode, and
+    // none of the three OTHER application-wide key claims live. The tooltip
+    // only names the render-mode reason specifically (fix round 1, Important
+    // 2) - the other four are pre-existing refusals this action already
+    // disabled itself for silently, and adding a full disjunction here for
+    // all five would be new copy for four reasons this task did not touch.
+    if (mySaveVersionAction) {
+        const bool canSaveVersion = canOpenSaveVersion();
+        mySaveVersionAction->setEnabled(canSaveVersion);
+        mySaveVersionAction->setToolTip(
+            !canSaveVersion && myRenderModeOn
+                ? tr("Unavailable in render mode — exit it first (a viewport "
+                     "click, or the View menu)")
+                : tr("Keep a named snapshot of this furniture\n"
+                     "Come back to it later with Restore, or open it beside "
+                     "the live one with Compare."));
+    }
     if (myVersionsPanelAction) myVersionsPanelAction->setEnabled(!atInit);
 
     // Render mode (Milestone 3, item 5). "|| myRenderModeOn" is what keeps a
@@ -2102,6 +2116,16 @@ void MainWindow::setRenderModeEnabled(bool on)
             case OcctViewWidget::RenderTier::Shadows:    text = tr("Render mode — shadows"); break;
             case OcctViewWidget::RenderTier::Plain:      text = tr("Render mode"); break;
         }
+        // Kind::Note, deliberately: this reports a successful, expected
+        // outcome, not a refusal, so CLAUDE.md's taxonomy ("every Note is a
+        // success report... every refusal is a Failure") puts it here rather
+        // than on Failure's unconditional-even-with-notifications-off path.
+        // The consequence, recorded rather than merely implied: with
+        // View -> Show notifications off, entering render mode raises no
+        // toast at all - the tier is still readable from
+        // OcctViewWidget::renderModeTier() and Save Screenshot still exports
+        // at the chosen tier's real look, so nothing is silently lost, only
+        // unannounced.
         myToasts->show(text, Toast::Kind::Note, false);
     }
 
@@ -2129,7 +2153,17 @@ bool MainWindow::canOpenSaveVersion() const
     // selected raises the gizmo but claims no keys, so the card and the
     // gizmo can coexist on screen with no ambiguity about which one Enter or
     // Escape belongs to.
-    return !myShowingInitScreen && !mySketching && !hasPendingFace() &&
+    //
+    // "!myRenderModeOn" is the fifth term (fix round 1, Important 2): render
+    // mode is not one of the three OTHER application-wide key claims named
+    // above, but the SAME mechanism that closes this card on one of those -
+    // SaveVersionCard::onAppStateChanged() cancels whenever this predicate
+    // goes false while the card is open - is exactly what a live studio shot
+    // needs too. Folded in here rather than added as a second check inside
+    // the card itself, so updateActions()'s own
+    // mySaveVersionAction->setEnabled(canOpenSaveVersion()) and the card's
+    // auto-cancel read the SAME one answer instead of two that could drift.
+    return !myShowingInitScreen && !myRenderModeOn && !mySketching && !hasPendingFace() &&
            !canPullSelectedFace() && !canBevelSelectedEdge();
 }
 
@@ -3204,6 +3238,18 @@ void MainWindow::checkpointDocument()
     // rather than eight separate reminders scattered across the file to add
     // one - and it runs before the checkpoint below, exactly as the brief's
     // own word "first" asks for.
+    //
+    // setSymmetryEnabled() gets the identical one-line exit explicitly,
+    // rather than being routed through here, because it is document-changing
+    // (unpairs bodies, bumps revision(), dirties, arms autosave) but takes NO
+    // checkpoint of its own - "a mode switch, not an edit," per its own
+    // comment - so there is no checkpoint() call here for it to ride along
+    // with. Lock to Face and Unlock Face were considered and left alone
+    // (fix round 1, Important 3's review): lockToFace() cannot actually be
+    // reached while render mode is on (it needs a flat face selected, and
+    // render mode clears and deactivates all selection on entry), and
+    // unlockFace() only moves the sketch plane back to the ground - neither
+    // is a change a render-mode shot would visibly disagree with.
     if (myRenderModeOn) setRenderModeEnabled(false);
     myDocument.checkpoint();
 }
@@ -4002,6 +4048,16 @@ void MainWindow::unlockFace()
 
 void MainWindow::setSymmetryEnabled(bool on)
 {
+    // Document-changing by any honest reading (fix round 1, Important 3):
+    // it unpairs every existing pairing, bumps revision(), dirties the
+    // furniture and arms autosave - even though (see below) it takes no undo
+    // checkpoint of its own. Render mode's exit rule is about a document
+    // change, not specifically about a checkpoint, so this needs the same
+    // one-line exit checkpointDocument()'s eight call sites get structurally
+    // rather than being folded into that function itself - see its own
+    // comment for why.
+    if (myRenderModeOn) setRenderModeEnabled(false);
+
     // Whatever plane document() already holds - the constructed default
     // (world YZ through the origin) the very first time this ever fires, or
     // whatever setSymmetryPlaneFromFace() last set. Turning it off unpairs

@@ -186,7 +186,7 @@ void skipByEnvironment(int checks, const QString& why)
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 1751;
+constexpr int kCheckFloor = 1781;
 
 void check(bool condition, const QString& what)
 {
@@ -15889,9 +15889,16 @@ int main(int argc, char* argv[])
         check(drawer != nullptr && !drawer->isVisible(), "the items drawer is hidden");
         check(gizmoCard != nullptr && !gizmoCard->isVisible(),
               "the axis gizmo card is hidden");
+        // Not "even though the body is still selected underneath" - it is
+        // NOT still selected. setRenderMode(true) clears the selection for
+        // real (a genuine ClearSelected(), not a presentation-only hide),
+        // and the manipulator is detached as a direct consequence of that
+        // (transformableBodyId() reads an empty selection and returns 0) -
+        // asserted here on both halves, not just the gizmo's own state.
+        check(rview->selectedSolidIds().empty(),
+              "the selection is genuinely cleared on entry, not merely hidden");
         check(!rview->hasManipulator(),
-              "the transform gizmo is detached, even though the body is still "
-              "selected underneath");
+              "and the transform gizmo is detached as a consequence");
 
         // Screenshot doubling AND the grid, off the same doubled dump.
         const QString afterPath = outDir + QStringLiteral("/render-mode-after.png");
@@ -15935,10 +15942,25 @@ int main(int argc, char* argv[])
               "orbiting the camera does not exit render mode - you are framing a shot");
 
         // --- a viewport press DOES exit, and restores the rail --------------
-        clickAt(rview, QPointF(rview->width() * 0.5, rview->height() * 0.5));
+        // Clicked well clear of the body's own footprint (0.30-0.55 of the
+        // viewport, the fractions buildBody() sketched it at) - the press
+        // itself is swallowed (see mousePressEvent()'s own guard), but the
+        // MATCHING RELEASE arrives after render mode has already turned off
+        // and selection modes are reactivated, so it behaves as an ordinary
+        // click; landing it on empty ground rather than on the body is what
+        // keeps the "not restored" assertion below honest rather than
+        // depending on where exactly the body's silhouette happens to fall.
+        clickAt(rview, QPointF(rview->width() * 0.88, rview->height() * 0.88));
         settle(200);
         check(!renderAction->isChecked(), "a plain viewport press exits render mode");
         check(!rview->renderModeActive(), "and the viewport's own flag follows");
+        // The selection render mode cleared on entry is NOT restored on
+        // exit - the consistent behaviour this task shipped (a real
+        // ClearSelected(), never a remembered cursor to put back), asserted
+        // here rather than only claimed by the entry-side comment above.
+        check(rview->selectedSolidIds().empty(),
+              "and the selection stays cleared - exiting render mode does not "
+              "resurrect the body that was selected before it started");
         check(rail != nullptr && rail->isVisible(), "the rail is back");
         QWidget* hitAfterExit = rail ? rview->childAt(railCentre) : nullptr;
         check(hitAfterExit != nullptr &&
@@ -15973,6 +15995,147 @@ int main(int argc, char* argv[])
               "first too");
         trigger(probe, QStringLiteral("Undo"));
         settle(150);
+
+        // --- fix round 1, Important 1: the symmetry plane indicator too -----
+        {
+            check(!probe.symmetryEnabled(), "symmetry starts off, going into this scenario");
+            probe.setSymmetryEnabled(true);
+            settle(150);
+            check(probe.symmetryEnabled(), "symmetry is on");
+            check(rview->symmetryIndicatorShown(),
+                  "the plane indicator is on screen before render mode");
+
+            renderAction->trigger();
+            settle(200);
+            check(renderAction->isChecked() && rview->renderModeActive(),
+                  "back in render mode, for the symmetry-indicator scenario");
+            check(!rview->symmetryIndicatorShown(),
+                  "the symmetry plane indicator is hidden too - \"the viewport is "
+                  "the furniture alone\" is not just the grid and the gizmos");
+
+            // applyCameraState() calls updateSymmetryIndicator() on every
+            // camera move - orbiting is exactly the path the guard has to
+            // survive, or the indicator would silently rebuild and reappear
+            // the moment its screen-sized half-span next changed enough.
+            dragButton(rview, QPointF(rview->width() * 0.5, rview->height() * 0.5),
+                      QPointF(rview->width() * 0.5 - 40.0, rview->height() * 0.5),
+                      Qt::RightButton);
+            check(!rview->symmetryIndicatorShown(),
+                  "and it stays hidden across a camera move while render mode is "
+                  "still on");
+
+            clickAt(rview, QPointF(rview->width() * 0.88, rview->height() * 0.12));
+            settle(200);
+            check(!renderAction->isChecked() && !rview->renderModeActive(),
+                  "exited render mode");
+            check(rview->symmetryIndicatorShown(),
+                  "and the symmetry plane indicator is back - restored from the "
+                  "one piece of state that says it should be (symmetry is still "
+                  "on), not a remembered flag");
+
+            // --- fix round 1, Important 3: the Symmetry toggle itself exits -
+            renderAction->trigger();
+            settle(200);
+            check(renderAction->isChecked() && rview->renderModeActive(),
+                  "back in render mode, for the Symmetry-toggle exit");
+            probe.setSymmetryEnabled(false);
+            settle(200);
+            check(!renderAction->isChecked() && !rview->renderModeActive(),
+                  "turning Symmetry off leaves render mode first - it unpairs "
+                  "bodies, bumps revision(), dirties and arms autosave, which is "
+                  "document-changing by any honest reading even though it takes "
+                  "no undo checkpoint of its own");
+            check(!probe.symmetryEnabled(), "...and symmetry really did turn off");
+        }
+
+        // --- fix round 1, Important 2: Save version... and its card ---------
+        {
+            QAction* saveVersionAction = action(probe, QStringLiteral("Save version..."));
+            check(saveVersionAction != nullptr, "there is a Save version action");
+            check(saveVersionAction != nullptr && saveVersionAction->isEnabled() &&
+                      !rview->renderModeActive(),
+                  "Save version is available outside render mode, going into "
+                  "this scenario");
+
+            trigger(probe, QStringLiteral("Save version..."));
+            SaveVersionCard* saveCard = probe.findChild<SaveVersionCard*>();
+            check(saveCard != nullptr && saveCard->isVisible(),
+                  "the card opens outside render mode");
+            if (saveCard && saveCard->field())
+                saveCard->field()->setText(QStringLiteral("Render probe"));
+
+            renderAction->trigger();
+            settle(200);
+            check(renderAction->isChecked() && rview->renderModeActive(),
+                  "render mode engages with the card still open");
+            check(saveCard == nullptr || !saveCard->isVisible(),
+                  "and the OPEN card cancels itself - the same auto-cancel "
+                  "canOpenSaveVersion() already drives for the other three "
+                  "application-wide key claims, now also true while render "
+                  "mode is on");
+            check(saveVersionAction != nullptr && !saveVersionAction->isEnabled(),
+                  "Save version is disabled while render mode is on");
+            check(saveVersionAction != nullptr &&
+                      saveVersionAction->toolTip().contains(
+                          QStringLiteral("render mode"), Qt::CaseInsensitive),
+                  QStringLiteral("...and the tooltip says why (\"%1\")")
+                      .arg(saveVersionAction ? saveVersionAction->toolTip() : QString()));
+
+            clickAt(rview, QPointF(rview->width() * 0.88, rview->height() * 0.12));
+            settle(200);
+            check(!renderAction->isChecked() && !rview->renderModeActive(),
+                  "exited render mode");
+            check(saveVersionAction != nullptr && saveVersionAction->isEnabled(),
+                  "Save version is available again");
+        }
+
+        // --- fix round 1, Important 2: the walkthrough guide hides too ------
+        {
+            QAction* showTipsAgain = action(probe, QStringLiteral("Show tips again"));
+            check(showTipsAgain != nullptr, "there is a Show tips again action");
+            if (showTipsAgain) { showTipsAgain->trigger(); settle(200); }
+
+            WalkthroughPanel* guide = probe.findChild<WalkthroughPanel*>();
+            check(guide != nullptr && guide->isVisible(),
+                  "Show tips again brings the guide back, going into this "
+                  "scenario");
+
+            // Real progress, not zero-vs-zero: Start Sketch (render mode is
+            // not active yet, so this does not exit anything) ticks the
+            // first step and Cancel Sketch leaves it latched, so
+            // completedSteps() has something to lose if a render-mode round
+            // trip wrongly re-derived the guide from scratch (the exact
+            // corruption a plain "&& !hiddenForRenderMode" on this panel's
+            // visibility would have caused - refresh() reads its own
+            // isHidden() as "resume from scratch", see WalkthroughPanel.cpp).
+            trigger(probe, QStringLiteral("Start Sketch"));
+            trigger(probe, QStringLiteral("Cancel Sketch"));
+            const int stepsBeforeRenderMode = guide ? guide->completedSteps() : -1;
+            check(stepsBeforeRenderMode > 0,
+                  QStringLiteral("the guide has real progress before render mode "
+                                 "(%1 step(s))")
+                      .arg(stepsBeforeRenderMode));
+
+            renderAction->trigger();
+            settle(200);
+            check(renderAction->isChecked() && rview->renderModeActive(),
+                  "back in render mode, for the walkthrough scenario");
+            check(guide != nullptr && !guide->isVisible(),
+                  "the walkthrough guide is hidden too - it must not paint "
+                  "over the furniture-alone viewport");
+
+            clickAt(rview, QPointF(rview->width() * 0.88, rview->height() * 0.12));
+            settle(200);
+            check(!renderAction->isChecked() && !rview->renderModeActive(),
+                  "exited render mode");
+            check(guide != nullptr && guide->isVisible(),
+                  "and the walkthrough guide is back");
+            check(guide != nullptr && guide->completedSteps() == stepsBeforeRenderMode,
+                  QStringLiteral("with its progress exactly where render mode "
+                                 "found it (%1 step(s), unchanged) - resumed, "
+                                 "not restarted")
+                      .arg(guide ? guide->completedSteps() : -1));
+        }
     }
 
     // The coverage floor, asserted OUTSIDE check() on purpose: an assertion
