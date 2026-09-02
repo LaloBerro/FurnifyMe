@@ -352,11 +352,24 @@ public:
     // OcctViewWidget::captureThumbnail(), advance the saved-revision mark.
     // Read-only while no furniture is open or the init screen is showing.
     bool saveCurrentFurniture();
-    // File -> Close furniture. With autosave off this SAVES FIRST - never a
-    // modal question - and the toast says so; either way it returns to the
-    // init screen. Flushes any autosave still waiting inside its debounce
-    // window first, so a furniture closed a moment after its last edit never
-    // loses that edit to a timer that had not fired yet.
+    // File -> Close furniture, and the native X's own route to it
+    // (MainWindow::closeEvent(), which always calls this when a furniture
+    // is open). SAVES FIRST whenever the furniture is dirty - never a modal
+    // question - then returns to the init screen. Cancels any autosave
+    // debounce still pending first, so a furniture closed a moment after
+    // its last edit never loses that edit to a timer that had not fired
+    // yet, but performs at most ONE fresh save attempt itself rather than
+    // also flushing that timer separately - CLAUDE.md's fix-round-2 ruling
+    // that an earlier failed autosave must not be double-reported.
+    //
+    // Fix round 2 (never-silent-failure law): if that save FAILS, this
+    // ABORTS the whole close - it returns without calling showInitScreen(),
+    // so the editor stays open, the Failure toast performSave() already
+    // raised stays genuinely readable (it would not if this window hid a
+    // moment later, per EditorSelectorHandoff.h), and the furniture stays
+    // open and dirty. A caller cannot tell success from failure by return
+    // value (this is still void, matching every other route into it) -
+    // isFurnitureDirty() and isShowingInitScreen() are what to read instead.
     void closeCurrentFurniture();
     // File -> Save automatically (checkable, persisted). On, a debounced
     // (400 ms) save runs after every document change; see

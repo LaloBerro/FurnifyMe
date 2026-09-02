@@ -1803,11 +1803,17 @@ void MainWindow::closeEvent(QCloseEvent* event)
     // Close-saves-first, exactly as File -> Close furniture's own law - the
     // native X is the OTHER route this task's brief names alongside it, and
     // closeCurrentFurniture() already performs the full save-then-return
-    // sequence (flush the autosave debounce, save outright with autosave
-    // off, then showInitScreen()). When nothing is open at all (the one
-    // state closeCurrentFurniture() itself refuses to act on - e.g. the X
-    // clicked on a blank editor after a failed openFurniture()) there is
-    // nothing to save, so this just returns to the selector directly.
+    // sequence. Fix round 2: that sequence now ABORTS (returns without
+    // calling showInitScreen()) whenever the close-time save fails - and
+    // since event->ignore() above already, unconditionally, keeps this
+    // window from ever actually closing regardless of what
+    // closeCurrentFurniture() does, a failed save simply leaves the window
+    // open with nothing further required here: no separate "stay open on
+    // failure" branch to get right a second time. When nothing is open at
+    // all (the one state closeCurrentFurniture() itself refuses to act on -
+    // e.g. the X clicked on a blank editor after a failed openFurniture())
+    // there is nothing to save, so this just returns to the selector
+    // directly.
     if (!myShowingInitScreen && !myFurnitureId.isEmpty()) {
         closeCurrentFurniture();
     } else {
@@ -2025,28 +2031,46 @@ void MainWindow::closeCurrentFurniture()
 {
     if (myShowingInitScreen || myFurnitureId.isEmpty()) return;
 
-    // Flush anything still waiting inside the debounce window FIRST,
-    // regardless of the toggle: a checkpoint made a moment ago must not be
-    // lost to a timer that had not fired yet, autosave on or off.
+    // Cancel any pending autosave debounce outright rather than flushing it
+    // separately - the check-and-save below is the ONE authoritative save
+    // this close performs, so a separate flush here would risk a second,
+    // independent save attempt (and a second Failure toast) for the exact
+    // same dirty state a moment later. Fix round 2's own ruling: "only the
+    // close-time save's own result decides" - an EARLIER autosave attempt
+    // (this timer firing on its own before the user ever clicked Close, or
+    // this very flush under the old two-step design) must not be
+    // double-reported; a single fresh decision, made right here, is what
+    // that requires.
     if (myAutosaveTimer && myAutosaveTimer->isActive()) {
         myAutosaveTimer->stop();
-        flushAutosave();
     }
 
     const QString name = myFurnitureName;
-    if (!myAutosaveOn) {
-        // The ruling: never a modal question. Save first, then the selector
-        // reappears with the reopened card's own thumbnail/date already
-        // updated - THAT is the visible confirmation now, not a toast.
-        // Milestone 4 fix round 1 (MINOR ruling): a Note toast used to fire
-        // here too, but showInitScreen() hides this whole window a moment
-        // later (see EditorSelectorHandoff.h), so it was never actually
-        // readable - dead copy reporting a real, unchanged save. The save
-        // itself is exactly as it always was; only the unreadable message
-        // is gone.
-        performSave(/*announce=*/false);
+    if (isFurnitureDirty()) {
+        // One fresh save attempt, whether autosave is on or off, and
+        // regardless of whether some earlier autosave attempt already
+        // failed - isFurnitureDirty() is read fresh, not from a cached
+        // "did the last autosave succeed" flag, so a stale failure and a
+        // resolved one are not confused with each other.
+        //
+        // Fix round 2 (CLAUDE.md's never-silent-failure law): a FAILED save
+        // here must ABORT the whole handoff, not merely fail to save.
+        // performSave() has already raised its own Failure toast - but
+        // showInitScreen() below is what hides this window a moment later
+        // (see EditorSelectorHandoff.h), and a toast on a window that is
+        // about to disappear is silent in practice, exactly the failure
+        // this law forbids. Returning here instead leaves the editor open,
+        // the toast readable, and the furniture open and dirty exactly as
+        // it was - both the menu route and the native X (MainWindow::
+        // closeEvent(), which already ignore()s the close event
+        // unconditionally) get this for free, since both call this
+        // function and neither does anything further once it returns.
+        if (!performSave(/*announce=*/false)) return;
         statusBar()->showMessage(tr("Saved and closed %1").arg(name));
     } else {
+        // Nothing to save (the ruling: never a modal question - and never
+        // a toast either, per fix round 1's own MINOR ruling. The refreshed
+        // selector's own card is the visible confirmation now).
         statusBar()->showMessage(tr("Closed %1").arg(name));
     }
 

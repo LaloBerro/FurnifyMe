@@ -191,7 +191,7 @@ void skipByEnvironment(int checks, const QString& why)
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 1955;
+constexpr int kCheckFloor = 1994;
 
 void check(bool condition, const QString& what)
 {
@@ -2059,6 +2059,166 @@ int main(int argc, char* argv[])
 
         check(handoffWindow.findChild<QDialog*>() == nullptr,
               "none of the handoff - boot, open, the native X - ever opened a QDialog");
+    }
+
+    // --- Milestone 4 fix round 2: a FAILED close-time save must abort the ----
+    // handoff outright, not merely fail to save --------------------------------
+    // CLAUDE.md's never-silent-failure law: performSave() already raises a
+    // Failure toast on refusal, but showInitScreen() hides this whole window
+    // a moment later (EditorSelectorHandoff.h) - a toast on a window about to
+    // disappear is silent in practice. closeCurrentFurniture() must therefore
+    // return WITHOUT calling showInitScreen() when the close-time save fails,
+    // leaving the editor open, the selector hidden, the toast readable and
+    // the furniture still dirty - covering both the menu route and the
+    // native X, since both call the same function.
+    //
+    // The failure injection is the atomic-saves work's own pattern (see that
+    // block, much further down this file): a DIRECTORY sitting at the exact
+    // ".tmp" path FurnitureStore::writeShapesFileAtomic() needs makes the
+    // temp file's own open() fail outright, with no permission-twiddling and
+    // no window where a real file is ever half-written.
+    {
+        RequiredTempDir saveFailDir;
+        MainWindow saveFailProbe(nullptr, /*persistProgress=*/false, saveFailDir.path());
+        saveFailProbe.setAttribute(Qt::WA_ShowWithoutActivating);
+        saveFailProbe.resize(900, 600);
+        saveFailProbe.show();
+        settle(300);
+        saveFailProbe.view()->setAnimationsEnabled(false);
+
+        SelectorWindow* saveFailSelector = wireSelector(saveFailProbe);
+        QPushButton* saveFailNewButton =
+            saveFailSelector ? saveFailSelector->newFurnitureButton() : nullptr;
+        check(saveFailNewButton != nullptr, "the save-failure probe's selector offers New furniture");
+        if (saveFailNewButton) {
+            clickAt(saveFailNewButton,
+                   QPointF(saveFailNewButton->width() / 2.0, saveFailNewButton->height() / 2.0));
+            settle(250);
+        }
+        check(!saveFailProbe.isShowingInitScreen(), "a fresh furniture is open for the probe");
+
+        QAction* saveFailAutosave = action(saveFailProbe, QStringLiteral("Save automatically"));
+        if (saveFailAutosave && saveFailAutosave->isChecked()) saveFailAutosave->trigger();
+        check(saveFailAutosave != nullptr && !saveFailProbe.autosaveEnabled(),
+              "autosave off for this probe - the close-time save is the only save in play");
+
+        check(buildBody(saveFailProbe, 0.30, 0.30, 0.5, 0.5, 60.0),
+              "a checkpoint - the furniture is genuinely dirty going into the close");
+        check(saveFailProbe.isFurnitureDirty(), "...confirmed dirty");
+
+        QString saveFailDirPath;
+        for (const FurnitureStore::FurnitureInfo& info : saveFailProbe.furnitureStore().listFurniture()) {
+            if (info.id == saveFailProbe.currentFurnitureId()) saveFailDirPath = info.filePath;
+        }
+        check(!saveFailDirPath.isEmpty(), "the furniture's own directory is found");
+        const QString saveFailTmpPath = saveFailDirPath + QStringLiteral("/shapes.bin.tmp");
+        check(QDir().mkpath(saveFailTmpPath),
+              "a directory blocks the shapes temp file - every save from here refuses");
+
+        ToastHost* saveFailToasts = saveFailProbe.findChild<ToastHost*>();
+
+        // --- leg one: the menu action ------------------------------------------
+        check(trigger(saveFailProbe, QStringLiteral("Close furniture")),
+              "Close furniture's action triggers");
+        check(!saveFailProbe.isShowingInitScreen(),
+              "...but the failed save ABORTS the handoff - the editor is still open on "
+              "this furniture, not back at the gallery");
+        check(saveFailProbe.isVisible(), "...the editor window itself stays visible");
+        check(saveFailSelector != nullptr && !saveFailSelector->isVisible(),
+              "...and the selector stays hidden - never shown for a handoff that never "
+              "completed");
+        check(saveFailProbe.isFurnitureDirty(),
+              "...and the furniture is still dirty - nothing was silently lost");
+        check(saveFailToasts != nullptr && saveFailToasts->isShowing() &&
+                  saveFailToasts->currentText().contains(QStringLiteral("Couldn't save")),
+              QStringLiteral("...and the Failure toast performSave() raised is genuinely up "
+                             "and readable, on a window that is still visible (\"%1\")")
+                  .arg(saveFailToasts ? saveFailToasts->currentText() : QString()));
+
+        // --- leg two: the native X, same refusal still in place ---------------
+        saveFailProbe.close();
+        settle(150);
+        check(!saveFailProbe.isShowingInitScreen(),
+              "the native X aborts the same way - still open on this furniture");
+        check(saveFailProbe.isVisible(), "...still visible");
+        check(saveFailSelector != nullptr && !saveFailSelector->isVisible(),
+              "...selector still hidden");
+        check(saveFailProbe.isFurnitureDirty(), "...still dirty");
+
+        // --- clear the injection: a successful save completes the handoff -----
+        check(QDir(saveFailTmpPath).removeRecursively(),
+              "the blocking directory is cleared, unblocking the save");
+        check(trigger(saveFailProbe, QStringLiteral("Close furniture")),
+              "Close furniture triggers again");
+        check(saveFailProbe.isShowingInitScreen(),
+              "...and THIS time, with nothing left to refuse it, the handoff completes");
+        check(!saveFailProbe.isVisible(), "...the editor hides");
+        check(saveFailSelector != nullptr && saveFailSelector->isVisible(),
+              "...and the selector reappears");
+        check(!saveFailProbe.isFurnitureDirty(), "...the furniture is no longer dirty - saved");
+
+        check(saveFailProbe.findChild<QDialog*>() == nullptr,
+              "none of this - two refused closes and one that succeeded - ever opened a "
+              "QDialog");
+    }
+
+    // --- Milestone 4 fix round 2: with autosave ON, an EARLIER failed --------
+    // autosave must not be double-reported at close time - one fresh, ------
+    // authoritative save decides, not a stale cached failure -------------------
+    {
+        RequiredTempDir autosaveFailDir;
+        MainWindow autosaveFailProbe(nullptr, /*persistProgress=*/false, autosaveFailDir.path());
+        autosaveFailProbe.setAttribute(Qt::WA_ShowWithoutActivating);
+        autosaveFailProbe.resize(900, 600);
+        autosaveFailProbe.show();
+        settle(300);
+        autosaveFailProbe.view()->setAnimationsEnabled(false);
+        enterFreshFurniture(autosaveFailProbe);
+        check(!autosaveFailProbe.isShowingInitScreen(),
+              "a fresh furniture is open for the autosave-failure probe");
+        check(autosaveFailProbe.autosaveEnabled(), "autosave starts on, per the default");
+
+        QString autosaveFailDirPath;
+        for (const FurnitureStore::FurnitureInfo& info :
+             autosaveFailProbe.furnitureStore().listFurniture()) {
+            if (info.id == autosaveFailProbe.currentFurnitureId())
+                autosaveFailDirPath = info.filePath;
+        }
+        check(!autosaveFailDirPath.isEmpty(), "the furniture's own directory is found");
+        const QString autosaveFailTmpPath = autosaveFailDirPath + QStringLiteral("/shapes.bin.tmp");
+        check(QDir().mkpath(autosaveFailTmpPath),
+              "a directory blocks the shapes temp file before the checkpoint below");
+
+        check(buildBody(autosaveFailProbe, 0.30, 0.30, 0.5, 0.5, 60.0),
+              "a checkpoint - this arms the autosave debounce with a save that will fail");
+        const int autosavePending = autosaveFailProbe.autosavePendingMs();
+        check(autosavePending > 0, "autosave is armed");
+        settle(autosavePending + 200);   // let the timer fire and fail on its own
+        check(autosaveFailProbe.isFurnitureDirty(),
+              "the timer's own save attempt failed - the furniture is still dirty, with no "
+              "debounce left armed to retry it silently");
+        check(autosaveFailProbe.autosavePendingMs() < 0,
+              "...and the single-shot timer has genuinely fired and stopped, not merely "
+              "about to - the close below cannot be flushing a still-pending write");
+
+        // The close-time decision is now the ONLY thing that runs a save -
+        // one fresh performSave() call, not a second independent one layered
+        // on top of the timer's own stale failure.
+        check(trigger(autosaveFailProbe, QStringLiteral("Close furniture")),
+              "Close furniture triggers with autosave on, after its own timer already failed");
+        check(!autosaveFailProbe.isShowingInitScreen(),
+              "the close-time save (the same refusal still in place) aborts the handoff too "
+              "- autosave being on does not paper over it");
+        check(autosaveFailProbe.isFurnitureDirty(), "...still dirty");
+
+        check(QDir(autosaveFailTmpPath).removeRecursively(),
+              "the blocking directory is cleared");
+        check(trigger(autosaveFailProbe, QStringLiteral("Close furniture")),
+              "Close furniture triggers again, unblocked");
+        check(autosaveFailProbe.isShowingInitScreen(),
+              "...and completes - the fresh, close-time attempt is what decided it, not "
+              "the stale failure from before");
+        check(!autosaveFailProbe.isFurnitureDirty(), "...saved");
     }
 
     // --- resyncView() reapplies hidden state on EVERY caller, not just -----
