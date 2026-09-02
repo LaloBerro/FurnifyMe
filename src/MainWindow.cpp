@@ -1783,9 +1783,14 @@ void MainWindow::closeEvent(QCloseEvent* event)
     // Milestone 4: this window is never actually destroyed. Closing it -
     // the native X, exactly as much as File -> Close furniture - always
     // means "go back to the library", never "quit the app": quitting is the
-    // SELECTOR window's own close, which Qt's default
-    // quitOnLastWindowClosed() already handles correctly once this window
-    // is hidden rather than visible-but-unfocused.
+    // SELECTOR window's own close (SelectorWindow::closing(), wired to the
+    // app's real quit function by EditorSelectorHandoff::wire() - see
+    // src/EditorSelectorHandoff.h). Fix round 1: this used to lean on Qt's
+    // default quitOnLastWindowClosed() noticing this window went hidden
+    // with nothing else shown yet - which is exactly the CRITICAL quit-trap
+    // that finding closed. main.cpp now disables that default outright, so
+    // this event->ignore() only has to keep THIS window from ever actually
+    // closing - it no longer has any bearing on whether the app quits.
     event->ignore();
 
     // A window closed inside the debounce window still has to store what the
@@ -1855,12 +1860,16 @@ void MainWindow::showInitScreen()
     updateActions();
     statusBar()->showMessage(tr("Choose a furniture to open, or start a new one"));
 
-    // Milestone 4: this window's own gallery no longer exists - it hides
-    // itself and hands control back through returnedToSelector() instead.
-    // Harmless before anything is connected (the constructor's own first
-    // call, above) and harmless if this window was never shown in the first
-    // place (hide() on an unshown widget is a no-op) - see the header.
-    hide();
+    // Milestone 4 fix round 1 (the CRITICAL quit-trap finding): this window
+    // does NOT hide itself here any more. It only announces that it wants
+    // the selector shown - EditorSelectorHandoff::wire() is the one place
+    // that ever hides this window, and it always shows the selector FIRST.
+    // Hiding here, unconditionally, before anything could show the
+    // selector, is exactly the ordering that let two unparented top-level
+    // windows both be hidden at once and race Qt's quitOnLastWindowClosed()
+    // - see EditorSelectorHandoff.h for the full story. Harmless if nothing
+    // is connected yet (the constructor's own first call, above) - this
+    // window simply stays in whatever visibility it already had.
     emit returnedToSelector();
 }
 
@@ -2026,13 +2035,17 @@ void MainWindow::closeCurrentFurniture()
 
     const QString name = myFurnitureName;
     if (!myAutosaveOn) {
-        // The ruling: never a modal question. Save first, then say so - one
-        // toast names both halves of what just happened rather than asking
-        // permission for either.
+        // The ruling: never a modal question. Save first, then the selector
+        // reappears with the reopened card's own thumbnail/date already
+        // updated - THAT is the visible confirmation now, not a toast.
+        // Milestone 4 fix round 1 (MINOR ruling): a Note toast used to fire
+        // here too, but showInitScreen() hides this whole window a moment
+        // later (see EditorSelectorHandoff.h), so it was never actually
+        // readable - dead copy reporting a real, unchanged save. The save
+        // itself is exactly as it always was; only the unreadable message
+        // is gone.
         performSave(/*announce=*/false);
-        const QString message = tr("Saved and closed %1").arg(name);
-        statusBar()->showMessage(message);
-        myToasts->show(message, Toast::Kind::Note, false);
+        statusBar()->showMessage(tr("Saved and closed %1").arg(name));
     } else {
         statusBar()->showMessage(tr("Closed %1").arg(name));
     }

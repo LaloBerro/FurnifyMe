@@ -35,6 +35,7 @@
 #include "CameraController.h"
 #include "DimensionRenderer.h"
 #include "DocumentModel.h"
+#include "EditorSelectorHandoff.h"
 #include "ExtrudePreview.h"
 #include "FurnifySerial.h"
 #include "FurnitureStore.h"
@@ -190,7 +191,7 @@ void skipByEnvironment(int checks, const QString& why)
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 1952;
+constexpr int kCheckFloor = 1955;
 
 void check(bool condition, const QString& what)
 {
@@ -481,36 +482,29 @@ bool trigger(MainWindow& window, const QString& label)
     return true;
 }
 
-// Milestone 4: the gallery is SelectorWindow, a genuinely separate top-level
-// window from MainWindow - not a state MainWindow shows over its own
-// viewport any more (Milestone 3's InitScreen, now retired). Constructs one,
-// wired to `window` exactly as main.cpp wires the real app's handoff -
-// SelectorWindow::furnitureChosen()/createRequested() hide the selector, show
-// `window` and call window.openFurniture(); MainWindow::returnedToSelector()
-// re-shows and refreshes the selector - and shows it. Parented to `window`
-// (Qt::Window, per SelectorWindow's own constructor comment - a parent is
-// for lifetime only, never layout) so it is torn down with whichever probe
-// owns it rather than needing explicit cleanup at each call site, and its
-// connections are what let a probe later trigger "Close furniture" or close
-// the window and land back on a live, correctly-refreshed selector without
-// any further wiring.
-SelectorWindow* wireSelector(MainWindow& window)
+// Milestone 4 fix round 1 - review's own IMPORTANT finding: this file used
+// to wire its own close cousin of main.cpp's handoff (a hand-rolled
+// hide/show pair, and a SelectorWindow parented to whichever MainWindow it
+// tested). Neither divergence is safe to keep: the hand-rolled wiring hid
+// the selector before showing the editor in one direction, which is exactly
+// the CRITICAL quit-trap finding, and a PARENTED SelectorWindow carries a
+// transientParent() the real, unparented main.cpp pair never has - which is
+// precisely the piece of state Qt's quitOnLastWindowClosed() scan reads, so
+// a suite testing a reparented pair could never have caught that bug in the
+// first place. This helper now calls EditorSelectorHandoff::wire() - the
+// SAME function main.cpp calls - against a genuinely UNPARENTED
+// SelectorWindow, so the suite drives exactly what ships.
+//
+// Cleanup without a Qt parent: tied to `window`'s own destroyed() signal
+// rather than QWidget parentage, so a probe still gets the same "goes away
+// when the probe does" convenience with no window-flag side effect at all -
+// `destroyed()` fires during ~QObject() regardless of who owns whom.
+SelectorWindow* wireSelector(MainWindow& window, EditorSelectorHandoff::Hooks hooks = {})
 {
-    auto* selector = new SelectorWindow(window.furnitureStore(), &window);
+    auto* selector = new SelectorWindow(window.furnitureStore());   // no parent - see above
     selector->setAttribute(Qt::WA_ShowWithoutActivating);
-
-    QObject::connect(selector, &SelectorWindow::furnitureChosen, &window,
-                     [&window, selector](const QString& id) {
-                         selector->hide();
-                         window.show();
-                         window.raise();
-                         window.openFurniture(id);
-                     });
-    QObject::connect(&window, &MainWindow::returnedToSelector, selector,
-                     [selector] {
-                         selector->refresh();
-                         selector->show();
-                     });
+    EditorSelectorHandoff::wire(window, *selector, std::move(hooks));
+    QObject::connect(&window, &QObject::destroyed, selector, [selector] { delete selector; });
 
     selector->show();
     settle(150);
@@ -981,6 +975,13 @@ int main(int argc, char* argv[])
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) qputenv("QT_QPA_PLATFORM", "xcb");
 #endif
     QApplication app(argc, argv);
+    // Exercise what actually ships: main.cpp sets this before building
+    // anything (see EditorSelectorHandoff.h's own comment on why), so this
+    // suite does too - inert here (this file never calls app.exec(), so
+    // Qt's quitOnLastWindowClosed() scan never runs regardless), but a
+    // stray future exec() call in this file should not silently pick up
+    // the default the real app deliberately does not ship with.
+    QApplication::setQuitOnLastWindowClosed(false);
     // Before anything is shown, so not one real mouse-move, wheel or keystroke
     // can reach the app under test - see SpontaneousInputBlocker for the law
     // it enforces and the 1.75x flake it closes.
@@ -1848,33 +1849,19 @@ int main(int argc, char* argv[])
         check(saveProbe.autosavePendingMs() < 0,
               "and with autosave off, this checkpoint arms no debounce at all");
 
-        ToastHost* toasts = saveProbe.findChild<ToastHost*>();
         check(trigger(saveProbe, QStringLiteral("Close furniture")),
               "Close furniture's action triggers");
         check(saveProbe.isShowingInitScreen(), "...and it lands back on the init screen");
-        // Milestone 4: closeCurrentFurniture() still raises the Note toast
-        // exactly as it always did, but showInitScreen() now hides the whole
-        // editor window right after AND overwrites the status bar with its
-        // own generic "Choose a furniture..." message - so neither
-        // ToastHost::currentText() (gated on isVisible(), which follows its
-        // hidden ancestor to false - a child cannot be visible while its
-        // parent is not) nor statusBar()->currentMessage() (clobbered by the
-        // very next line of code) is a reliable read of what this gesture
-        // said. Toast::paintedTexts() is: it records every message this
-        // Toast has EVER shown, not just the live one (Toast.h's own
-        // "honest limit" reasoning), so this proves the message was raised
-        // at all - the refreshed selector (new thumbnail/date on the card)
-        // is what actually stays visibly readable to the user afterward.
-        Toast* toast = toasts ? toasts->toast() : nullptr;
-        const QStringList toastHistory = toast ? toast->paintedTexts() : QStringList();
-        bool sawSavedAndClosed = false;
-        for (const QString& t : toastHistory) {
-            if (t.contains(QStringLiteral("Saved and closed"))) sawSavedAndClosed = true;
-        }
-        check(sawSavedAndClosed,
-              QStringLiteral("the Note toast said so plainly at the time - never a modal "
-                             "question (history: %1)")
-                  .arg(toastHistory.join(QStringLiteral(" | "))));
+        // Milestone 4 fix round 1 (MINOR ruling): closeCurrentFurniture()
+        // used to raise a "Saved and closed" Note toast here too, but
+        // showInitScreen() hides the whole editor window a moment later
+        // (see EditorSelectorHandoff.h), so it was never actually readable
+        // - dead copy, now removed at the source rather than asserted on
+        // here. The real confirmation - the file on disk actually carrying
+        // the move, not just the body's mere presence - is what the reload
+        // check right below already proves, and is exactly what stays
+        // visible to a real user afterward too, on the reopened card's own
+        // refreshed date.
 
         // RED-VERIFIED (task-2-report.md): with the save call removed from
         // closeCurrentFurniture()'s autosave-off branch, this reloaded the
@@ -1924,7 +1911,41 @@ int main(int argc, char* argv[])
         handoffWindow.setAttribute(Qt::WA_ShowWithoutActivating);
         check(!handoffWindow.isVisible(), "at boot, the editor is not shown");
 
-        SelectorWindow* handoffSelector = wireSelector(handoffWindow);
+        // Constructed directly rather than through wireSelector() here,
+        // deliberately: this block wants its OWN Hooks - the midpoint
+        // callbacks that pin the show-before-hide ORDER (fix round 1's
+        // IMPORTANT finding), and a substitute quit function so the
+        // selector's own close can be driven for real without touching
+        // Qt's actual quit machinery. Same parentless construction and the
+        // same EditorSelectorHandoff::wire() call wireSelector() itself
+        // makes, so this is still the real production wiring under test,
+        // not a hand-rolled variant of it.
+        auto* handoffSelector = new SelectorWindow(handoffWindow.furnitureStore());
+        handoffSelector->setAttribute(Qt::WA_ShowWithoutActivating);
+
+        bool openMidpointBothVisible = false;
+        bool returnMidpointBothVisible = false;
+        bool quitHookCalled = false;
+        EditorSelectorHandoff::Hooks handoffHooks;
+        handoffHooks.onOpenMidpoint = [&handoffWindow, handoffSelector,
+                                       &openMidpointBothVisible] {
+            // At THIS exact point (inside the open leg, after show(), before
+            // hide()) - not the settled end state a wrong order could still
+            // happen to reach by the time a test gets around to checking it.
+            openMidpointBothVisible = handoffWindow.isVisible() && handoffSelector->isVisible();
+        };
+        handoffHooks.onReturnMidpoint = [&handoffWindow, handoffSelector,
+                                         &returnMidpointBothVisible] {
+            returnMidpointBothVisible =
+                handoffWindow.isVisible() && handoffSelector->isVisible();
+        };
+        handoffHooks.quit = [&quitHookCalled] { quitHookCalled = true; };
+        EditorSelectorHandoff::wire(handoffWindow, *handoffSelector, handoffHooks);
+        QObject::connect(&handoffWindow, &QObject::destroyed, handoffSelector,
+                         [handoffSelector] { delete handoffSelector; });
+
+        handoffSelector->show();
+        settle(150);
         check(handoffSelector != nullptr && handoffSelector->isVisible(),
               "...and the selector is, alone");
         check(!handoffWindow.isVisible(),
@@ -1940,6 +1961,13 @@ int main(int argc, char* argv[])
         }
         check(handoffWindow.isVisible(), "choosing a furniture shows the editor");
         check(!handoffSelector->isVisible(), "...and hides the selector");
+        // Fix round 1, IMPORTANT: the ORDER, not just this settled end
+        // state - pinned via the hook fired between show() and hide()
+        // inside the wiring itself (see EditorSelectorHandoff::wire()).
+        check(openMidpointBothVisible,
+              "...and at the instrumented midpoint of that handoff, BOTH windows were "
+              "visible at once - the editor was shown before the selector was hidden, "
+              "never the other way round");
         check(!handoffWindow.isShowingInitScreen(), "...with that furniture actually loaded");
         const QString handoffFurnitureId = handoffWindow.currentFurnitureId();
 
@@ -1978,6 +2006,12 @@ int main(int argc, char* argv[])
         settle(250);
         check(!handoffWindow.isVisible(), "the native X hides the editor rather than quitting");
         check(handoffSelector->isVisible(), "...and the selector reappears");
+        // Same order pin, the other direction: the selector was shown
+        // before the editor was hidden, not both hidden for even one
+        // statement - the exact CRITICAL finding this fix round closes.
+        check(returnMidpointBothVisible,
+              "...and at the instrumented midpoint of the RETURN handoff, both windows "
+              "were visible at once too - never a moment where neither was");
         check(handoffWindow.isShowingInitScreen(),
               "...with the editor's own state back to \"nothing open\"");
 
@@ -2005,6 +2039,23 @@ int main(int argc, char* argv[])
         check(handoffSelector->furnitureCount() == 1,
               "the selector's own refresh (on returnedToSelector()) lists the furniture "
               "the native X just saved and closed");
+
+        // --- the ONE honest quit gesture: closing the selector itself ---------
+        // CRITICAL finding, belt 2: with quitOnLastWindowClosed() disabled
+        // (main.cpp; harmless-but-set here too - see this file's own
+        // main()), NOTHING hides the app by accident any more - quitting is
+        // this one explicit wire. Driven for real (a genuine close() on the
+        // selector, which is visible right now after the return handoff
+        // above) against a SUBSTITUTE quit function rather than the real
+        // QCoreApplication::quit(), so this proves the WIRING reaches the
+        // hook without depending on Qt's own quit machinery (which this
+        // file never exercises via exec() anyway).
+        check(!quitHookCalled, "the quit hook has not fired from anything above");
+        handoffSelector->close();
+        settle(120);
+        check(quitHookCalled,
+              "closing the selector runs the app's own quit hook - the one honest quit "
+              "gesture this two-window model has");
 
         check(handoffWindow.findChild<QDialog*>() == nullptr,
               "none of the handoff - boot, open, the native X - ever opened a QDialog");

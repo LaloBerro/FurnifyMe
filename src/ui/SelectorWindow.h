@@ -36,6 +36,7 @@
 #include <vector>
 
 class FurnitureStore;
+class QCloseEvent;
 class QDateTime;
 class QLabel;
 class QPushButton;
@@ -117,9 +118,21 @@ signals:
     // observable "the user asked for one", and carries no id of its own.
     void createRequested();
 
+    // This window is closing - the native X, or a real close() call. This
+    // class knows nothing about quitting the application; it only reports
+    // the gesture, exactly as it reports everything else through a signal
+    // rather than acting on another object directly. EditorSelectorHandoff::
+    // wire() (src/EditorSelectorHandoff.h) is what turns this into the
+    // app's one honest quit gesture - see its own header for why that
+    // matters (Milestone 4's fix-round-1 CRITICAL finding: two unparented
+    // top-level windows and Qt's default quitOnLastWindowClosed() do not
+    // mix safely with a handoff that hides one before showing the other).
+    void closing();
+
 protected:
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
+    void closeEvent(QCloseEvent* event) override;
 
 private:
     struct Card {

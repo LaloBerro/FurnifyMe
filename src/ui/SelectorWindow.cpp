@@ -4,6 +4,7 @@
 #include "InlineRename.h"
 #include "Theme.h"
 
+#include <QCloseEvent>
 #include <QDateTime>
 #include <QFileInfo>
 #include <QGridLayout>
@@ -613,4 +614,15 @@ void SelectorWindow::resizeEvent(QResizeEvent* event)
 {
     QWidget::resizeEvent(event);
     relayoutCards();
+}
+
+void SelectorWindow::closeEvent(QCloseEvent* event)
+{
+    // Report the gesture and let the base class accept it normally - this
+    // window genuinely does close (unlike MainWindow, which never does; see
+    // its own closeEvent()). What "closing the app's own picker window"
+    // MEANS is EditorSelectorHandoff::wire()'s call, not this class's -
+    // see the header on closing() for why.
+    emit closing();
+    QWidget::closeEvent(event);
 }

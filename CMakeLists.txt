@@ -108,6 +108,7 @@ if(FURNIFYME_BUILD_APP)
     add_library(furnify_app STATIC
       resources.qrc
       src/MainWindow.cpp
+      src/EditorSelectorHandoff.cpp
       src/OcctViewWidget.cpp
       src/GridRenderer.cpp
       src/ui/AppBar.cpp

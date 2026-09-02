@@ -319,16 +319,22 @@ public:
     // dress. showInitScreen() still owns that reset - live document replaced
     // with a fresh, empty one (never merely cleared - clear() leaves the
     // undo stack behind it, and the next furniture opened must not inherit
-    // checkpoints that were never its own) - and now ALSO hides this window
-    // and emits returnedToSelector(), which is main.cpp's own cue (see
-    // main.cpp) to refresh and re-show the selector. openFurniture() is the
-    // one path both an existing card and a freshly created one go through,
-    // so a new furniture and a reopened one round-trip identically; it does
-    // NOT show this window itself - the caller (main.cpp's handoff wiring,
-    // or a test replicating it) shows it first, preserving the CLAUDE.md
-    // lazy-`initializeViewer()` contract exactly as it already held before
-    // this task: every route that ever called openFurniture() already did so
-    // on an already-shown window.
+    // checkpoints that were never its own) - and emits returnedToSelector()
+    // once it is done. Fix round 1 (the CRITICAL quit-trap finding): it does
+    // NOT hide this window itself any more - EditorSelectorHandoff::wire()
+    // (src/EditorSelectorHandoff.h) is the ONE place that ever does, and it
+    // always shows the selector FIRST. Hiding here unconditionally, before
+    // anything could show the selector, is exactly the ordering that let two
+    // unparented top-level windows both be hidden at once and race Qt's
+    // quitOnLastWindowClosed() - see that header for the full story.
+    // openFurniture() is the one path both an existing card and a freshly
+    // created one go through, so a new furniture and a reopened one
+    // round-trip identically; it does NOT show this window itself either -
+    // the caller (EditorSelectorHandoff::wire(), in production and in every
+    // test that wants the real behaviour) shows it first, preserving the
+    // CLAUDE.md lazy-`initializeViewer()` contract exactly as it already
+    // held before this task: every route that ever called openFurniture()
+    // already did so on an already-shown window.
     void showInitScreen();
     bool openFurniture(const QString& id);
     bool isShowingInitScreen() const { return myShowingInitScreen; }
@@ -495,10 +501,13 @@ signals:
     // Milestone 4: this window is done editing and wants the selector shown
     // again - emitted by showInitScreen() (so every route that already went
     // through it - Close furniture, opening a different card, a failed
-    // openFurniture() - carries this for free) immediately after this window
-    // hides itself. main.cpp's own handoff wiring is what actually shows and
-    // refreshes SelectorWindow on it; this window knows nothing of that
-    // class, exactly as it knows nothing of MainWindow.
+    // openFurniture() - carries this for free) once its own state reset is
+    // done. Fix round 1: this window does NOT hide itself before or after
+    // emitting this - EditorSelectorHandoff::wire() (src/
+    // EditorSelectorHandoff.h) is what shows SelectorWindow and THEN hides
+    // this window, in that order, which is what closes the quit-trap the
+    // opposite order opened. This window knows nothing of that class,
+    // exactly as it knows nothing of MainWindow.
     void returnedToSelector();
 
 protected:
