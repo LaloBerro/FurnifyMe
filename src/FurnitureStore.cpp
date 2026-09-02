@@ -408,7 +408,8 @@ QVector<FurnitureStore::VersionInfo> FurnitureStore::versions(const QString& id)
     return result;
 }
 
-bool FurnitureStore::saveVersion(const QString& id, const QString& name, const DocumentModel& doc)
+bool FurnitureStore::saveVersion(const QString& id, const QString& name, const DocumentModel& doc,
+                                 const QString& thumbSourcePath)
 {
     if (!QFileInfo::exists(manifestPath(id))) return false;
 
@@ -425,18 +426,36 @@ bool FurnitureStore::saveVersion(const QString& id, const QString& name, const D
     const FurnifySerial::SerializedDocument serial = doc.toSerialized(meta);
 
     if (!QDir().mkpath(versionsDir(id))) return false;
-    // A fresh, never-reused filename - the version's own NAME is user text
-    // and not filesystem-safe, and reusing a small counter after a delete
-    // is exactly the "a name reappearing on different content" trap
-    // DocumentModel's own id/name counters were written to avoid.
-    const QString file = QUuid::createUuid().toString(QUuid::WithoutBraces) + QStringLiteral(".bin");
+    // A fresh, never-reused id - the version's own NAME is user text and not
+    // filesystem-safe, and reusing a small counter after a delete is
+    // exactly the "a name reappearing on different content" trap
+    // DocumentModel's own id/name counters were written to avoid. The blob
+    // and its thumbnail (if any) share this id with different extensions,
+    // the same pairing shapes.bin/thumb.png already use at the furniture
+    // level.
+    const QString versionUuid = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const QString file = versionUuid + QStringLiteral(".bin");
     const QString blobPath = versionsDir(id) + QStringLiteral("/") + file;
     if (!writeShapesFileAtomic(blobPath, serial)) return false;
+
+    // A thumbnail is presentation, never document data: a missing source
+    // path, or a copy that fails (a full disk, a source that vanished), is
+    // not a reason to refuse the whole version - it just leaves this
+    // version with nothing for versionThumbPath() to return, exactly like
+    // one saved before this task existed.
+    QString thumbFile;
+    if (!thumbSourcePath.isEmpty() && QFileInfo::exists(thumbSourcePath)) {
+        const QString candidateThumbFile = versionUuid + QStringLiteral(".png");
+        const QString thumbTargetPath = versionsDir(id) + QStringLiteral("/") + candidateThumbFile;
+        QFile::remove(thumbTargetPath);  // QFile::copy() refuses to replace an existing file
+        if (QFile::copy(thumbSourcePath, thumbTargetPath)) thumbFile = candidateThumbFile;
+    }
 
     QJsonObject entry;
     entry[QStringLiteral("name")] = name;
     entry[QStringLiteral("saved")] = QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs);
     entry[QStringLiteral("file")] = file;
+    if (!thumbFile.isEmpty()) entry[QStringLiteral("thumb")] = thumbFile;
     entry[QStringLiteral("bodies")] = itemMetaToJson(meta.bodyNames, meta.bodyVisible);
     entry[QStringLiteral("outlines")] = itemMetaToJson(meta.outlineNames, meta.outlineVisible);
     // A version snapshots the WHOLE document, per the plan's own ruling
@@ -447,15 +466,30 @@ bool FurnitureStore::saveVersion(const QString& id, const QString& name, const D
     versionsArr.append(entry);
     manifest[QStringLiteral("versions")] = versionsArr;
     if (!writeManifestObject(id, manifest)) {
-        // The blob is already on disk (writeShapesFileAtomic() above
-        // succeeded) but the manifest never learned its filename - an
-        // orphan nothing will ever load or list. Delete it rather than
-        // leaving versions/ quietly accumulate a dangling file every time
-        // this fails.
+        // The blob (and thumbnail, if one copied) are already on disk
+        // (writeShapesFileAtomic()/QFile::copy() above succeeded) but the
+        // manifest never learned their filenames - orphans nothing will
+        // ever load or list. Delete them rather than leaving versions/
+        // quietly accumulate dangling files every time this fails.
         QFile::remove(blobPath);
+        if (!thumbFile.isEmpty()) QFile::remove(versionsDir(id) + QStringLiteral("/") + thumbFile);
         return false;
     }
     return true;
+}
+
+QString FurnitureStore::versionThumbPath(const QString& id, const QString& name) const
+{
+    const QJsonObject manifest = readManifestObject(id);
+    const QJsonArray versionsArr = manifest.value(QStringLiteral("versions")).toArray();
+    for (const QJsonValue& v : versionsArr) {
+        const QJsonObject entry = v.toObject();
+        if (entry.value(QStringLiteral("name")).toString() != name) continue;
+        const QString thumb = entry.value(QStringLiteral("thumb")).toString();
+        if (thumb.isEmpty()) return QString();  // absent-tolerated - see the header's own comment
+        return versionsDir(id) + QStringLiteral("/") + thumb;
+    }
+    return QString();  // unknown furniture or version name
 }
 
 bool FurnitureStore::loadVersion(const QString& id, const QString& name, DocumentModel& doc)
@@ -510,6 +544,11 @@ bool FurnitureStore::deleteVersion(const QString& id, const QString& name)
 
         const QString file = entry.value(QStringLiteral("file")).toString();
         QFile::remove(versionsDir(id) + QStringLiteral("/") + file);
+        // Absent-tolerated, same as everywhere else "thumb" is read - a
+        // version saved before this task, or one whose thumbnail copy
+        // failed, simply has nothing more to remove here.
+        const QString thumb = entry.value(QStringLiteral("thumb")).toString();
+        if (!thumb.isEmpty()) QFile::remove(versionsDir(id) + QStringLiteral("/") + thumb);
         versionsArr.removeAt(i);
         manifest[QStringLiteral("versions")] = versionsArr;
         return writeManifestObject(id, manifest);

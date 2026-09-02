@@ -77,6 +77,9 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QImage>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QKeyEvent>
 #include <QKeySequence>
 #include <QLabel>
@@ -93,6 +96,7 @@
 #include <QStatusBar>
 #include <QString>
 #include <QTemporaryDir>
+#include <QTemporaryFile>
 #include <QWheelEvent>
 
 #include <BRepAdaptor_Curve.hxx>
@@ -14761,6 +14765,112 @@ int main(int argc, char* argv[])
         check(store.versions(chairId).isEmpty(), "and the version is gone from the list");
         check(!store.deleteVersion(chairId, QStringLiteral("First Draft")),
               "deleting it again refuses - it is already gone");
+
+        // --- version thumbnails (Milestone 4, Task 1.1) --------------------
+        // FurnitureStore::saveVersion() takes the PATH of an already-
+        // captured PNG, not a QImage - mirroring MainWindow's own capture
+        // (OcctViewWidget::saveSnapshot() straight to a temp file) rather
+        // than the furniture-level QImage saveFurniture() takes. This probe
+        // therefore writes a real PNG to a temp path itself before handing
+        // it to the store.
+        {
+            QTemporaryFile thumbSrc(QDir::tempPath() +
+                                     QStringLiteral("/gui-smoke-version-thumb-XXXXXX.png"));
+            check(thumbSrc.open(), "version-thumbnail probe: a source PNG opens for writing");
+            if (thumbSrc.isOpen()) {
+                QImage thumb(8, 8, QImage::Format_RGB32);
+                thumb.fill(Qt::darkGreen);
+                check(thumb.save(&thumbSrc, "PNG"), "version-thumbnail probe: the source PNG is written");
+                thumbSrc.close();
+
+                check(store.saveVersion(chairId, QStringLiteral("Thumbed"), doc, thumbSrc.fileName()),
+                      "saveVersion succeeds with a thumbnail path");
+                const QString thumbFile = store.versionThumbPath(chairId, QStringLiteral("Thumbed"));
+                check(!thumbFile.isEmpty() && QFileInfo::exists(thumbFile) &&
+                          QFileInfo(thumbFile).size() > 0,
+                      "versionThumbPath names an existing, non-empty file");
+                const QString furnitureDirPath =
+                    QFileInfo(tempDir.path() + QStringLiteral("/") + chairId).absoluteFilePath();
+                check(QFileInfo(thumbFile).absoluteFilePath().startsWith(furnitureDirPath),
+                      "...and that file lives inside the furniture's own directory");
+            }
+        }
+
+        check(store.saveVersion(chairId, QStringLiteral("No Thumb"), doc),
+              "saveVersion succeeds with no thumbnail path (the default argument)");
+        check(store.versionThumbPath(chairId, QStringLiteral("No Thumb")).isEmpty(),
+              "...and versionThumbPath answers empty for it");
+        {
+            DocumentModel noThumbDoc;
+            check(store.loadVersion(chairId, QStringLiteral("No Thumb"), noThumbDoc),
+                  "...and it still loads fine with no thumbnail");
+        }
+
+        // A hand-edited manifest whose version entry is missing "thumb"
+        // entirely - forward-compatible read, the same absent-tolerated
+        // rule the "symmetry" key already established.
+        {
+            const QString manifestFile =
+                tempDir.path() + QStringLiteral("/") + chairId + QStringLiteral("/manifest.json");
+            QJsonObject manifest;
+            {
+                QFile f(manifestFile);
+                check(f.open(QIODevice::ReadOnly), "hand-edit probe: the manifest opens for reading");
+                manifest = QJsonDocument::fromJson(f.readAll()).object();
+            }
+            QJsonArray versionsArr = manifest.value(QStringLiteral("versions")).toArray();
+            bool foundThumbed = false;
+            for (int i = 0; i < versionsArr.size(); ++i) {
+                QJsonObject entry = versionsArr.at(i).toObject();
+                if (entry.value(QStringLiteral("name")).toString() != QStringLiteral("Thumbed")) continue;
+                check(entry.contains(QStringLiteral("thumb")),
+                      "hand-edit probe: the entry carries \"thumb\" before it is stripped");
+                entry.remove(QStringLiteral("thumb"));
+                versionsArr.replace(i, entry);
+                foundThumbed = true;
+            }
+            check(foundThumbed, "hand-edit probe: the \"Thumbed\" version entry is found to edit");
+            manifest[QStringLiteral("versions")] = versionsArr;
+            QFile out(manifestFile);
+            check(out.open(QIODevice::WriteOnly | QIODevice::Truncate),
+                  "hand-edit probe: the manifest reopens for writing");
+            out.write(QJsonDocument(manifest).toJson(QJsonDocument::Indented));
+            out.close();
+
+            check(store.versions(chairId).size() == 2,
+                  "hand-edit probe: both versions still list after the edit");
+            check(store.versionThumbPath(chairId, QStringLiteral("Thumbed")).isEmpty(),
+                  "...and the hand-stripped entry now answers no thumbnail, never a refusal");
+            DocumentModel restoredDoc;
+            check(store.loadVersion(chairId, QStringLiteral("Thumbed"), restoredDoc),
+                  "...and the version with no \"thumb\" key still loads fine");
+        }
+
+        // deleteVersion removes the thumbnail PNG along with the blob.
+        {
+            const QString thumbFile = store.versionThumbPath(chairId, QStringLiteral("No Thumb"));
+            check(thumbFile.isEmpty(), "sanity: \"No Thumb\" really has no thumbnail to begin with");
+        }
+        {
+            QTemporaryFile thumbSrc(QDir::tempPath() +
+                                     QStringLiteral("/gui-smoke-version-thumb2-XXXXXX.png"));
+            check(thumbSrc.open(), "delete-thumbnail probe: a source PNG opens for writing");
+            if (thumbSrc.isOpen()) {
+                QImage thumb(8, 8, QImage::Format_RGB32);
+                thumb.fill(Qt::darkMagenta);
+                check(thumb.save(&thumbSrc, "PNG"), "delete-thumbnail probe: the source PNG is written");
+                thumbSrc.close();
+                check(store.saveVersion(chairId, QStringLiteral("Deletable"), doc, thumbSrc.fileName()),
+                      "delete-thumbnail probe: saveVersion succeeds with a thumbnail");
+                const QString thumbFile = store.versionThumbPath(chairId, QStringLiteral("Deletable"));
+                check(!thumbFile.isEmpty() && QFileInfo::exists(thumbFile),
+                      "delete-thumbnail probe: the thumbnail file exists before delete");
+                check(store.deleteVersion(chairId, QStringLiteral("Deletable")),
+                      "delete-thumbnail probe: deleteVersion succeeds");
+                check(!QFileInfo::exists(thumbFile),
+                      "...and the thumbnail PNG is gone along with the version");
+            }
+        }
 
         // --- refusals -----------------------------------------------------
         {

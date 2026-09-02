@@ -107,7 +107,25 @@ public:
     // inside `id`'s own files. False for an unknown furniture id, a
     // duplicate version name (versions are named by the user and looked up
     // by that name, so two cannot share one), or a serialization failure.
-    bool saveVersion(const QString& id, const QString& name, const DocumentModel& doc);
+    //
+    // `thumbSourcePath` is the path of an ALREADY-CAPTURED PNG on disk -
+    // MainWindow's call site writes it via OcctViewWidget::saveSnapshot()
+    // straight to a temp file, mirroring saveFurniture()'s own thumbnail
+    // capture without the QImage round-trip a version's lighter-weight
+    // snapshot does not need. Empty (the default) means no thumbnail, which
+    // is never a failure - a thumbnail is presentation, never document data
+    // (see "Files, versions and the library" in CLAUDE.md), so a version
+    // with no snapshot, or one whose copy failed, still saves and still
+    // loads; it simply has nothing for versionThumbPath() to return.
+    bool saveVersion(const QString& id, const QString& name, const DocumentModel& doc,
+                     const QString& thumbSourcePath = QString());
+
+    // The PNG path for one version's thumbnail, or empty when it has none -
+    // absent from the manifest (saved before this task, or a copy that
+    // failed at save time, or a hand-edited manifest missing the key) reads
+    // exactly the same as "never had one": forward-compatible, never a
+    // refusal. Empty too for an unknown furniture or version name.
+    QString versionThumbPath(const QString& id, const QString& name) const;
 
     // Loads a version into a SCRATCH document first, exactly like
     // loadFurniture - a version that fails to decode must not disturb

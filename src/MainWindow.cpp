@@ -42,6 +42,7 @@
 #include <QAction>
 #include <QSignalBlocker>
 #include <QActionGroup>
+#include <QDir>
 #include <QFileDialog>
 #include <QFontMetrics>
 #include <QHBoxLayout>
@@ -54,6 +55,7 @@
 #include <QSplitter>
 #include <QStandardPaths>
 #include <QStatusBar>
+#include <QTemporaryFile>
 #include <QTimer>
 #include <QtGlobal>
 
@@ -2185,10 +2187,26 @@ bool MainWindow::saveVersion(const QString& name)
 {
     if (myShowingInitScreen || myFurnitureId.isEmpty()) return false;
 
+    // A version's own thumbnail, captured straight to a temp PNG via
+    // OcctViewWidget::saveSnapshot() - the path FurnitureStore::saveVersion()
+    // wants, rather than the QImage performSave() hands saveFurniture(). No
+    // render-mode guard is needed the way performSave() has one: this method
+    // can only run while canOpenSaveVersion() held, and that already refuses
+    // while render mode is on (see MainWindow.h). A failed capture leaves
+    // thumbPath empty, which saveVersion() below treats as "no thumbnail",
+    // never a refusal - a thumbnail is presentation, never document data.
+    QTemporaryFile thumbTemp(QDir::tempPath() + QStringLiteral("/furnifyme-version-thumb-XXXXXX.png"));
+    QString thumbPath;
+    if (thumbTemp.open()) {
+        thumbPath = thumbTemp.fileName();
+        thumbTemp.close();  // saveSnapshot() opens the path itself - see captureThumbnail()'s own comment
+        if (!myView->saveSnapshot(thumbPath)) thumbPath.clear();
+    }
+
     // The only refusal reachable here: a real, open furniture cannot be an
     // unknown id, so a false from the store means the name is a duplicate -
     // see FurnitureStore::saveVersion()'s own contract.
-    if (!myStore.saveVersion(myFurnitureId, name, myDocument)) {
+    if (!myStore.saveVersion(myFurnitureId, name, myDocument, thumbPath)) {
         myToasts->show(tr("Couldn't save version \"%1\" — a version by that name "
                           "already exists").arg(name),
                       Toast::Kind::Failure, false);
