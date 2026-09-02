@@ -48,7 +48,6 @@
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
 #include "PullArrow.h"
-#include "SaveVersionCard.h"
 #include "SketchController.h"
 #include "AppBar.h"
 #include "AxisGizmo.h"
@@ -14774,26 +14773,36 @@ int main(int argc, char* argv[])
         // therefore writes a real PNG to a temp path itself before handing
         // it to the store.
         {
+            // No `if (thumbSrc.isOpen())` guard around what follows - a
+            // failed open must cascade to red through the checks
+            // themselves, not skip them silently. Each downstream check
+            // below folds `thumbSaved` into its own condition, so a failed
+            // open/save reports as a chain of loud failures rather than a
+            // block that quietly never ran.
             QTemporaryFile thumbSrc(QDir::tempPath() +
                                      QStringLiteral("/gui-smoke-version-thumb-XXXXXX.png"));
-            check(thumbSrc.open(), "version-thumbnail probe: a source PNG opens for writing");
-            if (thumbSrc.isOpen()) {
-                QImage thumb(8, 8, QImage::Format_RGB32);
-                thumb.fill(Qt::darkGreen);
-                check(thumb.save(&thumbSrc, "PNG"), "version-thumbnail probe: the source PNG is written");
-                thumbSrc.close();
+            const bool thumbSrcOpened = thumbSrc.open();
+            check(thumbSrcOpened, "version-thumbnail probe: a source PNG opens for writing");
 
-                check(store.saveVersion(chairId, QStringLiteral("Thumbed"), doc, thumbSrc.fileName()),
-                      "saveVersion succeeds with a thumbnail path");
-                const QString thumbFile = store.versionThumbPath(chairId, QStringLiteral("Thumbed"));
-                check(!thumbFile.isEmpty() && QFileInfo::exists(thumbFile) &&
-                          QFileInfo(thumbFile).size() > 0,
-                      "versionThumbPath names an existing, non-empty file");
-                const QString furnitureDirPath =
-                    QFileInfo(tempDir.path() + QStringLiteral("/") + chairId).absoluteFilePath();
-                check(QFileInfo(thumbFile).absoluteFilePath().startsWith(furnitureDirPath),
-                      "...and that file lives inside the furniture's own directory");
-            }
+            QImage thumb(8, 8, QImage::Format_RGB32);
+            thumb.fill(Qt::darkGreen);
+            const bool thumbSaved = thumbSrcOpened && thumb.save(&thumbSrc, "PNG");
+            check(thumbSaved, "version-thumbnail probe: the source PNG is written");
+            thumbSrc.close();
+
+            check(thumbSaved &&
+                      store.saveVersion(chairId, QStringLiteral("Thumbed"), doc,
+                                        thumbSrc.fileName()),
+                  "saveVersion succeeds with a thumbnail path");
+            const QString thumbFile = store.versionThumbPath(chairId, QStringLiteral("Thumbed"));
+            check(thumbSaved && !thumbFile.isEmpty() && QFileInfo::exists(thumbFile) &&
+                      QFileInfo(thumbFile).size() > 0,
+                  "versionThumbPath names an existing, non-empty file");
+            const QString furnitureDirPath =
+                QFileInfo(tempDir.path() + QStringLiteral("/") + chairId).absoluteFilePath();
+            check(thumbSaved &&
+                      QFileInfo(thumbFile).absoluteFilePath().startsWith(furnitureDirPath),
+                  "...and that file lives inside the furniture's own directory");
         }
 
         check(store.saveVersion(chairId, QStringLiteral("No Thumb"), doc),
@@ -14852,24 +14861,29 @@ int main(int argc, char* argv[])
             check(thumbFile.isEmpty(), "sanity: \"No Thumb\" really has no thumbnail to begin with");
         }
         {
+            // Same cascade-not-skip restructuring as the block above.
             QTemporaryFile thumbSrc(QDir::tempPath() +
                                      QStringLiteral("/gui-smoke-version-thumb2-XXXXXX.png"));
-            check(thumbSrc.open(), "delete-thumbnail probe: a source PNG opens for writing");
-            if (thumbSrc.isOpen()) {
-                QImage thumb(8, 8, QImage::Format_RGB32);
-                thumb.fill(Qt::darkMagenta);
-                check(thumb.save(&thumbSrc, "PNG"), "delete-thumbnail probe: the source PNG is written");
-                thumbSrc.close();
-                check(store.saveVersion(chairId, QStringLiteral("Deletable"), doc, thumbSrc.fileName()),
-                      "delete-thumbnail probe: saveVersion succeeds with a thumbnail");
-                const QString thumbFile = store.versionThumbPath(chairId, QStringLiteral("Deletable"));
-                check(!thumbFile.isEmpty() && QFileInfo::exists(thumbFile),
-                      "delete-thumbnail probe: the thumbnail file exists before delete");
-                check(store.deleteVersion(chairId, QStringLiteral("Deletable")),
-                      "delete-thumbnail probe: deleteVersion succeeds");
-                check(!QFileInfo::exists(thumbFile),
-                      "...and the thumbnail PNG is gone along with the version");
-            }
+            const bool thumbSrcOpened = thumbSrc.open();
+            check(thumbSrcOpened, "delete-thumbnail probe: a source PNG opens for writing");
+
+            QImage thumb(8, 8, QImage::Format_RGB32);
+            thumb.fill(Qt::darkMagenta);
+            const bool thumbSaved = thumbSrcOpened && thumb.save(&thumbSrc, "PNG");
+            check(thumbSaved, "delete-thumbnail probe: the source PNG is written");
+            thumbSrc.close();
+
+            check(thumbSaved &&
+                      store.saveVersion(chairId, QStringLiteral("Deletable"), doc,
+                                        thumbSrc.fileName()),
+                  "delete-thumbnail probe: saveVersion succeeds with a thumbnail");
+            const QString thumbFile = store.versionThumbPath(chairId, QStringLiteral("Deletable"));
+            check(thumbSaved && !thumbFile.isEmpty() && QFileInfo::exists(thumbFile),
+                  "delete-thumbnail probe: the thumbnail file exists before delete");
+            check(thumbSaved && store.deleteVersion(chairId, QStringLiteral("Deletable")),
+                  "delete-thumbnail probe: deleteVersion succeeds");
+            check(thumbSaved && !QFileInfo::exists(thumbFile),
+                  "...and the thumbnail PNG is gone along with the version");
         }
 
         // --- refusals -----------------------------------------------------
@@ -15084,10 +15098,7 @@ int main(int argc, char* argv[])
 
         enterFreshFurniture(probe);
 
-        // --- Save version: the panel, its two keys, the duplicate refusal --
-        QAction* saveVersionAction = action(probe, QStringLiteral("Save version..."));
-        check(saveVersionAction != nullptr, "the Save version... action exists");
-
+        // --- Task 1.2: the picked mockup - large cards, a + button, hover --
         // Body A: a real 10mm cube through the real sketch/extrude gesture -
         // the same volume oracle every other probe in this file uses.
         trigger(probe, QStringLiteral("Start Sketch"));
@@ -15102,82 +15113,293 @@ int main(int argc, char* argv[])
             versionVolumeA = props.Mass();
         }
 
+        // File -> Save version... still exists as a real action - it is the
+        // menu route to VersionsPanel::beginNewVersion(), the same gesture
+        // the drawer's own + button starts (see MainWindow::onSaveVersion()).
+        // SaveVersionCard itself is retired; there is no floating card left
+        // to test independently of the drawer.
+        QAction* saveVersionAction = action(probe, QStringLiteral("Save version..."));
+        check(saveVersionAction != nullptr, "the Save version... action exists");
         check(saveVersionAction != nullptr && saveVersionAction->isEnabled(),
               "Save version... is enabled: a furniture is open, no sketch, no other "
               "application-wide key claim is live");
 
-        trigger(probe, QStringLiteral("Save version..."));
-        SaveVersionCard* saveCard = probe.findChild<SaveVersionCard*>();
-        check(saveCard != nullptr && saveCard->isVisible(),
-              "Save version... opens a panel, not a dialog");
-        check(probe.findChildren<QDialog*>().isEmpty(), "and it is genuinely not a QDialog");
-        check(saveCard != nullptr && saveCard->field() != nullptr,
-              "the panel carries its own name field");
+        // --- the drawer, its title and its + control --------------------------
+        trigger(probe, QStringLiteral("Versions"));
+        VersionsPanel* panel = probe.findChild<VersionsPanel*>();
+        check(panel != nullptr && panel->isVisible(), "View -> Versions opens the drawer");
+        check(panel != nullptr && !panel->paintedTexts().isEmpty() &&
+                  panel->paintedTexts().contains(QStringLiteral("Versions")),
+              "the panel paints its own title");
+        check(panel != nullptr && panel->rowCount() == 0, "no versions saved yet");
 
-        // Enter on an empty field refuses silently - the card stays open
-        // rather than saving something unnamed.
-        if (saveCard && saveCard->field()) {
-            QKeyEvent emptyCommit(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
-            QCoreApplication::sendEvent(saveCard->field(), &emptyCommit);
-            settle(120);
-        }
-        check(saveCard != nullptr && saveCard->isVisible(),
-              "an empty name is refused rather than saving an unnamed version");
+        QPushButton* addBtn = panel ? panel->addButton() : nullptr;
+        check(addBtn != nullptr, "the header's + control exists");
+        check(addBtn != nullptr && addBtn->isEnabled(),
+              "...and is enabled: a furniture is open, nothing else claims the keys");
+        // childAt() from the VIEWPORT, per this task's own brief - the +
+        // control is buried three widgets deep (viewport -> drawer -> header
+        // -> button), and CLAUDE.md's childAt()-vs-sendEvent law is exactly
+        // about proving a control is reachable through the REAL hit-testing
+        // chain, not merely that a pointer to it exists.
+        check(addBtn != nullptr &&
+                  probe.view()->childAt(addBtn->mapTo(probe.view(), addBtn->rect().center())) ==
+                      addBtn,
+              "...and view->childAt() at its centre finds the button itself, buried "
+              "hierarchy and all");
 
         ToastHost* toasts = probe.findChild<ToastHost*>();
 
-        if (saveCard && saveCard->field()) {
-            saveCard->field()->setText(QStringLiteral("Original"));
-            QKeyEvent commit(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
-            QCoreApplication::sendEvent(saveCard->field(), &commit);
+        // --- + creates a version and opens inline naming -----------------------
+        clickAt(addBtn, QPointF(addBtn->rect().width() / 2.0, addBtn->rect().height() / 2.0));
+        QLineEdit* pendingEdit = panel->findChild<QLineEdit*>();
+        check(pendingEdit != nullptr,
+              "+ opens InlineRename's own edit on the new card's bar");
+        check(pendingEdit != nullptr && pendingEdit->text() == QStringLiteral("Version 1"),
+              QStringLiteral("...pre-filled with a fresh default name (\"%1\")")
+                  .arg(pendingEdit ? pendingEdit->text() : QString()));
+        check(probe.furnitureStore().versions(probe.currentFurnitureId()).isEmpty(),
+              "nothing is written to FurnitureStore yet - only Enter persists");
+        check(addBtn != nullptr && !addBtn->isEnabled(),
+              "the + button disables itself while a create is already open - one "
+              "gesture at a time");
+
+        // Enter keeps the typed name.
+        if (pendingEdit) {
+            pendingEdit->setText(QStringLiteral("Original"));
+            sendKeyTo(pendingEdit, Qt::Key_Return);
             settle(150);
         }
-        check(saveCard != nullptr && !saveCard->isVisible(),
-              "a real name commits and closes the card");
+        check(panel->findChild<QLineEdit*>() == nullptr,
+              "the pending edit is gone once Enter commits");
         check(probe.furnitureStore().versions(probe.currentFurnitureId()).size() == 1,
               "one version is now saved");
+        check(panel->rowCount() == 1 && panel->rowNameAt(0) == QStringLiteral("Original"),
+              "and the drawer shows exactly one row, named by what was typed");
         check(toasts != nullptr &&
                   toasts->currentText() == QStringLiteral("Version \"Original\" saved"),
               QStringLiteral("the Note toast names the version (\"%1\")")
                   .arg(toasts ? toasts->currentText() : QString()));
         check(toasts != nullptr && toasts->toast() != nullptr && !toasts->toast()->hasUndo(),
               "and offers no Undo - a version is file data, not a document edit");
+        check(addBtn != nullptr && addBtn->isEnabled(),
+              "the + button re-enables itself once the gesture ends");
 
-        // Duplicate name: a Failure toast naming the clash, card stays open.
-        trigger(probe, QStringLiteral("Save version..."));
-        saveCard = probe.findChild<SaveVersionCard*>();
-        if (saveCard && saveCard->field()) {
-            saveCard->field()->setText(QStringLiteral("Original"));
-            QKeyEvent commit(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
-            QCoreApplication::sendEvent(saveCard->field(), &commit);
+        // --- Escape leaves the version COUNT unchanged - genuinely nothing --
+        // was ever written, not "written then deleted": see
+        // VersionsPanel::discardPendingCreate()'s own comment.
+        clickAt(addBtn, QPointF(addBtn->rect().width() / 2.0, addBtn->rect().height() / 2.0));
+        pendingEdit = panel->findChild<QLineEdit*>();
+        check(pendingEdit != nullptr, "+ opens a second pending card");
+        if (pendingEdit) {
+            pendingEdit->setText(QStringLiteral("Should not exist"));
+            sendKeyTo(pendingEdit, Qt::Key_Escape);
             settle(150);
         }
-        check(saveCard != nullptr && saveCard->isVisible(),
-              "a duplicate name refuses - the card stays open so the user can retype");
+        check(panel->findChild<QLineEdit*>() == nullptr,
+              "Escape tears the pending card down");
+        check(probe.furnitureStore().versions(probe.currentFurnitureId()).size() == 1,
+              "...and the version COUNT is unchanged - Escape genuinely wrote nothing");
+        check(panel->rowCount() == 1, "still exactly one real row");
+
+        // --- an empty commit cascades to the same discard, through --------
+        // InlineRename's own "empty commit is refused" rule: doCommit()
+        // never calls this panel's commit callback for empty text, but it
+        // still tears its OWN edit down - and this panel's destroyed()
+        // handler (armed in beginNewVersion()) is what turns "the edit is
+        // gone with no commit" into "discard the whole pending card", since
+        // there is no old card here to fall back to the way a body's rename
+        // falls back to its old name.
+        clickAt(addBtn, QPointF(addBtn->rect().width() / 2.0, addBtn->rect().height() / 2.0));
+        pendingEdit = panel->findChild<QLineEdit*>();
+        check(pendingEdit != nullptr, "+ opens a third pending card");
+        if (pendingEdit) {
+            pendingEdit->setText(QString());
+            sendKeyTo(pendingEdit, Qt::Key_Return);
+            settle(150);
+        }
+        check(panel->findChild<QLineEdit*>() == nullptr,
+              "an empty commit also tears the pending card down");
+        check(probe.furnitureStore().versions(probe.currentFurnitureId()).size() == 1,
+              "...with the version count still unchanged");
+
+        // --- a duplicate name refuses; the card stays up so the user can ---
+        // retype (the exact behaviour SaveVersionCard used to offer on this
+        // same refusal).
+        clickAt(addBtn, QPointF(addBtn->rect().width() / 2.0, addBtn->rect().height() / 2.0));
+        pendingEdit = panel->findChild<QLineEdit*>();
+        check(pendingEdit != nullptr, "+ opens a fourth pending card");
+        if (pendingEdit) {
+            pendingEdit->setText(QStringLiteral("Original"));
+            sendKeyTo(pendingEdit, Qt::Key_Return);
+            settle(150);
+        }
+        check(panel->findChild<QLineEdit*>() != nullptr,
+              "a duplicate name refuses - the pending card stays up so the user can "
+              "retype, rather than the gesture being lost outright");
+        check(probe.furnitureStore().versions(probe.currentFurnitureId()).size() == 1,
+              "...and nothing new was written");
         check(toasts != nullptr && toasts->currentText().contains(QStringLiteral("already exists")),
               QStringLiteral("the Failure toast names the clash (\"%1\")")
                   .arg(toasts ? toasts->currentText() : QString()));
-        if (saveCard && saveCard->field()) {
-            QKeyEvent esc(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
-            QCoreApplication::sendEvent(saveCard->field(), &esc);
-            settle(120);
+        pendingEdit = panel->findChild<QLineEdit*>();
+        if (pendingEdit) {
+            sendKeyTo(pendingEdit, Qt::Key_Escape);
+            settle(150);
         }
-        check(saveCard != nullptr && !saveCard->isVisible(), "Escape cancels the retry");
+        check(panel->findChild<QLineEdit*>() == nullptr, "Escape cancels the retry");
+        check(panel->rowCount() == 1, "the drawer still shows exactly the one real row");
 
-        // --- the drawer ------------------------------------------------------
-        trigger(probe, QStringLiteral("Versions"));
-        VersionsPanel* panel = probe.findChild<VersionsPanel*>();
-        check(panel != nullptr && panel->isVisible(), "View -> Versions opens the drawer");
-        check(panel != nullptr && panel->rowCount() == 1, "one row for the one saved version");
-        check(panel != nullptr && panel->rowNameAt(0) == QStringLiteral("Original"),
-              "named by the version itself");
-        if (panel) {
-            QPushButton* compareBtn = panel->compareButtonAt(0);
-            check(compareBtn != nullptr &&
-                      panel->childAt(compareBtn->mapTo(panel, compareBtn->rect().center())) ==
-                          compareBtn,
-                  "childAt() at Compare's centre finds the button itself - not buried");
+        // --- hover reveals the three actions; at rest they are hidden -------
+        // A real Enter/Leave delivered the way Qt's own hit-testing would,
+        // not a flag flipped by hand - ToolChip's own hover probe's shape
+        // (see the "normal vs hovered" check earlier in this file), aimed at
+        // the row CARD rather than a leaf control, since that is what
+        // VersionsPanel::eventFilter() actually watches.
+        QWidget* card0 = panel->cardAt(0);
+        check(card0 != nullptr, "the one real row has its own card widget");
+        QPushButton* compareBtn = panel->compareButtonAt(0);
+        QPushButton* restoreBtn = panel->restoreButtonAt(0);
+        QPushButton* deleteBtnRow0 = panel->deleteButtonAt(0);
+        check(compareBtn != nullptr && restoreBtn != nullptr && deleteBtnRow0 != nullptr,
+              "the row carries all three action buttons");
+        check(compareBtn && restoreBtn && deleteBtnRow0 && !compareBtn->isVisible() &&
+                  !restoreBtn->isVisible() && !deleteBtnRow0->isVisible(),
+              "at rest, all three are hidden");
+        if (card0) {
+            const QPointF centre(card0->width() / 2.0, card0->height() / 2.0);
+            QEnterEvent enter(centre, centre, card0->mapToGlobal(centre.toPoint()));
+            QCoreApplication::sendEvent(card0, &enter);
+            settle(60);
         }
+        check(compareBtn && restoreBtn && deleteBtnRow0 && compareBtn->isVisible() &&
+                  restoreBtn->isVisible() && deleteBtnRow0->isVisible(),
+              "hovering the card reveals all three");
+        check(compareBtn != nullptr &&
+                  panel->childAt(compareBtn->mapTo(panel, compareBtn->rect().center())) ==
+                      compareBtn,
+                  "childAt() at Compare's centre finds the button itself - not buried");
+        check(restoreBtn != nullptr &&
+                  panel->childAt(restoreBtn->mapTo(panel, restoreBtn->rect().center())) ==
+                      restoreBtn,
+                  "...and the same is true of Restore");
+        check(deleteBtnRow0 != nullptr &&
+                  panel->childAt(deleteBtnRow0->mapTo(panel, deleteBtnRow0->rect().center())) ==
+                      deleteBtnRow0,
+                  "...and of Delete");
+        if (card0) {
+            QEvent leave(QEvent::Leave);
+            QCoreApplication::sendEvent(card0, &leave);
+            settle(60);
+        }
+        check(compareBtn && restoreBtn && deleteBtnRow0 && !compareBtn->isVisible() &&
+                  !restoreBtn->isVisible() && !deleteBtnRow0->isVisible(),
+              "leaving the card hides all three again");
+
+        // --- each row paints its thumbnail when one exists and a ------------
+        // placeholder otherwise - measured pixels from a REAL render, not an
+        // accessor's say-so. "Original" was saved through
+        // MainWindow::saveVersion(), which always captures a live snapshot
+        // first, so it has a real thumbnail; a version saved straight
+        // through FurnitureStore (bypassing MainWindow, Task 1.1's own test
+        // shape) has none, which is exactly the placeholder case this needs.
+        check(probe.furnitureStore().saveVersion(probe.currentFurnitureId(),
+                                                 QStringLiteral("No Thumb"), probe.document()),
+              "a version saved with no thumbnail path exists for the placeholder half "
+              "of this check");
+        panel->refresh();   // bypassed MainWindow::saveVersion(), so no appStateChanged fired
+        int noThumbIndex = -1, originalIndex = -1;
+        for (int i = 0; i < panel->rowCount(); ++i) {
+            if (panel->rowNameAt(i) == QStringLiteral("No Thumb")) noThumbIndex = i;
+            if (panel->rowNameAt(i) == QStringLiteral("Original")) originalIndex = i;
+        }
+        check(noThumbIndex >= 0 && originalIndex >= 0,
+              "both rows - one with a thumbnail, one genuinely without - are listed");
+
+        auto sampleThumbnail = [](VersionsPanel* p, int index) -> QVector<QColor> {
+            QVector<QColor> samples;
+            QWidget* c = p->cardAt(index);
+            const QRect r = p->thumbnailRectAt(index);
+            if (!c || r.isEmpty()) return samples;
+            const QImage img = renderExact(c);
+            const int y = r.center().y();
+            for (int i = 1; i <= 5; ++i) {
+                const int x = r.left() + (r.width() * i) / 6;
+                if (img.rect().contains(x, y)) samples << img.pixelColor(x, y);
+            }
+            return samples;
+        };
+        const QVector<QColor> noThumbSamples = sampleThumbnail(panel, noThumbIndex);
+        const QVector<QColor> originalSamples = sampleThumbnail(panel, originalIndex);
+        check(noThumbSamples.size() == 5 && originalSamples.size() == 5,
+              "both thumbnail rects sampled a real, non-empty region - not vacuous");
+
+        bool noThumbUniform = true;
+        for (const QColor& c : noThumbSamples) {
+            if (colorDistance(c, noThumbSamples.first()) > 6.0) noThumbUniform = false;
+        }
+        bool originalVaries = false;
+        for (const QColor& c : originalSamples) {
+            if (colorDistance(c, originalSamples.first()) > 6.0) originalVaries = true;
+        }
+        check(noThumbUniform,
+              "the placeholder card paints a FLAT block - every sampled pixel matches");
+        check(!noThumbSamples.isEmpty() &&
+                  colorDistance(noThumbSamples.first(), Theme::panel()) < 12.0,
+              "...and that flat block reads as the panel() token, not an arbitrary "
+              "colour - it is the card's own paintSurface() ground showing through a "
+              "transparent label, not a second thing painted on top");
+        check(originalVaries,
+              "the real thumbnail is a genuine image - its sampled pixels are NOT "
+              "all the same colour");
+
+        // --- the panel and a row card both go through the SAME paintSurface -
+        // family every other floating card does - opaque right out to the
+        // edge (no translucent pixels over the GL surface) and a border()
+        // edge reading closer to itself than the panel() interior does.
+        checkFamilySurface(panel, QPoint(0, panel->height() / 2),
+                           panel->rect().adjusted(6, 6, -6, -6), Theme::border(),
+                           QStringLiteral("VersionsPanel (the drawer)"));
+        if (QWidget* c = panel->cardAt(originalIndex)) {
+            checkFamilySurface(c, QPoint(0, c->height() / 2), c->rect().adjusted(4, 4, -4, -4),
+                               Theme::border(), QStringLiteral("VersionsPanel row card"));
+        }
+
+        // --- every visible widget in the drawer uses the four-size type -----
+        // scale - the shared `window`'s own sweep (elsewhere in this file)
+        // never opens Versions, so it can never reach this panel; this is
+        // its own local proof, the same reasoning the probe's own toast
+        // sweep further down already applies to vocabulary.
+        {
+            QSet<double> scale;
+            for (const QFont& f : {Theme::titleFont(), Theme::bodyFont(), Theme::labelFont(),
+                                   Theme::badgeFont()})
+                scale.insert(f.pointSizeF());
+            QStringList offenders;
+            for (QWidget* w : panel->findChildren<QWidget*>()) {
+                if (!w->isVisible()) continue;
+                if (!scale.contains(w->font().pointSizeF()))
+                    offenders << (w->metaObject()->className() +
+                                  QStringLiteral(" @ %1").arg(w->font().pointSizeF()));
+            }
+            check(offenders.isEmpty(),
+                  QStringLiteral("every visible widget in the versions drawer uses the "
+                                 "type scale (%1)")
+                      .arg(offenders.isEmpty() ? QStringLiteral("all do")
+                                               : offenders.join(QStringLiteral(", "))));
+        }
+
+        // "No Thumb" was only ever needed for the placeholder-vs-thumbnail
+        // pixel check above - removed here so every count below can keep
+        // reasoning about "Original" as the one and only saved version,
+        // exactly as the rest of this block already does.
+        check(probe.furnitureStore().deleteVersion(probe.currentFurnitureId(),
+                                                    QStringLiteral("No Thumb")),
+              "the placeholder-only probe version is cleaned up");
+        panel->refresh();
+        check(probe.furnitureStore().versions(probe.currentFurnitureId()).size() == 1 &&
+                  panel->rowCount() == 1,
+              "back down to the one real version this block's later counts assume");
 
         // --- Compare: the splitter, a real viewer-only second view -----------
         check(probe.centralWidget() == probe.view(),
@@ -15278,37 +15500,36 @@ int main(int argc, char* argv[])
                                           : QStringLiteral("the compare view")));
         }
 
-        // --- fix round 1, Important 1: measure the badge, the drawer and --
-        // the save card together, not just built. Every other floating card
-        // in this app is proven against a real composited capture
-        // (checkNoBlackLine()); the compare badge was the one new family
-        // member this task never actually measured - it only asserted
-        // childAt() reachability, which says nothing about a fractional
-        // display scale leaving an unpainted device row along its edge, the
-        // exact defect class CLAUDE.md records this family paying for twice
-        // already. All three floating cards this task added or reuses are
-        // on screen at once here: the versions drawer (opened earlier and
-        // still up), the compare badge (compare is still open), and
-        // Save version...'s own card, opened for exactly this capture.
+        // --- fix round 1, Important 1 (carried forward): measure the badge, --
+        // the drawer and a pending create card together, not just built.
+        // Every other floating card in this app is proven against a real
+        // composited capture (checkNoBlackLine()); the compare badge was the
+        // one new family member that task never actually measured - it only
+        // asserted childAt() reachability, which says nothing about a
+        // fractional display scale leaving an unpainted device row along its
+        // edge, the exact defect class CLAUDE.md records this family paying
+        // for twice already. All three are on screen at once here: the
+        // versions drawer (opened earlier and still up), the compare badge
+        // (compare is still open), and a fresh pending create card, opened
+        // for exactly this capture.
         check(probe.findChild<VersionsPanel*>() != nullptr &&
                   probe.findChild<VersionsPanel*>()->isVisible(),
               "the versions drawer is still up for the combined capture");
         trigger(probe, QStringLiteral("Save version..."));
-        SaveVersionCard* captureCard = probe.findChild<SaveVersionCard*>();
-        check(captureCard != nullptr && captureCard->isVisible(),
-              "the save-version card is up too - all three families on screen at once");
+        QLineEdit* captureEdit = panel->findChild<QLineEdit*>();
+        check(captureEdit != nullptr,
+              "File -> Save version... reaches the same pending-create gesture the + "
+              "button does - all three families on screen at once");
         settle(200);
         const QImage familyShot = printWindowCapture(
             &probe, snapDir + QStringLiteral("/badge-drawer-card.png"));
-        checkNoBlackLine(familyShot, QStringLiteral("badge + versions drawer + save card"));
-        if (captureCard) {
-            QKeyEvent esc(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
-            QCoreApplication::sendEvent(captureCard->field(), &esc);
+        checkNoBlackLine(familyShot, QStringLiteral("badge + versions drawer + pending card"));
+        if (captureEdit) {
+            sendKeyTo(captureEdit, Qt::Key_Escape);
             settle(120);
         }
-        check((captureCard = probe.findChild<SaveVersionCard*>()) == nullptr ||
-                  !captureCard->isVisible(),
-              "and the capture card closes cleanly afterward, leaving compare and the "
+        check(panel->findChild<QLineEdit*>() == nullptr,
+              "and the pending card closes cleanly afterward, leaving compare and the "
               "drawer exactly as they were");
 
         // --- closing compare leaves the live viewport intact -------------------
@@ -15456,14 +15677,24 @@ int main(int argc, char* argv[])
         check(probe.isCompareOpen(), "...and is open");
         check(probe.restoreVersion(QStringLiteral("Original")), "restoring again");
         check(!probe.isCompareOpen(), "...closed the compare pane first, as documented");
+        // closeCompare() reparents myView back to being the plain central
+        // widget - a Qt operation that can leave layout/focus bookkeeping
+        // queued for the NEXT event-loop turn rather than resolved
+        // synchronously. Flushed here, before opening the create gesture
+        // below: InlineRename's edit commits on ANY focus-out (by design -
+        // see its own header comment, "a user who clicks away gets the same
+        // result as pressing Enter"), so a stray queued focus event
+        // reaching the fresh edit mid-test would silently commit its
+        // untouched DEFAULT name instead of what this test is about to
+        // type.
+        settle(150);
 
         // --- Delete: two clicks, final, no Undo ---------------------------------
         trigger(probe, QStringLiteral("Save version..."));
-        saveCard = probe.findChild<SaveVersionCard*>();
-        if (saveCard && saveCard->field()) {
-            saveCard->field()->setText(QStringLiteral("ToDelete"));
-            QKeyEvent commit(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
-            QCoreApplication::sendEvent(saveCard->field(), &commit);
+        QLineEdit* toDeleteEdit = panel->findChild<QLineEdit*>();
+        if (toDeleteEdit) {
+            toDeleteEdit->setText(QStringLiteral("ToDelete"));
+            sendKeyTo(toDeleteEdit, Qt::Key_Return);
             settle(150);
         }
         check(probe.furnitureStore().versions(probe.currentFurnitureId()).size() == 2,
@@ -15472,13 +15703,29 @@ int main(int argc, char* argv[])
         panel = probe.findChild<VersionsPanel*>();
         check(panel != nullptr && panel->rowCount() == 2, "two rows now");
         int deleteIndex = -1;
-        for (int i = 0; panel && i < panel->rowCount(); ++i)
+        QStringList diagRowNames;
+        for (int i = 0; panel && i < panel->rowCount(); ++i) {
+            diagRowNames << panel->rowNameAt(i);
             if (panel->rowNameAt(i) == QStringLiteral("ToDelete")) deleteIndex = i;
-        check(deleteIndex >= 0, "the row for the new version exists");
+        }
+        check(deleteIndex >= 0,
+              QStringLiteral("the row for the new version exists (rows: %1)")
+                  .arg(diagRowNames.join(QStringLiteral(", "))));
 
+        // Its actions are hidden at rest, same as every other row - hover
+        // the card before clicking Delete, the real gesture a user would
+        // make rather than clicking through a hidden control.
+        QWidget* deleteCard = (panel && deleteIndex >= 0) ? panel->cardAt(deleteIndex) : nullptr;
+        if (deleteCard) {
+            const QPointF centre(deleteCard->width() / 2.0, deleteCard->height() / 2.0);
+            QEnterEvent enter(centre, centre, deleteCard->mapToGlobal(centre.toPoint()));
+            QCoreApplication::sendEvent(deleteCard, &enter);
+            settle(60);
+        }
         QPushButton* deleteBtn =
             (panel && deleteIndex >= 0) ? panel->deleteButtonAt(deleteIndex) : nullptr;
-        check(deleteBtn != nullptr, "its Delete button exists");
+        check(deleteBtn != nullptr && deleteBtn->isVisible(),
+              "its Delete button exists and is visible once hovered");
         if (deleteBtn) clickAt(deleteBtn, QPointF(deleteBtn->rect().width() / 2.0,
                                                   deleteBtn->rect().height() / 2.0));
         check(probe.furnitureStore().versions(probe.currentFurnitureId()).size() == 2,
@@ -15556,11 +15803,10 @@ int main(int argc, char* argv[])
         // trips it every time.
         const QString bannedName = QStringLiteral("Fuse Edition");
         trigger(probe, QStringLiteral("Save version..."));
-        saveCard = probe.findChild<SaveVersionCard*>();
-        if (saveCard && saveCard->field()) {
-            saveCard->field()->setText(bannedName);
-            QKeyEvent commit(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
-            QCoreApplication::sendEvent(saveCard->field(), &commit);
+        QLineEdit* bannedEdit = panel->findChild<QLineEdit*>();
+        if (bannedEdit) {
+            bannedEdit->setText(bannedName);
+            sendKeyTo(bannedEdit, Qt::Key_Return);
             settle(150);
         }
         panel = probe.findChild<VersionsPanel*>();
@@ -16399,7 +16645,11 @@ int main(int argc, char* argv[])
             check(!probe.symmetryEnabled(), "...and symmetry really did turn off");
         }
 
-        // --- fix round 1, Important 2: Save version... and its card ---------
+        // --- fix round 1, Important 2 (carried forward): Save version... ----
+        // and the pending create it opens - SaveVersionCard itself is
+        // retired (Task 1.2), but the auto-cancel it used to demonstrate is
+        // now VersionsPanel::refresh()'s own job, on the exact same
+        // predicate.
         {
             QAction* saveVersionAction = action(probe, QStringLiteral("Save version..."));
             check(saveVersionAction != nullptr, "there is a Save version action");
@@ -16409,21 +16659,34 @@ int main(int argc, char* argv[])
                   "this scenario");
 
             trigger(probe, QStringLiteral("Save version..."));
-            SaveVersionCard* saveCard = probe.findChild<SaveVersionCard*>();
-            check(saveCard != nullptr && saveCard->isVisible(),
-                  "the card opens outside render mode");
-            if (saveCard && saveCard->field())
-                saveCard->field()->setText(QStringLiteral("Render probe"));
+            VersionsPanel* renderProbePanel = probe.findChild<VersionsPanel*>();
+            check(renderProbePanel != nullptr && renderProbePanel->isVisible(),
+                  "Save version... opens the drawer outside render mode");
+            QLineEdit* renderProbeEdit =
+                renderProbePanel ? renderProbePanel->findChild<QLineEdit*>() : nullptr;
+            check(renderProbeEdit != nullptr, "...and a pending create card is open on it");
+            if (renderProbeEdit) renderProbeEdit->setText(QStringLiteral("Render probe"));
 
             renderAction->trigger();
             settle(200);
             check(renderAction->isChecked() && rview->renderModeActive(),
-                  "render mode engages with the card still open");
-            check(saveCard == nullptr || !saveCard->isVisible(),
-                  "and the OPEN card cancels itself - the same auto-cancel "
+                  "render mode engages with the pending card still open");
+            check(!probe.canOpenSaveVersion(), "canOpenSaveVersion() really is false now");
+            // HIDDEN, not necessarily gone - VersionsPanel::teardownPendingCard()'s
+            // own comment: hide() is synchronous and is the property this
+            // (or any caller) can actually observe, but the object's real
+            // destruction rides on a QEvent::DeferredDelete that CAN sit
+            // undelivered through many settle()s when it was posted from
+            // inside a nested event-loop level (setRenderMode()'s own tier
+            // probe, in particular) - asserting non-existence here would be
+            // pinning an implementation timing detail, not the behaviour
+            // that actually matters. `renderProbeEdit` stays a perfectly
+            // valid, non-dangling pointer either way - only its visibility
+            // changes.
+            check(renderProbeEdit != nullptr && !renderProbeEdit->isVisible(),
+                  "and the OPEN pending card cancels itself - the same auto-cancel "
                   "canOpenSaveVersion() already drives for the other three "
-                  "application-wide key claims, now also true while render "
-                  "mode is on");
+                  "application-wide key claims, now also true while render mode is on");
             check(saveVersionAction != nullptr && !saveVersionAction->isEnabled(),
                   "Save version is disabled while render mode is on");
             check(saveVersionAction != nullptr &&

@@ -130,7 +130,6 @@ if(FURNIFYME_BUILD_APP)
       src/ui/InlineRename.cpp
       src/ui/InitScreen.cpp
       src/ui/VersionsPanel.cpp
-      src/ui/SaveVersionCard.cpp
       src/FurnitureStore.cpp
     )
     target_include_directories(furnify_app PUBLIC src/ui)

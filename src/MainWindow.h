@@ -25,7 +25,6 @@ class PullArrow;
 class QAction;
 class QMenuBar;
 class QSplitter;
-class SaveVersionCard;
 class ToastHost;
 class ToolCluster;
 class VersionsPanel;
@@ -363,13 +362,16 @@ public:
 
     // --- versions and the side-by-side compare (Milestone 3) ---------------
     //
-    // File -> Save version... 's commit path - the one place saveVersion()
-    // reaches the store: a duplicate name is FurnitureStore::saveVersion()'s
-    // one real refusal here (an unknown furniture id cannot happen - this
-    // guards on a real, open one first), reported with a Failure toast
-    // naming the clash; SaveVersionCard stays open on that refusal so the
-    // user can retype. Versions are file data, not document state - no
-    // checkpoint, no Undo on the Note toast that reports success.
+    // The commit path both VersionsPanel's + button and File -> Save
+    // version... reach through (see VersionsPanel::beginNewVersion() /
+    // MainWindow::onSaveVersion()) - the one place this window reaches the
+    // store to persist a version. A duplicate name is
+    // FurnitureStore::saveVersion()'s one real refusal here (an unknown
+    // furniture id cannot happen - this guards on a real, open one first),
+    // reported with a Failure toast naming the clash; VersionsPanel's own
+    // pending card stays open on that refusal so the user can retype.
+    // Versions are file data, not document state - no checkpoint, no Undo
+    // on the Note toast that reports success.
     bool saveVersion(const QString& name);
 
     // VersionsPanel's Restore button. Closes any open compare FIRST (a
@@ -407,13 +409,18 @@ public:
     OcctViewWidget* compareView() const { return myCompareView; }
     QString compareVersionName() const { return myCompareVersionName; }
 
-    // THE predicate behind File -> Save version...: a furniture is open, no
-    // sketch is in progress, and none of the three OTHER application-wide
-    // Enter/Escape claims is live (ExtrudePreview, the pull arrow, the bevel
-    // arrow) - see SaveVersionCard.h for why that is what makes the four
-    // claims mutually exclusive by construction. updateActions() gates the
-    // action on this and nothing else; SaveVersionCard reads it a second
-    // time on appStateChanged, to close itself if it goes false while open.
+    // THE predicate behind both File -> Save version... and VersionsPanel's
+    // + button: a furniture is open, no sketch is in progress, render mode
+    // is off, and none of the three application-wide Enter/Escape claims is
+    // live (ExtrudePreview, the pull arrow, the bevel arrow). Milestone 4
+    // retired SaveVersionCard - the fourth application-wide claim this
+    // predicate used to keep disjoint from - so the "mutually exclusive
+    // claims" reasoning is now about those three alone; kept as its own
+    // named predicate rather than folded away because updateActions() still
+    // gates the action on it, and VersionsPanel still reads it a second
+    // time on appStateChanged, to cancel a pending create if it goes false
+    // while one is open (VersionsPanel::refresh()'s own auto-cancel, the
+    // same reasoning SaveVersionCard::onAppStateChanged() used to apply).
     bool canOpenSaveVersion() const;
 
     // Fixed copy the compare badge paints, exposed statically - like
@@ -531,10 +538,12 @@ private slots:
     // OcctViewWidget::endGizmoDrag), so there is nothing to undo here either.
     void onGizmoReleased(int solidId, const gp_Trsf& delta);
 
-    // File -> Save version...: opens SaveVersionCard. Split from the panel
-    // itself on the same terms onExtrude()/ExtrudePreview are - the action's
-    // enabled state is canOpenSaveVersion(), and this is only ever reachable
-    // once that already holds.
+    // File -> Save version...: starts VersionsPanel's own create-a-version
+    // gesture (VersionsPanel::beginNewVersion()), opening the drawer first
+    // if it is not already showing. Split from the panel itself on the same
+    // terms onExtrude()/ExtrudePreview are - the action's enabled state is
+    // canOpenSaveVersion(), and this is only ever reachable once that
+    // already holds.
     void onSaveVersion();
 
 private:
@@ -911,7 +920,6 @@ private:
     QAction* myVersionsPanelAction = nullptr;   // View -> Versions - the drawer's law
     QAction* mySaveVersionAction = nullptr;     // File -> Save version...
     VersionsPanel* myVersionsPanel = nullptr;
-    SaveVersionCard* mySaveVersionCard = nullptr;
 
     // Non-null only while compare is open. mySplitter owns myView and
     // myCompareView as its two panes for that interval; myView is

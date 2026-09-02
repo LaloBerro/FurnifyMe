@@ -14,7 +14,6 @@
 #include "InitScreen.h"
 #include "ItemsPanel.h"
 #include "PullArrow.h"
-#include "SaveVersionCard.h"
 #include "ShortcutSheet.h"
 #include "Theme.h"
 #include "Toast.h"
@@ -1292,14 +1291,6 @@ void MainWindow::buildOverlay()
     // appStateChanged. Nothing here shows or hides it.
     myBevelArrow = new BevelArrow(this, myView);
 
-    // File -> Save version...'s panel - ExtrudePreview's exact key-claim
-    // contract, on the same terms as the three gizmos above: it parents
-    // itself to the viewport and positions itself (top-centre, the same
-    // spot ExtrudePreview stands - the two predicates are disjoint by
-    // construction, so they can never collide), so it needs no overlay
-    // anchor either.
-    mySaveVersionCard = new SaveVersionCard(this, myView);
-
     // The live view's half of the compare camera sync - see syncCamera()'s
     // declaration. A no-op for as long as myCompareView is null, which is
     // most of this window's life; wired once, here, rather than re-wired
@@ -1345,7 +1336,6 @@ void MainWindow::buildOverlay()
     connect(myOverlay, &ViewportOverlay::laidOut, myExtrudePreview, &ExtrudePreview::replace);
     connect(myOverlay, &ViewportOverlay::laidOut, myPullArrow, &PullArrow::replace);
     connect(myOverlay, &ViewportOverlay::laidOut, myBevelArrow, &BevelArrow::replace);
-    connect(myOverlay, &ViewportOverlay::laidOut, mySaveVersionCard, &SaveVersionCard::replace);
 }
 
 void MainWindow::updateActions()
@@ -2149,30 +2139,25 @@ void MainWindow::setRenderModeEnabled(bool on)
 bool MainWindow::canOpenSaveVersion() const
 {
     // Every OTHER application-wide Enter/Escape claim this app can have
-    // live at once, named explicitly rather than folded into one flag -
-    // see the declaration for why this is what keeps the four claims
-    // mutually exclusive by construction. canTransformSelectedBody()
-    // deliberately does NOT appear here (fix round 1, Important 2): the
-    // transform gizmo holds no application-wide key claim of its own - it is
-    // a direct 3D drag with no text field and no Enter/Escape filter, unlike
-    // the other three - so excluding it bought no disjointness, only a false
-    // conflict. With it included, clicking a body while this card was open
-    // (an ordinary Shift-click, or even a stray click meant for something
-    // else entirely) flipped this predicate false, appStateChanged() fired,
-    // and SaveVersionCard::onAppStateChanged() cancelled the card - silently
-    // discarding whatever name the user had already typed. A single body
-    // selected raises the gizmo but claims no keys, so the card and the
-    // gizmo can coexist on screen with no ambiguity about which one Enter or
-    // Escape belongs to.
+    // live at once, named explicitly rather than folded into one flag.
+    // canTransformSelectedBody() deliberately does NOT appear here (fix
+    // round 1, Important 2, from back when SaveVersionCard still existed):
+    // the transform gizmo holds no application-wide key claim of its own -
+    // it is a direct 3D drag with no text field and no Enter/Escape filter,
+    // unlike the other three - so excluding it bought no disjointness, only
+    // a false conflict. A single body selected raises the gizmo but claims
+    // no keys, so a pending version-create card and the gizmo can coexist
+    // on screen with no ambiguity about which one Enter or Escape belongs
+    // to.
     //
-    // "!myRenderModeOn" is the fifth term (fix round 1, Important 2): render
-    // mode is not one of the three OTHER application-wide key claims named
-    // above, but the SAME mechanism that closes this card on one of those -
-    // SaveVersionCard::onAppStateChanged() cancels whenever this predicate
-    // goes false while the card is open - is exactly what a live studio shot
-    // needs too. Folded in here rather than added as a second check inside
-    // the card itself, so updateActions()'s own
-    // mySaveVersionAction->setEnabled(canOpenSaveVersion()) and the card's
+    // "!myRenderModeOn": render mode is not one of the three OTHER
+    // application-wide key claims named above, but the SAME mechanism that
+    // cancels a pending create on one of those - VersionsPanel::refresh()'s
+    // own auto-cancel, mirroring what SaveVersionCard::onAppStateChanged()
+    // used to do before Milestone 4 retired that card - is exactly what a
+    // live studio shot needs too. Folded in here rather than added as a
+    // second check inside the panel itself, so updateActions()'s own
+    // mySaveVersionAction->setEnabled(canOpenSaveVersion()) and the panel's
     // auto-cancel read the SAME one answer instead of two that could drift.
     return !myShowingInitScreen && !myRenderModeOn && !mySketching && !hasPendingFace() &&
            !canPullSelectedFace() && !canBevelSelectedEdge();
@@ -2180,7 +2165,14 @@ bool MainWindow::canOpenSaveVersion() const
 
 void MainWindow::onSaveVersion()
 {
-    if (mySaveVersionCard) mySaveVersionCard->begin();
+    // File -> Save version... is the menu route to the SAME gesture the
+    // versions drawer's own + button starts (VersionsPanel::beginNewVersion())
+    // - one implementation, two entry points. Opening the drawer first (if
+    // it is not already showing) is what makes triggering this from the
+    // menu behave the same as clicking the button: the pending card has
+    // somewhere visible to appear.
+    if (myVersionsPanelAction) myVersionsPanelAction->setChecked(true);
+    if (myVersionsPanel) myVersionsPanel->beginNewVersion();
 }
 
 bool MainWindow::saveVersion(const QString& name)

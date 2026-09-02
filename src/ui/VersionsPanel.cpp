@@ -1,35 +1,90 @@
 #include "VersionsPanel.h"
 
 #include "FurnitureStore.h"
+#include "InlineRename.h"
 #include "MainWindow.h"
 #include "OcctViewWidget.h"
 #include "Theme.h"
 
-#include <QDateTime>
+#include <QEvent>
+#include <QFileInfo>
 #include <QFontMetrics>
 #include <QHBoxLayout>
+#include <QKeyEvent>
 #include <QLabel>
+#include <QLineEdit>
 #include <QLocale>
 #include <QPainter>
+#include <QPixmap>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QTimer>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <cmath>
+#include <memory>
 
 namespace {
 // Card width AT THE SHIPPED TYPE SCALE - ItemsPanel::cardWidth()'s own
 // reasoning applies here unchanged: fixed rather than min/preferred, so a
 // long version name cannot walk the drawer's width around under the user,
 // and grown only by what a larger base size actually costs, measured
-// against specimen text rather than live content.
+// against specimen text rather than live content. The name and the meta
+// line are STACKED now, not side by side, so the measurement is the wider
+// of the two specimens rather than their sum.
 constexpr int kBaseWidth = 240;
-QString nameSpecimen() { return QStringLiteral("A version name"); }
-QString dateSpecimen() { return QStringLiteral("Jan 1, 2026"); }
+QString nameSpecimen() { return QStringLiteral("A version name that runs a little long"); }
+QString dateSpecimen() { return QStringLiteral("Jan 1, 2026, 12:00 PM"); }
 constexpr int kRadius = 10;
+constexpr int kCardRadius = 8;
 constexpr int kPad = 12;
-constexpr int kMinHeight = 120;
+constexpr int kMinHeight = 160;
 constexpr int kButtonHeight = 22;
+// 16:10-ish, per the picked mockup.
+constexpr double kThumbAspect = 10.0 / 16.0;
+
+// One version's own card - the thumbnail-plus-bar shape both a real,
+// already-saved row and the in-progress "create" gesture share. A plain
+// QWidget cannot paint its own rounded card background (see
+// InitScreen.cpp's InitCardWidget for the exact same reasoning), so this
+// is the one place that does: Theme::paintSurface() with `ground` =
+// Theme::panel(), the colour actually sitting behind it (this widget is a
+// child of VersionsPanel, not of the viewport - see paintSurface()'s own
+// comment on why the ground parameter exists at all).
+class VersionCardWidget : public QWidget {
+public:
+    explicit VersionCardWidget(QWidget* parent) : QWidget(parent)
+    {
+        setAttribute(Qt::WA_NoSystemBackground);
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        Theme::paintSurface(painter, rect(), kCardRadius, Theme::panel());
+    }
+};
+
+QString buttonCss()
+{
+    // "small bordered buttons" - the picked mockup's own words for
+    // Compare/Restore/Delete, unlike the borderless chip style the rest of
+    // this app's small buttons wear. A real border rather than a hand-
+    // painted one: these are plain QPushButtons, the same idiom
+    // BevelArrow/ExtrudePreview/PullArrow's own field chrome already uses
+    // for a 1px border on a control sitting over the GL surface.
+    return QStringLiteral(
+               "QPushButton { background-color: %1; color: %2; border: 1px solid %3; "
+               "border-radius: 4px; font-size: %4pt; padding: 2px 8px; } "
+               "QPushButton:hover { background-color: %5; } "
+               "QPushButton:disabled { color: %6; border-color: %6; }")
+        .arg(Theme::chip().name(), Theme::text().name(), Theme::border().name())
+        .arg(Theme::labelFont().pointSizeF())
+        .arg(Theme::chipHover().name(), Theme::textDisabled().name());
+}
 }  // namespace
 
 VersionsPanel::VersionsPanel(MainWindow* window, OcctViewWidget* view, QWidget* parent)
@@ -43,15 +98,28 @@ VersionsPanel::VersionsPanel(MainWindow* window, OcctViewWidget* view, QWidget* 
 
     myOuter = new QVBoxLayout(this);
     myOuter->setContentsMargins(kPad, kPad, kPad, kPad);
-    myOuter->setSpacing(8);
+    myOuter->setSpacing(10);
 
-    myTitle = new QLabel(tr("Versions"), this);
-    myOuter->addWidget(myTitle);
-    myTitle->show();
+    auto* header = new QWidget(this);
+    header->setStyleSheet(QStringLiteral("background: transparent;"));
+    auto* headerLayout = new QHBoxLayout(header);
+    headerLayout->setContentsMargins(0, 0, 0, 0);
+    headerLayout->setSpacing(8);
+
+    myTitle = new QLabel(tr("Versions"), header);
+    headerLayout->addWidget(myTitle, 1);
+
+    myAddButton = new QPushButton(QStringLiteral("+"), header);
+    myAddButton->setFixedSize(Theme::wholeDevicePixels(QSize(26, 26)));
+    myAddButton->setToolTip(tr("Save a new version"));
+    headerLayout->addWidget(myAddButton);
+    connect(myAddButton, &QPushButton::clicked, this, &VersionsPanel::beginNewVersion);
+
+    myOuter->addWidget(header);
 
     myRowsLayout = new QVBoxLayout();
     myRowsLayout->setContentsMargins(0, 0, 0, 0);
-    myRowsLayout->setSpacing(6);
+    myRowsLayout->setSpacing(10);
     myOuter->addLayout(myRowsLayout);
     myOuter->addStretch(1);
 
@@ -65,12 +133,22 @@ int VersionsPanel::cardWidth()
 {
     const Theme::Spec shipped = Theme::defaultSpec();
     auto measure = [](const QFont& name, const QFont& date) {
-        return QFontMetrics(name).horizontalAdvance(nameSpecimen()) +
-               QFontMetrics(date).horizontalAdvance(dateSpecimen());
+        return std::max(QFontMetrics(name).horizontalAdvance(nameSpecimen()),
+                        QFontMetrics(date).horizontalAdvance(dateSpecimen()));
     };
     const int now = measure(Theme::bodyFont(), Theme::labelFont());
     const int atShippedScale = measure(Theme::bodyFontFor(shipped), Theme::labelFontFor(shipped));
     return std::max(kBaseWidth, kBaseWidth + now - atShippedScale);
+}
+
+int VersionsPanel::cardInnerWidth()
+{
+    return cardWidth() - 2 * kPad;
+}
+
+int VersionsPanel::thumbHeightFor(int thumbWidth)
+{
+    return Theme::wholeDevicePixels(static_cast<int>(std::lround(thumbWidth * kThumbAspect)));
 }
 
 QString VersionsPanel::deleteLabel() { return tr("Delete"); }
@@ -78,9 +156,9 @@ QString VersionsPanel::deleteArmedLabel() { return tr("Delete — click again");
 
 QStringList VersionsPanel::paintedTexts() const
 {
-    return {tr("Versions"),
-            tr("No versions yet.\n\nFile \xE2\x86\x92 Save version\xE2\x80\xA6 keeps a named "
-               "snapshot you can come back to."),
+    return {tr("Versions"), tr("Save a new version"),
+            tr("No versions yet.\n\nPress + to keep a named snapshot you can come "
+               "back to."),
             deleteLabel(), deleteArmedLabel(), tr("Compare"), tr("Restore")};
 }
 
@@ -92,37 +170,44 @@ void VersionsPanel::applyTheme()
                                    .arg(Theme::textMuted().name())
                                    .arg(Theme::titleFont().pointSizeF()));
     }
-
-    for (const Row& row : myRows) {
-        if (row.name)
-            row.name->setStyleSheet(QStringLiteral("background: transparent; color: %1;")
-                                        .arg(Theme::text().name()));
-        if (row.saved)
-            row.saved->setStyleSheet(QStringLiteral("background: transparent; color: %1; "
-                                                     "font-size: %2pt;")
-                                         .arg(Theme::textMuted().name())
-                                         .arg(Theme::labelFont().pointSizeF()));
-        const QString buttonCss =
-            QStringLiteral("QPushButton { background-color: %1; color: %2; border: none; "
-                          "border-radius: 4px; font-size: %3pt; } "
-                          "QPushButton:hover { background-color: %4; } "
-                          "QPushButton:disabled { color: %5; }")
-                .arg(Theme::chip().name(), Theme::text().name())
-                .arg(Theme::labelFont().pointSizeF())
-                .arg(Theme::chipHover().name(), Theme::textDisabled().name());
-        for (QPushButton* button : {row.compare, row.restore, row.remove}) {
-            if (button) button->setStyleSheet(buttonCss);
-        }
+    if (myAddButton) {
+        // Accent-bordered, per the picked mockup - the one control on this
+        // panel that draws attention to itself, since it is the only way
+        // left to make a version now that SaveVersionCard is retired.
+        myAddButton->setStyleSheet(
+            QStringLiteral("QPushButton { background-color: %1; color: %2; "
+                          "border: 1.5px solid %3; border-radius: 6px; "
+                          "font-weight: 600; font-size: %4pt; } "
+                          "QPushButton:hover { background-color: %5; } "
+                          "QPushButton:disabled { color: %6; border-color: %6; }")
+                .arg(Theme::chip().name(), Theme::text().name(), Theme::accent().name())
+                .arg(Theme::bodyFont().pointSizeF())
+                .arg(Theme::chipHover().name(), Theme::textDisabled().name()));
     }
 
-    if (myRows.empty()) {
-        for (QLabel* empty : findChildren<QLabel*>()) {
-            if (empty == myTitle) continue;
-            empty->setStyleSheet(QStringLiteral("background: transparent; color: %1; "
-                                                "font-size: %2pt;")
-                                     .arg(Theme::textMuted().name())
-                                     .arg(Theme::bodyFont().pointSizeF()));
+    const QString css = buttonCss();
+    for (const Row& row : myRows) {
+        if (row.name)
+            row.name->setStyleSheet(QStringLiteral("background: transparent; color: %1; "
+                                                    "font-weight: 500; font-size: %2pt;")
+                                        .arg(Theme::text().name())
+                                        .arg(Theme::bodyFont().pointSizeF()));
+        if (row.meta)
+            row.meta->setStyleSheet(QStringLiteral("background: transparent; color: %1; "
+                                                    "font-size: %2pt;")
+                                        .arg(Theme::textMuted().name())
+                                        .arg(Theme::labelFont().pointSizeF()));
+        for (QPushButton* button : {row.compare, row.restore, row.remove}) {
+            if (button) button->setStyleSheet(css);
         }
+        if (row.widget) row.widget->update();
+    }
+
+    if (QLabel* empty = findChild<QLabel*>(QStringLiteral("versionsEmptyState"))) {
+        empty->setStyleSheet(QStringLiteral("background: transparent; color: %1; "
+                                            "font-size: %2pt;")
+                                 .arg(Theme::textMuted().name())
+                                 .arg(Theme::bodyFont().pointSizeF()));
     }
 
     setFixedWidth(cardWidth());
@@ -149,10 +234,47 @@ void VersionsPanel::paintEvent(QPaintEvent* /*event*/)
     Theme::paintSurface(painter, rect(), kRadius);
 }
 
+bool VersionsPanel::eventFilter(QObject* watched, QEvent* event)
+{
+    if (event->type() == QEvent::Enter || event->type() == QEvent::Leave) {
+        const QVariant key = watched->property("versionCardKey");
+        if (key.isValid()) {
+            const QString name = key.toString();
+            for (Row& row : myRows) {
+                if (row.versionName != name) continue;
+                if (row.actions) row.actions->setVisible(event->type() == QEvent::Enter);
+                break;
+            }
+        }
+    } else if (event->type() == QEvent::KeyPress && watched == myPendingEdit) {
+        // See the header's own comment on myPendingEdit/teardownPendingCard()
+        // for why this exists beside InlineRename's own Escape QShortcut.
+        auto* keyEvent = static_cast<QKeyEvent*>(event);
+        if (keyEvent->key() == Qt::Key_Escape && keyEvent->modifiers() == Qt::NoModifier) {
+            discardPendingCreate();
+            return true;
+        }
+    }
+    return QWidget::eventFilter(watched, event);
+}
+
 QString VersionsPanel::rowNameAt(int index) const
 {
     return index >= 0 && index < static_cast<int>(myRows.size()) ? myRows[index].versionName
                                                                  : QString();
+}
+
+QWidget* VersionsPanel::cardAt(int index) const
+{
+    return index >= 0 && index < static_cast<int>(myRows.size()) ? myRows[index].widget
+                                                                 : nullptr;
+}
+
+QRect VersionsPanel::thumbnailRectAt(int index) const
+{
+    if (index < 0 || index >= static_cast<int>(myRows.size()) || !myRows[index].thumb)
+        return QRect();
+    return myRows[index].thumb->geometry();
 }
 
 QPushButton* VersionsPanel::compareButtonAt(int index) const
@@ -191,8 +313,32 @@ void VersionsPanel::disarmDelete(Row& row)
     if (row.remove) row.remove->setText(deleteLabel());
 }
 
+QString VersionsPanel::nextVersionDefaultName() const
+{
+    int highest = 0;
+    if (myWindow && !myWindow->currentFurnitureId().isEmpty()) {
+        static const QRegularExpression pattern(QStringLiteral("^Version (\\d+)$"));
+        for (const FurnitureStore::VersionInfo& v :
+             myWindow->furnitureStore().versions(myWindow->currentFurnitureId())) {
+            const QRegularExpressionMatch m = pattern.match(v.name);
+            if (m.hasMatch()) highest = std::max(highest, m.captured(1).toInt());
+        }
+    }
+    return tr("Version %1").arg(highest + 1);
+}
+
 void VersionsPanel::refresh()
 {
+    // Mirrors SaveVersionCard::onAppStateChanged()'s own reasoning (now
+    // retired, but the reasoning is not): a create gesture open over this
+    // panel is exactly as vulnerable to a real, competing application-wide
+    // claim - a sketch started, render mode engaged, a face pulled or an
+    // edge bevelled - as the old floating card was. Nothing was ever
+    // written for a pending create (see the class comment), so "cancel" is
+    // simply tearing the pending card down, not undoing a save.
+    if (myPendingWidget && myWindow && !myWindow->canOpenSaveVersion())
+        discardPendingCreate();
+
     QVector<FurnitureStore::VersionInfo> versions;
     if (myWindow && !myWindow->currentFurnitureId().isEmpty())
         versions = myWindow->furnitureStore().versions(myWindow->currentFurnitureId());
@@ -206,19 +352,22 @@ void VersionsPanel::refresh()
         signature += v.name + QLatin1Char('\x1f') + v.saved.toString(Qt::ISODateWithMs) +
                     QLatin1Char('\x1e');
     }
-    // Whether the row controls should be usable at all right now - reread on
-    // EVERY call, including the early-out below: sketching or leaving the
-    // init screen changes this without touching the version list itself
-    // (the signature), and a row whose buttons only updated when a version
-    // was added or removed would stay clickable mid-sketch until the next
-    // unrelated change happened to rebuild it.
-    const bool enabled =
+
+    const bool rowsEnabled =
         myWindow && !myWindow->isShowingInitScreen() && !myWindow->isSketching();
+    // The + button's own gate mirrors exactly what used to gate the old
+    // "Save version..." action (MainWindow::canOpenSaveVersion()) - it is
+    // the SAME gesture, reached a different way - plus "no create already
+    // open", since one gesture is one pending card.
+    if (myAddButton)
+        myAddButton->setEnabled(!myPendingWidget && myWindow &&
+                                myWindow->canOpenSaveVersion());
+
     if (myRowsBuilt && signature == myRowSignature) {
         for (const Row& row : myRows) {
-            if (row.compare) row.compare->setEnabled(enabled);
-            if (row.restore) row.restore->setEnabled(enabled);
-            if (row.remove) row.remove->setEnabled(enabled);
+            if (row.compare) row.compare->setEnabled(rowsEnabled);
+            if (row.restore) row.restore->setEnabled(rowsEnabled);
+            if (row.remove) row.remove->setEnabled(rowsEnabled);
         }
         return;
     }
@@ -234,123 +383,18 @@ void VersionsPanel::refresh()
     }
     myRows.clear();
 
-    for (const FurnitureStore::VersionInfo& v : versions) {
-        auto* row = new QWidget(this);
-        auto* rowLayout = new QVBoxLayout(row);
-        rowLayout->setContentsMargins(6, 4, 6, 4);
-        rowLayout->setSpacing(2);
-
-        auto* top = new QHBoxLayout();
-        top->setContentsMargins(0, 0, 0, 0);
-        top->setSpacing(8);
-        auto* name = new QLabel(v.name, row);
-        name->setStyleSheet(QStringLiteral("background: transparent; color: %1;")
-                                .arg(Theme::text().name()));
-        top->addWidget(name, 1);
-        auto* saved = new QLabel(QLocale().toString(v.saved.toLocalTime(), QLocale::ShortFormat),
-                                 row);
-        saved->setStyleSheet(QStringLiteral("background: transparent; color: %1; font-size: %2pt;")
-                                 .arg(Theme::textMuted().name())
-                                 .arg(Theme::labelFont().pointSizeF()));
-        top->addWidget(saved);
-        rowLayout->addLayout(top);
-
-        auto* buttons = new QHBoxLayout();
-        buttons->setContentsMargins(0, 0, 0, 0);
-        buttons->setSpacing(4);
-
-        auto* compare = new QPushButton(tr("Compare"), row);
-        compare->setFixedHeight(kButtonHeight);
-        compare->setEnabled(enabled);
-        buttons->addWidget(compare);
-
-        auto* restore = new QPushButton(tr("Restore"), row);
-        restore->setFixedHeight(kButtonHeight);
-        restore->setEnabled(enabled);
-        buttons->addWidget(restore);
-
-        auto* remove = new QPushButton(deleteLabel(), row);
-        remove->setFixedHeight(kButtonHeight);
-        remove->setEnabled(enabled);
-        buttons->addWidget(remove);
-
-        rowLayout->addLayout(buttons);
-
-        Row entry;
-        entry.widget = row;
-        entry.name = name;
-        entry.saved = saved;
-        entry.compare = compare;
-        entry.restore = restore;
-        entry.remove = remove;
-        entry.versionName = v.name;
-        entry.deleteTimer = new QTimer(row);
-        entry.deleteTimer->setSingleShot(true);
-        entry.deleteTimer->setInterval(kDeleteConfirmMs);
-
-        myRows.push_back(entry);
-        const int rowIndex = static_cast<int>(myRows.size()) - 1;
-
-        connect(compare, &QPushButton::clicked, this, [this, rowIndex] {
-            if (rowIndex < 0 || rowIndex >= static_cast<int>(myRows.size())) return;
-            // Copied to a LOCAL before the call, not passed as a reference
-            // into the Row - MainWindow::openCompare() ends in
-            // updateActions(), which can run this panel's own refresh()
-            // synchronously, and a refresh that rebuilds rows destroys the
-            // very Row this reference would still be pointing into for the
-            // rest of the call.
-            const QString name = myRows[rowIndex].versionName;
-            if (myWindow) myWindow->openCompare(name);
-        });
-        connect(restore, &QPushButton::clicked, this, [this, rowIndex] {
-            if (rowIndex < 0 || rowIndex >= static_cast<int>(myRows.size())) return;
-            const QString name = myRows[rowIndex].versionName;   // see compare's lambda above
-            if (myWindow) myWindow->restoreVersion(name);
-        });
-        // The two-click confirmation. A first click arms it - the label
-        // changes and the timer starts - and does NOT delete anything; a
-        // second click while still armed is the one that actually calls
-        // through to MainWindow. The timer's own timeout disarms it on its
-        // own if the second click never comes, through the exact same
-        // disarmDelete() a rebuild uses to tear an armed row down cleanly.
-        connect(remove, &QPushButton::clicked, this, [this, rowIndex] {
-            if (rowIndex < 0 || rowIndex >= static_cast<int>(myRows.size())) return;
-            Row& r = myRows[rowIndex];
-            if (r.deleteArmed) {
-                // A LOCAL copy, for the same reason compare's and restore's
-                // lambdas take one: deleteVersionByName() ends in
-                // updateActions(), which WILL rebuild this panel's rows
-                // synchronously (the version list itself just changed, so
-                // refresh()'s signature check cannot take its early-out) -
-                // a reference into `r` would be dangling before its own
-                // statement finished evaluating.
-                const QString name = r.versionName;
-                disarmDelete(r);
-                if (myWindow) myWindow->deleteVersionByName(name);
-                // `r`, and every other reference into myRows, may now be
-                // dangling - nothing below this line may touch them again.
-                return;
-            }
-            r.deleteArmed = true;
-            if (r.remove) r.remove->setText(deleteArmedLabel());
-            if (r.deleteTimer) r.deleteTimer->start();
-        });
-        connect(entry.deleteTimer, &QTimer::timeout, this, [this, rowIndex] {
-            if (rowIndex < 0 || rowIndex >= static_cast<int>(myRows.size())) return;
-            disarmDelete(myRows[rowIndex]);
-        });
-
-        myRowsLayout->addWidget(row);
-        row->show();
-    }
+    for (const FurnitureStore::VersionInfo& v : versions)
+        buildRealRow(v.name, v.saved, rowsEnabled);
 
     if (myRows.empty()) {
-        auto* empty = new QLabel(tr("No versions yet.\n\nFile \xE2\x86\x92 Save version\xE2\x80\xA6 "
-                                    "keeps a named snapshot you can come back to."),
+        auto* empty = new QLabel(tr("No versions yet.\n\nPress + to keep a named "
+                                    "snapshot you can come back to."),
                                  this);
+        empty->setObjectName(QStringLiteral("versionsEmptyState"));
         empty->setWordWrap(true);
         empty->setAlignment(Qt::AlignTop);
-        empty->setStyleSheet(QStringLiteral("background: transparent; color: %1; font-size: %2pt;")
+        empty->setStyleSheet(QStringLiteral("background: transparent; color: %1; "
+                                            "font-size: %2pt;")
                                  .arg(Theme::textMuted().name())
                                  .arg(Theme::bodyFont().pointSizeF()));
         myRowsLayout->addWidget(empty);
@@ -363,11 +407,333 @@ void VersionsPanel::refresh()
     updateGeometry();
     adjustSize();
 
-    // The buttons just built need the live theme's colours - applyTheme()
-    // is what the constructor calls after this on first build, but every
+    // The rows just built need the live theme's colours - applyTheme() is
+    // what the constructor calls after this on first build, but every
     // LATER refresh() (a version saved or deleted) rebuilds rows with no
     // theme broadcast to follow, so this call is what keeps a freshly
     // rebuilt row from painting Qt's own default button chrome instead of
     // this app's.
     applyTheme();
+}
+
+void VersionsPanel::buildRealRow(const QString& name, const QDateTime& saved, bool enabled)
+{
+    auto* card = new VersionCardWidget(this);
+    auto* cardLayout = new QVBoxLayout(card);
+    cardLayout->setContentsMargins(0, 0, 0, 0);
+    cardLayout->setSpacing(0);
+
+    // The full-width thumbnail. A transparent QLabel with no pixmap shows
+    // the card's OWN paintSurface() ground through it unmangled - that flat
+    // fill IS the "flat neutral placeholder block" the mockup calls for,
+    // not a second thing this code has to paint - see thumbnailRectAt()'s
+    // own comment for why a test has to render the CARD to see it.
+    auto* thumb = new QLabel(card);
+    thumb->setFixedHeight(thumbHeightFor(cardInnerWidth()));
+    thumb->setAlignment(Qt::AlignCenter);
+    thumb->setStyleSheet(QStringLiteral("background: transparent; border: none;"));
+    thumb->setAttribute(Qt::WA_TransparentForMouseEvents);
+    QPixmap pix;
+    const QString thumbPath =
+        myWindow ? myWindow->furnitureStore().versionThumbPath(myWindow->currentFurnitureId(),
+                                                               name)
+                : QString();
+    if (!thumbPath.isEmpty() && QFileInfo::exists(thumbPath) && pix.load(thumbPath)) {
+        thumb->setPixmap(pix.scaled(thumb->size(), Qt::KeepAspectRatioByExpanding,
+                                    Qt::SmoothTransformation));
+    } else {
+        thumb->setPixmap(QPixmap());
+    }
+    cardLayout->addWidget(thumb);
+
+    auto* bar = new QWidget(card);
+    bar->setStyleSheet(QStringLiteral("background: transparent;"));
+    auto* barLayout = new QHBoxLayout(bar);
+    barLayout->setContentsMargins(10, 8, 10, 8);
+    barLayout->setSpacing(6);
+
+    auto* textCol = new QWidget(bar);
+    textCol->setStyleSheet(QStringLiteral("background: transparent;"));
+    auto* textLayout = new QVBoxLayout(textCol);
+    textLayout->setContentsMargins(0, 0, 0, 0);
+    textLayout->setSpacing(0);
+
+    auto* nameLabel = new QLabel(name, textCol);
+    nameLabel->setStyleSheet(QStringLiteral("background: transparent; color: %1; "
+                                            "font-weight: 500; font-size: %2pt;")
+                                 .arg(Theme::text().name())
+                                 .arg(Theme::bodyFont().pointSizeF()));
+    nameLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
+    textLayout->addWidget(nameLabel);
+
+    auto* metaLabel =
+        new QLabel(QLocale().toString(saved.toLocalTime(), QLocale::ShortFormat), textCol);
+    metaLabel->setStyleSheet(QStringLiteral("background: transparent; color: %1; "
+                                            "font-size: %2pt;")
+                                 .arg(Theme::textMuted().name())
+                                 .arg(Theme::labelFont().pointSizeF()));
+    metaLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
+    textLayout->addWidget(metaLabel);
+
+    barLayout->addWidget(textCol, 1);
+
+    auto* actions = new QWidget(bar);
+    actions->setStyleSheet(QStringLiteral("background: transparent;"));
+    auto* actionsLayout = new QHBoxLayout(actions);
+    actionsLayout->setContentsMargins(0, 0, 0, 0);
+    actionsLayout->setSpacing(4);
+
+    auto* compare = new QPushButton(tr("Compare"), actions);
+    compare->setFixedHeight(kButtonHeight);
+    compare->setEnabled(enabled);
+    actionsLayout->addWidget(compare);
+
+    auto* restore = new QPushButton(tr("Restore"), actions);
+    restore->setFixedHeight(kButtonHeight);
+    restore->setEnabled(enabled);
+    actionsLayout->addWidget(restore);
+
+    auto* remove = new QPushButton(deleteLabel(), actions);
+    remove->setFixedHeight(kButtonHeight);
+    remove->setEnabled(enabled);
+    actionsLayout->addWidget(remove);
+
+    // Hidden at rest - "revealed on ROW HOVER only" is the mockup's own
+    // words. See eventFilter() for what shows it again.
+    actions->setVisible(false);
+    barLayout->addWidget(actions);
+
+    cardLayout->addWidget(bar);
+
+    card->setProperty("versionCardKey", name);
+    card->setAttribute(Qt::WA_Hover);
+    card->installEventFilter(this);
+
+    Row entry;
+    entry.widget = card;
+    entry.thumb = thumb;
+    entry.name = nameLabel;
+    entry.meta = metaLabel;
+    entry.actions = actions;
+    entry.compare = compare;
+    entry.restore = restore;
+    entry.remove = remove;
+    entry.versionName = name;
+    entry.deleteTimer = new QTimer(card);
+    entry.deleteTimer->setSingleShot(true);
+    entry.deleteTimer->setInterval(kDeleteConfirmMs);
+
+    myRows.push_back(entry);
+    const int rowIndex = static_cast<int>(myRows.size()) - 1;
+
+    connect(compare, &QPushButton::clicked, this, [this, rowIndex] {
+        if (rowIndex < 0 || rowIndex >= static_cast<int>(myRows.size())) return;
+        // Copied to a LOCAL before the call, not passed as a reference into
+        // the Row - MainWindow::openCompare() ends in updateActions(),
+        // which can run this panel's own refresh() synchronously, and a
+        // refresh that rebuilds rows destroys the very Row this reference
+        // would still be pointing into for the rest of the call.
+        const QString versionName = myRows[rowIndex].versionName;
+        if (myWindow) myWindow->openCompare(versionName);
+    });
+    connect(restore, &QPushButton::clicked, this, [this, rowIndex] {
+        if (rowIndex < 0 || rowIndex >= static_cast<int>(myRows.size())) return;
+        const QString versionName = myRows[rowIndex].versionName;   // see compare's lambda above
+        if (myWindow) myWindow->restoreVersion(versionName);
+    });
+    // The two-click confirmation. A first click arms it - the label
+    // changes and the timer starts - and does NOT delete anything; a
+    // second click while still armed is the one that actually calls
+    // through to MainWindow. The timer's own timeout disarms it on its
+    // own if the second click never comes, through the exact same
+    // disarmDelete() a rebuild uses to tear an armed row down cleanly.
+    connect(remove, &QPushButton::clicked, this, [this, rowIndex] {
+        if (rowIndex < 0 || rowIndex >= static_cast<int>(myRows.size())) return;
+        Row& r = myRows[rowIndex];
+        if (r.deleteArmed) {
+            // A LOCAL copy, for the same reason compare's and restore's
+            // lambdas take one: deleteVersionByName() ends in
+            // updateActions(), which WILL rebuild this panel's rows
+            // synchronously (the version list itself just changed, so
+            // refresh()'s signature check cannot take its early-out) - a
+            // reference into `r` would be dangling before its own
+            // statement finished evaluating.
+            const QString versionName = r.versionName;
+            disarmDelete(r);
+            if (myWindow) myWindow->deleteVersionByName(versionName);
+            // `r`, and every other reference into myRows, may now be
+            // dangling - nothing below this line may touch them again.
+            return;
+        }
+        r.deleteArmed = true;
+        if (r.remove) r.remove->setText(deleteArmedLabel());
+        if (r.deleteTimer) r.deleteTimer->start();
+    });
+    connect(entry.deleteTimer, &QTimer::timeout, this, [this, rowIndex] {
+        if (rowIndex < 0 || rowIndex >= static_cast<int>(myRows.size())) return;
+        disarmDelete(myRows[rowIndex]);
+    });
+
+    myRowsLayout->addWidget(card);
+    card->show();
+}
+
+QWidget* VersionsPanel::buildPendingCard(const QString& defaultName)
+{
+    auto* card = new VersionCardWidget(this);
+    auto* cardLayout = new QVBoxLayout(card);
+    cardLayout->setContentsMargins(0, 0, 0, 0);
+    cardLayout->setSpacing(0);
+
+    // A placeholder thumbnail - the pending card has no saved snapshot yet
+    // (nothing has been written to FurnitureStore), and the real one is
+    // captured by MainWindow::saveVersion() itself the moment Enter
+    // actually persists this version.
+    auto* thumb = new QLabel(card);
+    thumb->setFixedHeight(thumbHeightFor(cardInnerWidth()));
+    thumb->setStyleSheet(QStringLiteral("background: transparent; border: none;"));
+    thumb->setAttribute(Qt::WA_TransparentForMouseEvents);
+    cardLayout->addWidget(thumb);
+
+    auto* bar = new QWidget(card);
+    bar->setStyleSheet(QStringLiteral("background: transparent;"));
+    auto* barLayout = new QHBoxLayout(bar);
+    barLayout->setContentsMargins(10, 8, 10, 8);
+
+    auto* nameLabel = new QLabel(defaultName, bar);
+    nameLabel->setObjectName(QStringLiteral("pendingVersionName"));
+    nameLabel->setStyleSheet(QStringLiteral("background: transparent; color: %1; "
+                                            "font-weight: 500; font-size: %2pt;")
+                                 .arg(Theme::text().name())
+                                 .arg(Theme::bodyFont().pointSizeF()));
+    barLayout->addWidget(nameLabel, 1);
+    cardLayout->addWidget(bar);
+
+    return card;
+}
+
+void VersionsPanel::beginNewVersion()
+{
+    if (!myWindow || !myWindow->canOpenSaveVersion()) return;
+    if (myPendingWidget) return;   // one create gesture at a time
+
+    const QString defaultName = nextVersionDefaultName();
+    myPendingWidget = buildPendingCard(defaultName);
+    // Above the real rows, below the header - myOuter's index 0 is the
+    // header widget and index 1 is myRowsLayout (added as a nested
+    // layout), so inserting a WIDGET at 1 lands it exactly between them.
+    myOuter->insertWidget(1, myPendingWidget);
+    myPendingWidget->show();
+    if (myAddButton) myAddButton->setEnabled(false);
+
+    openPendingNameEdit(defaultName);
+}
+
+void VersionsPanel::openPendingNameEdit(const QString& seedText)
+{
+    if (!myPendingWidget) return;
+    QLabel* nameLabel =
+        myPendingWidget->findChild<QLabel*>(QStringLiteral("pendingVersionName"));
+    if (!nameLabel) return;
+    nameLabel->setText(seedText);
+
+    // Guards against a double outcome the exact way InlineRename's own
+    // `settled` flag does: my commit lambda runs SYNCHRONOUSLY, inside
+    // InlineRename's doCommit(), before it calls edit->deleteLater() - so
+    // by the time the edit's destroyed() signal below actually fires
+    // (always later - deleteLater() only posts a deferred-delete event),
+    // this flag already says whether that was a real commit or an Escape.
+    auto committed = std::make_shared<bool>(false);
+    InlineRename::beginRename(myPendingWidget, nameLabel->geometry(), seedText,
+                              [this, committed](QString finalName) {
+                                  *committed = true;
+                                  commitPendingCreate(finalName);
+                              });
+
+    // InlineRename has no cancel callback of its own - by design, every
+    // OTHER caller (InitScreen, ItemsPanel) wants Escape to leave the OLD
+    // name standing, which needs no cleanup at all. This gesture is
+    // different: there is no "old" card to fall back to, so Escape has to
+    // tear the whole pending card down, not just abandon the rename. The
+    // edit's own destroyed() signal - which fires whether it was Enter's
+    // deleteLater() or Escape's - is what stands in for that missing hook:
+    // if `committed` is still false when it fires, nothing committed this
+    // gesture, and discardPendingCreate() is the only remaining outcome.
+    //
+    // findChildren(), taking the LAST one - not findChild(), which returns
+    // the FIRST match. On a duplicate-name retry this runs from INSIDE the
+    // outgoing edit's own commit handling (commitPendingCreate() calls this
+    // again before that edit's caller gets back to its own
+    // edit->deleteLater()), so the OLD edit is still transiently a live
+    // child of myPendingWidget alongside the brand new one - findChild()
+    // would find the OLD one first (children are appended in construction
+    // order) and wire this connection to an edit that is seconds from being
+    // destroyed regardless of what the user does with the new one, tearing
+    // the retry card down out from under them. The new edit, just
+    // constructed by beginRename() above, is always last in the list.
+    const QList<QLineEdit*> edits = myPendingWidget->findChildren<QLineEdit*>();
+    if (!edits.isEmpty()) {
+        myPendingEdit = edits.last();
+        // Belt-and-suspenders Escape delivery - see the header's own
+        // comment on myPendingEdit for why a plain eventFilter sits beside
+        // InlineRename's own QShortcut here rather than replacing it.
+        myPendingEdit->installEventFilter(this);
+        connect(edits.last(), &QObject::destroyed, this, [this, committed] {
+            if (!*committed) discardPendingCreate();
+        });
+    }
+}
+
+void VersionsPanel::commitPendingCreate(const QString& name)
+{
+    // The exact call the old "Save version..." menu action made - one
+    // implementation of "persist a version", reached two ways.
+    if (myWindow && myWindow->saveVersion(name)) {
+        teardownPendingCard();
+        return;
+    }
+    // Refused - a duplicate version name, the only real refusal
+    // MainWindow::saveVersion() has (it already showed the Failure toast
+    // naming the clash). The card stays up so the user can retype, the
+    // same thing SaveVersionCard used to do on this exact refusal -
+    // InlineRename's own edit has already destroyed itself unconditionally
+    // (doCommit() calls deleteLater() regardless of outcome), so this
+    // reopens a fresh one, seeded with what was just tried.
+    openPendingNameEdit(name);
+}
+
+void VersionsPanel::discardPendingCreate()
+{
+    // Nothing was ever written to FurnitureStore for a pending create (see
+    // the class comment) - discarding is exactly teardownPendingCard() and
+    // nothing more, which is the whole point: "no unnamed version left
+    // behind" is true because nothing was ever named IN THE STORE, not
+    // because this function went and deleted one.
+    teardownPendingCard();
+}
+
+void VersionsPanel::teardownPendingCard()
+{
+    if (!myPendingWidget) return;
+    myOuter->removeWidget(myPendingWidget);
+    // hide() before deleteLater(), not instead of it - ItemsPanel::refresh()'s
+    // own reasoning: deleteLater() leaves the widget alive, parented and
+    // visible until control returns to the event loop, and this may be
+    // called from inside the very QLineEdit child this widget still holds
+    // (InlineRename's own event handling) - a synchronous delete here
+    // would free memory a still-executing call frame is about to use. hide()
+    // is what a caller can actually observe SYNCHRONOUSLY - the object's
+    // real destruction can be delayed well past this call (measured: a
+    // deleteLater() posted from inside setRenderMode()'s own tier probe sat
+    // undelivered through many later settle()s, only actually destroyed at
+    // the test binary's own shutdown - QEvent::DeferredDelete is tagged
+    // with the event-loop NESTING LEVEL it was posted at, and is skipped by
+    // sendPostedEvents() until execution returns to at least that depth
+    // again), so hidden-ness, not existence, is the property any caller -
+    // this file's own tests included - should ever assert against.
+    myPendingWidget->hide();
+    myPendingWidget->deleteLater();
+    myPendingWidget = nullptr;
+    if (myAddButton)
+        myAddButton->setEnabled(myWindow && myWindow->canOpenSaveVersion());
 }
