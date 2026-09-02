@@ -282,6 +282,20 @@ void GridRenderer::rebuild(double minorStep, double centerU, double centerV,
     // AIS_InteractiveObject::SetZLayer stores it on the drawer, and Display
     // reads the drawer.
     if (myLayer != Graphic3d_ZLayerId_UNKNOWN) myGrid->SetZLayer(myLayer);
-    myContext->Display(myGrid, 0, -1, Standard_False);   // mode -1: not selectable
+    // Only actually shown while myVisible - see setVisible(). A rebuild while
+    // hidden (render mode moving the camera to frame a shot) still keeps the
+    // cache current, so the grid is correct the moment it is shown again
+    // rather than one camera move stale.
+    if (myVisible) myContext->Display(myGrid, 0, -1, Standard_False);   // mode -1: not selectable
+    myContext->UpdateCurrentViewer();
+}
+
+void GridRenderer::setVisible(bool visible)
+{
+    if (myVisible == visible) return;
+    myVisible = visible;
+    if (myContext.IsNull() || myGrid.IsNull()) return;   // nothing built yet - update() will honour it
+    if (myVisible) myContext->Display(myGrid, 0, -1, Standard_False);
+    else           myContext->Erase(myGrid, Standard_False);
     myContext->UpdateCurrentViewer();
 }

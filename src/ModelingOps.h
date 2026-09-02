@@ -14,6 +14,7 @@
 #include <TopoDS_Shape.hxx>
 #include <TopoDS_Wire.hxx>
 #include <gp_Dir.hxx>
+#include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
 
@@ -80,9 +81,16 @@ TopoDS_Shape makeCompound(const std::vector<TopoDS_Shape>& shapes);
 //
 // Pull a planar face of `body` by `distance` along its OUTWARD normal.
 // Positive grows (prism fused on), negative carves (prism cut away). The
-// outward normal is derived here, the same way MainWindow::lockToFace does
-// it: BRepAdaptor_Surface never applies TopAbs_Orientation, so a REVERSED
-// face's plane normal is flipped before use.
+// outward normal starts from the same flag MainWindow::lockToFace reads -
+// BRepAdaptor_Surface never applies TopAbs_Orientation, so a REVERSED face's
+// plane normal is flipped before use - and is then CONFIRMED against the
+// body itself with BRepClass3d_SolidClassifier before use. The flag alone
+// is not enough: a MIRRORED body (Milestone 3's symmetry twins) is built by
+// a negative-determinant transform, and BRepBuilderAPI_Transform's copy
+// rebuild toggles a mirrored shape's face-orientation flags uniformly, so a
+// face whose raw geometric normal the mirror never touched can still have
+// its flag flipped. See outwardPlane() in the .cpp for the measured case
+// this fixed - a "grow" pull that landed net inward on a mirrored twin.
 // Refuses: a null body/face, a face that is not one of `body`'s own faces
 // (checked by TopoDS_Shape::IsSame - a foreign face would otherwise fuse or
 // cut a perfectly valid boolean between two unrelated shapes), a non-planar
@@ -269,6 +277,31 @@ gp_Trsf snapTransform(const gp_Trsf& delta, const gp_Pnt& pivot,
 // nothing", so the gizmo's cancel path and any test asserting it agree.
 bool isIdentityTransform(const gp_Trsf& trsf, double linearTolerance = 1.0e-7,
                          double angularToleranceDeg = 1.0e-5);
+
+// --- Symmetry (Milestone 3) -------------------------------------------------
+//
+// Reflects `shape` across `plane` - gp_Trsf::SetMirror(gp_Ax2(plane.Location(),
+// plane.Axis().Direction())), applied through BRepBuilderAPI_Transform with
+// copy = true, the same builder transformShape() uses. A mirror is a
+// negative-determinant transform; BRepBuilderAPI_Transform is documented to
+// correct face orientation for one, so the result's volume comes back
+// POSITIVE - pinned by test rather than assumed, because a flipped-orientation
+// solid that measures negative is exactly the "looks fine, measures wrong"
+// mistake this file exists to catch.
+//
+// Refuses a null shape and any kernel exception - the same contract as every
+// other function here: ok == false always carries a null shape.
+BooleanResult mirrorShape(const TopoDS_Shape& shape, const gp_Pln& plane);
+
+// True when `shape`'s AXIS-ALIGNED bounding box has corners on both sides of
+// `plane` - the minimum signed distance among its eight corners is negative
+// past `tolerance` AND the maximum is positive past it. This is what decides
+// whether a freshly extruded body gets a mirror twin: a body that already
+// straddles the symmetry plane would produce a twin overlapping the body
+// itself, which is not a second piece of furniture. False (never straddling)
+// for a null shape or a void bounding box.
+bool boundingBoxStraddlesPlane(const TopoDS_Shape& shape, const gp_Pln& plane,
+                               double tolerance = 1.0e-7);
 
 // Must run before display or STL export, or curved faces render faceted / not at all.
 void tessellate(const TopoDS_Shape& shape, double linearDeflection = 0.1);

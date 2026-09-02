@@ -2,6 +2,7 @@
 
 #include "DocumentModel.h"
 #include "IconSet.h"
+#include "InlineRename.h"
 #include "Measure.h"
 #include "OcctViewWidget.h"
 #include "Theme.h"
@@ -10,6 +11,7 @@
 #include <QFontMetrics>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QPainter>
 #include <QPushButton>
 #include <QVBoxLayout>
@@ -41,7 +43,7 @@ constexpr int kPad = 12;
 constexpr int kMinHeight = 176;
 }  // namespace
 
-ItemsPanel::ItemsPanel(const DocumentModel* document, OcctViewWidget* view, QWidget* parent)
+ItemsPanel::ItemsPanel(DocumentModel* document, OcctViewWidget* view, QWidget* parent)
     : QWidget(parent)
     , myDocument(document)
     , myView(view)
@@ -214,8 +216,8 @@ void ItemsPanel::refresh()
                          QString::fromStdString(
                              Measure::formatFaceExtents(outline.face, outline.plane)) +
                          QLatin1Char('\x1f') +
-                         ((myView && myView->isOutlineVisible(outline.id)) ? QLatin1Char('1')
-                                                                          : QLatin1Char('0')) +
+                         (myDocument->isVisible(outline.id) ? QLatin1Char('1')
+                                                            : QLatin1Char('0')) +
                          QLatin1Char('\x1e');
         }
         for (const DocumentModel::Solid& solid : myDocument->solids()) {
@@ -223,8 +225,8 @@ void ItemsPanel::refresh()
                          QString::fromStdString(solid.name) + QLatin1Char('\x1f') +
                          QString::fromStdString(Measure::formatDimensions(solid.shape)) +
                          QLatin1Char('\x1f') +
-                         ((myView && myView->isSolidVisible(solid.id)) ? QLatin1Char('1')
-                                                                       : QLatin1Char('0')) +
+                         (myDocument->isVisible(solid.id) ? QLatin1Char('1')
+                                                          : QLatin1Char('0')) +
                          QLatin1Char('\x1e');
         }
     }
@@ -278,6 +280,14 @@ void ItemsPanel::refresh()
         auto* name = new QLabel(itemName, row);
         name->setStyleSheet(QStringLiteral("background: transparent; color: %1;")
                                 .arg(Theme::text().name()));
+        // Mouse-TRANSPARENT - Task 5's own fix, the same trap CLAUDE.md
+        // documents for InitCardWidget: Qt delivers a click to the DEEPEST
+        // widget under the cursor, not to an ancestor whose eventFilter
+        // happens to be watching for one, so without this a click landing on
+        // the name's own text - exactly where a double-click-to-rename
+        // gesture is aimed - never reached this row's eventFilter at all.
+        // Neither label has an interactive child of its own to lose by this.
+        name->setAttribute(Qt::WA_TransparentForMouseEvents);
         layout->addWidget(name, 1);
 
         auto* size = new QLabel(sizeText, row);
@@ -286,6 +296,7 @@ void ItemsPanel::refresh()
                                            "font-size: %2pt;")
                                 .arg(Theme::textMuted().name())
                                 .arg(Theme::labelFont().pointSizeF()));
+        size->setAttribute(Qt::WA_TransparentForMouseEvents);
         layout->addWidget(size);
 
         auto* eye = new QPushButton(row);
@@ -296,6 +307,11 @@ void ItemsPanel::refresh()
         eye->setToolTip(isOutline ? tr("Show or hide this outline")
                                   : tr("Show or hide this body"));
         connect(eye, &QPushButton::toggled, this, [this, id, isOutline](bool show) {
+            // DocumentModel owns visibility now (Task 1's isVisible()/
+            // setVisible()); the view is a mirror of it, written second so a
+            // save reads back exactly what the eye buttons show rather than
+            // a copy that only ever lived in the viewport.
+            if (myDocument) myDocument->setVisible(id, show);
             if (!myView) return;
             if (isOutline) myView->setOutlineVisible(id, show);
             else myView->setSolidVisible(id, show);
@@ -334,12 +350,12 @@ void ItemsPanel::refresh()
     for (const DocumentModel::Outline& outline : myDocument->outlines()) {
         addRow(outline.id, QString::fromStdString(outline.name),
                QString::fromStdString(Measure::formatFaceExtents(outline.face, outline.plane)),
-               myView && myView->isOutlineVisible(outline.id), /*isOutline=*/true);
+               myDocument->isVisible(outline.id), /*isOutline=*/true);
     }
     for (const DocumentModel::Solid& solid : myDocument->solids()) {
         addRow(solid.id, QString::fromStdString(solid.name),
                QString::fromStdString(Measure::formatDimensions(solid.shape)),
-               myView && myView->isSolidVisible(solid.id), /*isOutline=*/false);
+               myDocument->isVisible(solid.id), /*isOutline=*/false);
     }
 
     if (myRowList.empty()) {
@@ -392,6 +408,26 @@ bool ItemsPanel::eventFilter(QObject* watched, QEvent* event)
             return true;
         }
     }
+    // Double-click renames - the FIRST press above already ran the single-
+    // click activation (select the body, or make the outline pending), which
+    // is harmless here: neither writes anything checkpointed, and refresh()
+    // does not rebuild rows over a selection-only change (see its own
+    // signature comment), so the row this rename opens over is still the
+    // live widget the press just fired on. The release that follows the
+    // dblclick is swallowed by the branch below, on the same terms every
+    // other release on a row already is.
+    if (event->type() == QEvent::MouseButtonDblClick) {
+        const QVariant outline = watched->property("outlineId");
+        if (outline.isValid()) {
+            beginRenameForItem(outline.toInt(), /*isOutline=*/true);
+            return true;
+        }
+        const QVariant id = watched->property("solidId");
+        if (id.isValid()) {
+            beginRenameForItem(id.toInt(), /*isOutline=*/false);
+            return true;
+        }
+    }
     // A widget that accepts a press must accept the release too - CLAUDE.md's
     // rule, learned from HintBalloon letting one through and having the
     // viewport re-pick underneath it. WA_NoMousePropagation on this panel
@@ -405,6 +441,17 @@ bool ItemsPanel::eventFilter(QObject* watched, QEvent* event)
     return QWidget::eventFilter(watched, event);
 }
 
+QStringList ItemsPanel::paintedTexts() const
+{
+    // Fixed app copy ONLY - never a row's name, which is the user's own
+    // text. Same boundary InitScreen::paintedTexts() and
+    // VersionsPanel::paintedTexts() already draw for their own user-supplied
+    // names.
+    return {tr("Items"), tr("Show or hide this body"), tr("Show or hide this outline"),
+            tr("No bodies yet.\n\nPress Ctrl+K and click points on "
+               "the ground to draw your first outline.")};
+}
+
 void ItemsPanel::showSelection(const std::vector<int>& ids)
 {
     mySelectedIds = ids;
@@ -415,6 +462,51 @@ void ItemsPanel::showPendingOutline(int id)
 {
     myPendingOutlineId = id;
     restyleRows();
+}
+
+void ItemsPanel::beginRenameForItem(int id, bool isOutline)
+{
+    // Fix round 1 (review): refuse outright while this panel is not visible.
+    // MainWindow's updateActions() already disables the F2 action while
+    // View -> Items is off (the discoverable half - a disabled control that
+    // says why), but disabling a QAction does not stop a caller from
+    // invoking trigger() directly, which Qt runs regardless of isEnabled() -
+    // only real shortcut/menu input respects it. This is the one place the
+    // gesture actually opens a QLineEdit, so it is the one place the wedge
+    // has to be impossible rather than merely discouraged: InlineRename's
+    // setFocus() cannot take focus inside a hidden widget hierarchy, so an
+    // edit opened here would sit with no way to commit, cancel, or lose
+    // focus - and the re-entrancy guard just below would then read that
+    // stray editor as "a rename is already open" and refuse every LATER
+    // rename too, drawer shown or not, until an unrelated document change
+    // rebuilds the rows out from under it.
+    if (!isVisible()) return;
+
+    // Re-entrancy guard: F2 is a plain QAction shortcut, which fires
+    // regardless of what currently holds focus - including the QLineEdit an
+    // earlier call to this very function just opened, since that edit claims
+    // only Enter/Escape (InlineRename's own filter), never F2. Without this,
+    // F2 pressed twice - or F2 then a double-click on the same row - stacks a
+    // SECOND independent QLineEdit on top of the first, each with its own
+    // commit callback racing the other's. One rename gesture live on this
+    // panel at a time, full stop.
+    if (findChild<QLineEdit*>()) return;
+
+    for (const Row& row : myRowList) {
+        if (row.id != id || row.isOutline != isOutline) continue;
+        if (!row.name) return;
+        const QString current = row.name->text();
+        // The name label's own geometry, in row.widget's coordinates - the
+        // "text cell" InlineRename opens over. Not the whole row: the size
+        // readout beside it is derived, not editable, and the eye button is
+        // its own control.
+        const QRect cellRect = row.name->geometry();
+        InlineRename::beginRename(row.widget, cellRect, current,
+                                  [this, id, isOutline](QString newName) {
+                                      emit renameCommitted(id, isOutline, newName);
+                                  });
+        return;
+    }
 }
 
 void ItemsPanel::restyleRows()

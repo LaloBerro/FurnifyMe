@@ -12,7 +12,11 @@ library target `furnify_geometry`.
 This file distills the project brief (`CAD_APP_BRIEF.md`, supplied at init; ask the user
 for it if you need the verbatim original). Milestone 1 scope is exactly: **sketch → extrude → boolean**,
 plus STEP export. **Milestone 2 (direct modeling) is merged**: push/pull on faces,
-fillets, chamfers, and a transform gizmo now exist — see "Direct modeling" below. Still out
+fillets, chamfers, and a transform gizmo now exist — see "Direct modeling" below.
+**Milestone 3 (files, versions, symmetry and render) is merged**: a managed library of
+`.furnify` furniture with an init screen and autosave, named versions with a side-by-side
+compare, live mirror symmetry, inline rename, a render mode, and a bottom-bar toggle — see
+"Files, versions and the library" below. Still out
 of scope: history/parametric tree, constraint solver, 2D drawings, assemblies, materials,
 and any file format beyond STEP.
 
@@ -217,6 +221,12 @@ Source files under `src/`, plus `tests/`:
 | `ui/BevelArrow.{h,cpp}` | edge drag: inward fillets, outward chamfers, same contract |
 | `ui/AppearancePanel.{h,cpp}` | every Theme token editable live; debounced persistence |
 | `ui/AppBar.{h,cpp}` | the menu strip: wordmark, real `QMenuBar`, view controls |
+| `FurnifySerial.{h,cpp}` | binary shape (de)serialization via `BinTools`, **zero Qt includes** |
+| `FurnitureStore.{h,cpp}` | owns the managed library — enumerate/create/save/load/rename/versions |
+| `ui/InitScreen.{h,cpp}` | the gallery-of-furniture state that replaces the empty viewport at launch |
+| `ui/InlineRename.{h,cpp}` | the one `QLineEdit`-in-place helper: init cards and drawer rows both use it |
+| `ui/VersionsPanel.{h,cpp}` | versions drawer: list, Compare, Restore, two-click Delete |
+| `ui/SaveVersionCard.{h,cpp}` | name-a-version card, the `ExtrudePreview` contract |
 
 ### The vocabulary — enforced by test
 
@@ -262,6 +272,22 @@ substring matching would red-flag "background", "ground" and "surround", which t
 entitled to say. `gui_smoke`'s `usesBannedWord()` is the one matcher every sweep goes
 through, and its boundary rule is pinned in both directions: a rule living at one call site
 is not a rule.
+
+**User-typed text is exempt from the sweep; this app's own copy embedding it is not.**
+`usesBannedWord()` takes an `isUserData` flag (default false, so every pre-Milestone-3 call
+site sweeps exactly as before) that short-circuits to "clean" outright — an item's name, a
+furniture's name, a version's name is the owner's word choice, not this app's copy, and
+"Fuse My Table" must pass the same sweep that correctly fails an action tooltip saying "Fuse
+the two bodies". Each surface that paints user text — `ItemsPanel::paintedTexts()`,
+`InitScreen`'s cards, `VersionsPanel`'s rows — exposes it and passes `isUserData=true` at its
+own sweep site, following `WalkthroughPanel`/`HintBalloon`/`ShortcutSheet`'s existing
+generate-don't-duplicate pattern. **`Toast` has no user-data channel of its own** — it paints
+one plain string with no way to mark part of it exempt, so a rename toast that reads
+`Renamed to "Fuse My Table"` genuinely contains the banned word and genuinely fails the sweep
+if one is run against it. That is not a gap to close; the exemption lives one layer up, at
+the surface that *knows* which substring is the user's, and `gui_smoke` pins both directions
+at once — the same string passes through `ItemsPanel`'s exempted sweep and fails a plain
+`usesBannedWord()` call, proving the mechanism does something rather than nothing.
 
 Numbers are formatted by `Measure` (`src/Measure.h`), never by hand at a call
 site: lengths as `340 mm` / `1,200 mm` / `18.5 mm`, sizes as `340 × 220 × 18 mm`.
@@ -597,13 +623,31 @@ hazard the transform gizmo's `Deactivate` closes, one layer up and by a differen
 
 **`Theme` is spec-backed** since the Appearance panel: every colour accessor and the four
 derived fonts (badge = base−2, label = base−1, body = base, title = base+3 pt) read
-`Theme::Spec`; `defaultSpec()` is Graphite byte-for-byte and all 21 defaults are pinned to
-hex in the suite. Edits apply live through one `themeChanged` broadcast — no widget may
-cache a colour across it — and persist **debounced** (400 ms, flushed on close), because a
-colour-wheel drag fires per mouse-move. The picker opens with `show()`, never `open()`:
-`QDialog::open()` forces window-modality regardless of `setModal(false)`, and nothing in
-this app blocks. The gizmo's axis hues and the OCCT body/preview materials are the
-remaining untokenised colours, by scope ruling.
+`Theme::Spec`; `defaultSpec()` is Graphite byte-for-byte and all 24 defaults are pinned to
+hex in the suite (three of them, `gizmoAxisX/Y/Z`, added in Milestone 3 — see "Direct
+modeling"'s gizmo restyle note). Edits apply live through one `themeChanged` broadcast — no
+widget may cache a colour across it — and persist **debounced** (400 ms, flushed on close),
+because a colour-wheel drag fires per mouse-move. The picker opens with `show()`, never
+`open()`: `QDialog::open()` forces window-modality regardless of `setModal(false)`, and
+nothing in this app blocks. The OCCT body/preview materials are the remaining untokenised
+colours, by scope ruling.
+
+**The transform gizmo's colour is a real, total API wall; its proportions are not, and
+measuring the difference cost a revert.** Milestone 3 tried to carry `gizmoAxisX/Y/Z` onto
+`AIS_Manipulator` too, and read `AIS_Manipulator.hxx` end to end rather than trusting the
+brief's "as far as the API allows": no setter reaches `Axis::myColor` at any access level, so
+colour stops at the 2D `AxisGizmo` card by construction, not by choice. Proportions looked
+reachable — `protected Axis myAxes[3]` plus public `Axis::SetAxisRadius()` — so a
+`SlimAxisManipulator` subclass was built and then *measured* against real `Dump` pixels,
+three independent methodologies, several scale factors, at a point OCCT's own hover
+detection confirmed was on the arm: the cross-section **grew** as the radius shrank (34 px
+stock → 80 px at an extreme 0.02 scale, monotonic, not noise) — most likely the thinning
+shaft revealing the rotation ring/hub cluster underneath, which shares the same material.
+Reverted rather than shipped; the manipulator wears stock hues and stock proportions,
+unchanged, and the finding lives as a comment at the read site in `OcctViewWidget.cpp`. The
+zoom-persistence lesson generalizes: **trust the pixel over the setter's name** — a setter
+that compiles and a header that looks reachable are not evidence a control is doing what its
+name says.
 
 ### Dimensions, planes and units
 
@@ -693,6 +737,157 @@ that chooses one and the grid that shows it.
   signal the items panel and the extrude preview already follow, rather than
   `setDisplayUnit()` growing a private list of everything that shows a length.
 
+### Files, versions and the library
+
+Milestone 3's rule: a furniture is a file, and the file always round-trips or refuses —
+never half-loads and never lies about having saved.
+
+- **`FurnitureStore` owns `Documents/FurnifyMe/`** (created on demand via
+  `QStandardPaths::DocumentsLocation`; the root is *injected*, never looked up inside the
+  class, the same discipline `UserProgress` and `ScopedTestSettings` already established, so
+  the suite never touches a real user's files). "One `.furnify` file is one furniture" is the
+  spec's words, not the literal disk layout: a furniture is a **directory** under the root,
+  named by id — `manifest.json` + `shapes.bin` + `thumb.png` + `versions/*.bin` — and nothing
+  outside `FurnitureStore` touches a path inside it. **That layout is store-private** and can
+  change (zipping the directory into one real file is the obvious future move) without any
+  other file in the app noticing.
+- **`.furnify` = a JSON manifest (names, visibility, the symmetry block, the versions index)
+  plus the shapes themselves via `FurnifySerial`**, a thin, Qt-free wrapper (`furnify_geometry`
+  target, headless-tested) around OCCT's own `BinTools_ShapeSet` — exact B-rep, no
+  tessellation loss. `FurnifySerial` knows nothing about names or manifests; a blob format
+  that also carried labels could not be reused the day something other than a whole document
+  needs the same round-trip (a version snapshot already is that reuse). Both the blob and the
+  manifest carry their own format version and **refuse a future one outright** rather than
+  guessing at a newer layout — guessing is exactly how a document silently loses data.
+- **Every load is scratch-then-swap.** `FurnitureStore::loadFurniture`/`loadVersion` decode
+  into a fresh `DocumentModel` and only assign to the caller's document on success;
+  `DocumentModel::fromSerialized` additionally validates everything — vector-length matches,
+  no null shape, every outline face actually `TopAbs_FACE` — *before* mutating `this`, so the
+  scratch discipline is belt, and the validation is suspenders. A refusal is a Failure toast
+  naming the file; the init screen stays up. **A refusal must never surface as a success** —
+  the same law `BooleanResult::ok` already enforces for a failed boolean, now enforced for a
+  failed file.
+- **An absent manifest key defaults off — symmetry pre-dates files by one task.** Task 1
+  reserved the `symmetry` key before Task 4 existed to write it, specifically so a version or
+  furniture saved in that gap loads as symmetry-off rather than refusing outright. The rule
+  generalizes past this one key: a manifest is read forward-compatibly, never assumed
+  complete.
+- **Save (`Ctrl+S`) and autosave are never a checkpoint** and never touch the undo stack —
+  writing a file to disk is not an edit to the document, the same distinction visibility and
+  the symmetry mode already draw against `checkpoint()`. Autosave is a persisted, checkable
+  option: on, a save runs after every checkpoint, **debounced 400 ms** — the Appearance
+  panel's own discipline, because a drag or a fast sequence of edits must not thrash the disk
+  once per intermediate state — and flushed on close or on returning to the init screen so a
+  debounce window can never eat the last edit.
+- **Close-saves-first, never a modal question.** With autosave on there is nothing to ask;
+  with it off, leaving to the init screen or closing the window saves first and a toast names
+  what happened — a library app's files are not precious enough to lose work over a missed
+  dialog, and this app has no modal dialogs regardless (see "Reporting outcomes").
+- **A version is a named snapshot living inside the furniture's own file**, captured on
+  demand only, never automatically — shapes, item names, visibility, and (the ruling that
+  resolved the one real T1/T4 conflict) the symmetry pairings and plane, because a version is
+  a snapshot of the *whole document* and a restore that silently dropped pairings would break
+  live symmetry the moment the user undid the restore. **Restore replaces the current
+  document through one undoable checkpoint** — an accidental restore is one Ctrl+Z away —
+  while **version delete is file data, not document data**: it does not touch the undo stack
+  at all, so instead of a toast with Undo it is a **two-click confirm** on the row itself
+  ("Delete — click again to confirm"), final once taken. That taxonomy — document data goes
+  through checkpoint+Undo, file data goes through a second click — is the same line "Save is
+  never a checkpoint" draws, applied to deletion instead of writing.
+- **Compare is a second, read-only `OcctViewWidget`** (`myViewerOnly`, no gizmos, no
+  selection, no hover, no picking channels attached at all — skipped structurally in the
+  constructor rather than left wired and merely unused) beside the live one in a `QSplitter`,
+  with **cameras synced both ways, epsilon-guarded against recursion**: each side applies the
+  other's state only when it actually differs, the same `appStateChanged` no-reentry
+  discipline used everywhere else in this app. Restore closes the compare pane first, so
+  "replace the document" and "look at two documents side by side" can never overlap.
+
+### Live symmetry is twins, not replay
+
+Milestone 3's live symmetry works because it never tries to *replay* an edit onto a second
+body — it keeps two independent bodies and re-derives one from the other every time either
+changes.
+
+- **`mirror(edit(A))` replaces the twin, in the same checkpoint that committed the edit to
+  A.** No operation is recorded and no face correspondence is tracked: whatever `edit(A)`
+  produced, its mirror through the symmetry plane is *definitionally* the correct twin, so
+  `ModelingOps::mirrorShape` (Qt-free, headless-tested — mirror twice is the identity within
+  tolerance, volume is preserved, the centre of mass reflects exactly) is the entire
+  mechanism. One gesture — pull, bevel, transform, a boolean, a rename — produces one
+  checkpoint covering both bodies and one toast naming both.
+- **`symmetryOn()` gates every `twinOf()` read**, not just the ones that create pairings.
+  `DocumentModel::State` keeps the **pairing map** (`twin`) as checkpointed, undo-tracked
+  content — an edit under symmetry pairs bodies inside a commit, so undoing that commit must
+  restore the pairing exactly as it stood, the same way it restores names. The **mode**
+  (`symmetryOn`/`symmetryPlane`) deliberately does **not** ride in `State`: it is a session
+  setting set outside any checkpoint, the same rule presentation visibility already follows,
+  and treating it as undo content let an undo land *after* "turn symmetry off" and silently
+  turn it back on, resurrecting whatever pairing that older checkpoint had captured — a mode
+  switch reanimated by a Ctrl+Z aimed at something else. Every consumer of a pairing therefore
+  checks `symmetryOn()` **as well as** `twinOf()`: a pairing entry surviving in `State` is
+  inert the instant the live mode is off, whatever undo does to the map underneath it.
+- **Plane change and toggling symmetry off both unpair everything, with no checkpoint, but
+  both bump `revision()`.** Unpairing is not an edit a Ctrl+Z should have its own entry for —
+  it is a mode/plane change, the same category as visibility — but the manifest's symmetry
+  block has genuinely changed, so a furniture with autosave on has to notice and write it
+  back. A new plane invalidates every existing pairing's *meaning* (each mirror was computed
+  against the old plane), which is why changing the plane unpairs rather than re-mirroring in
+  place. Turning symmetry back on does not re-pair what was unpaired — pairing happens at
+  creation only, and there is no record of what used to go with what once the map is cleared.
+- **A boolean between a body and its own twin collapses the pair to one unpaired body** — a
+  body fused with its own mirror is the symmetric whole, not two halves any more — while a
+  boolean between a paired body and an unrelated one leaves the edited side paired as usual
+  (its twin replaced by the mirrored result, same as any other edit).
+- **A body that straddles the symmetry plane at creation is left unpaired.** Straddling means
+  the user is modeling on the centreline itself, where a mirror twin would be redundant
+  geometry sitting on top of the original — pairing is only offered to a body that is wholly
+  on one side.
+- The kernel bug the commute test caught is worth remembering past this milestone:
+  `pullFace` used to trust `TopAbs_Orientation` to decide which side of a face is "outward",
+  which is wrong for a mirrored (negative-determinant) body — a `BRepClass_FaceClassifier`
+  probe at a genuine on-face point replaced it. `bevelAxis`/`outwardNormalNear` carry the same
+  flag-only-normal risk on mirrored bodies and are **not yet fixed** — ledgered, out of scope
+  for the task that found it, worth checking before trusting a bevel gesture on a mirrored
+  body.
+
+### Render mode
+
+`View → Render mode` (menu-only, checkable, **session-only** — it is never persisted, the app
+always starts in modeling) strips the viewport down to the furniture and nothing else.
+
+- **"The viewport is the furniture alone" reaches every overlay, not just the obvious ones.**
+  Grid, axis-gizmo card, rail, drawers, dimension, markers, every live gizmo, and the symmetry
+  plane indicator all hide — the indicator is scene decoration exactly like the grid, so the
+  same rule applies to it, and it re-derives its "genuinely on screen now" state off
+  `myRenderModeActive` rather than off "the mode is on", closing a hole where it survived an
+  orbit mid-render-mode. The two teaching surfaces, `WalkthroughPanel` and `HintBalloon`, could
+  **not** take the same blunt hide: both classes read their own `isHidden()` as a semantic
+  signal — "restart the walkthrough from scratch", "never show this hint again" — so an
+  external, generic hide would have corrupted progress or permanently burned a hint's one
+  showing. Both suppress **non-destructively** instead, inside their own `refresh()`/
+  `reconsider()`, so progress resumes rather than restarts when render mode exits.
+- **Exits are any state or document change, including the Symmetry toggle.** Every
+  `myDocument.checkpoint()` call site runs through one `checkpointDocument()` choke point that
+  exits render mode first; undo/redo, Start Sketch, opening compare and returning to the init
+  screen each get their own explicit one-line exit, because they either take no *new*
+  checkpoint or are literally render mode's own gate reached by menu with the rail hidden.
+  `setSymmetryEnabled()` also exits first even though unpairing takes no checkpoint of its
+  own — it bumps `revision()` and dirties the furniture, which is document-changing by the
+  same test every other exit uses. A viewport press is intercepted at the top of
+  `mousePressEvent()` (left button only) and swallowed; orbit/pan/zoom/Fit All are untouched,
+  because framing a shot is not a modeling gesture.
+- **The tier probe** tries `Graphic3d_RM_RAYTRACING` first, timed against one redraw at a
+  roughly **100 ms** threshold (try/catch around the OCCT call, since ray tracing can throw on
+  hardware that does not support it), falls back to shadow-mapped rasterization
+  (`Graphic3d_CLight::SetCastShadows`, Dump-pixel-probed to confirm shadows are actually
+  drawn), and falls back again to plain rasterization. The chosen tier is **cached for the
+  session** — probed once, at first activation — and reported in a **Note** toast, which means
+  it goes quiet with `View → Show notifications` off: Notes can be silenced, Failures cannot,
+  and a tier announcement is a Note by that same taxonomy, not a refusal.
+- A neutral studio gradient backdrop replaces the flat viewport colour while active, derived
+  from the same function `applyTheme()` uses, so a live Appearance edit re-derives it for
+  free. `Save Screenshot` exports at 2× device pixels while render mode is on.
+
 ### Qt plugin deployment - do not remove
 
 Qt will not start without a platform plugin, and it looks for one in a `platforms/`
@@ -733,7 +928,10 @@ The shell's composition, settled in Phase 5 against HTML mockups the user chose 
   casualty, then Undo). A fourteenth tool raises that floor rather than reintroducing
   the clip, but the user's actual screen height is a real ceiling the floor cannot push
   past, so the rail still wants a rework - scrolling, grouping, something - well before
-  it gets there.
+  it gets there. **Symmetry stayed off the rail for exactly this reason** — it is a
+  Model-menu-only checkable action (`S`), not a fifteenth chip, so live symmetry did not
+  raise the floor further. Render mode and the bottom-bar toggle are View-menu-only for
+  the same load-bearing reason, not merely by omission.
 - **The items drawer** floats beside the rail, toggled by the existing Items action -
   visibility is derived from the action's checked state, both directions, and nothing
   else may show or hide it. The viewport is full-bleed; there is no dock.
@@ -934,9 +1132,13 @@ never-silent-failure law, so `Failure` bypasses the toggle unconditionally. Ever
 a success report carrying Undo; every refusal is a Failure — the taxonomy is load-bearing.
 
 **Sketching**: Shift snaps the cursor onto the previous segment's direction (parameter
-then grid-snapped along the line); the close-hit on the first point is tested on the RAW
-plane hit and outranks the straight constraint, with the radius in one place
-(`OcctViewWidget::sketchCloseTolerance()`). Ctrl+Z mid-sketch removes the last point
+then grid-snapped along the line); the close-hit on the first point is tested on the
+plane hit **snapped first when Snap to Grid is on** (raw otherwise) and outranks the
+straight constraint, with the radius in one place
+(`OcctViewWidget::sketchCloseTolerance()`). The raw-only comparison it replaced was the
+Milestone 3 whole-branch review's 1.25× find: `myCloseTarget` is the SNAPPED first point,
+so a raw probe could sit up to √2/2·step from it while the tolerance is step/2 — whether
+hovering the first point closed depended on where in the grid cell the ray landed. Ctrl+Z mid-sketch removes the last point
 through Backspace's one implementation; the toast's Undo pill deliberately keeps the
 document-only predicate.
 
@@ -993,6 +1195,45 @@ document-only predicate.
 - **Topological naming:** face indices are not stable across a rebuild. Milestone 1 dodges
   this by having no history tree — do not design in an assumption of stable IDs, because a
   real naming scheme will be needed when history lands.
+- **Reparenting a native GL widget out of a `QSplitter` and back can leave the real HWND
+  client rect stale, while Qt geometry, `V3d_View`, and even its own `Dump` all agree on the
+  WRONG size.** Closing the Milestone 3 compare pane moved `OcctViewWidget` out of the
+  splitter; `width()`/`height()` correctly reported the full viewport afterward, but the
+  underlying native surface stayed at its old, splitter-constrained size — unmoved by
+  `resize()`, `repaint()`, `hide()`/`show()`, or even a full top-level resize round trip. Only
+  `GetClientRect` or a composited `PrintWindow` capture ever saw the real size; a snapshot or a
+  picking proof built from Qt's own numbers stayed green while the app was visibly broken. The
+  fix is a defensive, always-on `SetWindowPos` in `resizeEvent()`, in **device** pixels
+  (`toDevicePixels()`, this file's one conversion point — a raw HWND client rect is
+  unambiguously device-pixel), synced to Qt's own idea of the widget's size on every resize
+  regardless of what caused the drift. `windows.h` can be hoisted above the OCCT includes for
+  the `SetWindowPos`/`HWND` types using the same `NOMINMAX`-style guard `gui_smoke` already
+  uses, without colliding with `Handle()` or the `near`/`far` traps above.
+- **`initializeViewer()` must stay lazy — an unconditional call reached from inside the
+  constructor deterministically breaks startup.** `resyncView()` (undo/redo/open/restore,
+  symmetry on/off) legitimately needs the viewer to exist, but calling `initializeViewer()`
+  unconditionally to guarantee that reached it from `showInitScreen()`'s own path inside the
+  constructor — ahead of the window's first `show()` — and forced `winId()`/native-window
+  realization far earlier than this widget's lazy-init contract intends, which broke camera
+  and focus determinism (`startup distance is 700 mm`, focus-visible checks) in `gui_smoke`.
+  Follow `GridRenderer::update()`'s existing rule instead: a no-op until a context already
+  exists, with the desired state recorded first and `applyCameraState()` re-applying it on the
+  first real `paintEvent()`.
+- **`AIS_Manipulator` styling has a real API wall for colour and a separate, only
+  pixel-measurable one for proportions (OCCT 8.0.1).** No setter reaches a per-axis colour at
+  any access level — `Axis::myColor` has none — so restyling the 3D transform gizmo to match
+  a token stops there, structurally. Proportions look reachable (`protected Axis myAxes[3]`
+  plus public `Axis::SetAxisRadius()`), but a measured `Dump` probe of a subclass that used
+  them showed the rendered cross-section **growing** as the radius shrank — the thinning shaft
+  revealing same-material neighbouring parts underneath, not a shrinking control. Measure
+  pixels before believing any styling setter's name, the same law the zoom-persistence finding
+  already established for this class.
+- **A/B a claimed pre-existing failure against the parent commit before calling it
+  pre-existing.** A Milestone 3 task asserted a scale-run flake was environmental; a review's
+  A/B run against the parent commit proved the same run passed there and the branch's own
+  commit deterministically broke it (the `initializeViewer()` regression above). The rule
+  holds generally: "pre-existing" and "environmental" are claims that need a comparison run to
+  back them, not a plausible story.
 
 ## Milestone 1 acceptance — all of these, on **both** platforms
 

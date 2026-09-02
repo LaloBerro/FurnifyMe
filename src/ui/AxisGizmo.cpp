@@ -13,10 +13,22 @@
 
 namespace {
 
-// Unity's axis colours, adjusted to sit on our dark viewport.
-const QColor kAxisColor[3] = {QColor("#e0564a"),    // X red
-                              QColor("#7fc84e"),    // Y green
-                              QColor("#4a80e0")};   // Z blue
+// Unity's axis colours, adjusted to sit on our dark viewport - promoted to
+// Theme::Spec tokens in Milestone 3 (Task 5), editable in the Appearance
+// panel. Read LIVE inside paintEvent() rather than cached here: a QColor
+// array at file scope would be exactly the "cached appearance value" survives
+// a themeChanged that Theme.h's own Notifier comment warns against - the
+// gizmo would keep drawing the shipped hues after an edit until the next
+// process restart. Byte-identical to what this array held before the tokens
+// existed, so defaultSpec() repaints nothing on its own.
+QColor axisColor(int axis)
+{
+    switch (axis) {
+        case 0: return Theme::gizmoAxisX();
+        case 1: return Theme::gizmoAxisY();
+        default: return Theme::gizmoAxisZ();
+    }
+}
 constexpr char kAxisLetter[3] = {'x', 'y', 'z'};
 
 constexpr double kRadius = 36.0;      // arm length in pixels
@@ -237,7 +249,7 @@ void AxisGizmo::paintEvent(QPaintEvent* /*event*/)
     const QPointF centre = hubCenter(*this);
 
     for (const Tip* tip : order) {
-        QColor colour = kAxisColor[tip->axis];
+        QColor colour = axisColor(tip->axis);
         const bool hovered = tip->axis == myHoverAxis && tip->positive == myHoverPositive;
         // Far side dims, hover brightens - same depth cue Unity uses.
         if (tip->depth > 0.15) colour = colour.darker(140);

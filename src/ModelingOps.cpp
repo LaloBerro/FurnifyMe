@@ -1,5 +1,6 @@
 #include "ModelingOps.h"
 
+#include <algorithm>
 #include <memory>
 #include <sstream>
 
@@ -15,6 +16,9 @@
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
+#include <BRepClass_FaceClassifier.hxx>
+#include <BRepTools.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
@@ -50,6 +54,7 @@
 #include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Pln.hxx>
+#include <gp_Pnt2d.hxx>
 #include <gp_Quaternion.hxx>
 #include <gp_Vec.hxx>
 
@@ -101,19 +106,89 @@ bool isShapeSane(const TopoDS_Shape& shape)
     return analyzer.IsValid();
 }
 
-// BRepAdaptor_Surface carries geometry and location only - it never applies
-// TopAbs_Orientation. On a plain box three of six faces are REVERSED and
-// their plane normals point into the body; the same one-line fix
-// MainWindow::lockToFace already carries for the sketch plane belongs here
-// too, so pullFace's caller never has to know about it.
-gp_Pln outwardPlane(const TopoDS_Face& face, const BRepAdaptor_Surface& surface)
+// A point genuinely ON `face`'s own material - not merely inside its
+// bounding box, and NOT its area centroid. This app's canonical face has a
+// hole in it (the slab-with-a-rectangular-through-hole CLAUDE.md's own STEP
+// export check pins), and BRepGProp::SurfaceProperties' centroid is the
+// centroid of OUTER-MINUS-INNER area: for a centred hole that point lands
+// exactly in the hole, on no material at all - fix round 1, found by
+// review before it ever reached the suite. Samples a grid of the face's own
+// UV parameter space and classifies each candidate with
+// BRepClass_FaceClassifier, the one classifier that reads every wire (the
+// outer boundary AND any hole) rather than trusting a bounding box or an
+// area-weighted average. False (leaving `out` untouched) only for a
+// genuinely degenerate face no sample lands inside - not expected for
+// anything this app builds, and the caller (outwardPlane(), below) falls
+// back to the flag-based guess alone rather than refuse the pull over it.
+bool pointOnFace(const TopoDS_Face& face, gp_Pnt& out)
 {
-    gp_Pln plane = surface.Plane();
-    if (face.Orientation() == TopAbs_REVERSED) {
-        plane = gp_Pln(gp_Ax3(plane.Location(), plane.Axis().Direction().Reversed(),
-                              plane.Position().XDirection()));
+    Standard_Real umin = 0.0, umax = 0.0, vmin = 0.0, vmax = 0.0;
+    BRepTools::UVBounds(face, umin, umax, vmin, vmax);
+    const Handle(Geom_Surface) geometry = BRep_Tool::Surface(face);
+    if (geometry.IsNull()) return false;
+
+    constexpr int kGrid = 9;   // odd, so the exact centre is sampled too
+    for (int iu = 0; iu < kGrid; ++iu) {
+        const double u = umin + (umax - umin) * (iu + 0.5) / kGrid;
+        for (int iv = 0; iv < kGrid; ++iv) {
+            const double v = vmin + (vmax - vmin) * (iv + 0.5) / kGrid;
+            BRepClass_FaceClassifier classifier(face, gp_Pnt2d(u, v), 1.0e-7);
+            if (classifier.State() == TopAbs_IN) {
+                out = geometry->Value(u, v);
+                return true;
+            }
+        }
     }
-    return plane;
+    return false;
+}
+
+// BRepAdaptor_Surface carries geometry and location only - it never applies
+// TopAbs_Orientation. On a plain box built by BRepPrimAPI_MakeBox three of
+// six faces are REVERSED and their plane normals point into the body, and
+// the flag alone says which - the fast guess below.
+//
+// It stops being reliable the moment `body` came from a MIRROR (Milestone
+// 3's own twin bodies). A mirror is a negative-determinant transform, and
+// BRepBuilderAPI_Transform's copy rebuild toggles a mirrored shape's face
+// orientation flags UNIFORMLY to keep the B-rep valid - independent of
+// whether a given face's own geometric normal happened to change direction
+// under that particular reflection. A face square to the mirror axis (a
+// box's top, mirrored across a vertical plane) keeps its raw normal exactly
+// and flips its orientation flag anyway, so the flag-only rule reads it
+// backwards. Measured: pulling that face by +20 (a "grow" gesture) landed
+// at 6000 mm3 instead of the correct 8400 - net INWARD - before the check
+// below existed, which is exactly the edit-then-mirror /
+// mirror-then-edit commute property this file is pinned against.
+//
+// Settled with ground truth rather than trusted a second time:
+// BRepClass3d_SolidClassifier, stepped a small distance off the face along
+// the candidate normal from a point genuinely ON the face - pointOnFace(),
+// above; ITS OWN comment covers why that point is not simply the face's
+// centre of mass. This is orientation-flag-independent, so it is correct
+// whether or not `body` was built by a mirror, and it costs one classifier
+// build on the COMMIT path only (pullFaceBy calls this once per gesture,
+// never per drag frame).
+gp_Pln outwardPlane(const TopoDS_Shape& body, const TopoDS_Face& face,
+                    const BRepAdaptor_Surface& surface)
+{
+    const gp_Pln plane = surface.Plane();
+    gp_Dir candidate = plane.Axis().Direction();
+    if (face.Orientation() == TopAbs_REVERSED) candidate.Reverse();
+
+    // Ground truth overrides the flag-based guess.
+    gp_Pnt onFace;
+    if (pointOnFace(face, onFace)) {
+        const gp_Pnt probe = onFace.Translated(gp_Vec(candidate) * 0.01);
+        BRepClass3d_SolidClassifier classifier(body);
+        classifier.Perform(probe, 1.0e-6);
+        if (classifier.State() == TopAbs_IN) candidate.Reverse();
+    }
+
+    // gp_Ax3's (P, N, Vx) constructor keeps Vx as the X direction when it is
+    // already perpendicular to N, which it is here (candidate only ever
+    // differs from the plane's own axis by a sign flip) - so only the
+    // normal (and with it the derived Y direction) changes.
+    return gp_Pln(gp_Ax3(plane.Location(), candidate, plane.Position().XDirection()));
 }
 
 // filletEdge/chamferEdge get this check for free - BRepFilletAPI throws on
@@ -523,7 +598,7 @@ BooleanResult pullFace(const TopoDS_Shape& body, const TopoDS_Face& face, double
             return out;
         }
 
-        const gp_Pln plane = outwardPlane(face, surface);
+        const gp_Pln plane = outwardPlane(body, face, surface);
         const gp_Dir outward = plane.Axis().Direction();
         // Growing sweeps outward and fuses the prism on; carving sweeps
         // INWARD by the same amount and cuts that prism away - a carve tool
@@ -747,6 +822,72 @@ bool isIdentityTransform(const gp_Trsf& trsf, double linearTolerance,
     Standard_Real angle = 0.0;
     trsf.GetRotation().GetVectorAndAngle(axis, angle);
     return std::fabs(angle) <= angularToleranceDeg * kPi / 180.0;
+}
+
+BooleanResult mirrorShape(const TopoDS_Shape& shape, const gp_Pln& plane)
+{
+    BooleanResult out;
+    if (shape.IsNull()) {
+        out.error = "mirror: shape is null";
+        return out;
+    }
+
+    try {
+        gp_Trsf trsf;
+        trsf.SetMirror(gp_Ax2(plane.Location(), plane.Axis().Direction()));
+        BRepBuilderAPI_Transform transform(shape, trsf, Standard_True /* copy geometry */);
+        if (!transform.IsDone()) {
+            out.error = "mirror: kernel failed to apply the transform";
+            return out;
+        }
+        const TopoDS_Shape result = transform.Shape();
+        if (!isShapeSane(result)) {
+            out.error = "mirror: result is empty or invalid";
+            return out;
+        }
+
+        out.ok = true;
+        out.shape = result;
+    } catch (const Standard_Failure& e) {
+        out.ok = false;
+        out.error = std::string("mirror: kernel exception - ") +
+                     (e.GetMessageString() ? e.GetMessageString() : "unknown");
+    }
+    return out;
+}
+
+bool boundingBoxStraddlesPlane(const TopoDS_Shape& shape, const gp_Pln& plane, double tolerance)
+{
+    if (shape.IsNull()) return false;
+
+    Bnd_Box box;
+    BRepBndLib::Add(shape, box);
+    if (box.IsVoid()) return false;
+
+    double xmin = 0.0, ymin = 0.0, zmin = 0.0, xmax = 0.0, ymax = 0.0, zmax = 0.0;
+    box.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+
+    const gp_Pnt origin = plane.Location();
+    const gp_Dir normal = plane.Axis().Direction();
+    const gp_Pnt corners[8] = {
+        gp_Pnt(xmin, ymin, zmin), gp_Pnt(xmax, ymin, zmin),
+        gp_Pnt(xmin, ymax, zmin), gp_Pnt(xmax, ymax, zmin),
+        gp_Pnt(xmin, ymin, zmax), gp_Pnt(xmax, ymin, zmax),
+        gp_Pnt(xmin, ymax, zmax), gp_Pnt(xmax, ymax, zmax),
+    };
+
+    double minDist = 0.0;
+    double maxDist = 0.0;
+    bool first = true;
+    for (const gp_Pnt& corner : corners) {
+        const double d = gp_Vec(origin, corner).Dot(gp_Vec(normal));
+        if (first) { minDist = maxDist = d; first = false; }
+        else {
+            minDist = std::min(minDist, d);
+            maxDist = std::max(maxDist, d);
+        }
+    }
+    return minDist < -tolerance && maxDist > tolerance;
 }
 
 void tessellate(const TopoDS_Shape& shape, double linearDeflection)

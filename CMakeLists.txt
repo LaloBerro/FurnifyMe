@@ -28,6 +28,7 @@ add_library(furnify_geometry STATIC
   src/CameraController.cpp
   src/Measure.cpp
   src/UserProgress.cpp
+  src/FurnifySerial.cpp
 )
 target_include_directories(furnify_geometry PUBLIC
   src ${OpenCASCADE_INCLUDE_DIR})
@@ -35,6 +36,10 @@ target_link_libraries(furnify_geometry PUBLIC
   TKernel TKMath TKG2d TKG3d TKGeomBase TKGeomAlgo
   TKBRep TKTopAlgo TKPrim TKBO TKBool TKFillet TKShHealing TKMesh
   TKXSBase ${OCCT_STEP_LIBS}
+  # Binary shape (de)serialization for .furnify's shapes.bin - BinTools_ShapeSet
+  # lives in the "light" binary-persistence toolkit, which needs no OCAF/document
+  # machinery. Modeling-adjacent, not visualization - see CLAUDE.md's stack note.
+  TKBinL
 )
 
 # ---------------------------------------------------------------------------
@@ -64,6 +69,10 @@ add_test(NAME headless_progress COMMAND headless_progress)
 add_executable(headless_direct_modeling tests/direct_modeling.cpp)
 target_link_libraries(headless_direct_modeling PRIVATE furnify_geometry)
 add_test(NAME headless_direct_modeling COMMAND headless_direct_modeling)
+
+add_executable(headless_furnify_serial tests/furnify_serial.cpp)
+target_link_libraries(headless_furnify_serial PRIVATE furnify_geometry)
+add_test(NAME headless_furnify_serial COMMAND headless_furnify_serial)
 
 # ---------------------------------------------------------------------------
 # Application (Qt + OCCT visualization)
@@ -118,6 +127,11 @@ if(FURNIFYME_BUILD_APP)
       src/ui/ExtrudePreview.cpp
       src/ui/PullArrow.cpp
       src/ui/BevelArrow.cpp
+      src/ui/InlineRename.cpp
+      src/ui/InitScreen.cpp
+      src/ui/VersionsPanel.cpp
+      src/ui/SaveVersionCard.cpp
+      src/FurnitureStore.cpp
     )
     target_include_directories(furnify_app PUBLIC src/ui)
     target_link_libraries(furnify_app PUBLIC

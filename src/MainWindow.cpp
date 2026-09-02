@@ -11,14 +11,17 @@
 #include "ExtrudePreview.h"
 #include "HintBalloon.h"
 #include "IconSet.h"
+#include "InitScreen.h"
 #include "ItemsPanel.h"
 #include "PullArrow.h"
+#include "SaveVersionCard.h"
 #include "ShortcutSheet.h"
 #include "Theme.h"
 #include "Toast.h"
 #include "ToolChip.h"
 #include "ToolCluster.h"
 #include "ViewportOverlay.h"
+#include "VersionsPanel.h"
 #include "WalkthroughPanel.h"
 
 #include <BRepAdaptor_Curve.hxx>
@@ -37,12 +40,19 @@
 #include <gp_Vec.hxx>
 
 #include <QAction>
+#include <QSignalBlocker>
 #include <QActionGroup>
 #include <QFileDialog>
+#include <QFontMetrics>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QMenuBar>
 #include <QCloseEvent>
+#include <QPainter>
+#include <QPushButton>
 #include <QSettings>
+#include <QSplitter>
+#include <QStandardPaths>
 #include <QStatusBar>
 #include <QTimer>
 #include <QtGlobal>
@@ -53,8 +63,212 @@
 #include <utility>
 #include <vector>
 
-MainWindow::MainWindow(QWidget* parent, bool persistProgress)
+QString MainWindow::defaultLibraryRoot()
+{
+    // A SENTINEL, not the real path - resolveLibraryRoot() below is the one
+    // place that actually asks QStandardPaths, so there is exactly one
+    // implementation of "where the real library lives". Deliberately not
+    // the empty string: see this method's declaration in MainWindow.h for
+    // why an empty libraryRoot has to mean something else entirely (a
+    // refusal, not "use the default"). The leading \x01 makes collision
+    // with any string a caller could type or a path could resolve to
+    // essentially impossible.
+    static const QString sentinel =
+        QStringLiteral("\x01__FurnifyMe_default_library_root__");
+    return sentinel;
+}
+
+namespace {
+// The real library location - QStandardPaths::DocumentsLocation +
+// "/FurnifyMe" - is resolved here rather than inline in the initializer
+// list below, purely so the constructor's own comment can stay next to the
+// member it explains rather than a one-liner buried in a mem-initializer.
+//
+// Structural, not advisory: an EMPTY (or all-whitespace) libraryRoot
+// reaching this function is refused outright with qFatal() rather than
+// quietly treated as "use the default". That default is asked for through
+// MainWindow::defaultLibraryRoot()'s own sentinel - the constructor's
+// header default, so main.cpp's plain `MainWindow window;` still gets it
+// for free - so an empty string here can only mean a caller passed one
+// explicitly, most concretely a QTemporaryDir that failed to create and
+// handed back "". Silently falling through to the real library in that
+// case is exactly the failure mode this refusal exists to close off; the
+// test suite's own RequiredTempDir (gui_smoke.cpp) is the other half of
+// the same fix, at the point such a failure would actually originate.
+QString resolveLibraryRoot(const QString& injected)
+{
+    if (injected == MainWindow::defaultLibraryRoot()) {
+        return QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation) +
+              QStringLiteral("/FurnifyMe");
+    }
+    if (injected.trimmed().isEmpty()) {
+        qFatal("MainWindow: an empty library root was passed explicitly - refusing to "
+              "silently fall back to the real furniture library. Pass "
+              "MainWindow::defaultLibraryRoot() to ask for that on purpose, or a real "
+              "path otherwise.");
+    }
+    return injected;
+}
+
+// The no-recursion camera sync's own epsilon compare - see
+// MainWindow::syncCamera()'s declaration for the whole argument. Tight on
+// purpose: the two widgets are meant to be pushed to EXACTLY the same
+// CameraState by that function, so this only has to absorb floating-point
+// noise, not genuine disagreement, and a loose epsilon would let a real
+// follow (an orbit that moved the camera by less than the epsilon) go
+// silently unsynced. CameraController.h gains nothing new for this - every
+// field it needs is already public on CameraState.
+bool camerasApproximatelyEqual(const CameraState& a, const CameraState& b)
+{
+    constexpr double kPosEps = 1.0e-6;     // mm
+    constexpr double kAngleEps = 1.0e-6;   // degrees
+    constexpr double kDistEps = 1.0e-6;    // mm
+    return a.target.Distance(b.target) < kPosEps &&
+           std::abs(a.azimuthDeg - b.azimuthDeg) < kAngleEps &&
+           std::abs(a.elevationDeg - b.elevationDeg) < kAngleEps &&
+           std::abs(a.distance - b.distance) < kDistEps;
+}
+
+// The compare view's corner badge: a family card (Theme::paintSurface,
+// opaque, WA_NoMousePropagation) naming the version being compared, with a
+// Close-compare control on it - ItemsPanel's own composition, not the
+// sibling-widget trick ExtrudePreview/Toast need. Those two exist because
+// their cards must let a click through to the model everywhere EXCEPT one
+// small interactive area; this badge has no such requirement - it is a
+// small, bounded card in a corner, exactly like ItemsPanel's own drawer -
+// so its Close button can be an ordinary CHILD, hit-tested by Qt the normal
+// way, with nothing to route around.
+//
+// No Q_OBJECT: it declares no signals of its own, and connecting an
+// existing Qt signal (QPushButton::clicked, Theme::Notifier::changed) to a
+// lambda needs no moc on the RECEIVING object - only on a class that
+// declares its own signals or slots. MainWindow reads the button back
+// through closeButton() and wires its own connection to closeCompare(),
+// rather than this class knowing MainWindow exists.
+class CompareBadge : public QWidget {
+public:
+    explicit CompareBadge(QWidget* parent)
+        : QWidget(parent)
+    {
+        setAttribute(Qt::WA_NoSystemBackground);
+        setAttribute(Qt::WA_NoMousePropagation);
+
+        myName = new QLabel(this);
+        myClose = new QPushButton(MainWindow::compareBadgeCloseLabel(), this);
+        myClose->setFixedHeight(22);
+
+        auto* layout = new QHBoxLayout(this);
+        layout->setContentsMargins(kPad, kPad, kPad, kPad);
+        layout->setSpacing(10);
+        layout->addWidget(myName, 1);
+        layout->addWidget(myClose);
+
+        // Tracks the PARENT's own resize, not this widget's - the badge sits
+        // at a fixed offset from myCompareView's own top-left corner, and
+        // that offset's snapped device-pixel value depends on where
+        // myCompareView itself lands inside the window (see reposition()),
+        // which moves whenever the splitter handle is dragged. No Q_OBJECT
+        // needed: eventFilter() overrides a plain virtual QObject already
+        // declares.
+        if (parent) parent->installEventFilter(this);
+
+        applyTheme();
+        connect(Theme::notifier(), &Theme::Notifier::changed, this,
+                [this] { applyTheme(); });
+    }
+
+    // The version's name is USER TEXT - painted here raw and unmangled
+    // (never truncated to a fixed banned-word-safe alphabet - CLAUDE.md's
+    // point is that the user's own words are not this app's copy to
+    // police), and deliberately not exposed through any paintedTexts()-style
+    // accessor the vocabulary sweep would walk. See VersionsPanel.h's class
+    // comment for the same rule applied to a row.
+    void setVersionName(const QString& name)
+    {
+        const QFontMetrics fm(Theme::bodyFont());
+        myName->setText(fm.elidedText(name, Qt::ElideRight, kMaxNameWidth));
+        myName->setToolTip(name);
+        growAndReposition();
+    }
+
+    QPushButton* closeButton() const { return myClose; }
+
+    // Snaps this card's position off its parent's own placement inside the
+    // window - Theme.h's position half of the whole-device-pixel rule, the
+    // same one ViewportOverlay::relayout() applies to every anchored card.
+    // Public so MainWindow can call it once right after construction
+    // (before the first paint, when this card is not yet parent-resized) as
+    // well as from the event filter below.
+    void reposition()
+    {
+        QWidget* host = parentWidget();
+        if (!host) return;
+        const QPoint origin = host->mapTo(host->window(), QPoint(0, 0));
+        const double dpr = host->devicePixelRatioF();
+        move(Theme::snapToDevicePixels(kMargin, origin.x(), dpr),
+             Theme::snapToDevicePixels(kMargin, origin.y(), dpr));
+    }
+
+protected:
+    void paintEvent(QPaintEvent* /*event*/) override
+    {
+        QPainter painter(this);
+        Theme::paintSurface(painter, rect(), 8);
+    }
+
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        if (watched == parentWidget() && event->type() == QEvent::Resize) reposition();
+        return QWidget::eventFilter(watched, event);
+    }
+
+private:
+    static constexpr int kPad = 10;
+    static constexpr int kMaxNameWidth = 160;
+    static constexpr int kMargin = 16;   // the same corner margin every other floating card uses
+
+    // Theme.h's SIZE half of the whole-device-pixel rule: adjustSize() first,
+    // to get this card's natural size from its own layout (the name label's
+    // width changed), then grown to a whole number of device pixels so a
+    // fractional display scale cannot leave an unpainted row along its far
+    // edge over OCCT's GL surface - see ExtrudePreview::applyTheme() and
+    // ViewportOverlay::relayout() for the same rule applied to a
+    // setFixedSize() card and an anchored one respectively; this is the
+    // adjustSize()-driven variant of the identical rule. reposition() runs
+    // afterward too, since a font or padding change can, in principle, move
+    // where this card's content wants to sit relative to its own top-left.
+    void growAndReposition()
+    {
+        adjustSize();
+        resize(Theme::wholeDevicePixels(size()));
+        reposition();
+    }
+
+    void applyTheme()
+    {
+        myName->setStyleSheet(QStringLiteral("background: transparent; color: %1; font-size: %2pt;")
+                                  .arg(Theme::text().name())
+                                  .arg(Theme::bodyFont().pointSizeF()));
+        myClose->setStyleSheet(
+            QStringLiteral("QPushButton { background-color: %1; color: %2; border: none; "
+                          "border-radius: 4px; font-size: %3pt; padding: 2px 8px; } "
+                          "QPushButton:hover { background-color: %4; }")
+                .arg(Theme::chip().name(), Theme::text().name())
+                .arg(Theme::labelFont().pointSizeF())
+                .arg(Theme::chipHover().name()));
+        growAndReposition();
+        update();
+    }
+
+    QLabel* myName = nullptr;
+    QPushButton* myClose = nullptr;
+};
+
+}  // namespace
+
+MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& libraryRoot)
     : QMainWindow(parent)
+    , myStore(resolveLibraryRoot(libraryRoot))
     , myPersistProgress(persistProgress)
 {
     if (myPersistProgress) {
@@ -84,6 +298,20 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
         // started silent would look broken to a first-time user.
         myShowNotifications =
             settings.value(QStringLiteral("showNotifications"), true).toBool();
+
+        // View -> Show bottom bar. Same guard, same "read before
+        // buildActions()" reason as the notifications preference just above:
+        // the View entry's initial checked state has to agree with what was
+        // last chosen. Default ON, for the same reason.
+        myShowBottomBar = settings.value(QStringLiteral("showBottomBar"), true).toBool();
+
+        // File -> Save automatically. Same guard, same "read before
+        // buildActions()" reason: the menu entry's initial checked state has
+        // to agree with what was last chosen rather than being corrected
+        // afterwards. Defaults to ON - see the member's own comment in the
+        // header for why the safer default wins for a user who has not found
+        // the toggle yet.
+        myAutosaveOn = settings.value(QStringLiteral("autosave"), true).toBool();
 
         // Before a single widget exists, for the same reason as the unit
         // above: every card measures itself with the type scale in its own
@@ -143,6 +371,12 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     // The transform gizmo reports the end of a drag; this window decides what
     // it means, exactly as it does for the face-pull arrow above.
     connect(myView, &OcctViewWidget::gizmoReleased, this, &MainWindow::onGizmoReleased);
+    // Render mode's own exit gesture - "a pick press in the viewport". The
+    // viewport already swallowed the press (see its own mousePressEvent()),
+    // so this window's only job is to turn the mode off through the single
+    // authority every other exit routes through.
+    connect(myView, &OcctViewWidget::renderModeExitRequested, this,
+            [this] { setRenderModeEnabled(false); });
 
     buildActions();
     buildAppBar(buildMenus());
@@ -159,6 +393,10 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     // touches no document but still has to reread every dimension the panel
     // shows (see setDisplayUnit()).
     connect(this, &MainWindow::appStateChanged, myItemsPanel, &ItemsPanel::refresh);
+    // The versions drawer, on the same terms - built in buildOverlay(),
+    // which has already run by this point in the constructor.
+    if (myVersionsPanel)
+        connect(this, &MainWindow::appStateChanged, myVersionsPanel, &VersionsPanel::refresh);
 
     // Connected AFTER the refresh above, so it runs after it: a row added or
     // removed changes the drawer's height, and the drawer's rectangle is one
@@ -177,13 +415,35 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     // Only reads state and moves geometry, so it cannot recurse back into
     // updateActions().
     connect(this, &MainWindow::appStateChanged, this, [this] {
-        myItemsPanel->setVisible(myItemsPanelAction->isChecked());
+        // Render mode (Milestone 3, item 5) hides every one of these outright,
+        // regardless of its own action's checked state - "&& !myRenderModeOn"
+        // on each line below rather than a separate branch, so turning render
+        // mode off needs no restore logic of its own: the very next
+        // appStateChanged (updateActions() ends by emitting it) re-derives
+        // every line from the SAME action states it always has, which is
+        // CLAUDE.md's sibling-visibility law applied to a fourth surface
+        // rather than a new mechanism.
+        const bool hiddenForRenderMode = myRenderModeOn;
+        myItemsPanel->setVisible(myItemsPanelAction->isChecked() && !hiddenForRenderMode);
         // Derived on every state change from the action, exactly as the
         // drawer above is and for exactly the same reason - a one-shot hide
         // is not a state, and QWidget::showChildren() on the window's first
         // show will happily undo one.
         if (myAppearancePanel)
-            myAppearancePanel->setVisible(myAppearanceAction->isChecked());
+            myAppearancePanel->setVisible(myAppearanceAction->isChecked() && !hiddenForRenderMode);
+        if (myVersionsPanel)
+            myVersionsPanel->setVisible(myVersionsPanelAction->isChecked() && !hiddenForRenderMode);
+        // The status bar's own shown state, on the same derived-not-stored
+        // terms - View -> Show bottom bar's checked state IS the answer,
+        // never a one-shot hide()/show() called from the toggle handler
+        // alone.
+        if (myBottomBarAction)
+            statusBar()->setVisible(myBottomBarAction->isChecked() && !hiddenForRenderMode);
+        // The rail and the axis gizmo card have no action of their own to be
+        // derived FROM - they are always on outside render mode - so this is
+        // simply their whole predicate rather than one term of it.
+        if (myRail) myRail->setVisible(!hiddenForRenderMode);
+        if (myAxisGizmo) myAxisGizmo->setVisible(!hiddenForRenderMode);
         if (myOverlay) myOverlay->relayout();
     });
 
@@ -222,6 +482,11 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
             [this](int id) { selectOutline(id); });
     connect(myView, &OcctViewWidget::selectionChanged, this,
             [this] { myItemsPanel->showSelection(myView->selectedSolidIds()); });
+    // A row's rename gesture (double-click, or F2 through onRenameSelected())
+    // committed. MainWindow does the checkpoint/setItemName/toast, exactly as
+    // the panel's own header says - see onItemRenameCommitted().
+    connect(myItemsPanel, &ItemsPanel::renameCommitted, this,
+            &MainWindow::onItemRenameCommitted);
 
     // The Items rail button, the menu entry and Ctrl+Alt+S all drive the one
     // action, and the drawer's shown state is read off that action rather
@@ -244,6 +509,13 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     // geometry, so it cannot recurse back into updateActions().
     connect(myItemsPanelAction, &QAction::toggled, this, [this](bool shown) {
         myItemsPanel->setVisible(shown);
+        if (myOverlay) myOverlay->relayout();
+    });
+
+    // The versions drawer, on the same terms - see the items drawer's
+    // toggle above.
+    connect(myVersionsPanelAction, &QAction::toggled, this, [this](bool shown) {
+        if (myVersionsPanel) myVersionsPanel->setVisible(shown);
         if (myOverlay) myOverlay->relayout();
     });
 
@@ -279,6 +551,14 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress)
     setWindowTitle(tr("FurnifyMe"));
     resize(1280, 800);
     statusBar()->showMessage(tr("Right-drag to orbit, middle-drag to pan, wheel to zoom"));
+
+    // Built after buildOverlay() so it can be raised above everything that
+    // already exists over the viewport, and shown last: on launch nothing is
+    // open, myShowingInitScreen already starts true, and this is what
+    // actually raises the gallery and writes its own status message over
+    // the generic one two lines up.
+    buildInitScreen();
+    showInitScreen();
 }
 
 void MainWindow::buildActions()
@@ -322,9 +602,64 @@ void MainWindow::buildActions()
     myUnlockFaceAction->setToolTip(unlockTooltipText());
     connect(myUnlockFaceAction, &QAction::triggered, this, &MainWindow::unlockFace);
 
+    // Symmetry (Milestone 3). Checkable, and its checked state IS
+    // document().symmetryOn() - updateActions() reads that back onto it,
+    // never the reverse, the same rule the projection toggle follows.
+    mySymmetryAction = new QAction(tr("&Symmetry"), this);
+    mySymmetryAction->setCheckable(true);
+    // No "(S)" here - the banned-word sweep matches "(s)" as a bare
+    // substring, case-insensitive, for the vocabulary rule against a typed
+    // plural marker, and this shortcut's own letter collides with it.
+    mySymmetryAction->setToolTip(tr("Mirror every new body across a plane as you build — "
+                                    "shortcut S\n"
+                                    "Extrude makes both halves at once, and later edits "
+                                    "follow across."));
+    mySymmetryAction->setShortcut(QKeySequence(Qt::Key_S));
+    connect(mySymmetryAction, &QAction::toggled, this, &MainWindow::setSymmetryEnabled);
+
+    mySetSymmetryPlaneAction = new QAction(tr("Set Symmetry &Plane"), this);
+    mySetSymmetryPlaneAction->setToolTip(tr("Mirror across this face instead of the middle\n"
+                                            "Pick one flat face - the plane it lies on "
+                                            "becomes the mirror."));
+    connect(mySetSymmetryPlaneAction, &QAction::triggered, this, &MainWindow::onSetSymmetryPlane);
+
     myExportStepAction = new QAction(tr("Export &STEP..."), this);
-    myExportStepAction->setShortcut(QKeySequence::Save);
+    // Ctrl+S is Save's now - the platform standard key and a furniture SAVE
+    // is what it should mean the moment a library exists to save into.
+    // Export keeps a mnemonic of its own rather than losing a binding
+    // outright.
+    myExportStepAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_E));
     connect(myExportStepAction, &QAction::triggered, this, &MainWindow::onExportStep);
+
+    myFileSaveAction = new QAction(tr("&Save"), this);
+    myFileSaveAction->setShortcut(QKeySequence::Save);
+    myFileSaveAction->setToolTip(tr("Save this furniture (Ctrl+S)"));
+    connect(myFileSaveAction, &QAction::triggered, this,
+            [this] { saveCurrentFurniture(); });
+
+    myAutosaveAction = new QAction(tr("Save &automatically"), this);
+    myAutosaveAction->setCheckable(true);
+    myAutosaveAction->setChecked(myAutosaveOn);
+    myAutosaveAction->setToolTip(tr("Save a moment after every change\n"
+                                    "Off, Ctrl+S is how a change reaches disk."));
+    connect(myAutosaveAction, &QAction::toggled, this, &MainWindow::setAutosaveEnabled);
+
+    myCloseFurnitureAction = new QAction(tr("&Close furniture"), this);
+    myCloseFurnitureAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_W));
+    myCloseFurnitureAction->setToolTip(tr("Return to your furniture library (Ctrl+W)\n"
+                                          "With Save automatically off, this saves first."));
+    connect(myCloseFurnitureAction, &QAction::triggered, this,
+            &MainWindow::closeCurrentFurniture);
+
+    // File -> Save version... Enabled state is canOpenSaveVersion() - see
+    // its own declaration for the disjointness this buys against
+    // ExtrudePreview and the two drag gizmos' own application-wide key
+    // claims.
+    mySaveVersionAction = new QAction(tr("Save &version..."), this);
+    mySaveVersionAction->setToolTip(tr("Keep a named snapshot of this furniture\n"
+                                       "Come back to it later with Restore, or open it "
+                                       "beside the live one with Compare."));
+    connect(mySaveVersionAction, &QAction::triggered, this, &MainWindow::onSaveVersion);
 
     mySolidSelectAction = new QAction(tr("Select &Bodies"), this);
     mySolidSelectAction->setCheckable(true);
@@ -340,6 +675,19 @@ void MainWindow::buildActions()
     myDeleteAction->setShortcut(QKeySequence::Delete);
     myDeleteAction->setToolTip(tr("Delete the selected bodies (Del)"));
     connect(myDeleteAction, &QAction::triggered, this, &MainWindow::onDeleteSelected);
+
+    // Renames the Items drawer's selected row - see the header for why this
+    // is exactly one item, never a multi-body selection. F2 is the row's
+    // keyboard route; double-click on a row is its mouse route, wired
+    // straight into ItemsPanel rather than through this action (see
+    // buildOverlay()'s connection to renameCommitted()).
+    // No ellipsis: the convention elsewhere in this menu is that "..."
+    // promises a further dialog (Appearance..., Save version...), and this
+    // app has none - Rename opens an inline edit directly over the row, the
+    // same immediate contract Delete Selected's own unadorned label keeps.
+    myRenameAction = new QAction(tr("Re&name"), this);
+    myRenameAction->setShortcut(QKeySequence(Qt::Key_F2));
+    connect(myRenameAction, &QAction::triggered, this, &MainWindow::onRenameSelected);
 
     myUndoAction = new QAction(tr("&Undo"), this);
     myUndoAction->setShortcut(QKeySequence::Undo);
@@ -362,6 +710,19 @@ void MainWindow::buildActions()
     myItemsPanelAction->setChecked(true);
     myItemsPanelAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Alt+S")));
     myItemsPanelAction->setToolTip(tr("Show or hide the list of bodies (Ctrl+Alt+S)"));
+
+    // View -> Versions - the drawer's visibility is DERIVED from this
+    // action's checked state, both directions, exactly as the items
+    // drawer's is from myItemsPanelAction. Starts UNCHECKED, unlike Items:
+    // most furniture never has a saved version at all, and a second drawer
+    // open by default beside one that is almost always empty is clutter the
+    // Items drawer does not have to earn.
+    myVersionsPanelAction = new QAction(tr("Versions"), this);
+    myVersionsPanelAction->setCheckable(true);
+    myVersionsPanelAction->setChecked(false);
+    myVersionsPanelAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Alt+V")));
+    myVersionsPanelAction->setToolTip(tr("Show or hide this furniture's saved versions "
+                                         "(Ctrl+Alt+V)"));
 
     // Menu only, and deliberately: the rail stays at thirteen tools. Choosing
     // colours is not a modelling tool and does not belong in the spine the
@@ -390,6 +751,35 @@ void MainWindow::buildActions()
                                          "Off, only refusals appear. Undo stays on the "
                                          "Edit menu and on Ctrl+Z either way."));
     connect(myNotificationsAction, &QAction::toggled, this, &MainWindow::setShowNotifications);
+
+    // Whether the status bar along the bottom edge is shown at all. Checkable
+    // and persisted on the same terms as the preference above; a Failure
+    // toast is unrelated chrome (parented to OcctViewWidget, not to the
+    // status bar) and stays reachable with this off - the tooltip says so,
+    // because a control that hides a place messages appear has to say what
+    // still gets through.
+    myBottomBarAction = new QAction(tr("Show &bottom bar"), this);
+    myBottomBarAction->setCheckable(true);
+    myBottomBarAction->setChecked(myShowBottomBar);
+    myBottomBarAction->setToolTip(tr("Show or hide the status bar along the bottom edge\n"
+                                     "Off, a Failure toast still reaches you - only the bar hides."));
+    connect(myBottomBarAction, &QAction::toggled, this, &MainWindow::setShowBottomBar);
+
+    // Render mode (Milestone 3, item 5) - strips the viewport to the
+    // furniture alone. Checkable, but deliberately NOT initialised from
+    // QSettings the way every toggle above it is: CLAUDE.md's own words for
+    // this one are "the app always starts in modeling", so it always starts
+    // unchecked regardless of how a previous session left it.
+    //
+    // toggled(bool) connects straight to the public setRenderModeEnabled(),
+    // exactly as myAutosaveAction connects to setAutosaveEnabled() - but
+    // this is also the one action in this file that gets un-checked from
+    // CODE as often as from the user, since every exit gesture calls
+    // setRenderModeEnabled(false) directly (see its own declaration).
+    myRenderModeAction = new QAction(tr("&Render mode"), this);
+    myRenderModeAction->setCheckable(true);
+    myRenderModeAction->setChecked(false);
+    connect(myRenderModeAction, &QAction::toggled, this, &MainWindow::setRenderModeEnabled);
 
     // The projection toggle. Checkable, because the mode is state the user
     // chose and comes back next session; a QAction rather than a button that
@@ -495,6 +885,11 @@ QMenuBar* MainWindow::buildMenus()
     auto* bar = new QMenuBar(this);
 
     QMenu* fileMenu = bar->addMenu(tr("&File"));
+    fileMenu->addAction(myFileSaveAction);
+    fileMenu->addAction(myAutosaveAction);
+    fileMenu->addAction(mySaveVersionAction);
+    fileMenu->addAction(myCloseFurnitureAction);
+    fileMenu->addSeparator();
     fileMenu->addAction(myExportStepAction);
     fileMenu->addAction(myScreenshotAction);
     fileMenu->addSeparator();
@@ -514,6 +909,7 @@ QMenuBar* MainWindow::buildMenus()
     editMenu->addAction(myRedoAction);
     editMenu->addSeparator();
     editMenu->addAction(myDeleteAction);
+    editMenu->addAction(myRenameAction);
 
     QMenu* modelMenu = bar->addMenu(tr("&Model"));
     modelMenu->addAction(myExtrudeAction);
@@ -521,6 +917,11 @@ QMenuBar* MainWindow::buildMenus()
     modelMenu->addAction(myUnionAction);
     modelMenu->addAction(mySubtractAction);
     modelMenu->addAction(myIntersectAction);
+    modelMenu->addSeparator();
+    // Menu-only - see mySymmetryAction's own declaration for why no rail
+    // chip.
+    modelMenu->addAction(mySymmetryAction);
+    modelMenu->addAction(mySetSymmetryPlaneAction);
 
     QMenu* viewMenu = bar->addMenu(tr("&View"));
     viewMenu->addAction(myFitAction);
@@ -559,7 +960,10 @@ QMenuBar* MainWindow::buildMenus()
     viewMenu->addAction(myFaceSelectAction);
     viewMenu->addAction(myEdgeSelectAction);
     viewMenu->addAction(myItemsPanelAction);
+    viewMenu->addAction(myVersionsPanelAction);
     viewMenu->addAction(myNotificationsAction);
+    viewMenu->addAction(myBottomBarAction);
+    viewMenu->addAction(myRenderModeAction);
     viewMenu->addSeparator();
     QMenu* unitsMenu = viewMenu->addMenu(tr("Units"));
     unitsMenu->addAction(myUnitsMillimetresAction);
@@ -691,6 +1095,10 @@ void MainWindow::buildOverlay()
     // screen's own height becomes the real ceiling this derivation cannot
     // push past).
     auto* rail = new ToolCluster(myView);
+    // Kept as a member - render mode's own visibility lambda (see the
+    // constructor) needs to reach it, and findChild<>() on every
+    // appStateChanged is a lookup this class already has a real pointer for.
+    myRail = rail;
     auto tool = [rail](QAction* action, IconSet::Glyph glyph) {
         rail->addChip(new ToolChip(action, glyph, ToolChip::ChipMode::IconOnly));
     };
@@ -734,6 +1142,17 @@ void MainWindow::buildOverlay()
     // guide step around it without any of them naming this widget.
     myOverlay->addWidget(myItemsPanel, ViewportOverlay::Anchor::TopLeft);
 
+    // The versions drawer, same anchor - TopLeft entries stack downward in
+    // the order they are added (see ViewportOverlay::relayout()), so this
+    // lands beside the rail and below the items drawer for free. Starts
+    // hidden: myVersionsPanelAction starts unchecked (see buildActions()),
+    // and addWidget() shows whatever it anchors UNLESS the widget has
+    // already made its own explicit hide decision - hide() here, before
+    // adding it, is what makes this one of those.
+    myVersionsPanel = new VersionsPanel(this, myView, myView);
+    myVersionsPanel->hide();
+    myOverlay->addWidget(myVersionsPanel, ViewportOverlay::Anchor::TopLeft);
+
     // Wireframe and Fit All are buttons in the app bar, and Save Screenshot -
     // the least used of the three, and absent from the design's bar and rail
     // alike - is reachable from the File menu.
@@ -741,6 +1160,9 @@ void MainWindow::buildOverlay()
     // The orientation gizmo. Its own label chip and the unit readout that sat
     // under it are in the app bar; only the axes stay over the viewport.
     auto* gizmo = new AxisGizmo(myView, myView);
+    // Kept as a member on the same terms as myRail above - render mode
+    // hides this card too.
+    myAxisGizmo = gizmo;
     // Clicking an arm of the gizmo is the other way to look from a named
     // direction, and the hint that teaches the gizmo is retired by
     // view.changed - so a user who only ever used the gizmo used to dismiss
@@ -813,6 +1235,25 @@ void MainWindow::buildOverlay()
     // operation - see ToastHost::documentMovedTo().
     connect(this, &MainWindow::documentChanged, this,
             [this] { myToasts->documentMovedTo(myDocument.revision()); });
+
+    // File -> Save automatically's arm: documentChanged fires after every
+    // committed change to the document (every commit path checkpoints THEN
+    // mutates THEN emits this), which is functionally "after every
+    // checkpoint" without a second signal only this feature would need.
+    // Restarted on every call, exactly like the appearance debounce - a
+    // burst of edits inside the 400ms window lands one write, not one per
+    // edit. Skips entirely while no furniture is open or the toggle is off,
+    // so this never fires for the seeded startup document a test builds
+    // before opening anything.
+    connect(this, &MainWindow::documentChanged, this, [this] {
+        if (myShowingInitScreen || myFurnitureId.isEmpty() || !myAutosaveOn) return;
+        // openFurniture() emits this too, for a freshly loaded document that
+        // is clean by construction (mySavedRevision is set to its revision
+        // in the same call) - guarded here so opening a furniture cannot
+        // itself arm a spurious autosave write.
+        if (!isFurnitureDirty()) return;
+        armAutosaveTimer();
+    });
     // A guide can appear UNDERNEATH a toast that is already up (Show tips
     // again does exactly that), and nothing told the toast to step aside
     // when it did - HintBalloon::reconsider() already handled that case for
@@ -848,6 +1289,22 @@ void MainWindow::buildOverlay()
     // its own visibility from MainWindow::bevelTarget() on every
     // appStateChanged. Nothing here shows or hides it.
     myBevelArrow = new BevelArrow(this, myView);
+
+    // File -> Save version...'s panel - ExtrudePreview's exact key-claim
+    // contract, on the same terms as the three gizmos above: it parents
+    // itself to the viewport and positions itself (top-centre, the same
+    // spot ExtrudePreview stands - the two predicates are disjoint by
+    // construction, so they can never collide), so it needs no overlay
+    // anchor either.
+    mySaveVersionCard = new SaveVersionCard(this, myView);
+
+    // The live view's half of the compare camera sync - see syncCamera()'s
+    // declaration. A no-op for as long as myCompareView is null, which is
+    // most of this window's life; wired once, here, rather than re-wired
+    // every time compare opens.
+    connect(myView, &OcctViewWidget::cameraChanged, this, [this] {
+        if (myCompareView) syncCamera(myView, myCompareView);
+    });
 
     // Always built, even for a user who has already learned this - it
     // decides its own visibility in its constructor (see WalkthroughPanel's
@@ -886,19 +1343,33 @@ void MainWindow::buildOverlay()
     connect(myOverlay, &ViewportOverlay::laidOut, myExtrudePreview, &ExtrudePreview::replace);
     connect(myOverlay, &ViewportOverlay::laidOut, myPullArrow, &PullArrow::replace);
     connect(myOverlay, &ViewportOverlay::laidOut, myBevelArrow, &BevelArrow::replace);
+    connect(myOverlay, &ViewportOverlay::laidOut, mySaveVersionCard, &SaveVersionCard::replace);
 }
 
 void MainWindow::updateActions()
 {
-    const std::size_t selectedCount = myView->selectedSolidIds().size();
-    const bool booleanReady = !mySketching && selectedCount == 2;
+    // The init screen's own gate. Every modeling action is disabled while
+    // it shows - not merely painted over. A fresh, empty DocumentModel
+    // (showInitScreen() replaces it, never just clears it) already makes
+    // most of the predicates below false on their own - there is nothing to
+    // select, nothing to undo, no outline waiting - but Start Sketch's own
+    // predicate is `!mySketching` alone, which an empty document does not
+    // touch: without this a shortcut typed over the gallery would start
+    // drawing an outline nobody can see. Kept as one explicit clause here
+    // rather than trusted to the document being empty, because "empty" and
+    // "no furniture is open" are two different facts that only happen to
+    // coincide right now.
+    const bool atInit = myShowingInitScreen;
 
-    myStartSketchAction->setEnabled(!mySketching);
+    const std::size_t selectedCount = myView->selectedSolidIds().size();
+    const bool booleanReady = !mySketching && !atInit && selectedCount == 2;
+
+    myStartSketchAction->setEnabled(!mySketching && !atInit);
     myFinishSketchAction->setEnabled(mySketching && mySketch.canClose());
     myUndoPointAction->setEnabled(mySketching && mySketch.pointCount() > 0);
     myCancelSketchAction->setEnabled(mySketching);
 
-    myExtrudeAction->setEnabled(!mySketching && hasPendingFace());
+    myExtrudeAction->setEnabled(!mySketching && !atInit && hasPendingFace());
 
     // Exactly one face, and a flat one: an outline needs a single plane to
     // live on, and a cylinder's side has no such plane. Both halves are
@@ -911,8 +1382,8 @@ void MainWindow::updateActions()
     // canChangeSketchPlane() for what moving the plane out from under it does.
     // That is exactly canPullSelectedFace()'s rule too, so the two read the
     // same function rather than each carrying a copy of it.
-    const bool planeCanMove = !mySketching && !hasPendingFace();
-    const bool flatFaceSelected = canPullSelectedFace();
+    const bool planeCanMove = !mySketching && !atInit && !hasPendingFace();
+    const bool flatFaceSelected = !atInit && canPullSelectedFace();
     myLockFaceAction->setEnabled(flatFaceSelected);
     myUnlockFaceAction->setEnabled(myFaceLocked && planeCanMove);
     // A disabled control that does not say why is a control the user reads as
@@ -947,11 +1418,26 @@ void MainWindow::updateActions()
     myLockFaceAction->setToolTip(planeCanMove ? lockTooltipText() : planeReason);
     myUnlockFaceAction->setToolTip(planeCanMove ? unlockTooltipText() : planeReason);
 
+    // Symmetry (Milestone 3). The checked state is DOCUMENT state - undo,
+    // redo, opening a different furniture and restoring a version can all
+    // change myDocument.symmetryOn() without going through this action's own
+    // toggle - so it is resynced here rather than trusted to stay in step on
+    // its own, the way the pure UI preferences (autosave, projection) are.
+    // Blocked so resyncing it can never re-fire setSymmetryEnabled().
+    if (mySymmetryAction) {
+        const QSignalBlocker blocker(mySymmetryAction);
+        mySymmetryAction->setChecked(myDocument.symmetryOn());
+    }
+    if (mySymmetryAction) mySymmetryAction->setEnabled(!atInit);
+    // The same pick as Lock to Face - one flat face, no sketch, no pending
+    // outline.
+    if (mySetSymmetryPlaneAction) mySetSymmetryPlaneAction->setEnabled(flatFaceSelected);
+
     myUnionAction->setEnabled(booleanReady);
     mySubtractAction->setEnabled(booleanReady);
     myIntersectAction->setEnabled(booleanReady);
 
-    myExportStepAction->setEnabled(myDocument.count() > 0);
+    myExportStepAction->setEnabled(!atInit && myDocument.count() > 0);
     // Delete has TWO meanings and one of them is new: bodies when bodies are
     // selected, and the waiting outline when nothing is. It is the outline's
     // only exit besides Extrude, and the whole reason it needed one is in
@@ -961,7 +1447,7 @@ void MainWindow::updateActions()
     // decided HERE, in the one place that decides what is available, and
     // onDeleteSelected() asks the same question the same way.
     const bool deleteTargetsOutline = selectedCount == 0 && hasPendingFace();
-    myDeleteAction->setEnabled(!mySketching && (selectedCount > 0 || hasPendingFace()));
+    myDeleteAction->setEnabled(!mySketching && !atInit && (selectedCount > 0 || hasPendingFace()));
     // A control whose meaning moves has to say which meaning is live, or the
     // user reads one label and gets the other - the same argument the Lock to
     // Face tooltip above makes for a control that is disabled.
@@ -970,6 +1456,42 @@ void MainWindow::updateActions()
             ? tr("Discard the outline that's waiting (Del) — nothing is selected, "
                  "so Delete takes the outline instead of a body")
             : tr("Delete the selected bodies (Del)"));
+    // Rename has the same two targets Delete does, but never falls back to a
+    // "whichever, in bulk" meaning: InlineRename edits exactly one name, so
+    // this is live for exactly one selected body, or for the waiting outline
+    // when nothing is selected - never for two or more bodies, where Delete
+    // stays enabled and this does not.
+    //
+    // Fix round 1 (review): the drawer must be VISIBLE too. F2's whole
+    // gesture is opening a QLineEdit over a row that lives inside
+    // myItemsPanel, and with View -> Items off that row is a real widget in
+    // a HIDDEN hierarchy - InlineRename's setFocus() never actually takes
+    // focus there (Qt does not focus a widget with a hidden ancestor), so
+    // none of Enter/Escape/focus-out can ever fire and the stray editor sits
+    // there forever. Worse, ItemsPanel::beginRenameForItem()'s own
+    // re-entrancy guard (see its header) then reads that stray editor as "a
+    // rename is already open" and refuses every LATER rename too, drawer
+    // shown or not, until an unrelated document change rebuilds the rows out
+    // from under it. Gating here is the disabled-control-explains-itself law
+    // CLAUDE.md names elsewhere; ItemsPanel::beginRenameForItem() below
+    // additionally guards itself, because this action's enabled state does
+    // not stop a caller from invoking trigger() directly (Qt actions ignore
+    // isEnabled() for programmatic trigger()s, only for real shortcut/menu
+    // input) - the ONE place the gesture actually opens is where the wedge
+    // has to be structurally impossible, not just discouraged.
+    const bool drawerVisible = myItemsPanelAction && myItemsPanelAction->isChecked();
+    const bool renameTargetsOutline = selectedCount == 0 && hasPendingFace();
+    const bool canRename = !mySketching && !atInit && drawerVisible &&
+                           (selectedCount == 1 || renameTargetsOutline);
+    myRenameAction->setEnabled(canRename);
+    myRenameAction->setToolTip(
+        !drawerVisible
+            ? tr("Show the Items drawer to rename a row (F2, View → Items)")
+            : renameTargetsOutline
+                  ? tr("Rename the outline that's waiting (F2)")
+                  : selectedCount == 1
+                        ? tr("Rename the selected body (F2)")
+                        : tr("Select exactly one body to rename it (F2)"));
     // Mid-sketch, Undo removes the last placed point (onUndo() reroutes to
     // onUndoSketchPoint); outside a sketch it undoes a document change. The
     // menu text stays "Undo" either way - the user's word for "take that
@@ -981,7 +1503,7 @@ void MainWindow::updateActions()
     // asymmetry is deliberate: it is better than a Redo that silently means
     // "redo a document change" while the user is looking at an outline.
     myUndoAction->setEnabled(mySketching ? mySketch.pointCount() > 0
-                                         : myDocument.canUndo());
+                                         : (!atInit && myDocument.canUndo()));
     myUndoAction->setToolTip(mySketching
                                  ? tr("Take back the last point you placed (Ctrl+Z)")
                                  : tr("Undo the last change to your bodies (Ctrl+Z)"));
@@ -995,7 +1517,7 @@ void MainWindow::updateActions()
     // revision guard in ToastHost was added to end. Still decided here, in
     // the one place that decides what is available, and still pushed out
     // rather than re-derived at the toast.
-    if (myToasts) myToasts->setUndoEnabled(!mySketching && myDocument.canUndo());
+    if (myToasts) myToasts->setUndoEnabled(!mySketching && !atInit && myDocument.canUndo());
     // View -> Show notifications, pushed the same way and for the same reason:
     // this is the one place that decides it, and the host reads it rather than
     // re-deriving it from an action it would otherwise have to know about.
@@ -1011,7 +1533,7 @@ void MainWindow::updateActions()
     // rather than at the click, so an undo or a redo that moves the pending
     // outline moves the highlight with it.
     if (myItemsPanel) myItemsPanel->showPendingOutline(pendingOutlineId());
-    myRedoAction->setEnabled(!mySketching && myDocument.canRedo());
+    myRedoAction->setEnabled(!mySketching && !atInit && myDocument.canRedo());
 
     // Not a slot on appStateChanged - part of updateActions() itself, same
     // as updateStateLabel(), so it recomputes on every unit switch too
@@ -1019,7 +1541,66 @@ void MainWindow::updateActions()
     // first built in buildActions().
     mySnapAction->setToolTip(snapTooltipText());
 
+    // Selection mode and snap are meaningless with nothing to select or
+    // snap - part of the same "every modeling action" gate atInit closes,
+    // even though an empty document already leaves them harmless.
+    mySnapAction->setEnabled(!atInit);
+    mySolidSelectAction->setEnabled(!atInit);
+    myFaceSelectAction->setEnabled(!atInit);
+    myEdgeSelectAction->setEnabled(!atInit);
+
+    // File -> Save / Save automatically / Close furniture: available only
+    // with a furniture actually open.
+    if (myFileSaveAction) myFileSaveAction->setEnabled(!atInit);
+    if (myAutosaveAction) myAutosaveAction->setEnabled(!atInit);
+    if (myCloseFurnitureAction) myCloseFurnitureAction->setEnabled(!atInit);
+    // File -> Save version...: see canOpenSaveVersion()'s own declaration for
+    // the full predicate - a furniture open, no sketch, no render mode, and
+    // none of the three OTHER application-wide key claims live. The tooltip
+    // only names the render-mode reason specifically (fix round 1, Important
+    // 2) - the other four are pre-existing refusals this action already
+    // disabled itself for silently, and adding a full disjunction here for
+    // all five would be new copy for four reasons this task did not touch.
+    if (mySaveVersionAction) {
+        const bool canSaveVersion = canOpenSaveVersion();
+        mySaveVersionAction->setEnabled(canSaveVersion);
+        mySaveVersionAction->setToolTip(
+            !canSaveVersion && myRenderModeOn
+                ? tr("Unavailable in render mode — exit it first (a viewport "
+                     "click, or the View menu)")
+                : tr("Keep a named snapshot of this furniture\n"
+                     "Come back to it later with Restore, or open it beside "
+                     "the live one with Compare."));
+    }
+    if (myVersionsPanelAction) myVersionsPanelAction->setEnabled(!atInit);
+
+    // Render mode (Milestone 3, item 5). "|| myRenderModeOn" is what keeps a
+    // control whose entire subject is this mode from ever being outvoted by
+    // a state that changed underneath it - the same rule the Persp/Ortho
+    // toggle's own comment makes; without it a stray state change while the
+    // mode was already on could disable the one control that turns it back
+    // off. In practice every one of canOpenRenderMode()'s four conditions is
+    // kept true for as long as myRenderModeOn is (every route that could
+    // make one false forces the mode off FIRST - see checkpointDocument(),
+    // onStartSketch(), openCompare()), so this is defence in depth rather
+    // than a state this file expects to actually reach.
+    if (myRenderModeAction) {
+        const bool canRender = canOpenRenderMode();
+        myRenderModeAction->setEnabled(canRender || myRenderModeOn);
+        myRenderModeAction->setToolTip(
+            canRender || myRenderModeOn
+                ? tr("Strip the viewport to the furniture alone, with real shadows")
+                : myShowingInitScreen
+                      ? tr("Open a furniture first")
+                      : isCompareOpen()
+                            ? tr("Unavailable while comparing versions")
+                            : mySketching
+                                  ? sketchReason
+                                  : pendingReason);
+    }
+
     updateStateLabel();
+    updateWindowTitle();
     emit appStateChanged();
 }
 
@@ -1061,6 +1642,21 @@ void MainWindow::setShowNotifications(bool show)
     // capability. updateActions() is what actually pushes the state onto the
     // toast host - this function only stores it - so the one place that
     // decides what is available stays the one place that says it.
+    updateActions();
+}
+
+void MainWindow::setShowBottomBar(bool show)
+{
+    myShowBottomBar = show;
+    if (myPersistProgress) {
+        QSettings settings;
+        settings.setValue(QStringLiteral("showBottomBar"), show);
+    }
+    // Not recordProgress(): a display preference, not a learned capability -
+    // the same reasoning setShowNotifications() gives just above. The actual
+    // statusBar()->setVisible() call lives in the appStateChanged-driven
+    // block this triggers, alongside every other drawer's own derived
+    // visibility, rather than here - see that block's own comment.
     updateActions();
 }
 
@@ -1199,7 +1795,690 @@ void MainWindow::closeEvent(QCloseEvent* event)
         myAppearanceWrite->stop();
         writeAppearanceNow();
     }
+    // Closing the app mid-furniture is Close furniture's own ruling, not a
+    // separate one: flush anything still waiting inside the autosave
+    // debounce, and with autosave off, save outright. Never lose work, never
+    // block - this app has no modal "save before closing?" question to ask.
+    if (!myShowingInitScreen && !myFurnitureId.isEmpty()) {
+        if (myAutosaveTimer && myAutosaveTimer->isActive()) {
+            myAutosaveTimer->stop();
+            flushAutosave();
+        }
+        if (!myAutosaveOn) performSave(false);
+    }
     QMainWindow::closeEvent(event);
+}
+
+void MainWindow::buildInitScreen()
+{
+    myInitScreen = new InitScreen(&myStore, myView);
+    myInitScreen->setGeometry(myView->rect());
+
+    connect(myInitScreen, &InitScreen::furnitureChosen, this, &MainWindow::openFurniture);
+    connect(myInitScreen, &InitScreen::furnitureCreated, this, &MainWindow::openFurniture);
+
+    // The gallery's two refusals - a library that will not take a new
+    // directory, a rename landing on a furniture whose files are gone - are
+    // never silent. Same cause-and-fix shape as every other refusal this
+    // window reports, and the same reasoning AppearancePanel's colour-file
+    // failures already established: the card owns a gallery, not the way
+    // this app says no, so the copy lives here.
+    connect(myInitScreen, &InitScreen::furnitureCreateFailed, this,
+            [this](const QString& name) {
+                myToasts->show(tr("Couldn't create %1 — Check that the library folder "
+                                  "still exists and isn't read-only").arg(name),
+                              Toast::Kind::Failure, false);
+            });
+    connect(myInitScreen, &InitScreen::furnitureRenameFailed, this,
+            [this](const QString& id, const QString& name) {
+                Q_UNUSED(id);
+                myToasts->show(tr("Couldn't rename this furniture to %1 — Check that "
+                                  "its folder still exists and isn't read-only")
+                                  .arg(name),
+                              Toast::Kind::Failure, false);
+            });
+
+    // The gallery fills the whole viewport, not one anchored corner, so it
+    // does not go through ViewportOverlay's anchor system - but it still has
+    // to track the viewport's size, and laidOut() is where every other
+    // widget that positions itself against the viewport already does that
+    // (see the connections at the end of buildOverlay()). Only reads
+    // geometry, so it cannot recurse back into updateActions().
+    connect(myOverlay, &ViewportOverlay::laidOut, this, [this] {
+        if (myInitScreen) myInitScreen->setGeometry(myView->rect());
+    });
+}
+
+void MainWindow::showInitScreen()
+{
+    // Render mode's own gate requires a furniture open - and this function is
+    // how one stops being open, however it was reached (Close furniture,
+    // opening a different card). Exiting first, rather than leaving
+    // updateActions()'s "|| myRenderModeOn" defence to paper over it, is what
+    // keeps the gallery from appearing underneath a hidden rail and a studio
+    // backdrop that has nothing left to render mode a shot OF.
+    if (myRenderModeOn) setRenderModeEnabled(false);
+
+    // A compare pane reads a version of the furniture that is about to stop
+    // being open at all - closing it here, before anything else, is what
+    // keeps the splitter from outliving the furniture it was comparing.
+    if (myCompareView) closeCompare();
+
+    // Flush whatever furniture is currently open before leaving it - the
+    // same rule closeCurrentFurniture() follows, reached here too (a
+    // furniture can be left behind by more than one route, and this is the
+    // one both converge on).
+    if (myAutosaveTimer && myAutosaveTimer->isActive()) {
+        myAutosaveTimer->stop();
+        flushAutosave();
+    }
+
+    myShowingInitScreen = true;
+    myFurnitureId.clear();
+    myFurnitureName.clear();
+    mySavedRevision = 0;
+
+    // A FRESH document, not a cleared one: DocumentModel::clear() leaves the
+    // undo stack standing, and the next furniture opened must not inherit
+    // checkpoints that were never its own.
+    myDocument = DocumentModel();
+    mySelectedOutlineId = 0;
+    myFaceLocked = false;
+    mySketching = false;
+    mySketch.reset();
+    myView->setSketchMode(false, mySketch.plane());
+    myView->clearPreview();
+    myView->clearSelection();
+    resyncView();
+
+    if (myInitScreen) {
+        myInitScreen->setGeometry(myView->rect());
+        myInitScreen->refresh();
+        myInitScreen->show();
+        myInitScreen->raise();
+    }
+
+    updateActions();
+    statusBar()->showMessage(tr("Choose a furniture to open, or start a new one"));
+}
+
+bool MainWindow::openFurniture(const QString& id)
+{
+    // Same reasoning as showInitScreen(): a compare pane belongs to
+    // whichever furniture is currently open, and that is about to change.
+    if (myCompareView) closeCompare();
+
+    QString error;
+    DocumentModel loaded;
+    if (!myStore.loadFurniture(id, loaded, &error)) {
+        myToasts->show(tr("Couldn't open this furniture — %1").arg(error),
+                      Toast::Kind::Failure, false);
+        return false;
+    }
+
+    myDocument = loaded;
+    myFurnitureId = id;
+    // Read once from the library listing rather than from the manifest
+    // directly - FurnitureStore's own layout stays its private business
+    // (see FurnitureStore.h), and listFurniture() is the one place this
+    // window is allowed to read a name from.
+    myFurnitureName.clear();
+    for (const FurnitureStore::FurnitureInfo& info : myStore.listFurniture()) {
+        if (info.id == id) { myFurnitureName = info.name; break; }
+    }
+
+    mySavedRevision = myDocument.revision();
+    myShowingInitScreen = false;
+    mySelectedOutlineId = 0;
+    myFaceLocked = false;
+    mySketching = false;
+    mySketch.reset();
+    myView->setSketchMode(false, mySketch.plane());
+    myView->clearPreview();
+    myView->clearSelection();
+    // resyncView() itself reapplies persisted visibility onto the freshly
+    // displayed items now - see its own comment - so nothing further is
+    // needed here.
+    resyncView();
+
+    if (myInitScreen) myInitScreen->hide();
+
+    myView->fitAll();
+    updateActions();
+    emit documentChanged();
+    statusBar()->showMessage(tr("Opened %1").arg(myFurnitureName));
+    return true;
+}
+
+bool MainWindow::isFurnitureDirty() const
+{
+    if (myShowingInitScreen || myFurnitureId.isEmpty()) return false;
+    return myDocument.revision() != mySavedRevision;
+}
+
+bool MainWindow::performSave(bool announce)
+{
+    if (myShowingInitScreen || myFurnitureId.isEmpty()) return false;
+
+    // Thumbnail capture reuses OcctViewWidget::saveSnapshot() - see its
+    // header. A failed capture (a null image) is not itself a save failure;
+    // saveFurniture() already treats a null thumbnail as "nothing to write
+    // there yet" rather than as a reason to refuse.
+    //
+    // Fix-wave item (b): NOT while render mode is on. The render-mode
+    // viewport is a studio shot of the scene, not a picture of the
+    // FURNITURE, and Ctrl+S must not silently replace the gallery's card
+    // image with it. Skipping the capture leaves the OLD thumbnail exactly
+    // where saveFurniture() already treats a null image - untouched, not
+    // deleted (see its own comment) - while the save itself still writes
+    // shapes and manifest either way: data safety does not depend on which
+    // picture is showing.
+    const QImage thumb = myRenderModeOn ? QImage() : myView->captureThumbnail();
+    if (!myStore.saveFurniture(myFurnitureId, myDocument, thumb)) {
+        // A refusal reports here whether or not the caller wanted an
+        // announcement - CLAUDE.md's law that a Failure is never silenced
+        // applies to autosave's own background writes exactly as it does to
+        // Ctrl+S.
+        myToasts->show(tr("Couldn't save %1 — Check that its folder still exists "
+                          "and isn't read-only").arg(myFurnitureName),
+                      Toast::Kind::Failure, false);
+        return false;
+    }
+
+    mySavedRevision = myDocument.revision();
+    // Whatever the debounce was waiting to write, it just got written by
+    // this call instead - a pending autosave surviving a save right next to
+    // it would fire a moment later and write nothing new, but it would also
+    // leave the debounce armed for longer than the checkpoint that started
+    // it actually explains, which is exactly what autosavePendingMs() exists
+    // to let a test catch.
+    if (myAutosaveTimer) myAutosaveTimer->stop();
+    updateActions();   // the dirty star and the Save action both follow this
+    if (announce) {
+        const QString message = tr("Saved %1").arg(myFurnitureName);
+        statusBar()->showMessage(message);
+        // Not a document change - no Undo, and no document-revision stamp:
+        // a save does not touch the undo stack (see DocumentModel.h), so
+        // there is nothing for the pill to take back.
+        myToasts->show(message, Toast::Kind::Note, false);
+    }
+    return true;
+}
+
+bool MainWindow::saveCurrentFurniture()
+{
+    return performSave(/*announce=*/true);
+}
+
+void MainWindow::flushAutosave()
+{
+    if (myShowingInitScreen || myFurnitureId.isEmpty()) return;
+    if (!isFurnitureDirty()) return;   // nothing changed since the last write
+    performSave(/*announce=*/false);
+}
+
+void MainWindow::setAutosaveEnabled(bool enabled)
+{
+    myAutosaveOn = enabled;
+    if (myPersistProgress) {
+        QSettings settings;
+        settings.setValue(QStringLiteral("autosave"), enabled);
+    }
+    // Turning it ON while a dirty furniture is open should not leave that
+    // furniture waiting for its NEXT checkpoint before the toggle's promise
+    // takes effect - the document has already moved since the last save,
+    // and that is exactly what "save after every change" means for the
+    // change that already happened.
+    if (enabled && isFurnitureDirty()) armAutosaveTimer();
+    updateActions();
+}
+
+int MainWindow::autosavePendingMs() const
+{
+    return (myAutosaveTimer && myAutosaveTimer->isActive()) ? myAutosaveTimer->remainingTime()
+                                                            : -1;
+}
+
+void MainWindow::armAutosaveTimer()
+{
+    if (!myAutosaveTimer) {
+        myAutosaveTimer = new QTimer(this);
+        myAutosaveTimer->setSingleShot(true);
+        myAutosaveTimer->setInterval(kAutosaveWriteMs);
+        connect(myAutosaveTimer, &QTimer::timeout, this, &MainWindow::flushAutosave);
+    }
+    // start() on a running single-shot timer RESTARTS it - the whole
+    // debounce, exactly as persistAppearance()'s does.
+    myAutosaveTimer->start();
+}
+
+void MainWindow::closeCurrentFurniture()
+{
+    if (myShowingInitScreen || myFurnitureId.isEmpty()) return;
+
+    // Flush anything still waiting inside the debounce window FIRST,
+    // regardless of the toggle: a checkpoint made a moment ago must not be
+    // lost to a timer that had not fired yet, autosave on or off.
+    if (myAutosaveTimer && myAutosaveTimer->isActive()) {
+        myAutosaveTimer->stop();
+        flushAutosave();
+    }
+
+    const QString name = myFurnitureName;
+    if (!myAutosaveOn) {
+        // The ruling: never a modal question. Save first, then say so - one
+        // toast names both halves of what just happened rather than asking
+        // permission for either.
+        performSave(/*announce=*/false);
+        const QString message = tr("Saved and closed %1").arg(name);
+        statusBar()->showMessage(message);
+        myToasts->show(message, Toast::Kind::Note, false);
+    } else {
+        statusBar()->showMessage(tr("Closed %1").arg(name));
+    }
+
+    showInitScreen();
+}
+
+bool MainWindow::canOpenRenderMode() const
+{
+    // The four conditions this task's own ruling names: a furniture open, no
+    // compare open, not sketching, no outline waiting. Unlike
+    // canOpenSaveVersion() this does not also exclude the three gizmo
+    // predicates - render mode is not a text field with an Enter/Escape
+    // claim of its own, it is a toggle that HIDES those gizmos the instant
+    // it turns on, so there is nothing for it to collide with.
+    return !myShowingInitScreen && !isCompareOpen() && !mySketching && !hasPendingFace();
+}
+
+void MainWindow::setRenderModeEnabled(bool on)
+{
+    if (myRenderModeOn == on) return;
+    myRenderModeOn = on;
+    // The single source of truth for the menu entry's checked state, kept in
+    // step in BOTH directions - the user unchecking the box arrives here
+    // already in sync (QAction::toggled already changed it), but every OTHER
+    // caller (checkpointDocument(), onStartSketch(), the viewport press,
+    // openCompare()) flips this flag from code, and the box has to follow.
+    // Blocked so that setChecked() cannot re-enter this function through
+    // toggled().
+    if (myRenderModeAction) {
+        const QSignalBlocker blocker(myRenderModeAction);
+        myRenderModeAction->setChecked(on);
+    }
+
+    myView->setRenderMode(on);
+
+    // The one Note toast render mode raises on entry, naming the tier the
+    // viewport just settled on - read AFTER setRenderMode(on) returns, since
+    // the first activation this session is what actually runs the probe.
+    // Copy uses none of the banned words (CLAUDE.md's vocabulary sweep reads
+    // it for free through Toast::paintedTexts(), which records every message
+    // actually shown this run - no separate static accessor needed, unlike
+    // bevelRefusalText() and friends, because this toast is always reachable
+    // from a real render-mode entry rather than gated behind a refusal that
+    // might never fire).
+    if (on) {
+        QString text;
+        switch (myView->renderModeTier()) {
+            case OcctViewWidget::RenderTier::RayTracing: text = tr("Render mode — ray tracing"); break;
+            case OcctViewWidget::RenderTier::Shadows:    text = tr("Render mode — shadows"); break;
+            case OcctViewWidget::RenderTier::Plain:      text = tr("Render mode"); break;
+        }
+        // Kind::Note, deliberately: this reports a successful, expected
+        // outcome, not a refusal, so CLAUDE.md's taxonomy ("every Note is a
+        // success report... every refusal is a Failure") puts it here rather
+        // than on Failure's unconditional-even-with-notifications-off path.
+        // The consequence, recorded rather than merely implied: with
+        // View -> Show notifications off, entering render mode raises no
+        // toast at all - the tier is still readable from
+        // OcctViewWidget::renderModeTier() and Save Screenshot still exports
+        // at the chosen tier's real look, so nothing is silently lost, only
+        // unannounced.
+        myToasts->show(text, Toast::Kind::Note, false);
+    }
+
+    // The single authority: rail, drawers, the axis gizmo card and the three
+    // gizmo predicates all re-derive themselves off myRenderModeOn from the
+    // appStateChanged this ends by emitting.
+    updateActions();
+}
+
+bool MainWindow::canOpenSaveVersion() const
+{
+    // Every OTHER application-wide Enter/Escape claim this app can have
+    // live at once, named explicitly rather than folded into one flag -
+    // see the declaration for why this is what keeps the four claims
+    // mutually exclusive by construction. canTransformSelectedBody()
+    // deliberately does NOT appear here (fix round 1, Important 2): the
+    // transform gizmo holds no application-wide key claim of its own - it is
+    // a direct 3D drag with no text field and no Enter/Escape filter, unlike
+    // the other three - so excluding it bought no disjointness, only a false
+    // conflict. With it included, clicking a body while this card was open
+    // (an ordinary Shift-click, or even a stray click meant for something
+    // else entirely) flipped this predicate false, appStateChanged() fired,
+    // and SaveVersionCard::onAppStateChanged() cancelled the card - silently
+    // discarding whatever name the user had already typed. A single body
+    // selected raises the gizmo but claims no keys, so the card and the
+    // gizmo can coexist on screen with no ambiguity about which one Enter or
+    // Escape belongs to.
+    //
+    // "!myRenderModeOn" is the fifth term (fix round 1, Important 2): render
+    // mode is not one of the three OTHER application-wide key claims named
+    // above, but the SAME mechanism that closes this card on one of those -
+    // SaveVersionCard::onAppStateChanged() cancels whenever this predicate
+    // goes false while the card is open - is exactly what a live studio shot
+    // needs too. Folded in here rather than added as a second check inside
+    // the card itself, so updateActions()'s own
+    // mySaveVersionAction->setEnabled(canOpenSaveVersion()) and the card's
+    // auto-cancel read the SAME one answer instead of two that could drift.
+    return !myShowingInitScreen && !myRenderModeOn && !mySketching && !hasPendingFace() &&
+           !canPullSelectedFace() && !canBevelSelectedEdge();
+}
+
+void MainWindow::onSaveVersion()
+{
+    if (mySaveVersionCard) mySaveVersionCard->begin();
+}
+
+bool MainWindow::saveVersion(const QString& name)
+{
+    if (myShowingInitScreen || myFurnitureId.isEmpty()) return false;
+
+    // The only refusal reachable here: a real, open furniture cannot be an
+    // unknown id, so a false from the store means the name is a duplicate -
+    // see FurnitureStore::saveVersion()'s own contract.
+    if (!myStore.saveVersion(myFurnitureId, name, myDocument)) {
+        myToasts->show(tr("Couldn't save version \"%1\" — a version by that name "
+                          "already exists").arg(name),
+                      Toast::Kind::Failure, false);
+        return false;
+    }
+
+    updateActions();   // refreshes the drawer through VersionsPanel::refresh
+    const QString message = tr("Version \"%1\" saved").arg(name);
+    statusBar()->showMessage(message);
+    // No Undo - versions are file data, not a document edit; there is
+    // nothing on the undo stack for a pill to take back.
+    myToasts->show(message, Toast::Kind::Note, false);
+    return true;
+}
+
+bool MainWindow::restoreVersion(const QString& name)
+{
+    if (myShowingInitScreen || myFurnitureId.isEmpty()) return false;
+
+    // Closed FIRST: a restore is about to replace the very document a
+    // compare pane may still be showing half of, and a stale read-only pane
+    // sitting beside a document that just moved on is confusing at best.
+    if (myCompareView) closeCompare();
+
+    DocumentModel loaded;
+    if (!myStore.loadVersion(myFurnitureId, name, loaded)) {
+        myToasts->show(tr("Couldn't restore \"%1\" — its file is missing or damaged")
+                          .arg(name),
+                      Toast::Kind::Failure, false);
+        return false;
+    }
+
+    // ONE checkpoint around the whole replacement - DocumentModel::checkpoint()
+    // then restoreFrom(), never fromSerialized() (which clears undo history
+    // outright; see DocumentModel.h) - so a single Ctrl+Z brings back
+    // everything this replaced, not just part of it.
+    checkpointDocument();
+    myDocument.restoreFrom(loaded);
+    myView->clearSelection();
+    mySelectedOutlineId = 0;
+    resyncView();
+
+    recordProgress("version.restored");
+    updateActions();
+    emit documentChanged();
+    const QString message = tr("Restored version \"%1\"").arg(name);
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    return true;
+}
+
+bool MainWindow::deleteVersionByName(const QString& name)
+{
+    if (myShowingInitScreen || myFurnitureId.isEmpty()) return false;
+
+    if (!myStore.deleteVersion(myFurnitureId, name)) {
+        myToasts->show(tr("Couldn't delete \"%1\" — it may already be gone").arg(name),
+                      Toast::Kind::Failure, false);
+        return false;
+    }
+
+    // Comparing the version just removed would leave a stale pane reading a
+    // file that no longer exists - close it first, same as a restore does.
+    if (myCompareView && myCompareVersionName == name) closeCompare();
+
+    updateActions();   // refreshes the drawer
+    const QString message = tr("Deleted version \"%1\"").arg(name);
+    statusBar()->showMessage(message);
+    // No Undo - final. Versions are file data, and "Ctrl+Z brings back a
+    // deleted file" is not a promise this app makes anywhere else either;
+    // the two-click confirmation on the row itself is what stands in for it.
+    myToasts->show(message, Toast::Kind::Note, false);
+    return true;
+}
+
+QString MainWindow::compareBadgeCloseLabel()
+{
+    return tr("Close compare");
+}
+
+bool MainWindow::openCompare(const QString& name)
+{
+    if (myShowingInitScreen || myFurnitureId.isEmpty()) return false;
+
+    // Render mode's own gate is "no compare open" (canOpenRenderMode()), and
+    // this is the structural half of that: even with the versions drawer
+    // hidden while render mode is on, the drawer's own row-click is not the
+    // only way to reach this - App Bar/File menu routes stay reachable, so
+    // opening a compare exits render mode first rather than refusing.
+    if (myRenderModeOn) setRenderModeEnabled(false);
+
+    DocumentModel loaded;
+    if (!myStore.loadVersion(myFurnitureId, name, loaded)) {
+        myToasts->show(tr("Couldn't compare \"%1\" — its file is missing or damaged")
+                          .arg(name),
+                      Toast::Kind::Failure, false);
+        return false;
+    }
+
+    // Only one compare pane at a time - opening a different version replaces
+    // it rather than stacking a second one.
+    if (myCompareView) closeCompare();
+
+    // A fresh generation for this compare session - see the badge's own
+    // Close-button connect() below for what this guards against.
+    ++myCompareGeneration;
+
+    // The live view's PARENT never changes here - only the compare pane is
+    // ever newly parented, so there is no risk to the live view's own OCCT
+    // bridge from this call. mySplitter takes myView as its first pane
+    // (reparenting it OUT of being the window's plain central widget, in)
+    // and myCompareView, freshly constructed straight into the splitter, as
+    // its second - see closeCompare() for the reverse move.
+    mySplitter = new QSplitter(Qt::Horizontal);
+    mySplitter->addWidget(myView);
+    myCompareView = new OcctViewWidget(mySplitter, /*viewerOnly=*/true);
+    mySplitter->addWidget(myCompareView);
+    setCentralWidget(mySplitter);
+
+    for (const DocumentModel::Solid& solid : loaded.solids()) {
+        myCompareView->displaySolid(solid.id, solid.shape);
+        myCompareView->setSolidVisible(solid.id, loaded.isVisible(solid.id));
+    }
+    for (const DocumentModel::Outline& outline : loaded.outlines()) {
+        myCompareView->displayOutline(outline.id, outline.face);
+        myCompareView->setOutlineVisible(outline.id, loaded.isVisible(outline.id));
+    }
+
+    // Seeded from the live view's own current pose rather than fitAll()'d
+    // fresh, so the two start in lockstep - the first camera-sync round
+    // trip that orbiting either one triggers is already at equilibrium.
+    myCompareView->setCameraStateNow(myView->camera().state());
+    // The compare pane's own half of the sync - see syncCamera(). Torn down
+    // automatically with myCompareView on closeCompare().
+    connect(myCompareView, &OcctViewWidget::cameraChanged, this, [this] {
+        if (myCompareView) syncCamera(myCompareView, myView);
+    });
+
+    myCompareVersionName = name;
+    auto* badge = new CompareBadge(myCompareView);
+    // setVersionName() ends in growAndReposition() - both device-pixel
+    // rules (Theme::wholeDevicePixels() for the size, Theme::
+    // snapToDevicePixels() for the position) apply themselves; nothing
+    // further to place by hand here.
+    badge->setVersionName(name);
+    badge->show();
+    badge->raise();
+    // Deferred by one event-loop turn, deliberately - see closeCompare()'s
+    // own comment on why it deletes synchronously. This button is a
+    // descendant of everything that delete destroys (button -> badge ->
+    // myCompareView -> mySplitter), so calling closeCompare() straight from
+    // this click would destroy the very widget whose signal is still on the
+    // call stack. QTimer::singleShot(0, ...) runs it on the next turn
+    // instead, by which point this click has finished being handled and
+    // nothing is executing inside the object about to be deleted.
+    //
+    // The generation captured here (fix round 1, Minor 6) is what stops a
+    // STALE deferred close from acting on the WRONG compare session: a
+    // click, then - inside that single deferred turn - Restore or a second
+    // Compare click replacing this pane with a different version before the
+    // timer fires. Without it the deferred call would still run
+    // closeCompare() unconditionally and close whatever compare happens to
+    // be open BY THEN, silently discarding a session the user never asked
+    // to end. myCompareGeneration is bumped once per openCompare() call
+    // (below), so a mismatch here means "the compare this button belonged
+    // to is already gone or already replaced" and the deferred call becomes
+    // a no-op rather than acting on the wrong pane.
+    const int generation = myCompareGeneration;
+    connect(badge->closeButton(), &QPushButton::clicked, this, [this, generation] {
+        QTimer::singleShot(0, this, [this, generation] {
+            if (myCompareGeneration == generation) closeCompare();
+        });
+    });
+    myCompareBadge = badge;
+
+    updateActions();
+    statusBar()->showMessage(tr("Comparing %1").arg(name));
+    return true;
+}
+
+void MainWindow::closeCompare()
+{
+    if (!myCompareView) return;
+
+    // The splitter's own size IS the correct target for whatever replaces
+    // it as central widget - QMainWindowLayout already computed and applied
+    // it when mySplitter itself became central, back in openCompare().
+    // Captured before anything below touches mySplitter.
+    const QSize centralSize = mySplitter ? mySplitter->size() : QSize();
+
+    // Pulls the live view back OUT of the splitter and back to being the
+    // window's plain central widget - the same reparenting openCompare()
+    // did in reverse, and the one QMainWindow::setCentralWidget() already
+    // knows how to perform on a widget it does not currently own.
+    setCentralWidget(myView);
+    // setCentralWidget() alone leaves myView at whatever geometry it held as
+    // ONE PANE of the splitter (roughly half the window, since QSplitter
+    // gives its FIRST widget's own sizeHint priority in the absence of an
+    // explicit setSizes() call) until something else forces
+    // QMainWindowLayout to lay out again - and empirically, neither
+    // layout()->invalidate() nor layout()->activate() is that something for
+    // a QMainWindow's own specialised layout in this situation. Found by a
+    // real composited capture (fix round 1, Important 1/Minor 3), not
+    // assumed: centralWidget()==view was true and the view still rendered
+    // and picked CORRECTLY within its own (wrong, roughly-600-of-1000-px)
+    // rect, so neither of those checks caught it - only a PrintWindow
+    // capture showed the other ~40% of the window still painting the
+    // compare pane's stale pixels, and a direct geometry check confirmed it
+    // (view->width() == 601 in a 1000px-wide probe).
+    //
+    // myView is resized explicitly to the size we KNOW is right, because it
+    // is exactly the size the widget it is replacing just had. That alone
+    // still was not the whole fix, though - see
+    // OcctViewWidget::resizeEvent() for the other half: the resize() call
+    // below updates Qt's own widget-level bookkeeping (which this
+    // triggered correctly, and which is what V3d_View::Dump() reads), but
+    // the underlying native HWND's ACTUAL client rect turned out not to
+    // follow it here, confirmed with GetClientRect - a defect resizeEvent()
+    // now corrects on every resize, not just this one call site.
+    if (centralSize.isValid()) myView->resize(centralSize);
+
+    // A SYNCHRONOUS delete, not deleteLater(). QMainWindow keeps the
+    // REPLACED central widget referenced in its own internal layout state
+    // (QMainWindowLayout's own bookkeeping for the widget it just stopped
+    // showing) even once it is no longer parented as the current central
+    // widget - and a QObject::deleteLater() event posted for an object that
+    // internal state still holds onto is never actually delivered by
+    // QCoreApplication::sendPostedEvents(), however many times or how long a
+    // caller pumps the event loop afterward. Measured, not theorised: a
+    // QPointer watching mySplitter stayed non-null through a full 500ms of
+    // repeated processEvents() calls. An immediate delete has no such
+    // dependency - the object is simply gone, right here.
+    //
+    // The one call site this makes genuinely risky is the compare badge's
+    // own Close button, whose click would otherwise be destroying an
+    // ancestor of itself (this splitter owns myCompareView owns the badge
+    // owns that very button) while still on that button's own call stack -
+    // see the badge's own connect() in openCompare() for how that specific
+    // route defers through QTimer::singleShot(0, ...) instead of calling
+    // this directly, so by the time this function's delete actually runs,
+    // nothing is still executing inside the object being destroyed. Every
+    // OTHER caller here (VersionsPanel's Compare/Restore buttons by way of
+    // restoreVersion()/openCompare(), and a direct call from a test) is not
+    // itself a descendant of what this deletes, so no such deferral is
+    // needed for them.
+    //
+    // A SECOND reentrancy shape was considered and is safe without any
+    // deferral of its own: a window-level shortcut (Ctrl+W for Close
+    // furniture, say) firing while focus happens to sit on a widget this
+    // call is about to delete - the badge's Close button, if it was ever
+    // Tab-focused rather than clicked. That dispatch runs through
+    // QApplication::notify(), which Qt guards internally with QPointer
+    // around the focus widget across the handler call specifically so a
+    // slot invoked by a shortcut can delete the widget the shortcut was
+    // dispatched through without notify() touching a dangling pointer
+    // afterward - unlike the click case above, where the reentrancy is
+    // THIS class's own signal/slot wiring and nothing upstream is guarding
+    // it for us.
+    myCompareBadge = nullptr;   // a child of myCompareView - goes with it below
+    delete myCompareView;
+    myCompareView = nullptr;
+    myCompareVersionName.clear();
+    delete mySplitter;
+    mySplitter = nullptr;
+
+    updateActions();
+}
+
+void MainWindow::syncCamera(OcctViewWidget* from, OcctViewWidget* to)
+{
+    if (!from || !to) return;
+    // The no-recursion guard: see the declaration for the whole argument.
+    // Skipping the copy when the two already agree is what stops this from
+    // being an infinite ping-pong rather than merely a fast-converging one -
+    // setCameraStateNow() unconditionally emits cameraChanged() again, and
+    // THIS check is what the other direction's own call finds already
+    // satisfied.
+    if (camerasApproximatelyEqual(from->camera().state(), to->camera().state())) return;
+    to->setCameraStateNow(from->camera().state());
+}
+
+void MainWindow::updateWindowTitle()
+{
+    if (myShowingInitScreen || myFurnitureId.isEmpty()) {
+        setWindowTitle(tr("FurnifyMe"));
+        return;
+    }
+    setWindowTitle(QStringLiteral("%1%2 — FurnifyMe")
+                       .arg(myFurnitureName, isFurnitureDirty() ? QStringLiteral(" *")
+                                                                : QString()));
 }
 
 void MainWindow::recordProgress(const std::string& event)
@@ -1313,6 +2592,11 @@ void MainWindow::updateStateLabel()
     // where the next outline will land governs how to read everything after
     // it.
     if (myFaceLocked) state = tr("On a locked face — %1").arg(state);
+    // Symmetry LEADS - CLAUDE.md's own words for this label - because
+    // whether the next body gets a mirrored twin governs how to read
+    // everything after it, the same argument the face lock makes one layer
+    // in.
+    if (myDocument.symmetryOn()) state = tr("Symmetry on — %1").arg(state);
 
     myStateLabel->setText(state);
 }
@@ -1331,6 +2615,27 @@ void MainWindow::resyncView()
     for (const DocumentModel::Outline& outline : myDocument.outlines()) {
         myView->displayOutline(outline.id, outline.face);
     }
+
+    // The visibility reconciliation: DocumentModel owns isVisible() (Task 1,
+    // written through by ItemsPanel's eye button - see ItemsPanel.cpp), and
+    // the view is a mirror of it. displaySolid()/displayOutline() above
+    // always show what they just built, so the persisted state is reapplied
+    // on top HERE, in the one place every caller of this function goes
+    // through - not just the caller (openFurniture()) that happened to be
+    // written first. Undo, redo, and every other resync (six call sites)
+    // rebuild the presentation wholesale exactly as a fresh open does, so a
+    // hidden body must not silently reappear on any of them.
+    for (const DocumentModel::Solid& solid : myDocument.solids())
+        myView->setSolidVisible(solid.id, myDocument.isVisible(solid.id));
+    for (const DocumentModel::Outline& outline : myDocument.outlines())
+        myView->setOutlineVisible(outline.id, myDocument.isVisible(outline.id));
+
+    // Same reconciliation, for the same reason: symmetryOn()/symmetryPlane()
+    // can change from underneath the view through undo, redo, opening a
+    // different furniture or restoring a version, none of which go through
+    // setSymmetryEnabled()/setSymmetryPlaneFromFace() - this is the one place
+    // every one of those already rebuilds the viewport wholesale.
+    myView->setSymmetryIndicator(myDocument.symmetryOn(), myDocument.symmetryPlane());
 }
 
 void MainWindow::onDeleteSelected()
@@ -1358,12 +2663,37 @@ void MainWindow::onDeleteSelected()
         return;
     }
 
-    const std::string deletedName = ids.size() == 1 ? myDocument.nameOf(ids.front())
-                                                    : std::string();
+    // Symmetry: deleting either half of a pair takes both, in the SAME
+    // checkpoint - a twin left standing with nothing to mirror is a symmetry
+    // the document no longer describes. Expanded BEFORE anything is removed,
+    // so the message and the single undo agree with what actually happened.
+    //
+    // Gated on symmetryOn(), not just twinOf() != -1: DocumentModel's pairing
+    // map is undo-tracked while the on/off mode is not (fix round 1 - a mode
+    // switch stays outside undo State, the same rule visibility follows), so
+    // an undo landing after symmetry was turned off can resurrect an OLD
+    // pairing entry while the mode itself stays off. A pairing only ACTS
+    // while symmetry is on; the guard is what keeps that true everywhere,
+    // not just at the edit-propagation hook.
+    std::vector<int> toDelete = ids;
+    if (myDocument.symmetryOn()) {
+        for (int id : ids) {
+            const int twin = myDocument.twinOf(id);
+            if (twin > 0 && std::find(toDelete.begin(), toDelete.end(), twin) == toDelete.end())
+                toDelete.push_back(twin);
+        }
+    }
+    const bool isTwinPair = myDocument.symmetryOn() && toDelete.size() == 2 &&
+                            myDocument.twinOf(toDelete[0]) == toDelete[1];
 
-    myDocument.checkpoint();
+    const std::string deletedName = toDelete.size() == 1 ? myDocument.nameOf(toDelete.front())
+                                                          : std::string();
+    const std::string twinNameA = isTwinPair ? myDocument.nameOf(toDelete[0]) : std::string();
+    const std::string twinNameB = isTwinPair ? myDocument.nameOf(toDelete[1]) : std::string();
+
+    checkpointDocument();
     myView->clearSelection();
-    for (int id : ids) {
+    for (int id : toDelete) {
         myDocument.removeSolid(id);
         myView->removeSolid(id);
     }
@@ -1372,8 +2702,12 @@ void MainWindow::onDeleteSelected()
     updateActions();
     emit documentChanged();
     const QString message =
-        ids.size() == 1 ? tr("Deleted %1").arg(QString::fromStdString(deletedName))
-                        : tr("Deleted %1 bodies").arg(ids.size());
+        toDelete.size() == 1
+            ? tr("Deleted %1").arg(QString::fromStdString(deletedName))
+        : isTwinPair
+            ? tr("Deleted %1 and %2").arg(QString::fromStdString(twinNameA),
+                                          QString::fromStdString(twinNameB))
+            : tr("Deleted %1 bodies").arg(toDelete.size());
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
 }
@@ -1392,7 +2726,7 @@ bool MainWindow::deletePendingOutline()
     // puts it back. The toast that reports it carries Undo for the same
     // reason - CLAUDE.md's rule is that a change the user can see is a change
     // they can take back from where it is reported.
-    myDocument.checkpoint();
+    checkpointDocument();
     myDocument.removeOutline(id);
     myView->removeOutline(id);
     // The drawer's choice went with it. Not strictly required -
@@ -1414,8 +2748,53 @@ bool MainWindow::deletePendingOutline()
     return true;
 }
 
+void MainWindow::onRenameSelected()
+{
+    // The same target updateActions() just decided myRenameAction's enabled
+    // state from - asked the same way, rather than kept as a second copy of
+    // the rule (onDeleteSelected()'s own comment makes the identical
+    // argument for Delete's two targets).
+    const std::vector<int> ids = myView->selectedSolidIds();
+    if (ids.size() == 1) {
+        myItemsPanel->beginRenameForItem(ids.front(), /*isOutline=*/false);
+        return;
+    }
+    if (ids.empty() && hasPendingFace())
+        myItemsPanel->beginRenameForItem(pendingOutlineId(), /*isOutline=*/true);
+}
+
+void MainWindow::onItemRenameCommitted(int id, bool isOutline, QString newName)
+{
+    // InlineRename already trimmed the text and refused an empty/whitespace
+    // commit silently - see its header - so this is only ever reached with a
+    // real, non-empty name. The id is checked live BEFORE checkpointing,
+    // rather than after: this app is single-threaded and the drawer's row
+    // does not rebuild between opening the edit and committing it (refresh()'s
+    // signature comment explains why), so nothing can invalidate `id` between
+    // this check and setItemName() below - but checking first means a
+    // checkpoint is never pushed for a mutation that was always going to
+    // refuse, which a check-after-the-fact could not promise.
+    if (!(isOutline ? myDocument.containsOutline(id) : myDocument.contains(id))) return;
+
+    checkpointDocument();
+    myDocument.setItemName(id, newName.trimmed().toStdString());
+    recordProgress("rename.used");
+
+    updateActions();
+    emit documentChanged();
+    const QString message = tr("Renamed to \"%1\"").arg(newName.trimmed());
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+}
+
 void MainWindow::onUndo()
 {
+    // A document-changing gesture in every sense that matters here, even
+    // though it does not run through checkpointDocument() (undo does not
+    // take a NEW checkpoint) - so render mode's own exit rule is enforced
+    // explicitly rather than piggy-backing on that choke point.
+    if (myRenderModeOn) setRenderModeEnabled(false);
+
     // Mid-sketch, Undo means the last POINT. One implementation with two
     // triggers, not a second remove-last-point path: Backspace and Ctrl+Z
     // both land in onUndoSketchPoint(), so the two can never drift.
@@ -1449,6 +2828,9 @@ void MainWindow::onUndo()
 
 void MainWindow::onRedo()
 {
+    // See onUndo()'s own comment - the same reasoning applies here.
+    if (myRenderModeOn) setRenderModeEnabled(false);
+
     const std::vector<int> outlinesBefore = outlineIds();
     if (!myDocument.redo()) return;
     recordProgress("undo.used");
@@ -1519,6 +2901,12 @@ void MainWindow::onSketchCursorMoved(const gp_Pnt& point)
 
 void MainWindow::onStartSketch()
 {
+    // Render mode's own exit gesture, named explicitly in CLAUDE.md's
+    // contract ("Start Sketch... leaves render mode first"). Ctrl+K and the
+    // Sketch menu entry both stay reachable while render mode hides the
+    // rail, so this is not merely defensive - it is a real route in.
+    if (myRenderModeOn) setRenderModeEnabled(false);
+
     mySketch.reset();
     // A waiting outline is NOT discarded here any more. It used to be, when
     // it was a bare member and starting a sketch was the only way to be rid
@@ -1691,7 +3079,7 @@ void MainWindow::onFinishSketch()
     // checkpoint like every other change to the document, appears in the
     // drawer, and can be taken back with Ctrl+Z rather than only by being
     // extruded or silently dropped by the next sketch.
-    myDocument.checkpoint();
+    checkpointDocument();
     const int id = myDocument.addOutline(face, mySketch.plane());
     // The newest is what Extrude consumes by default, and saying so
     // explicitly rather than leaning on pendingOutlineId()'s fallback means
@@ -1763,21 +3151,54 @@ bool MainWindow::extrudePendingFace(double height)
     // body arriving are one change, so one Ctrl+Z puts the outline back and
     // takes the body away. Two checkpoints would make the user press it twice
     // and leave a document holding both in between.
-    myDocument.checkpoint();
+    checkpointDocument();
     const int id = myDocument.convertOutlineToBody(outlineId, solid);
     recordProgress("extrude.completed");
     myView->clearPreview();
     myView->removeOutline(outlineId);
     myView->displaySolid(id, solid);
+
+    // Symmetry (Milestone 3): creation pairs. A body whose own bounding box
+    // straddles the plane stays unpaired - mirroring it would build a twin
+    // overlapping the body itself, not a second piece of furniture. This
+    // sits in the SAME checkpoint as the conversion above (nothing has
+    // called updateActions()/documentChanged() yet), so one undo removes the
+    // outline's replacement body AND its twin together.
+    int twinId = 0;
+    if (id > 0 && myDocument.symmetryOn() &&
+        !ModelingOps::boundingBoxStraddlesPlane(solid, myDocument.symmetryPlane())) {
+        const ModelingOps::BooleanResult mirrored =
+            ModelingOps::mirrorShape(solid, myDocument.symmetryPlane());
+        if (mirrored.ok) {
+            twinId = myDocument.addSolid(mirrored.shape);
+            if (twinId > 0) {
+                myDocument.pairBodies(id, twinId);
+                myView->displaySolid(twinId, mirrored.shape);
+            }
+        } else {
+            qWarning("Symmetry: creation-pair mirror failed: %s", mirrored.error.c_str());
+        }
+    }
+    // AFTER the twin arrives, not before - fix round 1: framing on the first
+    // body alone left a mirrored twin sitting half (or entirely) outside the
+    // viewport on the very first extrude of a symmetric session.
     if (wasEmpty) myView->fitAll();
 
     mySelectedOutlineId = 0;
     mySketch.reset();
     updateActions();
     emit documentChanged();
-    const QString message = tr("%1 created — %2")
-                                .arg(QString::fromStdString(myDocument.nameOf(id)),
-                                     QString::fromStdString(Measure::formatDimensions(solid)));
+    // Paired: names both, no dimensions - a twin repeats the same size, and
+    // "Body 03 and Body 04 created" is the whole point (the brief's own
+    // words). Unpaired: the ordinary single-body message, unchanged.
+    const QString message =
+        twinId > 0
+            ? tr("%1 and %2 created")
+                  .arg(QString::fromStdString(myDocument.nameOf(id)),
+                       QString::fromStdString(myDocument.nameOf(twinId)))
+            : tr("%1 created — %2")
+                  .arg(QString::fromStdString(myDocument.nameOf(id)),
+                       QString::fromStdString(Measure::formatDimensions(solid)));
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
     return true;
@@ -1788,7 +3209,14 @@ bool MainWindow::canPullSelectedFace() const
     // No sketch in progress, and no closed outline waiting - see
     // canChangeSketchPlane() and the header for both halves. The pending-face
     // half is what keeps this and ExtrudePreview mutually exclusive.
-    if (mySketching || hasPendingFace()) return false;
+    //
+    // Render mode adds a third: it clears the selection and deactivates
+    // every solid's own selection modes the moment it turns on (see
+    // OcctViewWidget::setRenderMode()), so selectedFace() below would answer
+    // null on its own - this term is defence in depth, named explicitly so a
+    // future selection route cannot silently reach this predicate before the
+    // viewport's own suppression does.
+    if (mySketching || hasPendingFace() || myRenderModeOn) return false;
 
     // selectedFace() is deliberately "the ONE selected face", never the first
     // of several, so this cannot be a coin toss between two highlighted
@@ -1808,6 +3236,67 @@ int MainWindow::bodyIdForFace(const TopoDS_Face& face) const
         }
     }
     return 0;
+}
+
+void MainWindow::checkpointDocument()
+{
+    // Render mode's own exit rule: "any document-changing action leaves
+    // render mode first". Every commit in this file that takes a checkpoint
+    // now calls THIS rather than myDocument.checkpoint() directly (eight call
+    // sites, before this task), which is what makes the rule structural
+    // rather than eight separate reminders scattered across the file to add
+    // one - and it runs before the checkpoint below, exactly as the brief's
+    // own word "first" asks for.
+    //
+    // setSymmetryEnabled() gets the identical one-line exit explicitly,
+    // rather than being routed through here, because it is document-changing
+    // (unpairs bodies, bumps revision(), dirties, arms autosave) but takes NO
+    // checkpoint of its own - "a mode switch, not an edit," per its own
+    // comment - so there is no checkpoint() call here for it to ride along
+    // with. Lock to Face and Unlock Face were considered and left alone
+    // (fix round 1, Important 3's review): lockToFace() cannot actually be
+    // reached while render mode is on (it needs a flat face selected, and
+    // render mode clears and deactivates all selection on entry), and
+    // unlockFace() only moves the sketch plane back to the ground - neither
+    // is a change a render-mode shot would visibly disagree with.
+    if (myRenderModeOn) setRenderModeEnabled(false);
+    myDocument.checkpoint();
+}
+
+void MainWindow::commitReplaceBody(int id, const TopoDS_Shape& newShape, bool& twinFollowed)
+{
+    twinFollowed = false;
+    if (id <= 0 || newShape.IsNull()) return;
+
+    checkpointDocument();
+    myDocument.replaceSolid(id, newShape);
+    myView->displaySolid(id, newShape);
+
+    // Symmetry (Milestone 3): the whole reason this function exists rather
+    // than staying three copies of "checkpoint, replace, display" - one
+    // twin-follow rule instead of one per gizmo. A mirror failure here (not
+    // expected to be reachable in practice - mirrorShape only refuses a null
+    // shape or a kernel exception, and `newShape` just came from a
+    // successful edit) leaves the twin untouched rather than turning a
+    // successful primary edit into a reported failure.
+    //
+    // Gated on symmetryOn(): the pairing map is undo-tracked while the
+    // on/off mode is not (fix round 1), so an undo can resurrect an old
+    // pairing while symmetry stays off. A pairing only ACTS while the mode
+    // is on - this is the hook that makes "turn symmetry off, edit, nothing
+    // propagates" true even across that undo.
+    const int twin = myDocument.symmetryOn() ? myDocument.twinOf(id) : -1;
+    if (twin > 0) {
+        const ModelingOps::BooleanResult mirrored =
+            ModelingOps::mirrorShape(newShape, myDocument.symmetryPlane());
+        if (mirrored.ok) {
+            myDocument.replaceSolid(twin, mirrored.shape);
+            myView->displaySolid(twin, mirrored.shape);
+            twinFollowed = true;
+        } else {
+            qWarning("Symmetry: twin mirror failed: %s", mirrored.error.c_str());
+        }
+    }
 }
 
 bool MainWindow::pullFaceBy(const TopoDS_Face& face, double distance)
@@ -1832,8 +3321,6 @@ bool MainWindow::pullFaceBy(const TopoDS_Face& face, double distance)
         return false;
     }
 
-    myDocument.checkpoint();
-    myDocument.replaceSolid(id, result.shape);
     // The preview and the arrow both describe the face that is about to stop
     // existing; the selection holds that face too. All three go before the
     // body is redisplayed, in that order, so nothing is left pointing at
@@ -1841,15 +3328,18 @@ bool MainWindow::pullFaceBy(const TopoDS_Face& face, double distance)
     myView->clearModelingPreview();
     myView->clearPullArrow();
     myView->clearSelection();
-    myView->displaySolid(id, result.shape);
+
+    bool twinFollowed = false;
+    commitReplaceBody(id, result.shape, twinFollowed);
     recordProgress("pull.completed");
 
     updateActions();
     emit documentChanged();
-    const QString message =
+    QString message =
         tr("%1 pulled — %2")
             .arg(QString::fromStdString(myDocument.nameOf(id)),
                  QString::fromStdString(Measure::formatDimensions(result.shape)));
+    if (twinFollowed) message += tr(" — twin followed");
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
     return true;
@@ -1869,9 +3359,9 @@ int MainWindow::bodyIdForEdge(const TopoDS_Edge& edge) const
 bool MainWindow::bevelTarget(std::vector<TopoDS_Edge>& edges, TopoDS_Edge& edge, int& bodyId,
                              gp_Pnt& centre, gp_Dir& outward) const
 {
-    // The same two halves canPullSelectedFace() opens with, for the same
+    // The same three terms canPullSelectedFace() opens with, for the same
     // reasons - see its comment and the header.
-    if (mySketching || hasPendingFace()) return false;
+    if (mySketching || hasPendingFace() || myRenderModeOn) return false;
 
     // Edge mode explicitly, so this cannot be true at the same time as the
     // face pull's predicate or the transform gizmo's.
@@ -2042,8 +3532,6 @@ bool MainWindow::bevelEdgesBy(const std::vector<TopoDS_Edge>& edges, double size
         return false;
     }
 
-    myDocument.checkpoint();
-    myDocument.replaceSolid(id, result.shape);
     // The preview, the arrow and the selection all describe the edge that is
     // about to stop existing. All three go before the body is redisplayed, in
     // that order, so nothing is left pointing at topology from before the
@@ -2051,7 +3539,9 @@ bool MainWindow::bevelEdgesBy(const std::vector<TopoDS_Edge>& edges, double size
     myView->clearModelingPreview();
     myView->clearBevelArrow();
     myView->clearSelection();
-    myView->displaySolid(id, result.shape);
+
+    bool twinFollowed = false;
+    commitReplaceBody(id, result.shape, twinFollowed);
     recordProgress("bevel.completed");
 
     updateActions();
@@ -2065,13 +3555,14 @@ bool MainWindow::bevelEdgesBy(const std::vector<TopoDS_Edge>& edges, double size
     // Written out rather than through "(s)", per the vocabulary rules.
     const QString name = QString::fromStdString(myDocument.nameOf(id));
     const QString extent = QString::fromStdString(Measure::formatDimensions(result.shape));
-    const QString message =
+    QString message =
         edges.size() > 1
             ? (fillet ? tr("Fillet added to %1 — %2 edges — %3")
                       : tr("Chamfer added to %1 — %2 edges — %3"))
                   .arg(name, QString::number(static_cast<int>(edges.size())), extent)
             : (fillet ? tr("Fillet added to %1 — %2") : tr("Chamfer added to %1 — %2"))
                   .arg(name, extent);
+    if (twinFollowed) message += tr(" — twin followed");
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
     return true;
@@ -2079,10 +3570,10 @@ bool MainWindow::bevelEdgesBy(const std::vector<TopoDS_Edge>& edges, double size
 
 int MainWindow::transformableBodyId() const
 {
-    // The same two halves canPullSelectedFace() opens with, for the same
+    // The same three terms canPullSelectedFace() opens with, for the same
     // reasons: an outline in progress lives on a plane, and a body that moved
     // under it would take the plane's meaning with it.
-    if (mySketching || hasPendingFace()) return 0;
+    if (mySketching || hasPendingFace() || myRenderModeOn) return 0;
 
     // Body mode explicitly. selectedSolidIds() reports the owning body of a
     // selected FACE too, so without this the gizmo would appear over a face
@@ -2164,9 +3655,8 @@ bool MainWindow::transformBody(int id, const gp_Trsf& delta)
         return false;
     }
 
-    myDocument.checkpoint();
-    myDocument.replaceSolid(id, result.shape);
-    myView->displaySolid(id, result.shape);
+    bool twinFollowed = false;
+    commitReplaceBody(id, result.shape, twinFollowed);
     // Selected again on purpose, unlike the face pull's clearSelection(): the
     // body is still the same body, and keeping it selected is what leaves the
     // gizmo standing on it for a second drag. displaySolid() detached the
@@ -2180,11 +3670,12 @@ bool MainWindow::transformBody(int id, const gp_Trsf& delta)
 
     // The same derivation the refusals above use - one source for all three
     // outcomes, and it stays right if a gesture ever combines two of them.
-    const QString message =
+    QString message =
         tr("%1 %2 — %3")
             .arg(QString::fromStdString(myDocument.nameOf(id)),
                  transformPastVerb(delta),
                  QString::fromStdString(Measure::formatDimensions(result.shape)));
+    if (twinFollowed) message += tr(" — twin followed");
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
     return true;
@@ -2245,26 +3736,76 @@ bool MainWindow::applyBooleanToSelection(int kind)
         return false;
     }
 
-    myDocument.checkpoint();
-    myView->clearSelection();
-    for (int id : ids) {
-        myDocument.removeSolid(id);
-        myView->removeSolid(id);
+    // Symmetry: an operand pair that IS each other's own twin collapses to
+    // ONE unpaired result (the plan's own ruling - the symmetric whole no
+    // longer needs a mirror, since it already contains both halves). A
+    // paired operand combined with something unrelated instead KEEPS that
+    // operand's own id, so its twin can be replaced with the mirrored
+    // result rather than left standing for a body that no longer exists.
+    // Determined BEFORE anything is removed, from the two ids the boolean
+    // actually consumed.
+    //
+    // Gated on symmetryOn(), same rule as commitReplaceBody's and
+    // onDeleteSelected's own guards (fix round 1): the pairing map survives
+    // undo while the on/off mode does not, so a stale pairing must never
+    // drive behaviour once symmetry is off.
+    const bool operandsAreTwins =
+        myDocument.symmetryOn() && myDocument.twinOf(ids[0]) == ids[1];
+    int survivingId = 0;
+    if (myDocument.symmetryOn() && !operandsAreTwins) {
+        if (myDocument.twinOf(ids[0]) > 0) survivingId = ids[0];
+        else if (myDocument.twinOf(ids[1]) > 0) survivingId = ids[1];
     }
 
-    const int id = myDocument.addSolid(result.shape);
+    checkpointDocument();
+    myView->clearSelection();
+
+    int id = 0;
+    bool twinFollowed = false;
+    if (survivingId > 0) {
+        const int otherId = (survivingId == ids[0]) ? ids[1] : ids[0];
+        myDocument.removeSolid(otherId);
+        myView->removeSolid(otherId);
+        myDocument.replaceSolid(survivingId, result.shape);
+        myView->displaySolid(survivingId, result.shape);
+        id = survivingId;
+
+        const int twin = myDocument.symmetryOn() ? myDocument.twinOf(id) : -1;
+        if (twin > 0) {
+            const ModelingOps::BooleanResult mirrored =
+                ModelingOps::mirrorShape(result.shape, myDocument.symmetryPlane());
+            if (mirrored.ok) {
+                myDocument.replaceSolid(twin, mirrored.shape);
+                myView->displaySolid(twin, mirrored.shape);
+                twinFollowed = true;
+            } else {
+                qWarning("Symmetry: twin mirror failed: %s", mirrored.error.c_str());
+            }
+        }
+    } else {
+        // Both unpaired, or the two operands were each other's own twin -
+        // either way the result is a single, freshly unpaired body.
+        // removeSolid() below drops each removed id's own pairing entries,
+        // so the "own twin" case leaves nothing pointing at a ghost id.
+        for (int rid : ids) {
+            myDocument.removeSolid(rid);
+            myView->removeSolid(rid);
+        }
+        id = myDocument.addSolid(result.shape);
+        myView->displaySolid(id, result.shape);
+    }
     recordProgress("boolean.completed");
-    myView->displaySolid(id, result.shape);
 
     updateActions();
     emit documentChanged();
-    const QString message = tr("%1 — %2 and %3 → %4 — %5")
-                                .arg(operationName,
-                                     QString::fromStdString(nameA),
-                                     QString::fromStdString(nameB),
-                                     QString::fromStdString(myDocument.nameOf(id)),
-                                     QString::fromStdString(
-                                         Measure::formatDimensions(result.shape)));
+    QString message = tr("%1 — %2 and %3 → %4 — %5")
+                          .arg(operationName,
+                               QString::fromStdString(nameA),
+                               QString::fromStdString(nameB),
+                               QString::fromStdString(myDocument.nameOf(id)),
+                               QString::fromStdString(
+                                   Measure::formatDimensions(result.shape)));
+    if (twinFollowed) message += tr(" — twin followed");
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
     return true;
@@ -2512,6 +4053,100 @@ void MainWindow::unlockFace()
 
     updateActions();
     statusBar()->showMessage(tr("Back to the ground — outlines are drawn flat again"));
+}
+
+void MainWindow::setSymmetryEnabled(bool on)
+{
+    // Document-changing by any honest reading (fix round 1, Important 3):
+    // it unpairs every existing pairing, bumps revision(), dirties the
+    // furniture and arms autosave - even though (see below) it takes no undo
+    // checkpoint of its own. Render mode's exit rule is about a document
+    // change, not specifically about a checkpoint, so this needs the same
+    // one-line exit checkpointDocument()'s eight call sites get structurally
+    // rather than being folded into that function itself - see its own
+    // comment for why.
+    if (myRenderModeOn) setRenderModeEnabled(false);
+
+    // Whatever plane document() already holds - the constructed default
+    // (world YZ through the origin) the very first time this ever fires, or
+    // whatever setSymmetryPlaneFromFace() last set. Turning it off unpairs
+    // everything (DocumentModel::setSymmetry()'s own rule) but takes no
+    // checkpoint - a mode switch, not an edit - so it is not itself
+    // undoable; it still bumps revision(), which is what tells autosave and
+    // the dirty star that the manifest's own "symmetry" block changed.
+    myDocument.setSymmetry(on, myDocument.symmetryPlane());
+    myView->setSymmetryIndicator(on, myDocument.symmetryPlane());
+
+    updateActions();
+    emit documentChanged();
+    statusBar()->showMessage(
+        on ? tr("Symmetry on — new bodies get a mirrored twin")
+           : tr("Symmetry off — bodies keep their own shape now"));
+}
+
+bool MainWindow::setSymmetryPlaneFromFace(const TopoDS_Face& face)
+{
+    if (face.IsNull()) return false;
+
+    const BRepAdaptor_Surface surface(face);
+    if (surface.GetType() != GeomAbs_Plane) {
+        myToasts->show(tr("This face isn't flat, so it can't hold the symmetry plane. "
+                          "Pick a flat face and try again."),
+                      Toast::Kind::Failure, false);
+        return false;
+    }
+
+    // The same outward-orientation fix lockToFace() carries, for the same
+    // reason: BRepAdaptor_Surface never applies TopAbs_Orientation, and on a
+    // plain box three of six faces are REVERSED with their raw plane normal
+    // pointing into the body. It does not actually change what the MIRROR
+    // does here - SetMirror(gp_Ax2) treats a plane and its own reverse
+    // identically - but a plane captured with an arbitrarily-flipped normal
+    // is a needless inconsistency the next reader of this value would have
+    // to rediscover is harmless.
+    gp_Pln plane = surface.Plane();
+    if (face.Orientation() == TopAbs_REVERSED) {
+        plane = gp_Pln(gp_Ax3(plane.Location(), plane.Axis().Direction().Reversed(),
+                              plane.Position().XDirection()));
+    }
+
+    // A plane change invalidates every existing pairing's meaning - each one
+    // was computed against the OLD plane, and a subsequent twin-follow edit
+    // mirrored about the new one would silently teleport the twin. Unpair
+    // FIRST, so setSymmetry() below is not what a caller has to trust to
+    // have done it. Only reported when it actually changed anything.
+    const bool hadPairings = myDocument.unpairAll();
+
+    myDocument.setSymmetry(true, plane);
+    myView->setSymmetryIndicator(true, plane);
+    // Blocked - fix round 1: this function already performs everything
+    // setSymmetryEnabled(true) would (the two lines just above, plus the
+    // updateActions()/documentChanged() below), so an UNBLOCKED setChecked()
+    // re-entered that slot and redid all of it a second time, purely by
+    // accident of which action happened to still read unchecked. Every
+    // other resync of this action's checked state (updateActions() itself)
+    // already goes through QSignalBlocker for the same reason.
+    if (mySymmetryAction && !mySymmetryAction->isChecked()) {
+        const QSignalBlocker blocker(mySymmetryAction);
+        mySymmetryAction->setChecked(true);
+    }
+
+    updateActions();
+    emit documentChanged();
+    const QString message = hadPairings ? tr("Symmetry plane moved — bodies unpaired")
+                                        : tr("Symmetry plane set to this face");
+    statusBar()->showMessage(message);
+    // No checkpoint behind this (a plane change is a mode switch, not an
+    // edit - the same rule turning symmetry off follows), so no Undo either.
+    if (hadPairings) myToasts->show(message, Toast::Kind::Note, false);
+    return true;
+}
+
+void MainWindow::onSetSymmetryPlane()
+{
+    const TopoDS_Face face = myView->selectedFace();
+    if (face.IsNull()) return;
+    setSymmetryPlaneFromFace(face);
 }
 
 void MainWindow::onSelectionChanged()

@@ -10,11 +10,17 @@
 // before giving them any longer life.
 //
 #include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Shape.hxx>
+#include <gp_Dir.hxx>
 #include <gp_Pln.hxx>
+#include <gp_Pnt.hxx>
+
+#include "FurnifySerial.h"
 
 class DocumentModel {
 public:
@@ -57,6 +63,71 @@ public:
     // Empty string if the id is unknown.
     std::string nameOf(int id) const;
     bool renameSolid(int id, const std::string& name);
+
+    // --- symmetry (Milestone 3: live mirror twins) -------------------------
+    //
+    // Symmetry is DOCUMENT state, not a session preference: it is snapshotted
+    // by checkpoint()/undo()/redo() and persisted in the manifest (Task 1
+    // reserved the "symmetry" key), so a save/load or a version restore
+    // brings the pairing back exactly as it stood. `plane` is captured BY
+    // VALUE - the same rule the sketch plane and every Outline follow - so a
+    // rebuild elsewhere can never move it out from under a live pairing.
+    //
+    // Turning it OFF unpairs everything: no checkpoint (this is a mode
+    // switch, not an edit a Ctrl+Z should have its own entry for), but it
+    // DOES bump revision() - the manifest's own "symmetry" block has
+    // genuinely changed, so a furniture with autosave on has to notice.
+    // Turning it back on does NOT re-pair what was unpaired; there is no
+    // record of what used to go with what once the map is cleared.
+    void setSymmetry(bool on, const gp_Pln& plane);
+    bool symmetryOn() const { return mySymmetryOn; }
+    gp_Pln symmetryPlane() const { return mySymmetryPlane; }
+
+    // Pairs `idA` and `idB` as mirror twins, both directions. Either id's
+    // PREVIOUS pairing (if any) is dropped first, so a body can never belong
+    // to two pairs at once. A no-op for an unknown id, an id paired with
+    // itself, or either id <= 0.
+    void pairBodies(int idA, int idB);
+    // `id`'s twin body id, or -1 when unpaired (including for an unknown id).
+    int twinOf(int id) const;
+
+    // Drops EVERY pairing, leaving symmetryOn()/symmetryPlane() untouched -
+    // the plane-change rule (fix round 1): a new plane invalidates every
+    // existing pairing's MEANING (each one was computed against the OLD
+    // plane), so changing the plane unpairs everything, the same rule
+    // setSymmetry(false, ...) already follows for turning the mode off. No
+    // checkpoint, for the same reason - a mode/plane change is not an edit -
+    // but it does bump revision() when it actually drops anything, so a
+    // dirty furniture is written back.
+    //
+    // Returns whether anything was actually unpaired, so a caller (only
+    // MainWindow's plane-pick route needs this) can announce it - or stay
+    // silent - rather than reporting an unpairing that changed nothing.
+    bool unpairAll();
+
+    // Renames whichever kind of item `id` belongs to - a body or an
+    // outline, since the two share one id space. Milestone 3 introduces
+    // user-editable names (Task 5 wires the drawer's rename gesture); this
+    // is the one setter both a UI rename and a file load go through, so
+    // there is exactly one place a name can be written. False for an
+    // unknown id, same as renameSolid.
+    bool setItemName(int id, const std::string& name);
+
+    // Presentation state - whether an item currently displays in the
+    // viewport - deliberately kept OUTSIDE `State` and therefore outside
+    // checkpoint()/undo()/redo(), for the same reason OcctViewWidget's own
+    // setSolidVisible()/setOutlineVisible() are not undo-tracked: hiding a
+    // body is not a document edit any more than orbiting the camera is.
+    // It lives here (rather than only in the view) purely so
+    // toSerialized()/fromSerialized() can round-trip it without the
+    // geometry library reaching into Qt or the OCCT visualization
+    // toolkits - reconciling this with the view's own tracking into one
+    // source of truth belongs to whichever task wires FurnitureStore into
+    // MainWindow. False for a known id hides it; querying an unknown id
+    // answers true (the safe default - "not hidden" - for an item nobody
+    // has touched).
+    void setVisible(int id, bool visible);
+    bool isVisible(int id) const;
 
     const std::vector<Solid>& solids() const { return mySolids; }
     // BODIES, deliberately - every existing caller ("3 bodies in the
@@ -124,6 +195,76 @@ public:
     bool undo();
     bool redo();
 
+    // --- serialization -------------------------------------------------------
+    // Everything a save/load round-trip needs beyond raw geometry: the
+    // labels and visibility the user set, positionally matched to
+    // FurnifySerial::SerializedDocument's own vectors - index i of
+    // bodyNames/bodyVisible describes serial.bodies[i], and
+    // outlineNames/outlineVisible describe serial.outlineFaces[i] the same
+    // way. Kept separate from SerializedDocument itself because
+    // FurnifySerial is pure kernel geometry and knows nothing about labels
+    // or presentation - see FurnifySerial.h.
+    struct DocumentMeta {
+        std::vector<std::string> bodyNames;
+        std::vector<bool> bodyVisible;
+        std::vector<std::string> outlineNames;
+        std::vector<bool> outlineVisible;
+
+        // Symmetry (Milestone 3). `symmetryPairs` is POSITION-based - a pair
+        // (i, j) means "serial.bodies[i] and serial.bodies[j] are twins" -
+        // the same rule bodyNames/bodyVisible follow and for the same
+        // reason: ids are session-only handles (see the header note at the
+        // top of this file) and cannot be persisted directly. Always empty
+        // when symmetryOn is false - see setSymmetry()'s own unpairing rule.
+        bool symmetryOn = false;
+        gp_Pln symmetryPlane{gp_Pnt(0.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0)};
+        std::vector<std::pair<int, int>> symmetryPairs;
+    };
+
+    // Walks mySolids/myOutlines in order, building the kernel-side shapes
+    // and the matching names/visibility. Does not touch undo history or the
+    // revision counter - reading the document out is not a change to it.
+    FurnifySerial::SerializedDocument toSerialized(DocumentMeta& meta) const;
+
+    // Replaces the WHOLE document - bodies, outlines, names, visibility -
+    // with what `serial`/`meta` describe. Everything is validated BEFORE
+    // any mutation, so a refused load leaves `this` exactly as it was; the
+    // caller (FurnitureStore::loadFurniture) additionally loads into a
+    // scratch instance and only swaps on success, but that discipline is
+    // not what makes this safe to call directly - the validation here does.
+    // Ids are freshly assigned through the normal addSolid()/addOutline()
+    // counters (ids are session-only handles, never persisted - see the
+    // header note above), and the loaded names/visibility are applied
+    // after. Undo history is cleared: a freshly loaded document has
+    // nothing to undo back past.
+    //
+    // Refuses (false, `this` untouched): outlineFaces/outlinePlanes size
+    // mismatch, any null body or outline face, an outline "face" whose
+    // shape type is not actually TopAbs_FACE, or a names/visible vector
+    // whose length does not match its shapes vector.
+    bool fromSerialized(const FurnifySerial::SerializedDocument& serial, const DocumentMeta& meta);
+
+    // Replaces the whole document's content - bodies, outlines, names,
+    // visibility - with `snapshot`'s, WITHOUT touching undo/redo history.
+    // This is the "restore a version IN PLACE" path (Milestone 3's Restore),
+    // as opposed to fromSerialized()'s "open a different furniture" path,
+    // which clears history outright because nothing before it should be
+    // undoable there. The caller checkpoints FIRST, exactly as every other
+    // commit path in this app does - checkpoint() then mutate - so this is
+    // the mutation that sits behind that checkpoint: one undo brings back
+    // everything this replaced.
+    //
+    // `snapshot` is typically a freshly loaded scratch document (the same
+    // shape FurnitureStore::loadVersion hands back), whose own ids count
+    // again from 1 - copying them in verbatim could collide with ids this
+    // document's own undo stack still references (see the header note above
+    // on why undo never rolls myNextId back). The id/name counters therefore
+    // advance to cover whichever of the two is larger, never shrink; `this`'s
+    // solids/outlines/visibility are replaced outright since `snapshot` is
+    // trusted to already be internally consistent (it came from a successful
+    // fromSerialized() or an equally-valid live document).
+    void restoreFrom(const DocumentModel& snapshot);
+
 private:
     // Everything a checkpoint restores. One struct rather than two parallel
     // stacks: two stacks could be pushed to in different numbers by two
@@ -132,10 +273,38 @@ private:
     struct State {
         std::vector<Solid> solids;
         std::vector<Outline> outlines;
+        // The PAIRING MAP rides along in State: pairing changes happen
+        // exclusively inside checkpointed commits (extrude, an edit that
+        // follows a twin, a boolean, a delete), so undoing one of those must
+        // restore the pairing exactly as it stood, the same way it restores
+        // names.
+        //
+        // symmetryOn/symmetryPlane deliberately do NOT - fix round 1. The
+        // mode is a session setting, not document content, the same rule
+        // visibility already follows (see setVisible()'s own comment): it
+        // is set outside any checkpoint (setSymmetry() never takes one), so
+        // treating it as undoable content let an undo landing after "turn
+        // symmetry off" silently turn it back ON and resurrect whatever
+        // pairing that checkpoint had captured - a mode switch resurrected
+        // by a Ctrl+Z aimed at something else entirely. Every reader of a
+        // pairing (MainWindow's twin-follow hook, the delete and boolean
+        // special cases) is gated on symmetryOn() as well as twinOf() for
+        // exactly this reason: a pairing entry surviving in State is inert
+        // the moment the live mode is off, whatever undo does to it.
+        std::unordered_map<int, int> twin;
     };
+
+    // Drops `id`'s existing pairing, both directions, if it has one. The one
+    // implementation pairBodies() and removeSolid() both call, so a removed
+    // or re-paired body can never leave a stale half-entry pointing at it.
+    void unpairInternal(int id);
 
     std::vector<Solid> mySolids;
     std::vector<Outline> myOutlines;
+    bool mySymmetryOn = false;
+    gp_Pln mySymmetryPlane{gp_Pnt(0.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0)};
+    // Both directions, so twinOf() is a single lookup either way round.
+    std::unordered_map<int, int> myTwin;
     int myNextId = 1;
     int myRevision = 0;   // see revision() - monotonic, never rolled back
     // Like ids, never rolled back by undo: a name reappearing on a different
@@ -149,4 +318,9 @@ private:
     // reference resolve to a different solid.
     std::vector<State> myUndo;
     std::vector<State> myRedo;
+
+    // See setVisible()/isVisible(): presentation state, deliberately not
+    // part of State and therefore not undo-tracked. An id absent here reads
+    // as visible (true) - see isVisible()'s doc comment.
+    std::unordered_map<int, bool> myVisibility;
 };

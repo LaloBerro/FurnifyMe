@@ -47,6 +47,19 @@ struct Spec {
     QColor danger;
     QColor focusRing;
     QColor focusRingMuted;
+    // The GIZMO's three axis hues - Milestone 3, Task 5. Deliberately NOT
+    // named axisX/axisY: those two already exist, for the ground grid's own
+    // muted axis tint (see axisX()/axisY() below), and promoting the
+    // AxisGizmo/manipulator hues under the same two names would silently
+    // repaint the grid the moment a user edited what they thought was the
+    // gizmo's colour, or vice versa - two unrelated surfaces sharing one
+    // token by an accident of naming. gizmoAxisZ has no such collision (the
+    // grid has no Z tint, since the ground plane's own two axes are X and Y),
+    // but it is named for symmetry with the other two rather than living
+    // under a different scheme.
+    QColor gizmoAxisX;
+    QColor gizmoAxisY;
+    QColor gizmoAxisZ;
     // The two viewport highlight colours. They were OCCT's own named
     // constants until this task (Quantity_NOC_CYAN1 and Quantity_NOC_ORANGE)
     // rather than Theme tokens - which meant the two colours a user looks at
@@ -157,6 +170,14 @@ QColor gridMinor();     // ground grid, minor lines
 QColor gridMajor();     // ground grid, major lines
 QColor axisX();         // ground grid, X axis tint (muted red)
 QColor axisY();         // ground grid, Y axis tint (muted green)
+QColor gizmoAxisX();    // AxisGizmo's X arm/tip - the vivid red the grid's
+                        // own axisX() is deliberately NOT (see Spec)
+QColor gizmoAxisY();    // AxisGizmo's Y arm/tip - vivid green
+QColor gizmoAxisZ();    // AxisGizmo's Z arm/tip - vivid blue; the transform
+                        // manipulator's own arms are NOT reachable through any
+                        // public OCCT 8.0 API and stay OCCT's stock colours -
+                        // see OcctViewWidget::attachManipulator()'s own
+                        // comment for the boundary this was probed against
 QColor sketchPointMarker(); // in-progress sketch: the dot at each placed
                         // point and the ring on the first one - a hue none
                         // of the above already carries (not the yellow

@@ -164,6 +164,24 @@ WalkthroughPanel::~WalkthroughPanel()
 
 void WalkthroughPanel::refresh()
 {
+    // Render mode (Milestone 3, item 5): "the viewport is the furniture
+    // alone" - a purely VISUAL suppression, never a variant of "finished" or
+    // "not learned yet" the way the two branches just below are, and never a
+    // reason to restart the guide the way every OTHER hide() in this
+    // function is (see myHiddenForRenderMode's own comment). Checked FIRST,
+    // before anything reads or writes myFinished or a step flag - render
+    // mode must be able to hide this panel and hand it right back unchanged.
+    if (myWindow->renderModeEnabled()) {
+        myHiddenForRenderMode = true;
+        hide();
+        return;
+    }
+    // Consumed once: this call is the one that resumes from a render-mode
+    // hide (if that is what THIS hide happens to be), and every later call
+    // must go back to reading isHidden() as the ordinary "restart" signal.
+    const bool resumingFromRenderMode = myHiddenForRenderMode;
+    myHiddenForRenderMode = false;
+
     // Even "finished" is derived from live state on every call, never latched
     // for good - a returning user (progress restored from an earlier session,
     // or already past the threshold some other way) always resolves
@@ -171,6 +189,23 @@ void WalkthroughPanel::refresh()
     // too, see the header.
     if (myWindow->progress().hasLearned("walkthrough.done")) {
         myFinished = true;
+        hide();
+        return;
+    }
+
+    // The init screen's own gate (Milestone 3, item 2). Checked AFTER
+    // hasLearned() and BEFORE everything else - a returning, already-learned
+    // user has to read as finished the instant this panel exists, before it
+    // has ever been shown and before any furniture is open, because that is
+    // exactly what the returning-user probe asserts; ordered the other way
+    // round, this branch would return before myFinished was ever set and a
+    // learned user would read as not-finished for as long as the gallery
+    // happened to be up. Not learned, and the gallery is showing: hide and
+    // say nothing about myFinished either way, since a fresh guide has not
+    // been rejected, it simply has nowhere to stand yet - document().count()
+    // is 0 for every furniture that has not been opened, so there is no
+    // "step 4" to measure against.
+    if (myWindow->isShowingInitScreen()) {
         hide();
         return;
     }
@@ -186,7 +221,23 @@ void WalkthroughPanel::refresh()
     // spot - a reset immediately followed by re-completion is the bug this
     // replaces, not a variant of the fix. The steps get their real derivation
     // on the next refresh(), against the baseline captured here.
-    if (myFinished) {
+    //
+    // isHidden() joins myFinished here for the same reason: the init-screen
+    // gate above hides this panel by the same mechanism a completion does
+    // (hide(), which sets WA_WState_ExplicitShowHide), and nothing else in
+    // this function ever calls show() again on its own - the "derive from
+    // live state" tail below only update()s. Leaving the init screen for a
+    // furniture that is not yet learned needs its own baseline exactly as a
+    // restore does: document().count() is whatever that furniture already
+    // held, and treating it as step 4's target rather than as the panel's
+    // own starting line would let an already-populated furniture finish the
+    // guide on the spot, the same bug the myFinished branch exists to avoid.
+    //
+    // "&& !resumingFromRenderMode" is the one exception: isHidden() is ALSO
+    // true immediately after a render-mode hide, and without this exclusion
+    // resuming from render mode would restart the guide from scratch every
+    // single time - the opposite of "hand it right back unchanged".
+    if (myFinished || (isHidden() && !resumingFromRenderMode)) {
         myFinished = false;
         myStartedSketch = false;
         myPlacedPoints = false;
@@ -196,6 +247,10 @@ void WalkthroughPanel::refresh()
         show();
         return;
     }
+    // Resuming from a render-mode hide with nothing else to restart:
+    // show() is the one thing the tail below does not do on its own (it only
+    // update()s), so this call is what actually brings the panel back.
+    if (resumingFromRenderMode) show();
 
     // Derive from live state; latch the transient ones. Step 4 is "a body
     // was made since the panel appeared" - document().count() alone would

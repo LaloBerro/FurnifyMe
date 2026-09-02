@@ -13,6 +13,7 @@
 #include <V3d_View.hxx>
 #include <V3d_Viewer.hxx>
 #include <gp_Ax2.hxx>
+#include <gp_Dir.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
@@ -22,6 +23,7 @@
 #include "GridRenderer.h"
 #include "PullArrow.h"
 
+#include <QImage>
 #include <QPoint>
 #include <QString>
 #include <QStringList>
@@ -38,8 +40,31 @@ class OcctViewWidget : public QWidget {
 public:
     enum class SelectionMode { Solid, Face, Edge };
 
-    explicit OcctViewWidget(QWidget* parent = nullptr);
+    // `viewerOnly` is Milestone 3's compare pane: a second, read-only view
+    // of a loaded version alongside the live one. It still gets a real
+    // V3d_View/AIS_InteractiveContext - it displays real AIS_Shape
+    // presentations - and RMB orbit / MMB pan / wheel zoom all still work
+    // (it is a VIEWER, not a picture), but it never activates a selection
+    // mode on anything it displays, never runs the hover-highlight MoveTo,
+    // and never builds a work-plane grid - see initializeViewer(),
+    // displaySolid(), setSolidVisible(), mouseMoveEvent() and
+    // mouseReleaseEvent() for the four places that read this flag. A body
+    // clicked in this view is therefore never added to
+    // selectedSolidIds() - there is no picking to select it with.
+    explicit OcctViewWidget(QWidget* parent = nullptr, bool viewerOnly = false);
     ~OcctViewWidget() override;
+
+    bool isViewerOnly() const { return myViewerOnly; }
+
+    // Sets the camera state immediately - no animation, no tween - and
+    // pushes it straight onto the OCCT camera through the one function that
+    // does that (applyCameraState(), which is what actually emits
+    // cameraChanged()). animateTo() is the ordinary route for anything the
+    // USER asked for (Fit All, a view snap); this is for the compare pane's
+    // bidirectional camera sync, where a 250ms tween on every follow-frame
+    // of an orbit would make the second view visibly lag the first one it
+    // is supposed to be locked to.
+    void setCameraStateNow(const CameraState& state);
 
     // Qt must not paint here or it fights OpenGL for the surface.
     QPaintEngine* paintEngine() const override { return nullptr; }
@@ -281,6 +306,23 @@ public:
     // answers to "is this click on the start point".
     double sketchCloseTolerance() const;
 
+    // The symmetry plane indicator (Milestone 3): a faint outline in the
+    // sketch-work layer, screen-sized via worldPerPixel() (GridRenderer's own
+    // idiom - a constant APPARENT size rather than a fixed number of
+    // millimetres that shrinks to nothing as the camera pulls back), shown
+    // for as long as symmetry is on. `plane` is captured BY VALUE, the same
+    // rule every other work plane in this app follows.
+    void setSymmetryIndicator(bool on, const gp_Pln& plane);
+    // Whether the indicator is genuinely ON SCREEN right now - not merely
+    // whether symmetry itself is on. The two differ for as long as render
+    // mode is active (Milestone 3, item 5, fix round 1): "the viewport is
+    // the furniture alone" applies to this indicator too, and
+    // updateSymmetryIndicator() suppresses it structurally while
+    // myRenderModeActive - see setRenderMode(). mySymmetryIndicatorOn alone
+    // (the mode's own on/off, untouched by render mode) is what
+    // setRenderMode() reads to decide whether to bring it back on exit.
+    bool symmetryIndicatorShown() const { return mySymmetryIndicatorOn && !myRenderModeActive; }
+
     // The Z-layer every piece of sketch work is displayed in - the in-progress
     // outline and the pending face (setPreview), the direct-modeling preview,
     // the point markers, the cursor marker and the dimension annotation.
@@ -394,6 +436,15 @@ public:
     // screen or on top of the window, unlike a screen grab.
     bool saveSnapshot(const QString& path);
 
+    // MainWindow's furniture-thumbnail capture at save time - built on
+    // saveSnapshot() itself (V3d_View::Dump has no in-memory sibling) through
+    // a short-lived temp file this function owns start to finish, so
+    // FurnitureStore's own thumbPath() never has to leave that class (its
+    // exact directory layout is FurnitureStore's private business - see
+    // FurnitureStore.h). A null image on any failure: Dump refusing, or the
+    // PNG it wrote failing to reload.
+    QImage captureThumbnail();
+
     void fitAll();
     void animateTo(const CameraState& goal);
     void setAnimationsEnabled(bool enabled) { myAnimationsEnabled = enabled; }
@@ -470,6 +521,49 @@ public:
     // myWireframe itself was never touched.
     bool isSolidWireframe(int id) const;
 
+    // --- Render mode (Milestone 3, item 5) ----------------------------------
+    //
+    // Strips this viewport down to the raw scene: clears and suppresses
+    // selection (a real ClearSelected() plus every solid's own selection
+    // modes taken out of the context's pick candidates - see the .cpp), hides
+    // the work-plane grid, switches the rendering pipeline to the best tier
+    // this GPU sustains interactively, and swaps the flat viewport colour for
+    // a soft studio gradient. Session-only: MainWindow never persists this
+    // action's checked state, so the app always starts in modeling however it
+    // was left.
+    //
+    // This class owns only the OCCT-side scene: the grid, selection, the
+    // rendering params, the backdrop. Every Qt-side surface CLAUDE.md's
+    // contract also hides - the rail, the drawers, the axis gizmo card, the
+    // three gizmos - is MainWindow's, and is derived off the SAME predicates
+    // that already govern them (canPullSelectedFace(), bevelTarget(),
+    // transformableBodyId() all refuse while render mode is on, and the
+    // rail/drawer visibility lambda reads it directly) rather than pushed
+    // from here - CLAUDE.md's sibling-visibility law: derive, never set.
+    //
+    // A no-op on the compare pane (myViewerOnly) and a no-op when already in
+    // the requested state.
+    void setRenderMode(bool on);
+    bool renderModeActive() const { return myRenderModeActive; }
+
+    // The three tiers the first activation each session probes between, best
+    // first - see setRenderMode()'s .cpp comment for how each is measured.
+    enum class RenderTier { RayTracing, Shadows, Plain };
+    // The tier chosen at the FIRST activation this session, and reused on
+    // every activation after that ("cache the tier for the session" - the
+    // brief's own words) - Plain before any activation has happened, which is
+    // also RenderTier's own zero-cost default should nothing ever probe it.
+    // MainWindow reads this the moment setRenderMode(true) returns, to name
+    // it in the one Note toast render mode raises on entry.
+    RenderTier renderModeTier() const { return myRenderTier; }
+    bool renderModeTierProbed() const { return myRenderTierProbed; }
+
+    // ~100 ms - the brief's own number for "is ray tracing still
+    // interactive on this GPU", measured against a single redraw. A session
+    // constant, not a setting: CLAUDE.md's ruling for this task is that nothing
+    // about the tier probe is user-configurable.
+    static constexpr int kRenderTierProbeThresholdMs = 100;
+
 signals:
     void sketchPointPicked(const gp_Pnt& point);
     // Fired on every camera change so overlays (the axis gizmo) can repaint.
@@ -520,6 +614,16 @@ signals:
     // way, so a consumer that ignores this signal entirely still leaves the
     // viewport agreeing with the document.
     void gizmoReleased(int solidId, const gp_Trsf& delta);
+
+    // A LEFT press landed in the viewport while render mode is active - the
+    // brief's "a pick press in the viewport" exit. This widget does not know
+    // what leaving render mode means beyond its own scene (MainWindow owns
+    // the QAction, the toast and the rest of the chrome, and updateActions()
+    // is the single authority that un-checks it), so it asks rather than
+    // acts - see mousePressEvent(), which swallows the press unconditionally
+    // once it emits this, so the click that exits never also performs
+    // whatever pick or gesture it would ordinarily have started.
+    void renderModeExitRequested();
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -633,6 +737,12 @@ private:
     // the manipulator already holds, since that recomputes every one of its
     // presentations and this runs on every frame of an orbit.
     void updateManipulatorSize();
+    // Rebuilds the symmetry plane indicator from myCamera's current distance
+    // (screen-sized, so it has to follow zoom the way updateManipulatorSize()
+    // follows it) - guarded the same way, against rebuilding on a camera move
+    // that would not visibly change its size. A no-op while the indicator is
+    // off.
+    void updateSymmetryIndicator();
     // Reads the accumulated transform, puts the PRESENTATION back to where the
     // document says it should be, snaps, and emits gizmoReleased(). The
     // presentation reset is unconditional and happens here rather than in the
@@ -650,6 +760,36 @@ private:
     // that went away - calls this, because an annotation that only some of
     // them refresh is an annotation that is sometimes a lie.
     void updateEdgeDimension();
+
+    // --- Render mode's own private machinery --------------------------------
+    //
+    // The tier probe itself: ray tracing timed against one redraw, falling
+    // back to a shadow-mapped directional light, falling back to plain
+    // rasterization - see the .cpp for the full argument on each step and
+    // why each is measured rather than trusted as setter data.
+    RenderTier probeRenderTier();
+    // Writes `tier`'s rendering params (Method, IsShadowEnabled, which
+    // lights cast shadows) onto the live view WITHOUT timing or Dump-probing
+    // anything - the cheap reapplication path a cached tier uses on every
+    // activation after the first.
+    void applyRenderTier(RenderTier tier);
+    // Every directional light this viewer owns, told to cast shadows or not.
+    // One place, because both the tier-2 probe and applyRenderTier() need it.
+    void setLightsCastShadows(bool cast);
+    // Two real Dump()s - shadows off, then on - compared pixel by pixel.
+    // CLAUDE.md's zoom-persistence lesson: Graphic3d_CLight::SetCastShadows()
+    // succeeding is not proof a shadow actually reached the screen, so this
+    // is the ONLY thing that accepts tier 2. False on any failure to render
+    // or compare, which is what sends the probe on to plain rasterization.
+    bool probeShadowPixelsDiffer();
+    // The flat viewport colour outside render mode, the studio gradient
+    // while it is on - one function, called from setRenderMode() on both
+    // edges and from applyTheme(), which is what "re-derived on
+    // themeChanged while active" (the brief's own words) actually is: a
+    // theme edit repaints through applyTheme() regardless of render mode,
+    // and this is the one place that reads myRenderModeActive to pick which
+    // background that repaint means.
+    void applyBackgroundForMode();
 
     Handle(V3d_Viewer) myViewer;
     Handle(V3d_View) myView;
@@ -760,4 +900,23 @@ private:
 
     class QVariantAnimation* myCameraAnimation = nullptr;
     bool myAnimationsEnabled = true;
+
+    // The symmetry plane indicator - see setSymmetryIndicator().
+    bool mySymmetryIndicatorOn = false;
+    gp_Pln mySymmetryIndicatorPlane{gp_Pnt(0.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0)};
+    Handle(AIS_InteractiveObject) mySymmetryIndicator;
+    // The world half-span it was last built at - 0 forces the next
+    // updateSymmetryIndicator() to rebuild regardless of the equal-guard.
+    double mySymmetryIndicatorBuiltHalfSpan = 0.0;
+
+    // See the constructor's own comment - the compare pane's flag.
+    bool myViewerOnly = false;
+
+    // Render mode (Milestone 3, item 5) - see setRenderMode(). Session-only
+    // in the sense that matters: nothing here is ever read from or written
+    // to QSettings, so a fresh OcctViewWidget always starts with all three
+    // false/Plain regardless of what a previous session left.
+    bool myRenderModeActive = false;
+    bool myRenderTierProbed = false;
+    RenderTier myRenderTier = RenderTier::Plain;
 };

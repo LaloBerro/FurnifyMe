@@ -120,6 +120,42 @@ QString HintBalloon::textForEvent(const QString& event) const
 
 void HintBalloon::reconsider()
 {
+    // Render mode (Milestone 3, item 5): "the viewport is the furniture
+    // alone" - a purely VISUAL suppression, and deliberately NOT dismiss().
+    // dismiss() clears myText/myEvent, and this event is already marked in
+    // myShownThisSession (showHint() sets that the instant a hint appears,
+    // not when it goes away) - so a currently-showing hint dismissed for
+    // this reason could never show again, even once render mode ends and
+    // its condition still holds. A plain hide() preserves myText/myEvent
+    // across the round trip; the resync just below is what brings a
+    // preserved hint back once render mode is off again.
+    if (myWindow->renderModeEnabled()) {
+        hide();
+        return;
+    }
+    // This class's own invariant everywhere else is isVisible() == !myText
+    // .isEmpty() - re-established here in case the render-mode branch above
+    // just spent a call or two holding it hidden with myText still set.
+    if (!myText.isEmpty() && !isVisible()) {
+        show();
+        raise();
+    }
+
+    // The init screen's own gate (Milestone 3, item 2), on the same terms
+    // as WalkthroughPanel's - see that class for the fuller reasoning. Every
+    // one of the three conditions below already requires document().count()
+    // > 0 or a live selection, both of which showInitScreen() forces to
+    // nothing, so this has never actually been reachable in practice; it is
+    // still made explicit rather than left to that coincidence, because a
+    // future hint with no document requirement would otherwise be free to
+    // pop up over the gallery with nothing here to stop it. dismiss() rather
+    // than a bare hide(): a hint the gallery caught mid-display must not be
+    // left remembering state a real dismissal would have cleared.
+    if (myWindow->isShowingInitScreen()) {
+        dismiss();
+        return;
+    }
+
     const UserProgress& progress = myWindow->progress();
 
     // A shown hint is dismissed by any one of three equally valid triggers:

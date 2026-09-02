@@ -195,6 +195,42 @@ int main()
               "a click far from the first point does not close");
         check(!sketch.isNearFirstPoint(gp_Pnt(48.0, 48.0, 0.0), 5.0),
               "clicking near the LAST point does not close");
+
+        // --- the 1.25x root cause: the close exemption must compare a
+        // snapped probe against the (snapped) target, not a raw one --------
+        // Milestone-3 fix-wave finding: OcctViewWidget::pointOnSketchPlane()
+        // used to test the RAW ray/plane hit directly against its close
+        // target, myCloseTarget - which is itself grid-snapped, since it is
+        // just the sketch's own first point (placed through this same snap).
+        // At a 10 mm step the raw-to-snapped distance can reach a cell's own
+        // diagonal, 7.07 mm, while sketchCloseTolerance() is half a step,
+        // 5 mm - so a raw hit that WOULD land exactly back on the first
+        // point once snapped could still fail the raw comparison, and
+        // whether it did came down to exactly where in the cell the ray
+        // landed. Device-pixel rounding at a 1.25x display scale was enough
+        // to tip it into the failing corner.
+        //
+        // The fix snaps the probe first - the same SketchController::
+        // snapToPlaneGrid() call every ordinary click already runs a few
+        // lines later in that function - and compares THAT against the
+        // target. This pins the corrected relationship directly, with pure
+        // geometry and no live viewport: snapToPlaneGrid() plus
+        // isNearFirstPoint()'s own tolerance are the exact two calls the fix
+        // combines.
+        const gp_Pnt closeTarget = sketch.points().front();  // (0, 0, 0), already grid-aligned
+        const gp_Pnt rawHit(4.9, 4.9, 0.0);   // inside the same 10mm cell as closeTarget
+
+        check(rawHit.Distance(closeTarget) > 5.0,
+              "setup: the raw hit is further than the 5 mm close tolerance from the target - "
+              "the OLD raw-vs-snapped comparison would have refused to close here");
+
+        const gp_Pnt snappedProbe = SketchController::snapToPlaneGrid(rawHit, xy, 10.0);
+        check(snappedProbe.Distance(closeTarget) < 1.0e-9,
+              "...but the raw hit snaps exactly onto the close target - the same snap the "
+              "click itself would apply a moment later");
+        check(snappedProbe.Distance(closeTarget) <= 5.0,
+              "so the FIXED probe (snap first, then compare) is within tolerance: the "
+              "exemption takes, and hovering here promises exactly the close the click delivers");
     }
 
     // --- rubber-band preview -------------------------------------------------
@@ -276,6 +312,49 @@ int main()
         undoDoc.undo();
         check(undoDoc.count() == 1, "undo left one solid");
         check(undoDoc.nameOf(1) == "Renamed", "undo restores the name with the solid");
+    }
+
+    // --- setItemName (Milestone 3, Task 5: the Items drawer's rename) --------
+    {
+        DocumentModel doc;
+        const TopoDS_Shape box = ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 5.0, 5.0, 5.0);
+        const gp_Pln ground(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
+        SketchController itemNameSketch;
+        itemNameSketch.addPoint(gp_Pnt(0.0, 0.0, 0.0));
+        itemNameSketch.addPoint(gp_Pnt(1.0, 0.0, 0.0));
+        itemNameSketch.addPoint(gp_Pnt(1.0, 1.0, 0.0));
+        itemNameSketch.addPoint(gp_Pnt(0.0, 1.0, 0.0));
+        const TopoDS_Face face = itemNameSketch.closedFace();
+        check(!face.IsNull(), "the fixture outline for the setItemName block closes");
+
+        const int bodyId = doc.addSolid(box);
+        const int outlineId = doc.addOutline(face, ground);
+
+        // setItemName is "the one setter both a UI rename and a file load go
+        // through" (DocumentModel.h's own comment) - it has to reach whichever
+        // kind of item the id names, body or outline, through the SAME call.
+        check(doc.setItemName(bodyId, "Table Top"), "renames a body through setItemName");
+        check(doc.nameOf(bodyId) == "Table Top", "the body's new name sticks");
+        check(doc.setItemName(outlineId, "Side Panel"),
+              "renames an outline through setItemName");
+        check(doc.outlineNameOf(outlineId) == "Side Panel", "the outline's new name sticks");
+        check(!doc.setItemName(9999, "Nope"), "setItemName fails for an unknown id");
+
+        // The revision bump - Task 5's fix. Every OTHER mutator in this file
+        // bumps myRevision (see revision()'s own comment); setItemName did
+        // not, which left a rename invisible to the dirty star, autosave's
+        // arm and a toast's own revision guard. Both branches (body and
+        // outline) have to bump it, and a failed rename must not.
+        const int beforeBodyRename = doc.revision();
+        doc.setItemName(bodyId, "Renamed Again");
+        check(doc.revision() > beforeBodyRename, "renaming a body bumps the revision");
+        const int beforeOutlineRename = doc.revision();
+        doc.setItemName(outlineId, "Renamed Again Too");
+        check(doc.revision() > beforeOutlineRename, "renaming an outline bumps the revision");
+        const int beforeFailedRename = doc.revision();
+        doc.setItemName(9999, "Nope");
+        check(doc.revision() == beforeFailedRename,
+              "a rename that fails (unknown id) does not bump the revision");
     }
 
     // --- undo / redo of document state --------------------------------------

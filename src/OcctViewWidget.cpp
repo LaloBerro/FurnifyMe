@@ -1,3 +1,20 @@
+// windows.h FIRST, deliberately - the one exception to "OCCT headers before
+// windows.h", and for the same reason gui_smoke.cpp takes it (see that
+// file's own top-of-file comment): OCCT's own Standard_Macro.hxx includes
+// windows.h itself, but with NOUSER defined first, which excludes the
+// entire User32 window-management API. resizeEvent() below needs
+// SetWindowPos and its SWP_* flags from that API (see its own comment for
+// why), and windows.h's include guard means a second, unrestricted
+// #include after OCCT's own restricted one is a silent no-op - the only
+// way to get the real declarations is to be the FIRST includer. Handle()
+// (OCCT's macro that collides with some Windows headers) does not exist
+// yet at this point in the file, so there is nothing for windows.h to
+// collide with here.
+#ifdef _WIN32
+  #define NOMINMAX
+  #include <windows.h>
+#endif
+
 #include "OcctViewWidget.h"
 
 #include "ModelingOps.h"
@@ -8,18 +25,24 @@
 #include <AIS_DisplayMode.hxx>
 #include <AIS_SelectionScheme.hxx>
 #include <Aspect_DisplayConnection.hxx>
+#include <Aspect_GradientFillMethod.hxx>
 #include <Aspect_TypeOfMarker.hxx>
 #include <Bnd_Box.hxx>
 #include <BRepBndLib.hxx>
 #include <Graphic3d_ArrayOfPoints.hxx>
+#include <Graphic3d_ArrayOfSegments.hxx>
+#include <Graphic3d_AspectLine3d.hxx>
 #include <Graphic3d_AspectMarker3d.hxx>
 #include <Graphic3d_Camera.hxx>
+#include <Graphic3d_CLight.hxx>
 #include <Graphic3d_Group.hxx>
 #include <Graphic3d_MaterialAspect.hxx>
 #include <Graphic3d_NameOfMaterial.hxx>
+#include <Graphic3d_RenderingParams.hxx>
 #include <Graphic3d_TransformPers.hxx>
 #include <Graphic3d_Vec2.hxx>
 #include <Graphic3d_ZLayerSettings.hxx>
+#include <Image_AlienPixMap.hxx>
 #include <NCollection_HArray1.hxx>
 #include <OpenGl_GraphicDriver.hxx>
 #include <Prs3d_Drawer.hxx>
@@ -31,6 +54,7 @@
 #include <Quantity_Color.hxx>
 #include <Quantity_NameOfColor.hxx>
 #include <SelectMgr_Selection.hxx>
+#include <Standard_Failure.hxx>
 #include <StdSelect_ViewerSelector3d.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopExp.hxx>
@@ -39,7 +63,9 @@
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Vertex.hxx>
 #include <BRep_Tool.hxx>
+#include <V3d_DirectionalLight.hxx>
 #include <V3d_TypeOfVisualization.hxx>
+#include <gp_Ax3.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Lin.hxx>
 #include <gp_Vec.hxx>
@@ -50,10 +76,15 @@
   #include <Xw_Window.hxx>
 #endif
 
+#include <QDir>
 #include <QEasingCurve>
+#include <QElapsedTimer>
+#include <QFile>
+#include <QImage>
 #include <QMouseEvent>
 #include <QPaintEvent>
 #include <QResizeEvent>
+#include <QTemporaryFile>
 #include <QVariantAnimation>
 #include <QWheelEvent>
 
@@ -77,6 +108,34 @@ Quantity_Color toOcctColor(const QColor& c)
 {
     return Quantity_Color(c.redF(), c.greenF(), c.blueF(), Quantity_TOC_sRGB);
 }
+
+// The symmetry plane indicator's own presentation - GridRenderer's aspect
+// idiom (GridObject in GridRenderer.cpp), one pre-built segment array drawn
+// with a single Graphic3d_AspectLine3d, never pickable. A much lighter shape
+// than a grid: this is an INDICATOR, not a work surface, so it draws a
+// rectangle outline and a cross through the origin rather than a field of
+// lines.
+class SymmetryPlaneObject : public AIS_InteractiveObject {
+public:
+    Handle(Graphic3d_ArrayOfSegments) segments;
+    Quantity_Color colour;
+
+    void Compute(const Handle(PrsMgr_PresentationManager)&,
+                 const Handle(Prs3d_Presentation)& presentation, const Standard_Integer) override
+    {
+        if (segments.IsNull()) return;
+        Handle(Graphic3d_Group) group = presentation->NewGroup();
+        Handle(Graphic3d_AspectLine3d) aspect =
+            new Graphic3d_AspectLine3d(colour, Aspect_TOL_SOLID, 1.2);
+        group->SetGroupPrimitivesAspect(aspect);
+        group->AddPrimitiveArray(segments);
+    }
+
+    void ComputeSelection(const Handle(SelectMgr_Selection)&, const Standard_Integer) override
+    {
+        // Never pickable - an indicator, not a body.
+    }
+};
 
 // One tiny point in world space, drawn as a marker whose size lives in
 // screen pixels - Graphic3d_AspectMarker3d/Prs3d_PointAspect's own documented
@@ -164,9 +223,10 @@ Handle(SketchPointMarker) makeFilledSquareMarker(const gp_Pnt& point,
 }
 }  // namespace
 
-OcctViewWidget::OcctViewWidget(QWidget* parent)
+OcctViewWidget::OcctViewWidget(QWidget* parent, bool viewerOnly)
     : QWidget(parent)
     , mySketchPlane(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0))
+    , myViewerOnly(viewerOnly)
 {
     // Omit any of these and the viewport flickers or renders black.
     setAttribute(Qt::WA_PaintOnScreen);
@@ -218,7 +278,11 @@ void OcctViewWidget::initializeViewer()
     // the Theme spec exists to end.
     applyTheme();
 
-    myGridRenderer.attach(myContext);
+    // No grid in viewer-only mode - see the header. GridRenderer::update()
+    // (called from applyCameraState() and setWorkPlane() unconditionally,
+    // every camera move) is already a safe no-op with no context attached,
+    // so skipping the attach here is the one change this needs.
+    if (!myViewerOnly) myGridRenderer.attach(myContext);
     // The third layer of the three - see sketchZLayer() in the header. It has
     // to be created AFTER the grid's, because it is positioned relative to it:
     // bodies (default) -> grid -> sketch work. If the grid renderer could not
@@ -241,10 +305,19 @@ void OcctViewWidget::initializeViewer()
         if (myViewer->InsertLayerAfter(layer, settings, after)) mySketchLayer = layer;
     }
     myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane());
-    myDimension.attach(myContext);
-    myDimension.setZLayer(mySketchLayer);
-    myPullArrow.attach(myContext);
-    myBevelArrow.attach(myContext);
+    // None of these three are ever driven for a viewer-only widget - nothing
+    // calls showPullArrow()/showBevelArrow()/updateEdgeDimension() on one
+    // (see the header) - so attaching them would only be inert presentation
+    // channels sitting in the context for no caller to ever reach. Skipped
+    // outright rather than left as harmless dead weight, so "viewer-only has
+    // no picking, no hover, no grid" reads as the true, complete list rather
+    // than one this constructor quietly disagrees with.
+    if (!myViewerOnly) {
+        myDimension.attach(myContext);
+        myDimension.setZLayer(mySketchLayer);
+        myPullArrow.attach(myContext);
+        myBevelArrow.attach(myContext);
+    }
 
     // The field of view is fixed for the life of the view; WHICH projection is
     // drawn with it moves, so applyCameraState() owns that and this does not
@@ -268,6 +341,32 @@ void OcctViewWidget::paintEvent(QPaintEvent* /*event*/)
 
 void OcctViewWidget::resizeEvent(QResizeEvent* /*event*/)
 {
+#ifdef _WIN32
+    // A safety net for a real, measured defect (fix round 1, Important 1 /
+    // Minor 3 on Milestone 3's Task 3): reparenting this widget's native
+    // window OUT of a QSplitter and back - MainWindow's compare pane,
+    // closeCompare() - left Qt's own WIDGET-LEVEL geometry correctly
+    // updated (width()/height() agreed with the window) while the ACTUAL
+    // underlying HWND's client rect stayed at its old, splitter-constrained
+    // size. Confirmed with GetClientRect, and unmoved by resize(),
+    // repaint(), hide()/show(), or even a full top-level window resize
+    // round trip - none of which reach whatever is actually caching the
+    // native surface's extent here. SetWindowPos, synced to Qt's own idea
+    // of this widget's size on EVERY resize, closes the gap regardless of
+    // what caused it - a defensive, always-on correction that costs
+    // nothing when the two already agree (SetWindowPos with an unchanged
+    // size is a cheap no-op) rather than a special case wired only into
+    // the one call site that happened to find it.
+    //
+    // DEVICE pixels, not logical - toDevicePixels() is this file's one
+    // conversion point (see its own comment), and a raw HWND client rect is
+    // unambiguously a device-pixel quantity. Passing width()/height()
+    // straight through would undersize the native surface at any scale
+    // other than 100%, the exact class of bug that helper exists to close.
+    const QPoint deviceSize = toDevicePixels(QPoint(width(), height()));
+    SetWindowPos(reinterpret_cast<HWND>(winId()), nullptr, 0, 0, deviceSize.x(), deviceSize.y(),
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE);
+#endif
     if (!myView.IsNull()) myView->MustBeResized();
 }
 
@@ -299,7 +398,10 @@ void OcctViewWidget::displaySolid(int id, const TopoDS_Shape& shape)
     myContext->Display(presentation, myWireframe ? AIS_WireFrame : AIS_Shaded,
                        kSelectionModeWholeShape, Standard_False);
     mySolids[id] = presentation;
-    applySelectionMode(presentation);
+    // No picking in viewer-only mode - see the header. Leaving the
+    // presentation's selection mode deactivated is the literal version of
+    // "never pickable", on the same terms an outline already is.
+    if (!myViewerOnly) applySelectionMode(presentation);
 
     myContext->UpdateCurrentViewer();
 }
@@ -356,7 +458,7 @@ void OcctViewWidget::setSolidVisible(int id, bool visible)
         // again. Pass the mode the viewport is actually in.
         myContext->Display(it->second, myWireframe ? AIS_WireFrame : AIS_Shaded,
                            kSelectionModeWholeShape, Standard_False);
-        applySelectionMode(it->second);
+        if (!myViewerOnly) applySelectionMode(it->second);
         myContext->UpdateCurrentViewer();
     } else {
         // Erase also drops it from the selection, which is what we want: acting
@@ -794,13 +896,57 @@ void OcctViewWidget::attachManipulator(int solidId)
     options.SetEnableModes(Standard_True);
     myManipulator->Attach(it->second, options);
     activateManipulatorModes();
-    // The one styling hook AIS_Manipulator actually exposes: the shading
-    // aspect its parts are computed from. The per-axis HUES are private
-    // (AIS_Manipulator::Axis::myColor, set in init() and reachable through no
-    // public setter), and red/green/blue for X/Y/Z is the universal gizmo
+    // The one COLOUR styling hook AIS_Manipulator actually exposes: the
+    // shading aspect its parts are computed from. The per-axis HUES are
+    // private (AIS_Manipulator::Axis::myColor, set in init() and reachable
+    // through no public setter at ANY access level - see the corrected
+    // paragraph below), and red/green/blue for X/Y/Z is the universal gizmo
     // language anyway - tinting all three to one accent would cost more than
     // it bought. What this does reach is the material, so the gizmo reads as
     // part of this app's matte surface family rather than a glossy default.
+    //
+    // CONFIRMED, not assumed - Task 5 (Theme::gizmoAxisX/Y/Z, the 2D
+    // AxisGizmo's own restyle) went looking for a way to carry those same
+    // three tokens onto THIS manipulator too, and read AIS_Manipulator.hxx
+    // end to end rather than trust the paragraph above at face value.
+    //
+    // CORRECTED in fix round 1 (review), TWICE - once by the review, once by
+    // actually building and measuring what it found. It is real and total
+    // for COLOUR - AIS_Manipulator::Axis::Color() is a const getter with no
+    // matching setter anywhere, and Axis::myColor is protected to Axis's OWN
+    // class hierarchy, unreachable even from a subclass of AIS_Manipulator.
+    // It is NOT total for API SURFACE alone: `protected Axis myAxes[3]` on
+    // AIS_Manipulator IS reachable from a subclass (protected members are),
+    // and Axis::SetAxisRadius()/AxisRadius() ARE public on Axis itself - the
+    // review correctly caught that the first pass had stopped at "the Axis
+    // objects are unreachable" without separating "unreachable" (false, for
+    // a subclass) from "myColor is unreachable regardless" (true).
+    //
+    // But REACHABLE is not the same as USABLE, and this file went looking
+    // for that difference rather than assuming the header settled it: a
+    // SlimAxisManipulator subclass was built exactly as described, and its
+    // effect was measured against real Dump pixels - not a Size()/
+    // AxisRadius() read-back, three independent methodologies, several
+    // scale factors, at points OCCT's own hover detection confirmed were
+    // genuinely on the X translation arm. Every measurement moved the WRONG
+    // way: the arm's rendered cross-section GREW as the radius shrank (34 px
+    // stock to 40 px at a 0.3 scale to 80 px at 0.02 - reproducible and
+    // monotonic, not noise), almost certainly because the shrinking shaft
+    // revealed an adjacent manipulator part - the rotation ring or the hub
+    // cluster - that shares the exact same uniform matte material this file
+    // already applies below, so a thinner shaft did not read as "less grey"
+    // anywhere the probe could isolate it. Reverted rather than shipped:
+    // CLAUDE.md's zoom-persistence lesson is to trust a measured pixel over
+    // a setter's own claim, and here the measurement said the setter's name
+    // did not describe what actually reached the screen. SetPart(axisIndex,
+    // mode, enabled) is still visibility-only, not colour, despite the name;
+    // Attributes()->ShadingAspect(), the hook used below, is still the ONE
+    // material for the whole object, which is why it recolours all three
+    // arms uniformly and could never single out "the uniform-scale handle";
+    // and SetGap() is still public with no matching getter at all, so a
+    // spacing tweak through it was never attempted. The manipulator wears
+    // OCCT's stock proportions AND stock per-axis hues; both boundaries are
+    // real, and only one of the two was ever a matter of API surface.
     const Handle(Prs3d_ShadingAspect) gizmoAspect =
         myManipulator->Attributes()->ShadingAspect();
     if (!gizmoAspect.IsNull()) {
@@ -972,6 +1118,111 @@ void OcctViewWidget::updateManipulatorSize()
     // performs). A cap that is re-derived from the camera keeps the drag maths
     // untouched, and it also lets a small body keep a small gizmo instead of
     // giving every body the same one.
+}
+
+void OcctViewWidget::setSymmetryIndicator(bool on, const gp_Pln& plane)
+{
+    mySymmetryIndicatorOn = on;
+    mySymmetryIndicatorPlane = plane;
+
+    // NEVER forces initializeViewer() - GridRenderer::update()'s own rule,
+    // one call site over (see its header): a no-op until a context already
+    // exists. This is reached from resyncView() on every undo/redo/open/
+    // restore, symmetry off or on, and an unconditional initializeViewer()
+    // here forced winId()/native-window realization far earlier than this
+    // widget's lazy-init contract intends - measured as a real regression
+    // (fix round 1): it moved that realization inside the constructor's own
+    // showInitScreen() path, ahead of the window's first show(), and that
+    // reordering broke camera-state and focus determinism in gui_smoke
+    // ("startup distance is 700mm", "keyboard focus is visible on a chip" -
+    // both failed 4/4 on a clean parent-commit A/B, neither is the P7 wheel
+    // flake). By the time symmetry is genuinely turned on by a user or a
+    // test, the viewport has always already painted once, so myContext is
+    // never null there in practice - see setSymmetryEnabled()'s own comment.
+    if (myContext.IsNull()) return;
+
+    if (!on) {
+        if (!mySymmetryIndicator.IsNull()) {
+            myContext->Remove(mySymmetryIndicator, Standard_False);
+            myContext->UpdateCurrentViewer();
+        }
+        mySymmetryIndicator.Nullify();
+        mySymmetryIndicatorBuiltHalfSpan = 0.0;
+        return;
+    }
+
+    // Force a rebuild: the plane may have changed even if the half-span
+    // (which is all the equal-guard inside updateSymmetryIndicator() checks)
+    // has not.
+    mySymmetryIndicatorBuiltHalfSpan = 0.0;
+    updateSymmetryIndicator();
+}
+
+void OcctViewWidget::updateSymmetryIndicator()
+{
+    // Render mode (Milestone 3, item 5): "the viewport is the furniture
+    // alone" is not just the grid and the gizmos - the symmetry plane is
+    // scene decoration too. This single guard is what keeps it hidden
+    // across every camera move while render mode is active, since
+    // applyCameraState() calls this function on every one of them; without
+    // it, orbiting during render mode would silently rebuild and redisplay
+    // the plane the moment its screen-sized half-span crossed the equal-
+    // guard below. setRenderMode() handles the two edges - erasing it
+    // immediately on entry if it was already up, and forcing this function
+    // to rebuild and redisplay it on exit if symmetry is still on.
+    if (!mySymmetryIndicatorOn || myContext.IsNull() || myRenderModeActive) return;
+
+    // Screen-sized - DimensionRenderer's own idiom, one call site up: a
+    // constant APPARENT extent rather than a fixed number of millimetres
+    // that shrinks to nothing as the camera pulls back. ~220 px half-span
+    // reads as a generous plane without swallowing a small body.
+    const double halfSpan = worldPerPixel() * 220.0;
+    // The equal-guard updateManipulatorSize() uses, one call site over: this
+    // runs on every frame of an orbit, and a rebuild is a real allocation.
+    if (mySymmetryIndicatorBuiltHalfSpan > 0.0 &&
+        halfSpan < mySymmetryIndicatorBuiltHalfSpan * 1.1 &&
+        halfSpan > mySymmetryIndicatorBuiltHalfSpan * 0.9) {
+        return;
+    }
+
+    const gp_Ax3 frame = mySymmetryIndicatorPlane.Position();
+    const gp_Pnt origin = mySymmetryIndicatorPlane.Location();
+    const gp_Dir u = frame.XDirection();
+    const gp_Dir v = frame.YDirection();
+    const auto at = [&](double du, double dv) {
+        return origin.Translated(gp_Vec(u) * du + gp_Vec(v) * dv);
+    };
+
+    // A rectangle outline plus a cross through the origin - enough to read
+    // as a PLANE rather than a single line, without the density of a work
+    // grid; this is an indicator, not a surface to click on.
+    Handle(Graphic3d_ArrayOfSegments) array = new Graphic3d_ArrayOfSegments(10);
+    array->AddVertex(at(-halfSpan, -halfSpan));
+    array->AddVertex(at(halfSpan, -halfSpan));
+    array->AddVertex(at(halfSpan, -halfSpan));
+    array->AddVertex(at(halfSpan, halfSpan));
+    array->AddVertex(at(halfSpan, halfSpan));
+    array->AddVertex(at(-halfSpan, halfSpan));
+    array->AddVertex(at(-halfSpan, halfSpan));
+    array->AddVertex(at(-halfSpan, -halfSpan));
+    array->AddVertex(at(0.0, -halfSpan));
+    array->AddVertex(at(0.0, halfSpan));
+
+    Handle(SymmetryPlaneObject) indicator = new SymmetryPlaneObject();
+    indicator->segments = array;
+    // A fixed, faint, untokenised colour - the same scope ruling CLAUDE.md
+    // already makes for the gizmo's axis hues and the OCCT body/preview
+    // materials: this is scene decoration on the OCCT side of the bridge,
+    // not a Theme surface.
+    indicator->colour = Quantity_Color(0.55, 0.55, 0.65, Quantity_TOC_sRGB);
+    markInSketchLayer(indicator);
+
+    if (!mySymmetryIndicator.IsNull()) myContext->Remove(mySymmetryIndicator, Standard_False);
+    mySymmetryIndicator = indicator;
+    // Selection mode -1: an indicator, never pickable.
+    myContext->Display(mySymmetryIndicator, 0, -1, Standard_False);
+    myContext->UpdateCurrentViewer();
+    mySymmetryIndicatorBuiltHalfSpan = halfSpan;
 }
 
 void OcctViewWidget::activateManipulatorModes()
@@ -1450,13 +1701,31 @@ bool OcctViewWidget::pointOnSketchPlane(int px, int py, gp_Pnt& out, bool straig
     // projection moves the click off the very point it was aimed at - so with
     // Shift held that route silently stopped working, and a modifier that
     // disables a way out of the mode is worse than one that does nothing.
-    // Tested on the RAW plane hit, before any snapping: what the user aimed
-    // at, not where a constraint would have put it. Falling through then
-    // takes the ordinary grid snap, which lands the click exactly on the
-    // first point - so a Shift-click on the start point behaves precisely
-    // like a plain one, rather than merely closing by a different route.
+    // Falling through then takes the ordinary grid snap, which lands the
+    // click exactly on the first point - so a Shift-click on the start point
+    // behaves precisely like a plain one, rather than merely closing by a
+    // different route.
+    //
+    // Tested on the SNAPPED plane hit when snapping is on, not the raw one -
+    // myCloseTarget is itself a grid-snapped point (the first sketch point
+    // was placed through this same snap), and comparing a RAW ray hit against
+    // it directly is comparing two things on different footings: the raw hit
+    // can sit up to half a grid cell's DIAGONAL from the corner it will snap
+    // to (7.07 mm at a 10 mm step), which is already past the 5 mm tolerance
+    // sketchCloseTolerance() grants - so whether hovering the first point
+    // registers as a close depended on exactly where in the cell the ray
+    // happened to land, and device-pixel rounding at a non-integer display
+    // scale (1.25x measured) was enough to tip it into the failing corner.
+    // Pre-snapping the probe first puts both sides of the comparison on the
+    // grid, so the exemption fires whenever the point WOULD land on the
+    // first point after the ordinary snap below - which is the only question
+    // that actually matters here.
+    const gp_Pnt closeProbe =
+        (mySnapEnabled && mySnapStep > 0.0)
+            ? SketchController::snapToPlaneGrid(out, mySketchPlane, mySnapStep)
+            : out;
     const bool closing =
-        myHasCloseTarget && out.Distance(myCloseTarget) <= sketchCloseTolerance();
+        myHasCloseTarget && closeProbe.Distance(myCloseTarget) <= sketchCloseTolerance();
 
     if (straight && myHasStraightAnchor && !closing) {
         out = SketchController::snapToDirection(myStraightPrev, myStraightDir, out);
@@ -1686,7 +1955,38 @@ bool OcctViewWidget::saveSnapshot(const QString& path)
     if (myView.IsNull()) return false;
 
     myView->Redraw();
-    return myView->Dump(path.toUtf8().constData()) == Standard_True;
+
+    if (!myRenderModeActive) return myView->Dump(path.toUtf8().constData()) == Standard_True;
+
+    // Render mode doubles the export - the view's own DEVICE-pixel size
+    // (toDevicePixels()'s own conversion, so a 150% display's screenshot is
+    // 2x its OWN already-scaled pixel count, not 2x the logical widget
+    // size), through ToPixMap() rather than Dump(): it renders an offscreen
+    // buffer of the requested target size directly, with no window resize
+    // needed - Dump() has no size parameter of its own to hand it one.
+    const QPoint deviceSize = toDevicePixels(QPoint(width(), height()));
+    Image_AlienPixMap pixmap;
+    if (!myView->ToPixMap(pixmap, deviceSize.x() * 2, deviceSize.y() * 2)) return false;
+    return pixmap.Save(path.toUtf8().constData());
+}
+
+QImage OcctViewWidget::captureThumbnail()
+{
+    QTemporaryFile temp(QDir::tempPath() + QStringLiteral("/furnifyme-thumb-XXXXXX.png"));
+    if (!temp.open()) return QImage();
+    const QString path = temp.fileName();
+    // Closed rather than left open: V3d_View::Dump opens the path itself and
+    // "the output directory does not exist" is not the only way it can
+    // refuse to write - a file handle already open on it is another.
+    temp.close();
+
+    if (!saveSnapshot(path)) {
+        QFile::remove(path);
+        return QImage();
+    }
+    const QImage image(path);
+    QFile::remove(path);
+    return image;
 }
 
 void OcctViewWidget::applyCameraState()
@@ -1730,6 +2030,8 @@ void OcctViewWidget::applyCameraState()
     // that would need its own UpdateCurrentViewer(). Its own guards make this
     // free on a camera move that does not change the scale.
     updateManipulatorSize();
+    // Screen-sized the same way - see its own header comment.
+    updateSymmetryIndicator();
     // Slots FIRST, redraw second. A slot on cameraChanged() that changes the
     // scene - PullArrow rebuilds its 3D arrow, which is sized in screen
     // pixels and so has to be rebuilt whenever the camera moves - was
@@ -1741,6 +2043,12 @@ void OcctViewWidget::applyCameraState()
     emit cameraChanged();
     myApplyingCamera = false;
     myView->Redraw();
+}
+
+void OcctViewWidget::setCameraStateNow(const CameraState& state)
+{
+    myCamera.setState(state);
+    applyCameraState();
 }
 
 void OcctViewWidget::fitAll()
@@ -1929,9 +2237,13 @@ void OcctViewWidget::applyTheme()
 {
     if (myView.IsNull() || myContext.IsNull()) return;
 
-    const QColor bg = Theme::viewport();
-    myView->SetBackgroundColor(Quantity_Color(bg.redF(), bg.greenF(), bg.blueF(),
-                                              Quantity_TOC_sRGB));
+    // The flat colour outside render mode, the studio gradient while it is
+    // on - one function so a theme edit re-derives whichever is live rather
+    // than always repainting the flat one underneath an active gradient.
+    // This is what makes render mode's backdrop "re-derived on themeChanged
+    // while active" true: this call already runs on every theme edit
+    // (onThemeChanged() below), so render mode needed no second broadcast.
+    applyBackgroundForMode();
 
     // OCCT's default highlight barely reads against a shaded body. Make hover
     // and selection unmistakable - not being able to tell what is selected was
@@ -1974,6 +2286,213 @@ void OcctViewWidget::applyTheme()
     update();
 }
 
+void OcctViewWidget::applyBackgroundForMode()
+{
+    if (myView.IsNull()) return;
+
+    const QColor base = Theme::viewport();
+    if (!myRenderModeActive) {
+        myView->SetBackgroundColor(toOcctColor(base));
+        return;
+    }
+
+    // Studio backdrop: a soft vertical gradient derived from the SAME
+    // viewport token the flat colour above reads, rather than a second,
+    // untokenised colour pair - lighter top, darker bottom, the brief's own
+    // words. This is OCCT-side (SetBgGradientColors on the live camera's
+    // clear), not a Qt translucency, so the opaque-paint-family law is
+    // untouched.
+    const QColor top = base.lighter(140);
+    const QColor bottom = base.darker(140);
+    myView->SetBgGradientColors(toOcctColor(top), toOcctColor(bottom),
+                                Aspect_GradientFillMethod_Vertical, Standard_True);
+}
+
+void OcctViewWidget::setLightsCastShadows(bool cast)
+{
+    if (myViewer.IsNull()) return;
+    // Every directional light this viewer's SetDefaultLights() gave it -
+    // Graphic3d_CLight::SetCastShadows() is what OCCT 8.0 actually offers
+    // for a shadow-mapped RASTERIZATION light (checked against the real
+    // header under vcpkg's opencascade include tree; V3d_DirectionalLight
+    // itself carries no shadow API of its own, it inherits this one). An
+    // ambient light (also part of SetDefaultLights()) is not a
+    // V3d_DirectionalLight and DownCast() simply skips it.
+    for (const Handle(Graphic3d_CLight)& light : myViewer->ActiveLights()) {
+        const Handle(V3d_DirectionalLight) directional =
+            Handle(V3d_DirectionalLight)::DownCast(light);
+        if (!directional.IsNull()) directional->SetCastShadows(cast);
+    }
+}
+
+void OcctViewWidget::applyRenderTier(RenderTier tier)
+{
+    if (myView.IsNull()) return;
+    Graphic3d_RenderingParams& params = myView->ChangeRenderingParams();
+    params.Method = (tier == RenderTier::RayTracing) ? Graphic3d_RM_RAYTRACING
+                                                      : Graphic3d_RM_RASTERIZATION;
+    if (tier == RenderTier::RayTracing) params.IsShadowEnabled = true;
+    setLightsCastShadows(tier == RenderTier::Shadows);
+}
+
+bool OcctViewWidget::probeShadowPixelsDiffer()
+{
+    // Real Dump() pixels, not the setter's own claim - CLAUDE.md's
+    // zoom-persistence lesson, restated for this task: SetCastShadows(true)
+    // returning does not mean a shadow actually reached the screen, and a
+    // driver that silently ignores the flag is a real possibility this probe
+    // exists to catch. Two full dumps, shadows off then on, compared pixel
+    // by pixel; any real difference is accepted as proof the effect rendered.
+    if (myView.IsNull()) return false;
+
+    QTemporaryFile beforeFile(QDir::tempPath() +
+                              QStringLiteral("/furnifyme-shadow-before-XXXXXX.png"));
+    QTemporaryFile afterFile(QDir::tempPath() +
+                             QStringLiteral("/furnifyme-shadow-after-XXXXXX.png"));
+    if (!beforeFile.open() || !afterFile.open()) return false;
+    const QString beforePath = beforeFile.fileName();
+    const QString afterPath = afterFile.fileName();
+    // Closed rather than left open - same reasoning captureThumbnail() gives:
+    // Dump() opens the path itself, and a handle already open on it is
+    // another way for that to fail besides a missing directory.
+    beforeFile.close();
+    afterFile.close();
+
+    setLightsCastShadows(false);
+    myView->Redraw();
+    const bool dumpedBefore = myView->Dump(beforePath.toUtf8().constData()) == Standard_True;
+
+    setLightsCastShadows(true);
+    myView->Redraw();
+    const bool dumpedAfter = myView->Dump(afterPath.toUtf8().constData()) == Standard_True;
+
+    bool differ = false;
+    if (dumpedBefore && dumpedAfter) {
+        const QImage before(beforePath);
+        const QImage after(afterPath);
+        if (!before.isNull() && !after.isNull() && before.size() == after.size()) {
+            // Sampled, not exhaustive - this runs once per session, but a
+            // full-resolution nested loop over a live viewport is still real
+            // work for what is fundamentally a yes/no question.
+            constexpr int kStride = 4;
+            for (int y = 0; y < before.height() && !differ; y += kStride) {
+                for (int x = 0; x < before.width(); x += kStride) {
+                    if (before.pixel(x, y) != after.pixel(x, y)) { differ = true; break; }
+                }
+            }
+        }
+    }
+
+    QFile::remove(beforePath);
+    QFile::remove(afterPath);
+    return differ;
+}
+
+OcctViewWidget::RenderTier OcctViewWidget::probeRenderTier()
+{
+    if (myView.IsNull()) return RenderTier::Plain;
+
+    // Tier 1: GPU ray tracing with shadows, timed against a single redraw -
+    // the brief's own method, not an average over several frames (a warm-up
+    // redraw would hide exactly the shader-compilation cost a slow GPU also
+    // pays on every later one). Wrapped in try/catch per this task's own
+    // ruling: a driver that cannot do this is expected to REFUSE cleanly
+    // rather than take the app down, and OCCT reports that refusal as a
+    // Standard_Failure here rather than a bool return.
+    bool rayTracingFast = false;
+    try {
+        applyRenderTier(RenderTier::RayTracing);
+        QElapsedTimer timer;
+        timer.start();
+        myView->Redraw();
+        rayTracingFast = timer.elapsed() <= kRenderTierProbeThresholdMs;
+    } catch (const Standard_Failure&) {
+        rayTracingFast = false;
+    }
+    if (rayTracingFast) return RenderTier::RayTracing;
+
+    // Ray tracing was refused, or too slow to be interactive - rasterization
+    // from here down. Tier 2: a shadow-mapped directional light, accepted
+    // only once a real Dump() shows a pixel actually moved.
+    applyRenderTier(RenderTier::Shadows);
+    if (probeShadowPixelsDiffer()) return RenderTier::Shadows;
+
+    // Neither held up - stand plain, and undo the shadow flag probeShadow-
+    // PixelsDiffer() may have left set.
+    applyRenderTier(RenderTier::Plain);
+    return RenderTier::Plain;
+}
+
+void OcctViewWidget::setRenderMode(bool on)
+{
+    // Never on the compare pane - it is read-only furniture from a saved
+    // version, not a scene anyone renders a shot of, and this widget's own
+    // header says so. A no-op when already in the requested state, so a
+    // caller need not guard the call itself.
+    if (myViewerOnly || on == myRenderModeActive) return;
+    initializeViewer();
+    if (myContext.IsNull() || myView.IsNull()) return;
+
+    myRenderModeActive = on;
+
+    if (on) {
+        // Suppress hover and selection highlight - a REAL ClearSelected(),
+        // reusing clearSelection() rather than a second copy of its body, so
+        // the edge-length dimension it clears and the selectionChanged() it
+        // emits stay the one implementation. Every solid's own selection
+        // modes then come OUT of the context's pick candidates -
+        // Deactivate() is what actually suppresses both a future hover
+        // highlight and a future pick, not merely today's selection; a
+        // plain LEFT press exits render mode instead of picking anything
+        // (see mousePressEvent()), and reactivating them on the way out
+        // below is what makes picking work again once it does.
+        clearSelection();
+        for (auto& entry : mySolids) myContext->Deactivate(entry.second);
+
+        myGridRenderer.setVisible(false);
+        // The symmetry plane indicator, on the same terms as the grid - it
+        // may already be up (symmetry was on before render mode was
+        // entered), and updateSymmetryIndicator()'s own new guard only stops
+        // it being REBUILT while active, not the presentation already on
+        // screen. Erased outright rather than merely marked, because Erase
+        // is what a Dump actually stops drawing; mySymmetryIndicatorOn
+        // itself is untouched, so it is still the one source of truth
+        // updateSymmetryIndicator() reads once render mode lets it run again.
+        if (!mySymmetryIndicator.IsNull()) myContext->Erase(mySymmetryIndicator, Standard_False);
+
+        // Cache the tier for the session - the brief's own words. The first
+        // activation pays for the probe (a timed redraw, and possibly two
+        // full Dump()s); every later one just reapplies what was already
+        // found.
+        if (!myRenderTierProbed) {
+            myRenderTier = probeRenderTier();
+            myRenderTierProbed = true;
+        } else {
+            applyRenderTier(myRenderTier);
+        }
+    } else {
+        for (auto& entry : mySolids) applySelectionMode(entry.second);
+        myGridRenderer.setVisible(true);
+        // Restored from the one piece of state that says whether it should
+        // be up at all (mySymmetryIndicatorOn) - derived, not a remembered
+        // "it was showing" flag. Forcing the half-span guard to miss is what
+        // makes updateSymmetryIndicator() actually rebuild and redisplay
+        // rather than trust a cached size that may itself be stale after
+        // however long render mode was up.
+        mySymmetryIndicatorBuiltHalfSpan = 0.0;
+        updateSymmetryIndicator();
+        // Ordinary modeling never ray-traces or shadow-maps - both would be
+        // an interactivity hazard mid-edit, and neither is part of the look
+        // this app had before this feature existed. Plain rasterization
+        // restores that exactly, whichever tier was live a moment ago.
+        applyRenderTier(RenderTier::Plain);
+    }
+
+    applyBackgroundForMode();
+    myContext->UpdateCurrentViewer();
+    myView->Redraw();
+}
+
 void OcctViewWidget::setWireframe(bool wireframe)
 {
     if (myWireframe == wireframe) return;
@@ -1995,6 +2514,20 @@ bool OcctViewWidget::isSolidWireframe(int id) const
 
 void OcctViewWidget::mousePressEvent(QMouseEvent* event)
 {
+    // Render mode's own exit gesture - "a pick press in the viewport" in
+    // CLAUDE.md's words. Checked FIRST and unconditionally for a LEFT press:
+    // every gizmo this widget could otherwise grab is already cleared or
+    // detached while render mode is active (see setRenderMode()), so there
+    // is nothing here for the rest of this function to do differently - the
+    // press is swallowed outright rather than falling through to an ordinary
+    // pick, so the click that exits render mode never also selects whatever
+    // happens to be underneath it. RMB orbit and MMB pan are NOT gated here:
+    // the brief is explicit that framing a shot does not exit.
+    if (myRenderModeActive && event->button() == Qt::LeftButton) {
+        emit renderModeExitRequested();
+        return;
+    }
+
     stopCameraAnimation();
     initializeViewer();
     myLastPos = event->position().toPoint();
@@ -2092,6 +2625,15 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
 {
     if (event->button() == Qt::RightButton)  myOrbiting = false;
     if (event->button() == Qt::MiddleButton) myPanningDrag = false;
+
+    // No picking in viewer-only mode - see the header. Orbit and pan are
+    // both handled above (unconditionally, since neither depends on the
+    // picker), so a left click in the compare pane simply does nothing
+    // rather than selecting whatever is under it. None of the drag flags
+    // below can be true here either: nothing ever calls showPullArrow(),
+    // showBevelArrow() or attachManipulator() on a viewer-only widget, so
+    // mousePressEvent() never arms one in the first place.
+    if (myViewerOnly) return;
 
     // The end of a pull. This widget picks NOTHING on this release: the press
     // that started the drag was aimed at the arrow, and re-picking here would
@@ -2253,9 +2795,11 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
             myHasLastHoverPoint = true;
             emit sketchCursorMoved(onPlane);
         }
-    } else if (!myContext.IsNull()) {
+    } else if (!myViewerOnly && !myContext.IsNull()) {
         // Hover highlight. Suppressed while sketching so the in-progress wire
-        // does not fight the highlighter for attention.
+        // does not fight the highlighter for attention. Suppressed
+        // altogether in viewer-only mode - see the header: no picking means
+        // no hover highlight either.
         const QPoint device = toDevicePixels(pos);
         myContext->MoveTo(device.x(), device.y(), myView, Standard_True);
         // The manipulator arms a manipulation mode when one of its parts is
@@ -2292,7 +2836,8 @@ void OcctViewWidget::wheelEvent(QWheelEvent* event)
 
 void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
 {
-    if (event->button() != Qt::LeftButton || mySketchMode || myContext.IsNull()) return;
+    if (event->button() != Qt::LeftButton || mySketchMode || myContext.IsNull() || myViewerOnly)
+        return;
 
     const QPoint pos = event->position().toPoint();
     const bool onArrow = arrowHit(myPullArrow, pos) || arrowHit(myBevelArrow, pos);

@@ -24,6 +24,17 @@ public:
     // default, a locked face's own plane while one is locked.
     void update(double cameraDistance, const gp_Pnt& cameraTarget, const gp_Pln& plane);
 
+    // Render mode (Milestone 3, item 5) hides the grid outright rather than
+    // merely not rebuilding it - the viewport is meant to be the furniture
+    // alone. Idempotent, and safe before anything has ever been built: a
+    // hide with no myGrid yet is remembered (myVisible) and honoured by the
+    // NEXT update()'s own Display call rather than needing a redundant show
+    // here. Restoring visibility does not force a rebuild - the cached grid
+    // (if any) is simply redisplayed, and the next camera move corrects it
+    // exactly as it always does.
+    void setVisible(bool visible);
+    bool isVisible() const { return myVisible; }
+
     // Forces the next update() to rebuild, whatever the camera is doing.
     //
     // The cache below is keyed on everything that changes the grid's
@@ -83,6 +94,9 @@ private:
     Handle(AIS_InteractiveContext) myContext;
     Handle(AIS_InteractiveObject) myGrid;
     Graphic3d_ZLayerId myLayer = Graphic3d_ZLayerId_UNKNOWN;
+    // See setVisible(). True by default - the grid is on until something
+    // (render mode) asks otherwise.
+    bool myVisible = true;
     double myBuiltStep = 0.0;
     gp_Pnt myBuiltCenter{0.0, 0.0, 0.0};
     double myBuiltExtent = 0.0;

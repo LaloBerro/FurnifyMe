@@ -9,25 +9,50 @@
 #include <QMainWindow>
 
 #include "DocumentModel.h"
+#include "FurnitureStore.h"
 #include "Measure.h"
 #include "SketchController.h"
 #include "UserProgress.h"
 
 class AppBar;
 class AppearancePanel;
+class AxisGizmo;
 class BevelArrow;
 class ExtrudePreview;
+class InitScreen;
 class OcctViewWidget;
 class PullArrow;
 class QAction;
 class QMenuBar;
+class QSplitter;
+class SaveVersionCard;
 class ToastHost;
+class ToolCluster;
+class VersionsPanel;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
 
 public:
-    explicit MainWindow(QWidget* parent = nullptr, bool persistProgress = true);
+    // The sentinel `libraryRoot` means "use the real library location" -
+    // QStandardPaths::DocumentsLocation + "/FurnifyMe" - and is the
+    // constructor's own default, so `MainWindow window;` (main.cpp's own
+    // call) still gets it for free. Deliberately NOT the empty string:
+    // QTemporaryDir::path() returns exactly "" when a temp directory could
+    // not be created at all, and treating that the same as "the caller
+    // wants the default" would let a broken test silently read and write a
+    // real user's Documents folder instead of failing where the mistake
+    // happened. An empty (or otherwise blank) `libraryRoot` reaching the
+    // constructor is refused outright - see its definition - rather than
+    // quietly resolved to the real path.
+    static QString defaultLibraryRoot();
+
+    // `libraryRoot` is FurnitureStore's INJECTED directory - see
+    // FurnitureStore.h and defaultLibraryRoot() above. Every test passes a
+    // real QTemporaryDir path here, the same discipline persistProgress=false
+    // already established for QSettings.
+    explicit MainWindow(QWidget* parent = nullptr, bool persistProgress = true,
+                        const QString& libraryRoot = defaultLibraryRoot());
 
     // Operations, split from the dialogs that ask for their parameters. The GUI
     // smoke test drives these directly; a modal QInputDialog cannot be answered
@@ -191,6 +216,27 @@ public:
     static QString transformPastVerb(const gp_Trsf& delta);
     static QString transformRefusalText(const gp_Trsf& delta);
 
+    // --- symmetry (Milestone 3: live mirror twins) --------------------------
+    //
+    // The Symmetry action's own handler: checking it turns the mode on at
+    // WHATEVER plane document() already holds (the constructed default,
+    // world YZ through the origin, the first time this ever fires); the
+    // face-pick route below is the only thing that changes the plane.
+    // Unchecking it unpairs everything - see DocumentModel::setSymmetry()
+    // for why that carries no checkpoint but still marks the furniture
+    // dirty.
+    void setSymmetryEnabled(bool on);
+    bool symmetryEnabled() const { return myDocument.symmetryOn(); }
+
+    // "Set symmetry plane": the Lock to Face pick idiom, aimed at
+    // DocumentModel's plane instead of the sketch plane. Turns symmetry ON
+    // at `face`'s own outward-oriented plane - captured BY VALUE, the same
+    // rule lockToFace() follows and for the same reason (face indices are
+    // not stable across a rebuild). Refuses a non-flat face with a Failure
+    // toast; unlike lockToFace() this has no pending-outline conflict to
+    // refuse, since it does not touch the sketch plane at all.
+    bool setSymmetryPlaneFromFace(const TopoDS_Face& face);
+
     bool lockToFace(const TopoDS_Face& face);
     // Back to the ground plane. The ground plane is the default and is never
     // itself "locked", so this is not a toggle of the same state. Refused,
@@ -266,6 +312,147 @@ public:
     // preference, not a learned capability.
     void setDisplayUnit(Measure::Unit unit);
 
+    // --- the init screen, save and autosave (Milestone 3) -------------------
+    //
+    // The init screen is a STATE, not a dialog and not a separate window -
+    // CLAUDE.md's no-modal law applies to it exactly as to everything else.
+    // showInitScreen() puts the window into it: the live document is
+    // replaced with a fresh, empty one (never merely cleared - clear()
+    // leaves the undo stack behind it, and the next furniture opened must
+    // not inherit checkpoints that were never its own) and the gallery is
+    // raised over the viewport. openFurniture() is the one path both an
+    // existing card and a freshly created one go through, so a new
+    // furniture and a reopened one round-trip identically.
+    void showInitScreen();
+    bool openFurniture(const QString& id);
+    bool isShowingInitScreen() const { return myShowingInitScreen; }
+    QString currentFurnitureId() const { return myFurnitureId; }
+    QString currentFurnitureName() const { return myFurnitureName; }
+    // Dirty = the live document's revision differs from the revision as of
+    // the last save - revision() is monotonic (DocumentModel.h), so this can
+    // never be fooled by an undo landing back on a number it already used.
+    bool isFurnitureDirty() const;
+
+    // File -> Save (Ctrl+S). The one save path this window has - autosave's
+    // debounce timer and "close with autosave off" both call this rather
+    // than carrying a copy of the write each, so a save always means the
+    // same thing: capture the document, capture a thumbnail through
+    // OcctViewWidget::captureThumbnail(), advance the saved-revision mark.
+    // Read-only while no furniture is open or the init screen is showing.
+    bool saveCurrentFurniture();
+    // File -> Close furniture. With autosave off this SAVES FIRST - never a
+    // modal question - and the toast says so; either way it returns to the
+    // init screen. Flushes any autosave still waiting inside its debounce
+    // window first, so a furniture closed a moment after its last edit never
+    // loses that edit to a timer that had not fired yet.
+    void closeCurrentFurniture();
+    // File -> Save automatically (checkable, persisted). On, a debounced
+    // (400 ms) save runs after every document change; see
+    // kAutosaveWriteMs.
+    void setAutosaveEnabled(bool enabled);
+    bool autosaveEnabled() const { return myAutosaveOn; }
+    static constexpr int kAutosaveWriteMs = 400;
+    // The live autosave countdown in ms, or -1 when nothing is pending -
+    // ToastHost::remainingMs()'s own shape, for the same reason: the suite
+    // asserts the ARMED timer rather than waiting kAutosaveWriteMs real
+    // milliseconds for it to fire.
+    int autosavePendingMs() const;
+
+    InitScreen* initScreen() const { return myInitScreen; }
+    FurnitureStore& furnitureStore() { return myStore; }
+
+    // --- versions and the side-by-side compare (Milestone 3) ---------------
+    //
+    // File -> Save version... 's commit path - the one place saveVersion()
+    // reaches the store: a duplicate name is FurnitureStore::saveVersion()'s
+    // one real refusal here (an unknown furniture id cannot happen - this
+    // guards on a real, open one first), reported with a Failure toast
+    // naming the clash; SaveVersionCard stays open on that refusal so the
+    // user can retype. Versions are file data, not document state - no
+    // checkpoint, no Undo on the Note toast that reports success.
+    bool saveVersion(const QString& name);
+
+    // VersionsPanel's Restore button. Closes any open compare FIRST (a
+    // restore replaces the very document a stale compare pane would still
+    // be showing half of), then replaces the WHOLE live document - bodies,
+    // outlines, names, visibility - through ONE checkpoint
+    // (DocumentModel::checkpoint() then restoreFrom(), never
+    // fromSerialized(), which clears undo history outright - see
+    // DocumentModel.h) so a single Ctrl+Z brings back everything this
+    // replaced. Note toast `Restored version "<name>"` with Undo. The
+    // version itself is unchanged - this only ever READS it.
+    bool restoreVersion(const QString& name);
+
+    // VersionsPanel's Delete, called once its own two-click confirmation has
+    // fired. Final and carries no Undo - a version is file data, and
+    // "Ctrl+Z brings back a deleted file" is not a promise this app makes
+    // anywhere else either. Closes an open compare of exactly this version
+    // first, so a stale read-only pane can never outlive the file it reads.
+    bool deleteVersionByName(const QString& name);
+
+    // Opens the side-by-side compare: swaps the central widget to a
+    // QSplitter holding the live view and a second, VIEWER-ONLY
+    // OcctViewWidget showing `name`'s own saved shapes, read-only. Camera
+    // orbit/pan/zoom on EITHER view is mirrored onto the other - see
+    // syncCamera() - until closeCompare() (the badge's own control, or a
+    // Restore) ends it. Compare is VIEW state, not document state: no
+    // checkpoint, no dirty star, and the live document is untouched by it.
+    // Opening a different version while one is already open replaces the
+    // pane rather than stacking a second one.
+    bool openCompare(const QString& name);
+    // Returns to the full-bleed single viewport. A no-op when compare is
+    // not open.
+    void closeCompare();
+    bool isCompareOpen() const { return myCompareView != nullptr; }
+    OcctViewWidget* compareView() const { return myCompareView; }
+    QString compareVersionName() const { return myCompareVersionName; }
+
+    // THE predicate behind File -> Save version...: a furniture is open, no
+    // sketch is in progress, and none of the three OTHER application-wide
+    // Enter/Escape claims is live (ExtrudePreview, the pull arrow, the bevel
+    // arrow) - see SaveVersionCard.h for why that is what makes the four
+    // claims mutually exclusive by construction. updateActions() gates the
+    // action on this and nothing else; SaveVersionCard reads it a second
+    // time on appStateChanged, to close itself if it goes false while open.
+    bool canOpenSaveVersion() const;
+
+    // Fixed copy the compare badge paints, exposed statically - like
+    // bevelRefusalText() and friends above - so the vocabulary sweep can
+    // check it without a live compare pane, and so it has exactly one
+    // implementation the badge's own construction reads too.
+    static QString compareBadgeCloseLabel();
+
+    // --- Render mode (Milestone 3, item 5) ----------------------------------
+    //
+    // View -> Render mode: strips the viewport to the furniture alone -
+    // grid, drawers, rail, the axis gizmo card, every live gizmo and the
+    // dimension all hidden or suppressed - and switches to the best
+    // rendering tier this GPU sustains interactively (see
+    // OcctViewWidget::setRenderMode() for the three-tier probe). Checkable,
+    // and unlike every OTHER View toggle in this file, deliberately NEVER
+    // persisted: CLAUDE.md's own words are "the app always starts in
+    // modeling", so this never touches QSettings the way
+    // setShowBottomBar()/setAutosaveEnabled() and friends do.
+    //
+    // Also the one place that flips myRenderModeAction's checked state, in
+    // BOTH directions - the user unchecking the box calls this through the
+    // action's own toggled(bool), and every exit gesture (a viewport pick,
+    // Start Sketch, any document-changing commit - see checkpointDocument())
+    // calls it directly, which is what un-checks the box FOR them. Ends by
+    // calling updateActions(), the single authority every other toggle in
+    // this file already answers to.
+    void setRenderModeEnabled(bool on);
+    bool renderModeEnabled() const { return myRenderModeOn; }
+
+    // THE predicate behind View -> Render mode's own enabled state: a
+    // furniture open, no compare open, not sketching, no outline waiting -
+    // the four conditions named in this task's own ruling. Render mode
+    // raises no application-wide Enter/Escape claim of its own (it is a
+    // toggle, not a text field), so unlike canOpenSaveVersion() it does not
+    // need to exclude the three gizmo predicates - it hides them itself the
+    // moment it turns on.
+    bool canOpenRenderMode() const;
+
 signals:
     // DocumentModel is Qt-free by design, so the window announces its changes.
     void documentChanged();
@@ -311,13 +498,26 @@ private slots:
     void onIntersect();
 
     void onDeleteSelected();
+    void onRenameSelected();
     void onUndo();
     void onRedo();
+
+    // The Items drawer's own rename gesture (double-click or F2) landed on a
+    // row - see ItemsPanel::renameCommitted(). One checkpoint, one setItemName
+    // call, one Note toast with Undo - the shape every other checkpointed
+    // commit in this file follows.
+    void onItemRenameCommitted(int id, bool isOutline, QString newName);
 
     void onExportStep();
     void onSelectionModeChanged();
     void onSelectionChanged();
     void onLockToFace();
+    // "Set symmetry plane": reads the current face selection and calls
+    // setSymmetryPlaneFromFace() - the Lock to Face idiom, one gizmo over.
+    // The checkable Symmetry action itself needs no slot of its own: its
+    // toggled(bool) connects straight to setSymmetryEnabled(), exactly as
+    // myAutosaveAction connects to setAutosaveEnabled().
+    void onSetSymmetryPlane();
     // A plain double-click on a body in face or edge selection mode: switch to
     // body selection and select that body, in one gesture. Routed through
     // mySolidSelectAction rather than straight at the viewport, so the rail
@@ -330,6 +530,12 @@ private slots:
     // has already put its presentation back by the time this runs (see
     // OcctViewWidget::endGizmoDrag), so there is nothing to undo here either.
     void onGizmoReleased(int solidId, const gp_Trsf& delta);
+
+    // File -> Save version...: opens SaveVersionCard. Split from the panel
+    // itself on the same terms onExtrude()/ExtrudePreview are - the action's
+    // enabled state is canOpenSaveVersion(), and this is only ever reachable
+    // once that already holds.
+    void onSaveVersion();
 
 private:
     void buildActions();
@@ -433,6 +639,39 @@ private:
     static bool transformIsScale(const gp_Trsf& delta);
     static bool transformIsRotation(const gp_Trsf& delta);
     void runBoolean(int kind);   // ModelingOps::BooleanKind as int, to keep it out of the header
+
+    // THE one place every pull/bevel/transform commit lands - see the task-4
+    // brief's own words: "if today they land in several places, this task's
+    // first refactor is to route them through one". Before this, all three
+    // hand-rolled their own `checkpoint(); replaceSolid(); displaySolid();`
+    // sequence, which is exactly three places the twin-follows rule could be
+    // forgotten as a fourth gizmo arrived.
+    //
+    // Takes the undo checkpoint, replaces `id`'s shape and redisplays it,
+    // then - if `id` has a mirror twin - replaces the twin too, with
+    // `ModelingOps::mirrorShape(newShape, myDocument.symmetryPlane())`, in
+    // the SAME checkpoint, so a single Ctrl+Z reverts both. `twinFollowed`
+    // reports whether that actually happened - false, and the twin left
+    // completely untouched, both when `id` is unpaired and on the (expected
+    // to be unreachable in practice) case the mirror itself fails, since a
+    // failed twin-mirror must never turn a successful primary edit into a
+    // reported failure.
+    //
+    // Callers still do their OWN gizmo cleanup (clearModelingPreview,
+    // clearPullArrow/clearBevelArrow, clearSelection) - that has to happen
+    // before the body they describe is replaced, and it differs per gizmo -
+    // so this owns only the part that is genuinely identical three times
+    // over: the checkpoint, the replace, and the twin.
+    void commitReplaceBody(int id, const TopoDS_Shape& newShape, bool& twinFollowed);
+
+    // THE single choke point every document-changing commit's checkpoint()
+    // call now goes through, in place of calling myDocument.checkpoint()
+    // directly (eight call sites, before this) - which is what makes render
+    // mode's own exit rule ("any document-changing action leaves render mode
+    // FIRST") structural rather than eight separate reminders to add one.
+    // Exits through setRenderModeEnabled(false), the single authority that
+    // un-checks the action, before the checkpoint it guards ever lands.
+    void checkpointDocument();
     // The one place "the camera was moved to a named direction" is recorded.
     // Every route to that - the four View menu entries and a click on the
     // axis gizmo - goes through here, so no route can record the event
@@ -467,6 +706,47 @@ private:
     // a Failure is not this preference's to suppress.
     void setShowNotifications(bool show);
 
+    // View -> Show bottom bar. Same shape as setShowNotifications() - stores
+    // the preference under the same guard, calls updateActions(), which is
+    // what derives statusBar()'s visibility from it (the same
+    // appStateChanged-driven block that derives the items/versions/appearance
+    // drawers' own visibility from their actions, so a QWidget::show() this
+    // file did not intend to survive cannot leave the bar stuck on). It hides
+    // only the BAR - a Failure toast is unrelated chrome, parented to
+    // OcctViewWidget rather than to the status bar, and stays reachable
+    // exactly as CLAUDE.md's never-silent-failure law requires.
+    void setShowBottomBar(bool show);
+
+    // Builds myInitScreen and wires its two signals - see the header for why
+    // it is a state rather than a dialog. Called once, from the
+    // constructor, after buildOverlay() so it can be raised above every
+    // overlay widget that already exists.
+    void buildInitScreen();
+    // The one save implementation - Ctrl+S, autosave's debounce timer and
+    // "close with autosave off" all call this rather than each carrying its
+    // own copy. `announce` is what tells Ctrl+S's success apart from
+    // autosave's: a Note ("Saved Furniture NN") only when the user asked for
+    // it directly, never once per debounced background write, while a
+    // FAILURE is never conditional on it - CLAUDE.md's law that a refusal
+    // must report somewhere applies to a silent autosave exactly as it does
+    // to everything else.
+    bool performSave(bool announce);
+    // The debounce timer's own timeout, and closeCurrentFurniture()'s flush.
+    // A no-op when nothing is actually dirty, so closing a furniture the
+    // instant after its own autosave just ran does not write it twice.
+    void flushAutosave();
+    // Builds myAutosaveTimer on first use (same lazy-build reasoning as
+    // persistAppearance()'s myAppearanceWrite) and (re)starts it - the ONE
+    // place either happens, so the two call sites that arm it (a checkpoint,
+    // and the toggle turning on over an already-dirty document) cannot drift
+    // out of step with each other's interval or wiring.
+    void armAutosaveTimer();
+    // The window title from the furniture name and the dirty star - the
+    // ONE place either is written, called from updateActions() the way
+    // updateStateLabel() is, so a save, an undo/redo, or opening a different
+    // furniture can never leave it stale.
+    void updateWindowTitle();
+
     // Flies the camera square onto a face: the eye moves onto the face's
     // OUTWARD normal, the target to the face's centre, the distance out far
     // enough to frame it, orthographic for as long as the user does not orbit.
@@ -475,9 +755,53 @@ private:
     // user is not going to be drawing on.
     void flyOntoFace(const TopoDS_Face& face, const gp_Pln& plane);
 
+    // The no-recursion camera sync: copies `from`'s CameraState onto `to`
+    // ONLY when the two differ by more than a tight epsilon, then pushes it
+    // straight onto `to`'s OCCT camera through setCameraStateNow() - which
+    // itself unconditionally emits cameraChanged() again. That second
+    // emission is what closes the loop rather than opening an infinite one:
+    // by the time it reaches the OTHER direction's own equality check, the
+    // two states already agree (this call just made them), so that check
+    // returns without copying anything further. Wired both ways - myView's
+    // cameraChanged to sync into myCompareView, and (only once one exists)
+    // myCompareView's cameraChanged to sync into myView - so orbiting
+    // either view moves both.
+    void syncCamera(OcctViewWidget* from, OcctViewWidget* to);
+
     OcctViewWidget* myView = nullptr;
     DocumentModel myDocument;
     SketchController mySketch;
+
+    // The managed library - see FurnitureStore.h. A plain value member, not
+    // a pointer: the class holds nothing but its own root directory string,
+    // so there is no ownership question to resolve between "the real one"
+    // and "the one a test injected" - the constructor just picks which
+    // string to build it from.
+    FurnitureStore myStore;
+    InitScreen* myInitScreen = nullptr;
+    // The init screen is the window's state whenever no furniture is open -
+    // true from construction (nothing is open yet) until openFurniture()
+    // succeeds, and true again the moment showInitScreen() runs.
+    bool myShowingInitScreen = true;
+    // Empty exactly when myShowingInitScreen is true - the two are kept in
+    // step by showInitScreen()/openFurniture() rather than derived from one
+    // another, because "derived from an empty id" reads backwards from what
+    // actually causes what.
+    QString myFurnitureId;
+    QString myFurnitureName;
+    // DocumentModel::revision() as of the last successful save - see
+    // isFurnitureDirty(). 0 while no furniture is open, which is harmless:
+    // isFurnitureDirty() refuses to answer true for that state regardless.
+    int mySavedRevision = 0;
+    // File -> Save automatically, persisted under the same guard as every
+    // other preference. Defaults to on: CLAUDE.md's ruling for this branch
+    // is "never lose work, never block", and a new user who has not found
+    // the toggle yet should get the safer default.
+    bool myAutosaveOn = true;
+    // The debounce behind autosave - built on first use, exactly as
+    // myAppearanceWrite is, and for the same reason: a window that never
+    // sees a checkpoint while autosave is on never creates one.
+    class QTimer* myAutosaveTimer = nullptr;
 
     // Which outline item Extrude would consume, when the user has chosen one
     // from the drawer. Not the pending face itself and not a cursor into the
@@ -516,6 +840,13 @@ private:
     QAction* myEdgeSelectAction = nullptr;
     QAction* mySnapAction = nullptr;
     QAction* myDeleteAction = nullptr;
+    // F2, and (like Delete) two meanings decided in ONE place - updateActions().
+    // Unlike Delete, the two meanings never fall back on each other: renaming
+    // is a single-item gesture (InlineRename edits one name), so this is
+    // enabled for exactly one selected body, or for the waiting outline when
+    // no body is selected - never for a multi-body selection, where Delete
+    // stays available but this does not.
+    QAction* myRenameAction = nullptr;
     QAction* myUndoAction = nullptr;
     QAction* myRedoAction = nullptr;
     QAction* myItemsPanelAction = nullptr;
@@ -527,7 +858,17 @@ private:
     QAction* myUnitsCentimetresAction = nullptr;
     QAction* myLockFaceAction = nullptr;
     QAction* myUnlockFaceAction = nullptr;
+    // Symmetry (Milestone 3) - menu-only, per the ledger note: the rail is
+    // at its height floor and a fourteenth chip is the rework CLAUDE.md
+    // already says it wants before it gets there.
+    QAction* mySymmetryAction = nullptr;
+    QAction* mySetSymmetryPlaneAction = nullptr;
     QAction* myAppearanceAction = nullptr;
+    // File -> Save / Save automatically / Close furniture - see the public
+    // methods above, which every one of these three triggers into.
+    QAction* myFileSaveAction = nullptr;
+    QAction* myAutosaveAction = nullptr;
+    QAction* myCloseFurnitureAction = nullptr;
     // Checkable, and the single source of the base projection's truth: the
     // View menu entry, the O shortcut and the bar's readout button are all
     // this one action, exactly as the unit chip is the Units entries.
@@ -538,6 +879,17 @@ private:
     // What the stored setting said, read in the constructor before any action
     // exists so the View entry is built already ticked correctly. Default true.
     bool myShowNotifications = true;
+    // Checkable, and the single source of the bottom bar's own visibility,
+    // exactly as myItemsPanelAction is for the drawer - statusBar()'s shown
+    // state is DERIVED from this action's checked state, both directions, in
+    // the same appStateChanged-driven block that derives the drawers' own.
+    QAction* myBottomBarAction = nullptr;
+    // What the stored setting said, read in the constructor before any action
+    // exists, on the same terms as myShowNotifications above. Default true -
+    // an app that started with no status bar would look broken to a
+    // first-time user, the same reasoning myShowNotifications's own comment
+    // gives.
+    bool myShowBottomBar = true;
     // What the stored setting said, read in the constructor before the
     // viewport exists and applied the moment it does. A plain bool rather
     // than a second read, because QSettings is touched once per preference
@@ -554,4 +906,45 @@ private:
     ExtrudePreview* myExtrudePreview = nullptr;
     PullArrow* myPullArrow = nullptr;
     BevelArrow* myBevelArrow = nullptr;
+
+    // --- versions and the side-by-side compare (Milestone 3) ---------------
+    QAction* myVersionsPanelAction = nullptr;   // View -> Versions - the drawer's law
+    QAction* mySaveVersionAction = nullptr;     // File -> Save version...
+    VersionsPanel* myVersionsPanel = nullptr;
+    SaveVersionCard* mySaveVersionCard = nullptr;
+
+    // Non-null only while compare is open. mySplitter owns myView and
+    // myCompareView as its two panes for that interval; myView is
+    // reparented BACK to being the plain central widget the moment compare
+    // closes (see closeCompare()) - it is never left inside a torn-down
+    // splitter, and setCentralWidget(myView) is what performs that move.
+    QSplitter* mySplitter = nullptr;
+    OcctViewWidget* myCompareView = nullptr;
+    // --- Render mode (Milestone 3, item 5) ----------------------------------
+    // The one flag every predicate and every appStateChanged-driven
+    // visibility block below reads - never persisted, never read back from
+    // OcctViewWidget::renderModeActive() at a second call site, so the
+    // viewport's own state and this window's idea of it cannot
+    // independently drift. setRenderModeEnabled() is the only writer.
+    bool myRenderModeOn = false;
+    QAction* myRenderModeAction = nullptr;
+    // The rail and the axis gizmo card, kept here rather than found with
+    // findChild<>() on demand - both are constructed as locals inside
+    // buildOverlay() otherwise, and both need to be reached from the
+    // appStateChanged-driven visibility lambda that already hides the three
+    // drawers and the status bar the same way.
+    ToolCluster* myRail = nullptr;
+    AxisGizmo* myAxisGizmo = nullptr;
+    QString myCompareVersionName;   // user text - see the badge's own rule
+    // The badge and its Close-compare control, parented to myCompareView -
+    // owned by Qt's parent-child cascade (destroyed with myCompareView),
+    // kept only so closeCompare() need not search for them and the badge's
+    // name can be updated without a second lookup if that is ever wanted.
+    class QWidget* myCompareBadge = nullptr;
+    // Bumped once per openCompare() call - the token a deferred
+    // QTimer::singleShot(0, ...) close (the compare badge's own Close
+    // button; see closeCompare()'s comment) checks against before acting,
+    // so a stale deferred close from a session already replaced by a newer
+    // one cannot close the WRONG pane.
+    int myCompareGeneration = 0;
 };
