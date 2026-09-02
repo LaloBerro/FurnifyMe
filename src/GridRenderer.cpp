@@ -174,99 +174,124 @@ void GridRenderer::rebuild(double minorStep, double centerU, double centerV,
 
     // Everything below is laid out in the plane's own (u, v) coordinates and
     // mapped into the world here. That single indirection is the whole of
-    // this class's plane support - the band maths never sees a world axis.
+    // this class's plane support - the fade maths never sees a world axis.
     auto at = [&plane](double u, double v) { return ElSLib::Value(u, v, plane); };
 
-    // Three concentric bands; outer bands blend toward the background so the
-    // grid has no visible boundary.
-    struct BandSpec { double inner, outer, fade; };
-    const BandSpec specs[3] = {{0.0, 0.5, 0.0}, {0.5, 0.75, 0.55}, {0.75, 1.0, 0.85}};
+    // One continuous edge fade, per VERTEX, in place of the three flat-colour
+    // rings this function used to draw. The rings blended toward the
+    // background in two steps, and both steps - plus the outer cutoff, which
+    // stopped at 0.85 rather than 1.0 - were visible as concentric seams.
+    // With Graphic3d_ArrayFlags_VertexColor the GPU interpolates colour along
+    // each segment, so the grid can dissolve into the background instead:
+    // full grid colour out to 40% of the extent, then a smoothstep to EXACTLY
+    // the background colour at the edge, so there is no boundary left to see.
+    //
+    // Chebyshev distance (max of |du|, |dv|), not Euclidean: the grid is a
+    // square, so a square fade keeps the dissolve the same visual width along
+    // an edge as at a corner. And because colour only interpolates linearly
+    // between a segment's own two endpoints, each full-length line is cut
+    // into chunks so the falloff bends where the function does rather than
+    // averaging across the whole line.
+    constexpr double kFadeStart = 0.40;
+    auto fadeAt = [&](double du, double dv) {
+        const double d = std::max(std::fabs(du), std::fabs(dv)) / extent;
+        const double f = std::clamp((d - kFadeStart) / (1.0 - kFadeStart), 0.0, 1.0);
+        return f * f * (3.0 - 2.0 * f);   // smoothstep
+    };
 
     Handle(GridObject) grid = new GridObject();
 
-    auto addLines = [&](bool isMajor, const BandSpec& spec) {
-        const double step = isMajor ? major : minorStep;
-        const QColor base = isMajor ? Theme::gridMajor() : Theme::gridMinor();
-        const QColor colour = lerp(base, background, spec.fade);
+    constexpr int kChunks = 12;
+    const double chunk = 2.0 * extent / kChunks;
 
-        // Collect segments for lines whose |coordinate| lies in the band ring.
-        std::vector<gp_Pnt> points;
-        const double lo = extent * spec.inner, hi = extent * spec.outer;
-        // Positions are absolute multiples of the step, snapped outward from
-        // the band's clip range - never anchored at the band edge, which is
-        // not in general a multiple of the step.
-        const double first = firstLineAtOrBelow(hi, step);
-        for (double offset = first; offset <= hi + step * 0.5; offset += step) {
-            if (!isMajor && std::fmod(std::fabs(offset) + step * 0.25, major) < step * 0.5)
-                continue;   // skip positions covered by a major line
-            const double a = std::fabs(offset);
-            // Lines fully inside an inner band are drawn by that band already;
-            // draw the full length in the innermost band and only the ring
-            // extension in outer bands.
-            if (spec.inner == 0.0) {
-                if (a > hi) continue;
-                points.push_back(at(centerU + offset, centerV - hi));
-                points.push_back(at(centerU + offset, centerV + hi));
-                points.push_back(at(centerU - hi, centerV + offset));
-                points.push_back(at(centerU + hi, centerV + offset));
-            } else {
-                if (a > hi) continue;
-                // Ring: two segments per line (the parts outside the inner square),
-                // plus full-length lines whose offset itself is in the ring.
-                if (a >= lo) {
-                    points.push_back(at(centerU + offset, centerV - hi));
-                    points.push_back(at(centerU + offset, centerV + hi));
-                    points.push_back(at(centerU - hi, centerV + offset));
-                    points.push_back(at(centerU + hi, centerV + offset));
-                } else {
-                    points.push_back(at(centerU + offset, centerV - hi));
-                    points.push_back(at(centerU + offset, centerV - lo));
-                    points.push_back(at(centerU + offset, centerV + lo));
-                    points.push_back(at(centerU + offset, centerV + hi));
-                    points.push_back(at(centerU - hi, centerV + offset));
-                    points.push_back(at(centerU - lo, centerV + offset));
-                    points.push_back(at(centerU + lo, centerV + offset));
-                    points.push_back(at(centerU + hi, centerV + offset));
-                }
-            }
-        }
-        if (points.empty()) return;
+    struct Vertex { gp_Pnt p; Quantity_Color c; };
 
-        Handle(Graphic3d_ArrayOfSegments) array =
-            new Graphic3d_ArrayOfSegments(static_cast<Standard_Integer>(points.size()));
-        for (const gp_Pnt& p : points) array->AddVertex(p);
+    auto build = [&](const std::vector<Vertex>& verts, const QColor& aspect, double width) {
+        if (verts.empty()) return;
+        Handle(Graphic3d_ArrayOfSegments) array = new Graphic3d_ArrayOfSegments(
+            static_cast<Standard_Integer>(verts.size()), 0,
+            Graphic3d_ArrayFlags_VertexColor);
+        for (const Vertex& v : verts) array->AddVertex(v.p, v.c);
 
         GridObject::Band band;
         band.segments = array;
-        band.colour = toOcct(colour);
-        band.width = isMajor ? 1.4 : 1.0;
+        // Ignored by the renderer once vertex colours are present, but kept
+        // meaningful so Compute()'s aspect never carries a garbage colour.
+        band.colour = toOcct(aspect);
+        band.width = width;
         grid->bands.push_back(band);
     };
 
-    for (const BandSpec& spec : specs) {
-        addLines(false, spec);
-        addLines(true, spec);
+    // One chunked, vertex-faded line at `offset` in each of the two grid
+    // directions. A chunk both of whose ends have fully faded is pure
+    // background - skipped, which is what trims the corners for free.
+    auto addLine = [&](const QColor& base, double offset, std::vector<Vertex>& out) {
+        for (int i = 0; i < kChunks; ++i) {
+            const double a0 = -extent + i * chunk;
+            const double a1 = -extent + (i + 1) * chunk;
+            const double fv0 = fadeAt(offset, a0), fv1 = fadeAt(offset, a1);
+            if (fv0 < 0.999 || fv1 < 0.999) {
+                out.push_back({at(centerU + offset, centerV + a0),
+                               toOcct(lerp(base, background, fv0))});
+                out.push_back({at(centerU + offset, centerV + a1),
+                               toOcct(lerp(base, background, fv1))});
+            }
+            const double fu0 = fadeAt(a0, offset), fu1 = fadeAt(a1, offset);
+            if (fu0 < 0.999 || fu1 < 0.999) {
+                out.push_back({at(centerU + a0, centerV + offset),
+                               toOcct(lerp(base, background, fu0))});
+                out.push_back({at(centerU + a1, centerV + offset),
+                               toOcct(lerp(base, background, fu1))});
+            }
+        }
+    };
+
+    // Positions are absolute multiples of the step, snapped outward from the
+    // clip range - never anchored at the edge, which is not in general a
+    // multiple of the step.
+    std::vector<Vertex> minorVerts, majorVerts;
+    const double first = firstLineAtOrBelow(extent, minorStep);
+    for (double offset = first; offset <= extent + minorStep * 0.5; offset += minorStep) {
+        if (std::fabs(offset) > extent) continue;
+        const bool isMajor =
+            std::fmod(std::fabs(offset) + minorStep * 0.25, major) < minorStep * 0.5;
+        addLine(isMajor ? Theme::gridMajor() : Theme::gridMinor(), offset,
+                isMajor ? majorVerts : minorVerts);
     }
+    build(minorVerts, Theme::gridMinor(), 1.0);
+    build(majorVerts, Theme::gridMajor(), 1.4);
 
     // The plane's own two axes through its origin, if that origin is inside
     // the built area. On the ground plane these are the world X and Y axes,
     // which is what they have always been; on a locked face they are the
-    // face's own local axes, which is what the grid is measured in.
+    // face's own local axes, which is what the grid is measured in. They fade
+    // by the same function as the lines around them - an axis that stayed at
+    // full strength past the dissolved grid would be the edge all over again.
     if (std::fabs(centerU) < extent && std::fabs(centerV) < extent) {
         auto axis = [&](const QColor& colour, bool isU) {
-            Handle(Graphic3d_ArrayOfSegments) array = new Graphic3d_ArrayOfSegments(2);
-            if (isU) {
-                array->AddVertex(at(centerU - extent, 0.0));
-                array->AddVertex(at(centerU + extent, 0.0));
-            } else {
-                array->AddVertex(at(0.0, centerV - extent));
-                array->AddVertex(at(0.0, centerV + extent));
+            std::vector<Vertex> verts;
+            for (int i = 0; i < kChunks; ++i) {
+                const double a0 = -extent + i * chunk;
+                const double a1 = -extent + (i + 1) * chunk;
+                // The axis runs through the PLANE's origin, not the grid's
+                // centre, so its cross-distance from the fade centre is the
+                // centre coordinate itself.
+                const double f0 = isU ? fadeAt(a0, centerV) : fadeAt(centerU, a0);
+                const double f1 = isU ? fadeAt(a1, centerV) : fadeAt(centerU, a1);
+                if (f0 >= 0.999 && f1 >= 0.999) continue;
+                if (isU) {
+                    verts.push_back({at(centerU + a0, 0.0),
+                                     toOcct(lerp(colour, background, f0))});
+                    verts.push_back({at(centerU + a1, 0.0),
+                                     toOcct(lerp(colour, background, f1))});
+                } else {
+                    verts.push_back({at(0.0, centerV + a0),
+                                     toOcct(lerp(colour, background, f0))});
+                    verts.push_back({at(0.0, centerV + a1),
+                                     toOcct(lerp(colour, background, f1))});
+                }
             }
-            GridObject::Band band;
-            band.segments = array;
-            band.colour = toOcct(colour);
-            band.width = 1.8;
-            grid->bands.push_back(band);
+            build(verts, colour, 1.8);
         };
         axis(Theme::axisX(), true);
         axis(Theme::axisY(), false);

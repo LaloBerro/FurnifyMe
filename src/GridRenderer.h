@@ -1,15 +1,16 @@
 #pragma once
 // The adaptive work-plane grid. Replaces OCCT's finite ActivateGrid patch:
-// three concentric bands of line segments whose colours blend toward the
-// viewport background with distance, so there is never a visible edge.
+// line segments with PER-VERTEX colours that dissolve continuously into the
+// viewport background toward the edge, so there is never a visible boundary.
+// (It used to be three flat-coloured concentric bands, and both band seams
+// plus the outer cutoff read as hard rings - the gradient replaced them.)
 // App-layer only - it builds OCCT presentation objects.
 //
-// The bands are built in the SUPPLIED plane's own coordinates rather than in
+// The grid is built in the SUPPLIED plane's own coordinates rather than in
 // world XY. Locking a face makes that face the sketch plane, and a world-XY
 // grid drawn across a vertical face teaches the user nothing about where
-// their next point will land. The adaptive step, the three bands and the
-// distance fade are unchanged by that - only the frame they are built in
-// moves.
+// their next point will land. The adaptive step and the edge fade are
+// unchanged by that - only the frame they are built in moves.
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_InteractiveObject.hxx>
 #include <Graphic3d_ZLayerId.hxx>
