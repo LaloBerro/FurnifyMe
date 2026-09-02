@@ -1,10 +1,25 @@
 # Milestone 3: Files, versions, symmetry and render — design
 
 Date: 2026-09-01
-Status: approved. The user listed seven items, answered four scoping questions
+Status: implemented 2026-09-02. The user listed seven items, answered four scoping questions
 (live symmetry over one-shot mirror; side-by-side over ghost overlay; restyle the
 stock manipulator; managed library), and approved the sectioned design. Numbers
 below are the user's own numbering.
+
+Two deviations from this design, both API/measurement boundaries rather than scope cuts,
+documented at their read site in `src/OcctViewWidget.cpp`:
+
+- **Item 6, the manipulator restyle, ships with stock hues AND stock proportions**, not
+  slimmer proportions on the spec's own palette. `AIS_Manipulator.hxx` (OCCT 8.0.1) has no
+  colour setter reachable at any access level, which the spec anticipated ("where the API
+  does not reach, the stock look stays"); proportions looked reachable via a subclass
+  (`protected Axis myAxes[3]` + public `SetAxisRadius()`), but a measured `Dump`-pixel probe
+  of that subclass showed the rendered cross-section growing as the radius shrank rather than
+  shrinking, so it was reverted rather than shipped. The 2D `AxisGizmo` card carries the
+  palette instead.
+- **The three axis-hue tokens are named `gizmoAxisX`/`gizmoAxisY`/`gizmoAxisZ`**, not the
+  design's `axisX`/`axisY`/`axisZ` — those names were already taken by the ground grid's own
+  axis tint tokens.
 
 ## The seven items, as decided
 
