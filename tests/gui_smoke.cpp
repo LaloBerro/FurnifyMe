@@ -75,6 +75,7 @@
 #include <QEnterEvent>
 #include <QFile>
 #include <QFileInfo>
+#include <QFocusEvent>
 #include <QImage>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -15250,6 +15251,105 @@ int main(int argc, char* argv[])
         check(panel->findChild<QLineEdit*>() == nullptr, "Escape cancels the retry");
         check(panel->rowCount() == 1, "the drawer still shows exactly the one real row");
 
+        // --- fix round 1, Important 1: closing the DRAWER mid-naming --------
+        // cancels the pending create too, not just the four
+        // canOpenSaveVersion() routes (sketching, render mode, a pull, a
+        // bevel). MainWindow's View -> Versions toggle handler calls
+        // VersionsPanel::setVisible() DIRECTLY - it never runs
+        // updateActions() and never emits appStateChanged() - so this
+        // exercises the panel's OWN setVisible()/hideEvent() overrides
+        // rather than refresh()'s canOpenSaveVersion()-driven auto-cancel,
+        // which this specific route bypasses entirely.
+        clickAt(addBtn, QPointF(addBtn->rect().width() / 2.0, addBtn->rect().height() / 2.0));
+        pendingEdit = panel->findChild<QLineEdit*>();
+        check(pendingEdit != nullptr, "+ opens a fifth pending card, for the drawer-close check");
+        trigger(probe, QStringLiteral("Versions"));   // closes the drawer
+        settle(150);
+        check(panel != nullptr && !panel->isVisible(), "the drawer is now closed");
+        check(panel->findChild<QLineEdit*>() == nullptr,
+              "...and closing it cancelled the pending create - no edit survives hidden");
+        check(probe.furnitureStore().versions(probe.currentFurnitureId()).size() == 1,
+              "...and the version count is unchanged - nothing was ever written");
+        trigger(probe, QStringLiteral("Versions"));   // reopens the drawer
+        check(panel != nullptr && panel->isVisible(), "the drawer reopens");
+        check(panel->rowCount() == 1,
+              "...showing exactly the one real row - no half-named ghost card waiting");
+
+        // --- fix round 1, Important 3 (review ruling: KEEP, pin as -----------
+        // intentional): clicking away from the pending field before typing
+        // anything commits a real, named version under the scanned default
+        // name. This is InlineRename's own app-wide contract -
+        // QLineEdit::editingFinished() fires on Enter AND on an ordinary
+        // focus-out (see beginNewVersion()'s own comment) - reused here
+        // exactly as every other InlineRename call site relies on it: one
+        // rename helper, one focus-out semantic, everywhere it is used.
+        // Pinned, not guarded against.
+        clickAt(addBtn, QPointF(addBtn->rect().width() / 2.0, addBtn->rect().height() / 2.0));
+        pendingEdit = panel->findChild<QLineEdit*>();
+        check(pendingEdit != nullptr, "+ opens a sixth pending card, for the click-away check");
+        const QString clickAwayName = pendingEdit ? pendingEdit->text() : QString();
+        check(!clickAwayName.isEmpty(),
+              "...pre-filled with a real scanned default name to click away from");
+        // A direct QFocusEvent(FocusOut), not view->setFocus() or a
+        // synthetic click - this suite's windows carry
+        // WA_ShowWithoutActivating, which sendKeyTo()'s own comment already
+        // documents as leaving Qt's GLOBAL focus-widget bookkeeping
+        // unreliable ("the application-wide focus widget is left null").
+        // A real setFocus() call landed on neither the intended target nor
+        // the edit here (measured: probe.focusWidget() after it was a
+        // THIRD widget, and probe.view()->hasFocus() was false) - global
+        // focus TRANSFER is exactly the mechanism that is not trustworthy
+        // in this harness. QLineEdit::focusOutEvent() does not consult
+        // QApplication::focusWidget() at all, though - it reacts to the
+        // event's own reason - so delivering the event a real click would
+        // cause is what actually proves this, the same "deliver the
+        // specific event, do not hope the platform produces it" rule every
+        // other key/mouse delivery in this file already follows.
+        if (pendingEdit) {
+            QFocusEvent focusOut(QEvent::FocusOut, Qt::MouseFocusReason);
+            QCoreApplication::sendEvent(pendingEdit, &focusOut);
+        }
+        settle(150);
+        check(panel->findChild<QLineEdit*>() == nullptr,
+              "focus-out committed the pending card - editingFinished() fired exactly "
+              "as it does for every other InlineRename caller");
+        check(probe.furnitureStore().versions(probe.currentFurnitureId()).size() == 2,
+              "...and exactly one NEW version now exists");
+        int clickAwayIndex = -1;
+        for (int i = 0; i < panel->rowCount(); ++i)
+            if (panel->rowNameAt(i) == clickAwayName) clickAwayIndex = i;
+        check(clickAwayIndex >= 0,
+              QStringLiteral("...bearing the scanned default name it was never typed "
+                             "over (\"%1\")")
+                  .arg(clickAwayName));
+
+        // Cleaned up via the row's own two-click delete, so this probe's
+        // store is left exactly as the rest of this block still assumes:
+        // one version, "Original".
+        if (QWidget* clickAwayCard = panel->cardAt(clickAwayIndex)) {
+            const QPointF centre(clickAwayCard->width() / 2.0, clickAwayCard->height() / 2.0);
+            QEnterEvent enter(centre, centre, clickAwayCard->mapToGlobal(centre.toPoint()));
+            QCoreApplication::sendEvent(clickAwayCard, &enter);
+            settle(60);
+        }
+        QPushButton* clickAwayDelete = panel->deleteButtonAt(clickAwayIndex);
+        check(clickAwayDelete != nullptr && clickAwayDelete->isVisible(),
+              "its Delete button is reachable once the row is hovered");
+        if (clickAwayDelete) {
+            clickAt(clickAwayDelete, QPointF(clickAwayDelete->rect().width() / 2.0,
+                                             clickAwayDelete->rect().height() / 2.0));
+            // Second click within the window - the version is really gone,
+            // and clickAwayDelete is not touched again below: the delete
+            // rebuilds this drawer's rows synchronously (see the Delete
+            // section further down for the same rule spelled out in full).
+            clickAt(clickAwayDelete, QPointF(clickAwayDelete->rect().width() / 2.0,
+                                             clickAwayDelete->rect().height() / 2.0));
+        }
+        check(probe.furnitureStore().versions(probe.currentFurnitureId()).size() == 1,
+              "the click-away version is cleaned up - back to just \"Original\"");
+        check(panel->rowCount() == 1 && panel->rowNameAt(0) == QStringLiteral("Original"),
+              "...and the drawer agrees");
+
         // --- hover reveals the three actions; at rest they are hidden -------
         // A real Enter/Leave delivered the way Qt's own hit-testing would,
         // not a flag flipped by hand - ToolChip's own hover probe's shape
@@ -16658,6 +16758,13 @@ int main(int argc, char* argv[])
                   "Save version is available outside render mode, going into "
                   "this scenario");
 
+            // Captured BEFORE the gesture, not assumed to be zero - this
+            // probe is deep inside a long shared scenario by this point,
+            // and the point is proving the count does not MOVE along this
+            // path, whatever it started at.
+            const int versionsBeforeRenderCancel =
+                probe.furnitureStore().versions(probe.currentFurnitureId()).size();
+
             trigger(probe, QStringLiteral("Save version..."));
             VersionsPanel* renderProbePanel = probe.findChild<VersionsPanel*>();
             check(renderProbePanel != nullptr && renderProbePanel->isVisible(),
@@ -16687,6 +16794,13 @@ int main(int argc, char* argv[])
                   "and the OPEN pending card cancels itself - the same auto-cancel "
                   "canOpenSaveVersion() already drives for the other three "
                   "application-wide key claims, now also true while render mode is on");
+            // fix round 1, Important 2: proven against the STORE, not just
+            // the widget - discardPendingCreate() never calls
+            // MainWindow::saveVersion(), so "Render probe" must never have
+            // reached FurnitureStore at all.
+            check(probe.furnitureStore().versions(probe.currentFurnitureId()).size() ==
+                      versionsBeforeRenderCancel,
+                  "...and the store gained no orphaned version along this path either");
             check(saveVersionAction != nullptr && !saveVersionAction->isEnabled(),
                   "Save version is disabled while render mode is on");
             check(saveVersionAction != nullptr &&

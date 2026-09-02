@@ -10,6 +10,7 @@
 #include <QFileInfo>
 #include <QFontMetrics>
 #include <QHBoxLayout>
+#include <QHideEvent>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
@@ -232,6 +233,34 @@ void VersionsPanel::paintEvent(QPaintEvent* /*event*/)
 {
     QPainter painter(this);
     Theme::paintSurface(painter, rect(), kRadius);
+}
+
+void VersionsPanel::setVisible(bool visible)
+{
+    QWidget::setVisible(visible);
+    // Derived, not set - see the header's own comment. This is the route
+    // MainWindow's View -> Versions toggle actually takes (a direct
+    // setVisible() call on this widget, never through
+    // updateActions()/appStateChanged), so it is also the one place that
+    // has to catch it: canOpenSaveVersion()'s own auto-cancel inside
+    // refresh() only runs when appStateChanged fires, which a plain drawer
+    // close never does. Checked AFTER the base call, not before - the
+    // guard only cares what visibility this widget is ABOUT to have, not
+    // whatever bookkeeping Qt's own setVisible() does on the way.
+    if (!visible && myPendingWidget) discardPendingCreate();
+}
+
+void VersionsPanel::hideEvent(QHideEvent* event)
+{
+    QWidget::hideEvent(event);
+    // The backstop half of setVisible()'s own rule above. An ANCESTOR
+    // being hidden delivers a QHideEvent straight to this widget without
+    // ever calling ITS setVisible() - Qt propagates a parent's hide to
+    // children by posting each child a QHideEvent directly, not by
+    // invoking the child's own virtual setVisible(). Neither route alone
+    // is guaranteed to fire for every way this panel can stop being
+    // shown, so the cancel lives in both.
+    if (myPendingWidget) discardPendingCreate();
 }
 
 bool VersionsPanel::eventFilter(QObject* watched, QEvent* event)
@@ -617,6 +646,14 @@ void VersionsPanel::beginNewVersion()
     if (!myWindow || !myWindow->canOpenSaveVersion()) return;
     if (myPendingWidget) return;   // one create gesture at a time
 
+    // Note the one behaviour this inherits rather than chooses:
+    // InlineRename::beginRename() (called below, via openPendingNameEdit())
+    // wires QLineEdit::editingFinished() - which fires on Enter AND on an
+    // ordinary focus-out, by the helper's own documented, app-wide contract
+    // - to the same commit path Enter uses, so clicking away before typing
+    // anything commits a real version under the scanned default name. Kept
+    // deliberately (see the review ruling this task carries forward): one
+    // rename helper, one focus-out semantic, used everywhere it is used.
     const QString defaultName = nextVersionDefaultName();
     myPendingWidget = buildPendingCard(defaultName);
     // Above the real rows, below the header - myOuter's index 0 is the

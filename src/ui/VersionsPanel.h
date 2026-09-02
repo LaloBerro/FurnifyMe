@@ -127,6 +127,24 @@ public:
     // the same guard the button's own enabled state already shows.
     void beginNewVersion();
 
+    // Derived, not set: this panel's visibility already follows
+    // MainWindow's View -> Versions action (see the class comment), and
+    // that toggle handler calls setVisible() directly rather than going
+    // through updateActions()/appStateChanged - so canOpenSaveVersion()'s
+    // own auto-cancel inside refresh() never runs on a plain drawer close.
+    // Overridden here so "the drawer stopped being shown" cancels a pending
+    // create by itself, the same law every other exit from this gesture
+    // already obeys, rather than leaving a half-named card alive-but-hidden
+    // until the drawer reopens. hideEvent() below is the same rule's
+    // backstop for a hide this widget's own setVisible() is never actually
+    // called for (an ANCESTOR hiding, which Qt delivers as a QHideEvent
+    // straight to the child rather than by calling the child's setVisible())
+    // - CLAUDE.md's own warning that hide() does not always mean a
+    // QHideEvent arrives cuts the other way too: a widget CAN be hidden by
+    // a route setVisible() never sees, so the cancel cannot live in only
+    // one of the two.
+    void setVisible(bool visible) override;
+
     // The live "second click still armed" countdown for the row named
     // `name`, in ms, or -1 when that row is not armed (or does not exist).
     // ToastHost::remainingMs()'s own shape, for the same reason: a test
@@ -153,6 +171,9 @@ protected:
     // and toggles that card's own action row's visibility - the "revealed
     // on row hover only, hidden at rest" half of the mockup contract.
     bool eventFilter(QObject* watched, QEvent* event) override;
+    // The backstop half of setVisible()'s own cancel-on-hide rule above -
+    // see its comment for why both exist.
+    void hideEvent(QHideEvent* event) override;
 
 private:
     void applyTheme();
