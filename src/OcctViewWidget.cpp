@@ -1701,13 +1701,31 @@ bool OcctViewWidget::pointOnSketchPlane(int px, int py, gp_Pnt& out, bool straig
     // projection moves the click off the very point it was aimed at - so with
     // Shift held that route silently stopped working, and a modifier that
     // disables a way out of the mode is worse than one that does nothing.
-    // Tested on the RAW plane hit, before any snapping: what the user aimed
-    // at, not where a constraint would have put it. Falling through then
-    // takes the ordinary grid snap, which lands the click exactly on the
-    // first point - so a Shift-click on the start point behaves precisely
-    // like a plain one, rather than merely closing by a different route.
+    // Falling through then takes the ordinary grid snap, which lands the
+    // click exactly on the first point - so a Shift-click on the start point
+    // behaves precisely like a plain one, rather than merely closing by a
+    // different route.
+    //
+    // Tested on the SNAPPED plane hit when snapping is on, not the raw one -
+    // myCloseTarget is itself a grid-snapped point (the first sketch point
+    // was placed through this same snap), and comparing a RAW ray hit against
+    // it directly is comparing two things on different footings: the raw hit
+    // can sit up to half a grid cell's DIAGONAL from the corner it will snap
+    // to (7.07 mm at a 10 mm step), which is already past the 5 mm tolerance
+    // sketchCloseTolerance() grants - so whether hovering the first point
+    // registers as a close depended on exactly where in the cell the ray
+    // happened to land, and device-pixel rounding at a non-integer display
+    // scale (1.25x measured) was enough to tip it into the failing corner.
+    // Pre-snapping the probe first puts both sides of the comparison on the
+    // grid, so the exemption fires whenever the point WOULD land on the
+    // first point after the ordinary snap below - which is the only question
+    // that actually matters here.
+    const gp_Pnt closeProbe =
+        (mySnapEnabled && mySnapStep > 0.0)
+            ? SketchController::snapToPlaneGrid(out, mySketchPlane, mySnapStep)
+            : out;
     const bool closing =
-        myHasCloseTarget && out.Distance(myCloseTarget) <= sketchCloseTolerance();
+        myHasCloseTarget && closeProbe.Distance(myCloseTarget) <= sketchCloseTolerance();
 
     if (straight && myHasStraightAnchor && !closing) {
         out = SketchController::snapToDirection(myStraightPrev, myStraightDir, out);
