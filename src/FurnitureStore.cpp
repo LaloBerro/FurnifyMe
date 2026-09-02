@@ -393,6 +393,13 @@ bool FurnitureStore::renameFurniture(const QString& id, const QString& name)
     return writeManifestObject(id, manifest);
 }
 
+bool FurnitureStore::deleteFurniture(const QString& id)
+{
+    if (!QFileInfo::exists(manifestPath(id))) return false;
+    QDir dir(furnitureDir(id));
+    return dir.removeRecursively();
+}
+
 QVector<FurnitureStore::VersionInfo> FurnitureStore::versions(const QString& id) const
 {
     QVector<VersionInfo> result;

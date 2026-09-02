@@ -128,7 +128,7 @@ if(FURNIFYME_BUILD_APP)
       src/ui/PullArrow.cpp
       src/ui/BevelArrow.cpp
       src/ui/InlineRename.cpp
-      src/ui/InitScreen.cpp
+      src/ui/SelectorWindow.cpp
       src/ui/VersionsPanel.cpp
       src/FurnitureStore.cpp
     )

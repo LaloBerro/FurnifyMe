@@ -97,6 +97,17 @@ public:
     // directory, or anything inside it. False for an unknown id.
     bool renameFurniture(const QString& id, const QString& name);
 
+    // Removes a furniture's own directory entirely - manifest.json,
+    // shapes.bin, thumb.png and every version it holds. False for an unknown
+    // id, or when the directory could not be fully removed (a file locked or
+    // otherwise undeletable) - `QDir::removeRecursively()`'s own contract,
+    // which may remove some entries and not others on a partial failure; a
+    // caller that gets false back should treat the furniture as possibly
+    // still partly on disk, not as untouched. Final and carries no undo, the
+    // same "file data, not document data" ruling deleteVersion() above
+    // already follows (see CLAUDE.md's "Files, versions and the library").
+    bool deleteFurniture(const QString& id);
+
     // --- versions: named snapshots stored inside the same furniture -------
     // Oldest-saved first (the order they were made), matching a version
     // list's natural reading order - contrast listFurniture()'s

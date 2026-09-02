@@ -41,13 +41,13 @@
 #include "GridRenderer.h"
 #include "HintBalloon.h"
 #include "IconSet.h"
-#include "InitScreen.h"
 #include "ItemsPanel.h"
 #include "MainWindow.h"
 #include "Measure.h"
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
 #include "PullArrow.h"
+#include "SelectorWindow.h"
 #include "SketchController.h"
 #include "AppBar.h"
 #include "AxisGizmo.h"
@@ -190,7 +190,7 @@ void skipByEnvironment(int checks, const QString& why)
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 1818;
+constexpr int kCheckFloor = 1952;
 
 void check(bool condition, const QString& what)
 {
@@ -481,24 +481,61 @@ bool trigger(MainWindow& window, const QString& label)
     return true;
 }
 
+// Milestone 4: the gallery is SelectorWindow, a genuinely separate top-level
+// window from MainWindow - not a state MainWindow shows over its own
+// viewport any more (Milestone 3's InitScreen, now retired). Constructs one,
+// wired to `window` exactly as main.cpp wires the real app's handoff -
+// SelectorWindow::furnitureChosen()/createRequested() hide the selector, show
+// `window` and call window.openFurniture(); MainWindow::returnedToSelector()
+// re-shows and refreshes the selector - and shows it. Parented to `window`
+// (Qt::Window, per SelectorWindow's own constructor comment - a parent is
+// for lifetime only, never layout) so it is torn down with whichever probe
+// owns it rather than needing explicit cleanup at each call site, and its
+// connections are what let a probe later trigger "Close furniture" or close
+// the window and land back on a live, correctly-refreshed selector without
+// any further wiring.
+SelectorWindow* wireSelector(MainWindow& window)
+{
+    auto* selector = new SelectorWindow(window.furnitureStore(), &window);
+    selector->setAttribute(Qt::WA_ShowWithoutActivating);
+
+    QObject::connect(selector, &SelectorWindow::furnitureChosen, &window,
+                     [&window, selector](const QString& id) {
+                         selector->hide();
+                         window.show();
+                         window.raise();
+                         window.openFurniture(id);
+                     });
+    QObject::connect(&window, &MainWindow::returnedToSelector, selector,
+                     [selector] {
+                         selector->refresh();
+                         selector->show();
+                     });
+
+    selector->show();
+    settle(150);
+    return selector;
+}
+
 // Every MainWindow this suite builds now starts on the init screen
-// (Milestone 3, item 2) rather than handing out an immediately-editable
-// document - see the "init screen, on launch" block near the top of main()
-// for the one place that is actually under test. Every OTHER probe window in
-// this file just needs an editable document to get on with whatever it is
-// actually testing, the same way a user would get one: by opening New
-// furniture on the real gallery widget. One driver, so the click sequence
-// cannot drift between the twenty-odd call sites that need it.
+// (Milestone 3, item 2; the gallery itself moved to SelectorWindow in
+// Milestone 4) rather than handing out an immediately-editable document -
+// see the "boot state" block near the top of main() for the one place that
+// is actually under test. Every OTHER probe window in this file just needs
+// an editable document to get on with whatever it is actually testing, the
+// same way a user would get one: by wiring a real SelectorWindow and
+// clicking its real "+ New furniture" button. One driver, so the click
+// sequence cannot drift between the twenty-odd call sites that need it.
 void enterFreshFurniture(MainWindow& window)
 {
-    InitScreen* gallery = window.initScreen();
-    QWidget* newCard = gallery ? gallery->newCard() : nullptr;
-    if (!newCard) {
-        std::printf("[FAIL] enterFreshFurniture: no New furniture card\n");
+    SelectorWindow* selector = wireSelector(window);
+    QPushButton* newButton = selector ? selector->newFurnitureButton() : nullptr;
+    if (!newButton) {
+        std::printf("[FAIL] enterFreshFurniture: no New furniture button\n");
         ++g_failures;
         return;
     }
-    clickAt(newCard, QPointF(newCard->width() / 2.0, newCard->height() / 2.0));
+    clickAt(newButton, QPointF(newButton->width() / 2.0, newButton->height() / 2.0));
     settle(200);
 }
 
@@ -1034,10 +1071,20 @@ int main(int argc, char* argv[])
     // opens the New furniture card through a real click on the real gallery
     // widget. Every check after this one runs exactly as it always has,
     // against a fresh, empty, genuinely-opened furniture.
+    SelectorWindow* windowSelector = nullptr;
     {
         check(window.isShowingInitScreen(), "the window opens on the init screen");
-        InitScreen* gallery = window.initScreen();
-        check(gallery != nullptr && gallery->isVisible(), "the gallery is up and visible");
+
+        // Milestone 4: the gallery is its own top-level window now - wired
+        // here exactly as main.cpp wires the real app's handoff. `window`
+        // was already shown above (for the shell-layout checks, which have
+        // nothing to do with boot ORDER between the two windows - the
+        // dedicated boot-order check lives in its own isolated block further
+        // down, against a window that is genuinely never shown before the
+        // selector hands off to it).
+        windowSelector = wireSelector(window);
+        check(windowSelector != nullptr && windowSelector->isVisible(),
+              "the gallery is up and visible");
 
         // Pinned, not merely implied by the checks further down that happen
         // never to trip it: WalkthroughPanel::refresh() gates on
@@ -1064,19 +1111,20 @@ int main(int argc, char* argv[])
         check(closeFurnitureAction != nullptr && !closeFurnitureAction->isEnabled(),
               "and Close furniture, with nothing open to close");
 
-        check(gallery != nullptr && gallery->furnitureCount() == 0,
+        check(windowSelector->furnitureCount() == 0,
               "a fresh temp library starts with no furniture - only New furniture");
-        QWidget* newCard = gallery ? gallery->newCard() : nullptr;
-        check(newCard != nullptr, "the New furniture card is there from the start");
-        if (newCard) {
+        QPushButton* newButton = windowSelector->newFurnitureButton();
+        check(newButton != nullptr, "the New furniture button is there from the start");
+        if (newButton) {
             // childAt-real: a probe that clicks a coordinate and asserts
-            // identity against the pointer InitScreen hands back, not merely
-            // "something was there" - the same discipline every other
+            // identity against the pointer SelectorWindow hands back, not
+            // merely "something was there" - the same discipline every other
             // reachability check in this file already applies.
-            const QPoint centre(newCard->width() / 2, newCard->height() / 2);
-            check(gallery->childAt(newCard->mapTo(gallery, centre)) == newCard,
-                  "childAt() at its centre finds the card itself");
-            clickAt(newCard, QPointF(newCard->width() / 2.0, newCard->height() / 2.0));
+            const QPoint centre(newButton->width() / 2, newButton->height() / 2);
+            check(windowSelector->childAt(newButton->mapTo(windowSelector, centre)) ==
+                      newButton,
+                  "childAt() at its centre finds the button itself");
+            clickAt(newButton, QPointF(newButton->width() / 2.0, newButton->height() / 2.0));
             settle(300);
         }
         check(!window.isShowingInitScreen(), "New furniture leaves the init screen");
@@ -1086,7 +1134,7 @@ int main(int argc, char* argv[])
         check(window.currentFurnitureName().startsWith(QStringLiteral("Furniture ")),
               QStringLiteral("named Furniture NN (\"%1\")")
                   .arg(window.currentFurnitureName()));
-        check(gallery != nullptr && !gallery->isVisible(), "and the gallery itself is gone");
+        check(!windowSelector->isVisible(), "and the gallery itself is gone");
         check(!window.windowTitle().contains(QLatin1Char('*')),
               "a freshly opened furniture carries no dirty star");
 
@@ -1136,7 +1184,7 @@ int main(int argc, char* argv[])
         settle(400);
         libraryProbe.view()->setAnimationsEnabled(false);
 
-        InitScreen* gallery = libraryProbe.initScreen();
+        SelectorWindow* gallery = wireSelector(libraryProbe);
         check(gallery != nullptr && gallery->furnitureCount() == 1,
               QStringLiteral("the seeded library shows exactly the one card (%1)")
                   .arg(gallery ? gallery->furnitureCount() : -1));
@@ -1145,18 +1193,29 @@ int main(int argc, char* argv[])
                   .arg(gallery ? gallery->cardName(0) : QString()));
 
         QWidget* card = gallery ? gallery->cardAt(0) : nullptr;
-        QWidget* newCard = gallery ? gallery->newCard() : nullptr;
-        check(card != nullptr && newCard != nullptr && card != newCard,
-              "the seeded card and New furniture are two different widgets");
-        if (card) {
-            const QPoint centre(card->width() / 2, card->height() / 2);
-            check(gallery->childAt(card->mapTo(gallery, centre)) == card,
-                  "childAt() at the seeded card's centre finds the card itself");
+        QPushButton* newButton = gallery ? gallery->newFurnitureButton() : nullptr;
+        check(card != nullptr && newButton != nullptr,
+              "the seeded card and the New furniture button both exist");
+        // childAt-real at the THUMBNAIL's own centre, not the whole cell's -
+        // Option B's cell nests a real interactive thumbnail widget (the
+        // click-to-open target) above a real under-row (name/date/hover
+        // buttons), unlike InitScreen's old flat card where every inner
+        // label was mouse-transparent and childAt() at any point inside
+        // always found the outer card itself. The thumbnail occupies most
+        // of the cell's height, so it - not the cell - is what a click near
+        // the cell's own geometric centre actually reaches.
+        QWidget* thumb = gallery ? gallery->thumbnailAt(0) : nullptr;
+        check(thumb != nullptr, "the seeded card's thumbnail exists");
+        if (thumb) {
+            const QPoint centre(thumb->width() / 2, thumb->height() / 2);
+            check(gallery->childAt(thumb->mapTo(gallery, centre)) == thumb,
+                  "childAt() at the thumbnail's own centre finds the thumbnail itself");
         }
 
-        // --- renaming: F2/double-click's shared driver, InlineRename --------
+        // --- renaming: the hover Rename button's shared driver, InlineRename
         // beginRenameAt() drives the same InlineRename::beginRename() a real
-        // F2 or a double-click on the card's name would - see ui/InitScreen.h.
+        // click on the card's own (hover-revealed) Rename button would - see
+        // ui/SelectorWindow.h.
         QString renamedTo = seededName;
         if (card && gallery) {
             gallery->beginRenameAt(0);
@@ -1201,12 +1260,15 @@ int main(int argc, char* argv[])
         }
 
         // --- opening loads the seeded shapes: a volume probe -----------------
-        QWidget* openCard = gallery ? gallery->cardAt(0) : nullptr;
-        if (openCard) {
-            clickAt(openCard, QPointF(openCard->width() / 2.0, openCard->height() / 2.0));
+        // Option B's own rule: a plain click OPENS on the thumbnail itself,
+        // not the under-row (name/date/hover buttons) - see
+        // SelectorWindow.h's "plain click on a card opens it".
+        QWidget* openThumb = gallery ? gallery->thumbnailAt(0) : nullptr;
+        if (openThumb) {
+            clickAt(openThumb, QPointF(openThumb->width() / 2.0, openThumb->height() / 2.0));
             settle(300);
         }
-        check(!libraryProbe.isShowingInitScreen(), "clicking the card opens it");
+        check(!libraryProbe.isShowingInitScreen(), "clicking the thumbnail opens it");
         check(libraryProbe.currentFurnitureName() == renamedTo,
               QStringLiteral("opening it names the (renamed) furniture (\"%1\")")
                   .arg(libraryProbe.currentFurnitureName()));
@@ -1237,11 +1299,12 @@ int main(int argc, char* argv[])
         // --- and separately: New furniture opens an empty document -----------
         trigger(libraryProbe, QStringLiteral("Close furniture"));
         check(libraryProbe.isShowingInitScreen(), "Close furniture returns to the gallery");
-        InitScreen* galleryAgain = libraryProbe.initScreen();
-        QWidget* freshNewCard = galleryAgain ? galleryAgain->newCard() : nullptr;
-        if (freshNewCard) {
-            clickAt(freshNewCard, QPointF(freshNewCard->width() / 2.0,
-                                          freshNewCard->height() / 2.0));
+        check(gallery != nullptr && gallery->isVisible(),
+              "...and the SAME selector reappears (returnedToSelector()), refreshed");
+        QPushButton* freshNewButton = gallery ? gallery->newFurnitureButton() : nullptr;
+        if (freshNewButton) {
+            clickAt(freshNewButton, QPointF(freshNewButton->width() / 2.0,
+                                            freshNewButton->height() / 2.0));
             settle(300);
         }
         check(!libraryProbe.isShowingInitScreen() && libraryProbe.document().count() == 0,
@@ -1250,12 +1313,150 @@ int main(int argc, char* argv[])
               "no modal appeared anywhere in this block either");
     }
 
-    // --- the gallery's two refusals are never silent ---------------------------
-    // createFurniture() and renameFurniture() can both refuse; before this fix
-    // round, InitScreen swallowed either outcome outright - a failed create did
-    // nothing at all, and a failed rename simply repainted the old name with
-    // no report of why. Both are now Failure toasts, forced here without
-    // needing real filesystem permissions (unreliable to twiddle portably).
+    // --- delete: hover reveals it, two clicks confirm it, FurnitureStore -----
+    // actually loses the furniture ---------------------------------------------
+    // A NEW capability - Milestone 4's own addition to FurnitureStore (see
+    // its header, deleteFurniture()) - with no InitScreen precedent to
+    // adapt, so this is a fresh block rather than a rewrite of an existing
+    // one. VersionsPanel's own two-click Delete (Task 1.2) is the shape it
+    // follows: a first click arms it (a timer starts) and does nothing yet;
+    // a second click while still armed is the one that actually removes it.
+    {
+        RequiredTempDir deleteDir;
+        FurnitureStore deleteSeedStore(deleteDir.path());
+        const QString doomedId = deleteSeedStore.createFurniture(QStringLiteral("Doomed Stool"));
+        check(!doomedId.isEmpty(), "seeding a furniture for the delete probe");
+
+        MainWindow deleteProbe(nullptr, /*persistProgress=*/false, deleteDir.path());
+        deleteProbe.setAttribute(Qt::WA_ShowWithoutActivating);
+        deleteProbe.resize(900, 600);
+        deleteProbe.show();
+        settle(300);
+
+        SelectorWindow* deleteGallery = wireSelector(deleteProbe);
+        check(deleteGallery != nullptr && deleteGallery->furnitureCount() == 1,
+              "the delete probe's library shows the seeded furniture");
+
+        QWidget* doomedCard = deleteGallery ? deleteGallery->cardAt(0) : nullptr;
+        check(doomedCard != nullptr, "the doomed card exists");
+
+        QPushButton* renameBtn = deleteGallery ? deleteGallery->renameButtonAt(0) : nullptr;
+        QPushButton* deleteBtn = deleteGallery ? deleteGallery->deleteButtonAt(0) : nullptr;
+        QLabel* dateLabel = deleteGallery ? deleteGallery->dateLabelAt(0) : nullptr;
+        check(renameBtn != nullptr && deleteBtn != nullptr && dateLabel != nullptr,
+              "the card carries Rename, Delete and a date label");
+        check(renameBtn && deleteBtn && dateLabel && !renameBtn->isVisible() &&
+                  !deleteBtn->isVisible() && dateLabel->isVisible(),
+              "at rest: the date shows, Rename/Delete are hidden");
+
+        // A real Enter delivered the way Qt's own hit-testing would -
+        // VersionsPanel's own hover probe's shape (Task 1.2).
+        if (doomedCard) {
+            const QPointF centre(doomedCard->width() / 2.0, doomedCard->height() / 2.0);
+            QEnterEvent enter(centre, centre, doomedCard->mapToGlobal(centre.toPoint()));
+            QCoreApplication::sendEvent(doomedCard, &enter);
+            settle(60);
+        }
+        check(renameBtn && deleteBtn && dateLabel && renameBtn->isVisible() &&
+                  deleteBtn->isVisible() && !dateLabel->isVisible(),
+              "hovering the card swaps the date for Rename/Delete");
+
+        check(deleteGallery->deleteArmedMsFor(0) < 0, "Delete starts unarmed");
+        if (deleteBtn) {
+            clickAt(deleteBtn, QPointF(deleteBtn->width() / 2.0, deleteBtn->height() / 2.0));
+        }
+        const int armedMs = deleteGallery ? deleteGallery->deleteArmedMsFor(0) : -1;
+        check(armedMs > 0 && armedMs <= SelectorWindow::kDeleteConfirmMs,
+              QStringLiteral("a first click arms the confirmation (%1 ms left of %2)")
+                  .arg(armedMs)
+                  .arg(SelectorWindow::kDeleteConfirmMs));
+        check(deleteGallery->furnitureCount() == 1,
+              "...and the furniture is still there - one click never deletes");
+        check(!deleteSeedStore.listFurniture().isEmpty(), "...confirmed on disk too");
+
+        if (deleteBtn) {
+            clickAt(deleteBtn, QPointF(deleteBtn->width() / 2.0, deleteBtn->height() / 2.0));
+            settle(200);
+        }
+        check(deleteGallery->furnitureCount() == 0,
+              "the second click actually removes it - the gallery rebuilds with none left");
+        check(deleteSeedStore.listFurniture().isEmpty(),
+              "...and FurnitureStore genuinely lost the directory, not just the card");
+
+        check(deleteProbe.findChild<QDialog*>() == nullptr,
+              "delete never opened a QDialog either - the two-click confirm is this "
+              "app's whole answer to \"are you sure\"");
+    }
+
+    // --- SelectorWindow: the type scale and the opaque-paint family reach it -
+    // too, not just MainWindow's own tree -------------------------------------
+    // The existing "one type scale" sweep further down this file walks
+    // `window.findChildren<QWidget*>()` - and SelectorWindow instances this
+    // file constructs are all parented to whichever MainWindow they were
+    // wired to (see wireSelector()'s own comment), so they ARE technically
+    // in that tree, but every one of them is HIDDEN by the time that sweep
+    // runs (the gallery-driven open already hid it), and the sweep skips
+    // anything `!isVisible()`. So it never actually exercises a single
+    // SelectorWindow font. This block does, on a SelectorWindow shown and
+    // left up on purpose. `grab()` rather than the composited
+    // printWindowCapture() the OCCT-viewport captures elsewhere in this file
+    // need: this window never touches OCCT (see SelectorWindow.h), so there
+    // is no on-screen GL surface for DWM compositing to matter - Qt's own
+    // backing store already is the authoritative render.
+    {
+        RequiredTempDir sweepDir;
+        FurnitureStore sweepStore(sweepDir.path());
+        const QString sweepId = sweepStore.createFurniture(QStringLiteral("Sweep Chair"));
+        check(!sweepId.isEmpty(), "seeding a furniture so the sweep has a real card to walk");
+
+        SelectorWindow sweepSelector(sweepStore);
+        sweepSelector.setAttribute(Qt::WA_ShowWithoutActivating);
+        sweepSelector.resize(900, 600);
+        sweepSelector.show();
+        settle(300);
+
+        QSet<double> scale;
+        for (const QFont& f :
+             {Theme::titleFont(), Theme::bodyFont(), Theme::labelFont(), Theme::badgeFont()}) {
+            scale.insert(f.pointSizeF());
+        }
+        QStringList offenders;
+        for (QWidget* w : sweepSelector.findChildren<QWidget*>()) {
+            if (!w->isVisible()) continue;
+            if (!scale.contains(w->font().pointSizeF()))
+                offenders << (w->metaObject()->className() +
+                              QStringLiteral(" @ %1").arg(w->font().pointSizeF()));
+        }
+        check(offenders.isEmpty(),
+              QStringLiteral("every visible SelectorWindow widget uses the same four-size "
+                             "type scale (%1)")
+                  .arg(offenders.isEmpty() ? QStringLiteral("all do")
+                                           : offenders.join(QStringLiteral(", "))));
+
+        // Hover reveals Rename/Delete on the seeded card - the same state
+        // the create/delete/rename blocks above already drive - so the
+        // black-line sweep below covers the hover-revealed buttons too, not
+        // only the at-rest gallery.
+        if (QWidget* card = sweepSelector.cardAt(0)) {
+            const QPointF centre(card->width() / 2.0, card->height() / 2.0);
+            QEnterEvent enter(centre, centre, card->mapToGlobal(centre.toPoint()));
+            QCoreApplication::sendEvent(card, &enter);
+            settle(60);
+        }
+        const QImage sweepShot = sweepSelector.grab().toImage();
+        checkNoBlackLine(sweepShot, QStringLiteral("SelectorWindow"));
+    }
+
+    // --- the gallery's two (now three) refusals are never silent ---------------
+    // createFurniture()/renameFurniture()/deleteFurniture() can all refuse;
+    // before Milestone 3's fix round, InitScreen swallowed either of the
+    // first two outright - a failed create did nothing at all, and a failed
+    // rename simply repainted the old name with no report of why.
+    // SelectorWindow has no MainWindow toast to route these through (it
+    // never touches OcctViewWidget, which ToastHost is built around - see
+    // its own header) - each is reported through the window's own inline
+    // failure banner instead, forced here without needing real filesystem
+    // permissions (unreliable to twiddle portably).
     {
         // createFurniture(): a REGULAR FILE sits where the library root would
         // need to be a directory, so QDir::mkpath() cannot create it - the
@@ -1276,21 +1477,25 @@ int main(int argc, char* argv[])
         createFailProbe.show();
         settle(300);
 
-        InitScreen* createFailGallery = createFailProbe.initScreen();
-        QWidget* createFailCard = createFailGallery ? createFailGallery->newCard() : nullptr;
-        check(createFailCard != nullptr, "the create-refusal probe still offers New furniture");
-        ToastHost* createFailToasts = createFailProbe.findChild<ToastHost*>();
-        if (createFailCard) {
-            clickAt(createFailCard,
-                   QPointF(createFailCard->width() / 2.0, createFailCard->height() / 2.0));
+        SelectorWindow* createFailGallery = wireSelector(createFailProbe);
+        QPushButton* createFailButton =
+            createFailGallery ? createFailGallery->newFurnitureButton() : nullptr;
+        check(createFailButton != nullptr,
+              "the create-refusal probe still offers New furniture");
+        if (createFailButton) {
+            clickAt(createFailButton,
+                   QPointF(createFailButton->width() / 2.0, createFailButton->height() / 2.0));
             settle(200);
         }
         check(createFailProbe.isShowingInitScreen(),
               "a refused createFurniture leaves the window on the init screen");
-        check(createFailToasts != nullptr &&
-                  createFailToasts->currentText().contains(QStringLiteral("Couldn't create")),
-              QStringLiteral("...and reports it as a Failure toast, never silently (\"%1\")")
-                  .arg(createFailToasts ? createFailToasts->currentText() : QString()));
+        check(createFailGallery != nullptr &&
+                  createFailGallery->currentFailureText().contains(
+                      QStringLiteral("Couldn't create")),
+              QStringLiteral("...and reports it in the selector's own failure banner, "
+                             "never silently (\"%1\")")
+                  .arg(createFailGallery ? createFailGallery->currentFailureText()
+                                        : QString()));
     }
     {
         // renameFurniture(): a furniture whose own directory is removed out
@@ -1308,7 +1513,7 @@ int main(int argc, char* argv[])
         renameFailProbe.show();
         settle(300);
 
-        InitScreen* renameFailGallery = renameFailProbe.initScreen();
+        SelectorWindow* renameFailGallery = wireSelector(renameFailProbe);
         check(renameFailGallery != nullptr && renameFailGallery->furnitureCount() == 1,
               "the rename-refusal probe's library shows the doomed furniture");
 
@@ -1320,7 +1525,6 @@ int main(int argc, char* argv[])
         check(!doomedDir.isEmpty() && QDir(doomedDir).removeRecursively(),
               "the doomed furniture's own directory is removed out from under it");
 
-        ToastHost* renameFailToasts = renameFailProbe.findChild<ToastHost*>();
         if (renameFailGallery && renameFailGallery->furnitureCount() == 1) {
             renameFailGallery->beginRenameAt(0);
             QWidget* doomedCard = renameFailGallery->cardAt(0);
@@ -1332,11 +1536,42 @@ int main(int argc, char* argv[])
                 settle(150);
             }
         }
-        check(renameFailToasts != nullptr &&
-                  renameFailToasts->currentText().contains(QStringLiteral("Couldn't rename")),
-              QStringLiteral("renameFurniture's refusal is reported as a Failure toast too "
+        check(renameFailGallery != nullptr &&
+                  renameFailGallery->currentFailureText().contains(
+                      QStringLiteral("Couldn't rename")),
+              QStringLiteral("renameFurniture's refusal is reported in the same banner too "
                              "(\"%1\")")
-                  .arg(renameFailToasts ? renameFailToasts->currentText() : QString()));
+                  .arg(renameFailGallery ? renameFailGallery->currentFailureText()
+                                        : QString()));
+
+        // deleteFurniture(): the same doomed, already-vanished directory -
+        // the third of the three refusals this window's own FurnitureStore
+        // calls can hand back.
+        if (renameFailGallery && renameFailGallery->furnitureCount() == 1) {
+            QPushButton* doomedDelete = renameFailGallery->deleteButtonAt(0);
+            QWidget* doomedCard = renameFailGallery->cardAt(0);
+            if (doomedCard) {
+                const QPointF c(doomedCard->width() / 2.0, doomedCard->height() / 2.0);
+                QEnterEvent enter(c, c, doomedCard->mapToGlobal(c.toPoint()));
+                QCoreApplication::sendEvent(doomedCard, &enter);
+                settle(60);
+            }
+            check(doomedDelete != nullptr, "the doomed card still offers Delete once hovered");
+            if (doomedDelete) {
+                clickAt(doomedDelete,
+                       QPointF(doomedDelete->width() / 2.0, doomedDelete->height() / 2.0));
+                clickAt(doomedDelete,
+                       QPointF(doomedDelete->width() / 2.0, doomedDelete->height() / 2.0));
+                settle(150);
+            }
+        }
+        check(renameFailGallery != nullptr &&
+                  renameFailGallery->currentFailureText().contains(
+                      QStringLiteral("Couldn't delete")),
+              QStringLiteral("deleteFurniture's refusal is reported too, never silently "
+                             "(\"%1\")")
+                  .arg(renameFailGallery ? renameFailGallery->currentFailureText()
+                                        : QString()));
     }
 
     // --- a hand-corrupted shapes.bin: the Failure toast is swept too ----------
@@ -1427,13 +1662,7 @@ int main(int argc, char* argv[])
         settle(400);
         saveProbe.view()->setAnimationsEnabled(false);
 
-        InitScreen* gallery = saveProbe.initScreen();
-        QWidget* newCard = gallery ? gallery->newCard() : nullptr;
-        check(newCard != nullptr, "the probe's gallery offers New furniture");
-        if (newCard) {
-            clickAt(newCard, QPointF(newCard->width() / 2.0, newCard->height() / 2.0));
-            settle(300);
-        }
+        enterFreshFurniture(saveProbe);
         check(!saveProbe.isShowingInitScreen(), "New furniture opens it");
         const QString furnitureId = saveProbe.currentFurnitureId();
 
@@ -1623,10 +1852,29 @@ int main(int argc, char* argv[])
         check(trigger(saveProbe, QStringLiteral("Close furniture")),
               "Close furniture's action triggers");
         check(saveProbe.isShowingInitScreen(), "...and it lands back on the init screen");
-        check(toasts != nullptr &&
-                  toasts->currentText().contains(QStringLiteral("Saved and closed")),
-              QStringLiteral("the toast says so plainly - never a modal question (\"%1\")")
-                  .arg(toasts ? toasts->currentText() : QString()));
+        // Milestone 4: closeCurrentFurniture() still raises the Note toast
+        // exactly as it always did, but showInitScreen() now hides the whole
+        // editor window right after AND overwrites the status bar with its
+        // own generic "Choose a furniture..." message - so neither
+        // ToastHost::currentText() (gated on isVisible(), which follows its
+        // hidden ancestor to false - a child cannot be visible while its
+        // parent is not) nor statusBar()->currentMessage() (clobbered by the
+        // very next line of code) is a reliable read of what this gesture
+        // said. Toast::paintedTexts() is: it records every message this
+        // Toast has EVER shown, not just the live one (Toast.h's own
+        // "honest limit" reasoning), so this proves the message was raised
+        // at all - the refreshed selector (new thumbnail/date on the card)
+        // is what actually stays visibly readable to the user afterward.
+        Toast* toast = toasts ? toasts->toast() : nullptr;
+        const QStringList toastHistory = toast ? toast->paintedTexts() : QStringList();
+        bool sawSavedAndClosed = false;
+        for (const QString& t : toastHistory) {
+            if (t.contains(QStringLiteral("Saved and closed"))) sawSavedAndClosed = true;
+        }
+        check(sawSavedAndClosed,
+              QStringLiteral("the Note toast said so plainly at the time - never a modal "
+                             "question (history: %1)")
+                  .arg(toastHistory.join(QStringLiteral(" | "))));
 
         // RED-VERIFIED (task-2-report.md): with the save call removed from
         // closeCurrentFurniture()'s autosave-off branch, this reloaded the
@@ -1654,6 +1902,112 @@ int main(int argc, char* argv[])
         }
         check(saveProbe.findChild<QDialog*>() == nullptr,
               "and none of this - Save, autosave, Close - ever opened a QDialog");
+    }
+
+    // --- Milestone 4: two windows - boot state, the handoff both ways, and ---
+    // the native X saving first exactly like the menu route above -------------
+    // A fresh, ISOLATED pair: MainWindow constructed but never shown (its own
+    // constructor already ran showInitScreen(), which hides it - see
+    // MainWindow.cpp) and a SelectorWindow wired to it exactly as main.cpp
+    // wires the real app's boot. At real boot only the selector is ever on
+    // screen; this is the one place in this file that checks that literally,
+    // rather than relying on the shared `window`'s own early show() (done
+    // for ITS OWN shell-layout checks, near the top of main(), which have
+    // nothing to do with boot ORDER between the two windows).
+    {
+        RequiredTempDir handoffDir;
+        MainWindow handoffWindow(nullptr, /*persistProgress=*/false, handoffDir.path());
+        // Never activate, even though this window's first show() happens
+        // well after construction (inside the handoff below) rather than
+        // right away like every other probe's - the machine must stay
+        // usable regardless of when a probe's window actually appears.
+        handoffWindow.setAttribute(Qt::WA_ShowWithoutActivating);
+        check(!handoffWindow.isVisible(), "at boot, the editor is not shown");
+
+        SelectorWindow* handoffSelector = wireSelector(handoffWindow);
+        check(handoffSelector != nullptr && handoffSelector->isVisible(),
+              "...and the selector is, alone");
+        check(!handoffWindow.isVisible(),
+              "wiring and showing the selector does not itself show the editor");
+
+        // --- handoff, direction one: a card opens the editor ------------------
+        QPushButton* handoffNewButton = handoffSelector->newFurnitureButton();
+        check(handoffNewButton != nullptr, "the selector offers New furniture");
+        if (handoffNewButton) {
+            clickAt(handoffNewButton,
+                   QPointF(handoffNewButton->width() / 2.0, handoffNewButton->height() / 2.0));
+            settle(250);
+        }
+        check(handoffWindow.isVisible(), "choosing a furniture shows the editor");
+        check(!handoffSelector->isVisible(), "...and hides the selector");
+        check(!handoffWindow.isShowingInitScreen(), "...with that furniture actually loaded");
+        const QString handoffFurnitureId = handoffWindow.currentFurnitureId();
+
+        // --- a real, dirty checkpoint - the oracle the close has to save ------
+        check(buildBody(handoffWindow, 0.30, 0.30, 0.5, 0.5, 90.0),
+              "a body for the close-saves-first probe");
+        check(!handoffWindow.document().solids().empty(),
+              "...and it is really there before the move below reads its position");
+        GProp_GProps handoffProps;
+        BRepGProp::VolumeProperties(handoffWindow.document().solids().front().shape,
+                                    handoffProps);
+        const double handoffXBefore = handoffProps.CentreOfMass().X();
+
+        QAction* handoffAutosave = action(handoffWindow, QStringLiteral("Save automatically"));
+        if (handoffAutosave && handoffAutosave->isChecked()) handoffAutosave->trigger();
+        check(handoffAutosave != nullptr && !handoffWindow.autosaveEnabled(),
+              "autosave is off for this probe - the native X has to save on its own, "
+              "not merely flush an already-armed debounce");
+
+        gp_Trsf handoffMove;
+        handoffMove.SetTranslation(gp_Vec(22.0, 0.0, 0.0));
+        const int handoffBodyId =
+            handoffWindow.document().solids().empty() ? 0 : handoffWindow.document().solids().front().id;
+        check(handoffBodyId != 0 && handoffWindow.transformBody(handoffBodyId, handoffMove),
+              "an unsaved move - what the native X's own save has to carry to disk");
+        check(handoffWindow.isFurnitureDirty(), "the furniture reads dirty going into the close");
+
+        // --- handoff, direction two: the native X, not the menu action --------
+        // The "Close furniture, autosave off" block above already drives the
+        // MENU route with this exact oracle shape; this is CLAUDE.md's OTHER
+        // named route - a real QCloseEvent, exactly what clicking the
+        // window's own titlebar X sends. MainWindow::closeEvent() ignores it
+        // and returns to the selector itself rather than letting Qt actually
+        // destroy/close the window - see its own comment.
+        handoffWindow.close();
+        settle(250);
+        check(!handoffWindow.isVisible(), "the native X hides the editor rather than quitting");
+        check(handoffSelector->isVisible(), "...and the selector reappears");
+        check(handoffWindow.isShowingInitScreen(),
+              "...with the editor's own state back to \"nothing open\"");
+
+        DocumentModel handoffReloaded;
+        QString handoffErr;
+        FurnitureStore handoffStore(handoffDir.path());
+        check(handoffStore.loadFurniture(handoffFurnitureId, handoffReloaded, &handoffErr) &&
+                  handoffReloaded.count() == 1,
+              QStringLiteral("the native X saved the furniture before returning to the "
+                             "selector (%1)")
+                  .arg(handoffErr.isEmpty() ? QStringLiteral("ok") : handoffErr));
+        if (handoffReloaded.count() == 1) {
+            GProp_GProps handoffAfterProps;
+            BRepGProp::VolumeProperties(handoffReloaded.solids().front().shape,
+                                        handoffAfterProps);
+            const double handoffXAfter = handoffAfterProps.CentreOfMass().X();
+            check(std::fabs(handoffXAfter - (handoffXBefore + 22.0)) < 1.0e-3,
+                  QStringLiteral("...and saved the MOVE, not just the body's mere presence "
+                                 "(%1 mm against %2 mm wanted)")
+                      .arg(handoffXAfter, 0, 'f', 3)
+                      .arg(handoffXBefore + 22.0, 0, 'f', 3));
+        }
+
+        // --- the refreshed selector shows the reopened furniture ---------------
+        check(handoffSelector->furnitureCount() == 1,
+              "the selector's own refresh (on returnedToSelector()) lists the furniture "
+              "the native X just saved and closed");
+
+        check(handoffWindow.findChild<QDialog*>() == nullptr,
+              "none of the handoff - boot, open, the native X - ever opened a QDialog");
     }
 
     // --- resyncView() reapplies hidden state on EVERY caller, not just -----
@@ -1756,12 +2110,17 @@ int main(int argc, char* argv[])
     }
 
     // --- closeEvent() itself saves - flushes a pending autosave, and saves
-    // outright with autosave off - rather than only closeCurrentFurniture()
-    // doing so. Two isolated probes, each isolating ONE of the two halves:
-    // a save that only happened because the debounce timer had already
-    // fired on its own (unrelated to closeEvent()'s own code) would prove
-    // nothing, so each probe closes the window before that could happen by
-    // coincidence.
+    // outright with autosave off. Milestone 4's own closeEvent() delegates
+    // straight to closeCurrentFurniture() (the native X is the OTHER route
+    // CLAUDE.md's "close-saves-first" law names, alongside the menu action -
+    // see MainWindow.cpp), which is exactly what makes this block worth
+    // keeping rather than redundant with the menu-triggered version further
+    // up: the two are now the SAME implementation, and this is what proves
+    // the native X reaches it too. Two isolated probes, each isolating ONE
+    // of the two halves: a save that only happened because the debounce
+    // timer had already fired on its own (unrelated to the close itself)
+    // would prove nothing, so each probe closes the window before that could
+    // happen by coincidence.
     {
         // Autosave ON, closed the instant after the checkpoint - well
         // inside the 400ms debounce window, so any save that lands here can
@@ -1891,11 +2250,38 @@ int main(int argc, char* argv[])
     check(view != nullptr && view->width() > 100, "viewport has a usable size");
 
     // --- camera startup state -------------------------------------------------
+    // Milestone 4: the "New furniture" gesture this file drives `window`
+    // through, above, now wires and shows a whole second top-level window
+    // (SelectorWindow) before the click - a real HWND, with real Windows
+    // messages pumped through the settle() calls around it. That is enough
+    // extra event-loop activity to occasionally let OcctViewWidget's OWN
+    // first real paintEvent land (and so initializeViewer() run - see
+    // CLAUDE.md's lazy-init contract) before openFurniture()'s unconditional
+    // fitAll() call, where it never reliably did before. Both outcomes are
+    // legitimate: fitAll() on the still-uninitialized viewer is a documented
+    // no-op (`if (myView.IsNull()) return;`), leaving CameraState's own
+    // compile-time default (700mm) standing; a viewer that HAS initialized
+    // by then genuinely fits the +/-250mm fallback box (OcctViewWidget's own
+    // documented empty-scene box) at kFovyDeg=45 - computed the same way
+    // CameraController::frame() does, so a change to either constant is
+    // caught here too rather than this test silently drifting from it.
+    const double kFallbackBoxRadius = 0.5 * std::sqrt(500.0 * 500.0 + 500.0 * 500.0 + 10.0 * 10.0);
+    const double kDegToRad = 3.14159265358979323846 / 180.0;
+    const double kEmptySceneFitDistance =
+        (kFallbackBoxRadius / std::sin(0.5 * OcctViewWidget::kFovyDeg * kDegToRad)) * 1.1;
     {
         const CameraState& cam = view->camera().state();
         check(std::fabs(cam.azimuthDeg - (-45.0)) < 1e-6, "startup azimuth is -45");
         check(std::fabs(cam.elevationDeg - 30.0) < 1e-6, "startup elevation is +30");
-        check(std::fabs(cam.distance - 700.0) < 1e-6, "startup distance is 700mm");
+        const bool atDefault = std::fabs(cam.distance - 700.0) < 1e-6;
+        const bool atEmptyFit = std::fabs(cam.distance - kEmptySceneFitDistance) < 1e-3;
+        check(atDefault || atEmptyFit,
+              QStringLiteral("startup distance is either the pristine 700mm default (the "
+                             "viewer had not initialized when the first fitAll() ran) or "
+                             "the correctly-fitted empty-scene distance (%1mm) once it had "
+                             "- got %2mm")
+                  .arg(kEmptySceneFitDistance, 0, 'f', 3)
+                  .arg(cam.distance, 0, 'f', 3));
     }
 
     // --- Fit All knows outlines exist -----------------------------------------
@@ -10217,14 +10603,15 @@ int main(int argc, char* argv[])
                            ? QStringLiteral("none")
                            : walkthroughOffenders.join(QStringLiteral(", "))));
 
-        // Same story for the init screen: its title and its New furniture
-        // card are painted copy this app wrote. Per-furniture card NAMES are
-        // deliberately excluded from paintedTexts() itself - they are the
-        // user's own word choice, the same exemption a furniture literally
-        // named "Fuse My Table" gets below.
+        // Same story for the selector: its title, its New furniture button
+        // and its cards' Rename/Delete labels are painted copy this app
+        // wrote. Per-furniture card NAMES are deliberately excluded from
+        // paintedTexts() itself - they are the user's own word choice, the
+        // same exemption a furniture literally named "Fuse My Table" gets
+        // below.
         QStringList initScreenOffenders;
-        if (InitScreen* gallery = window.initScreen()) {
-            for (const QString& text : gallery->paintedTexts()) {
+        if (windowSelector) {
+            for (const QString& text : windowSelector->paintedTexts()) {
                 for (const QString& word : banned) {
                     if (usesBannedWord(text, word))
                         initScreenOffenders
@@ -10233,7 +10620,7 @@ int main(int argc, char* argv[])
             }
         }
         check(initScreenOffenders.isEmpty(),
-              QStringLiteral("no init screen text uses a banned word (%1)")
+              QStringLiteral("no selector window text uses a banned word (%1)")
                   .arg(initScreenOffenders.isEmpty()
                            ? QStringLiteral("none")
                            : initScreenOffenders.join(QStringLiteral(", "))));
@@ -14327,7 +14714,7 @@ int main(int argc, char* argv[])
         }
 
         // --- the vocabulary sweep: user data is exempt, both directions -----
-        // The SAME mechanism InitScreen's furniture names and VersionsPanel's
+        // The SAME mechanism SelectorWindow's furniture names and VersionsPanel's
         // version names already established: a user-typed name is never
         // flagged by ItemsPanel::paintedTexts() (this task's own boundary),
         // while the identical string, fed to the sweep's own matcher as if it
@@ -16023,7 +16410,7 @@ int main(int argc, char* argv[])
         // --- a version named with a banned word: the row shows it unmangled, -
         // and the drawer's real sweep still passes, because a version's own
         // name is user text and this panel's paintedTexts() never includes it
-        // (VersionsPanel.h's own rule, the same one InitScreen's furniture
+        // (VersionsPanel.h's own rule, the same one SelectorWindow's furniture
         // names already established). The mirrored assertion proves that is
         // an EXEMPTION being exercised, not merely an accident: the exact
         // same string, fed to the sweep's own matcher as if it WERE app copy,
@@ -16467,6 +16854,13 @@ int main(int argc, char* argv[])
         check(probe.saveCurrentFurniture(), "Save succeeds");
         const QString savedFurnitureId = probe.currentFurnitureId();
         probe.showInitScreen();
+        // Milestone 4: showInitScreen() now hides this window (see
+        // MainWindow.cpp - it hands off to a selector this direct-API test
+        // deliberately bypasses). Re-shown here so openFurniture() runs on
+        // an already-shown window, the invariant every other caller of it
+        // relies on (CLAUDE.md's lazy-initializeViewer() contract), and so
+        // this probe stays usable for the checks further down this block.
+        probe.show();
         check(probe.openFurniture(savedFurnitureId), "reopening the same furniture succeeds");
         check(probe.document().symmetryOn(), "symmetry (on/off) survives the save/load round trip");
 

@@ -19,7 +19,6 @@ class AppearancePanel;
 class AxisGizmo;
 class BevelArrow;
 class ExtrudePreview;
-class InitScreen;
 class OcctViewWidget;
 class PullArrow;
 class QAction;
@@ -311,17 +310,25 @@ public:
     // preference, not a learned capability.
     void setDisplayUnit(Measure::Unit unit);
 
-    // --- the init screen, save and autosave (Milestone 3) -------------------
+    // --- the selector handoff, save and autosave (Milestones 3 and 4) -------
     //
-    // The init screen is a STATE, not a dialog and not a separate window -
-    // CLAUDE.md's no-modal law applies to it exactly as to everything else.
-    // showInitScreen() puts the window into it: the live document is
-    // replaced with a fresh, empty one (never merely cleared - clear()
-    // leaves the undo stack behind it, and the next furniture opened must
-    // not inherit checkpoints that were never its own) and the gallery is
-    // raised over the viewport. openFurniture() is the one path both an
-    // existing card and a freshly created one go through, so a new
-    // furniture and a reopened one round-trip identically.
+    // Milestone 4 split the gallery out of this window into its own
+    // top-level SelectorWindow (src/ui/SelectorWindow.h) - this window no
+    // longer hosts an init-screen STATE at all, only the "nothing open" data
+    // state (myShowingInitScreen, an empty document) that state used to
+    // dress. showInitScreen() still owns that reset - live document replaced
+    // with a fresh, empty one (never merely cleared - clear() leaves the
+    // undo stack behind it, and the next furniture opened must not inherit
+    // checkpoints that were never its own) - and now ALSO hides this window
+    // and emits returnedToSelector(), which is main.cpp's own cue (see
+    // main.cpp) to refresh and re-show the selector. openFurniture() is the
+    // one path both an existing card and a freshly created one go through,
+    // so a new furniture and a reopened one round-trip identically; it does
+    // NOT show this window itself - the caller (main.cpp's handoff wiring,
+    // or a test replicating it) shows it first, preserving the CLAUDE.md
+    // lazy-`initializeViewer()` contract exactly as it already held before
+    // this task: every route that ever called openFurniture() already did so
+    // on an already-shown window.
     void showInitScreen();
     bool openFurniture(const QString& id);
     bool isShowingInitScreen() const { return myShowingInitScreen; }
@@ -357,7 +364,6 @@ public:
     // milliseconds for it to fire.
     int autosavePendingMs() const;
 
-    InitScreen* initScreen() const { return myInitScreen; }
     FurnitureStore& furnitureStore() { return myStore; }
 
     // --- versions and the side-by-side compare (Milestone 3) ---------------
@@ -485,6 +491,15 @@ signals:
     // avoid. This lets each surface drop that session memory itself, without
     // MainWindow having to know any of them has one.
     void progressReset();
+
+    // Milestone 4: this window is done editing and wants the selector shown
+    // again - emitted by showInitScreen() (so every route that already went
+    // through it - Close furniture, opening a different card, a failed
+    // openFurniture() - carries this for free) immediately after this window
+    // hides itself. main.cpp's own handoff wiring is what actually shows and
+    // refreshes SelectorWindow on it; this window knows nothing of that
+    // class, exactly as it knows nothing of MainWindow.
+    void returnedToSelector();
 
 protected:
     // Flushes a pending appearance write - see myAppearanceWrite.
@@ -726,11 +741,6 @@ private:
     // exactly as CLAUDE.md's never-silent-failure law requires.
     void setShowBottomBar(bool show);
 
-    // Builds myInitScreen and wires its two signals - see the header for why
-    // it is a state rather than a dialog. Called once, from the
-    // constructor, after buildOverlay() so it can be raised above every
-    // overlay widget that already exists.
-    void buildInitScreen();
     // The one save implementation - Ctrl+S, autosave's debounce timer and
     // "close with autosave off" all call this rather than each carrying its
     // own copy. `announce` is what tells Ctrl+S's success apart from
@@ -787,7 +797,6 @@ private:
     // and "the one a test injected" - the constructor just picks which
     // string to build it from.
     FurnitureStore myStore;
-    InitScreen* myInitScreen = nullptr;
     // The init screen is the window's state whenever no furniture is open -
     // true from construction (nothing is open yet) until openFurniture()
     // succeeds, and true again the moment showInitScreen() runs.

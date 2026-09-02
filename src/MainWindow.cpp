@@ -11,7 +11,6 @@
 #include "ExtrudePreview.h"
 #include "HintBalloon.h"
 #include "IconSet.h"
-#include "InitScreen.h"
 #include "ItemsPanel.h"
 #include "PullArrow.h"
 #include "ShortcutSheet.h"
@@ -553,12 +552,13 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     resize(1280, 800);
     statusBar()->showMessage(tr("Right-drag to orbit, middle-drag to pan, wheel to zoom"));
 
-    // Built after buildOverlay() so it can be raised above everything that
-    // already exists over the viewport, and shown last: on launch nothing is
-    // open, myShowingInitScreen already starts true, and this is what
-    // actually raises the gallery and writes its own status message over
-    // the generic one two lines up.
-    buildInitScreen();
+    // On launch nothing is open - myShowingInitScreen already starts true -
+    // and this establishes that data state (a fresh, empty document) and
+    // writes its own status message over the generic one two lines up. It
+    // also hides this window and emits returnedToSelector() (see the
+    // header), which nobody has connected to yet at this point in the
+    // constructor - main.cpp's own handoff wiring is what actually shows
+    // SelectorWindow, unconditionally, as the real app's boot state.
     showInitScreen();
 }
 
@@ -1780,65 +1780,34 @@ void MainWindow::writeAppearanceNow()
 
 void MainWindow::closeEvent(QCloseEvent* event)
 {
+    // Milestone 4: this window is never actually destroyed. Closing it -
+    // the native X, exactly as much as File -> Close furniture - always
+    // means "go back to the library", never "quit the app": quitting is the
+    // SELECTOR window's own close, which Qt's default
+    // quitOnLastWindowClosed() already handles correctly once this window
+    // is hidden rather than visible-but-unfocused.
+    event->ignore();
+
     // A window closed inside the debounce window still has to store what the
-    // user chose. Fired by hand rather than left to the timer, which is about
-    // to be destroyed with this window.
+    // user chose. Fired by hand rather than left to the timer.
     if (myAppearanceWrite && myAppearanceWrite->isActive()) {
         myAppearanceWrite->stop();
         writeAppearanceNow();
     }
-    // Closing the app mid-furniture is Close furniture's own ruling, not a
-    // separate one: flush anything still waiting inside the autosave
-    // debounce, and with autosave off, save outright. Never lose work, never
-    // block - this app has no modal "save before closing?" question to ask.
+
+    // Close-saves-first, exactly as File -> Close furniture's own law - the
+    // native X is the OTHER route this task's brief names alongside it, and
+    // closeCurrentFurniture() already performs the full save-then-return
+    // sequence (flush the autosave debounce, save outright with autosave
+    // off, then showInitScreen()). When nothing is open at all (the one
+    // state closeCurrentFurniture() itself refuses to act on - e.g. the X
+    // clicked on a blank editor after a failed openFurniture()) there is
+    // nothing to save, so this just returns to the selector directly.
     if (!myShowingInitScreen && !myFurnitureId.isEmpty()) {
-        if (myAutosaveTimer && myAutosaveTimer->isActive()) {
-            myAutosaveTimer->stop();
-            flushAutosave();
-        }
-        if (!myAutosaveOn) performSave(false);
+        closeCurrentFurniture();
+    } else {
+        showInitScreen();
     }
-    QMainWindow::closeEvent(event);
-}
-
-void MainWindow::buildInitScreen()
-{
-    myInitScreen = new InitScreen(&myStore, myView);
-    myInitScreen->setGeometry(myView->rect());
-
-    connect(myInitScreen, &InitScreen::furnitureChosen, this, &MainWindow::openFurniture);
-    connect(myInitScreen, &InitScreen::furnitureCreated, this, &MainWindow::openFurniture);
-
-    // The gallery's two refusals - a library that will not take a new
-    // directory, a rename landing on a furniture whose files are gone - are
-    // never silent. Same cause-and-fix shape as every other refusal this
-    // window reports, and the same reasoning AppearancePanel's colour-file
-    // failures already established: the card owns a gallery, not the way
-    // this app says no, so the copy lives here.
-    connect(myInitScreen, &InitScreen::furnitureCreateFailed, this,
-            [this](const QString& name) {
-                myToasts->show(tr("Couldn't create %1 — Check that the library folder "
-                                  "still exists and isn't read-only").arg(name),
-                              Toast::Kind::Failure, false);
-            });
-    connect(myInitScreen, &InitScreen::furnitureRenameFailed, this,
-            [this](const QString& id, const QString& name) {
-                Q_UNUSED(id);
-                myToasts->show(tr("Couldn't rename this furniture to %1 — Check that "
-                                  "its folder still exists and isn't read-only")
-                                  .arg(name),
-                              Toast::Kind::Failure, false);
-            });
-
-    // The gallery fills the whole viewport, not one anchored corner, so it
-    // does not go through ViewportOverlay's anchor system - but it still has
-    // to track the viewport's size, and laidOut() is where every other
-    // widget that positions itself against the viewport already does that
-    // (see the connections at the end of buildOverlay()). Only reads
-    // geometry, so it cannot recurse back into updateActions().
-    connect(myOverlay, &ViewportOverlay::laidOut, this, [this] {
-        if (myInitScreen) myInitScreen->setGeometry(myView->rect());
-    });
 }
 
 void MainWindow::showInitScreen()
@@ -1883,15 +1852,16 @@ void MainWindow::showInitScreen()
     myView->clearSelection();
     resyncView();
 
-    if (myInitScreen) {
-        myInitScreen->setGeometry(myView->rect());
-        myInitScreen->refresh();
-        myInitScreen->show();
-        myInitScreen->raise();
-    }
-
     updateActions();
     statusBar()->showMessage(tr("Choose a furniture to open, or start a new one"));
+
+    // Milestone 4: this window's own gallery no longer exists - it hides
+    // itself and hands control back through returnedToSelector() instead.
+    // Harmless before anything is connected (the constructor's own first
+    // call, above) and harmless if this window was never shown in the first
+    // place (hide() on an unshown widget is a no-op) - see the header.
+    hide();
+    emit returnedToSelector();
 }
 
 bool MainWindow::openFurniture(const QString& id)
@@ -1932,8 +1902,6 @@ bool MainWindow::openFurniture(const QString& id)
     // displayed items now - see its own comment - so nothing further is
     // needed here.
     resyncView();
-
-    if (myInitScreen) myInitScreen->hide();
 
     myView->fitAll();
     updateActions();
