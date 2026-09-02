@@ -494,6 +494,74 @@ int main()
         check(doc.twinOf(idA) == idB, "...and brings the pairing back");
     }
 
+    // --- DocumentModel symmetry: the MODE (on/off + plane) is NOT part of
+    // undo State, even though the PAIRING MAP is - fix round 1 (review
+    // Important #2). Before this fix, undo restored symmetryOn/symmetryPlane
+    // from State exactly like the pairing map, so an undo landing after
+    // "turn symmetry off" could resurrect the mode itself - a mode switch
+    // (which never took its own checkpoint) silently reversed by a Ctrl+Z
+    // aimed at an entirely different change. Mode is session state, the
+    // same rule visibility already follows.
+    {
+        DocumentModel doc;
+        const gp_Pln yz(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0));
+        const int idA = doc.addSolid(ModelingOps::makeBox(gp_Pnt(10.0, 0.0, 0.0), 5.0, 5.0, 5.0));
+        const int idB = doc.addSolid(ModelingOps::makeBox(gp_Pnt(-15.0, 0.0, 0.0), 5.0, 5.0, 5.0));
+        doc.setSymmetry(true, yz);
+
+        doc.checkpoint();               // captures State WHILE symmetry is on
+        doc.pairBodies(idA, idB);
+        check(doc.twinOf(idA) == idB, "paired, symmetry on");
+
+        doc.setSymmetry(false, yz);     // takes NO checkpoint - unpairs immediately
+        check(!doc.symmetryOn(), "symmetry is off");
+        check(doc.twinOf(idA) == -1, "...and unpaired, by setSymmetry(false, ...) itself");
+
+        check(doc.undo(), "undo succeeds - it pops the checkpoint taken before pairBodies()");
+        check(!doc.symmetryOn(),
+              "the MODE stays OFF - undo must not resurrect a mode switch that took no "
+              "checkpoint of its own, whatever it does to the pairing map underneath it");
+        // The pairing map, unlike the mode, genuinely IS undo-tracked, so it
+        // reverts to whatever it held at the checkpoint - here, unpaired
+        // (pairBodies() ran AFTER the checkpoint). A caller (MainWindow)
+        // must still gate every reader of twinOf() on symmetryOn() as well,
+        // since a DIFFERENT ordering (checkpoint AFTER pairing) would leave
+        // a live pairing entry behind a now-off mode - proven at the
+        // MainWindow level in gui_smoke, where "no re-pairing behaviour" is
+        // the actual observable contract.
+        check(doc.twinOf(idA) == -1, "and the pairing map is unpaired here too");
+    }
+
+    // --- DocumentModel symmetry: the exact resurrection scenario the review
+    // found - checkpoint WHILE paired, unpair (off, no checkpoint), undo.
+    // The pairing map genuinely DOES come back (it is undo-tracked, by
+    // design - a twin-follow edit's own undo needs it to), but the mode
+    // does not. This is the literal proof that a caller reading twinOf()
+    // MUST also read symmetryOn() - a live pairing entry existing here is
+    // not itself a bug; only ACTING on one while the mode is off would be.
+    {
+        DocumentModel doc;
+        const gp_Pln yz(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0));
+        const int idA = doc.addSolid(ModelingOps::makeBox(gp_Pnt(10.0, 0.0, 0.0), 5.0, 5.0, 5.0));
+        const int idB = doc.addSolid(ModelingOps::makeBox(gp_Pnt(-15.0, 0.0, 0.0), 5.0, 5.0, 5.0));
+        doc.setSymmetry(true, yz);
+        doc.pairBodies(idA, idB);
+
+        doc.checkpoint();   // captures State WHILE paired - the twin-follow edit's own commit
+        doc.replaceSolid(idA, ModelingOps::makeBox(gp_Pnt(10.0, 0.0, 0.0), 5.0, 5.0, 6.0));
+
+        doc.setSymmetry(false, yz);   // off - no checkpoint, unpairs immediately
+        check(doc.twinOf(idA) == -1, "unpaired the moment symmetry turns off");
+
+        check(doc.undo(), "undo pops the checkpoint taken before the edit, while still paired");
+        check(!doc.symmetryOn(), "the mode STAYS off");
+        check(doc.twinOf(idA) == idB,
+              "...even though the pairing map genuinely comes back - it is undo-tracked by "
+              "design (a twin-follow edit's own undo needs the pairing restored too), and "
+              "MainWindow's symmetryOn() guard is what keeps a resurrected pairing inert "
+              "rather than DocumentModel refusing to ever restore one");
+    }
+
     // --- DocumentModel symmetry: toSerialized()/fromSerialized() round trip -
     {
         DocumentModel doc;
@@ -595,8 +663,25 @@ int main()
         check(doc.twinOf(vA) == vB, "...and the pairing, on the SAME ids restoreFrom() copied in");
 
         check(doc.undo(), "one undo...");
-        check(!doc.symmetryOn(), "...restores the PRE-restore symmetry state (off)");
-        check(doc.contains(before), "...and the pre-restore body");
+        // Fix round 1: symmetryOn()/symmetryPlane() are NOT part of undo
+        // State any more (see the dedicated block above) - restoreFrom()'s
+        // own mode change is a direct mutation, the same way it is for
+        // myVisibility, and undo does not revert that either (see "restore
+        // FROM ... visibility is presentation state" above). So the mode
+        // restoreFrom() set STAYS, even though the bodies and the pairing it
+        // brought along both revert - the same split isVisible() already
+        // establishes between document content and session state.
+        check(doc.symmetryOn(),
+              "...the mode restoreFrom() set is UNCHANGED by the undo - it is session state, "
+              "not part of the State this undo actually reverted");
+        // By NAME and count, not id membership: restoreFrom() copies the
+        // version's ids VERBATIM, and the version's own vA happens to be
+        // id 1 - the same id `before` was assigned in this fresh `doc` -
+        // so contains(vA) is true either way and proves nothing here.
+        check(doc.count() == 1 && doc.solids().front().name == "Before",
+              "...while the pre-restore BODY - by name, not a coincidentally-matching id - "
+              "is the only one left: solids/outlines/pairing are what this undo actually "
+              "reverts, and the version's own bodies are gone again");
     }
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures,

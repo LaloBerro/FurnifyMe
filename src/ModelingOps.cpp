@@ -17,6 +17,8 @@
 #include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
+#include <BRepClass_FaceClassifier.hxx>
+#include <BRepTools.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
@@ -52,6 +54,7 @@
 #include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Pln.hxx>
+#include <gp_Pnt2d.hxx>
 #include <gp_Quaternion.hxx>
 #include <gp_Vec.hxx>
 
@@ -103,6 +106,42 @@ bool isShapeSane(const TopoDS_Shape& shape)
     return analyzer.IsValid();
 }
 
+// A point genuinely ON `face`'s own material - not merely inside its
+// bounding box, and NOT its area centroid. This app's canonical face has a
+// hole in it (the slab-with-a-rectangular-through-hole CLAUDE.md's own STEP
+// export check pins), and BRepGProp::SurfaceProperties' centroid is the
+// centroid of OUTER-MINUS-INNER area: for a centred hole that point lands
+// exactly in the hole, on no material at all - fix round 1, found by
+// review before it ever reached the suite. Samples a grid of the face's own
+// UV parameter space and classifies each candidate with
+// BRepClass_FaceClassifier, the one classifier that reads every wire (the
+// outer boundary AND any hole) rather than trusting a bounding box or an
+// area-weighted average. False (leaving `out` untouched) only for a
+// genuinely degenerate face no sample lands inside - not expected for
+// anything this app builds, and the caller (outwardPlane(), below) falls
+// back to the flag-based guess alone rather than refuse the pull over it.
+bool pointOnFace(const TopoDS_Face& face, gp_Pnt& out)
+{
+    Standard_Real umin = 0.0, umax = 0.0, vmin = 0.0, vmax = 0.0;
+    BRepTools::UVBounds(face, umin, umax, vmin, vmax);
+    const Handle(Geom_Surface) geometry = BRep_Tool::Surface(face);
+    if (geometry.IsNull()) return false;
+
+    constexpr int kGrid = 9;   // odd, so the exact centre is sampled too
+    for (int iu = 0; iu < kGrid; ++iu) {
+        const double u = umin + (umax - umin) * (iu + 0.5) / kGrid;
+        for (int iv = 0; iv < kGrid; ++iv) {
+            const double v = vmin + (vmax - vmin) * (iv + 0.5) / kGrid;
+            BRepClass_FaceClassifier classifier(face, gp_Pnt2d(u, v), 1.0e-7);
+            if (classifier.State() == TopAbs_IN) {
+                out = geometry->Value(u, v);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 // BRepAdaptor_Surface carries geometry and location only - it never applies
 // TopAbs_Orientation. On a plain box built by BRepPrimAPI_MakeBox three of
 // six faces are REVERSED and their plane normals point into the body, and
@@ -123,11 +162,12 @@ bool isShapeSane(const TopoDS_Shape& shape)
 //
 // Settled with ground truth rather than trusted a second time:
 // BRepClass3d_SolidClassifier, stepped a small distance off the face along
-// the candidate normal from a point actually ON the face (its own centre of
-// mass - the face is known planar here, so that point is unambiguous). This
-// is orientation-flag-independent, so it is correct whether or not `body`
-// was built by a mirror, and it costs one classifier build on the COMMIT
-// path only (pullFaceBy calls this once per gesture, never per drag frame).
+// the candidate normal from a point genuinely ON the face - pointOnFace(),
+// above; ITS OWN comment covers why that point is not simply the face's
+// centre of mass. This is orientation-flag-independent, so it is correct
+// whether or not `body` was built by a mirror, and it costs one classifier
+// build on the COMMIT path only (pullFaceBy calls this once per gesture,
+// never per drag frame).
 gp_Pln outwardPlane(const TopoDS_Shape& body, const TopoDS_Face& face,
                     const BRepAdaptor_Surface& surface)
 {
@@ -135,12 +175,14 @@ gp_Pln outwardPlane(const TopoDS_Shape& body, const TopoDS_Face& face,
     gp_Dir candidate = plane.Axis().Direction();
     if (face.Orientation() == TopAbs_REVERSED) candidate.Reverse();
 
-    GProp_GProps faceProps;
-    BRepGProp::SurfaceProperties(face, faceProps);
-    const gp_Pnt probe = faceProps.CentreOfMass().Translated(gp_Vec(candidate) * 0.01);
-    BRepClass3d_SolidClassifier classifier(body);
-    classifier.Perform(probe, 1.0e-6);
-    if (classifier.State() == TopAbs_IN) candidate.Reverse();   // ground truth overrides the guess
+    // Ground truth overrides the flag-based guess.
+    gp_Pnt onFace;
+    if (pointOnFace(face, onFace)) {
+        const gp_Pnt probe = onFace.Translated(gp_Vec(candidate) * 0.01);
+        BRepClass3d_SolidClassifier classifier(body);
+        classifier.Perform(probe, 1.0e-6);
+        if (classifier.State() == TopAbs_IN) candidate.Reverse();
+    }
 
     // gp_Ax3's (P, N, Vx) constructor keeps Vx as the X direction when it is
     // already perpendicular to N, which it is here (candidate only ever

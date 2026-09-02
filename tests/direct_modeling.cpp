@@ -1030,6 +1030,67 @@ int main()
         }
     }
 
+    // --- outwardPlane robustness: a face with a hole, after a mirror --------
+    // Fix round 1 (review): the classifier's PROBE POINT used to be the
+    // face's own area centroid, which for a CENTRED hole lands exactly in
+    // the hole - off the face's own material entirely, so the ground-truth
+    // check could read the wrong side and nothing would catch it. This
+    // app's canonical face has exactly this shape (the slab-with-a-
+    // rectangular-through-hole CLAUDE.md's own STEP export check pins), so
+    // pinned directly: mirror one, then pull its own (holed) top face
+    // outward and confirm the volume GROWS.
+    {
+        const gp_Pln yz(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0));
+        const TopoDS_Shape slab = makeBox(gp_Pnt(10.0, 0.0, 0.0), 40.0, 30.0, 10.0);
+        // Centred under the slab's own footprint (both share centroid
+        // (30, 15)), so BRepGProp::SurfaceProperties' area centroid for the
+        // resulting holed face lands exactly inside the hole - the precise
+        // case a bounding-box or centroid probe gets wrong.
+        const TopoDS_Shape holeTool = makeBox(gp_Pnt(20.0, 10.0, -5.0), 20.0, 10.0, 20.0);
+        const BooleanResult holed = applyBoolean(BooleanKind::Cut, slab, holeTool);
+        check(holed.ok, "a slab with a centred rectangular through-hole builds");
+        if (holed.ok) {
+            checkNear(volume(holed.shape), 40.0 * 30.0 * 10.0 - 20.0 * 10.0 * 10.0, 1.0e-3,
+                      "its volume is the slab minus the hole");
+
+            const BooleanResult mirrored = mirrorShape(holed.shape, yz);
+            check(mirrored.ok, "mirroring the holed slab succeeds");
+            if (mirrored.ok) {
+                // NOT faceAtZ(): that helper's 1e-6 z-bbox tolerance is tight
+                // enough for a face built directly by makeBox, but a face
+                // that came out of a Cut carries that boolean's own
+                // SetFuzzyValue(1.0e-5) tolerance in its geometry - measured
+                // at ~5e-6 of bbox slack here, just past faceAtZ()'s window.
+                // The holed face is identified precisely instead, by the
+                // one topological trait that actually names it: a planar
+                // through-hole face has TWO wires (the outer boundary and
+                // the hole), where every other face of this shape has one.
+                TopoDS_Face topFace;
+                for (TopExp_Explorer it(mirrored.shape, TopAbs_FACE); it.More(); it.Next()) {
+                    const TopoDS_Face candidate = TopoDS::Face(it.Current());
+                    int wires = 0;
+                    for (TopExp_Explorer w(candidate, TopAbs_WIRE); w.More(); w.Next()) ++wires;
+                    if (wires > 1) { topFace = candidate; break; }
+                }
+                check(!topFace.IsNull(),
+                      "the mirrored slab's own top face - the one WITH the hole - is found");
+                if (!topFace.IsNull()) {
+                    const BooleanResult pulled = pullFace(mirrored.shape, topFace, 15.0);
+                    check(pulled.ok, "pulling the mirrored holed face by +15 succeeds" +
+                                      (pulled.ok ? std::string() : ": " + pulled.error));
+                    if (pulled.ok) {
+                        check(volume(pulled.shape) > volume(mirrored.shape),
+                              "and the volume GROWS - a centroid probe landing in the hole "
+                              "would have read the wrong side and carved instead");
+                        checkNear(volume(pulled.shape) - volume(mirrored.shape),
+                                  (40.0 * 30.0 - 20.0 * 10.0) * 15.0, 1.0e-3,
+                                  "by exactly the pulled (holed) face's own area times 15");
+                    }
+                }
+            }
+        }
+    }
+
     // --- boundingBoxStraddlesPlane -------------------------------------------
     {
         const gp_Pln yz(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0));

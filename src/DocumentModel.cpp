@@ -110,6 +110,14 @@ int DocumentModel::twinOf(int id) const
     return it == myTwin.end() ? -1 : it->second;
 }
 
+bool DocumentModel::unpairAll()
+{
+    if (myTwin.empty()) return false;
+    myTwin.clear();
+    ++myRevision;
+    return true;
+}
+
 int DocumentModel::addOutline(const TopoDS_Face& face, const gp_Pln& plane)
 {
     if (face.IsNull()) return 0;
@@ -201,7 +209,7 @@ bool DocumentModel::contains(int id) const
 
 void DocumentModel::checkpoint()
 {
-    myUndo.push_back(State{mySolids, myOutlines, mySymmetryOn, mySymmetryPlane, myTwin});
+    myUndo.push_back(State{mySolids, myOutlines, myTwin});
     if (myUndo.size() > kMaxHistory) myUndo.erase(myUndo.begin());
 
     // Anything redoable described a future that no longer follows from here.
@@ -212,11 +220,11 @@ bool DocumentModel::undo()
 {
     if (myUndo.empty()) return false;
 
-    myRedo.push_back(State{mySolids, myOutlines, mySymmetryOn, mySymmetryPlane, myTwin});
+    myRedo.push_back(State{mySolids, myOutlines, myTwin});
     mySolids = myUndo.back().solids;
     myOutlines = myUndo.back().outlines;
-    mySymmetryOn = myUndo.back().symmetryOn;
-    mySymmetryPlane = myUndo.back().symmetryPlane;
+    // symmetryOn/symmetryPlane are NOT part of State - see its own comment.
+    // Only the pairing map moves with undo/redo.
     myTwin = myUndo.back().twin;
     myUndo.pop_back();
     ++myRevision;
@@ -227,11 +235,9 @@ bool DocumentModel::redo()
 {
     if (myRedo.empty()) return false;
 
-    myUndo.push_back(State{mySolids, myOutlines, mySymmetryOn, mySymmetryPlane, myTwin});
+    myUndo.push_back(State{mySolids, myOutlines, myTwin});
     mySolids = myRedo.back().solids;
     myOutlines = myRedo.back().outlines;
-    mySymmetryOn = myRedo.back().symmetryOn;
-    mySymmetryPlane = myRedo.back().symmetryPlane;
     myTwin = myRedo.back().twin;
     myRedo.pop_back();
     ++myRevision;
@@ -308,9 +314,11 @@ FurnifySerial::SerializedDocument DocumentModel::toSerialized(DocumentMeta& meta
 
     // Symmetry: plane and on/off travel as-is; pairs are re-expressed as
     // POSITIONS into serial.bodies (see DocumentMeta's own comment for why -
-    // ids are never persisted). Each pair is emitted once, from the lower
-    // id's own position, walking mySolids in the same order they were just
-    // pushed above so the positions agree with what was actually written.
+    // ids are never persisted). Each pair is emitted once, from the HIGHER
+    // id's own position (the loop below skips until it reaches the id whose
+    // twin is already smaller), walking mySolids in the same order they
+    // were just pushed above so the positions agree with what was actually
+    // written.
     meta.symmetryOn = mySymmetryOn;
     meta.symmetryPlane = mySymmetryPlane;
     std::unordered_map<int, std::size_t> positionOfId;

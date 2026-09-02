@@ -2390,13 +2390,24 @@ void MainWindow::onDeleteSelected()
     // checkpoint - a twin left standing with nothing to mirror is a symmetry
     // the document no longer describes. Expanded BEFORE anything is removed,
     // so the message and the single undo agree with what actually happened.
+    //
+    // Gated on symmetryOn(), not just twinOf() != -1: DocumentModel's pairing
+    // map is undo-tracked while the on/off mode is not (fix round 1 - a mode
+    // switch stays outside undo State, the same rule visibility follows), so
+    // an undo landing after symmetry was turned off can resurrect an OLD
+    // pairing entry while the mode itself stays off. A pairing only ACTS
+    // while symmetry is on; the guard is what keeps that true everywhere,
+    // not just at the edit-propagation hook.
     std::vector<int> toDelete = ids;
-    for (int id : ids) {
-        const int twin = myDocument.twinOf(id);
-        if (twin > 0 && std::find(toDelete.begin(), toDelete.end(), twin) == toDelete.end())
-            toDelete.push_back(twin);
+    if (myDocument.symmetryOn()) {
+        for (int id : ids) {
+            const int twin = myDocument.twinOf(id);
+            if (twin > 0 && std::find(toDelete.begin(), toDelete.end(), twin) == toDelete.end())
+                toDelete.push_back(twin);
+        }
     }
-    const bool isTwinPair = toDelete.size() == 2 && myDocument.twinOf(toDelete[0]) == toDelete[1];
+    const bool isTwinPair = myDocument.symmetryOn() && toDelete.size() == 2 &&
+                            myDocument.twinOf(toDelete[0]) == toDelete[1];
 
     const std::string deletedName = toDelete.size() == 1 ? myDocument.nameOf(toDelete.front())
                                                           : std::string();
@@ -2815,7 +2826,6 @@ bool MainWindow::extrudePendingFace(double height)
     myView->clearPreview();
     myView->removeOutline(outlineId);
     myView->displaySolid(id, solid);
-    if (wasEmpty) myView->fitAll();
 
     // Symmetry (Milestone 3): creation pairs. A body whose own bounding box
     // straddles the plane stays unpaired - mirroring it would build a twin
@@ -2838,6 +2848,10 @@ bool MainWindow::extrudePendingFace(double height)
             qWarning("Symmetry: creation-pair mirror failed: %s", mirrored.error.c_str());
         }
     }
+    // AFTER the twin arrives, not before - fix round 1: framing on the first
+    // body alone left a mirrored twin sitting half (or entirely) outside the
+    // viewport on the very first extrude of a symmetric session.
+    if (wasEmpty) myView->fitAll();
 
     mySelectedOutlineId = 0;
     mySketch.reset();
@@ -2902,7 +2916,13 @@ void MainWindow::commitReplaceBody(int id, const TopoDS_Shape& newShape, bool& t
     // shape or a kernel exception, and `newShape` just came from a
     // successful edit) leaves the twin untouched rather than turning a
     // successful primary edit into a reported failure.
-    const int twin = myDocument.twinOf(id);
+    //
+    // Gated on symmetryOn(): the pairing map is undo-tracked while the
+    // on/off mode is not (fix round 1), so an undo can resurrect an old
+    // pairing while symmetry stays off. A pairing only ACTS while the mode
+    // is on - this is the hook that makes "turn symmetry off, edit, nothing
+    // propagates" true even across that undo.
+    const int twin = myDocument.symmetryOn() ? myDocument.twinOf(id) : -1;
     if (twin > 0) {
         const ModelingOps::BooleanResult mirrored =
             ModelingOps::mirrorShape(newShape, myDocument.symmetryPlane());
@@ -3361,9 +3381,15 @@ bool MainWindow::applyBooleanToSelection(int kind)
     // result rather than left standing for a body that no longer exists.
     // Determined BEFORE anything is removed, from the two ids the boolean
     // actually consumed.
-    const bool operandsAreTwins = myDocument.twinOf(ids[0]) == ids[1];
+    //
+    // Gated on symmetryOn(), same rule as commitReplaceBody's and
+    // onDeleteSelected's own guards (fix round 1): the pairing map survives
+    // undo while the on/off mode does not, so a stale pairing must never
+    // drive behaviour once symmetry is off.
+    const bool operandsAreTwins =
+        myDocument.symmetryOn() && myDocument.twinOf(ids[0]) == ids[1];
     int survivingId = 0;
-    if (!operandsAreTwins) {
+    if (myDocument.symmetryOn() && !operandsAreTwins) {
         if (myDocument.twinOf(ids[0]) > 0) survivingId = ids[0];
         else if (myDocument.twinOf(ids[1]) > 0) survivingId = ids[1];
     }
@@ -3381,7 +3407,7 @@ bool MainWindow::applyBooleanToSelection(int kind)
         myView->displaySolid(survivingId, result.shape);
         id = survivingId;
 
-        const int twin = myDocument.twinOf(id);
+        const int twin = myDocument.symmetryOn() ? myDocument.twinOf(id) : -1;
         if (twin > 0) {
             const ModelingOps::BooleanResult mirrored =
                 ModelingOps::mirrorShape(result.shape, myDocument.symmetryPlane());
@@ -3711,13 +3737,35 @@ bool MainWindow::setSymmetryPlaneFromFace(const TopoDS_Face& face)
                               plane.Position().XDirection()));
     }
 
+    // A plane change invalidates every existing pairing's meaning - each one
+    // was computed against the OLD plane, and a subsequent twin-follow edit
+    // mirrored about the new one would silently teleport the twin. Unpair
+    // FIRST, so setSymmetry() below is not what a caller has to trust to
+    // have done it. Only reported when it actually changed anything.
+    const bool hadPairings = myDocument.unpairAll();
+
     myDocument.setSymmetry(true, plane);
     myView->setSymmetryIndicator(true, plane);
-    if (mySymmetryAction && !mySymmetryAction->isChecked()) mySymmetryAction->setChecked(true);
+    // Blocked - fix round 1: this function already performs everything
+    // setSymmetryEnabled(true) would (the two lines just above, plus the
+    // updateActions()/documentChanged() below), so an UNBLOCKED setChecked()
+    // re-entered that slot and redid all of it a second time, purely by
+    // accident of which action happened to still read unchecked. Every
+    // other resync of this action's checked state (updateActions() itself)
+    // already goes through QSignalBlocker for the same reason.
+    if (mySymmetryAction && !mySymmetryAction->isChecked()) {
+        const QSignalBlocker blocker(mySymmetryAction);
+        mySymmetryAction->setChecked(true);
+    }
 
     updateActions();
     emit documentChanged();
-    statusBar()->showMessage(tr("Symmetry plane set to this face"));
+    const QString message = hadPairings ? tr("Symmetry plane moved — bodies unpaired")
+                                        : tr("Symmetry plane set to this face");
+    statusBar()->showMessage(message);
+    // No checkpoint behind this (a plane change is a mode switch, not an
+    // edit - the same rule turning symmetry off follows), so no Undo either.
+    if (hadPairings) myToasts->show(message, Toast::Kind::Note, false);
     return true;
 }
 

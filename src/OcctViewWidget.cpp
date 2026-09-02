@@ -1070,13 +1070,27 @@ void OcctViewWidget::updateManipulatorSize()
 
 void OcctViewWidget::setSymmetryIndicator(bool on, const gp_Pln& plane)
 {
-    initializeViewer();
-
     mySymmetryIndicatorOn = on;
     mySymmetryIndicatorPlane = plane;
 
+    // NEVER forces initializeViewer() - GridRenderer::update()'s own rule,
+    // one call site over (see its header): a no-op until a context already
+    // exists. This is reached from resyncView() on every undo/redo/open/
+    // restore, symmetry off or on, and an unconditional initializeViewer()
+    // here forced winId()/native-window realization far earlier than this
+    // widget's lazy-init contract intends - measured as a real regression
+    // (fix round 1): it moved that realization inside the constructor's own
+    // showInitScreen() path, ahead of the window's first show(), and that
+    // reordering broke camera-state and focus determinism in gui_smoke
+    // ("startup distance is 700mm", "keyboard focus is visible on a chip" -
+    // both failed 4/4 on a clean parent-commit A/B, neither is the P7 wheel
+    // flake). By the time symmetry is genuinely turned on by a user or a
+    // test, the viewport has always already painted once, so myContext is
+    // never null there in practice - see setSymmetryEnabled()'s own comment.
+    if (myContext.IsNull()) return;
+
     if (!on) {
-        if (!myContext.IsNull() && !mySymmetryIndicator.IsNull()) {
+        if (!mySymmetryIndicator.IsNull()) {
             myContext->Remove(mySymmetryIndicator, Standard_False);
             myContext->UpdateCurrentViewer();
         }

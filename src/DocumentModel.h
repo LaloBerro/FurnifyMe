@@ -91,6 +91,20 @@ public:
     // `id`'s twin body id, or -1 when unpaired (including for an unknown id).
     int twinOf(int id) const;
 
+    // Drops EVERY pairing, leaving symmetryOn()/symmetryPlane() untouched -
+    // the plane-change rule (fix round 1): a new plane invalidates every
+    // existing pairing's MEANING (each one was computed against the OLD
+    // plane), so changing the plane unpairs everything, the same rule
+    // setSymmetry(false, ...) already follows for turning the mode off. No
+    // checkpoint, for the same reason - a mode/plane change is not an edit -
+    // but it does bump revision() when it actually drops anything, so a
+    // dirty furniture is written back.
+    //
+    // Returns whether anything was actually unpaired, so a caller (only
+    // MainWindow's plane-pick route needs this) can announce it - or stay
+    // silent - rather than reporting an unpairing that changed nothing.
+    bool unpairAll();
+
     // Renames whichever kind of item `id` belongs to - a body or an
     // outline, since the two share one id space. Milestone 3 introduces
     // user-editable names (Task 5 wires the drawer's rename gesture); this
@@ -259,15 +273,24 @@ private:
     struct State {
         std::vector<Solid> solids;
         std::vector<Outline> outlines;
-        // Symmetry rides along in the same State: pairing changes happen
+        // The PAIRING MAP rides along in State: pairing changes happen
         // exclusively inside checkpointed commits (extrude, an edit that
         // follows a twin, a boolean, a delete), so undoing one of those must
         // restore the pairing exactly as it stood, the same way it restores
-        // names. setSymmetry() itself never checkpoints - see its header -
-        // so an on/off flip is only ever captured incidentally, by whatever
-        // checkpoint happens next.
-        bool symmetryOn = false;
-        gp_Pln symmetryPlane{gp_Pnt(0.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0)};
+        // names.
+        //
+        // symmetryOn/symmetryPlane deliberately do NOT - fix round 1. The
+        // mode is a session setting, not document content, the same rule
+        // visibility already follows (see setVisible()'s own comment): it
+        // is set outside any checkpoint (setSymmetry() never takes one), so
+        // treating it as undoable content let an undo landing after "turn
+        // symmetry off" silently turn it back ON and resurrect whatever
+        // pairing that checkpoint had captured - a mode switch resurrected
+        // by a Ctrl+Z aimed at something else entirely. Every reader of a
+        // pairing (MainWindow's twin-follow hook, the delete and boolean
+        // special cases) is gated on symmetryOn() as well as twinOf() for
+        // exactly this reason: a pairing entry surviving in State is inert
+        // the moment the live mode is off, whatever undo does to it.
         std::unordered_map<int, int> twin;
     };
 

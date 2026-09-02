@@ -186,7 +186,7 @@ void skipByEnvironment(int checks, const QString& why)
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 1607;
+constexpr int kCheckFloor = 1630;
 
 void check(bool condition, const QString& what)
 {
@@ -14633,9 +14633,14 @@ int main(int argc, char* argv[])
               "the Symmetry action checks itself on");
         check(probe.document().symmetryOn(), "and document() agrees");
         check(probe.view()->symmetryIndicatorShown(), "the faint plane indicator appears");
-        check(probe.statusBar()->currentMessage().contains(QStringLiteral("Symmetry on")),
-              QStringLiteral("the status label leads with \"Symmetry on\" (\"%1\")")
-                  .arg(probe.statusBar()->currentMessage()));
+        // The PERSISTENT state label (updateStateLabel()'s own right-hand
+        // readout), not the transient status-bar message - fix round 1:
+        // the message happens to say "Symmetry on" too, which let the
+        // original check pass without ever reading the label CLAUDE.md's
+        // own words actually describe.
+        check(stateLabelText(probe).startsWith(QStringLiteral("Symmetry on — ")),
+              QStringLiteral("the persistent state label leads with \"Symmetry on\" (\"%1\")")
+                  .arg(stateLabelText(probe)));
 
         ToastHost* symToasts = probe.findChild<ToastHost*>();
 
@@ -14750,6 +14755,47 @@ int main(int argc, char* argv[])
         check(probe.document().twinOf(unionedId) == -1,
               "...and the result is UNPAIRED - the symmetric whole needs no mirror");
 
+        // --- boolean: BOTH operands paired to DIFFERENT third parties -----
+        // Not brief-required, added in fix round 1 review: G is paired to H,
+        // I is paired to J - two independent pairs, neither operand the
+        // other's own twin. The tie-break (applyBooleanToSelection's own
+        // comment) prefers the lower id, so G survives with its OWN pairing
+        // untouched; I is removed, and removeSolid()'s own pairing cleanup
+        // must leave J - I's former partner - cleanly unpaired rather than
+        // pointing at a ghost id.
+        trigger(probe, QStringLiteral("Start Sketch"));
+        sketchQuadWorld(-150.0, -150.0, -90.0, -90.0);
+        trigger(probe, QStringLiteral("Finish Sketch"));
+        check(probe.extrudePendingFace(6.0), "the G/H pair extrudes");
+        const auto& solidsGH = probe.document().solids();
+        const int idG = solidsGH[solidsGH.size() - 2].id;
+        const int idH = solidsGH[solidsGH.size() - 1].id;
+        check(probe.document().twinOf(idG) == idH, "G/H is paired");
+
+        trigger(probe, QStringLiteral("Start Sketch"));
+        sketchQuadWorld(90.0, -150.0, 150.0, -90.0);
+        trigger(probe, QStringLiteral("Finish Sketch"));
+        check(probe.extrudePendingFace(6.0), "the I/J pair extrudes");
+        const auto& solidsIJ = probe.document().solids();
+        const int idI = solidsIJ[solidsIJ.size() - 2].id;
+        const int idJ = solidsIJ[solidsIJ.size() - 1].id;
+        check(probe.document().twinOf(idI) == idJ, "I/J is paired");
+        check(idG < idI, "G was created before I, so the sort inside "
+                         "applyBooleanToSelection puts G first - what this check assumes");
+
+        probe.view()->setSelectedSolids({idG, idI});
+        settle(80);
+        const std::size_t bodiesBeforeCrossUnion = probe.document().count();
+        trigger(probe, QStringLiteral("Union"));
+        check(probe.document().count() == bodiesBeforeCrossUnion - 1,
+              "unioning two operands paired to DIFFERENT partners still collapses to one body");
+        check(probe.document().contains(idG) && !probe.document().contains(idI),
+              "the lower id (G) survives; I is gone");
+        check(probe.document().twinOf(idG) == idH,
+              "G keeps its OWN pairing, untouched by the boolean");
+        check(probe.document().twinOf(idJ) == -1,
+              "I's former partner (J) is cleanly unpaired, not left pointing at a ghost id");
+
         // --- delete: one half of a pair takes both, in ONE checkpoint ------
         trigger(probe, QStringLiteral("Start Sketch"));
         sketchQuadWorld(-220.0, 60.0, -170.0, 110.0);
@@ -14802,6 +14848,73 @@ int main(int argc, char* argv[])
         check(symToasts != nullptr && !symToasts->currentText().contains(QStringLiteral("twin followed")),
               "and the toast does not claim a twin followed");
 
+        // --- fix round 1, Important #2: an un-checkpointed mode switch must
+        // not be resurrected by an undo aimed at something else. Scenario,
+        // exactly as reviewed: symmetry on, pair, pull (checkpointed WHILE
+        // paired - that checkpoint's State snapshot carries the pairing),
+        // symmetry OFF (no checkpoint of its own), Ctrl+Z (pops the PULL's
+        // checkpoint, which restores the pairing map - pairing IS
+        // undo-tracked - but must NOT restore the mode, which is not). The
+        // mode must stay off, and a pairing the undo brings back must stay
+        // INERT: the very next edit must not propagate.
+        {
+            trigger(probe, QStringLiteral("Symmetry"));   // back on, for this scenario's setup
+            check(probe.document().symmetryOn(), "symmetry is on, going into this scenario");
+
+            trigger(probe, QStringLiteral("Start Sketch"));
+            sketchQuadWorld(-90.0, -150.0, -30.0, -90.0);
+            trigger(probe, QStringLiteral("Finish Sketch"));
+            check(probe.extrudePendingFace(6.0), "a fresh pair (K/L) extrudes for this scenario");
+            const auto& solidsKL = probe.document().solids();
+            const int idK = solidsKL[solidsKL.size() - 2].id;
+            const int idL = solidsKL[solidsKL.size() - 1].id;
+            check(probe.document().twinOf(idK) == idL, "K/L is paired");
+
+            TopoDS_Face faceOfK;
+            for (TopExp_Explorer it(probe.document().shapeOf(idK), TopAbs_FACE); it.More();
+                it.Next()) {
+                faceOfK = TopoDS::Face(it.Current());
+                break;
+            }
+            check(!faceOfK.IsNull(), "a face of K was found");
+            check(probe.pullFaceBy(faceOfK, 3.0),
+                  "pulling K (paired, symmetry on) succeeds - this checkpoint's State "
+                  "carries the K/L pairing");
+
+            trigger(probe, QStringLiteral("Symmetry"));   // off - takes NO checkpoint
+            check(!probe.document().symmetryOn(), "symmetry is off - no checkpoint for this");
+
+            trigger(probe, QStringLiteral("Undo"));   // pops the PULL's own checkpoint
+            check(!probe.document().symmetryOn(),
+                  "the mode STAYS off after undo - it is not part of undo State any more");
+
+            // The pairing map may well have been resurrected (it IS
+            // undo-tracked) - that is fine and expected. What must NOT
+            // happen is it ACTING: a pairing is inert the moment the live
+            // mode is off, whatever undo did to the map underneath it.
+            const double volLBefore = ModelingOps::volume(probe.document().shapeOf(idL));
+            TopoDS_Face anotherFaceOfK;
+            for (TopExp_Explorer it(probe.document().shapeOf(idK), TopAbs_FACE); it.More();
+                it.Next()) {
+                anotherFaceOfK = TopoDS::Face(it.Current());
+                break;
+            }
+            check(!anotherFaceOfK.IsNull(), "a face of K was found after the undo");
+            check(probe.pullFaceBy(anotherFaceOfK, 2.0),
+                  "pulling K again, after the undo, succeeds");
+            check(std::fabs(ModelingOps::volume(probe.document().shapeOf(idL)) - volLBefore) <
+                      1.0e-9,
+                  "L's volume is UNCHANGED - no re-pairing behaviour, even though the "
+                  "pairing map may have come back with the undo");
+            check(symToasts != nullptr &&
+                      !symToasts->currentText().contains(QStringLiteral("twin followed")),
+                  "and the toast does not claim a twin followed either");
+
+            // Leave symmetry off, matching the state the save/load section
+            // below expects to turn back on itself.
+            if (probe.document().symmetryOn()) trigger(probe, QStringLiteral("Symmetry"));
+        }
+
         // --- state survives save/load: on/off, plane and pairing all persist
         trigger(probe, QStringLiteral("Symmetry"));   // back on
         check(probe.document().symmetryOn(), "symmetry back on, for the save/load check");
@@ -14841,6 +14954,16 @@ int main(int argc, char* argv[])
         // own faces, and nothing checked past this point depends on the
         // plane being the world default any more.
         {
+            // Fix round 1, Important #3: a plane change must unpair every
+            // existing pairing (a pairing computed against the OLD plane is
+            // meaningless against the new one - the next twin-follow edit
+            // would mirror about the wrong plane and teleport the twin).
+            // reloadedE/reloadedF are still paired at this point in the
+            // block - confirm that BEFORE the pick, so the check below
+            // proves something actually changed.
+            check(probe.document().twinOf(reloadedE) == reloadedF,
+                  "reloadedE/reloadedF are still paired, going into the plane-change check");
+
             TopoDS_Face someFace;
             for (TopExp_Explorer it(probe.document().shapeOf(reloadedE), TopAbs_FACE);
                 it.More(); it.Next()) {
@@ -14868,6 +14991,15 @@ int main(int argc, char* argv[])
             check(symmetryAction != nullptr && symmetryAction->isChecked(),
                   "the Symmetry action's checked state follows document() (resynced by "
                   "updateActions(), not by this call)");
+
+            check(probe.document().twinOf(reloadedE) == -1,
+                  "the plane change unpaired reloadedE/reloadedF - a pairing computed "
+                  "against the old plane cannot mean anything against the new one");
+            check(symToasts != nullptr &&
+                      symToasts->currentText() ==
+                          QStringLiteral("Symmetry plane moved — bodies unpaired"),
+                  QStringLiteral("...and the Note toast says so (\"%1\")")
+                      .arg(symToasts ? symToasts->currentText() : QString()));
         }
     }
 
