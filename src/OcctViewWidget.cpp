@@ -817,6 +817,25 @@ bool OcctViewWidget::advanceAxisDrag(AxisDrag& drag, const gp_Lin& axis, const Q
     return true;
 }
 
+// Task 5 fix round 1: SlimAxisManipulator, a subclass that widened access to
+// AIS_Manipulator's protected `myAxes[3]` so Axis::SetAxisRadius() (public on
+// Axis, confirmed reachable this way) could be driven from here, was BUILT
+// and MEASURED against real Dump pixels - three independent methodologies,
+// several scale factors, at points OCCT's own hover detection confirmed were
+// genuinely on the X translation arm. Every measurement moved the WRONG way:
+// the arm's rendered cross-section GREW as the radius shrank (34 px stock to
+// 40 px at a 0.3 scale to 80 px at 0.02, a reproducible, monotonic trend, not
+// noise), most likely because the shrinking shaft was revealing an adjacent
+// manipulator part - the rotation ring or the hub cluster - that shares the
+// exact same uniform matte material this file already applies, so a thinner
+// shaft did not read as "less grey" anywhere the probe could isolate it.
+// Reverted rather than shipped: CLAUDE.md's zoom-persistence lesson is to
+// trust a measured pixel over a setter's own claim, and here the measurement
+// - taken seriously, not skipped - said the setter's name did not describe
+// what actually reached the screen. The manipulator therefore keeps OCCT's
+// stock proportions as well as its stock per-axis hues; see the colour
+// paragraph below for the boundary that IS real and holds regardless.
+
 void OcctViewWidget::attachManipulator(int solidId)
 {
     initializeViewer();
@@ -888,10 +907,11 @@ void OcctViewWidget::attachManipulator(int solidId)
     options.SetEnableModes(Standard_True);
     myManipulator->Attach(it->second, options);
     activateManipulatorModes();
-    // The one styling hook AIS_Manipulator actually exposes: the shading
-    // aspect its parts are computed from. The per-axis HUES are private
-    // (AIS_Manipulator::Axis::myColor, set in init() and reachable through no
-    // public setter), and red/green/blue for X/Y/Z is the universal gizmo
+    // The one COLOUR styling hook AIS_Manipulator actually exposes: the
+    // shading aspect its parts are computed from. The per-axis HUES are
+    // private (AIS_Manipulator::Axis::myColor, set in init() and reachable
+    // through no public setter at ANY access level - see the corrected
+    // paragraph below), and red/green/blue for X/Y/Z is the universal gizmo
     // language anyway - tinting all three to one accent would cost more than
     // it bought. What this does reach is the material, so the gizmo reads as
     // part of this app's matte surface family rather than a glossy default.
@@ -899,26 +919,45 @@ void OcctViewWidget::attachManipulator(int solidId)
     // CONFIRMED, not assumed - Task 5 (Theme::gizmoAxisX/Y/Z, the 2D
     // AxisGizmo's own restyle) went looking for a way to carry those same
     // three tokens onto THIS manipulator too, and read AIS_Manipulator.hxx
-    // end to end rather than trust the paragraph above at face value. The
-    // boundary is real and total: SetPart(axisIndex, mode, enabled) only
-    // toggles a part's VISIBILITY, not its colour, despite the name reading
-    // like a styling call; AIS_Manipulator::Axis::Color() is a const getter
-    // with no matching setter; the Axis objects themselves live in
-    // `protected Axis myAxes[3]` with no public accessor to reach one from
-    // outside the class, so even a hypothetical subclass could not repaint
-    // them (myColor is protected to Axis's OWN hierarchy, not
-    // AIS_Manipulator's); and Attributes()->ShadingAspect(), the hook used
-    // below, is the ONE material for the whole object - every Axis::Compute()
-    // call shares it, which is why tinting it recolours all three arms
-    // uniformly and could never single out "the uniform-scale handle" the
-    // way a token-per-part restyle would need. SetGap() is genuinely public,
-    // but it has no matching getter to read back, and CLAUDE.md's own
-    // zoom-persistence lesson is to measure a rendered pixel rather than
-    // trust a setter - a spacing tweak this file cannot verify against a
-    // Dump was left alone rather than shipped unverified. So the manipulator
-    // stays OCCT's stock proportions and stock per-axis hues; only the
-    // matte material below, and the AxisGizmo widget beside it, actually
-    // wear this app's tokens.
+    // end to end rather than trust the paragraph above at face value.
+    //
+    // CORRECTED in fix round 1 (review), TWICE - once by the review, once by
+    // actually building and measuring what it found. It is real and total
+    // for COLOUR - AIS_Manipulator::Axis::Color() is a const getter with no
+    // matching setter anywhere, and Axis::myColor is protected to Axis's OWN
+    // class hierarchy, unreachable even from a subclass of AIS_Manipulator.
+    // It is NOT total for API SURFACE alone: `protected Axis myAxes[3]` on
+    // AIS_Manipulator IS reachable from a subclass (protected members are),
+    // and Axis::SetAxisRadius()/AxisRadius() ARE public on Axis itself - the
+    // review correctly caught that the first pass had stopped at "the Axis
+    // objects are unreachable" without separating "unreachable" (false, for
+    // a subclass) from "myColor is unreachable regardless" (true).
+    //
+    // But REACHABLE is not the same as USABLE, and this file went looking
+    // for that difference rather than assuming the header settled it: a
+    // SlimAxisManipulator subclass was built exactly as described, and its
+    // effect was measured against real Dump pixels - not a Size()/
+    // AxisRadius() read-back, three independent methodologies, several
+    // scale factors, at points OCCT's own hover detection confirmed were
+    // genuinely on the X translation arm. Every measurement moved the WRONG
+    // way: the arm's rendered cross-section GREW as the radius shrank (34 px
+    // stock to 40 px at a 0.3 scale to 80 px at 0.02 - reproducible and
+    // monotonic, not noise), almost certainly because the shrinking shaft
+    // revealed an adjacent manipulator part - the rotation ring or the hub
+    // cluster - that shares the exact same uniform matte material this file
+    // already applies below, so a thinner shaft did not read as "less grey"
+    // anywhere the probe could isolate it. Reverted rather than shipped:
+    // CLAUDE.md's zoom-persistence lesson is to trust a measured pixel over
+    // a setter's own claim, and here the measurement said the setter's name
+    // did not describe what actually reached the screen. SetPart(axisIndex,
+    // mode, enabled) is still visibility-only, not colour, despite the name;
+    // Attributes()->ShadingAspect(), the hook used below, is still the ONE
+    // material for the whole object, which is why it recolours all three
+    // arms uniformly and could never single out "the uniform-scale handle";
+    // and SetGap() is still public with no matching getter at all, so a
+    // spacing tweak through it was never attempted. The manipulator wears
+    // OCCT's stock proportions AND stock per-axis hues; both boundaries are
+    // real, and only one of the two was ever a matter of API surface.
     const Handle(Prs3d_ShadingAspect) gizmoAspect =
         myManipulator->Attributes()->ShadingAspect();
     if (!gizmoAspect.IsNull()) {

@@ -186,7 +186,7 @@ void skipByEnvironment(int checks, const QString& why)
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 1693;
+constexpr int kCheckFloor = 1709;
 
 void check(bool condition, const QString& what)
 {
@@ -13956,10 +13956,50 @@ int main(int argc, char* argv[])
             }
         }
 
+        // --- a REAL double-click on the OUTLINE row (fix round 1, Minor 4) --
+        // The body case above proves the mechanism (real hit-testing,
+        // WA_TransparentForMouseEvents, the eventFilter's dblclick branch);
+        // this proves it for the OUTLINE branch specifically, which reads a
+        // different row property ("outlineId", not "solidId") and was
+        // otherwise only ever exercised through F2 below - never through the
+        // mouse route a real user would actually use to rename an outline.
+        QWidget* outlineRow = findRow(outlineId, true);
+        check(outlineRow != nullptr, "the outline's row widget is reachable for the suite");
+        if (outlineRow && items) {
+            const QPoint overOutlineText =
+                outlineRow->mapTo(items, QPoint(outlineRow->width() / 3, outlineRow->height() / 2));
+            QWidget* outlineHit = items->childAt(overOutlineText);
+            check(outlineHit != nullptr,
+                  "childAt() over the outline row's text cell finds a real widget to send to");
+            if (outlineHit) {
+                const QPoint hitLocal = outlineHit->mapFrom(items, overOutlineText);
+                doubleClickAt(outlineHit, QPointF(hitLocal));
+            }
+            QLineEdit* outlineEdit = outlineRow->findChild<QLineEdit*>();
+            check(outlineEdit != nullptr,
+                  QStringLiteral("a REAL double-click on the outline row's text cell opens "
+                                 "the inline editor too (real hit was %1)")
+                      .arg(outlineHit ? QString::fromLatin1(outlineHit->metaObject()->className())
+                                      : QStringLiteral("null")));
+            if (outlineEdit) {
+                check(outlineEdit->text() ==
+                          QString::fromStdString(renameProbe.document().outlineNameOf(outlineId)),
+                      QStringLiteral("pre-filled with the outline's current name (\"%1\")")
+                          .arg(outlineEdit->text()));
+                outlineEdit->setText(QStringLiteral("Back Panel"));
+                sendKeyTo(outlineEdit, Qt::Key_Return);
+                settle(200);
+            }
+            check(renameProbe.document().outlineNameOf(outlineId) == "Back Panel",
+                  QStringLiteral("Enter commits it through the document, on the OUTLINE "
+                                 "branch (\"%1\")")
+                      .arg(QString::fromStdString(renameProbe.document().outlineNameOf(outlineId))));
+        }
+
         // --- F2 on the SELECTED body row ------------------------------------
         renameProbe.view()->setSelectedSolids({bodyId});
         settle(150);
-        QAction* renameAction = action(renameProbe, QStringLiteral("Rename..."));
+        QAction* renameAction = action(renameProbe, QStringLiteral("Rename"));
         check(renameAction != nullptr && renameAction->isEnabled(),
               "Rename is enabled with exactly one body selected");
         if (renameAction) renameAction->trigger();
@@ -14053,6 +14093,71 @@ int main(int argc, char* argv[])
         renameProbe.view()->setSelectedSolids({});
         settle(150);
 
+        // --- the hidden-drawer wedge (fix round 1, Important 1) -------------
+        // View -> Items off, then F2: canRename's new drawerVisible term
+        // disables the action for the ordinary shortcut/menu route, but
+        // trigger() - what this suite (and any other programmatic caller)
+        // uses - ignores isEnabled() entirely, so the REAL protection has to
+        // live where the gesture actually opens the QLineEdit
+        // (ItemsPanel::beginRenameForItem()'s own isVisible() guard), not
+        // only in updateActions(). Without it: InlineRename's setFocus()
+        // cannot take focus inside a hidden hierarchy, so the stray editor
+        // never gets an Enter/Escape/focus-out to retire it, and the
+        // re-entrancy guard then reads that stray editor as "already open"
+        // and refuses EVERY later rename - drawer shown again or not - until
+        // an unrelated document change rebuilds the rows out from under it.
+        QAction* itemsDrawerAction = action(renameProbe, QStringLiteral("Items"));
+        check(itemsDrawerAction != nullptr && itemsDrawerAction->isChecked(),
+              "the drawer starts shown, so hiding it below is a real state change");
+        if (itemsDrawerAction) itemsDrawerAction->setChecked(false);
+        settle(150);
+        check(items != nullptr && !items->isVisible(), "the drawer is genuinely hidden now");
+
+        renameProbe.view()->setSelectedSolids({bodyId});
+        settle(150);
+        check(renameAction != nullptr && !renameAction->isEnabled(),
+              "Rename disables itself while the drawer is hidden, even with a body selected "
+              "(the disabled-control-explains-itself law - see its tooltip)");
+        check(renameAction->toolTip().contains(QStringLiteral("Items")),
+              QStringLiteral("...and the tooltip says why (\"%1\")").arg(renameAction->toolTip()));
+
+        // trigger() anyway - bypassing isEnabled(), exactly as a stray
+        // programmatic call (or a future control that forgets to check it)
+        // would.
+        if (renameAction) renameAction->trigger();
+        settle(150);
+        check(items != nullptr && items->findChild<QLineEdit*>() == nullptr,
+              "no stray QLineEdit was created in the hidden hierarchy - the wedge this fix "
+              "round closes");
+
+        // The drawer comes back, and rename genuinely still works - proving
+        // the guard above is a REFUSAL, not a silent wedge that wound up
+        // looking the same from this one assertion alone.
+        if (itemsDrawerAction) itemsDrawerAction->setChecked(true);
+        settle(150);
+        check(items != nullptr && items->isVisible(), "the drawer is shown again");
+        renameProbe.view()->setSelectedSolids({bodyId});
+        settle(150);
+        check(renameAction != nullptr && renameAction->isEnabled(),
+              "...and Rename is live again with the drawer back and a body selected");
+        if (renameAction) renameAction->trigger();
+        settle(150);
+        QWidget* postWedgeRow = findRow(bodyId, false);
+        QLineEdit* postWedgeEdit = postWedgeRow ? postWedgeRow->findChild<QLineEdit*>() : nullptr;
+        check(postWedgeEdit != nullptr,
+              "a rename opened after the hidden-drawer attempt still works - the "
+              "re-entrancy guard was never actually wedged");
+        if (postWedgeEdit) {
+            postWedgeEdit->setText(QStringLiteral("Post-Wedge"));
+            sendKeyTo(postWedgeEdit, Qt::Key_Return);
+            settle(200);
+        }
+        check(renameProbe.document().nameOf(bodyId) == "Post-Wedge",
+              QStringLiteral("...and it genuinely commits (\"%1\")")
+                  .arg(QString::fromStdString(renameProbe.document().nameOf(bodyId))));
+        renameProbe.view()->setSelectedSolids({});
+        settle(150);
+
         // --- Escape cancels outright - the old name stands ------------------
         if (items) items->beginRenameForItem(bodyId, /*isOutline=*/false);
         settle(120);
@@ -14066,7 +14171,7 @@ int main(int argc, char* argv[])
             sendKeyTo(escapeEdit, Qt::Key_Escape);
             settle(150);
         }
-        check(renameProbe.document().nameOf(bodyId) == "Leg",
+        check(renameProbe.document().nameOf(bodyId) == "Post-Wedge",
               "Escape cancels outright - the old name stands");
         check(static_cast<int>(renameProbe.document().undoDepth()) == checkpointsBeforeEscape,
               "...and no checkpoint was taken for a rename that never happened");
@@ -14082,7 +14187,7 @@ int main(int argc, char* argv[])
             sendKeyTo(blankEdit, Qt::Key_Return);
             settle(150);
         }
-        check(renameProbe.document().nameOf(bodyId) == "Leg",
+        check(renameProbe.document().nameOf(bodyId) == "Post-Wedge",
               "a whitespace-only commit is refused silently - the old name stands");
         check(static_cast<int>(renameProbe.document().undoDepth()) == checkpointsBeforeBlank,
               "...with no checkpoint, no toast - a mind changed, not a failure");
@@ -14097,12 +14202,46 @@ int main(int argc, char* argv[])
         settle(200);
         ToastHost* afterRenameToasts = renameProbe.findChild<ToastHost*>();
         check(afterRenameToasts != nullptr &&
-                  afterRenameToasts->currentText() == QStringLiteral("Deleted Leg"),
+                  afterRenameToasts->currentText() == QStringLiteral("Deleted Post-Wedge"),
               QStringLiteral("a later toast about this body uses its RENAMED name, not its "
                              "original one (\"%1\")")
                   .arg(afterRenameToasts ? afterRenameToasts->currentText() : QString()));
         trigger(renameProbe, QStringLiteral("Undo"));
         settle(150);
+
+        // --- this probe's own toasts join the vocabulary sweep too (fix ----
+        // round 1, Minor 3) - the SAME mechanism Task 3's own probe-toast
+        // sweep uses (Toast::paintedTexts() records every message shown this
+        // run, not just the live one), pointed at `renameProbe` instead: an
+        // isolated probe's ToastHost is a separate object in a separate
+        // tree, so nothing about the shared `window`'s own sweep - or even
+        // the exact-text checks above, which prove the message shown at ONE
+        // moment, not the vocabulary of every message this probe has shown -
+        // could ever reach the "Renamed to ..." copy this block has produced
+        // so far. Run HERE, before the deliberate banned-word rename just
+        // below: that toast genuinely contains the banned word (Toast has no
+        // user-data exemption of its own), and sweeping after it would fail
+        // on exactly the string this task means to exempt one layer up.
+        {
+            QStringList renameToastOffenders;
+            for (Toast* toastWidget : renameProbe.findChildren<Toast*>()) {
+                for (const QString& text : toastWidget->paintedTexts()) {
+                    for (const QString& word : bannedWords()) {
+                        if (usesBannedWord(text, word))
+                            renameToastOffenders
+                                << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
+                    }
+                }
+            }
+            check(!renameProbe.findChildren<Toast*>().isEmpty(),
+                  "the rename probe has a toast host to sweep, so this is not vacuous");
+            check(renameToastOffenders.isEmpty(),
+                  QStringLiteral("none of this probe's own toast text (the ordinary renames "
+                                 "and the delete/undo above) uses a banned word (%1)")
+                      .arg(renameToastOffenders.isEmpty()
+                               ? QStringLiteral("none")
+                               : renameToastOffenders.join(QStringLiteral(", "))));
+        }
 
         // --- the vocabulary sweep: user data is exempt, both directions -----
         // The SAME mechanism InitScreen's furniture names and VersionsPanel's

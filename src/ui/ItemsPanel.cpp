@@ -466,6 +466,22 @@ void ItemsPanel::showPendingOutline(int id)
 
 void ItemsPanel::beginRenameForItem(int id, bool isOutline)
 {
+    // Fix round 1 (review): refuse outright while this panel is not visible.
+    // MainWindow's updateActions() already disables the F2 action while
+    // View -> Items is off (the discoverable half - a disabled control that
+    // says why), but disabling a QAction does not stop a caller from
+    // invoking trigger() directly, which Qt runs regardless of isEnabled() -
+    // only real shortcut/menu input respects it. This is the one place the
+    // gesture actually opens a QLineEdit, so it is the one place the wedge
+    // has to be impossible rather than merely discouraged: InlineRename's
+    // setFocus() cannot take focus inside a hidden widget hierarchy, so an
+    // edit opened here would sit with no way to commit, cancel, or lose
+    // focus - and the re-entrancy guard just below would then read that
+    // stray editor as "a rename is already open" and refuse every LATER
+    // rename too, drawer shown or not, until an unrelated document change
+    // rebuilds the rows out from under it.
+    if (!isVisible()) return;
+
     // Re-entrancy guard: F2 is a plain QAction shortcut, which fires
     // regardless of what currently holds focus - including the QLineEdit an
     // earlier call to this very function just opened, since that edit claims

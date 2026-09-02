@@ -660,7 +660,11 @@ void MainWindow::buildActions()
     // keyboard route; double-click on a row is its mouse route, wired
     // straight into ItemsPanel rather than through this action (see
     // buildOverlay()'s connection to renameCommitted()).
-    myRenameAction = new QAction(tr("Re&name..."), this);
+    // No ellipsis: the convention elsewhere in this menu is that "..."
+    // promises a further dialog (Appearance..., Save version...), and this
+    // app has none - Rename opens an inline edit directly over the row, the
+    // same immediate contract Delete Selected's own unadorned label keeps.
+    myRenameAction = new QAction(tr("Re&name"), this);
     myRenameAction->setShortcut(QKeySequence(Qt::Key_F2));
     connect(myRenameAction, &QAction::triggered, this, &MainWindow::onRenameSelected);
 
@@ -1412,16 +1416,37 @@ void MainWindow::updateActions()
     // this is live for exactly one selected body, or for the waiting outline
     // when nothing is selected - never for two or more bodies, where Delete
     // stays enabled and this does not.
+    //
+    // Fix round 1 (review): the drawer must be VISIBLE too. F2's whole
+    // gesture is opening a QLineEdit over a row that lives inside
+    // myItemsPanel, and with View -> Items off that row is a real widget in
+    // a HIDDEN hierarchy - InlineRename's setFocus() never actually takes
+    // focus there (Qt does not focus a widget with a hidden ancestor), so
+    // none of Enter/Escape/focus-out can ever fire and the stray editor sits
+    // there forever. Worse, ItemsPanel::beginRenameForItem()'s own
+    // re-entrancy guard (see its header) then reads that stray editor as "a
+    // rename is already open" and refuses every LATER rename too, drawer
+    // shown or not, until an unrelated document change rebuilds the rows out
+    // from under it. Gating here is the disabled-control-explains-itself law
+    // CLAUDE.md names elsewhere; ItemsPanel::beginRenameForItem() below
+    // additionally guards itself, because this action's enabled state does
+    // not stop a caller from invoking trigger() directly (Qt actions ignore
+    // isEnabled() for programmatic trigger()s, only for real shortcut/menu
+    // input) - the ONE place the gesture actually opens is where the wedge
+    // has to be structurally impossible, not just discouraged.
+    const bool drawerVisible = myItemsPanelAction && myItemsPanelAction->isChecked();
     const bool renameTargetsOutline = selectedCount == 0 && hasPendingFace();
-    const bool canRename =
-        !mySketching && !atInit && (selectedCount == 1 || renameTargetsOutline);
+    const bool canRename = !mySketching && !atInit && drawerVisible &&
+                           (selectedCount == 1 || renameTargetsOutline);
     myRenameAction->setEnabled(canRename);
     myRenameAction->setToolTip(
-        renameTargetsOutline
-            ? tr("Rename the outline that's waiting (F2)")
-            : selectedCount == 1
-                  ? tr("Rename the selected body (F2)")
-                  : tr("Select exactly one body to rename it (F2)"));
+        !drawerVisible
+            ? tr("Show the Items drawer to rename a row (F2, View → Items)")
+            : renameTargetsOutline
+                  ? tr("Rename the outline that's waiting (F2)")
+                  : selectedCount == 1
+                        ? tr("Rename the selected body (F2)")
+                        : tr("Select exactly one body to rename it (F2)"));
     // Mid-sketch, Undo removes the last placed point (onUndo() reroutes to
     // onUndoSketchPoint); outside a sketch it undoes a document change. The
     // menu text stays "Undo" either way - the user's word for "take that
