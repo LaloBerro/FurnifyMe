@@ -1836,10 +1836,11 @@ void MainWindow::showInitScreen()
     // keeps the splitter from outliving the furniture it was comparing.
     if (myCompareView) closeCompare();
 
-    // Flush whatever furniture is currently open before leaving it - the
-    // same rule closeCurrentFurniture() follows, reached here too (a
-    // furniture can be left behind by more than one route, and this is the
-    // one both converge on).
+    // Belt for any route that reaches here without closeCurrentFurniture()'s
+    // own fresh save decision (which cancels the debounce and saves before
+    // ever calling this): a debounce still pending at this point is flushed
+    // rather than left to fire after the editor has hidden. On the ordinary
+    // close path the timer is already stopped and this is a no-op.
     if (myAutosaveTimer && myAutosaveTimer->isActive()) {
         myAutosaveTimer->stop();
         flushAutosave();

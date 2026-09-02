@@ -772,9 +772,11 @@ private:
     // must report somewhere applies to a silent autosave exactly as it does
     // to everything else.
     bool performSave(bool announce);
-    // The debounce timer's own timeout, and closeCurrentFurniture()'s flush.
-    // A no-op when nothing is actually dirty, so closing a furniture the
-    // instant after its own autosave just ran does not write it twice.
+    // The debounce timer's own timeout. closeCurrentFurniture() does NOT
+    // route through this any more - it cancels the debounce and makes one
+    // fresh save decision of its own, so a failed close-time save can abort
+    // the handoff (fix round 2). A no-op when nothing is actually dirty, so
+    // an autosave firing the instant after a manual save does not write twice.
     void flushAutosave();
     // Builds myAutosaveTimer on first use (same lazy-build reasoning as
     // persistAppearance()'s myAppearanceWrite) and (re)starts it - the ONE
