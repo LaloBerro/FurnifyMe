@@ -8,6 +8,8 @@
 #include <QPainter>
 #include <QPainterPath>
 
+#include <algorithm>
+
 namespace {
 constexpr int kIcon = 16;
 constexpr int kPadX = 12;
@@ -159,18 +161,27 @@ void ToolChip::paintEvent(QPaintEvent* /*event*/)
     QPainterPath path;
     path.addRoundedRect(body, kRadius, kRadius);
     painter.fillPath(path, background);
-    // 1px border(), always - not just when checked. Through Theme's one
-    // crisp-border idiom: stroked on the integer path this used to use, a chip's border painted
-    // two columns at half intensity, which was invisible until it sat inside
-    // the rail's own crisp card.
-    Theme::drawCrispBorder(painter, QRectF(body), Theme::border(), kRadius);
+    // border(), always - not just when checked - at the user's own width
+    // (Theme::chipStrokePx(), an Appearance token since the user asked for
+    // it; 1px is the shipped default). Through Theme's one crisp-border
+    // idiom: stroked on the integer path this used to use, a chip's border
+    // painted two columns at half intensity, which was invisible until it
+    // sat inside the rail's own crisp card. A width of 0 draws nothing at
+    // all - the hover/pressed/checked fills still carry the states.
+    const double stroke = Theme::chipStrokePx();
+    if (stroke > 0.05)
+        Theme::drawCrispBorder(painter, QRectF(body), Theme::border(), kRadius, stroke);
 
-    if (isChecked()) {
+    if (isChecked() && stroke > 0.05) {
         // A second, inset ring - not a replacement for the border above.
         // Checked reads as "bordered, plus marked", not "a differently
-        // coloured border instead of the usual one".
-        Theme::drawCrispBorder(painter, QRectF(body).adjusted(2, 2, -2, -2),
-                               Theme::accent(), kRadius - 2);
+        // coloured border instead of the usual one". Inset past the border's
+        // own width so the two rings stay two rings at every stroke setting
+        // rather than overlapping into one thick smear.
+        const double inset = stroke + 1.0;
+        Theme::drawCrispBorder(painter,
+                               QRectF(body).adjusted(inset, inset, -inset, -inset),
+                               Theme::accent(), std::max(0.0, kRadius - inset), stroke);
     }
 
     // The glyph. Centred in the body when there is nothing beside it,

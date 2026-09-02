@@ -83,6 +83,7 @@ Spec graphite()
     s.highlightHover    = QColor("#00ffff");
     s.highlightSelected = QColor("#ffa500");
     s.basePt = 10.0;
+    s.chipStrokePx = 1.0;
     return s;
 }
 
@@ -204,7 +205,8 @@ bool operator==(const Spec& a, const Spec& b)
         if (a.*(token.member) != b.*(token.member)) return false;
     }
     return a.fontFamily == b.fontFamily &&
-           std::fabs(a.basePt - b.basePt) < 1.0e-9;
+           std::fabs(a.basePt - b.basePt) < 1.0e-9 &&
+           std::fabs(a.chipStrokePx - b.chipStrokePx) < 1.0e-9;
 }
 
 const QVector<ColourToken>& colourTokens()
@@ -284,6 +286,7 @@ QString serializeSpec(const Spec& s)
     if (!s.fontFamily.contains(QLatin1Char(';')) && !s.fontFamily.contains(QLatin1Char('=')))
         parts << QStringLiteral("family=") + s.fontFamily;
     parts << QStringLiteral("base=") + QString::number(s.basePt);
+    parts << QStringLiteral("chipStroke=") + QString::number(s.chipStrokePx);
     return parts.join(QLatin1Char(';'));
 }
 
@@ -324,6 +327,14 @@ bool deserializeSpec(const QString& text, Spec& out)
             const double pt = value.toDouble(&ok);
             if (!ok || pt < kMinBasePt || pt > kMaxBasePt) return false;
             parsed.basePt = pt;
+            sawSomething = true;
+            continue;
+        }
+        if (key == QLatin1String("chipStroke")) {
+            bool ok = false;
+            const double px = value.toDouble(&ok);
+            if (!ok || px < kMinChipStrokePx || px > kMaxChipStrokePx) return false;
+            parsed.chipStrokePx = px;
             sawSomething = true;
             continue;
         }
@@ -371,6 +382,8 @@ QColor focusRing()    { return spec().focusRing; }
 QColor focusRingMuted() { return spec().focusRingMuted; }
 QColor highlightHover()    { return spec().highlightHover; }
 QColor highlightSelected() { return spec().highlightSelected; }
+
+double chipStrokePx() { return spec().chipStrokePx; }
 
 QString fontFamily() { return spec().fontFamily; }
 

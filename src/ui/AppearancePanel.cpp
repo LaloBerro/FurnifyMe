@@ -254,6 +254,30 @@ AppearancePanel::AppearancePanel(QWidget* parent)
     sizeLine->addWidget(mySize);
     outer->addWidget(sizeRow);
 
+    auto* strokeRow = new QWidget(this);
+    makeTransparent(strokeRow, QStringLiteral("appearanceStrokeRow"));
+    auto* strokeLine = new QHBoxLayout(strokeRow);
+    strokeLine->setContentsMargins(0, 0, 0, 0);
+    strokeLine->setSpacing(8);
+    myStrokeLabel = new QLabel(tr("Button border"), strokeRow);
+    makeTransparent(myStrokeLabel, QStringLiteral("appearanceStrokeLabel"));
+    strokeLine->addWidget(myStrokeLabel, 1);
+    myStroke = new QSpinBox(strokeRow);
+    // The spec's field is a double, but a border is judged in whole pixels
+    // and the crisp-border idiom is built around integer alignment - so the
+    // control offers integers over the full legal range, 0 included.
+    myStroke->setRange(static_cast<int>(Theme::kMinChipStrokePx),
+                       static_cast<int>(Theme::kMaxChipStrokePx));
+    myStroke->setSuffix(tr(" px"));
+    myStroke->setToolTip(tr("How thick the line around the tool buttons is — "
+                            "0 leaves only the fill"));
+    connect(myStroke, &QSpinBox::valueChanged, this, [this](int px) {
+        if (mySyncing) return;
+        setChipStroke(px);
+    });
+    strokeLine->addWidget(myStroke);
+    outer->addWidget(strokeRow);
+
     auto* familyRow = new QWidget(this);
     makeTransparent(familyRow, QStringLiteral("appearanceFamilyRow"));
     auto* familyLine = new QHBoxLayout(familyRow);
@@ -343,6 +367,7 @@ void AppearancePanel::applyTheme()
         }
     }
     if (mySize) mySize->setValue(static_cast<int>(live.basePt));
+    if (myStroke) myStroke->setValue(static_cast<int>(live.chipStrokePx));
     if (myFamily) {
         const int index = myFamily->findText(live.fontFamily);
         if (index >= 0) myFamily->setCurrentIndex(index);
@@ -380,6 +405,13 @@ void AppearancePanel::setBaseSize(double pt)
 {
     Theme::Spec next = Theme::spec();
     next.basePt = std::clamp(pt, Theme::kMinBasePt, Theme::kMaxBasePt);
+    Theme::setSpec(next);
+}
+
+void AppearancePanel::setChipStroke(double px)
+{
+    Theme::Spec next = Theme::spec();
+    next.chipStrokePx = std::clamp(px, Theme::kMinChipStrokePx, Theme::kMaxChipStrokePx);
     Theme::setSpec(next);
 }
 
@@ -568,6 +600,7 @@ QStringList AppearancePanel::paintedTexts() const
     if (myTitle) texts << myTitle->text();
     for (const Row& row : myRows) texts << row.name;
     if (mySizeLabel) texts << mySizeLabel->text();
+    if (myStrokeLabel) texts << myStrokeLabel->text();
     if (myFamilyLabel) texts << myFamilyLabel->text();
     if (mySave) texts << mySave->text();
     if (myLoad) texts << myLoad->text();

@@ -78,6 +78,11 @@ struct Spec {
     // a stored derived value is a second source of truth, and the four-size
     // law is only a law while the four cannot drift apart.
     double basePt = 10.0;
+    // The border width every ToolChip strokes - the always-on border() ring
+    // and the checked accent ring both. 0 is a legal value and means no ring
+    // at all (the fill states still carry hover/pressed/checked); the default
+    // is the 1px the family has always drawn.
+    double chipStrokePx = 1.0;
 };
 
 bool operator==(const Spec& a, const Spec& b);
@@ -87,6 +92,11 @@ inline bool operator!=(const Spec& a, const Spec& b) { return !(a == b); }
 // basePt - 2 to basePt + 3, so this is 6pt..17pt of actual type.
 constexpr double kMinBasePt = 8.0;
 constexpr double kMaxBasePt = 14.0;
+
+// The band the chip border width may be set to. 0 removes the rings outright;
+// past 4 the border eats the 34px icon-only chip's face.
+constexpr double kMinChipStrokePx = 0.0;
+constexpr double kMaxChipStrokePx = 4.0;
 
 const Spec& spec();
 Spec defaultSpec();
@@ -196,6 +206,8 @@ QColor focusRingMuted(); // same outline, dimmed - a focused widget in a
                         // attention
 QColor highlightHover();    // the viewport's hover tint
 QColor highlightSelected(); // and its selection tint
+
+double chipStrokePx();      // ToolChip border width - see Spec::chipStrokePx
 
 // The whole app's type scale: four sizes, and every widget that paints text
 // reads one of them - a fifth size anywhere is a smell, not a design choice.
