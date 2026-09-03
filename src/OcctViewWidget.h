@@ -325,6 +325,68 @@ public:
     // setRenderMode() reads to decide whether to bring it back on exit.
     bool symmetryIndicatorShown() const { return mySymmetryIndicatorOn && !myRenderModeActive; }
 
+    // --- Mirror plane placement (Milestone 4, Phase 3) ---------------------
+    //
+    // The RETROACTIVE half of live symmetry - pairing bodies that already
+    // exist, as opposed to Milestone 3's creation-time pairing (which this
+    // gesture feeds into: a successful confirm turns symmetryOn() on, so
+    // every later extrude keeps mirroring the way it always did). See
+    // CLAUDE.md's picked mockup, "Handle and keys": an accent-coloured plane
+    // through the selection's own combined centre (restyling the symmetry
+    // indicator's own drawing), ONE drag handle at its centre that slides
+    // the plane along its own normal (PullArrowRenderer's axisParameterForRay
+    // mathematics, one gizmo over), and X/Y/Z keys that jump the plane
+    // straight to one of the three axis-aligned presets. MainWindow owns the
+    // commit (DocumentModel::pairWithMirror) and the checkpoint/toast; this
+    // widget owns only the gesture's own state and presentation - the same
+    // split PullArrow/BevelArrow draw between themselves and OcctViewWidget.
+    //
+    // `ids` is captured BY VALUE at the call and never re-read from the live
+    // selection afterwards - the gesture describes exactly the bodies
+    // selected when it began, PullArrow's face and BevelArrow's edges are
+    // captured the same way. The plane starts at the COMBINED centre of
+    // their bounding boxes (Bnd_Box, unioned) with its normal along world X -
+    // the same default DocumentModel's own constructed symmetry plane uses,
+    // so a gesture that never drags or reorients reproduces exactly the old
+    // toggle's starting plane. A no-op when `ids` is empty.
+    void beginMirrorPlacement(const std::vector<int>& ids);
+    // Ends the gesture with NOTHING changed - the drag, the orientation and
+    // the twin preview are all discarded. Safe to call when nothing is
+    // active.
+    void cancelMirrorPlacement();
+    // Ends the gesture WITHOUT itself changing the document - MainWindow
+    // reads mirrorPlacementPlane()/mirrorPlacementIds() BEFORE calling this,
+    // commits through DocumentModel::pairWithMirror(), and only then tears
+    // the presentation down. Kept a distinct name from cancelMirrorPlacement()
+    // so a caller can never blur "the user backed out" with "the gesture
+    // committed", even though the viewport-side teardown the two perform is
+    // identical.
+    void endMirrorPlacement();
+    bool mirrorPlacementActive() const { return myMirrorPlacement.active; }
+    // The live plane, in world space - MainWindow's own read at Enter. A
+    // default-constructed plane while nothing is active.
+    gp_Pln mirrorPlacementPlane() const;
+    // The ids captured at beginMirrorPlacement(), unchanged for the
+    // gesture's whole life.
+    std::vector<int> mirrorPlacementIds() const { return myMirrorPlacement.ids; }
+    // Jumps the orientation straight to one of the three axis-aligned
+    // presets - 0 = X, 1 = Y, 2 = Z, clamped - the X/Y/Z keys' one
+    // implementation. Resets the dragged offset to zero: an offset measured
+    // along the old normal has no honest meaning projected onto a different
+    // one. A no-op while no gesture is active or the axis is unchanged.
+    void setMirrorPlacementAxis(int axis);
+    int mirrorPlacementAxis() const { return myMirrorPlacement.axis; }
+    // The plane's signed offset from the selection's own combined centre,
+    // along its CURRENT normal, in millimetres - the chip's own number.
+    double mirrorPlacementOffset() const { return myMirrorPlacement.offset; }
+    // The handle's world position, for placing the value chip and hit-testing
+    // the drag - the plane's own location. False while no gesture is active.
+    bool mirrorPlacementHandle(gp_Pnt& out) const;
+    // True between the press that grabbed the handle and the release that
+    // ends the drag - PullArrow's rule, one gizmo over: this widget picks
+    // nothing on that release either (see mouseReleaseEvent()).
+    bool mirrorPlacementDragActive() const { return myMirrorDrag.active; }
+
     // The Z-layer every piece of sketch work is displayed in - the in-progress
     // outline and the pending face (setPreview), the direct-modeling preview,
     // the point markers, the cursor marker and the dimension annotation.
@@ -622,6 +684,17 @@ signals:
     // viewport agreeing with the document.
     void gizmoReleased(int solidId, const gp_Trsf& delta);
 
+    // A live drag of the mirror-plane handle. `offset` is the plane's whole
+    // signed distance from the selection's combined centre along its CURRENT
+    // normal - not a delta - already snapped to the grid step when Snap to
+    // Grid is on, pullDragged()'s own rule. Multiple drags can happen inside
+    // one gesture (nudge, release, nudge again) before Enter, which is why
+    // this is an absolute position rather than a per-drag distance.
+    void mirrorPlaneDragged(double offset);
+    // The end of that gesture, on pullReleased()'s own terms: `dragged` is
+    // false for a press and release that never moved.
+    void mirrorPlaneReleased(bool dragged);
+
     // A LEFT press landed in the viewport while render mode is active - the
     // brief's "a pick press in the viewport" exit. This widget does not know
     // what leaving render mode means beyond its own scene (MainWindow owns
@@ -750,6 +823,30 @@ private:
     // that would not visibly change its size. A no-op while the indicator is
     // off.
     void updateSymmetryIndicator();
+    // Rebuilds the mirror-placement plane and its handle from the live
+    // gesture state - updateSymmetryIndicator()'s own shape, one call site
+    // over, but with no equal-guard: this runs on every drag/orientation
+    // change, not on every camera tick, so the "did the screen size actually
+    // change" cache that indicator needs would only be extra bookkeeping
+    // here. A no-op while no gesture is active.
+    void updateMirrorPlacementIndicator();
+    // The FIXED line a mirror-placement drag is measured along - the
+    // selection's own combined centre (never the current, possibly already
+    // offset, plane location) and the current orientation's normal. Fixed
+    // for exactly the reason PullArrowRenderer::axis() is: measuring from a
+    // point that itself moves as the drag proceeds would make the drag
+    // measure its own effect.
+    gp_Lin mirrorPlacementAxisLine() const;
+    // 0/1/2 -> world X/Y/Z, clamped. The one place the axis-index -> gp_Dir
+    // mapping lives, so the placement, the drag and the preview cannot each
+    // carry a slightly different idea of what "Y" means.
+    static gp_Dir mirrorPlacementNormalFor(int axis);
+    // Whether `point` lands on the handle, tested in SCREEN space against its
+    // own projected position - arrowHit()'s shape, one gizmo over, and for
+    // the same reason: an AIS object with a real ComputeSelection would join
+    // the ordinary pick pipeline and compete with (or replace) the body
+    // selection the gesture is standing on.
+    bool mirrorHandleHit(const QPoint& point) const;
     // Reads the accumulated transform, puts the PRESENTATION back to where the
     // document says it should be, snaps, and emits gizmoReleased(). The
     // presentation reset is unconditional and happens here rather than in the
@@ -909,6 +1006,13 @@ private:
     // The two axis drags, one per arrow. See AxisDrag above.
     AxisDrag myPullDrag;
     AxisDrag myBevelDrag;
+    // The mirror-placement handle's own drag - the same AxisDrag shape, a
+    // third time over. Its `value` is a DELTA from the press, exactly as the
+    // other two are; myMirrorDragOffsetStart is what turns that delta back
+    // into the plane's ABSOLUTE offset (see mirrorPlaneDragged()'s own
+    // comment for why this one is not a fresh-each-gesture distance).
+    AxisDrag myMirrorDrag;
+    double myMirrorDragOffsetStart = 0.0;
 
     // While true, updateEdgeDimension() draws nothing - see
     // setEdgeDimensionSuppressed().
@@ -931,6 +1035,38 @@ private:
     // The world half-span it was last built at - 0 forces the next
     // updateSymmetryIndicator() to rebuild regardless of the equal-guard.
     double mySymmetryIndicatorBuiltHalfSpan = 0.0;
+
+    // The mirror-placement gesture's own live state - see
+    // beginMirrorPlacement(). `centre` is the FIXED combined centre computed
+    // once at begin(); `axis` is 0/1/2 for X/Y/Z; `offset` is the plane's
+    // current signed distance from `centre` along the current normal.
+    struct MirrorPlacement {
+        bool active = false;
+        std::vector<int> ids;
+        gp_Pnt centre{0.0, 0.0, 0.0};
+        int axis = 0;
+        double offset = 0.0;
+    };
+    MirrorPlacement myMirrorPlacement;
+    // What updateMirrorPlacementIndicator() last actually built - the
+    // equal-guard updateSymmetryIndicator() and updateManipulatorSize() both
+    // carry, extended past their own screen-size check to the plane's own
+    // location and normal, which (unlike the passive symmetry indicator) can
+    // change on every drag step and every orientation flip without the
+    // screen size changing at all. A camera orbit with no drag in progress is
+    // therefore free, exactly as it is for those two.
+    double myMirrorPlacementBuiltHalfSpan = 0.0;
+    gp_Pnt myMirrorPlacementBuiltOrigin{0.0, 0.0, 0.0};
+    gp_Dir myMirrorPlacementBuiltNormal{1.0, 0.0, 0.0};
+    // The plane rectangle - SymmetryPlaneObject, restyled - and the handle
+    // marker, both rebuilt by updateMirrorPlacementIndicator(). Separate
+    // objects from mySymmetryIndicator: the two can never be up at once (this
+    // one only exists mid-gesture, and confirming it is what turns the OTHER
+    // one on) but sharing a handle would still make one's teardown the
+    // other's, which is exactly the kind of channel-sharing bug CLAUDE.md's
+    // setModelingPreview/setPreview split exists to avoid repeating.
+    Handle(AIS_InteractiveObject) myMirrorPlacementPlaneObject;
+    Handle(AIS_InteractiveObject) myMirrorPlacementHandleObject;
 
     // See the constructor's own comment - the compare pane's flag.
     bool myViewerOnly = false;

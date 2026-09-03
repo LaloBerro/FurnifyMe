@@ -235,6 +235,47 @@ public:
     // refuse, since it does not touch the sketch plane at all.
     bool setSymmetryPlaneFromFace(const TopoDS_Face& face);
 
+    // --- the mirror plane placement gesture (Milestone 4, Phase 3) ---------
+    //
+    // The RETROACTIVE half of live symmetry: pairing bodies that already
+    // exist, as opposed to setSymmetryEnabled()'s creation-time toggle above
+    // (which this gesture now feeds - a successful confirm turns
+    // symmetryOn() on exactly as that toggle used to, so every later extrude
+    // keeps mirroring the way it always did). `S` and the Model menu's
+    // Symmetry entry are both this now when symmetryOn() reads false; when it
+    // reads true the SAME action instead calls setSymmetryEnabled(false) -
+    // the old toggle-off semantics, kept reachable exactly as CLAUDE.md's
+    // ruling requires, one Model-menu entry serving both directions of one
+    // idea ("S always means toggle symmetry off, or place a plane to turn it
+    // on"). See onSymmetryActionTriggered() in the .cpp.
+    //
+    // ONE OR MORE bodies selected, in body selection mode, no sketch in
+    // progress, no outline waiting, render mode off, and no gesture already
+    // active - the same three terms canPullSelectedFace() opens with, plus
+    // the mode check transformableBodyId() carries for the same reason:
+    // mutual exclusivity by construction with the pull arrow (face mode),
+    // the bevel arrow (edge mode) and ExtrudePreview (pending face), all
+    // BEFORE either widget has to ask about the other. The transform gizmo
+    // is the one exception that needs an explicit cross-check, since exactly
+    // one body in body mode satisfies both this and
+    // transformableBodyId() - see that function's own added term.
+    bool canBeginMirrorPlacement() const;
+    // Enter's own handler, called by the gesture's own value chip - reads
+    // OcctViewWidget::mirrorPlacementIds()/mirrorPlacementPlane(), commits
+    // through DocumentModel::pairWithMirror() (which checkpoints itself - see
+    // its own header comment on why render mode's exit has to run BEFORE
+    // this call rather than through checkpointDocument()'s usual choke
+    // point), and reports the outcome: a Note toast with Undo naming the
+    // paired count when at least one body was actually paired, a Failure
+    // when pairWithMirror() found nothing it could do (every id straddling,
+    // already paired, or refused by the kernel) - never-silent-failure,
+    // applied to a document mutation that can genuinely net zero. Ends the
+    // gesture either way. False on that Failure path; true on success.
+    bool confirmMirrorPlacement();
+    // Escape's own handler: ends the gesture with nothing changed. Safe to
+    // call when no gesture is active.
+    void cancelMirrorPlacement();
+
     bool lockToFace(const TopoDS_Face& face);
     // Back to the ground plane. The ground plane is the default and is never
     // itself "locked", so this is not a toggle of the same state. Refused,
@@ -454,6 +495,17 @@ public:
     // implementation the badge's own construction reads too.
     static QString compareBadgeCloseLabel();
 
+    // The mirror-placement chip's own label and hint text, on
+    // compareBadgeCloseLabel()'s exact terms: MirrorPlacementChip has no
+    // header of its own to declare these in (it lives entirely inside
+    // MainWindow.cpp - see myMirrorChip's field comment), so gui_smoke's
+    // banned-word sweep cannot reach a live instance's paintedTexts() the
+    // way it does for PullArrow/BevelArrow/ExtrudePreview. These two are
+    // the SAME strings the chip paints, never a second copy only the sweep
+    // sees - its own labelText()/hintText() call straight through to these.
+    static QString mirrorPlacementLabelText();
+    static QString mirrorPlacementHintText();
+
     // --- Render mode (Milestone 3, item 5) ----------------------------------
     //
     // View -> Render mode: strips the viewport to the furniture alone -
@@ -562,6 +614,12 @@ private slots:
     // toggled(bool) connects straight to setSymmetryEnabled(), exactly as
     // myAutosaveAction connects to setAutosaveEnabled().
     void onSetSymmetryPlane();
+    // mySymmetryAction's own triggered() handler (NOT toggled() any more -
+    // see the action's own comment in the .cpp for why the split matters):
+    // turns mirroring off when it is already on, otherwise attempts to begin
+    // the plane-placement gesture and reverts the action's own optimistic
+    // checked-flash via updateActions() when that refuses.
+    void onSymmetryActionTriggered();
     // A plain double-click on a body in face or edge selection mode: switch to
     // body selection and select that body, in one gesture. Routed through
     // mySolidSelectAction rather than straight at the viewport, so the rail
@@ -982,6 +1040,17 @@ private:
     // kept only so closeCompare() need not search for them and the badge's
     // name can be updated without a second lookup if that is ever wanted.
     class QWidget* myCompareBadge = nullptr;
+    // The mirror-placement gesture's floating value chip - constructed and
+    // wired entirely inside buildOverlay(), like the compare badge above:
+    // a plain QWidget subclass local to MainWindow.cpp, PullArrow's shape
+    // but with no typed field of its own to expose (X/Y/Z, Enter and Escape
+    // are its whole vocabulary), so it needs no header of its own. Its own
+    // visibility is DERIVED from OcctViewWidget::mirrorPlacementActive() on
+    // every appStateChanged - nothing here shows or hides it - and it is a
+    // proper CHILD of the viewport (not a sibling needing manual teardown
+    // the way Toast's UndoControl does), so Qt's own parent-child cascade is
+    // what destroys it.
+    class QWidget* myMirrorChip = nullptr;
     // Bumped once per openCompare() call - the token a deferred
     // QTimer::singleShot(0, ...) close (the compare badge's own Close
     // button; see closeCompare()'s comment) checks against before acting,

@@ -419,6 +419,17 @@ void OcctViewWidget::removeSolid(int id)
     clearBevelArrow();
     // Same reason: the gizmo is attached to the presentation about to go.
     if (myManipulatorSolid == id) detachManipulator();
+    // Same reason again: a mirror-placement gesture describes exactly the
+    // ids captured at beginMirrorPlacement(), and one of them is about to
+    // stop existing - undo/redo and Delete are not gated off this gesture
+    // (see canBeginMirrorPlacement()'s own header comment on why that gate
+    // was left to selection mode alone), so a document change reaching here
+    // mid-gesture is a real, if rare, path.
+    if (myMirrorPlacement.active &&
+        std::find(myMirrorPlacement.ids.begin(), myMirrorPlacement.ids.end(), id) !=
+            myMirrorPlacement.ids.end()) {
+        cancelMirrorPlacement();
+    }
 
     myContext->Remove(it->second, Standard_False);
     mySolids.erase(it);
@@ -440,6 +451,7 @@ void OcctViewWidget::clearSolids()
     clearPullArrow();
     clearBevelArrow();
     detachManipulator();
+    cancelMirrorPlacement();   // same reasoning: every id it describes is about to go
 
     for (auto& entry : mySolids) myContext->Remove(entry.second, Standard_False);
     mySolids.clear();
@@ -1223,6 +1235,204 @@ void OcctViewWidget::updateSymmetryIndicator()
     myContext->Display(mySymmetryIndicator, 0, -1, Standard_False);
     myContext->UpdateCurrentViewer();
     mySymmetryIndicatorBuiltHalfSpan = halfSpan;
+}
+
+// --- Mirror plane placement (Milestone 4, Phase 3) --------------------------
+
+gp_Dir OcctViewWidget::mirrorPlacementNormalFor(int axis)
+{
+    switch (axis) {
+        case 1: return gp_Dir(0.0, 1.0, 0.0);
+        case 2: return gp_Dir(0.0, 0.0, 1.0);
+        default: return gp_Dir(1.0, 0.0, 0.0);   // 0, and anything else out of range
+    }
+}
+
+void OcctViewWidget::beginMirrorPlacement(const std::vector<int>& ids)
+{
+    initializeViewer();
+    if (myContext.IsNull() || ids.empty()) return;
+
+    // The combined centre of every selected body's own bounding box -
+    // fitAll()'s own accumulation, one call site over.
+    Bnd_Box box;
+    for (int id : ids) {
+        const auto it = mySolids.find(id);
+        if (it == mySolids.end()) continue;
+        Bnd_Box b;
+        BRepBndLib::Add(it->second->Shape(), b);
+        box.Add(b);
+    }
+    gp_Pnt centre(0.0, 0.0, 0.0);
+    if (!box.IsVoid()) {
+        Standard_Real xmin, ymin, zmin, xmax, ymax, zmax;
+        box.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+        centre = gp_Pnt((xmin + xmax) * 0.5, (ymin + ymax) * 0.5, (zmin + zmax) * 0.5);
+    }
+
+    myMirrorPlacement.active = true;
+    myMirrorPlacement.ids = ids;
+    myMirrorPlacement.centre = centre;
+    // World X, normal-along-YZ-through-the-centre - DocumentModel's own
+    // constructed default (see its header), so a gesture that never drags or
+    // reorients reproduces exactly the plane the old direct toggle started
+    // at.
+    myMirrorPlacement.axis = 0;
+    myMirrorPlacement.offset = 0.0;
+
+    updateMirrorPlacementIndicator();
+}
+
+void OcctViewWidget::cancelMirrorPlacement()
+{
+    if (!myMirrorPlacement.active) return;
+
+    if (!myContext.IsNull()) {
+        if (!myMirrorPlacementPlaneObject.IsNull()) {
+            myContext->Remove(myMirrorPlacementPlaneObject, Standard_False);
+            myMirrorPlacementPlaneObject.Nullify();
+        }
+        if (!myMirrorPlacementHandleObject.IsNull()) {
+            myContext->Remove(myMirrorPlacementHandleObject, Standard_False);
+            myMirrorPlacementHandleObject.Nullify();
+        }
+        myContext->UpdateCurrentViewer();
+    }
+    // The twin ghost preview lives on the dedicated modeling-preview channel,
+    // never replacing a body (replacesSolidId is -1 throughout this gesture -
+    // see updateMirrorPlacementIndicator()), so clearing it here cannot leave
+    // any body stuck in wireframe.
+    clearModelingPreview();
+
+    myMirrorPlacement = MirrorPlacement();
+    myMirrorDrag = AxisDrag();
+}
+
+void OcctViewWidget::endMirrorPlacement()
+{
+    // The viewport-side teardown is identical either way - see the header
+    // comment on why this stays a distinct name from cancelMirrorPlacement()
+    // regardless.
+    cancelMirrorPlacement();
+}
+
+gp_Pln OcctViewWidget::mirrorPlacementPlane() const
+{
+    if (!myMirrorPlacement.active) return gp_Pln();
+    const gp_Dir normal = mirrorPlacementNormalFor(myMirrorPlacement.axis);
+    const gp_Pnt location =
+        myMirrorPlacement.centre.Translated(gp_Vec(normal) * myMirrorPlacement.offset);
+    return gp_Pln(location, normal);
+}
+
+bool OcctViewWidget::mirrorPlacementHandle(gp_Pnt& out) const
+{
+    if (!myMirrorPlacement.active) return false;
+    out = mirrorPlacementPlane().Location();
+    return true;
+}
+
+void OcctViewWidget::setMirrorPlacementAxis(int axis)
+{
+    if (!myMirrorPlacement.active) return;
+    axis = std::clamp(axis, 0, 2);
+    if (axis == myMirrorPlacement.axis) return;
+    myMirrorPlacement.axis = axis;
+    // An offset measured along the OLD normal has no honest meaning against a
+    // different one - see the header comment.
+    myMirrorPlacement.offset = 0.0;
+    updateMirrorPlacementIndicator();
+}
+
+gp_Lin OcctViewWidget::mirrorPlacementAxisLine() const
+{
+    return gp_Lin(myMirrorPlacement.centre, mirrorPlacementNormalFor(myMirrorPlacement.axis));
+}
+
+bool OcctViewWidget::mirrorHandleHit(const QPoint& point) const
+{
+    if (!myMirrorPlacement.active) return false;
+    gp_Pnt handle;
+    if (!mirrorPlacementHandle(handle)) return false;
+    QPoint screen;
+    if (!projectToScreen(handle, screen)) return false;
+    const QPoint d = point - screen;
+    // The same generous 14 px radius arrowHit() grabs a whole shaft with -
+    // this is a single point, so a target the user has to hit exactly would
+    // be one they miss even more often.
+    return std::sqrt(static_cast<double>(d.x() * d.x() + d.y() * d.y())) <= 14.0;
+}
+
+void OcctViewWidget::updateMirrorPlacementIndicator()
+{
+    if (!myMirrorPlacement.active || myContext.IsNull()) return;
+
+    const gp_Pln plane = mirrorPlacementPlane();
+    // Screen-sized, updateSymmetryIndicator()'s own idiom - a constant
+    // APPARENT extent rather than a fixed number of millimetres that shrinks
+    // to nothing as the camera pulls back.
+    const double halfSpan = worldPerPixel() * 220.0;
+    const gp_Pnt origin0 = plane.Location();
+    const gp_Dir normal0 = plane.Axis().Direction();
+    // The equal-guard: a camera orbit with no drag or orientation change in
+    // progress touches neither the half-span (no zoom) nor the location/
+    // normal (nothing moved it), so applyCameraState()'s own per-tick call
+    // costs nothing beyond this check - updateSymmetryIndicator()'s own
+    // reasoning, widened past screen size to the two things a drag or a
+    // flip changes that a plain orbit never does.
+    if (!myMirrorPlacementPlaneObject.IsNull() && myMirrorPlacementBuiltHalfSpan > 0.0 &&
+        halfSpan < myMirrorPlacementBuiltHalfSpan * 1.1 &&
+        halfSpan > myMirrorPlacementBuiltHalfSpan * 0.9 &&
+        origin0.IsEqual(myMirrorPlacementBuiltOrigin, 1.0e-6) &&
+        normal0.IsEqual(myMirrorPlacementBuiltNormal, 1.0e-9)) {
+        return;
+    }
+
+    const gp_Ax3 frame = plane.Position();
+    const gp_Pnt origin = plane.Location();
+    const gp_Dir u = frame.XDirection();
+    const gp_Dir v = frame.YDirection();
+    const auto at = [&](double du, double dv) {
+        return origin.Translated(gp_Vec(u) * du + gp_Vec(v) * dv);
+    };
+
+    Handle(Graphic3d_ArrayOfSegments) array = new Graphic3d_ArrayOfSegments(10);
+    array->AddVertex(at(-halfSpan, -halfSpan));
+    array->AddVertex(at(halfSpan, -halfSpan));
+    array->AddVertex(at(halfSpan, -halfSpan));
+    array->AddVertex(at(halfSpan, halfSpan));
+    array->AddVertex(at(halfSpan, halfSpan));
+    array->AddVertex(at(-halfSpan, halfSpan));
+    array->AddVertex(at(-halfSpan, halfSpan));
+    array->AddVertex(at(-halfSpan, -halfSpan));
+    array->AddVertex(at(0.0, -halfSpan));
+    array->AddVertex(at(0.0, halfSpan));
+
+    Handle(SymmetryPlaneObject) plane3d = new SymmetryPlaneObject();
+    plane3d->segments = array;
+    // Accent-coloured, per the picked mockup - unlike the passive symmetry
+    // indicator this is a live control the user is actively placing, and
+    // Theme::accent() is what every other live gizmo (the arrows, the
+    // markers) already wears.
+    plane3d->colour = toOcctColor(Theme::accent());
+    markInSketchLayer(plane3d);
+    if (!myMirrorPlacementPlaneObject.IsNull())
+        myContext->Remove(myMirrorPlacementPlaneObject, Standard_False);
+    myMirrorPlacementPlaneObject = plane3d;
+    myContext->Display(myMirrorPlacementPlaneObject, 0, -1, Standard_False);
+
+    Handle(SketchPointMarker) handle =
+        makeMarker(origin, Aspect_TOM_BALL, toOcctColor(Theme::accent()), 2.2);
+    markInSketchLayer(handle);
+    if (!myMirrorPlacementHandleObject.IsNull())
+        myContext->Remove(myMirrorPlacementHandleObject, Standard_False);
+    myMirrorPlacementHandleObject = handle;
+    myContext->Display(myMirrorPlacementHandleObject, 0, -1, Standard_False);
+
+    myContext->UpdateCurrentViewer();
+    myMirrorPlacementBuiltHalfSpan = halfSpan;
+    myMirrorPlacementBuiltOrigin = origin0;
+    myMirrorPlacementBuiltNormal = normal0;
 }
 
 void OcctViewWidget::activateManipulatorModes()
@@ -2032,6 +2242,9 @@ void OcctViewWidget::applyCameraState()
     updateManipulatorSize();
     // Screen-sized the same way - see its own header comment.
     updateSymmetryIndicator();
+    // Screen-sized the same way, and no-ops itself the same way - see its
+    // own equal-guard.
+    updateMirrorPlacementIndicator();
     // Slots FIRST, redraw second. A slot on cameraChanged() that changes the
     // scene - PullArrow rebuilds its 3D arrow, which is sized in screen
     // pixels and so has to be rebuilt whenever the camera moves - was
@@ -2533,6 +2746,17 @@ void OcctViewWidget::setRenderMode(bool on)
         clearSelection();
         for (auto& entry : mySolids) myContext->Deactivate(entry.second);
 
+        // The mirror-placement gesture (Milestone 4, Phase 3), on the same
+        // terms as every other live gizmo CLAUDE.md's render-mode section
+        // names: "the viewport is the furniture alone" reaches it too, and
+        // unlike the symmetry indicator a few lines down this is a genuinely
+        // MODAL gesture with nothing to resume - canBeginMirrorPlacement()
+        // already refuses to begin one while render mode is on, so ending an
+        // active one here keeps entry and begin symmetric rather than
+        // leaving a plane and a chip alive over a scene that is supposed to
+        // be the furniture alone.
+        cancelMirrorPlacement();
+
         myGridRenderer.setVisible(false);
         // The symmetry plane indicator, on the same terms as the grid - it
         // may already be up (symmetry was on before render mode was
@@ -2731,6 +2955,20 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
         return;
     }
 
+    // The mirror-placement handle, on the same terms as the two arrows below
+    // it - including claiming the gesture at an angle the maths refuses.
+    // Checked ahead of them rather than after: a mirror gesture requires body
+    // selection mode, which the pull and bevel arrows are never shown in
+    // (face mode, edge mode respectively), so the ordering is not
+    // load-bearing either, but this keeps the three "grab a screen-space
+    // handle" branches together.
+    if (event->button() == Qt::LeftButton && !mySketchMode && myMirrorPlacement.active &&
+        mirrorHandleHit(myLastPos)) {
+        beginAxisDrag(myMirrorDrag, mirrorPlacementAxisLine(), myLastPos);
+        myMirrorDragOffsetStart = myMirrorPlacement.offset;
+        return;
+    }
+
     // The bevel arrow, on exactly the same terms - including claiming the
     // gesture at an angle the maths refuses. The two arrows are never up at
     // once (face mode against edge mode), so the order of these two blocks is
@@ -2804,6 +3042,16 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
     if (myPullDrag.active && event->button() == Qt::LeftButton) {
         myPullDrag.active = false;
         emit pullReleased(myPullDrag.moved);
+        return;
+    }
+
+    // The end of a mirror-placement drag, swallowed for the same reason: the
+    // press was aimed at the handle, and re-picking here would change the
+    // body selection that has nothing to do with this gesture (the ids it
+    // pairs were captured at beginMirrorPlacement() and never re-read).
+    if (myMirrorDrag.active && event->button() == Qt::LeftButton) {
+        myMirrorDrag.active = false;
+        emit mirrorPlaneReleased(myMirrorDrag.moved);
         return;
     }
 
@@ -2924,6 +3172,16 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
                 myGizmoDelta = trsf;
                 myView->Redraw();
             }
+        }
+    } else if (myMirrorDrag.active) {
+        if (advanceAxisDrag(myMirrorDrag, mirrorPlacementAxisLine(), pos)) {
+            // ABSOLUTE offset, not the raw delta advanceAxisDrag() returns -
+            // see mirrorPlaneDragged()'s own comment on the header for why a
+            // mirror-placement drag is not a fresh-each-gesture distance the
+            // way a pull or a bevel is.
+            myMirrorPlacement.offset = myMirrorDragOffsetStart + myMirrorDrag.value;
+            updateMirrorPlacementIndicator();
+            emit mirrorPlaneDragged(myMirrorPlacement.offset);
         }
     } else if (myPullDrag.active) {
         if (advanceAxisDrag(myPullDrag, myPullArrow.axis(), pos))

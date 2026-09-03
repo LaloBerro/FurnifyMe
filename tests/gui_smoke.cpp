@@ -16758,10 +16758,55 @@ int main(int argc, char* argv[])
         check(!probe.document().symmetryOn(), "and document() agrees");
         check(!probe.view()->symmetryIndicatorShown(), "no plane indicator while off");
 
+        // Milestone 4, Phase 3 retired the bare toggle-on: turning symmetry
+        // ON now goes through the mirror-placement gesture (its own
+        // dedicated block, further down this file, exercises the gesture
+        // itself end to end - the combined centre, the drag, X/Y/Z, Enter
+        // and Escape). This block still wants "symmetry on" AT EXACTLY THE
+        // WORLD DEFAULT PLANE (x=0) as its own starting condition, since
+        // every check further down (comA.X() + comB.X() == 0, the straddle
+        // test at x=-30..30, and so on) is pinned against that plane - so
+        // two throwaway seed bodies are built symmetric about x=0 and BOTH
+        // selected together: their COMBINED centre is exactly x=0 with no
+        // drag needed (a single seed body's own centre would also start the
+        // plane there, but pairWithMirror() refuses a body straddling the
+        // plane it would be mirrored across, and a lone body always
+        // straddles its own centre - two bodies on opposite sides do not).
+        // Comfortably away from every coordinate range the rest of this
+        // block uses (a Y band no other quad in this block ever visits).
+        trigger(probe, QStringLiteral("Start Sketch"));
+        sketchQuadWorld(-30.0, -400.0, -10.0, -380.0);
+        trigger(probe, QStringLiteral("Finish Sketch"));
+        check(probe.extrudePendingFace(10.0), "the first seed body extrudes, symmetry still off");
+        const int seedIdA = probe.document().solids().back().id;
+        trigger(probe, QStringLiteral("Start Sketch"));
+        sketchQuadWorld(10.0, -400.0, 30.0, -380.0);
+        trigger(probe, QStringLiteral("Finish Sketch"));
+        check(probe.extrudePendingFace(10.0), "the second seed body extrudes, symmetric about x=0");
+        const int seedIdB = probe.document().solids().back().id;
+
+        probe.view()->setSelectionMode(OcctViewWidget::SelectionMode::Solid);
+        probe.view()->setSelectedSolids({seedIdA, seedIdB});
+        settle(80);
         trigger(probe, QStringLiteral("Symmetry"));
+        check(probe.view()->mirrorPlacementActive(),
+              "S with both seed bodies selected begins the mirror-placement gesture");
+        check(std::fabs(probe.view()->mirrorPlacementPlane().Location().X()) < 1.0e-6,
+              "...and the plane starts exactly at x=0 - the two seeds' own combined centre");
+        sendKeyTo(&probe, Qt::Key_Return);
+        settle(200);
+        check(!probe.view()->mirrorPlacementActive(), "Enter ends the gesture");
         check(symmetryAction != nullptr && symmetryAction->isChecked(),
-              "the Symmetry action checks itself on");
-        check(probe.document().symmetryOn(), "and document() agrees");
+              "the Symmetry action's checked state now follows document() "
+              "(resynced by updateActions(), not by the click itself)");
+        check(probe.document().symmetryOn(), "...and turns symmetry on");
+        check(probe.document().count() == 4,
+              "...pairing each seed body with its own fresh twin");
+        check(probe.document().twinOf(seedIdA) != -1 && probe.document().twinOf(seedIdB) != -1,
+              "both seed bodies read back paired");
+        check(std::fabs(probe.document().symmetryPlane().Location().X()) < 1.0e-6,
+              "the symmetry plane itself is exactly the world default (x=0) - nothing "
+              "downstream in this block has to account for a dragged offset");
         check(probe.view()->symmetryIndicatorShown(), "the faint plane indicator appears");
         // The PERSISTENT state label (updateStateLabel()'s own right-hand
         // readout), not the transient status-bar message - fix round 1:
@@ -16788,12 +16833,18 @@ int main(int argc, char* argv[])
         // more checkpoint, not two.
         const std::size_t undoDepthBeforeCreate = probe.document().undoDepth();
         check(probe.extrudePendingFace(10.0), "extrude with symmetry on succeeds");
-        check(probe.document().count() == 2, "two bodies exist - the body and its twin");
+        check(probe.document().count() == 6, "six bodies exist now - the two seed pairs, and "
+                                             "the fresh body plus its twin");
         check(probe.document().undoDepth() == undoDepthBeforeCreate + 1,
               "...in exactly ONE checkpoint, whichever body arrived");
 
-        const int idA = probe.document().solids()[0].id;
-        const int idB = probe.document().solids()[1].id;
+        // The fresh creation pair is whichever two bodies are LAST in the
+        // list - the same relative indexing every later pair in this block
+        // already uses, and required now that the seed pair occupies the
+        // first two slots.
+        const auto& solidsAfterCreate = probe.document().solids();
+        const int idA = solidsAfterCreate[solidsAfterCreate.size() - 2].id;
+        const int idB = solidsAfterCreate[solidsAfterCreate.size() - 1].id;
         check(probe.document().twinOf(idA) == idB, "the two are paired");
         check(probe.document().twinOf(idB) == idA, "...both directions");
         const QString nameA = QString::fromStdString(probe.document().nameOf(idA));
@@ -16988,8 +17039,39 @@ int main(int argc, char* argv[])
         // mode must stay off, and a pairing the undo brings back must stay
         // INERT: the very next edit must not propagate.
         {
-            trigger(probe, QStringLiteral("Symmetry"));   // back on, for this scenario's setup
+            // Back on, through the gesture: two FRESH throwaway bodies,
+            // symmetric about x=0 (a Y band this block has not touched
+            // anywhere else), selected together so the plane needs no drag -
+            // NOT idD, which is a single body and would leave the plane
+            // dragged off x=0 exactly the way a single-body pairing would
+            // have to (see the very first "symmetry on" setup earlier in
+            // this block for the full reasoning). Keeping the plane pinned
+            // to x=0 is load-bearing for K/L's own centre-of-mass shape
+            // further down.
+            trigger(probe, QStringLiteral("Start Sketch"));
+            sketchQuadWorld(-30.0, -440.0, -10.0, -420.0);
+            trigger(probe, QStringLiteral("Finish Sketch"));
+            check(probe.extrudePendingFace(10.0), "a fresh symmetric seed extrudes");
+            const int reseedA = probe.document().solids().back().id;
+            trigger(probe, QStringLiteral("Start Sketch"));
+            sketchQuadWorld(10.0, -440.0, 30.0, -420.0);
+            trigger(probe, QStringLiteral("Finish Sketch"));
+            check(probe.extrudePendingFace(10.0), "...and its mirror-image partner");
+            const int reseedB = probe.document().solids().back().id;
+
+            probe.view()->setSelectionMode(OcctViewWidget::SelectionMode::Solid);
+            probe.view()->setSelectedSolids({reseedA, reseedB});
+            settle(80);
+            trigger(probe, QStringLiteral("Symmetry"));
+            check(probe.view()->mirrorPlacementActive(),
+                  "S with the two fresh seeds selected begins the gesture");
+            check(std::fabs(probe.view()->mirrorPlacementPlane().Location().X()) < 1.0e-6,
+                  "...at exactly x=0 again, no drag needed");
+            sendKeyTo(&probe, Qt::Key_Return);
+            settle(200);
             check(probe.document().symmetryOn(), "symmetry is on, going into this scenario");
+            check(probe.document().twinOf(reseedA) != -1 && probe.document().twinOf(reseedB) != -1,
+                  "...and both fresh seeds are freshly paired");
 
             trigger(probe, QStringLiteral("Start Sketch"));
             sketchQuadWorld(-90.0, -150.0, -30.0, -90.0);
@@ -17046,10 +17128,35 @@ int main(int argc, char* argv[])
         }
 
         // --- state survives save/load: on/off, plane and pairing all persist
-        trigger(probe, QStringLiteral("Symmetry"));   // back on
+        // Back on through the gesture again - two more fresh symmetric seeds
+        // (a Y band nothing else in this block visits), so the plane needs
+        // no drag and stays pinned at x=0 for the plane-change check further
+        // down. idC and idD are untouched by this gesture at all, which is
+        // the cleanest possible proof that re-enabling does not resurrect
+        // their old pairing with each other.
+        trigger(probe, QStringLiteral("Start Sketch"));
+        sketchQuadWorld(-30.0, -480.0, -10.0, -460.0);
+        trigger(probe, QStringLiteral("Finish Sketch"));
+        check(probe.extrudePendingFace(10.0), "a third fresh symmetric seed extrudes");
+        const int reseedC = probe.document().solids().back().id;
+        trigger(probe, QStringLiteral("Start Sketch"));
+        sketchQuadWorld(10.0, -480.0, 30.0, -460.0);
+        trigger(probe, QStringLiteral("Finish Sketch"));
+        check(probe.extrudePendingFace(10.0), "...and its mirror-image partner");
+        const int reseedD = probe.document().solids().back().id;
+
+        probe.view()->setSelectionMode(OcctViewWidget::SelectionMode::Solid);
+        probe.view()->setSelectedSolids({reseedC, reseedD});
+        settle(80);
+        trigger(probe, QStringLiteral("Symmetry"));
+        check(probe.view()->mirrorPlacementActive(),
+              "S with the third seed pair selected begins the gesture");
+        sendKeyTo(&probe, Qt::Key_Return);
+        settle(200);
         check(probe.document().symmetryOn(), "symmetry back on, for the save/load check");
-        check(probe.document().twinOf(idC) == -1,
-              "re-enabling does NOT re-pair what turning off unpaired");
+        check(probe.document().twinOf(idC) == -1 && probe.document().twinOf(idD) == -1,
+              "re-enabling does NOT re-pair what turning off unpaired - C and D are "
+              "still unpaired with each other, untouched by this gesture");
 
         trigger(probe, QStringLiteral("Start Sketch"));
         sketchQuadWorld(120.0, 60.0, 170.0, 110.0);
@@ -17137,6 +17244,462 @@ int main(int argc, char* argv[])
                           QStringLiteral("Symmetry plane moved — bodies unpaired"),
                   QStringLiteral("...and the Note toast says so (\"%1\")")
                       .arg(symToasts ? symToasts->currentText() : QString()));
+        }
+    }
+
+    // --- Milestone 4, Phase 3: the mirror plane placement gesture ----------
+    // A dedicated probe, on the same terms every other major-feature block in
+    // this file uses one: its own furniture and its own toast history, so a
+    // scene left mid-gesture can never bleed into the giant legacy symmetry
+    // block above (which now reaches this same gesture through S, but tests
+    // creation-time propagation, not the gesture's own mechanics) or into
+    // anything that runs after it.
+    {
+        RequiredTempDir placementLib;
+        MainWindow probe(nullptr, /*persistProgress=*/false, placementLib.path());
+        probe.setAttribute(Qt::WA_ShowWithoutActivating);
+        probe.resize(1000, 700);
+        probe.show();
+        settle(200);
+        probe.view()->setAnimationsEnabled(false);
+        enterFreshFurniture(probe);
+        probe.view()->setViewTop();
+        settle(150);
+
+        OcctViewWidget* pView = probe.view();
+        ToastHost* pToasts = probe.findChild<ToastHost*>();
+        QAction* symAction = action(probe, QStringLiteral("Symmetry"));
+        check(symAction != nullptr, "the Symmetry action exists");
+
+        // WORLD coordinates, not viewport fractions - buildBody()'s own
+        // screen-fraction clicks are fine for a single throwaway body, but
+        // this block needs PRECISE control over where two bodies land
+        // relative to each other (so neither straddles the plane their own
+        // combined centre would raise), which only a real world-point
+        // projection can guarantee. The legacy symmetry block's own idiom.
+        const auto worldToScreen = [&](double x, double y) -> QPointF {
+            QPoint out;
+            pView->projectToScreen(gp_Pnt(x, y, 0.0), out);
+            return QPointF(out);
+        };
+        const auto sketchQuadWorld = [&](double x0, double y0, double x1, double y1) {
+            pView->fitAll();
+            pView->setViewTop();
+            settle(120);
+            clickAt(pView, worldToScreen(x0, y0));
+            clickAt(pView, worldToScreen(x1, y0));
+            clickAt(pView, worldToScreen(x1, y1));
+            clickAt(pView, worldToScreen(x0, y1));
+        };
+
+        // At most one of the four application-wide gizmo claims may be live
+        // at once - ExtrudePreview, the pull arrow, the bevel arrow and now
+        // the mirror-placement chip. The transform gizmo is deliberately NOT
+        // counted (CLAUDE.md's own ruling: it holds no key claim of its own),
+        // which is why transformableBodyId() is checked separately below
+        // rather than folded into this count.
+        const auto activeClaimCount = [&]() -> int {
+            int count = 0;
+            for (ExtrudePreview* w : probe.findChildren<ExtrudePreview*>())
+                if (w->isVisible()) ++count;
+            for (PullArrow* w : probe.findChildren<PullArrow*>())
+                if (w->isVisible()) ++count;
+            for (BevelArrow* w : probe.findChildren<BevelArrow*>())
+                if (w->isVisible()) ++count;
+            if (pView->mirrorPlacementActive()) ++count;
+            return count;
+        };
+        check(activeClaimCount() == 0, "no application-wide key claim at the start");
+
+        // --- S with no selection refuses, with a reason ---------------------
+        trigger(probe, QStringLiteral("Symmetry"));
+        check(!pView->mirrorPlacementActive(),
+              "S with nothing selected does not begin a gesture");
+        check(pToasts != nullptr && pToasts->isShowing() &&
+                  pToasts->currentText().contains(QStringLiteral("Select")),
+              QStringLiteral("...and refuses with a reason (\"%1\")")
+                  .arg(pToasts ? pToasts->currentText() : QString()));
+
+        // --- one body, selected: S raises the plane at its own COMPUTED
+        // combined centre - assert against real Bnd_Box bounds, not a
+        // hardcoded coordinate. WORLD coordinates, comfortably on the
+        // negative side of x=0 - body B (built later, on the positive side)
+        // is what the two-body Enter/pairing test at the end of this block
+        // needs neither of them to straddle their own combined centre. -----
+        trigger(probe, QStringLiteral("Start Sketch"));
+        sketchQuadWorld(-150.0, 0.0, -100.0, 50.0);
+        trigger(probe, QStringLiteral("Finish Sketch"));
+        check(probe.extrudePendingFace(20.0), "body A extrudes");
+        const int bodyAId = probe.document().solids().back().id;
+
+        Bnd_Box boxA;
+        BRepBndLib::Add(probe.document().shapeOf(bodyAId), boxA);
+        Standard_Real axmin, aymin, azmin, axmax, aymax, azmax;
+        boxA.Get(axmin, aymin, azmin, axmax, aymax, azmax);
+        const gp_Pnt expectedCentreA((axmin + axmax) * 0.5, (aymin + aymax) * 0.5,
+                                     (azmin + azmax) * 0.5);
+
+        probe.view()->setSelectionMode(OcctViewWidget::SelectionMode::Solid);
+        probe.view()->setSelectedSolids({bodyAId});
+        settle(80);
+        check(probe.canBeginMirrorPlacement(),
+              "one body selected, in body mode, nothing else pending - S can begin");
+
+        trigger(probe, QStringLiteral("Symmetry"));
+        check(pView->mirrorPlacementActive(), "S with a selection raises the plane");
+        check(pView->mirrorPlacementPlane().Location().Distance(expectedCentreA) < 1.0e-6,
+              "...at exactly the selection's own computed combined centre");
+        check(pView->mirrorPlacementAxis() == 0, "...normal along world X, the default");
+        check(symAction != nullptr && !symAction->isChecked(),
+              "the Symmetry checkbox itself stays unchecked through the gesture - "
+              "Enter is what turns symmetryOn() on, not this click");
+        check(activeClaimCount() == 1, "exactly one application-wide key claim is now active");
+
+        // --- disjointness: the OTHER three gizmo predicates all read false
+        // while this one is active - provably disjoint by construction
+        // (canBeginMirrorPlacement()'s own mode/pending-face guards,
+        // transformableBodyId()'s own added term) --------------------------
+        check(!probe.canPullSelectedFace(), "the pull arrow's predicate cannot be true too");
+        check(!probe.canBevelSelectedEdge(), "...nor the bevel arrow's");
+        check(probe.transformableBodyId() == 0,
+              "...nor the transform gizmo's - it stands down while a gesture is active");
+        check(!probe.canBeginMirrorPlacement(),
+              "a second gesture cannot begin on top of the first");
+
+        // --- the chip's own painted text, swept for the vocabulary - it has
+        // no live-instance accessor (see MainWindow::mirrorPlacementLabelText()/
+        // mirrorPlacementHintText()'s own comment), so these two ARE the
+        // reachable copy the sweep reads. ------------------------------------
+        {
+            const QStringList banned = bannedWords();
+            QStringList mirrorOffenders;
+            for (const QString& text : {MainWindow::mirrorPlacementLabelText(),
+                                        MainWindow::mirrorPlacementHintText()}) {
+                for (const QString& word : banned) {
+                    if (usesBannedWord(text, word))
+                        mirrorOffenders
+                            << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
+                }
+            }
+            check(mirrorOffenders.isEmpty(),
+                  QStringLiteral("no mirror-placement chip text uses a banned word (%1)")
+                      .arg(mirrorOffenders.isEmpty()
+                               ? QStringLiteral("none")
+                               : mirrorOffenders.join(QStringLiteral(", "))));
+        }
+        check(MainWindow::mirrorPlacementHintText().contains(QStringLiteral("Enter")) &&
+                  MainWindow::mirrorPlacementHintText().contains(QStringLiteral("Esc")) &&
+                  MainWindow::mirrorPlacementHintText().contains(QStringLiteral("X")) &&
+                  MainWindow::mirrorPlacementHintText().contains(QStringLiteral("Y")) &&
+                  MainWindow::mirrorPlacementHintText().contains(QStringLiteral("Z")),
+              "the hint line names every key this gesture claims - a modeless gesture "
+              "with invisible verbs is exactly ExtrudePreview's own lesson");
+
+        // --- X/Y/Z jump the plane between exactly three axis-aligned
+        // presets, resetting the dragged offset each time --------------------
+        sendKeyTo(&probe, Qt::Key_Y);
+        settle(80);
+        check(pView->mirrorPlacementAxis() == 1, "Y jumps the plane to the Y-normal preset");
+        check(pView->mirrorPlacementPlane().Location().Distance(expectedCentreA) < 1.0e-6,
+              "...back at the selection's own centre, offset reset to zero");
+        sendKeyTo(&probe, Qt::Key_Z);
+        settle(80);
+        check(pView->mirrorPlacementAxis() == 2, "Z jumps to the Z-normal preset");
+        check(pView->mirrorPlacementPlane().Location().Distance(expectedCentreA) < 1.0e-6,
+              "...also reset to the centre");
+        sendKeyTo(&probe, Qt::Key_X);
+        settle(80);
+        check(pView->mirrorPlacementAxis() == 0,
+              "X returns to the first preset - exactly three, cycled by name, not by count");
+
+        // --- drag moves the plane along its OWN normal only ------------------
+        {
+            gp_Pnt handlePoint;
+            check(pView->mirrorPlacementHandle(handlePoint), "the handle position is available");
+            QPoint handleAt;
+            check(pView->projectToScreen(handlePoint, handleAt),
+                  "...and projects onto the viewport");
+            // Aimed at a world point offset in BOTH X and Y - if the drag were
+            // not constrained to the plane's own normal, Y would leak into
+            // the result too.
+            const gp_Pnt targetWorld = handlePoint.Translated(gp_Vec(1.0, 0.0, 0.0) * 60.0 +
+                                                              gp_Vec(0.0, 1.0, 0.0) * 45.0);
+            QPoint dragTo;
+            check(pView->projectToScreen(targetWorld, dragTo), "...and so does the drag aim");
+            dragButton(pView, QPointF(handleAt), QPointF(dragTo), Qt::LeftButton);
+            settle(150);
+
+            const gp_Pnt after = pView->mirrorPlacementPlane().Location();
+            // Within one grid step of 60mm - dragButton() interpolates over a
+            // handful of discrete move events and the aim was deliberately
+            // angled off-axis (see the comment above), so the settled,
+            // snapped value is close to 60 rather than exact.
+            check(std::fabs(after.X() - (expectedCentreA.X() + 60.0)) < 20.0,
+                  QStringLiteral("the plane moved ~60mm along its own X normal (landed at X=%1)")
+                      .arg(after.X()));
+            check(std::fabs(after.Y() - expectedCentreA.Y()) < 1.0e-6,
+                  "...and Y did NOT move - the drag is constrained to the normal alone, "
+                  "however the on-screen aim was angled");
+            check(std::fabs(after.Z() - expectedCentreA.Z()) < 1.0e-6, "...neither did Z");
+        }
+
+        // --- Escape leaves the document untouched -----------------------------
+        const std::size_t bodiesBeforeEscape = probe.document().count();
+        const std::size_t undoDepthBeforeEscape = probe.document().undoDepth();
+        sendKeyTo(&probe, Qt::Key_Escape);
+        settle(150);
+        check(!pView->mirrorPlacementActive(), "Escape ends the gesture");
+        check(probe.document().count() == bodiesBeforeEscape, "...with no new body");
+        check(probe.document().undoDepth() == undoDepthBeforeEscape, "...and no new checkpoint");
+        check(!probe.document().symmetryOn(), "...symmetry is still off");
+        check(activeClaimCount() == 0, "no application-wide key claim after Escape");
+
+        // --- Enter pairs: twin appears, one Note toast naming the count with
+        // plurals written out, one undo removes EVERYTHING it built, and
+        // symmetry mode itself stays ON after that undo -----------------------
+        trigger(probe, QStringLiteral("Start Sketch"));
+        sketchQuadWorld(100.0, 0.0, 150.0, 50.0);
+        trigger(probe, QStringLiteral("Finish Sketch"));
+        check(probe.extrudePendingFace(20.0), "body B extrudes, mirror-image of A about x=0");
+        const int bodyBId = probe.document().solids().back().id;
+        probe.view()->setSelectedSolids({bodyAId, bodyBId});
+        settle(80);
+
+        Bnd_Box boxAB;
+        BRepBndLib::Add(probe.document().shapeOf(bodyAId), boxAB);
+        Bnd_Box boxBOnly;
+        BRepBndLib::Add(probe.document().shapeOf(bodyBId), boxBOnly);
+        boxAB.Add(boxBOnly);
+        Standard_Real cxmin, cymin, czmin, cxmax, cymax, czmax;
+        boxAB.Get(cxmin, cymin, czmin, cxmax, cymax, czmax);
+        const gp_Pnt expectedCentreAB((cxmin + cxmax) * 0.5, (cymin + cymax) * 0.5,
+                                      (czmin + czmax) * 0.5);
+
+        const std::size_t undoDepthBeforeConfirm = probe.document().undoDepth();
+        trigger(probe, QStringLiteral("Symmetry"));
+        check(pView->mirrorPlacementActive(), "S with two bodies selected begins the gesture");
+        check(pView->mirrorPlacementPlane().Location().Distance(expectedCentreAB) < 1.0e-6,
+              "...at the TWO bodies' own combined centre");
+
+        sendKeyTo(&probe, Qt::Key_Return);
+        settle(200);
+        check(!pView->mirrorPlacementActive(), "Enter ends the gesture");
+        check(probe.document().count() == 4, "each of the two bodies gets its own twin");
+        check(probe.document().twinOf(bodyAId) != -1 && probe.document().twinOf(bodyBId) != -1,
+              "both bodies read back paired");
+        check(probe.document().undoDepth() == undoDepthBeforeConfirm + 1,
+              "...in exactly ONE checkpoint, however many twins were built");
+        check(probe.document().symmetryOn(), "...and symmetry is on");
+        check(pToasts != nullptr && pToasts->isShowing() &&
+                  pToasts->currentText() == QStringLiteral("2 bodies mirrored"),
+              QStringLiteral("one Note toast names the paired count, plural written out (\"%1\")")
+                  .arg(pToasts ? pToasts->currentText() : QString()));
+        check(pToasts != nullptr && pToasts->toast() != nullptr && pToasts->toast()->hasUndo(),
+              "...and offers Undo");
+
+        trigger(probe, QStringLiteral("Undo"));
+        settle(200);
+        check(probe.document().count() == 2, "one undo removes every twin the gesture built");
+        check(probe.document().twinOf(bodyAId) == -1 && probe.document().twinOf(bodyBId) == -1,
+              "...and both pairings with them");
+        check(probe.document().symmetryOn(),
+              "symmetry mode itself STAYS ON after that undo - the mode is not part of "
+              "undo State, the same rule the legacy toggle already follows");
+
+        // --- the mirrored-body bevel ledger item, re-run against a twin THIS
+        // gesture built (CLAUDE.md: bevelAxis()/outwardNormalNear() carry the
+        // same flag-only-normal risk on a mirrored, negative-determinant body
+        // as the pullFace() bug the commute test already caught - "not yet
+        // fixed... worth checking before trusting a bevel gesture on a
+        // mirrored body"). A FRESH, ISOLATED body - not a Redo of the A/B
+        // pair: A's own twin and B's own twin each land where the OTHER
+        // original body already sits (both were built symmetric about the
+        // SAME combined-centre plane), so the two-body scene picks fought
+        // over overlapping geometry the first time this was measured -
+        // found by print-debugging a drag that committed to "Body 01" while
+        // aimed at B's own twin. One isolated body, dragged well clear of
+        // both itself and everything else in this scene, has nothing to
+        // overlap with. ---------------------------------------------------
+        trigger(probe, QStringLiteral("Start Sketch"));
+        sketchQuadWorld(-25.0, 300.0, 25.0, 350.0);
+        trigger(probe, QStringLiteral("Finish Sketch"));
+        check(probe.extrudePendingFace(20.0), "an isolated body extrudes, for the bevel probe");
+        const int bodyCId = probe.document().solids().back().id;
+
+        // Symmetry mode is still ON from the A/B pairing above (an undo does
+        // not turn it off - see the check right before this section), which
+        // means the SAME "Symmetry" action would turn it OFF rather than
+        // begin a new placement (onSymmetryActionTriggered()'s own branch).
+        // Turned off first, so S means "begin" again - this drops A and B's
+        // now-empty pairing state, which nothing past this point reads.
+        if (probe.document().symmetryOn()) trigger(probe, QStringLiteral("Symmetry"));
+        check(!probe.document().symmetryOn(), "symmetry off, so S means begin again");
+
+        probe.view()->setSelectionMode(OcctViewWidget::SelectionMode::Solid);
+        probe.view()->setSelectedSolids({bodyCId});
+        settle(80);
+        trigger(probe, QStringLiteral("Symmetry"));
+        check(pView->mirrorPlacementActive(), "S with the isolated body selected begins the gesture");
+        {
+            gp_Pnt handlePoint;
+            QPoint handleAt, dragTo;
+            const bool haveHandle =
+                pView->mirrorPlacementHandle(handlePoint) &&
+                pView->projectToScreen(handlePoint, handleAt) &&
+                pView->projectToScreen(handlePoint.Translated(gp_Vec(1.0, 0.0, 0.0) * 60.0),
+                                       dragTo);
+            check(haveHandle, "the handle and a 60mm drag target both project");
+            if (haveHandle) dragButton(pView, QPointF(handleAt), QPointF(dragTo), Qt::LeftButton);
+            settle(150);
+        }
+        sendKeyTo(&probe, Qt::Key_Return);
+        settle(200);
+        check(probe.document().twinOf(bodyCId) != -1,
+              "the isolated body pairs, comfortably clear of everything else in this scene");
+        const int twinOfB = probe.document().twinOf(bodyCId);
+        check(twinOfB != -1, "the isolated body's twin exists for the bevel probe");
+        if (twinOfB != -1) {
+            probe.view()->setSelectionMode(OcctViewWidget::SelectionMode::Edge);
+            pView->fitAll();
+            settle(200);
+            // fitAll() just framed the WHOLE document (four bodies, well
+            // spread out), which leaves any one edge spanning very few
+            // pixels - the exact aiming trap CLAUDE.md's own bevel-drag
+            // comment records ("20mm...spanned only eleven pixels"). Re-aimed
+            // straight at the TWIN's own bounding box centre with a fixed,
+            // generously close distance, rather than a dolly-in on the
+            // document-wide target fitAll() left (which would zoom toward
+            // empty space between the four spread-out bodies, not onto the
+            // one this probe needs).
+            {
+                Bnd_Box twinBox;
+                BRepBndLib::Add(probe.document().shapeOf(twinOfB), twinBox);
+                Standard_Real txmin, tymin, tzmin, txmax, tymax, tzmax;
+                twinBox.Get(txmin, tymin, tzmin, txmax, tymax, tzmax);
+                CameraState closer = pView->camera().state();
+                closer.target = gp_Pnt((txmin + txmax) * 0.5, (tymin + tymax) * 0.5,
+                                       (tzmin + tzmax) * 0.5);
+                closer.distance = 80.0;
+                pView->animateTo(closer);
+                settle(200);
+            }
+
+            // Found through ModelingOps::bevelAxis() itself, exactly as
+            // BevelArrow's own gesture reads it - the naive "drag toward the
+            // edge's own screen midpoint" this probe first tried aims across
+            // the arrow's real axis (the bisector of the two adjacent faces'
+            // outward normals) as often as along it, which is what measured
+            // as a silently-inert drag (before==after, every time). kSize
+            // small enough to stay inside this box's 20mm thickness.
+            constexpr double kSize = 8.0;
+            TopoDS_Edge straightEdge;
+            gp_Pnt edgeCentre;
+            gp_Dir edgeOutward;
+            QPoint edgeAt;
+            for (TopExp_Explorer it(probe.document().shapeOf(twinOfB), TopAbs_EDGE);
+                 it.More() && straightEdge.IsNull(); it.Next()) {
+                const TopoDS_Edge candidate = TopoDS::Edge(it.Current());
+                gp_Pnt centre;
+                gp_Dir outward;
+                if (!ModelingOps::bevelAxis(probe.document().shapeOf(twinOfB), candidate, centre,
+                                            outward))
+                    continue;
+                // Skip an axis too close to parallel with the view direction
+                // (looking straight down the arrow, where the established
+                // bevel-drag block filters the same way): the inward point
+                // would project onto almost the same pixel as the centre
+                // itself, and dragButton()'s few screen pixels of motion
+                // would snap to 0mm - measured, this is exactly what a first
+                // version of this probe did with no filter at all.
+                const double facing =
+                    std::fabs(gp_Vec(outward).Dot(gp_Vec(pView->camera().viewDirection())));
+                if (facing > 0.85) continue;
+                TopoDS_Vertex v1, v2;
+                TopExp::Vertices(candidate, v1, v2);
+                if (v1.IsNull() || v2.IsNull()) continue;
+                if (BRep_Tool::Pnt(v1).Distance(BRep_Tool::Pnt(v2)) < 30.0) continue;
+                QPoint at;
+                if (!pView->projectToScreen(centre, at)) continue;
+                if (!pView->rect().adjusted(30, 30, -30, -30).contains(at)) continue;
+                clickAt(pView, QPointF(at));
+                settle(140);
+                const TopoDS_Edge got = pView->selectedEdge();
+                if (got.IsNull() || BRepAdaptor_Curve(got).GetType() != GeomAbs_Line) continue;
+                straightEdge = got;
+                edgeCentre = centre;
+                edgeOutward = outward;
+                edgeAt = at;
+            }
+            check(!straightEdge.IsNull(), "a straight edge of the twin body can be selected");
+            check(probe.canBevelSelectedEdge(),
+                  "...and the bevel arrow's predicate holds for it, on the mirrored body");
+
+            // Re-read the axis from bevelTarget() itself - the SAME call the
+            // live BevelArrow gizmo used to place itself - rather than
+            // trusting the loop's own candidate: if OCCT's pick landed on a
+            // straight edge other than the one that candidate iteration was
+            // computed for (two parallel edges near the same screen point,
+            // say), the arrow the drag is actually aimed at would disagree
+            // with edgeCentre/edgeOutward above.
+            std::vector<TopoDS_Edge> targetEdges;
+            TopoDS_Edge targetEdge;
+            int targetBodyId = 0;
+            const bool haveTarget = probe.bevelTarget(targetEdges, targetEdge, targetBodyId,
+                                                      edgeCentre, edgeOutward);
+            check(haveTarget, "bevelTarget() itself resolves the selected edge");
+            if (haveTarget) {
+                QPoint freshAt;
+                if (pView->projectToScreen(edgeCentre, freshAt)) edgeAt = freshAt;
+            }
+
+            BevelArrow* twinBevel = probe.findChild<BevelArrow*>();
+            check(twinBevel != nullptr && twinBevel->isVisible(),
+                  "the bevel arrow raises on the twin's own edge");
+            if (twinBevel && haveTarget) {
+                QPoint inwardAt;
+                const bool haveInward = pView->projectToScreen(
+                    edgeCentre.Translated(gp_Vec(edgeOutward) * -kSize), inwardAt);
+                check(haveInward, "a point along the arrow's own inward axis projects on screen");
+                if (haveInward) {
+                    const double volBefore =
+                        ModelingOps::volume(probe.document().shapeOf(twinOfB));
+                    // INWARD along the arrow's OWN reported axis - the
+                    // rounding half of the gesture (BevelArrow::myFillet
+                    // defaults true) - rather than a screen-space guess.
+                    dragButton(pView, QPointF(edgeAt), QPointF(inwardAt), Qt::LeftButton);
+                    settle(200);
+                    const double volAfter =
+                        ModelingOps::volume(probe.document().shapeOf(twinOfB));
+                    // RECORDED, not asserted as pass/fail against a specific
+                    // sign: this is the ledgered risk itself under test
+                    // (CLAUDE.md: bevelAxis()/outwardNormalNear() carry the
+                    // same flag-only-normal risk on a mirrored,
+                    // negative-determinant body as the pullFace() bug the
+                    // commute test already caught - "not yet fixed...worth
+                    // checking before trusting a bevel gesture on a mirrored
+                    // body"), and a wrong-signed result here would be a
+                    // FINDING to report, not a regression this task fixes
+                    // (its own ruling: "fix in ModelingOps only if it takes
+                    // under a day"). Measured on this run: a genuine
+                    // inward fillet on the twin's own edge, removing
+                    // material (volume dropped) exactly as it does on an
+                    // unmirrored body - so this run finds no sign of the
+                    // ledgered risk, though CLAUDE.md's own caveat about
+                    // "worth checking" stands for edges/bodies this probe
+                    // did not happen to pick.
+                    std::printf("[ mirrored-twin bevel ledger ] twin volume before=%.3f "
+                                "after=%.3f delta=%.3f\n",
+                                volBefore, volAfter, volAfter - volBefore);
+                    check(volAfter < volBefore - 1.0e-6,
+                          QStringLiteral("an inward drag on the twin's own edge removed "
+                                        "material, the correct direction for this mirrored "
+                                        "(negative-determinant) body (before=%1 after=%2) - "
+                                        "see CLAUDE.md's bevelAxis()/outwardNormalNear() "
+                                        "mirrored-body ledger for the risk this re-runs")
+                              .arg(volBefore)
+                              .arg(volAfter));
+                }
+            }
         }
     }
 

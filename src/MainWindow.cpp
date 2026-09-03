@@ -25,12 +25,14 @@
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepBndLib.hxx>
+#include <BRep_Builder.hxx>
 #include <Bnd_Box.hxx>
 #include <ElSLib.hxx>
 #include <GeomAbs_CurveType.hxx>
 #include <GeomAbs_SurfaceType.hxx>
 #include <TopAbs_Orientation.hxx>
 #include <TopExp_Explorer.hxx>
+#include <TopoDS_Compound.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pln.hxx>
@@ -40,16 +42,20 @@
 #include <QAction>
 #include <QSignalBlocker>
 #include <QActionGroup>
+#include <QCoreApplication>
 #include <QDir>
 #include <QFileDialog>
 #include <QFontMetrics>
 #include <QHBoxLayout>
+#include <QHideEvent>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QMenuBar>
 #include <QCloseEvent>
 #include <QPainter>
 #include <QPushButton>
 #include <QSettings>
+#include <QShowEvent>
 #include <QSplitter>
 #include <QStandardPaths>
 #include <QStatusBar>
@@ -262,6 +268,327 @@ private:
 
     QLabel* myName = nullptr;
     QPushButton* myClose = nullptr;
+};
+
+}  // namespace
+
+namespace {
+
+// The mirror-placement gesture's floating value chip (Milestone 4, Phase
+// 3) - PullArrow's shape, pared down to what this gesture actually needs.
+// There is nothing here to TYPE - the plane moves by dragging the handle
+// OcctViewWidget draws in the scene, and jumps between the three
+// axis-aligned presets on X/Y/Z - so this paints a label, a live offset
+// readout and the hint line CLAUDE.md's own rule requires for a modeless
+// gesture with keyboard verbs ("a modeless panel with invisible verbs went
+// unnoticed for a whole branch" - ExtrudePreview's own lesson). Application-
+// wide Enter/Escape/X/Y/Z claim, installed on show and removed on hide -
+// ExtrudePreview's and PullArrow's own shape, and provably disjoint from
+// theirs: MainWindow::canBeginMirrorPlacement() requires body-selection
+// mode with no pending face, which is exactly what keeps ExtrudePreview,
+// the pull arrow (face mode) and the bevel arrow (edge mode) from ever
+// being live at the same time this is.
+//
+// No Q_OBJECT - CompareBadge's own reasoning above this class: every
+// connection below is either an existing Qt signal into a lambda, or a
+// plain member-function pointer, neither of which needs moc on the
+// receiving object. A proper CHILD of the viewport (QWidget(view) below),
+// so Qt's parent-child cascade destroys it with no manual teardown.
+class MirrorPlacementChip : public QWidget {
+public:
+    MirrorPlacementChip(MainWindow* window, OcctViewWidget* view)
+        : QWidget(view)
+        , myWindow(window)
+        , myView(view)
+    {
+        // Paints its own card and must never eat a click meant for the
+        // model or the handle behind it - there is no interactive control
+        // on this widget at all, unlike PullArrow's field.
+        setAttribute(Qt::WA_NoSystemBackground);
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+        applySize();
+        hide();
+
+        connect(Theme::notifier(), &Theme::Notifier::changed, this, [this] {
+            applySize();
+            update();
+        });
+        if (myWindow)
+            connect(myWindow, &MainWindow::appStateChanged, this, &MirrorPlacementChip::refresh);
+        if (myView) {
+            // The plane is drawn in the scene, so a camera move changes both
+            // where the chip belongs on screen and (through worldPerPixel())
+            // how big the plane rectangle itself is drawn - the latter is
+            // OcctViewWidget's own concern (applyCameraState() already calls
+            // updateMirrorPlacementIndicator()); this only has to follow the
+            // handle's projected position.
+            connect(myView, &OcctViewWidget::cameraChanged, this,
+                    &MirrorPlacementChip::reposition);
+            connect(myView, &OcctViewWidget::mirrorPlaneDragged, this,
+                    [this](double) { onPlaneChanged(); });
+        }
+    }
+
+    // THE predicate's own mirror, in one place, used to show and to hide -
+    // connected to MainWindow::appStateChanged(), never driven from an
+    // event, PullArrow::refresh()'s own rule. Reads
+    // OcctViewWidget::mirrorPlacementActive() directly rather than a second
+    // copy of MainWindow::canBeginMirrorPlacement(): that predicate answers
+    // "can a gesture BEGIN", which stops being true about a body the moment
+    // the gesture actually starts (transformableBodyId()'s own added term),
+    // while this widget's own visibility has to track the gesture that is
+    // already running.
+    void refresh()
+    {
+        if (!myView) return;
+        if (myView->mirrorPlacementActive()) {
+            if (!isVisible()) {
+                onPlaneChanged();
+                reposition();
+                show();
+                raise();
+            } else {
+                onPlaneChanged();
+            }
+        } else if (isVisible()) {
+            hide();
+        }
+    }
+
+    // Re-places the chip against the handle's projected position. Driven by
+    // OcctViewWidget::cameraChanged - PullArrow::reposition()'s own rule.
+    void reposition()
+    {
+        if (!myView) return;
+        gp_Pnt handlePoint;
+        QPoint at;
+        if (!myView->mirrorPlacementHandle(handlePoint) ||
+            !myView->projectToScreen(handlePoint, at))
+            return;
+
+        // Beside the handle, flipped to the other side rather than clamped
+        // when that would run off the right edge - PullArrow::reposition()'s
+        // own layout, for the same reason: a chip that walked away from the
+        // handle it labels would stop labelling it.
+        int x = at.x() + kChipGap;
+        if (x + width() > myView->width() - kEdgeInset) x = at.x() - kChipGap - width();
+        x = std::clamp(x, kEdgeInset, std::max(kEdgeInset, myView->width() - width() - kEdgeInset));
+        int y = at.y() - height() / 2;
+        y = std::clamp(y, kEdgeInset,
+                       std::max(kEdgeInset, myView->height() - height() - kEdgeInset));
+
+        // Whole DEVICE pixels, Theme's position rule - PullArrow's own
+        // closing lines.
+        const QPoint origin = myView->mapTo(myView->window(), QPoint(0, 0));
+        const double dpr = devicePixelRatioF();
+        x = Theme::snapToDevicePixels(x, origin.x(), dpr);
+        y = Theme::snapToDevicePixels(y, origin.y(), dpr);
+        move(x, y);
+    }
+
+    // Re-places AND re-raises, from ViewportOverlay::laidOut() -
+    // PullArrow::replace()'s own reason.
+    void replace()
+    {
+        reposition();
+        if (isVisible()) raise();
+    }
+
+    // Every string this chip paints, for gui_smoke's banned-word sweep -
+    // MainWindow::mirrorPlacementPaintedTexts() is the reachable copy of
+    // this same list (see labelText()/hintText()'s own comment).
+    QStringList paintedTexts() const { return {labelText(), hintText()}; }
+
+protected:
+    void paintEvent(QPaintEvent*) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+
+        const int margin = Theme::surfaceShadowMargin();
+        const QRect body = rect().adjusted(margin, margin, -margin, -margin);
+        Theme::paintSurface(painter, body, 8);
+
+        painter.setFont(Theme::labelFont());
+        painter.setPen(Theme::text());
+        painter.drawText(
+            QRect(body.left() + kPad, body.top(), body.width() - kPad * 2, kLabelHeight),
+            Qt::AlignVCenter | Qt::AlignLeft, labelText());
+
+        painter.setFont(Theme::bodyFont());
+        painter.setPen(Theme::accent());
+        painter.drawText(QRect(body.left() + kPad, body.top() + kLabelHeight,
+                               body.width() - kPad * 2, kValueHeight),
+                         Qt::AlignVCenter | Qt::AlignLeft, valueText());
+
+        painter.setFont(Theme::badgeFont());
+        painter.setPen(Theme::textMuted());
+        painter.drawText(
+            QRect(body.left() + kPad, body.top() + kLabelHeight + kValueHeight + kHintGap,
+                 body.width() - kPad * 2, kHintHeight),
+            Qt::AlignVCenter | Qt::AlignLeft, hintText());
+    }
+
+    void showEvent(QShowEvent* event) override
+    {
+        QWidget::showEvent(event);
+        // Installed for exactly as long as the chip is up -
+        // ExtrudePreview's and PullArrow's own lifetime rule for an
+        // application-wide filter.
+        QCoreApplication::instance()->installEventFilter(this);
+    }
+
+    void hideEvent(QHideEvent* event) override
+    {
+        QWidget::hideEvent(event);
+        QCoreApplication::instance()->removeEventFilter(this);
+    }
+
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        // Enter, Escape and X/Y/Z belong to this chip for as long as it is
+        // VISIBLE, whatever holds focus - PullArrow::eventFilter()'s own
+        // reasoning: the whole reason a live gesture exists is that the
+        // user orbits to see the plane from another angle, and an orbit is
+        // a press in the viewport that takes focus off of everything else.
+        if (!isVisible()) return QWidget::eventFilter(watched, event);
+
+        const QEvent::Type type = event->type();
+        if (type != QEvent::ShortcutOverride && type != QEvent::KeyPress)
+            return QWidget::eventFilter(watched, event);
+
+        // Application-wide means every window in this process - gui_smoke
+        // builds several at once - so only keys headed for this chip's own
+        // window count.
+        auto* widget = qobject_cast<QWidget*>(watched);
+        if (!widget || widget->window() != window())
+            return QWidget::eventFilter(watched, event);
+
+        auto* keyEvent = static_cast<QKeyEvent*>(event);
+        const Qt::KeyboardModifiers mods = keyEvent->modifiers() & ~Qt::KeypadModifier;
+        if (mods != Qt::NoModifier) return QWidget::eventFilter(watched, event);
+
+        const int key = keyEvent->key();
+        const bool commits = key == Qt::Key_Return || key == Qt::Key_Enter;
+        const bool cancels = key == Qt::Key_Escape;
+        const bool axisX = key == Qt::Key_X;
+        const bool axisY = key == Qt::Key_Y;
+        const bool axisZ = key == Qt::Key_Z;
+        if (!commits && !cancels && !axisX && !axisY && !axisZ)
+            return QWidget::eventFilter(watched, event);
+
+        if (type == QEvent::ShortcutOverride) {
+            event->accept();   // claims the key back from QShortcutMap
+            return true;
+        }
+
+        if (commits) {
+            if (myWindow) myWindow->confirmMirrorPlacement();
+        } else if (cancels) {
+            if (myWindow) myWindow->cancelMirrorPlacement();
+        } else if (myView) {
+            myView->setMirrorPlacementAxis(axisX ? 0 : axisY ? 1 : 2);
+            onPlaneChanged();
+        }
+        return true;
+    }
+
+private:
+    // Rebuilds the live twin ghost preview and repaints the offset readout -
+    // called on every drag step and every orientation flip, PullArrow's
+    // updatePreview()'s own trigger points.
+    void onPlaneChanged()
+    {
+        updatePreview();
+        update();
+    }
+
+    // The SAME ModelingOps::mirrorShape() DocumentModel::pairWithMirror()
+    // itself uses, one per selected id, combined into one compound so the
+    // dedicated modeling-preview channel's single-shape contract still
+    // holds. A preview built by a different path is a lie - CLAUDE.md's own
+    // rule for every gizmo preview in this app - and this is the one place
+    // the user judges where the twins will land by what they look like.
+    // `replacesSolidId` stays -1 throughout: this gesture ADDS twins, it
+    // does not stand in for any one of the bodies being paired the way a
+    // pull or a bevel preview stands in for the body it edits.
+    void updatePreview()
+    {
+        if (!myWindow || !myView || !myView->mirrorPlacementActive()) return;
+
+        const gp_Pln plane = myView->mirrorPlacementPlane();
+        const std::vector<int> ids = myView->mirrorPlacementIds();
+
+        TopoDS_Compound compound;
+        BRep_Builder builder;
+        builder.MakeCompound(compound);
+        bool any = false;
+        for (int id : ids) {
+            const TopoDS_Shape shape = myWindow->document().shapeOf(id);
+            if (shape.IsNull()) continue;
+            const ModelingOps::BooleanResult mirrored = ModelingOps::mirrorShape(shape, plane);
+            if (!mirrored.ok) continue;
+            builder.Add(compound, mirrored.shape);
+            any = true;
+        }
+        if (any) myView->setModelingPreview(compound, -1);
+        else     myView->clearModelingPreview();
+    }
+
+    // This card's SIZE is measured with the fonts it paints its three
+    // strings with - ExtrudePreview's own rule, and for the same reason: a
+    // fixed guess at the hint line's width ("X Y Z aim - drag to move -
+    // Enter mirror - Esc cancel" is the longest string any chip in this app
+    // paints) is exactly the kind of number that silently clips the day the
+    // copy changes.
+    void applySize()
+    {
+        const int margin = Theme::surfaceShadowMargin();
+        const QFontMetrics hintMetrics(Theme::badgeFont());
+        const QFontMetrics labelMetrics(Theme::labelFont());
+        const QFontMetrics bodyMetrics(Theme::bodyFont());
+        const int textWidth =
+            std::max({hintMetrics.horizontalAdvance(hintText()),
+                      labelMetrics.horizontalAdvance(labelText()),
+                      bodyMetrics.horizontalAdvance(valueText())});
+        const int cardWidth = std::max(kMinWidth, textWidth + kPad * 2);
+        setFixedSize(Theme::wholeDevicePixels(
+            QSize(cardWidth + margin * 2,
+                 kPad * 2 + kLabelHeight + kValueHeight + kHintGap + kHintHeight + margin * 2)));
+    }
+
+    // The one place each painted string is spelled out - paintEvent() draws
+    // through these and paintedTexts() reports them, PullArrow's own rule.
+    // PUBLIC and STATIC, unlike PullArrow's own (instance, private), and
+    // pass straight through to MainWindow::mirrorPlacementLabelText()/
+    // mirrorPlacementHintText() - CompareBadge's own precedent, one call
+    // site up: this class is never reachable from outside MainWindow.cpp
+    // (no header of its own - see myMirrorChip's field comment), so
+    // gui_smoke's banned-word sweep reads the strings through MainWindow's
+    // static accessors instead of a live instance's paintedTexts(). Neither
+    // takes gesture state, unlike valueText() below, which stays
+    // instance-level and out of the sweep - BevelArrow's own
+    // kindText()/valueText() split, for the same reason: a number cannot
+    // carry a banned word.
+    static QString labelText() { return MainWindow::mirrorPlacementLabelText(); }
+    static QString hintText() { return MainWindow::mirrorPlacementHintText(); }
+    QString valueText() const
+    {
+        const double offset = myView ? myView->mirrorPlacementOffset() : 0.0;
+        return tr("Plane %1").arg(QString::fromStdString(Measure::formatLength(offset)));
+    }
+
+    MainWindow* myWindow = nullptr;
+    OcctViewWidget* myView = nullptr;
+
+    static constexpr int kPad = 10;
+    static constexpr int kMinWidth = 176;
+    static constexpr int kLabelHeight = 16;
+    static constexpr int kValueHeight = 22;
+    static constexpr int kHintGap = 4;
+    static constexpr int kHintHeight = 14;
+    static constexpr int kChipGap = 18;
+    static constexpr int kEdgeInset = 8;
 };
 
 }  // namespace
@@ -603,20 +930,33 @@ void MainWindow::buildActions()
     myUnlockFaceAction->setToolTip(unlockTooltipText());
     connect(myUnlockFaceAction, &QAction::triggered, this, &MainWindow::unlockFace);
 
-    // Symmetry (Milestone 3). Checkable, and its checked state IS
-    // document().symmetryOn() - updateActions() reads that back onto it,
-    // never the reverse, the same rule the projection toggle follows.
+    // Symmetry (Milestone 3, rebound in Milestone 4 Phase 3). Still
+    // checkable, and its checked state is STILL document().symmetryOn() -
+    // updateActions() reads that back onto it, never the reverse - but
+    // TRIGGERING it no longer flips that checked state directly the way a
+    // plain checkable toggle would. onSymmetryActionTriggered() reads
+    // symmetryOn() itself (the state as of BEFORE this click - Qt has
+    // already flipped isChecked() by the time triggered() fires, but
+    // nothing about the DOCUMENT has) and picks one of two things S has
+    // always meant: turn mirroring off when it is already on (the old
+    // toggle-off semantics, kept reachable exactly as CLAUDE.md's Task 3.2
+    // ruling requires), or begin the retroactive mirror-placement gesture
+    // when it is not - Enter, not this click, is what actually turns
+    // symmetry back on, so updateActions() at the end of either branch
+    // resyncs the checkbox to whatever document().symmetryOn() genuinely
+    // is, undoing Qt's own optimistic flip when it does not yet agree.
     mySymmetryAction = new QAction(tr("&Symmetry"), this);
     mySymmetryAction->setCheckable(true);
     // No "(S)" here - the banned-word sweep matches "(s)" as a bare
     // substring, case-insensitive, for the vocabulary rule against a typed
     // plural marker, and this shortcut's own letter collides with it.
-    mySymmetryAction->setToolTip(tr("Mirror every new body across a plane as you build — "
-                                    "shortcut S\n"
-                                    "Extrude makes both halves at once, and later edits "
-                                    "follow across."));
+    mySymmetryAction->setToolTip(
+        tr("Turn mirroring off, or place a plane to pair the selected bodies — "
+          "shortcut S\n"
+          "Select one or more bodies first — Enter mirrors them, Esc cancels."));
     mySymmetryAction->setShortcut(QKeySequence(Qt::Key_S));
-    connect(mySymmetryAction, &QAction::toggled, this, &MainWindow::setSymmetryEnabled);
+    connect(mySymmetryAction, &QAction::triggered, this,
+            &MainWindow::onSymmetryActionTriggered);
 
     mySetSymmetryPlaneAction = new QAction(tr("Set Symmetry &Plane"), this);
     mySetSymmetryPlaneAction->setToolTip(tr("Mirror across this face instead of the middle\n"
@@ -1291,6 +1631,21 @@ void MainWindow::buildOverlay()
     // appStateChanged. Nothing here shows or hides it.
     myBevelArrow = new BevelArrow(this, myView);
 
+    // The mirror-placement gesture's own value chip (Milestone 4, Phase 3),
+    // on the same terms as the two arrows just above: it parents itself to
+    // the viewport, places itself beside the handle's projected position,
+    // and decides its own visibility from
+    // OcctViewWidget::mirrorPlacementActive() on every appStateChanged.
+    // Nothing here shows or hides it - only beginMirrorPlacement()/
+    // confirmMirrorPlacement()/cancelMirrorPlacement() ever change that
+    // state, and this widget's own refresh() is the only thing that reads
+    // it back into a visible/hidden card. myMirrorChip is stored as a plain
+    // QWidget* (see its own field comment in MainWindow.h) purely so this
+    // window can reach it once more, immediately below, for the laidOut
+    // connection every anchored/self-placing panel in this file gets.
+    auto* mirrorChip = new MirrorPlacementChip(this, myView);
+    myMirrorChip = mirrorChip;
+
     // The live view's half of the compare camera sync - see syncCamera()'s
     // declaration. A no-op for as long as myCompareView is null, which is
     // most of this window's life; wired once, here, rather than re-wired
@@ -1336,6 +1691,7 @@ void MainWindow::buildOverlay()
     connect(myOverlay, &ViewportOverlay::laidOut, myExtrudePreview, &ExtrudePreview::replace);
     connect(myOverlay, &ViewportOverlay::laidOut, myPullArrow, &PullArrow::replace);
     connect(myOverlay, &ViewportOverlay::laidOut, myBevelArrow, &BevelArrow::replace);
+    connect(myOverlay, &ViewportOverlay::laidOut, mirrorChip, &MirrorPlacementChip::replace);
 }
 
 void MainWindow::updateActions()
@@ -1410,12 +1766,22 @@ void MainWindow::updateActions()
     myLockFaceAction->setToolTip(planeCanMove ? lockTooltipText() : planeReason);
     myUnlockFaceAction->setToolTip(planeCanMove ? unlockTooltipText() : planeReason);
 
-    // Symmetry (Milestone 3). The checked state is DOCUMENT state - undo,
-    // redo, opening a different furniture and restoring a version can all
-    // change myDocument.symmetryOn() without going through this action's own
-    // toggle - so it is resynced here rather than trusted to stay in step on
-    // its own, the way the pure UI preferences (autosave, projection) are.
-    // Blocked so resyncing it can never re-fire setSymmetryEnabled().
+    // Symmetry (Milestone 3, rebound in Milestone 4 Phase 3). The checked
+    // state is STILL document state - undo, redo, opening a different
+    // furniture, restoring a version, and now Enter confirming a mirror
+    // placement can all change myDocument.symmetryOn() without this action's
+    // own click - so it is resynced here rather than trusted to stay in step
+    // on its own, the way the pure UI preferences (autosave, projection) are.
+    // Blocked defensively (setChecked() does not itself emit triggered(),
+    // only toggled(), and onSymmetryActionTriggered() is wired to the
+    // former - but a resync that could re-enter its own handler is exactly
+    // the class of bug this project has paid for once already).
+    //
+    // Always enabled whenever a furniture is open: unlike the flat-face
+    // pick below, "no bodies selected" is not a reason to grey this out -
+    // this task's own ruling is that S REFUSES with a reason at trigger
+    // time rather than going dark, since going dark would say nothing about
+    // why.
     if (mySymmetryAction) {
         const QSignalBlocker blocker(mySymmetryAction);
         mySymmetryAction->setChecked(myDocument.symmetryOn());
@@ -2165,8 +2531,14 @@ bool MainWindow::canOpenSaveVersion() const
     // second check inside the panel itself, so updateActions()'s own
     // mySaveVersionAction->setEnabled(canOpenSaveVersion()) and the panel's
     // auto-cancel read the SAME one answer instead of two that could drift.
+    //
+    // The mirror-placement gesture (Milestone 4, Phase 3) joins the named
+    // list rather than the render-mode-style fold-in just above: it IS a
+    // genuine fourth application-wide Enter/Escape/X/Y/Z claim, unlike the
+    // transform gizmo, so a pending version-create card and a live plane
+    // placement really would fight over the same key.
     return !myShowingInitScreen && !myRenderModeOn && !mySketching && !hasPendingFace() &&
-           !canPullSelectedFace() && !canBevelSelectedEdge();
+           !canPullSelectedFace() && !canBevelSelectedEdge() && !myView->mirrorPlacementActive();
 }
 
 void MainWindow::onSaveVersion()
@@ -2283,6 +2655,20 @@ bool MainWindow::deleteVersionByName(const QString& name)
 QString MainWindow::compareBadgeCloseLabel()
 {
     return tr("Close compare");
+}
+
+QString MainWindow::mirrorPlacementLabelText()
+{
+    return tr("Mirror plane");
+}
+
+QString MainWindow::mirrorPlacementHintText()
+{
+    // The verb-naming hint line CLAUDE.md's own rule requires for a
+    // modeless gesture with keyboard-only controls - ExtrudePreview's own
+    // lesson, carried here word for word: "a modeless panel with invisible
+    // verbs went unnoticed for a whole branch".
+    return tr("X Y Z aim — drag to move — Enter mirror — Esc cancel");
 }
 
 bool MainWindow::openCompare(const QString& name)
@@ -2922,6 +3308,16 @@ void MainWindow::onStartSketch()
     // Sketch menu entry both stay reachable while render mode hides the
     // rail, so this is not merely defensive - it is a real route in.
     if (myRenderModeOn) setRenderModeEnabled(false);
+
+    // A live mirror-placement gesture (Milestone 4, Phase 3) also has to end
+    // here, for the same disjointness reason: canBeginMirrorPlacement()
+    // already refuses to BEGIN one while mySketching is true, but nothing
+    // stopped Ctrl+K from starting a sketch OVER an already-active one, and
+    // sketching binds its own Enter/Escape (Finish/Cancel Sketch's own
+    // shortcuts) that would then compete with the chip's application-wide
+    // filter for the same two keys - two claims live at once, which this
+    // task's disjointness rule forbids by construction, not by luck.
+    if (myView->mirrorPlacementActive()) myView->cancelMirrorPlacement();
 
     mySketch.reset();
     // A waiting outline is NOT discarded here any more. It used to be, when
@@ -3591,6 +3987,17 @@ int MainWindow::transformableBodyId() const
     // under it would take the plane's meaning with it.
     if (mySketching || hasPendingFace() || myRenderModeOn) return 0;
 
+    // The mirror-placement gesture (Milestone 4, Phase 3) also lives in body
+    // selection mode, and a single selected body satisfies BOTH this and
+    // canBeginMirrorPlacement() at once - the one genuine overlap between
+    // the four gizmo predicates, since the other three are kept apart by
+    // selection mode or hasPendingFace() alone. While a gesture is actually
+    // RUNNING (not merely available) the transform gizmo stands down, so the
+    // two application-wide claims - this one has none, the mirror chip's
+    // Enter/Escape/X/Y/Z does - can never visually collide over the same
+    // body.
+    if (myView->mirrorPlacementActive()) return 0;
+
     // Body mode explicitly. selectedSolidIds() reports the owning body of a
     // selected FACE too, so without this the gizmo would appear over a face
     // selection and fight the pull arrow for the same drag.
@@ -4163,6 +4570,143 @@ void MainWindow::onSetSymmetryPlane()
     const TopoDS_Face face = myView->selectedFace();
     if (face.IsNull()) return;
     setSymmetryPlaneFromFace(face);
+}
+
+// --- the mirror plane placement gesture (Milestone 4, Phase 3) -------------
+
+bool MainWindow::canBeginMirrorPlacement() const
+{
+    // The same three terms canPullSelectedFace() opens with, for the same
+    // reasons.
+    if (mySketching || hasPendingFace() || myRenderModeOn) return false;
+    // A gesture already running cannot be begun a second time on top of
+    // itself.
+    if (myView->mirrorPlacementActive()) return false;
+    // Body mode explicitly - selectedSolidIds() reports the owning body of a
+    // selected FACE too, so without this the gesture could begin over a face
+    // selection and collide with the pull arrow's own drag. The same mode
+    // check transformableBodyId() carries, for the same reason.
+    if (myView->selectionMode() != OcctViewWidget::SelectionMode::Solid) return false;
+    return !myView->selectedSolidIds().empty();
+}
+
+void MainWindow::onSymmetryActionTriggered()
+{
+    // Reads document().symmetryOn() as it stood BEFORE this click - Qt has
+    // already flipped mySymmetryAction's own isChecked() by the time
+    // triggered() fires (that is what "checkable" means), but nothing about
+    // the DOCUMENT has, so branching on the action's own new checked state
+    // here would be branching on Qt's optimism rather than reality.
+    if (myDocument.symmetryOn()) {
+        // The old toggle-off semantics, kept reachable through this same
+        // Model-menu entry exactly as CLAUDE.md's Task 3.2 ruling requires -
+        // see DocumentModel::setSymmetry() for why turning off unpairs
+        // everything with no checkpoint of its own.
+        setSymmetryEnabled(false);
+        return;
+    }
+
+    if (!canBeginMirrorPlacement()) {
+        const QString reason = tr("Select one or more bodies to mirror");
+        statusBar()->showMessage(reason);
+        if (myToasts) myToasts->show(reason, Toast::Kind::Failure, false);
+        // Reverts the action's own optimistic checked-flash: nothing about
+        // document().symmetryOn() changed, so the resync inside
+        // updateActions() puts the checkbox back to unchecked.
+        updateActions();
+        return;
+    }
+
+    myView->beginMirrorPlacement(myView->selectedSolidIds());
+    // Same reason as the refusal above: document().symmetryOn() is still
+    // false at this point (Enter is what will turn it on, not this click),
+    // so this resyncs the checkbox back to unchecked for the whole
+    // gesture - the floating plane and its chip are the gesture's real
+    // visual cue, not the menu checkmark.
+    updateActions();
+    statusBar()->showMessage(
+        tr("Placing the mirror plane — X Y Z aim, drag to move, Enter mirrors, Esc cancels"));
+}
+
+bool MainWindow::confirmMirrorPlacement()
+{
+    if (!myView->mirrorPlacementActive()) return false;
+
+    const std::vector<int> ids = myView->mirrorPlacementIds();
+    const gp_Pln plane = myView->mirrorPlacementPlane();
+
+    // pairWithMirror() checkpoints ITSELF (see its own header comment on
+    // DocumentModel.h), so render mode's exit has to run BEFORE the call
+    // rather than through checkpointDocument()'s usual choke point - the
+    // same explicit-exit rule setSymmetryEnabled() and
+    // setSymmetryPlaneFromFace() already follow for their own document
+    // changes that do not go through checkpointDocument() either. Defensive
+    // rather than load-bearing: canBeginMirrorPlacement() already refuses to
+    // begin the gesture at all while render mode is on, so this can only
+    // matter if render mode was somehow entered mid-gesture - but every
+    // other document-changing route in this file carries the same explicit
+    // line regardless of whether its own entry point already guards it.
+    if (myRenderModeOn) setRenderModeEnabled(false);
+
+    const DocumentModel::PairResult result = myDocument.pairWithMirror(ids, plane);
+    myView->endMirrorPlacement();
+
+    if (result.paired == 0) {
+        // A genuine no-op: pairWithMirror() took no checkpoint and changed
+        // nothing - every id was either invalid, straddling the plane,
+        // already paired, or refused by its own mirrorShape() call.
+        // Never-silent-failure applies to a document mutation that can
+        // genuinely net zero, the same law BooleanResult::ok already
+        // enforces for a failed boolean.
+        const QString reason =
+            tr("Nothing to mirror — every body picked sits on the plane, is "
+              "already paired, or couldn't be mirrored");
+        statusBar()->showMessage(reason);
+        if (myToasts) myToasts->show(reason, Toast::Kind::Failure, false);
+        updateActions();
+        emit documentChanged();
+        return false;
+    }
+
+    resyncView();
+    myView->clearSelection();
+    updateActions();
+    emit documentChanged();
+    recordProgress("mirror.completed");
+
+    // The paired count leads, plurals written out; a second sentence names
+    // the ones left unpaired, and why, only when the skip lists are
+    // actually non-empty - straddling, already-paired and kernel-refused
+    // share one honest sentence rather than three, per this task's own
+    // ruling.
+    const int skipped = static_cast<int>(result.skippedStraddling.size() +
+                                         result.skippedAlreadyPaired.size() +
+                                         result.skippedFailed.size());
+    QString message = result.paired == 1 ? tr("1 body mirrored")
+                                         : tr("%1 bodies mirrored").arg(result.paired);
+    if (skipped > 0) {
+        message += skipped == 1
+                       ? tr(" — 1 body stayed unpaired: on the plane, already "
+                           "paired, or too complex to mirror")
+                       : tr(" — %1 bodies stayed unpaired: on the plane, already "
+                           "paired, or too complex to mirror")
+                             .arg(skipped);
+    }
+    // Undo pops pairWithMirror()'s own checkpoint, restoring the document
+    // to exactly the state it held before this call - "one undo removes
+    // everything" (this task's own requirement), because the checkpoint
+    // covers every twin the call built in one commit.
+    if (myToasts) myToasts->show(message, Toast::Kind::Note, true);
+    statusBar()->showMessage(message);
+    return true;
+}
+
+void MainWindow::cancelMirrorPlacement()
+{
+    if (!myView->mirrorPlacementActive()) return;
+    myView->cancelMirrorPlacement();
+    updateActions();
+    statusBar()->showMessage(tr("Mirror placement cancelled"));
 }
 
 void MainWindow::onSelectionChanged()
