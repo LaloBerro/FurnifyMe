@@ -1812,6 +1812,50 @@ void OcctViewWidget::setSketchMode(bool enabled, const gp_Pln& plane)
     clearSketchCloseTarget();
 }
 
+QString OcctViewWidget::faceOnOrthoDirection() const
+{
+    // The eligibility half of gridPlane()'s own priority (see there),
+    // factored out to a single place so a caller that needs the DIRECTION
+    // rather than the plane - the status label's cue - reads the same
+    // answer rather than re-deriving "which views count" a second time.
+    // Never true outside an EFFECTIVELY orthographic look: Top/Bottom
+    // already see the ground grid face-on, and Persp has no "squared onto
+    // a world axis" to speak of.
+    if (!myCamera.effectiveOrtho()) return QString();
+    const QString direction = viewDirectionName();
+    if (direction == QStringLiteral("Front") || direction == QStringLiteral("Back") ||
+        direction == QStringLiteral("Right") || direction == QStringLiteral("Left"))
+        return direction;
+    return QString();
+}
+
+gp_Pln OcctViewWidget::faceOnOrthoPlane() const
+{
+    // The UNLOCKED half of gridPlane()'s priority, on its own: the vertical
+    // world plane a face-on Front/Back/Left/Right orthographic look is
+    // squared onto, or the ground plane when the current view is not
+    // eligible (faceOnOrthoDirection() above answers that). Callers outside
+    // this class - MainWindow::onStartSketch(), specifically - use this to
+    // derive the ACTUAL plane a new outline lands on, on exactly the terms
+    // the grid is already drawn on; gridPlane() itself calls this too now,
+    // so there is one construction of these two planes, not two that could
+    // drift apart.
+    const QString direction = faceOnOrthoDirection();
+    if (direction == QStringLiteral("Front") || direction == QStringLiteral("Back")) {
+        // World XZ, normal +Y - Front and Back share it: both look straight
+        // along the world Y axis, so the plane their view is squared onto is
+        // identical either way.
+        return gp_Pln(gp_Ax3(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 1.0, 0.0),
+                             gp_Dir(1.0, 0.0, 0.0)));
+    }
+    if (direction == QStringLiteral("Right") || direction == QStringLiteral("Left")) {
+        // World YZ, normal +X - the same sharing, along X instead of Y.
+        return gp_Pln(gp_Ax3(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0),
+                             gp_Dir(0.0, 1.0, 0.0)));
+    }
+    return gp_Pln(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
+}
+
 gp_Pln OcctViewWidget::gridPlane() const
 {
     // Since a face can be locked, the grid is drawn exactly coplanar with a
@@ -1866,22 +1910,14 @@ gp_Pln OcctViewWidget::gridPlane() const
     // on look, exactly the failure locking a face already solves for a real
     // face.
     //
-    // This is a VISUAL substitution only: it reads mySketchPlane/
-    // myWorkPlaneLocked but never writes them, so setWorkPlane() remains the
-    // one place a click's plane is decided, and sketching in this same Front
-    // ortho view still lands on the ground (or the locked face) exactly as
-    // it did before this existed - see workPlane()'s own comment.
-    gp_Pln basePlane = mySketchPlane;
-    if (!myWorkPlaneLocked && myCamera.effectiveOrtho()) {
-        const QString direction = viewDirectionName();
-        if (direction == QStringLiteral("Front") || direction == QStringLiteral("Back")) {
-            basePlane = gp_Pln(gp_Ax3(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 1.0, 0.0),
-                                      gp_Dir(1.0, 0.0, 0.0)));
-        } else if (direction == QStringLiteral("Right") || direction == QStringLiteral("Left")) {
-            basePlane = gp_Pln(gp_Ax3(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0),
-                                      gp_Dir(0.0, 1.0, 0.0)));
-        }
-    }
+    // This is a VISUAL substitution only when the grid reads it: it reads
+    // mySketchPlane/myWorkPlaneLocked but never writes them, so
+    // setWorkPlane() remains the one place a click's plane is decided here.
+    // Fix round (2026-09-03): Start Sketch now calls faceOnOrthoPlane()
+    // itself to derive the ACTUAL click plane too - see
+    // MainWindow::onStartSketch() - so the two no longer disagree the way
+    // the first round of this task left them.
+    const gp_Pln basePlane = myWorkPlaneLocked ? mySketchPlane : faceOnOrthoPlane();
 
     const double distance = std::max(1.0, myCamera.state().distance);
     const double octave = std::ldexp(1.0, static_cast<int>(std::lround(std::log2(distance))));

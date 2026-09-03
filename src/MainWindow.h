@@ -733,6 +733,15 @@ private:
     void syncSketchConstraints();
     // Persistent right-hand readout: what mode we are in and what is possible.
     void updateStateLabel();
+    // The label's own word for a vertical face-on plane's normal -
+    // "Front" for a Y-normal (world XZ - Front and Back share this plane,
+    // so a plane already pinned to a sketch has no way to tell the two
+    // apart, and this names it Front either way) and "Right" for an
+    // X-normal (world YZ - Right and Left, same reasoning). Empty for
+    // anything else: the ground plane's Z-normal, or a locked face at an
+    // arbitrary angle - updateStateLabel() already has its own cue for
+    // that case and never calls this for it.
+    QString faceOnDirectionLabel(const gp_Dir& normal) const;
     // The grid-step length, through Measure, so the snap tooltip never goes
     // stale after a unit switch - refreshed from updateActions(), same as
     // updateStateLabel().

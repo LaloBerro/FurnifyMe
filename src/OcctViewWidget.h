@@ -575,6 +575,25 @@ public:
     // If a direction readout ever comes back, this is what it reads.
     QString viewDirectionName() const;
 
+    // Whether the CURRENT camera is an effectively orthographic look square
+    // onto a world axis - "Front", "Back", "Right" or "Left" if so, empty
+    // otherwise (Top, Bottom, Persp, or a non-orthographic look). This is
+    // gridPlane()'s own unlocked eligibility test (see faceOnOrthoPlane()
+    // below and gridPlane()'s own comment), exposed so a caller outside this
+    // class - the status label's cue - can read the same answer rather than
+    // re-deriving "which views count" itself.
+    QString faceOnOrthoDirection() const;
+
+    // The vertical world plane a face-on Front/Back/Left/Right look is
+    // squared onto - world XZ (normal +Y) for Front/Back, YZ (normal +X)
+    // for Right/Left, both through the origin - or the ground plane when
+    // faceOnOrthoDirection() is empty. This is gridPlane()'s own UNLOCKED
+    // half, factored out so MainWindow::onStartSketch() can derive the
+    // plane a new outline actually lands on by the identical rule the grid
+    // is already drawn on, rather than a second construction of the same
+    // two planes that could silently drift from this one.
+    gp_Pln faceOnOrthoPlane() const;
+
     // Re-dresses everything on the OCCT side of the bridge from the current
     // Theme spec: the background the view clears to, the two highlight
     // drawers, and the ground grid, which is rebuilt because its colours are

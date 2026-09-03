@@ -3144,7 +3144,35 @@ void MainWindow::updateStateLabel()
     // easy to misread once the camera has moved. It leads the label, because
     // where the next outline will land governs how to read everything after
     // it.
-    if (myFaceLocked) state = tr("On a locked face — %1").arg(state);
+    if (myFaceLocked) {
+        state = tr("On a locked face — %1").arg(state);
+    } else {
+        // The face-on-ortho cue, this fix round's own addition - the
+        // locked-face cue's exact shape, on the plane that governs where
+        // the NEXT outline lands (or the one already in progress, if any).
+        // The plane itself is read off whatever actually decided it, never
+        // re-derived from the live camera once something is pinned:
+        //   - mid-sketch, SketchController's own plane (set once at
+        //     onStartSketch() and never touched again - see there);
+        //   - a pending outline, ITS OWN stored plane, via the same
+        //     pendingSweepDirection() extrudePendingFace() already reads,
+        //     because mySketch's own copy only reflects the LAST sketch
+        //     drawn and a different outline may be the one selected;
+        //   - otherwise (idle), the LIVE camera's own faceOnOrthoPlane() -
+        //     nothing is pinned yet, so this is free to track the camera
+        //     exactly as the grid does.
+        // An orbit away from Front mid-sketch therefore leaves this cue
+        // showing "Facing Front" although the camera itself has moved on -
+        // correct, not stale, since the outline really is still on that
+        // plane.
+        gp_Dir normal(0.0, 0.0, 1.0);
+        if (mySketching) normal = mySketch.plane().Axis().Direction();
+        else if (hasPendingFace()) normal = pendingSweepDirection();
+        else normal = myView->faceOnOrthoPlane().Axis().Direction();
+
+        const QString direction = faceOnDirectionLabel(normal);
+        if (!direction.isEmpty()) state = tr("Facing %1 — %2").arg(direction, state);
+    }
     // Symmetry LEADS - CLAUDE.md's own words for this label - because
     // whether the next body gets a mirrored twin governs how to read
     // everything after it, the same argument the face lock makes one layer
@@ -3152,6 +3180,13 @@ void MainWindow::updateStateLabel()
     if (myDocument.symmetryOn()) state = tr("Symmetry on — %1").arg(state);
 
     myStateLabel->setText(state);
+}
+
+QString MainWindow::faceOnDirectionLabel(const gp_Dir& normal) const
+{
+    if (std::fabs(std::fabs(normal.Y()) - 1.0) < 1.0e-6) return tr("Front");
+    if (std::fabs(std::fabs(normal.X()) - 1.0) < 1.0e-6) return tr("Right");
+    return QString();
 }
 
 void MainWindow::resyncView()
@@ -3480,7 +3515,22 @@ void MainWindow::onStartSketch()
     mySketching = true;
 
     // The ground plane by default, a locked face's own plane while one is
-    // locked - SketchController holds the single copy of it either way.
+    // locked, or - this fix round - the vertical world plane a face-on
+    // ORTHOGRAPHIC look (Front/Back/Left/Right) is squared onto: the same
+    // priority gridPlane() already draws the grid on, now actually landing
+    // clicks there too rather than only decorating the view. Derived once,
+    // here, through OcctViewWidget::faceOnOrthoPlane() - gridPlane()'s own
+    // unlocked half, so there is one construction of this plane, not a
+    // second that could drift from the grid's - and handed to
+    // SketchController BY VALUE, the same topological-naming law Lock to
+    // Face's plane already follows (see lockToFace()'s own comment): from
+    // this line on, SketchController holds its own copy, so orbiting away
+    // or leaving ortho mid-sketch cannot re-aim an outline already in
+    // progress. Skipped entirely while locked - the locked face already
+    // outranks this, and re-deriving here would overwrite lockToFace()'s
+    // own plane with the ground or the substitution.
+    const QString faceOnDirection = myView->faceOnOrthoDirection();
+    if (!myFaceLocked) mySketch.setPlane(myView->faceOnOrthoPlane());
     myView->setSketchMode(true, mySketch.plane());
     myView->setPreview(TopoDS_Shape());
     updateActions();
@@ -3488,8 +3538,12 @@ void MainWindow::onStartSketch()
         myFaceLocked
             ? tr("Click points on the locked face to draw an outline — "
                  "Enter closes it, Backspace undoes a point, Esc cancels")
-            : tr("Click points on the ground to draw an outline — "
-                 "Enter closes it, Backspace undoes a point, Esc cancels"));
+            : faceOnDirection.isEmpty()
+                  ? tr("Click points on the ground to draw an outline — "
+                       "Enter closes it, Backspace undoes a point, Esc cancels")
+                  : tr("Click points on the %1 plane to draw an outline — "
+                       "Enter closes it, Backspace undoes a point, Esc cancels")
+                        .arg(faceOnDirection));
 }
 
 void MainWindow::onSketchPointPicked(const gp_Pnt& point)

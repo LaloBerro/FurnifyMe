@@ -192,7 +192,7 @@ void skipByEnvironment(int checks, const QString& why)
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 2239;
+constexpr int kCheckFloor = 2289;
 
 void check(bool condition, const QString& what)
 {
@@ -10696,6 +10696,224 @@ int main(int argc, char* argv[])
             // is false), so the only claim worth pinning is that the ground
             // grid is still genuinely on screen.
         }
+    }
+
+    // --- Phase 5 fix round: Start Sketch follows gridPlane()'s own rule -------
+    // User feedback from the gate test: the vertical grid drew (Task 5.1) but
+    // clicks still sketched on the ground. OcctViewWidget::faceOnOrthoPlane()
+    // - gridPlane()'s own unlocked half, factored out this round - is now
+    // also read by MainWindow::onStartSketch(), so what the grid shows and
+    // what a click lands on cannot disagree. A dedicated probe window again,
+    // for the same reasons Task 5.1's own block gives.
+    {
+        RequiredTempDir sketchProbeLib;
+        MainWindow sketchProbe(nullptr, /*persistProgress=*/false, sketchProbeLib.path());
+        sketchProbe.setAttribute(Qt::WA_ShowWithoutActivating);
+        sketchProbe.resize(1000, 800);
+        sketchProbe.move(60, 60);
+        sketchProbe.show();
+        settle(300);
+        OcctViewWidget* pview = sketchProbe.view();
+        pview->setAnimationsEnabled(false);
+        // Snap to Grid off: every target point below is picked precisely so
+        // this probe can assert REAL clicked coordinates rather than "a
+        // point exists somewhere near where it should be", and snapping
+        // would fold that into a second question this block does not ask.
+        pview->setSnap(false, 10.0);
+
+        enterFreshFurniture(sketchProbe);
+
+        QAction* orthoAction = action(sketchProbe, QStringLiteral("Orthographic"));
+        check(orthoAction != nullptr, "there is an Orthographic action for this probe");
+        if (orthoAction && !orthoAction->isChecked()) orthoAction->trigger();
+        settle(150);
+
+        CameraState frontPose;
+        frontPose.target = gp_Pnt(0.0, 0.0, 0.0);
+        frontPose.azimuthDeg = 0.0;
+        frontPose.elevationDeg = 0.0;
+        frontPose.distance = 700.0;
+        pview->animateTo(frontPose);
+        settle(150);
+        check(pview->viewDirectionName() == QStringLiteral("Front") && pview->viewIsOrthographic(),
+              "the probe is squared onto Front, in ortho");
+
+        // --- Start Sketch derives the XZ plane, not the ground -----------
+        trigger(sketchProbe, QStringLiteral("Start Sketch"));
+        settle(100);
+        check(sketchProbe.isSketching(), "sketching began");
+        check(std::fabs(sketchProbe.sketch().plane().Axis().Direction().Y()) > 0.999,
+              "the sketch plane's normal is the world Y axis - the XZ plane the grid is "
+              "already drawn on, not the ground");
+        check(sketchProbe.sketch().plane().Location().Distance(gp_Pnt(0.0, 0.0, 0.0)) < 1.0e-6,
+              "...through the origin");
+
+        // --- the status label carries the cue, and it is sweep-clean -----
+        const QString label = stateLabelText(sketchProbe);
+        check(label.contains(QStringLiteral("Front")),
+              QStringLiteral("the status label names the view a new outline faces (\"%1\")")
+                  .arg(label));
+        for (const QString& word : bannedWords()) {
+            check(!usesBannedWord(label, word),
+                  QStringLiteral("the face-on cue uses no banned word (checked \"%1\" "
+                                 "against \"%2\")")
+                      .arg(word, label));
+        }
+
+        // --- clicked points land at REAL world coordinates on that plane -
+        // Four points already on the plane (Y = 0), projected through the
+        // SAME camera the clicks below use - a passing check proves a click
+        // landed at that exact 3D point, not merely somewhere with Y near 0.
+        const std::vector<gp_Pnt> quad = {
+            gp_Pnt(-80.0, 0.0, -60.0),
+            gp_Pnt(80.0, 0.0, -60.0),
+            gp_Pnt(80.0, 0.0, 60.0),
+            gp_Pnt(-80.0, 0.0, 60.0),
+        };
+        for (const gp_Pnt& target : quad) {
+            QPoint screen;
+            check(pview->projectToScreen(target, screen),
+                  "each quad corner projects onto the probe's own screen");
+            clickAt(pview, QPointF(screen));
+        }
+        check(sketchProbe.sketch().pointCount() == quad.size(),
+              QStringLiteral("all %1 clicks were recorded as sketch points (%2 seen)")
+                  .arg(quad.size())
+                  .arg(sketchProbe.sketch().pointCount()));
+        for (std::size_t i = 0; i < quad.size() && i < sketchProbe.sketch().points().size(); ++i) {
+            const gp_Pnt& got = sketchProbe.sketch().points()[i];
+            check(got.Distance(quad[i]) < 2.0,
+                  QStringLiteral("point %1 landed at the clicked world position (got "
+                                 "%2,%3,%4 vs %5,%6,%7)")
+                      .arg(i)
+                      .arg(got.X()).arg(got.Y()).arg(got.Z())
+                      .arg(quad[i].X()).arg(quad[i].Y()).arg(quad[i].Z()));
+            check(std::fabs(got.Y()) < 1.0e-3,
+                  QStringLiteral("...specifically on Y~0, the XZ plane - the ground would "
+                                 "instead read Z~0 here (Y=%1)").arg(got.Y()));
+        }
+
+        // --- orbit mid-sketch: the plane does not move --------------------
+        CameraState angled;
+        angled.target = gp_Pnt(0.0, 0.0, 0.0);
+        angled.azimuthDeg = -20.0;
+        angled.elevationDeg = 15.0;
+        angled.distance = 700.0;
+        pview->animateTo(angled);
+        settle(100);
+        check(pview->viewDirectionName() == QStringLiteral("Persp"),
+              "the orbit really left the snapped Front direction");
+        check(std::fabs(sketchProbe.sketch().plane().Axis().Direction().Y()) > 0.999,
+              "the sketch plane itself is unchanged by the orbit - it is not re-derived "
+              "from the live camera mid-sketch");
+
+        // Re-clicking near the FIRST point, now projected through the NEW,
+        // angled camera, closes the outline only if the ray from this new
+        // angle still meets the SAME plane near the same 3D point - which is
+        // exactly what "the plane held" means, tested through the app's own
+        // close-detection rather than asserted separately from it.
+        QPoint closeScreen;
+        check(pview->projectToScreen(quad.front(), closeScreen),
+              "the first corner still projects onto the probe after the orbit");
+        clickAt(pview, QPointF(closeScreen));
+        check(!sketchProbe.isSketching() && sketchProbe.hasPendingFace(),
+              "the post-orbit click near the first point closed the outline - the plane "
+              "held across the orbit");
+
+        // --- extrude follows the outline's own plane normal ---------------
+        const int outlineId = sketchProbe.pendingOutlineId();
+        check(outlineId != 0, "the closed outline is pending");
+        gp_Pln outlinePlane = sketchProbe.sketch().plane();
+        check(sketchProbe.document().outlinePlane(outlineId, outlinePlane),
+              "the outline's own stored plane is readable");
+        check(std::fabs(outlinePlane.Axis().Direction().Y()) > 0.999,
+              "...and it is still the XZ plane, captured at close");
+
+        const double extrudeHeight = 40.0;
+        check(sketchProbe.extrudePendingFace(extrudeHeight), "the outline extrudes");
+        check(sketchProbe.document().count() == 1, "into exactly one body");
+        if (sketchProbe.document().count() == 1) {
+            const TopoDS_Shape body = sketchProbe.document().solids().back().shape;
+            const double volume = ModelingOps::volume(body);
+            const double expectedVolume = 160.0 * 120.0 * extrudeHeight;
+            // 1% relative, not the exact geometry the headless boolean/prism
+            // tests hold themselves to - the SOURCE of any error here is the
+            // click round trip (projectToScreen() answers in whole LOGICAL
+            // pixels, per CLAUDE.md's own pitfall, so a projected-then-
+            // reclicked corner lands within about a pixel of its true world
+            // position, not exactly on it), already budgeted for at 2mm per
+            // point a few checks up - this is that same budget propagated
+            // through an area and a height rather than a second, unrelated
+            // tolerance.
+            check(std::fabs(volume - expectedVolume) < expectedVolume * 0.01,
+                  QStringLiteral("the body's volume is the outline's area times the height "
+                                 "(%1 against %2)")
+                      .arg(volume)
+                      .arg(expectedVolume));
+
+            Bnd_Box box;
+            BRepBndLib::Add(body, box);
+            Standard_Real xmin = 0, ymin = 0, zmin = 0, xmax = 0, ymax = 0, zmax = 0;
+            box.Get(xmin, ymin, zmin, xmax, ymax, zmax);
+            // 1mm, the same click-precision budget as the volume check above
+            // - X and Z both come straight from clicked corners, while Y
+            // (below) is the fixed extrudeHeight parameter and needs no such
+            // allowance.
+            check(std::fabs((xmax - xmin) - 160.0) < 1.0,
+                  QStringLiteral("X extent matches the sketch (%1 vs 160)").arg(xmax - xmin));
+            check(std::fabs((zmax - zmin) - 120.0) < 1.0,
+                  QStringLiteral("Z extent matches the sketch (%1 vs 120)").arg(zmax - zmin));
+            check(std::fabs((ymax - ymin) - extrudeHeight) < 1.0e-2,
+                  QStringLiteral("Y extent is exactly the extrude height - the body grew "
+                                 "along world Y, the Front plane's own normal, not Z or X "
+                                 "(%1 vs %2)")
+                      .arg(ymax - ymin)
+                      .arg(extrudeHeight));
+            check(ymin > -1.0e-2,
+                  QStringLiteral("...grown OUTWARD from Y=0 along the plane's own outward "
+                                 "normal, not into negative Y (ymin=%1)")
+                      .arg(ymin));
+        }
+
+        // --- ground behaviour when NOT face-on is unchanged ---------------
+        if (orthoAction && orthoAction->isChecked()) {
+            orthoAction->trigger();
+            settle(150);
+        }
+        check(!pview->viewIsOrthographic(), "back to perspective for the ground regression");
+        CameraState axo;
+        axo.target = gp_Pnt(0.0, 0.0, 0.0);
+        axo.azimuthDeg = -45.0;
+        axo.elevationDeg = 30.0;
+        axo.distance = 700.0;
+        pview->animateTo(axo);
+        settle(100);
+        check(pview->viewDirectionName() == QStringLiteral("Persp"),
+              "a plain angled look, not a snapped axis direction");
+
+        trigger(sketchProbe, QStringLiteral("Start Sketch"));
+        settle(100);
+        check(sketchProbe.isSketching(), "a second sketch begins for the ground regression");
+        check(std::fabs(sketchProbe.sketch().plane().Axis().Direction().Z()) > 0.999,
+              "away from a face-on ortho look, Start Sketch still derives the GROUND "
+              "plane - unchanged from before this fix round");
+
+        const gp_Pnt groundTarget(30.0, -20.0, 0.0);
+        QPoint groundScreen;
+        check(pview->projectToScreen(groundTarget, groundScreen),
+              "the ground target projects onto the probe");
+        clickAt(pview, QPointF(groundScreen));
+        check(sketchProbe.sketch().pointCount() == 1, "the ground click was recorded");
+        if (!sketchProbe.sketch().points().empty()) {
+            const gp_Pnt& got = sketchProbe.sketch().points().back();
+            check(got.Distance(groundTarget) < 2.0 && std::fabs(got.Z()) < 1.0e-3,
+                  QStringLiteral("...landing on the ground plane at the clicked world "
+                                 "position, Z~0 (got %1,%2,%3)")
+                      .arg(got.X())
+                      .arg(got.Y())
+                      .arg(got.Z()));
+        }
+        trigger(sketchProbe, QStringLiteral("Cancel Sketch"));
     }
 
     // --- animated transitions -------------------------------------------------
