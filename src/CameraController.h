@@ -18,8 +18,21 @@ struct CameraState {
 
 class CameraController {
 public:
-    static constexpr double kMinElevation = -88.0;
-    static constexpr double kMaxElevation = 88.0;
+    // Task 6.2's fix: the true poles, not two degrees short of them. The
+    // clamp used to sit at +-88 purely because upVector() derived "up" by
+    // projecting world +Z onto the plane perpendicular to the view direction
+    // - a formula that is genuinely undefined exactly at the poles, where
+    // view direction and +Z are parallel and the projection is the zero
+    // vector. upVector() below now uses an equivalent closed form (matches
+    // the old formula everywhere off the pole - both ARE "the direction
+    // elevation increases toward", just derived two different ways - and
+    // stays a well-defined unit vector, driven by azimuth, exactly AT the
+    // pole) so nothing needs the margin any more: a Top/Bottom snap can land
+    // dead on the axis instead of 2 degrees off it, which is what a user's
+    // screenshot showed as a visibly tilted "Top" view with side faces
+    // still in frame.
+    static constexpr double kMinElevation = -90.0;
+    static constexpr double kMaxElevation = 90.0;
     static constexpr double kMinDistance = 1.0;
     static constexpr double kMaxDistance = 100000.0;
 
@@ -72,9 +85,9 @@ public:
     // onto a face: hand it the face's OUTWARD normal and viewDirection() comes
     // back antiparallel to it.
     //
-    // Elevation is clamped like everything else, so a horizontal face lands at
-    // 88 degrees rather than 90 - two degrees off dead-on, the unavoidable
-    // price of the no-roll invariant (the same clamp setViewTop() meets). A
+    // Elevation is clamped like everything else, but the clamp is now the
+    // true pole (see kMinElevation/kMaxElevation's own comment), so a
+    // horizontal face lands dead on 90 degrees rather than short of it. A
     // vertical direction leaves azimuth undefined, and the previous azimuth is
     // kept, exactly as setPivot() does.
     void lookFrom(const gp_Dir& towardEye);

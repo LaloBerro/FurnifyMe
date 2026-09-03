@@ -192,7 +192,7 @@ void skipByEnvironment(int checks, const QString& why)
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 2289;
+constexpr int kCheckFloor = 2323;
 
 void check(bool condition, const QString& what)
 {
@@ -2571,12 +2571,13 @@ int main(int argc, char* argv[])
         check(view->camera().state().target.Distance(target0) > 1.0,
               "an MMB drag pans the target");
 
-        // Elevation clamp holds through input: a huge vertical drag stops at 88.
+        // Elevation clamp holds through input: a huge vertical drag stops at
+        // the true pole, 90 (Task 6.2's fix - it used to stop at 88).
         dragButton(view, QPointF(view->width() * 0.5, view->height() * 0.5),
                          QPointF(view->width() * 0.5, view->height() * 0.5 + 2000.0),
                    Qt::RightButton);
-        check(view->camera().state().elevationDeg >= -88.0 - 1e-6 &&
-              view->camera().state().elevationDeg <= 88.0 + 1e-6,
+        check(view->camera().state().elevationDeg >= -90.0 - 1e-6 &&
+              view->camera().state().elevationDeg <= 90.0 + 1e-6,
               "elevation stays inside the clamp under wild input");
 
         // Restore the exact startup pose: every later check clicks at fractions
@@ -2600,10 +2601,13 @@ int main(int argc, char* argv[])
             // Clicking the +Z cone looks down from above.
             clickAt(gizmo, gizmo->tipCenter(2, true));
             settle(150);
-            check(std::fabs(view->camera().state().elevationDeg - 88.0) < 1e-3,
-                  "clicking the +Z cone goes to Top");
+            check(std::fabs(view->camera().state().elevationDeg - 90.0) < 1e-3,
+                  "clicking the +Z cone goes to Top, exactly - Task 6.2's fix");
             check(view->viewDirectionName() == QStringLiteral("Top"),
                   "the camera reads as square onto Top when aligned");
+            check(std::fabs(view->liveCameraDirection().Dot(gp_Dir(0.0, 0.0, -1.0)) - 1.0) < 1.0e-9,
+                  "and the LIVE OCCT camera direction is exactly straight down, not "
+                  "merely close to it (Task 6.2)");
 
             // An axis view is a face-on view, and a face-on view with
             // perspective convergence is not one. The arm click borrows
@@ -10530,26 +10534,287 @@ int main(int argc, char* argv[])
         check(std::fabs(view->camera().state().azimuthDeg) < 1e-3 &&
               std::fabs(view->camera().state().elevationDeg) < 1e-3,
               "Front is azimuth 0, elevation 0");
+        check(std::fabs(view->liveCameraDirection().Dot(gp_Dir(0.0, -1.0, 0.0)) - 1.0) < 1.0e-9,
+              "and Front was already exact - elevation 0 never touched the "
+              "clamp, so this is a regression guard, not a fix");
 
         trigger(window, QStringLiteral("Top"));
         settle(400);
-        // setViewTop() requests 89 degrees, but CameraController's clamp caps
-        // elevation at kMaxElevation = 88 (see CameraController.h and the
-        // "setState clamps elevation" headless check) - 88 is what actually
-        // lands, and it is still comfortably non-degenerate.
-        check(std::fabs(view->camera().state().elevationDeg - 88.0) < 1e-3,
-              "Top is elevation +88, clamped from the requested +89");
+        // setViewTop() requests exactly 90 degrees, and CameraController's
+        // clamp is exactly 90 too (Task 6.2's fix - it used to sit at 88,
+        // two degrees short, which is what left a "Top" view visibly tilted
+        // with side faces still in frame).
+        check(std::fabs(view->camera().state().elevationDeg - 90.0) < 1e-3,
+              "Top is elevation +90, exactly");
+        check(std::fabs(view->liveCameraDirection().Dot(gp_Dir(0.0, 0.0, -1.0)) - 1.0) < 1.0e-9,
+              "and the live OCCT camera looks exactly straight down - dot == 1 "
+              "within 1e-9, not merely close");
 
         trigger(window, QStringLiteral("Right"));
         settle(400);
         check(std::fabs(view->camera().state().azimuthDeg - (-90.0)) < 1e-3,
               "Right is azimuth -90");
+        check(std::fabs(view->liveCameraDirection().Dot(gp_Dir(-1.0, 0.0, 0.0)) - 1.0) < 1.0e-9,
+              "Right was already exact too");
 
         trigger(window, QStringLiteral("Axonometric"));
         settle(400);
         check(std::fabs(view->camera().state().azimuthDeg - (-45.0)) < 1e-3 &&
               std::fabs(view->camera().state().elevationDeg - 30.0) < 1e-3,
               "Axonometric returns to the startup angles");
+    }
+
+    // --- Task 6.2: exact named views, all six, every route ---------------------
+    //
+    // The bug a user's screenshot showed: "Top" landed visibly tilted, with
+    // side faces still in frame. Root cause, measured rather than guessed -
+    // CameraController::kMaxElevation sat at 88, two degrees short of the
+    // true pole, because upVector() derived "up" by projecting world +Z onto
+    // the plane perpendicular to the view direction, a formula that is
+    // genuinely undefined AT the pole (view direction parallel to +Z, the
+    // projection is the zero vector, gp_Dir's constructor would raise) - so
+    // both setViewTop() (requesting 89, clamped to 88) and AxisGizmo::
+    // snapToAxis() (requesting 88 directly, "held just inside the clamp" per
+    // its own old comment) landed short by construction. The fix replaces
+    // upVector() with an equivalent closed form - the same up vector
+    // everywhere off the pole, verified headless across the whole sphere -
+    // that stays well-defined and azimuth-driven exactly at the pole, so the
+    // clamp could be raised to the true 90 with nothing left to protect
+    // against. Front/Right/Back/Left were never touched by this: elevation 0
+    // never approached the clamp, so they were already exact (confirmed
+    // just above).
+    //
+    // Every route this app has for a named view funnels through one of two
+    // places: the View menu / number-key actions (Top/Front/Right only - see
+    // MainWindow::buildMenus, no Bottom/Back/Left entry exists) and the axis
+    // gizmo's six tips (AxisGizmo::snapToAxis, all six). The menu/key route
+    // for Top/Front/Right is already pinned exactly above, through the same
+    // QAction a key press would trigger (CLAUDE.md's "every control mirrors
+    // its QAction" - a literal key-press test would only be testing Qt's own
+    // shortcut dispatch, not this app's logic). This block covers the other
+    // route, all six directions, in a fresh probe so a body of known,
+    // queryable geometry backs the pixel check below.
+    {
+        RequiredTempDir axisProbeLib;
+        MainWindow axisProbe(nullptr, /*persistProgress=*/false, axisProbeLib.path());
+        axisProbe.setAttribute(Qt::WA_ShowWithoutActivating);
+        axisProbe.resize(900, 700);
+        axisProbe.move(80, 80);
+        axisProbe.show();
+        settle(300);
+        OcctViewWidget* pview = axisProbe.view();
+        pview->setAnimationsEnabled(false);
+
+        enterFreshFurniture(axisProbe);
+        // Sketched from square-down, azimuth a multiple of 90 - buildBody()
+        // clicks a SCREEN rectangle, and unprojecting a screen rectangle
+        // onto the ground plane only yields a WORLD-axis-aligned rectangle
+        // (what the pixel probe below needs its Bnd_Box to actually mean)
+        // when the camera looks exactly along an axis with an axis-aligned
+        // up vector - any other pose skews the screen rectangle into a
+        // world PARALLELOGRAM whose bounding box is mostly background, which
+        // is what the first version of this probe actually sampled (the
+        // sketched shape was a diamond, not a box, at the default oblique
+        // axonometric start pose).
+        CameraState squareDown = pview->camera().state();
+        squareDown.azimuthDeg = 0.0;
+        squareDown.elevationDeg = 90.0;
+        pview->animateTo(squareDown);
+        settle(100);
+        // Tall on purpose: the pixel probe below needs a leaked side-face
+        // sliver (were the old 2-degree tilt bug to return) to be wide
+        // enough on screen to tell apart from the GRAY30 boundary line
+        // displaySolid() draws around every shaded face's own silhouette -
+        // a short body's leak would be thinner than that line's own
+        // clearance margin and prove nothing either way.
+        check(buildBody(axisProbe, 0.38, 0.38, 0.62, 0.62, 500.0),
+              "a body for the exact-named-views probe");
+
+        AxisGizmo* axisGizmo = axisProbe.findChild<AxisGizmo*>();
+        check(axisGizmo != nullptr, "the probe has an axis gizmo");
+
+        // AxisGizmo's own axis indices (0=X, 1=Y, 2=Z) and tip sign, the
+        // eye-to-target direction CameraController's spherical maths
+        // predicts for that pose (derived from CameraState's own documented
+        // convention, not re-guessed here), and the name viewDirectionName()
+        // is expected to agree on.
+        struct NamedView { int axis; bool positive; gp_Dir viewDir; const char* name; };
+        const NamedView views[] = {
+            {2, true,  gp_Dir(0.0, 0.0, -1.0), "Top"},
+            {2, false, gp_Dir(0.0, 0.0, 1.0),  "Bottom"},
+            {1, true,  gp_Dir(0.0, -1.0, 0.0), "Front"},
+            {1, false, gp_Dir(0.0, 1.0, 0.0),  "Back"},
+            {0, true,  gp_Dir(-1.0, 0.0, 0.0), "Right"},
+            {0, false, gp_Dir(1.0, 0.0, 0.0),  "Left"},
+        };
+
+        if (axisGizmo) {
+            for (const NamedView& v : views) {
+                // A neutral, off-axis pose before EVERY click, not just the
+                // first. computeTips() projects each world axis's two tips
+                // from the LIVE camera basis, and looking exactly down an
+                // axis is exactly the degenerate case for that axis's own
+                // pair: both tips project onto the same screen point (the
+                // hub), and the nearer-wins tie-break always resolves to
+                // whichever one the camera is already facing - which is a
+                // real, sensible property of the gizmo (there is no "look at
+                // the tip directly behind the one you're on" click to make),
+                // not a bug this task is asking about. Landing on Top and
+                // then asking for Bottom without first orbiting away is
+                // exactly that unreachable case, so reset first.
+                CameraState neutral = pview->camera().state();
+                neutral.azimuthDeg = -45.0;
+                neutral.elevationDeg = 30.0;
+                pview->animateTo(neutral);
+                settle(80);
+
+                clickAt(axisGizmo, axisGizmo->tipCenter(v.axis, v.positive));
+                settle(150);
+                const QString name = QString::fromLatin1(v.name);
+                check(pview->viewDirectionName() == name,
+                      QStringLiteral("the %1 tip reads as %1").arg(name));
+                const double dot = pview->liveCameraDirection().Dot(v.viewDir);
+                check(std::fabs(dot - 1.0) < 1.0e-9,
+                      QStringLiteral("%1: the live OCCT camera direction is exactly "
+                                     "on axis (dot %2)").arg(name).arg(dot, 0, 'f', 12));
+            }
+        }
+
+        // --- a Dump from Top shows no side-face pixels ----------------------
+        // The failure mode itself, read off actual rendered pixels rather
+        // than camera state: a box viewed from a genuinely exact Top shows
+        // only its top face - every pixel inside the top face's own screen
+        // rectangle should match ONE colour family. The old 88-degree pose
+        // left a sliver of a side face in view at the silhouette, and a side
+        // face reads differently under a directional light (a different
+        // surface normal means different Lambertian shading), so a leaked
+        // side-face pixel is a real, visible colour outlier, not a
+        // hypothetical one.
+        if (axisGizmo) {
+            clickAt(axisGizmo, axisGizmo->tipCenter(2, true));
+            settle(150);
+            check(pview->viewDirectionName() == QStringLiteral("Top"),
+                  "setup: the probe is on Top for the pixel check");
+
+            const TopoDS_Shape probeBody = axisProbe.document().solids().front().shape;
+            Bnd_Box probeBox;
+            BRepBndLib::Add(probeBody, probeBox);
+            Standard_Real bx0, by0, bz0, bx1, by1, bz1;
+            probeBox.Get(bx0, by0, bz0, bx1, by1, bz1);
+
+            const QString topPath = outDir + QStringLiteral("/exact-top-view.png");
+            check(pview->saveSnapshot(topPath), "a Top-view snapshot is captured");
+            const QImage topShot(topPath);
+            check(!topShot.isNull(), "the snapshot decodes");
+
+            if (!topShot.isNull()) {
+                QPoint centreAt;
+                const bool haveCentre = pview->projectToScreen(
+                    gp_Pnt(0.5 * (bx0 + bx1), 0.5 * (by0 + by1), bz1), centreAt);
+                check(haveCentre, "the top face's own centre projects onto the viewport");
+                const QColor topColour =
+                    haveCentre ? topShot.pixelColor(centreAt) : QColor();
+
+                // Sample the top face's screen rectangle, biased toward its
+                // own BORDER - a leaked side-face sliver (were the tilt bug
+                // to return) shows up at the silhouette first, not in the
+                // middle. Pulled in 8 px, well clear of the GRAY30 boundary
+                // line displaySolid() draws around every shaded face's own
+                // edges (that line is what the 2 px version of this probe
+                // was actually sampling - a false positive with nothing to
+                // do with the axis fix) - 8 px still sits comfortably inside
+                // the several-times-wider band a real leak would paint,
+                // thanks to the tall fixture above.
+                QPoint c00, c11;
+                const bool haveCorners =
+                    haveCentre &&
+                    pview->projectToScreen(gp_Pnt(bx0, by0, bz1), c00) &&
+                    pview->projectToScreen(gp_Pnt(bx1, by1, bz1), c11);
+                check(haveCorners, "the top face's corners project onto the viewport too");
+
+                int sampled = 0, matched = 0;
+                if (haveCorners) {
+                    const int left = std::min(c00.x(), c11.x()) + 8;
+                    const int right = std::max(c00.x(), c11.x()) - 8;
+                    const int top = std::min(c00.y(), c11.y()) + 8;
+                    const int bottom = std::max(c00.y(), c11.y()) - 8;
+                    for (int x = left; x <= right; x += 3) {
+                        for (int edge = 0; edge < 2; ++edge) {
+                            const int y = edge == 0 ? top : bottom;
+                            if (!topShot.rect().contains(x, y)) continue;
+                            ++sampled;
+                            if (colorDistance(topShot.pixelColor(x, y), topColour) < 10.0) ++matched;
+                        }
+                    }
+                    for (int y = top; y <= bottom; y += 3) {
+                        for (int edge = 0; edge < 2; ++edge) {
+                            const int x = edge == 0 ? left : right;
+                            if (!topShot.rect().contains(x, y)) continue;
+                            ++sampled;
+                            if (colorDistance(topShot.pixelColor(x, y), topColour) < 10.0) ++matched;
+                        }
+                    }
+                }
+                check(sampled > 20,
+                      QStringLiteral("a non-vacuous number of top-face-border pixels were "
+                                     "sampled (%1)").arg(sampled));
+                check(sampled > 0 && matched == sampled,
+                      QStringLiteral("every one of them is the top face's own colour - no "
+                                     "side-face sliver leaking in at the silhouette (%1 of "
+                                     "%2 matched)").arg(matched).arg(sampled));
+            }
+        }
+
+        // --- orbit away from an exact Top still works, smoothly -------------
+        // The caution the task itself raises: raising the clamp to the true
+        // pole must not break orbiting AT it. upVector() used to be
+        // undefined there by construction; if the fix left any path that
+        // still hit that formula, this would crash the process outright
+        // rather than fail a check quietly.
+        if (axisGizmo) {
+            clickAt(axisGizmo, axisGizmo->tipCenter(2, true));
+            settle(150);
+            check(std::fabs(pview->camera().state().elevationDeg - 90.0) < 1e-6,
+                  "setup: back on the exact pole for the orbit probe");
+            const double azBefore = pview->camera().state().azimuthDeg;
+            const gp_Dir dirBefore = pview->liveCameraDirection();
+
+            const QPointF centre(pview->width() * 0.5, pview->height() * 0.5);
+            // Upward and sideways - dy negative moves elevation DOWN off the
+            // pole (see OcctViewWidget::mouseMoveEvent's own sign
+            // convention), large enough that eight-step integer-pixel
+            // rounding cannot hide a real jump.
+            const double dx = 120.0, dy = -200.0;
+            dragButton(pview, centre, centre + QPointF(dx, dy), Qt::RightButton);
+
+            const double elAfter = pview->camera().state().elevationDeg;
+            const double azAfter = pview->camera().state().azimuthDeg;
+            check(std::isfinite(elAfter) && std::isfinite(azAfter),
+                  "the camera state stays finite coming off the pole - no NaN "
+                  "from the formula that used to be undefined there");
+
+            const gp_Dir dirAfter = pview->liveCameraDirection();
+            check(dirBefore.Dot(dirAfter) < 0.999,
+                  "the direction genuinely moved - orbiting off Top is not stuck");
+
+            // No discontinuity beyond the drag's own magnitude: the
+            // turntable maths is linear in the accumulated pixel delta
+            // (0.3 deg/px elevation, 0.4 deg/px azimuth - see
+            // OcctViewWidget::mouseMoveEvent), so the LANDED state should sit
+            // close to that closed-form prediction. A wide tolerance absorbs
+            // the eight-step integer-pixel rounding dragButton's own
+            // interpolation introduces; a real jump (a flipped sign, a
+            // doubled delta, a stuck value) would miss it by far more.
+            const double expectedElevation = 90.0 + dy * 0.3;
+            const double expectedAzimuth = azBefore - dx * 0.4;
+            check(std::fabs(elAfter - expectedElevation) < 3.0,
+                  QStringLiteral("elevation after the drag matches the linear prediction "
+                                 "(got %1, expected ~%2)").arg(elAfter).arg(expectedElevation));
+            check(std::fabs(azAfter - expectedAzimuth) < 3.0,
+                  QStringLiteral("azimuth after the drag matches the linear prediction "
+                                 "(got %1, expected ~%2)").arg(azAfter).arg(expectedAzimuth));
+            check(elAfter < 87.0, "and elevation genuinely left the pole, not a rounding wobble");
+        }
     }
 
     // --- Task 5.1: face-on ortho grids -----------------------------------------

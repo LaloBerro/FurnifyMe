@@ -138,8 +138,8 @@ void AxisGizmo::snapToAxis(int axis, bool positive)
             goal.azimuthDeg = positive ? 0.0 : 180.0;
             goal.elevationDeg = 0.0;
             break;
-        case 2:   // straight above or below, held just inside the clamp
-            goal.elevationDeg = s * 88.0;
+        case 2:   // straight above or below - the true pole (Task 6.2's fix)
+            goal.elevationDeg = s * 90.0;
             break;
     }
     // An axis view IS a face-on view, and perspective convergence is exactly

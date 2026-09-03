@@ -511,6 +511,15 @@ public:
     // shows up as the mismatch it is. Returns 0 before the view exists.
     double cameraViewHeightAtTarget() const;
 
+    // The eye-to-target direction the LIVE OCCT camera actually holds -
+    // Graphic3d_Camera::Direction() - rather than CameraController's own
+    // idea of it. Same oracle discipline as cameraViewHeightAtTarget()
+    // above: comparing myCamera.viewDirection() to itself across a snap
+    // flight proves nothing about what OCCT was actually told, so Task 6.2's
+    // exact-axis checks read this. gp_Dir(0, 0, 1) before the view exists -
+    // an arbitrary but harmless default, since no check runs without a view.
+    gp_Dir liveCameraDirection() const;
+
     // Document ids of the selected solids, deduplicated (face-mode selection can
     // hit several faces of one solid).
     std::vector<int> selectedSolidIds() const;

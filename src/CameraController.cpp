@@ -75,21 +75,45 @@ gp_Dir CameraController::viewDirection() const
 
 gp_Dir CameraController::upVector() const
 {
-    // Project +Z onto the plane perpendicular to the view direction. Because
-    // elevation is clamped short of the poles, this never degenerates.
-    const gp_Dir view = viewDirection();
-    const double dot = view.Z();   // view . (0,0,1)
-    return gp_Dir(-dot * view.X(), -dot * view.Y(), 1.0 - dot * view.Z());
+    // Task 6.2's fix. The straightforward formula - project world +Z onto
+    // the plane perpendicular to the view direction - is undefined exactly
+    // at the poles: there, view direction IS +-Z, the projection is the zero
+    // vector, and gp_Dir's constructor would raise. That was why elevation
+    // used to be clamped two degrees short of +-90 (see kMinElevation's own
+    // comment) - the margin was standing in for a fix this formula needed
+    // and never got.
+    //
+    // This closed form is the same up vector everywhere OFF the pole -
+    // both are "which way the eye moves as elevation increases", just
+    // derived two different ways, and they agree by construction (checked
+    // headless across the whole sphere away from the poles) - but it stays
+    // exactly this: differentiate eyePosition()'s spherical position
+    //   distance * (-cos(el)sin(az), cos(el)cos(az), sin(el))
+    // with respect to elevation and drop the distance factor (a positive
+    // scalar, so it does not change the direction):
+    //   (sin(el)sin(az), -sin(el)cos(az), cos(el))
+    // which is unit length for every (az, el) - sin(el)^2 + cos(el)^2 = 1 -
+    // including exactly at the pole, where it reduces to
+    // (+-sin(az), -+cos(az), 0): a horizontal vector that still rotates
+    // with azimuth, which is exactly "the turntable up vector at the pole
+    // needs a defined azimuth" - the tangent direction of the very motion
+    // that would carry the camera away from the pole.
+    const double az = myState.azimuthDeg * kDegToRad;
+    const double el = myState.elevationDeg * kDegToRad;
+    return gp_Dir(std::sin(el) * std::sin(az), -std::sin(el) * std::cos(az), std::cos(el));
 }
 
 void CameraController::setPivot(const gp_Pnt& pivot)
 {
     // Re-derive the spherical state around the new target, keeping the eye
-    // position fixed whenever the derived elevation lies within ±88 degrees.
-    // When the pivot is nearly overhead or underfoot, the derived elevation
-    // exceeds the clamp and is silently clamped; the eye then moves by at most
-    // distance*sin(2 deg) (~3.5% of distance) — the unavoidable price of
-    // maintaining the no-roll invariant.
+    // position fixed. atan2(dz, horizontal) is mathematically bounded to
+    // [-90, 90] already - horizontal is a magnitude, never negative - so the
+    // clamp below can no longer actually bind here (it did when the clamp
+    // sat at ±88, two degrees short of what the geometry alone can produce;
+    // see kMinElevation's own comment). A pivot placed exactly overhead or
+    // underfoot now derives exactly the pole, with the eye held EXACTLY
+    // where it was - no forced drift, because there is no gap left for the
+    // clamp to fight the geometry over.
     const gp_Pnt eye = eyePosition();
     const double dx = eye.X() - pivot.X();
     const double dy = eye.Y() - pivot.Y();

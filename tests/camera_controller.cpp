@@ -47,9 +47,9 @@ int main()
         checkNear(cam.state().elevationDeg, 35.0, 1e-9, "orbit adds elevation");
 
         cam.orbit(0.0, 500.0);
-        checkNear(cam.state().elevationDeg, 88.0, 1e-9, "elevation clamps at +88");
+        checkNear(cam.state().elevationDeg, 90.0, 1e-9, "elevation clamps at +90 - the true pole");
         cam.orbit(0.0, -500.0);
-        checkNear(cam.state().elevationDeg, -88.0, 1e-9, "elevation clamps at -88");
+        checkNear(cam.state().elevationDeg, -90.0, 1e-9, "elevation clamps at -90");
     }
 
     // --- eye position geometry ------------------------------------------------
@@ -95,13 +95,55 @@ int main()
     rollDone:;
     }
 
+    // --- up vector at the exact pole (Task 6.2) --------------------------------
+    // The formula upVector() uses away from the pole - projecting world +Z
+    // onto the plane perpendicular to the view direction - is genuinely
+    // undefined exactly AT elevation +-90 (view direction is parallel to
+    // +Z there, so the projection is the zero vector, and gp_Dir's own
+    // constructor would raise). The fix replaces it with an equivalent
+    // closed form that is well-defined everywhere, including the pole. This
+    // pins that directly: construction does not throw, the vector stays
+    // unit and perpendicular to the view direction, and - the part that
+    // matters for orbiting away from a Top view - it keeps varying with
+    // azimuth exactly at the pole rather than collapsing to one fixed value.
+    {
+        CameraController cam;
+        CameraState s;
+        s.distance = 500.0;
+
+        s.elevationDeg = 90.0;
+        for (double az : {0.0, 90.0, 180.0, 270.0, -30.0}) {
+            s.azimuthDeg = az;
+            cam.setState(s);
+            const gp_Dir up = cam.upVector();   // would throw on a zero vector
+            checkNear(up.Dot(cam.viewDirection()), 0.0, 1e-9,
+                      "at the pole, up stays perpendicular to the view direction");
+        }
+        s.azimuthDeg = 0.0;
+        cam.setState(s);
+        const gp_Dir upAz0 = cam.upVector();
+        s.azimuthDeg = 90.0;
+        cam.setState(s);
+        const gp_Dir upAz90 = cam.upVector();
+        check(upAz0.Angle(upAz90) > 1.0e-3,
+              "and it genuinely rotates with azimuth at the pole - a defined "
+              "azimuth, not a value the pole discards");
+
+        s.elevationDeg = -90.0;
+        s.azimuthDeg = 15.0;
+        cam.setState(s);
+        const gp_Dir upFloor = cam.upVector();   // would throw on a zero vector
+        checkNear(upFloor.Dot(cam.viewDirection()), 0.0, 1e-9,
+                  "the floor pole is just as well-defined as the ceiling");
+    }
+
     // --- setState clamps ------------------------------------------------------
     {
         CameraController cam;
         CameraState s;
         s.elevationDeg = 200.0; s.distance = 0.0001;
         cam.setState(s);
-        checkNear(cam.state().elevationDeg, 88.0, 1e-9, "setState clamps elevation");
+        checkNear(cam.state().elevationDeg, 90.0, 1e-9, "setState clamps elevation");
         checkNear(cam.state().distance, 1.0, 1e-9, "setState clamps distance to 1mm");
     }
 
@@ -121,26 +163,30 @@ int main()
                   "orbit after setPivot keeps the pivot as target");
     }
 
-    // --- setPivot at the clamp edge -------------------------------------------
+    // --- setPivot at the pole: no clamp fighting the geometry any more --------
+    // Before Task 6.2's fix, the clamp sat at +-88 - two degrees short of
+    // the pole - so a pivot nearly underfoot forced the DERIVED elevation
+    // (atan2(dz, horizontal), which is mathematically bounded to [-90, 90]
+    // already, since horizontal is a magnitude) past that artificial
+    // ceiling, and the eye had to move to keep the pose valid. Now the
+    // clamp IS the true ceiling, so it can no longer bind here: a pivot
+    // placed EXACTLY below the eye derives exactly the pole, and the eye
+    // does not move at all to get there.
     {
-        // A pivot nearly underfoot: derived elevation would exceed +88, so it
-        // clamps, and the eye is allowed to move - but only by the small amount
-        // the 2-degree clamp margin implies.
         CameraController cam;
         CameraState s;
         s.azimuthDeg = 0.0; s.elevationDeg = 80.0; s.distance = 100.0;
         cam.setState(s);
         const gp_Pnt eyeBefore = cam.eyePosition();
-        // A point on the ground almost directly below the eye.
-        const gp_Pnt pivot(eyeBefore.X() + 0.5, eyeBefore.Y(), 0.0);
+        // A point on the ground exactly below the eye.
+        const gp_Pnt pivot(eyeBefore.X(), eyeBefore.Y(), 0.0);
         cam.setPivot(pivot);
-        check(cam.state().elevationDeg <= 88.0 + 1e-9,
-              "clamp holds even for an overhead pivot");
-        const double drift = cam.eyePosition().Distance(eyeBefore);
-        const double bound = cam.state().distance * std::sin(2.5 * 3.14159265358979323846 / 180.0)
-                             + 1e-6;
-        check(drift <= bound,
-              "eye drift at the clamp edge stays within the documented bound");
+        checkNear(cam.state().elevationDeg, CameraController::kMaxElevation, 1e-9,
+                  "a pivot dead below the eye derives exactly the pole, not a "
+                  "clamped approximation of it");
+        checkNear(cam.eyePosition().Distance(eyeBefore), 0.0, 1e-6,
+                  "and the eye does not move to get there - the clamp no longer "
+                  "fights the geometry");
     }
 
     // --- pan moves the target in the view plane -------------------------------
@@ -355,7 +401,7 @@ int main()
                   "and the target");
     }
 
-    // --- lookFrom at the poles: clamped, and azimuth kept ---------------------
+    // --- lookFrom at the poles: exact, and azimuth kept ------------------------
     {
         CameraController cam;
         CameraState pose;
@@ -363,17 +409,21 @@ int main()
         cam.setState(pose);
         cam.lookFrom(gp_Dir(0.0, 0.0, 1.0));
         checkNear(cam.state().elevationDeg, CameraController::kMaxElevation, 1e-9,
-                  "a horizontal face is met at the elevation clamp, not at 90");
+                  "a horizontal face is met exactly at the pole - the elevation "
+                  "clamp IS 90 now, not two degrees short of it");
         checkNear(cam.state().azimuthDeg, 33.0, 1e-9,
                   "and a vertical direction leaves azimuth undefined, so it is kept");
-        // Two degrees off dead-on is the documented price of the no-roll
-        // invariant. Pinned so a change to the clamp cannot quietly widen it.
-        check(cam.viewDirection().Dot(gp_Dir(0.0, 0.0, 1.0)) < -0.999,
-              "which is still within a thousandth of antiparallel");
+        // Task 6.2's fix, pinned exactly rather than loosely: this used to be
+        // "< -0.999" because the old clamp held the view direction two
+        // degrees off antiparallel by construction. It is dead on now.
+        checkNear(cam.viewDirection().Dot(gp_Dir(0.0, 0.0, 1.0)), -1.0, 1e-9,
+                  "which is exactly antiparallel, not merely close");
 
         cam.lookFrom(gp_Dir(0.0, 0.0, -1.0));
         checkNear(cam.state().elevationDeg, CameraController::kMinElevation, 1e-9,
                   "and the floor clamps the same way");
+        checkNear(cam.viewDirection().Dot(gp_Dir(0.0, 0.0, -1.0)), -1.0, 1e-9,
+                  "exactly antiparallel there too");
     }
 
     // --- the face-pull drag mapping -------------------------------------------

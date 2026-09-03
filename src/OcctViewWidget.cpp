@@ -1779,6 +1779,12 @@ double OcctViewWidget::cameraViewHeightAtTarget() const
     return myView->Camera()->ViewDimensions().Y();
 }
 
+gp_Dir OcctViewWidget::liveCameraDirection() const
+{
+    if (myView.IsNull()) return gp_Dir(0.0, 0.0, 1.0);
+    return myView->Camera()->Direction();
+}
+
 bool OcctViewWidget::projectToScreen(const gp_Pnt& world, QPoint& out) const
 {
     if (myView.IsNull()) return false;
@@ -2518,7 +2524,12 @@ void OcctViewWidget::setViewAxonometric()
 void OcctViewWidget::setViewTop()
 {
     CameraState s = myCamera.state();
-    s.elevationDeg = 89.0;   // inside the clamp: a true 90 makes azimuth degenerate
+    // A true 90, not one short of it (Task 6.2's fix) - CameraController::
+    // upVector() no longer degenerates there. Azimuth going along for the
+    // ride unused is fine: eyePosition() is insensitive to it exactly
+    // overhead, but upVector() still reads it, so the view rotates about
+    // its own axis exactly as an orbit approaching the pole would.
+    s.elevationDeg = 90.0;
     animateTo(s);
 }
 
