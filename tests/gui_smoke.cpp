@@ -192,7 +192,7 @@ void skipByEnvironment(int checks, const QString& why)
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 2192;
+constexpr int kCheckFloor = 2239;
 
 void check(bool condition, const QString& what)
 {
