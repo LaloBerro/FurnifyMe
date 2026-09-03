@@ -1,7 +1,10 @@
 #include "DocumentModel.h"
 
+#include "ModelingOps.h"
+
 #include <algorithm>
 #include <cstdio>
+#include <unordered_set>
 
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopoDS.hxx>
@@ -108,6 +111,61 @@ int DocumentModel::twinOf(int id) const
 {
     const auto it = myTwin.find(id);
     return it == myTwin.end() ? -1 : it->second;
+}
+
+DocumentModel::PairResult DocumentModel::pairWithMirror(const std::vector<int>& ids,
+                                                         const gp_Pln& plane)
+{
+    PairResult result;
+
+    // Resolve every id BEFORE mutating anything - "never half-done" means a
+    // straddling or already-paired id partway through the list must not
+    // leave earlier ids paired while later ones silently fail. `candidates`
+    // is what actually gets mirrored below, once the whole list is known
+    // good.
+    struct Candidate {
+        int id;
+        TopoDS_Shape shape;
+    };
+    std::vector<Candidate> candidates;
+    std::unordered_set<int> seen;
+    for (int id : ids) {
+        if (id <= 0 || !contains(id)) continue;   // unknown/invalid - silently ignored
+        if (!seen.insert(id).second) continue;    // duplicate within this call
+
+        // symmetryOn() gates every twinOf() read - CLAUDE.md's rule. A
+        // pairing entry can survive in State (undo-tracked) even while the
+        // live mode is off, and such an entry is inert, not "already
+        // paired".
+        if (symmetryOn() && twinOf(id) != -1) {
+            result.skippedAlreadyPaired.push_back(id);
+            continue;
+        }
+
+        const TopoDS_Shape shape = shapeOf(id);
+        if (ModelingOps::boundingBoxStraddlesPlane(shape, plane)) {
+            result.skippedStraddling.push_back(id);
+            continue;
+        }
+        candidates.push_back(Candidate{id, shape});
+    }
+
+    if (candidates.empty()) return result;   // nothing to do - no checkpoint, no mode change
+
+    checkpoint();
+    setSymmetry(true, plane);
+    for (const Candidate& c : candidates) {
+        const ModelingOps::BooleanResult mirrored = ModelingOps::mirrorShape(c.shape, plane);
+        if (!mirrored.ok) continue;   // a kernel refusal on otherwise-valid geometry is rare
+                                       // and left unpaired rather than aborting ids that DID
+                                       // succeed - the checkpoint already taken still lets a
+                                       // single undo clean up whatever partial work happened.
+        const int twinId = addSolid(mirrored.shape);
+        if (twinId <= 0) continue;
+        pairBodies(c.id, twinId);
+        ++result.paired;
+    }
+    return result;
 }
 
 bool DocumentModel::unpairAll()

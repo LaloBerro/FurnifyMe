@@ -11,6 +11,8 @@
 #include <cstdio>
 #include <string>
 
+#include <BRepGProp.hxx>
+#include <GProp_GProps.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Lin.hxx>
 
@@ -30,6 +32,21 @@ void checkPoint(const gp_Pnt& actual, double x, double y, double z, const std::s
     std::printf("%-6s %s (got %.6f, %.6f, %.6f)\n", ok ? "[ ok ]" : "[FAIL]", what.c_str(),
                 actual.X(), actual.Y(), actual.Z());
     if (!ok) ++g_failures;
+}
+
+void checkNear(double actual, double expected, double tolerance, const std::string& what)
+{
+    const bool ok = std::fabs(actual - expected) <= tolerance;
+    std::printf("%-6s %s (got %.6f, expected %.6f)\n",
+                ok ? "[ ok ]" : "[FAIL]", what.c_str(), actual, expected);
+    if (!ok) ++g_failures;
+}
+
+gp_Pnt centreOfMass(const TopoDS_Shape& shape)
+{
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(shape, props);
+    return props.CentreOfMass();
 }
 
 }  // namespace
@@ -632,6 +649,112 @@ int main()
         check(ModelingOps::countSolids(both) == 2, "compound holds both solids");
         check(std::fabs(ModelingOps::volume(both) - 9.0) < 1.0e-6,
               "compound volume is the sum of its parts");
+    }
+
+    // --- pairWithMirror (Milestone 4, Task 3.1: retroactive pairing) --------
+    // "Select existing bodies, pair them as mirror twins" - built ON the
+    // Milestone 3 twin engine (pairBodies()/twinOf()/setSymmetry()) rather
+    // than changing any of its rules; see CLAUDE.md's "Live symmetry is
+    // twins, not replay".
+    {
+        const gp_Pln yz(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0));   // world YZ, x = 0
+
+        DocumentModel doc;
+        check(!doc.symmetryOn(), "a fresh document starts with symmetry off");
+
+        const TopoDS_Shape boxA =
+            ModelingOps::makeBox(gp_Pnt(10.0, 0.0, 0.0), 20.0, 10.0, 10.0);    // x in [10, 30]
+        const TopoDS_Shape boxB =
+            ModelingOps::makeBox(gp_Pnt(40.0, 0.0, 0.0), 5.0, 5.0, 5.0);       // x in [40, 45]
+        const TopoDS_Shape straddler =
+            ModelingOps::makeBox(gp_Pnt(-5.0, 0.0, 0.0), 20.0, 10.0, 10.0);    // x in [-5, 15]
+
+        const int idA = doc.addSolid(boxA);
+        const int idB = doc.addSolid(boxB);
+        const int idStraddler = doc.addSolid(straddler);
+        check(doc.count() == 3, "three clear bodies exist before pairing");
+
+        const double volumeA = ModelingOps::volume(boxA);
+        const double volumeB = ModelingOps::volume(boxB);
+        const gp_Pnt comA = centreOfMass(boxA);
+        const gp_Pnt comB = centreOfMass(boxB);
+
+        const DocumentModel::PairResult result = doc.pairWithMirror({idA, idB, idStraddler}, yz);
+
+        check(result.paired == 2, "two of the three ids got a twin");
+        check(result.skippedStraddling.size() == 1 && result.skippedStraddling.front() == idStraddler,
+              "the straddling body is reported skipped, by id");
+        check(result.skippedAlreadyPaired.empty(), "neither clear body was already paired");
+
+        check(doc.symmetryOn(), "pairing with symmetry previously OFF turns it on");
+        check(doc.symmetryPlane().Axis().Direction().IsEqual(yz.Axis().Direction(), 1.0e-9),
+              "and sets the symmetry plane to the one passed in");
+
+        check(doc.count() == 5, "two twin bodies were added (3 originals + 2 twins)");
+
+        const int twinA = doc.twinOf(idA);
+        const int twinB = doc.twinOf(idB);
+        check(twinA != -1 && twinB != -1, "both paired bodies report a twin");
+        check(doc.twinOf(twinA) == idA && doc.twinOf(twinB) == idB,
+              "pairing is recorded in both directions");
+        check(doc.twinOf(idStraddler) == -1, "the straddling body got no twin at all");
+
+        checkNear(ModelingOps::volume(doc.shapeOf(twinA)), volumeA, 1.0e-6,
+                  "twin A's volume matches its source exactly");
+        checkNear(ModelingOps::volume(doc.shapeOf(twinB)), volumeB, 1.0e-6,
+                  "twin B's volume matches its source exactly");
+
+        const gp_Pnt reflectedA = centreOfMass(doc.shapeOf(twinA));
+        checkNear(reflectedA.X(), -comA.X(), 1.0e-6, "twin A's centre of mass reflects across X");
+        checkNear(reflectedA.Y(), comA.Y(), 1.0e-6, "...Y is untouched by an X-normal mirror");
+        checkNear(reflectedA.Z(), comA.Z(), 1.0e-6, "...and so is Z");
+
+        const gp_Pnt reflectedB = centreOfMass(doc.shapeOf(twinB));
+        checkNear(reflectedB.X(), -comB.X(), 1.0e-6, "twin B's centre of mass reflects across X too");
+
+        // ONE undo removes every twin AND every pairing this call created.
+        check(doc.undo(), "one undo");
+        check(doc.count() == 3, "both twins are gone - back to the three originals");
+        check(doc.contains(idA) && doc.contains(idB) && doc.contains(idStraddler),
+              "and the three originals are exactly the ones that survive");
+        check(doc.twinOf(idA) == -1 && doc.twinOf(idB) == -1,
+              "and neither original reports a twin any more");
+
+        // Already-paired: pair A and B to EACH OTHER directly (not through
+        // pairWithMirror), then ask to pair A with a mirror again - a live
+        // pairing must be reported skipped, never silently replaced by a
+        // fresh twin that would orphan B.
+        doc.checkpoint();
+        doc.setSymmetry(true, yz);
+        doc.pairBodies(idA, idB);
+        check(doc.twinOf(idA) == idB, "A and B are paired directly, to set up the already-paired case");
+
+        const std::size_t countBeforeRepair = doc.count();
+        const DocumentModel::PairResult already = doc.pairWithMirror({idA}, yz);
+        check(already.paired == 0, "an already-paired id gets no new twin");
+        check(already.skippedAlreadyPaired.size() == 1 && already.skippedAlreadyPaired.front() == idA,
+              "and is reported in skippedAlreadyPaired");
+        check(doc.count() == countBeforeRepair, "no body was added for it");
+        check(doc.twinOf(idA) == idB, "and its existing pairing with B is untouched");
+
+        // A no-op call (every id skips) must not dirty the document at all:
+        // no checkpoint taken, mode left exactly as it was.
+        DocumentModel noopDoc;
+        const int noopId = noopDoc.addSolid(straddler);
+        check(!noopDoc.canUndo(), "fresh document, nothing to undo yet");
+        const DocumentModel::PairResult noop = noopDoc.pairWithMirror({noopId}, yz);
+        check(noop.paired == 0 && noop.skippedStraddling.size() == 1,
+              "the only id given straddles, so nothing is paired");
+        check(!noopDoc.symmetryOn(), "a call that pairs nothing does not turn symmetry on");
+        check(!noopDoc.canUndo(), "and takes no checkpoint at all");
+
+        // Unknown/invalid ids are silently ignored, not surfaced as either
+        // kind of skip.
+        DocumentModel unknownDoc;
+        const DocumentModel::PairResult unknown = unknownDoc.pairWithMirror({9999, -1, 0}, yz);
+        check(unknown.paired == 0 && unknown.skippedStraddling.empty() &&
+                  unknown.skippedAlreadyPaired.empty(),
+              "unknown/invalid ids are ignored rather than reported as a skip");
     }
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL",

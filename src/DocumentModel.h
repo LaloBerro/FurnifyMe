@@ -91,6 +91,36 @@ public:
     // `id`'s twin body id, or -1 when unpaired (including for an unknown id).
     int twinOf(int id) const;
 
+    // Retroactive pairing (Milestone 4): builds a mirror twin for each of
+    // `ids` (ModelingOps::mirrorShape) and pairs it with its source, all
+    // inside ONE checkpoint that also sets the symmetry plane and turns
+    // symmetryOn() on - built ON the Milestone 3 twin engine
+    // (pairBodies()/twinOf()/setSymmetry()) rather than changing any of its
+    // rules; see CLAUDE.md's "Live symmetry is twins, not replay".
+    struct PairResult {
+        // How many of `ids` actually got a fresh twin and pairing.
+        int paired = 0;
+        // ids skipped because ModelingOps::boundingBoxStraddlesPlane() found
+        // them straddling `plane` - mirroring one would build a twin
+        // overlapping the body itself, not a second piece of furniture (the
+        // same rule creation-time pairing already follows in MainWindow).
+        std::vector<int> skippedStraddling;
+        // ids skipped because they already have a live twin
+        // (symmetryOn() && twinOf(id) != -1). pairBodies() would silently
+        // drop an existing pairing and re-point it; a retroactive-pairing
+        // gesture must never do that without saying so, so these are
+        // reported rather than acted on.
+        std::vector<int> skippedAlreadyPaired;
+    };
+
+    // An id outside the document (unknown, <= 0, or repeated within `ids`)
+    // is silently ignored - the two skip lists above are for ids that ARE
+    // real bodies but cannot be paired as asked. Nothing is mutated unless
+    // at least one id can actually be paired: if every id skips, no
+    // checkpoint is taken and symmetryOn()/symmetryPlane() are left exactly
+    // as they were, so a no-op call cannot dirty the document.
+    PairResult pairWithMirror(const std::vector<int>& ids, const gp_Pln& plane);
+
     // Drops EVERY pairing, leaving symmetryOn()/symmetryPlane() untouched -
     // the plane-change rule (fix round 1): a new plane invalidates every
     // existing pairing's MEANING (each one was computed against the OLD
