@@ -915,6 +915,72 @@ int main()
         check(!unknownCopy.ok && !unknownCopy.error.empty(), "an unknown source id refuses too");
     }
 
+    // --- link groups: createLinkedCopy from a NON-ANCHOR source ---------------
+    // (fix round 1, item 2) Every createLinkedCopy call above used a source
+    // that was either fresh or the group's own anchor, whose basePlacement
+    // is always identity - offset.Multiplied(identity) is order-independent,
+    // so none of it exercised the REAL composition. This test copies from a
+    // MEMBER (not the anchor) whose own placement is a genuine rotation, so
+    // offset.Multiplied(basePlacement) actually matters, and it is checked
+    // against the STORED placement's own contract - not by re-deriving the
+    // same composition formula and comparing it to itself.
+    {
+        DocumentModel doc;
+        const TopoDS_Shape anchorShape = ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 20.0, 10.0, 5.0);
+        const int anchorId = doc.addSolid(anchorShape);
+
+        const double halfPi = 1.5707963267948966;   // 90 degrees, in radians
+
+        gp_Trsf rotationA;
+        rotationA.SetRotation(gp_Ax1(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0)), halfPi);
+        gp_Trsf translationA;
+        translationA.SetTranslation(gp_Vec(50.0, 0.0, 0.0));
+        const gp_Trsf placementA = translationA.Multiplied(rotationA);   // anchor -> memberA
+        const DocumentModel::LinkResult memberAResult = doc.createLinkedCopy(anchorId, placementA);
+        check(memberAResult.ok, "setup: a rotated first member founds the group");
+        const int memberAId = memberAResult.id;
+
+        gp_Trsf rotationB;
+        rotationB.SetRotation(gp_Ax1(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0)), halfPi);
+        gp_Trsf translationB;
+        translationB.SetTranslation(gp_Vec(0.0, 20.0, 0.0));
+        const gp_Trsf offsetB = translationB.Multiplied(rotationB);   // memberA -> memberB
+
+        // The case this test exists for: memberA (a NON-anchor member with a
+        // non-identity basePlacement) is the SOURCE.
+        const DocumentModel::LinkResult memberBResult = doc.createLinkedCopy(memberAId, offsetB);
+        check(memberBResult.ok, "createLinkedCopy from a non-anchor source succeeds");
+        const int memberBId = memberBResult.id;
+        check(doc.linkAnchorOf(memberBId) == anchorId,
+              "memberB attaches to the GROUP's anchor, not to memberA - one group, one anchor");
+
+        // memberB's ACTUAL shape is built along a path that never touches
+        // the placement-composition line at all (transformShape(memberA's
+        // OWN current shape, offsetB) directly) - independent ground truth
+        // for what memberB's real-world position must be.
+        const gp_Pnt actualMemberBCentre = ModelingOps::centreOfMass(doc.shapeOf(memberBId));
+
+        // The critical cross-check: the STORED placement (used by
+        // propagateLinkedEdit and anchor promotion, never by the shape-
+        // creation line above) must reproduce memberB's real geometry when
+        // applied directly to the ANCHOR's own original shape. If
+        // offset.Multiplied(basePlacement) were flipped to
+        // basePlacement.Multiplied(offset), this would fail under a real
+        // rotation while the shape-creation path above stayed correct -
+        // exactly the risk this test exists to catch.
+        DocumentModel::LinkGroup group;
+        check(doc.linkGroupOf(memberBId, group), "memberB's group is queryable");
+        const gp_Trsf storedPlacementB = group.placement.at(memberBId);
+        const ModelingOps::BooleanResult reconstructed =
+            ModelingOps::transformShape(anchorShape, storedPlacementB);
+        check(reconstructed.ok, "the stored placement applies cleanly to the anchor's own original shape");
+        const gp_Pnt reconstructedCentre = ModelingOps::centreOfMass(reconstructed.shape);
+        checkNear(reconstructedCentre.Distance(actualMemberBCentre), 0.0, 1.0e-6,
+                  "the STORED placement, applied to the anchor's own shape, reproduces memberB's actual "
+                  "geometry exactly - proving group.placement[memberB] really is 'anchor frame -> "
+                  "memberB frame', composed correctly through a real (non-commuting) rotation");
+    }
+
     // --- link groups: linkExisting --------------------------------------------
     {
         DocumentModel doc;
@@ -1022,6 +1088,11 @@ int main()
 
         checkNear(ModelingOps::volume(doc.shapeOf(copyId)), ModelingOps::volume(cutResult.shape), 1.0e-6,
                   "the edited member's own shape is exactly the edit's result");
+        // fix round 1, item 3: reused exactly, never round-tripped through
+        // the anchor and back - the strongest form of "exactly", handle
+        // identity rather than mere near-equality.
+        check(doc.shapeOf(copyId).IsEqual(cutResult.shape),
+              "and it is the SAME shape handle as cutResult.shape, not a kernel round trip of it");
         checkNear(ModelingOps::volume(doc.shapeOf(anchorId)), ModelingOps::volume(cutResult.shape), 1.0e-6,
                   "the anchor's volume moved to match - every member is the transformed anchor");
 
@@ -1042,6 +1113,93 @@ int main()
         const int loneId = doc.addSolid(ModelingOps::makeBox(gp_Pnt(500.0, 0.0, 0.0), 1.0, 1.0, 1.0));
         check(!doc.propagateLinkedEdit(loneId, doc.shapeOf(loneId)),
               "an id with no link group refuses too - nothing to propagate");
+    }
+
+    // --- link groups: propagateLinkedEdit under a ROTATED placement -----------
+    // (fix round 1, item 1) Every placement built anywhere ABOVE is a pure
+    // translation, which commutes - a flipped Inverted() or argument order
+    // would produce numerically identical results and pass every check so
+    // far. A 90-degree rotation does not commute, so this test can actually
+    // distinguish the documented formula (anchor := placement(edited)^-1 .
+    // newShape; member := placement(m) . anchor) from a flipped one. The
+    // expected centres below are hand-derived with gp_Pnt::Transformed()
+    // directly against the SAME gp_Trsf values passed into createLinkedCopy
+    // - doc.linkGroupOf() is never called in this block, so nothing here
+    // reads the composition back from the code under test.
+    {
+        DocumentModel doc;
+        const TopoDS_Shape anchorShape = ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 20.0, 10.0, 5.0);
+        const int anchorId = doc.addSolid(anchorShape);
+
+        const double halfPi = 1.5707963267948966;   // 90 degrees, in radians
+
+        // Member 1: rotate +90 about Z at the world origin, then translate.
+        gp_Trsf rotation1;
+        rotation1.SetRotation(gp_Ax1(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0)), halfPi);
+        gp_Trsf translation1;
+        translation1.SetTranslation(gp_Vec(100.0, 0.0, 0.0));
+        const gp_Trsf placement1 = translation1.Multiplied(rotation1);   // rotate, then translate
+        const DocumentModel::LinkResult member1Result = doc.createLinkedCopy(anchorId, placement1);
+        check(member1Result.ok, "setup: a rotated+translated linked copy is created");
+        const int member1Id = member1Result.id;
+
+        // Member 2: a DIFFERENT rotation (-90 about Z) and a different
+        // translation - checks "every member := placement(m) . anchor" for
+        // a member OTHER than the one that gets edited, not only the
+        // anchor itself.
+        gp_Trsf rotation2;
+        rotation2.SetRotation(gp_Ax1(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0)), -halfPi);
+        gp_Trsf translation2;
+        translation2.SetTranslation(gp_Vec(0.0, 100.0, 0.0));
+        const gp_Trsf placement2 = translation2.Multiplied(rotation2);
+        const DocumentModel::LinkResult member2Result = doc.createLinkedCopy(anchorId, placement2);
+        check(member2Result.ok, "setup: a second, differently-rotated linked copy is created");
+        const int member2Id = member2Result.id;
+
+        // Edit member 1 (not the anchor) - the harder direction, exercising
+        // placement(edited)^-1 for a REAL rotation. An off-centre notch, so
+        // the edit is not accidentally symmetric about member1's own
+        // centroid (which would leave the centroid unmoved and weaken the
+        // check) - offset by (0.7, 0.7, 0) with a 2mm half-size, safely
+        // inside the box's own tightest half-extent (2.5mm along Z, which a
+        // Z-axis rotation never touches).
+        const TopoDS_Shape member1Before = doc.shapeOf(member1Id);
+        const gp_Pnt member1CentreBefore = ModelingOps::centreOfMass(member1Before);
+        const TopoDS_Shape notch =
+            ModelingOps::makeBox(gp_Pnt(member1CentreBefore.X() - 0.3, member1CentreBefore.Y() - 0.3,
+                                         member1CentreBefore.Z() - 1.0),
+                                  1.0, 1.0, 2.0);
+        const ModelingOps::BooleanResult cutResult =
+            ModelingOps::applyBoolean(ModelingOps::BooleanKind::Cut, member1Before, notch);
+        check(cutResult.ok, "the fixture edit (an off-centre notch on the ROTATED member) succeeds");
+        check(std::fabs(ModelingOps::volume(cutResult.shape) - 1000.0) > 1.0e-6,
+              "setup: the edit genuinely changed the volume");
+
+        // The independent oracle: measure the edited shape's own new centre
+        // of mass with a plain ModelingOps::centreOfMass() call (no link-
+        // group logic involved), then apply the documented formula BY HAND.
+        const gp_Pnt newShapeCentre = ModelingOps::centreOfMass(cutResult.shape);
+        const gp_Pnt expectedAnchorCentre = newShapeCentre.Transformed(placement1.Inverted());
+        const gp_Pnt expectedMember2Centre = expectedAnchorCentre.Transformed(placement2);
+
+        doc.checkpoint();
+        const bool propagated = doc.propagateLinkedEdit(member1Id, cutResult.shape);
+        check(propagated, "propagateLinkedEdit succeeds under a rotated placement");
+
+        const gp_Pnt actualAnchorCentre = ModelingOps::centreOfMass(doc.shapeOf(anchorId));
+        checkNear(actualAnchorCentre.Distance(expectedAnchorCentre), 0.0, 1.0e-6,
+                  "the anchor's new centre matches the independently-derived placement(edited)^-1 . "
+                  "newShape - a flipped Inverted() or argument order would fail this under a real rotation");
+
+        const gp_Pnt actualMember2Centre = ModelingOps::centreOfMass(doc.shapeOf(member2Id));
+        checkNear(actualMember2Centre.Distance(expectedMember2Centre), 0.0, 1.0e-6,
+                  "member2's new centre matches the independently-derived placement(member2) . anchor");
+
+        // fix round 1, item 3, under rotation too: the edited member's own
+        // shape is reused exactly.
+        check(doc.shapeOf(member1Id).IsEqual(cutResult.shape),
+              "the edited member's own shape is written back exactly as given, not round-tripped "
+              "through the anchor");
     }
 
     // --- link groups: unlinking the anchor (deterministic promotion) ---------
@@ -1087,6 +1245,42 @@ int main()
         check(doc.undo(), "one undo");
         check(doc.linkAnchorOf(memberId1) == anchorId && doc.linkAnchorOf(memberId2) == anchorId,
               "restores the original anchor and both placements exactly");
+    }
+
+    // --- link groups: removeSolid() on the anchor directly (fix round 1, item 5) --
+    // The promotion rule was covered above only via unlink(anchorId); this
+    // exercises the OTHER route to the same code (removeSolid(), which
+    // MainWindow's own Delete goes through) - both share
+    // unlinkGroupInternal(), but the brief specifically calls out "deleting
+    // the ANCHOR body" and this is the one path that had no direct test.
+    {
+        DocumentModel doc;
+        const TopoDS_Shape base = ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 10.0, 10.0, 10.0);
+        const int anchorId = doc.addSolid(base);
+        gp_Trsf off1;
+        off1.SetTranslation(gp_Vec(20.0, 0.0, 0.0));
+        gp_Trsf off2;
+        off2.SetTranslation(gp_Vec(40.0, 0.0, 0.0));
+        const int memberId1 = doc.createLinkedCopy(anchorId, off1).id;
+        const int memberId2 = doc.createLinkedCopy(anchorId, off2).id;
+        check(memberId1 != 0 && memberId2 != 0, "setup: a three-member group exists");
+
+        doc.checkpoint();
+        check(doc.removeSolid(anchorId),
+              "removeSolid() on the ANCHOR itself succeeds - not routed through unlink() at all");
+        check(!doc.contains(anchorId), "the anchor body is genuinely gone from the document");
+        check(!doc.isLinked(anchorId), "and it is gone from any group bookkeeping too");
+        // Same deterministic promotion rule as unlink()'s own test above -
+        // removeSolid() runs the exact same unlinkGroupInternal() path, so
+        // no group is left with a dangling anchor id pointing at nothing.
+        check(doc.linkAnchorOf(memberId1) == memberId1,
+              "the lowest surviving id is promoted to anchor here too");
+        check(doc.linkAnchorOf(memberId2) == memberId1, "and the other member follows the new anchor");
+
+        check(doc.undo(), "one undo");
+        check(doc.contains(anchorId), "brings the removed anchor body back");
+        check(doc.linkAnchorOf(memberId1) == anchorId && doc.linkAnchorOf(memberId2) == anchorId,
+              "and restores the original anchor relationship exactly");
     }
 
     // --- link groups: dissolution below two members ---------------------------

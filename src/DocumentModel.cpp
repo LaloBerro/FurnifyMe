@@ -325,13 +325,25 @@ DocumentModel::LinkResult DocumentModel::createLinkedCopy(int sourceId, const gp
         result.error = transformed.error;
         return result;
     }
+    if (transformed.shape.IsNull()) {
+        // Unreachable per transformShape()'s own contract (ok == true never
+        // carries a null shape) - checked explicitly and LOCALLY anyway
+        // (fix round 1), so this function's own guarantee that checkpoint()
+        // is never taken on a path that ends up mutating nothing does not
+        // rely on a cross-function contract holding. Past this line,
+        // addSolid() below cannot fail (its own only refusal is a null
+        // shape), so checkpoint() is genuinely "after all validation and
+        // shape building" now, not merely positioned there.
+        result.error = "transform produced no shape";
+        return result;
+    }
 
     checkpoint();
     const int newId = addSolid(transformed.shape);
     if (newId <= 0) {
-        // transformShape() never returns ok == true with a null shape (its
-        // own contract), so addSolid() failing here is not expected - kept
-        // defensive anyway, matching this file's existing idiom.
+        // Unreachable given the check just above - kept defensive anyway,
+        // matching this file's existing idiom (pairWithMirror's own
+        // addSolid() call carries the same comment).
         result.error = "failed to add the copy";
         return result;
     }
@@ -439,20 +451,39 @@ bool DocumentModel::propagateLinkedEdit(int editedMemberId, const TopoDS_Shape& 
     const auto editedPlacement = group.placement.find(editedMemberId);
     if (editedPlacement == group.placement.end()) return false;   // defensive; kept in sync by construction
 
-    const gp_Trsf inv = editedPlacement->second.Inverted();
-    const ModelingOps::BooleanResult anchorResult = ModelingOps::transformShape(newShape, inv);
-    if (!anchorResult.ok) return false;
+    // The anchor's own new shape - `newShape` itself when the EDITED member
+    // IS the anchor (its own placement is always identity, so re-deriving it
+    // through a transform would be a needless kernel round trip), otherwise
+    // `newShape` walked back through placement(editedMemberId)^-1.
+    TopoDS_Shape anchorShape;
+    if (editedMemberId == group.anchorId) {
+        anchorShape = newShape;
+    } else {
+        const gp_Trsf inv = editedPlacement->second.Inverted();
+        const ModelingOps::BooleanResult anchorResult = ModelingOps::transformShape(newShape, inv);
+        if (!anchorResult.ok) return false;
+        anchorShape = anchorResult.shape;
+    }
 
-    // Resolve every member's new shape BEFORE writing any of them.
+    // Resolve every member's new shape BEFORE writing any of them. The
+    // edited member's OWN entry always reuses `newShape` exactly (fix round
+    // 1) - writing it back through the anchor and forward again would be an
+    // avoidable BRepBuilderAPI_Transform round trip and a needless
+    // floating-point drift source on repeated propagated edits to the same
+    // member.
     std::vector<std::pair<int, TopoDS_Shape>> resolved;
     resolved.reserve(group.placement.size());
     for (const auto& kv : group.placement) {
+        if (kv.first == editedMemberId) {
+            resolved.push_back({kv.first, newShape});
+            continue;
+        }
         if (kv.first == group.anchorId) {
-            resolved.push_back({kv.first, anchorResult.shape});
+            resolved.push_back({kv.first, anchorShape});
             continue;
         }
         const ModelingOps::BooleanResult memberResult =
-            ModelingOps::transformShape(anchorResult.shape, kv.second);
+            ModelingOps::transformShape(anchorShape, kv.second);
         if (!memberResult.ok) return false;
         resolved.push_back({kv.first, memberResult.shape});
     }

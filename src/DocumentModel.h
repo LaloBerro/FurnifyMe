@@ -247,11 +247,14 @@ public:
     // The propagation engine: `editedMemberId` just became `newShape`
     // (typically the result of a pull/bevel/transform run on that member's
     // OWN current shape) - this re-derives the anchor's shape as
-    // `placement(editedMemberId)^-1 . newShape`, then every member
-    // (including the anchor and `editedMemberId` itself) as
+    // `placement(editedMemberId)^-1 . newShape`, then every OTHER member as
     // `placement(member) . anchor`, through ModelingOps::transformShape.
-    // False, nothing changed, for an id with no link group, a null
-    // `newShape`, or a kernel-level transform failure on any member
+    // `editedMemberId`'s OWN entry is `newShape` itself, written back
+    // exactly as given rather than round-tripped through the anchor and
+    // forward again (fix round 1) - avoids an avoidable kernel transform and
+    // the floating-point drift it would add across repeated edits to the
+    // same member. False, nothing changed, for an id with no link group, a
+    // null `newShape`, or a kernel-level transform failure on any member
     // (resolve-before-mutate: every member's new shape is built before any
     // is written, so a mid-list failure leaves the document untouched).
     //
