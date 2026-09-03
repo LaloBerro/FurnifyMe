@@ -725,6 +725,35 @@ public:
     // the check built on this.
     bool probePathTracingChangedImage();
 
+    // gui_smoke's oracle for whether the render-mode floor actually blends
+    // into the studio backdrop - CLAUDE.md's own rule for this floor
+    // ("calibrated against sampled Dump() pixels, not derived from the
+    // lighting equations") extended to Task 7.1's PBR retune (0.875 -> 0.35
+    // emission fraction, see the task report), which shipped without a
+    // matching measurement. FORCES `forTier` for exactly one Dump() -
+    // restored to the session's real cached tier before this returns, the
+    // same discipline probePathTracingChangedImage() already follows, and
+    // the reason a caller on a PathTracing-only machine can still measure
+    // the Shadows-tier calibration this floor was actually retuned against.
+    // `floorPointLogical` is a point the CALLER already knows lands on the
+    // floor and clear of any body (this widget has no notion of where the
+    // test built one); this function finds its own backdrop comparison
+    // point by scanning the Dump's top rows for the pixel closest to
+    // renderBackdropColour() - the "known grid line" technique gui_smoke's
+    // own grid sweep already uses, rather than trusting one hardcoded corner
+    // to sit above the floor's horizon regardless of camera framing.
+    // `measured` is false - never a hard failure of its own - when render
+    // mode is off, the Dump fails, or no floor is on screen to sample; the
+    // CALLER is what turns that into a pass-with-note, `probePathTracing-
+    // ChangedImage()`'s own rule.
+    struct FloorBlendProbe {
+        bool measured = false;
+        int deltaR = 0;
+        int deltaG = 0;
+        int deltaB = 0;
+    };
+    FloorBlendProbe probeRenderFloorBlend(RenderTier forTier, const QPoint& floorPointLogical);
+
     // ~100 ms - the brief's own number for "is ray tracing still
     // interactive on this GPU", measured against a single redraw. A session
     // constant, not a setting: CLAUDE.md's ruling for this task is that nothing

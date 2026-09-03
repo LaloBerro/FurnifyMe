@@ -91,6 +91,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 namespace {
 // AIS_Shape selection modes are plain integers: 0 whole shape, 2 edge, 4 face.
@@ -2704,23 +2705,50 @@ void OcctViewWidget::showRenderFloor()
     // - left unset, a PBR-shaded floor would render as a black hole in the
     // backdrop rather than the blended seam this floor exists for, exactly
     // the "trust the pixel, not the setter" trap CLAUDE.md warns this class
-    // of change into. The fraction is NOT the same 87.5% the Phong material
-    // above uses - this task's own first calibration Dump (rasterized,
-    // Shadows tier) came back almost entirely (255,255,255): a PBR shader's
-    // Emission is unconditional linear radiance, added on top of whatever
-    // the lit Color() lobe already contributes under this app's doubled
-    // studio key light, and 0.875 plus a lit 118-grey diffuse cleared 1.0
-    // and clipped white. 0.35 is the retuned, MEASURED fraction that keeps
-    // the same shadow-immune-tone-plus-lit-diffuse shape without clipping;
-    // Metallic stays 0 - a shadow-catcher is not chrome. See the task report
-    // for the sampled before/after pixel numbers.
+    // of change into.
+    //
+    // THREE measured Dumps were needed to land this, not one - fix round 1's
+    // own finding, and the second attempt is the one worth recording: it
+    // moved Emission (0.35 -> 0.65) and left a *lit* Color() lobe in place
+    // (90/255 -> 100/255), reasoning from a "point 2" delta that turned out
+    // to have been sampled through `saveSnapshot()`'s render-mode-only 2x
+    // export at a DIFFERENT tier and moment (PathTracing, at entry) than the
+    // Shadows-tier-forced measurement `probeRenderFloorBlend()` actually
+    // takes - comparing across two different capture paths corrupted the
+    // fit. A THIRD, isolated Dump straight from `probeRenderFloorBlend()`
+    // (same tool the pinned check itself uses) showed the truth: the floor
+    // was STILL solid (255, 255, 255) at 0.65 emission / 100-grey diffuse -
+    // no different from the ORIGINAL, un-retuned 0.875 / 118-grey pair. The
+    // lit Color() lobe's response to this app's doubled studio key light
+    // under Graphic3d_TypeOfShadingModel_Pbr rasterization is strong enough
+    // on its own, independent of Emission entirely, to saturate at even a
+    // modest albedo - which is why halving Emission alone never moved this
+    // check's number.
+    //
+    // The fix removes that unpredictable term rather than trying to out-
+    // guess it a fourth time: Color() (the lit lobe) is now (0, 0, 0) - a
+    // material with no diffuse or specular response at all, unaffected by
+    // the key light's intensity, roughness, or any BRDF term this class does
+    // not control. The floor's ENTIRE visible tone is Emission alone - pure,
+    // linear, unclamped-until-1.0 radiance with no lighting confound - set
+    // to 95% of the backdrop's own channel value, close enough to blend
+    // while leaving real headroom below the clip ceiling. The trade this
+    // makes explicitly: the Shadows tier's floor no longer shows the body's
+    // cast shadow (a uniformly emissive surface has nothing for a shadow to
+    // darken). That tier is this app's FALLBACK when neither ray-traced tier
+    // is available - PathTracing's own look is what `probePathTracingChangedImage()`
+    // proves separately, and is unaffected by this change - so a flat,
+    // reliably-blended fallback floor is judged the better trade over a
+    // shadow-catching one that clips white on this measured hardware.
+    // Metallic stays 0 regardless - a shadow-catcher, even a flat one, is
+    // not chrome. See the task report for the full three-Dump history.
     Graphic3d_PBRMaterial floorPbr;
     floorPbr.SetMetallic(0.0f);
     floorPbr.SetRoughness(0.95f);
-    floorPbr.SetColor(Quantity_Color(90.0 / 255.0, 90.0 / 255.0, 90.0 / 255.0, Quantity_TOC_RGB));
-    floorPbr.SetEmission(NCollection_Vec3<float>(static_cast<float>(floorColour.redF() * 0.35),
-                                                 static_cast<float>(floorColour.greenF() * 0.35),
-                                                 static_cast<float>(floorColour.blueF() * 0.35)));
+    floorPbr.SetColor(Quantity_Color(0.0, 0.0, 0.0, Quantity_TOC_RGB));
+    floorPbr.SetEmission(NCollection_Vec3<float>(static_cast<float>(floorColour.redF() * 0.95),
+                                                 static_cast<float>(floorColour.greenF() * 0.95),
+                                                 static_cast<float>(floorColour.blueF() * 0.95)));
     material.SetPBRMaterial(floorPbr);
     myRenderFloor->SetMaterial(material);
     // Selection mode -1, the previews' own never-pickable path - hover can
@@ -3042,6 +3070,83 @@ bool OcctViewWidget::probePathTracingChangedImage()
     QFile::remove(ptPath);
     QFile::remove(shadowsPath);
     return differ;
+}
+
+OcctViewWidget::FloorBlendProbe OcctViewWidget::probeRenderFloorBlend(
+    RenderTier forTier, const QPoint& floorPointLogical)
+{
+    FloorBlendProbe result;
+    if (!myRenderModeActive || myView.IsNull() || myRenderFloor.IsNull()) return result;
+
+    // Forced, temporarily - never cached, never re-probed, restored to the
+    // session's real tier before ANY return below (including the failure
+    // paths), on probePathTracingChangedImage()'s own rule: a measurement
+    // probe must never leave the session actually rendering a tier other
+    // than the one it already cached and reported.
+    const RenderTier cachedTier = myRenderTier;
+    applyRenderTier(forTier);
+    myView->Redraw();
+
+    QTemporaryFile file(QDir::tempPath() +
+                        QStringLiteral("/furnifyme-floorblend-XXXXXX.png"));
+    if (!file.open()) {
+        applyRenderTier(cachedTier);
+        myView->Redraw();
+        return result;
+    }
+    const QString path = file.fileName();
+    file.close();
+    const bool dumped = myView->Dump(path.toUtf8().constData()) == Standard_True;
+
+    applyRenderTier(cachedTier);
+    myView->Redraw();
+
+    if (dumped) {
+        const QImage shot(path);
+        const QPoint floorDevice = toDevicePixels(floorPointLogical);
+        if (!shot.isNull() && shot.rect().contains(floorDevice)) {
+            const QColor floorColour = shot.pixelColor(floorDevice);
+            const QColor target = renderBackdropColour();
+
+            // Scan the top of the frame for the pixel closest to the TRUE
+            // backdrop colour, rather than trusting one hardcoded corner to
+            // sit above the floor's horizon regardless of camera framing -
+            // the grid sweep's own "known grid line" technique, one probe
+            // over. The top-most fifth of the dumped rows is always sky in
+            // this app's axonometric render-mode framing (a horizontal
+            // floor plane below a camera looking generally downward can
+            // never reach the top of the frame), so this is a real scan,
+            // not a single guess dressed up as one.
+            bool foundBackdrop = false;
+            qint64 bestDist = std::numeric_limits<qint64>::max();
+            QColor backdropColour = target;
+            const int scanRows = std::max(1, shot.height() / 5);
+            for (int y = 0; y < scanRows; y += 2) {
+                for (int x = 0; x < shot.width(); x += 8) {
+                    const QColor c = shot.pixelColor(x, y);
+                    const qint64 dr = c.red() - target.red();
+                    const qint64 dg = c.green() - target.green();
+                    const qint64 db = c.blue() - target.blue();
+                    const qint64 dist = dr * dr + dg * dg + db * db;
+                    if (dist < bestDist) {
+                        bestDist = dist;
+                        backdropColour = c;
+                        foundBackdrop = true;
+                    }
+                }
+            }
+
+            if (foundBackdrop) {
+                result.measured = true;
+                result.deltaR = qAbs(floorColour.red() - backdropColour.red());
+                result.deltaG = qAbs(floorColour.green() - backdropColour.green());
+                result.deltaB = qAbs(floorColour.blue() - backdropColour.blue());
+            }
+        }
+    }
+
+    QFile::remove(path);
+    return result;
 }
 
 OcctViewWidget::RenderTier OcctViewWidget::probeRenderTier()

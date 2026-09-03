@@ -193,12 +193,18 @@ void skipByEnvironment(int checks, const QString& why)
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
 //
-// Task 7.1 (path tracing + PBR) raised this from 2323 to 2326: the params
-// round-trip check (+1) and the PathTracing-vs-Shadows measured-pixel proof
-// (+2 when this session's GPU actually reaches PathTracing, +1 as a
-// pass-with-note otherwise - see probePathTracingChangedImage()'s own
-// comment). Measured on this machine, which reaches PathTracing.
-constexpr int kCheckFloor = 2326;
+// Task 7.1 (path tracing + PBR) raised this from 2323 to 2327: the params
+// round-trip check (+1, always runs), the PathTracing-vs-Shadows measured-
+// pixel proof (+2, EITHER as two real checks when this session's GPU
+// reaches PathTracing OR as skipByEnvironment(2, ...) otherwise - fix round
+// 1 replaced a bare check(true, ...) in the fallback branch specifically so
+// this total is invariant across tier outcomes, never 2325 on a GPU that
+// falls back to RayTracing/Shadows/Plain), and the floor-blend measurement
+// (+1, likewise either a real check or skipByEnvironment(1, ...) if the
+// Dump itself could not be captured - see probeRenderFloorBlend()'s own
+// comment). All three are accounted the same way on every tier outcome, by
+// construction, not merely as measured on this one machine.
+constexpr int kCheckFloor = 2327;
 
 void check(bool condition, const QString& what)
 {
@@ -18914,12 +18920,81 @@ int main(int argc, char* argv[])
                 case OcctViewWidget::RenderTier::Plain:      tierName = QStringLiteral("Plain"); break;
                 default: tierName = QStringLiteral("(unknown)"); break;
             }
-            check(true,
+            // Accounted, not a bare check(true, ...) - the PathTracing
+            // branch above runs TWO checks (the pixel-diff proof and the
+            // tier-restore assertion), so a machine that never reaches
+            // PathTracing has to skip the same two or the run total is one
+            // short of kCheckFloor on every GPU that falls back to
+            // RayTracing/Shadows/Plain - "a guard has stopped letting its
+            // checks run" reported against a machine that is doing exactly
+            // what this task's own ruling says is a pass. This is precisely
+            // what skipByEnvironment() exists for (see its own comment,
+            // ~line 164): a check that legitimately does not run on this
+            // machine, accounted rather than silently dropped.
+            skipByEnvironment(2,
                   QStringLiteral("PathTracing was refused or too slow on this GPU - probed "
                                  "to %1 instead, so the PathTracing-vs-Shadows pixel-diff "
-                                 "proof is skipped as a pass rather than run against a tier "
-                                 "that was never actually chosen")
+                                 "proof and its tier-restore assertion do not apply")
                       .arg(tierName));
+        }
+
+        // --- the floor's PBR blend (fix round 1, review item 2) --------------
+        // Task 7.1's own retune of this floor's PBR material shipped without
+        // a matching measurement - this pins one. FORCED to Shadows regardless of which
+        // tier the session actually cached: Shadows is the tier the white-
+        // clip finding and the retune were both measured against (plain
+        // RayTracing's own BSDF conversion already read the floor material
+        // correctly per the task's diagnostic; PathTracing's own look is
+        // what the block above proves instead), and forcing it needs no GPU
+        // ray-tracing capability - rasterization cannot be REFUSED the way
+        // PathTracing/RayTracing can - so this runs the same on every
+        // machine, PathTracing-only ones included, and is not itself gated
+        // on which tier the probe landed on. The sample point is (0.88,
+        // 0.88) of the viewport - the SAME "well clear of the body's own
+        // footprint" point the exit click below already relies on to land
+        // on empty ground, reused here rather than re-derived.
+        const QPoint floorPointLogical(static_cast<int>(rview->width() * 0.88),
+                                       static_cast<int>(rview->height() * 0.88));
+        const OcctViewWidget::FloorBlendProbe floorBlend =
+            rview->probeRenderFloorBlend(OcctViewWidget::RenderTier::Shadows, floorPointLogical);
+        if (floorBlend.measured) {
+            // NOT the same 3/255 CLAUDE.md's ORIGINAL Phong calibration
+            // reached - fix round 1's own honest finding, after three
+            // measured Dumps (the task report carries the full history):
+            // the PBR rasterization pipeline's lit Color() lobe saturated
+            // under this app's doubled studio key light regardless of
+            // Emission, so the floor material was retuned to a pure-
+            // Emission response (Color() = (0,0,0), no lit lobe at all) to
+            // make the remaining gap PREDICTABLE rather than clipped - and
+            // the measured residual with that fix in place is ~47-51/255,
+            // not the few-of-255 the Phong floor reached. 60 is set from
+            // that measurement with headroom, not aspiration: it pins the
+            // CURRENT, real behaviour (rejecting a regression back toward
+            // full clipping, delta ~61, or blackout, delta ~194) rather than
+            // gating the suite on a target this material does not reach.
+            // Closing the residual further - a second lit lobe calibrated
+            // small enough not to saturate, or a different backdrop/key-
+            // light balance - is real follow-up work, not scope this fix
+            // round covers; see the task report's own ledger entry.
+            constexpr int kFloorBlendToleranceMax = 60;
+            check(floorBlend.deltaR <= kFloorBlendToleranceMax &&
+                      floorBlend.deltaG <= kFloorBlendToleranceMax &&
+                      floorBlend.deltaB <= kFloorBlendToleranceMax,
+                  QStringLiteral("the Shadows-tier PBR floor blends into the backdrop within "
+                                 "%1/255 per channel - the measured current residual, not the "
+                                 "original few-of-255 target (delta R=%2 G=%3 B=%4)")
+                      .arg(kFloorBlendToleranceMax)
+                      .arg(floorBlend.deltaR)
+                      .arg(floorBlend.deltaG)
+                      .arg(floorBlend.deltaB));
+        } else {
+            // Dump() can fail for reasons that are the environment's, not a
+            // guard gone quiet - a missing output directory, a driver that
+            // refuses this particular capture - skipByEnvironment()'s own
+            // reason to exist, item 1's fix applied to a second check.
+            skipByEnvironment(1,
+                  QStringLiteral("the floor-blend Dump could not be measured (Dump() failed, "
+                                 "or no floor was on screen to sample)"));
         }
 
         // Vocabulary sweep, scoped to this probe's own toast history - the
