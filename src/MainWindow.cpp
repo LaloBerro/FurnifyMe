@@ -3589,9 +3589,12 @@ void MainWindow::onUndoSketchPoint()
 
 void MainWindow::syncSketchConstraints()
 {
-    gp_Dir dir;
-    if (mySketching && mySketch.lastSegmentDirection(dir))
-        myView->setSketchStraightAnchor(mySketch.points().back(), dir);
+    // The anchor is just the sketch's own last point - the 8-direction
+    // compass dial itself is computed live, from wherever the cursor
+    // currently sits, inside OcctViewWidget::pointOnSketchPlane(). No point
+    // placed yet means nothing for Shift to anchor to.
+    if (mySketching && !mySketch.points().empty())
+        myView->setSketchStraightAnchor(mySketch.points().back());
     else
         myView->clearSketchStraightAnchor();
 

@@ -4573,18 +4573,24 @@ int main(int argc, char* argv[])
         }
     }
 
-    // --- Shift continues the last segment straight ---------------------------
+    // --- Shift: the 8-direction compass dial (Phase 6, Task 6.1) -------------
     //
-    // SketchController::snapToDirection is proven headless; this is the wiring
-    // - that the modifier reaches the unprojection, that the point REPORTED
-    // (which is what the cursor marker, the status readout and the live
-    // dimension all draw) is the snapped one, and that a click places that
-    // same point rather than a second, differently-derived one.
+    // SketchController::snapToCompass/snapToDirection are proven headless;
+    // this is the wiring - that the modifier reaches the unprojection, that
+    // the point REPORTED (which is what the cursor marker, the status
+    // readout and the live dimension all draw) is the snapped one, and that
+    // a click places that same point rather than a second, differently-
+    // derived one. Replaces the earlier "continue the previous segment"
+    // rule: the anchor is now just the last placed point, and Shift dials in
+    // the nearest of 8 directions - 45 degrees apart, from the sketch
+    // plane's own +u axis - measured toward wherever the cursor currently
+    // is, rather than a direction fixed the moment the segment before it was
+    // drawn.
     {
         trigger(window, QStringLiteral("Start Sketch"));
-        check(window.isSketching(), "sketch mode for the straight-continuation checks");
+        check(window.isSketching(), "sketch mode for the compass-dial checks");
         check(!view->hasSketchStraightAnchor(),
-              "a fresh sketch has nothing for Shift to continue");
+              "a fresh sketch has nothing for Shift to anchor to");
 
         const double w = view->width();
         const double h = view->height();
@@ -4592,46 +4598,80 @@ int main(int argc, char* argv[])
         settle(300);
 
         clickAt(view, QPointF(0.32 * w, 0.62 * h));
-        check(!view->hasSketchStraightAnchor(),
-              "and one point is still not a segment - Shift needs two");
+        check(view->hasSketchStraightAnchor(),
+              "one placed point is already an anchor - unlike the retired "
+              "previous-segment rule, the dial needs no second point to exist");
         clickAt(view, QPointF(0.62 * w, 0.62 * h));
         check(view->hasSketchStraightAnchor(),
-              "two points give Shift a segment to continue");
+              "and a second point re-anchors on ITSELF, not the segment behind it");
 
-        auto collinearity = [&](const gp_Pnt& p) {
-            const std::vector<gp_Pnt>& pts = window.sketch().points();
-            const gp_Vec run(pts[pts.size() - 2], pts.back());
-            const gp_Vec out(pts.back(), p);
-            if (run.Magnitude() < 1.0e-9 || out.Magnitude() < 1.0e-9) return -1.0;
-            // Distance of `p` from the line, in millimetres - the honest
-            // reading of "collinear", and one a report can quote.
-            return run.Crossed(out).Magnitude() / run.Magnitude();
+        const gp_Pln plane = view->workPlane();
+        const gp_Vec uAxis(plane.XAxis().Direction());
+        const gp_Vec vAxis(plane.Position().YDirection());
+        const gp_Pnt anchor = window.sketch().points().back();
+
+        auto worldAt = [&](double angleDeg, double radius) {
+            const double kPi = 3.14159265358979323846;
+            const double rad = angleDeg * kPi / 180.0;
+            return anchor.Translated(uAxis * (radius * std::cos(rad)) +
+                                     vAxis * (radius * std::sin(rad)));
+        };
+        // Perpendicular distance from `p` to the line through the anchor
+        // along `dir`, in millimetres - the honest reading of "collinear",
+        // and one a report can quote.
+        auto offLineDistance = [&](const gp_Pnt& p, const gp_Dir& dir) {
+            return gp_Vec(anchor, p).Crossed(gp_Vec(dir)).Magnitude();
         };
 
-        // A pixel a long way off the line the last segment runs along.
-        const QPointF offLine(0.80 * w, 0.30 * h);
+        // 15 degrees off the plane's own +u axis - inside the 0-degree
+        // sector, whose boundary sits at 22.5 (SketchController::
+        // snapToCompass, proven headless).
+        QPoint offScreen;
+        check(view->projectToScreen(worldAt(15.0, 220.0), offScreen),
+              "the compass-dial probe projects onto the viewport");
+        const QPointF offLine(offScreen);
 
         moveTo(view, offLine);
         gp_Pnt plain;
         const bool havePlain = view->lastHoverPoint(plain);
-        check(havePlain && collinearity(plain) > 20.0,
-              QStringLiteral("without Shift that cursor is nowhere near the line "
-                             "(%1 mm off)").arg(havePlain ? collinearity(plain) : -1.0));
+        check(havePlain && offLineDistance(plain, gp_Dir(uAxis)) > 20.0,
+              QStringLiteral("without Shift that cursor is nowhere near the plane's "
+                             "0-degree line (%1 mm off)")
+                  .arg(havePlain ? offLineDistance(plain, gp_Dir(uAxis)) : -1.0));
 
         moveTo(view, offLine, Qt::ShiftModifier);
         gp_Pnt held;
         const bool haveHeld = view->lastHoverPoint(held);
-        check(haveHeld && collinearity(held) < 1.0e-6,
+        check(haveHeld && offLineDistance(held, gp_Dir(uAxis)) < 1.0e-6,
               QStringLiteral("with Shift held the REPORTED cursor - the marker, the "
-                             "readout and the dimension all draw this one point - is on "
-                             "the line (%1 mm off)").arg(haveHeld ? collinearity(held) : -1.0));
+                             "readout and the dimension all draw this one point - "
+                             "lands on the 0-degree line, the nearest of the 8 "
+                             "(%1 mm off)")
+                  .arg(haveHeld ? offLineDistance(held, gp_Dir(uAxis)) : -1.0));
+
+        // A second probe, 60 degrees off +u - inside the 45-degree sector -
+        // proves the dial genuinely picks BETWEEN directions rather than
+        // always landing on the same one.
+        {
+            QPoint diagScreen;
+            check(view->projectToScreen(worldAt(60.0, 220.0), diagScreen),
+                  "the 45-degree-sector probe projects onto the viewport");
+            const gp_Dir diagDir(uAxis + vAxis);
+            moveTo(view, QPointF(diagScreen), Qt::ShiftModifier);
+            gp_Pnt diagHeld;
+            const bool haveDiag = view->lastHoverPoint(diagHeld);
+            check(haveDiag && offLineDistance(diagHeld, diagDir) < 1.0e-6,
+                  QStringLiteral("a cursor 60 degrees off +u lands on the 45-degree "
+                                 "line instead - the dial reads its own nearest "
+                                 "sector rather than always the first one (%1 mm off)")
+                      .arg(haveDiag ? offLineDistance(diagHeld, diagDir) : -1.0));
+        }
 
         // Shift wins the direction; Snap to Grid then rounds the distance
         // ALONG it. Both constraints cannot be exact at once and the one the
         // user is holding a key down for is the direction.
         if (haveHeld) {
-            const std::vector<gp_Pnt>& pts = window.sketch().points();
-            const double along = pts.back().Distance(held);
+            const double along = anchor.Distance(held);
             check(view->snapEnabled() &&
                       std::fabs(along - std::round(along / view->snapStep()) *
                                             view->snapStep()) < 1.0e-6,
@@ -4644,12 +4684,11 @@ int main(int argc, char* argv[])
         check(window.sketch().pointCount() == 3, "a Shift-click places a point like any other");
         if (window.sketch().pointCount() == 3) {
             const std::vector<gp_Pnt>& pts = window.sketch().points();
-            const gp_Vec run(pts[0], pts[1]);
-            const gp_Vec seg(pts[1], pts[2]);
-            const double off = run.Crossed(seg).Magnitude() / std::max(1.0e-9, run.Magnitude());
+            const double off = offLineDistance(pts.back(), gp_Dir(uAxis));
             check(off < 1.0e-6,
-                  QStringLiteral("and the point it places continues the previous segment "
-                                 "dead straight (%1 mm off)").arg(off));
+                  QStringLiteral("and the point it places lands dead on the plane's "
+                                 "own 0-degree line through the anchor (%1 mm off)")
+                      .arg(off));
             check(haveHeld && pts.back().Distance(held) < 1.0e-6,
                   "which is the very point the cursor was already promising");
         }

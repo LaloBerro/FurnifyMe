@@ -289,18 +289,25 @@ public:
     void setWorkPlaneLocked(bool locked) { myWorkPlaneLocked = locked; }
     bool isWorkPlaneLocked() const { return myWorkPlaneLocked; }
 
-    // The straight-continuation anchor: the last placed point and the
-    // direction of the segment that led into it. While Shift is held, a
-    // reported sketch point - the hover that drives the cursor marker, the
-    // status readout and the live dimension, and the click that places the
-    // next point - is projected onto that line, so all four agree by
-    // construction rather than by four call sites each remembering to snap.
+    // The straight-continuation anchor: the last placed point. While Shift
+    // is held, the next segment snaps to the nearest of 8 compass
+    // directions - 45-degree steps from the sketch plane's own +u axis,
+    // measured from this anchor toward the cursor (SketchController::
+    // snapToCompass(), computed fresh on every hit test rather than fixed at
+    // the moment Shift went down). A reported sketch point - the hover that
+    // drives the cursor marker, the status readout and the live dimension,
+    // and the click that places the next point - is projected onto whichever
+    // of the 8 lines that turns out to be, so all four agree by construction
+    // rather than by four call sites each remembering to snap.
     //
-    // MainWindow owns the point list and so owns this: it sets the anchor from
-    // SketchController::lastSegmentDirection() whenever the list changes, and
-    // clears it when there is nothing to continue. Fewer than two points, or
-    // two coincident ones, means no anchor and Shift does nothing at all.
-    void setSketchStraightAnchor(const gp_Pnt& prev, const gp_Dir& dir);
+    // MainWindow owns the point list and so owns this: it sets the anchor to
+    // the sketch's own last point whenever the list changes, and clears it
+    // when there is none. No points placed yet means no anchor and Shift
+    // does nothing at all - the first point has no "previous point" to dial
+    // a direction from. One point is enough, unlike the old previous-segment
+    // rule, which needed two: the dial's centre is the anchor itself, not a
+    // direction inherited from a segment that came before it.
+    void setSketchStraightAnchor(const gp_Pnt& prev);
     void clearSketchStraightAnchor();
     bool hasSketchStraightAnchor() const { return myHasStraightAnchor; }
 
@@ -998,10 +1005,12 @@ private:
     bool mySnapEnabled = true;
     double mySnapStep = 10.0;      // matches the drawn grid
 
-    // The straight-continuation anchor - see setSketchStraightAnchor().
+    // The straight-continuation anchor - see setSketchStraightAnchor(). The
+    // direction is no longer stored: the 8-direction dial is derived fresh
+    // from this anchor and the live cursor on every hit test, inside
+    // pointOnSketchPlane().
     bool myHasStraightAnchor = false;
     gp_Pnt myStraightPrev{0.0, 0.0, 0.0};
-    gp_Dir myStraightDir{1.0, 0.0, 0.0};
     // The outline's closing point - see setSketchCloseTarget().
     bool myHasCloseTarget = false;
     gp_Pnt myCloseTarget{0.0, 0.0, 0.0};

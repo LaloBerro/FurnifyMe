@@ -180,7 +180,10 @@ int main()
         checkPoint(snapped, 10.0, 30.0, 50.0, "snapped point stays on its own plane");
     }
 
-    // --- straight continuation (Shift) ---------------------------------------
+    // --- snapToDirection: the projection primitive, direction-agnostic ------
+    // Shared by the 8-direction compass dial below and, previously, the
+    // retired previous-segment rule - it only knows "project onto this line",
+    // never where the direction it is handed came from.
     {
         const gp_Pnt prev(50.0, 0.0, 0.0);
         const gp_Dir alongX(1.0, 0.0, 0.0);
@@ -215,25 +218,149 @@ int main()
               "and lies on the diagonal it was snapped to");
         checkPoint(vSnapped, 40.0, 0.0, 40.0,
                    "at the foot of the perpendicular from the candidate");
+    }
 
-        // The direction itself: fewer than two points means Shift has nothing
-        // to continue, and two coincident points are the one way a
-        // zero-length direction could reach gp_Dir's raising constructor.
-        SketchController sketch;
-        gp_Dir dir;
-        check(!sketch.lastSegmentDirection(dir), "an empty sketch has no segment to continue");
-        sketch.addPoint(gp_Pnt(0.0, 0.0, 0.0));
-        check(!sketch.lastSegmentDirection(dir), "nor does a sketch with one point");
-        sketch.addPoint(gp_Pnt(0.0, 0.0, 0.0));
-        check(!sketch.lastSegmentDirection(dir),
-              "two coincident points give no direction rather than a raised construction");
-        sketch.addPoint(gp_Pnt(0.0, 80.0, 0.0));
-        check(sketch.lastSegmentDirection(dir) && dir.IsEqual(gp_Dir(0.0, 1.0, 0.0), 1.0e-9),
-              "two distinct points give the direction of the segment between them");
-        // It follows the LAST segment, not the first.
-        sketch.addPoint(gp_Pnt(60.0, 80.0, 0.0));
-        check(sketch.lastSegmentDirection(dir) && dir.IsEqual(gp_Dir(1.0, 0.0, 0.0), 1.0e-9),
-              "and it follows the most recent segment, not the first one drawn");
+    // --- the 8-direction compass dial (Shift), Phase 6 Task 6.1 -------------
+    // Replaces the earlier "continue the previous segment" rule: the
+    // direction is now the nearest of 8, 45 degrees apart, measured from the
+    // sketch plane's own +u axis toward wherever the cursor currently is -
+    // read fresh on every hit test, not fixed the moment the segment before
+    // it was drawn.
+    {
+        const double kPi = 3.14159265358979323846;
+        const gp_Pnt origin(0.0, 0.0, 0.0);
+
+        // A point exactly R away at `deg` degrees from the plane's +u axis -
+        // the fixture every sector test below is built from.
+        auto atAngleDeg = [](double deg, double r) {
+            const double rad = deg * 3.14159265358979323846 / 180.0;
+            return gp_Pnt(r * std::cos(rad), r * std::sin(rad), 0.0);
+        };
+
+        // All 8 sectors: a candidate placed dead on a sector's own centre
+        // angle both (a) reports that sector's direction and (b) is its own
+        // projection, since it already lies on the chosen line - two
+        // assertions, no floating-point-fragile hand arithmetic.
+        const char* sectorNames[8] = {"0", "45", "90", "135", "180", "225", "270", "315"};
+        for (int k = 0; k < 8; ++k) {
+            const double deg = k * 45.0;
+            const gp_Pnt candidate = atAngleDeg(deg, 100.0);
+            const gp_Dir expected(std::cos(deg * kPi / 180.0), std::sin(deg * kPi / 180.0), 0.0);
+
+            gp_Dir dir;
+            const bool ok = SketchController::snapToCompass(xy, origin, candidate, dir);
+            check(ok && dir.IsEqual(expected, 1.0e-6),
+                  std::string("sector ") + sectorNames[k] + " degrees reports that direction");
+            if (ok) {
+                const gp_Pnt projected = SketchController::snapToDirection(origin, dir, candidate);
+                check(projected.Distance(candidate) < 1.0e-6,
+                      std::string("and a candidate already on the ") + sectorNames[k] +
+                          "-degree line projects onto itself");
+            }
+        }
+
+        // Boundary angles, ±epsilon either side of 22.5 degrees - the seam
+        // between the 0 and 45 degree sectors.
+        {
+            gp_Dir dir;
+            check(SketchController::snapToCompass(xy, origin, atAngleDeg(22.49, 100.0), dir) &&
+                      dir.IsEqual(gp_Dir(1.0, 0.0, 0.0), 1.0e-6),
+                  "just under the 22.5-degree boundary still snaps to 0 degrees");
+            check(SketchController::snapToCompass(xy, origin, atAngleDeg(22.51, 100.0), dir) &&
+                      dir.IsEqual(gp_Dir(std::cos(45.0 * kPi / 180.0),
+                                          std::sin(45.0 * kPi / 180.0), 0.0), 1.0e-6),
+                  "just over it snaps to 45 degrees");
+
+            // The negative-angle mirror of the same boundary, between the
+            // 0 and 315 (-45) degree sectors.
+            check(SketchController::snapToCompass(xy, origin, atAngleDeg(-22.49, 100.0), dir) &&
+                      dir.IsEqual(gp_Dir(1.0, 0.0, 0.0), 1.0e-6),
+                  "just under -22.5 degrees still snaps to 0 degrees");
+            check(SketchController::snapToCompass(xy, origin, atAngleDeg(-22.51, 100.0), dir) &&
+                      dir.IsEqual(gp_Dir(std::cos(-45.0 * kPi / 180.0),
+                                          std::sin(-45.0 * kPi / 180.0), 0.0), 1.0e-6),
+                  "just under it snaps to -45 (315) degrees");
+
+            // atan2's own range seam, at +/-180 degrees - both sides of it
+            // must land on the SAME 180-degree sector rather than one
+            // wrapping to an unmatched value outside [0, 8).
+            check(SketchController::snapToCompass(xy, origin, atAngleDeg(179.99, 100.0), dir) &&
+                      dir.IsEqual(gp_Dir(-1.0, 0.0, 0.0), 1.0e-6),
+                  "just under the +180 seam snaps to 180 degrees");
+            check(SketchController::snapToCompass(xy, origin, atAngleDeg(-179.99, 100.0), dir) &&
+                      dir.IsEqual(gp_Dir(-1.0, 0.0, 0.0), 1.0e-6),
+                  "and just under it from the other side snaps to the same 180 degrees");
+        }
+
+        // Projection correctness, off a sector's centre line: the point
+        // reported is the DOT-PROJECTION of (candidate - start) onto the
+        // chosen direction, not the candidate itself and not the nearest
+        // placed point. (10, 4.0) sits at atan(0.4) =~ 21.8 degrees from
+        // +u - inside the 0-degree sector (below the 22.5-degree boundary)
+        // - so it projects straight onto the u axis at (10, 0).
+        {
+            gp_Dir dir;
+            check(SketchController::snapToCompass(xy, origin, gp_Pnt(10.0, 4.0, 0.0), dir) &&
+                      dir.IsEqual(gp_Dir(1.0, 0.0, 0.0), 1.0e-6),
+                  "(10, 4) is inside the 0-degree sector");
+            checkPoint(SketchController::snapToDirection(origin, dir, gp_Pnt(10.0, 4.0, 0.0)),
+                       10.0, 0.0, 0.0, "and dot-projects onto the u axis at (10, 0)");
+
+            // (10, 10.1) sits at atan(1.01) =~ 45.3 degrees - inside the
+            // 45-degree sector. For that direction, (1,1)/sqrt(2), the
+            // dot-projection of (a, b) has the closed form ((a+b)/2, (a+b)/2)
+            // - here (10.05, 10.05).
+            check(SketchController::snapToCompass(xy, origin, gp_Pnt(10.0, 10.1, 0.0), dir) &&
+                      dir.IsEqual(gp_Dir(std::cos(45.0 * kPi / 180.0),
+                                          std::sin(45.0 * kPi / 180.0), 0.0), 1.0e-6),
+                  "(10, 10.1) is inside the 45-degree sector");
+            checkPoint(SketchController::snapToDirection(origin, dir, gp_Pnt(10.0, 10.1, 0.0)),
+                       10.05, 10.05, 0.0, "and dot-projects onto the 45-degree line");
+        }
+
+        // The dial reads the PLANE's own u/v axes, not world X/Y - a locked,
+        // non-ground plane gets the same 8 directions in its own coordinates.
+        // The axes are read straight off the plane's own gp_Ax3 (never
+        // assumed to line up with world X/Z) so this stays correct whatever
+        // convention OCCT picks for a plane built from a bare normal.
+        {
+            const gp_Pln vertical(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 1.0, 0.0));  // the XZ plane
+            const gp_Pnt vOrigin(0.0, 0.0, 0.0);
+            const gp_Vec u(vertical.XAxis().Direction());
+            const gp_Vec v(vertical.Position().YDirection());
+
+            // A candidate 10 degrees off the plane's own +u axis (inside the
+            // 0-degree sector - the boundary sits at 22.5), built from the
+            // plane's own axes so it is genuinely in-plane regardless of
+            // what those axes turn out to be in world coordinates.
+            const gp_Pnt candidate = vOrigin.Translated(
+                u * (100.0 * std::cos(10.0 * kPi / 180.0)) +
+                v * (100.0 * std::sin(10.0 * kPi / 180.0)));
+
+            gp_Dir dir;
+            check(SketchController::snapToCompass(vertical, vOrigin, candidate, dir) &&
+                      dir.IsEqual(gp_Dir(u), 1.0e-6),
+                  "10 degrees off a locked plane's own +u axis still snaps to that "
+                  "plane's 0-degree direction");
+            const gp_Pnt snapped = SketchController::snapToDirection(vOrigin, dir, candidate);
+            check(vertical.Distance(snapped) < 1.0e-9,
+                  "and the snapped point stays ON the locked plane");
+        }
+
+        // The degenerate case: a cursor exactly on the anchor has no angle
+        // to dial. `out` is left untouched, same as the retired
+        // lastSegmentDirection()'s "two coincident points" refusal one level
+        // up, and the caller (OcctViewWidget::pointOnSketchPlane) keeps the
+        // raw, unsnapped point in exactly this case.
+        {
+            const gp_Dir sentinel(0.0, 0.0, 1.0);
+            gp_Dir dir = sentinel;
+            check(!SketchController::snapToCompass(xy, gp_Pnt(5.0, 5.0, 0.0),
+                                                    gp_Pnt(5.0, 5.0, 0.0), dir),
+                  "a cursor exactly on the anchor is refused - no angle to snap to");
+            check(dir.IsEqual(sentinel, 1.0e-9),
+                  "and the output direction is left untouched by the refusal");
+        }
     }
 
     // --- closing the sketch by clicking the first point ----------------------

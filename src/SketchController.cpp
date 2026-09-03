@@ -43,16 +43,37 @@ gp_Pnt SketchController::snapToDirection(const gp_Pnt& prev, const gp_Dir& dir,
     return prev.Translated(along * gp_Vec(prev, candidate).Dot(along));
 }
 
-bool SketchController::lastSegmentDirection(gp_Dir& out) const
+bool SketchController::snapToCompass(const gp_Pln& plane, const gp_Pnt& start,
+                                     const gp_Pnt& candidate, gp_Dir& out)
 {
-    if (myPoints.size() < 2) return false;
+    const gp_Vec raw(start, candidate);
+    // gp_Dir's own constructor RAISES on a zero-length vector - refused here
+    // for the same reason lastSegmentDirection() used to refuse a
+    // coincident pair, one level up.
+    if (raw.Magnitude() < Precision::Confusion()) return false;
 
-    const gp_Vec segment(myPoints[myPoints.size() - 2], myPoints.back());
-    // gp_Dir's own constructor RAISES on a zero-length vector, so this guard
-    // is the whole reason the caller can pass a gp_Dir at all.
-    if (segment.Magnitude() < Precision::Confusion()) return false;
+    // The plane's own axes, read straight off its gp_Ax3 rather than
+    // assumed to be world X/Y - the same care snapToPlaneGrid() takes via
+    // ElSLib::Parameters(), so a locked, non-ground plane gets a dial in
+    // its own coordinates instead of a meaningless one in world space.
+    const gp_Vec u(plane.XAxis().Direction());
+    const gp_Vec v(plane.Position().YDirection());
+    const double du = raw.Dot(u);
+    const double dv = raw.Dot(v);
 
-    out = gp_Dir(segment);
+    constexpr double kPi = 3.14159265358979323846;
+    constexpr double kStep = kPi / 4.0;   // 45 degrees
+    const double angle = std::atan2(dv, du);
+    // Round to the nearest 45-degree sector, symmetric across each boundary
+    // at 22.5 + n*45. atan2's range is (-pi, pi], so the raw round can land
+    // on -4 as easily as +4 right at the seam - both name the same 180
+    // degree line, so folding into [0, 8) collapses them onto one sector
+    // instead of leaving an unmatched -4.
+    long sector = std::lround(angle / kStep);
+    sector = ((sector % 8) + 8) % 8;
+
+    const double snapped = static_cast<double>(sector) * kStep;
+    out = gp_Dir(u * std::cos(snapped) + v * std::sin(snapped));
     return true;
 }
 

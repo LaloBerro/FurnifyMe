@@ -1670,10 +1670,9 @@ bool OcctViewWidget::hasSketchCursorMarker() const
     return !myCursorMarker.IsNull();
 }
 
-void OcctViewWidget::setSketchStraightAnchor(const gp_Pnt& prev, const gp_Dir& dir)
+void OcctViewWidget::setSketchStraightAnchor(const gp_Pnt& prev)
 {
     myStraightPrev = prev;
-    myStraightDir = dir;
     myHasStraightAnchor = true;
 }
 
@@ -1964,15 +1963,26 @@ bool OcctViewWidget::pointOnSketchPlane(int px, int py, gp_Pnt& out, bool straig
         if (toHit.Dot(gp_Vec(ray.Direction())) <= 0.0) return false;
     }
 
-    // Shift's straight continuation, and how it composes with Snap to Grid.
+    // Shift's 8-direction compass dial, and how it composes with Snap to
+    // Grid.
     //
-    // The composition is: SHIFT WINS THE DIRECTION, then the grid snaps the
-    // distance ALONG that direction. Snapping to the plane grid first and
-    // projecting afterwards would land off the grid; projecting first and
-    // then snapping to the plane grid would land off the line. Only one of
-    // the two constraints can be exact, and the direction is the one the user
-    // is holding a key down to get - a segment that is 3 mm off straight is
-    // the failure Shift exists to prevent, while a length of 47 mm instead of
+    // The dial itself: SketchController::snapToCompass() takes the raw
+    // vector from the anchor (the previous placed point) to this hit and
+    // snaps IT to the nearest of 8 directions, 45 degrees apart, measured
+    // from the sketch plane's own +u axis. That replaced an earlier rule
+    // that continued the previous SEGMENT dead straight - anchored the same
+    // way, at the previous point, but with a direction fixed the moment the
+    // segment before it was placed rather than read fresh off wherever the
+    // cursor currently sits.
+    //
+    // The composition with grid snap is unchanged from that earlier rule:
+    // SHIFT WINS THE DIRECTION, then the grid snaps the distance ALONG that
+    // direction. Snapping to the plane grid first and projecting afterwards
+    // would land off the grid; projecting first and then snapping to the
+    // plane grid would land off the line. Only one of the two constraints
+    // can be exact, and the direction is the one the user is holding a key
+    // down to get - a segment that is 3 mm off its compass line is the
+    // failure Shift exists to prevent, while a length of 47 mm instead of
     // 50 is not. Rounding the line parameter keeps both whenever the anchor
     // itself is on the grid and the direction is axis-aligned, which is the
     // ordinary case.
@@ -2010,11 +2020,18 @@ bool OcctViewWidget::pointOnSketchPlane(int px, int py, gp_Pnt& out, bool straig
         myHasCloseTarget && closeProbe.Distance(myCloseTarget) <= sketchCloseTolerance();
 
     if (straight && myHasStraightAnchor && !closing) {
-        out = SketchController::snapToDirection(myStraightPrev, myStraightDir, out);
-        if (mySnapEnabled && mySnapStep > 0.0) {
-            const gp_Vec along(myStraightDir);
-            const double t = gp_Vec(myStraightPrev, out).Dot(along);
-            out = myStraightPrev.Translated(along * (std::round(t / mySnapStep) * mySnapStep));
+        gp_Dir dir;
+        // A candidate coincident with the anchor has no angle to dial -
+        // snapToCompass() reports that and `out` is left as the raw plane
+        // hit, the same degenerate-input rule the previous-segment version
+        // followed for two coincident points.
+        if (SketchController::snapToCompass(mySketchPlane, myStraightPrev, out, dir)) {
+            out = SketchController::snapToDirection(myStraightPrev, dir, out);
+            if (mySnapEnabled && mySnapStep > 0.0) {
+                const gp_Vec along(dir);
+                const double t = gp_Vec(myStraightPrev, out).Dot(along);
+                out = myStraightPrev.Translated(along * (std::round(t / mySnapStep) * mySnapStep));
+            }
         }
         return true;
     }

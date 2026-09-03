@@ -53,11 +53,23 @@ public:
     static gp_Pnt snapToDirection(const gp_Pnt& prev, const gp_Dir& dir,
                                   const gp_Pnt& candidate);
 
-    // The direction of the last placed segment, for snapToDirection() above.
-    // False with fewer than two points - Shift does nothing until there is a
-    // segment to continue - and false when the last two points coincide,
-    // which is the one way a zero-length direction can arise.
-    bool lastSegmentDirection(gp_Dir& out) const;
+    // The 8-direction dial Shift asks for while sketching (replaces the
+    // earlier "continue the previous segment" rule). Snaps the vector from
+    // `start` toward `candidate` to the nearest of 8 directions at 45-degree
+    // steps, measured in the sketch PLANE's own (u, v) axes - `plane`'s own
+    // XAxis is 0 degrees, not world X - so a locked, non-ground plane gets
+    // the same dial in its own coordinates, the same discipline
+    // snapToPlaneGrid() already follows. `start` is the point BEFORE the one
+    // being placed - the previous click, not the segment before that one -
+    // so every segment gets its own dial anchored where it begins.
+    //
+    // False (leaving `out` untouched) when `candidate` coincides with
+    // `start`: a zero-length vector has no angle to snap to, and the caller
+    // is expected to keep the raw, unsnapped point in that case - degenerate
+    // input is refused here rather than guessed at, same as gp_Dir's own
+    // raising constructor would refuse it one level up.
+    static bool snapToCompass(const gp_Pln& plane, const gp_Pnt& start,
+                              const gp_Pnt& candidate, gp_Dir& out);
 
     // True when `candidate` is within `tolerance` of the first point AND the
     // sketch already has enough points to close - clicking the start point is
