@@ -2618,9 +2618,10 @@ void MainWindow::setRenderModeEnabled(bool on)
     if (on) {
         QString text;
         switch (myView->renderModeTier()) {
-            case OcctViewWidget::RenderTier::RayTracing: text = tr("Render mode — ray tracing"); break;
-            case OcctViewWidget::RenderTier::Shadows:    text = tr("Render mode — shadows"); break;
-            case OcctViewWidget::RenderTier::Plain:      text = tr("Render mode"); break;
+            case OcctViewWidget::RenderTier::PathTracing: text = tr("Render mode — path tracing"); break;
+            case OcctViewWidget::RenderTier::RayTracing:  text = tr("Render mode — ray tracing"); break;
+            case OcctViewWidget::RenderTier::Shadows:     text = tr("Render mode — shadows"); break;
+            case OcctViewWidget::RenderTier::Plain:       text = tr("Render mode"); break;
         }
         // Kind::Note, deliberately: this reports a successful, expected
         // outcome, not a refusal, so CLAUDE.md's taxonomy ("every Note is a

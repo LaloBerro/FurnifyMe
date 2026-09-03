@@ -7,6 +7,9 @@
 #include <AIS_ManipulatorMode.hxx>
 #include <AIS_Shape.hxx>
 #include <Graphic3d_CLight.hxx>
+#include <Graphic3d_RenderingParams.hxx>
+#include <Graphic3d_ToneMappingMethod.hxx>
+#include <Graphic3d_TypeOfShadingModel.hxx>
 #include <Graphic3d_ZLayerSettings.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
@@ -667,9 +670,14 @@ public:
     void setRenderMode(bool on);
     bool renderModeActive() const { return myRenderModeActive; }
 
-    // The three tiers the first activation each session probes between, best
+    // The four tiers the first activation each session probes between, best
     // first - see setRenderMode()'s .cpp comment for how each is measured.
-    enum class RenderTier { RayTracing, Shadows, Plain };
+    // PathTracing sits above RayTracing (both drive Graphic3d_RM_RAYTRACING;
+    // PathTracing additionally turns on global illumination and adaptive
+    // screen sampling - a genuinely different, slower-to-converge look, not
+    // a renamed tier), which is why it gets its own, more lenient timing
+    // threshold below rather than sharing RayTracing's.
+    enum class RenderTier { PathTracing, RayTracing, Shadows, Plain };
     // The tier chosen at the FIRST activation this session, and reused on
     // every activation after that ("cache the tier for the session" - the
     // brief's own words) - Plain before any activation has happened, which is
@@ -679,11 +687,69 @@ public:
     RenderTier renderModeTier() const { return myRenderTier; }
     bool renderModeTierProbed() const { return myRenderTierProbed; }
 
+    // A plain-value read of exactly the Graphic3d_RenderingParams fields
+    // saveRenderParams()/restoreRenderParams() round-trip - cameraViewHeight-
+    // AtTarget()'s own shape: an oracle for gui_smoke's params round-trip
+    // check, without putting Graphic3d_RenderingParams (or the V3d_View
+    // handle it lives on) into this class's public surface. The three enum
+    // fields come back as plain int so the caller need not include the OCCT
+    // headers that declare them just to compare two snapshots for equality.
+    struct RenderParamsProbe {
+        int method = 0;
+        int shadingModel = 0;
+        int toneMappingMethod = 0;
+        bool isGlobalIlluminationEnabled = false;
+        bool adaptiveScreenSampling = false;
+        bool isAntialiasingEnabled = false;
+        bool isShadowEnabled = true;
+        int shadowMapResolution = 1024;
+        int nbRayTracingTiles = 256;
+    };
+    RenderParamsProbe renderParamsProbe() const;
+
+    // gui_smoke's own oracle for "did the PathTracing tier actually change
+    // what is on screen, compared with what the Shadows tier draws on the
+    // IDENTICAL scene" - CLAUDE.md's zoom-persistence lesson applied to this
+    // task: IsGlobalIlluminationEnabled/AdaptiveScreenSampling succeeding as
+    // setters is not proof either one reached a pixel. Two real Dump()s -
+    // PathTracing's own live tier, then a TEMPORARY application of Shadows,
+    // restored back to PathTracing before this returns so the probe never
+    // leaves the session actually rendering a different tier than the one it
+    // already cached and told the user about - compared pixel by pixel,
+    // probeShadowPixelsDiffer()'s own shape. Returns false (never throws,
+    // never a hard failure of its own) when render mode is off, the cached
+    // tier is not PathTracing, or either Dump fails to write - the CALLER
+    // is what turns "false because PathTracing was never the chosen tier on
+    // this GPU" into a pass-with-note rather than a failure, per this task's
+    // ruling that only a chosen-but-provably-inert PathTracing tier may fail
+    // the check built on this.
+    bool probePathTracingChangedImage();
+
     // ~100 ms - the brief's own number for "is ray tracing still
     // interactive on this GPU", measured against a single redraw. A session
     // constant, not a setting: CLAUDE.md's ruling for this task is that nothing
     // about the tier probe is user-configurable.
     static constexpr int kRenderTierProbeThresholdMs = 100;
+
+    // The path-tracing probe's own, more lenient threshold. A path tracer's
+    // FIRST Redraw() after Method flips to RAYTRACING with global
+    // illumination on pays for GLSL/compute shader compilation - a real,
+    // one-time cost this task measured at several hundred milliseconds even
+    // on capable hardware, that never recurs on later frames and therefore
+    // says nothing about whether the tier stays interactive. Judging that
+    // first frame against the plain tier-2 threshold would refuse GPUs that
+    // are actually fine, so this is deliberately its own, wider number
+    // rather than a second use of kRenderTierProbeThresholdMs - 1500 ms,
+    // chosen to comfortably clear shader-compile cost while staying far
+    // short of "the app looks hung."
+    static constexpr int kPathTracingProbeThresholdMs = 1500;
+
+    // How long, in milliseconds, a PathTracing-tier activation keeps asking
+    // Qt to repaint at rest once the camera stops moving - see
+    // startPathTracingConvergence()'s own comment for why a live paint loop
+    // has to ask for those frames at all. A session constant on the same
+    // terms as the two thresholds above: nothing here is user-configurable.
+    static constexpr int kPathTracingConvergeMs = 1500;
 
 signals:
     void sketchPointPicked(const gp_Pnt& point);
@@ -919,16 +985,73 @@ private:
 
     // --- Render mode's own private machinery --------------------------------
     //
-    // The tier probe itself: ray tracing timed against one redraw, falling
-    // back to a shadow-mapped directional light, falling back to plain
-    // rasterization - see the .cpp for the full argument on each step and
-    // why each is measured rather than trusted as setter data.
+    // The tier probe itself: path tracing timed against one redraw, then
+    // plain ray tracing timed the same way, falling back to a shadow-mapped
+    // directional light, falling back to plain rasterization - see the .cpp
+    // for the full argument on each step and why each is measured rather
+    // than trusted as setter data.
     RenderTier probeRenderTier();
-    // Writes `tier`'s rendering params (Method, IsShadowEnabled, which
+    // Writes `tier`'s rendering params (Method, IsShadowEnabled, GI/adaptive
+    // sampling/antialiasing for path tracing, the PBR shading model and
+    // tone-mapping method that CLAUDE.md's brief for this task asks applied
+    // "while render mode is on" regardless of which tier renders it, which
     // lights cast shadows) onto the live view WITHOUT timing or Dump-probing
     // anything - the cheap reapplication path a cached tier uses on every
-    // activation after the first.
+    // activation after the first. Every field it writes is one
+    // saveRenderParams()/restoreRenderParams() round trip covers - see those
+    // two below.
     void applyRenderTier(RenderTier tier);
+    // Snapshots every Graphic3d_RenderingParams field applyRenderTier() (or
+    // this function's own PBR sibling) can write, from the LIVE view, before
+    // setRenderMode(true) touches any of them - the lights discipline
+    // (myRenderSavedLights) extended to the rendering pipeline's own state.
+    // Captured fresh on every entry rather than once per process, on the
+    // same reasoning: nothing outside this class ever changes these fields,
+    // but reading them live rather than hardcoding "what render mode always
+    // resets to" is what makes the restore provably correct instead of
+    // merely assumed correct.
+    void saveRenderParams();
+    // Writes the snapshot back verbatim - setRenderMode(false)'s own half of
+    // the round trip, replacing what used to be a bare
+    // applyRenderTier(RenderTier::Plain) call. That call was never wrong for
+    // the three fields it touched (Method/ShadowMapResolution/IsShadowEnabled
+    // all happen to reset to Graphic3d_RenderingParams' own constructor
+    // defaults), but it never touched ShadingModel, ToneMappingMethod,
+    // IsGlobalIlluminationEnabled or AdaptiveScreenSampling at all - so a
+    // session that ever reached the PathTracing tier would have left global
+    // illumination and the PBR shading model switched on underneath ordinary
+    // modeling forever after the first exit. gui_smoke's params round-trip
+    // check exists because that class of bug produces no visible symptom
+    // until the next render-mode entry reads the wrong "before" state.
+    void restoreRenderParams();
+    // Gives every currently displayed body a render-mode material: a light,
+    // matte, non-metallic PBR look (see the .cpp for the measured constants)
+    // plus the matching classic Phong color, since ShadingModel picks which
+    // half of the material the active tier's shader actually reads and both
+    // are cheap to keep populated. Undone by a plain UnsetMaterial() per
+    // solid on exit - correct BECAUSE no code path outside this one ever
+    // calls AIS_InteractiveObject::SetMaterial() on a body (displaySolid()
+    // only ever calls SetColor()), so "unset" really does mean "back to
+    // whatever stood before render mode touched it," on the same terms
+    // UnsetMaterial() documents for itself.
+    void applyRenderBodyMaterials();
+    // While the PathTracing tier is active, repeatedly asks Qt to repaint at
+    // rest. OCCT's own progressive accumulation - AdaptiveScreenSampling
+    // folds more samples into the image on every Redraw() the camera and
+    // scene stay still for - does not run itself; nothing schedules another
+    // paintEvent once the gesture that triggered the first one (a click, an
+    // orbit) lets go, so without this the studio shot would freeze on its
+    // FIRST, noisiest frame instead of the "converges in ~1-2s at rest" look
+    // the brief calls for. Bounded by kPathTracingConvergeMs rather than run
+    // forever - OCCT 8.0.1 exposes no "is this frame already converged" query
+    // at this widget's disposal (checked; V3d_View offers Invalidate()/
+    // IsInvalidated(), nothing PT-specific), so this is a documented,
+    // time-boxed approximation rather than a query-driven stop condition -
+    // and restarted on every applyCameraState(), the one place every camera
+    // move already funnels through, on the same reasoning a moved camera
+    // resets the path tracer's own accumulation buffer.
+    void startPathTracingConvergence();
+    void stopPathTracingConvergence();
     // Every directional light this viewer owns, told to cast shadows or not.
     // One place, because both the tier-2 probe and applyRenderTier() need it.
     void setLightsCastShadows(bool cast);
@@ -1155,4 +1278,42 @@ private:
         bool headlight;
     };
     std::vector<SavedLight> myRenderSavedLights;
+
+    // saveRenderParams()/restoreRenderParams()'s own snapshot - every
+    // Graphic3d_RenderingParams field applyRenderTier() or this task's PBR
+    // application can write, captured from the live view at every
+    // setRenderMode(true) and written back verbatim at setRenderMode(false).
+    // Deliberately a field-by-field copy rather than a whole
+    // Graphic3d_RenderingParams (which the type is copyable enough to allow)
+    // - naming exactly what is touched is what lets gui_smoke's round-trip
+    // check assert on the same fields this class actually promises to
+    // restore, rather than a struct-wide memcmp that would also pass by
+    // accident if an unrelated field this class never reads happened to
+    // match.
+    struct RenderParamsSnapshot {
+        Graphic3d_RenderingMode method = Graphic3d_RM_RASTERIZATION;
+        Graphic3d_TypeOfShadingModel shadingModel = Graphic3d_TypeOfShadingModel_Phong;
+        Graphic3d_ToneMappingMethod toneMappingMethod = Graphic3d_ToneMappingMethod_Disabled;
+        bool isGlobalIlluminationEnabled = false;
+        bool adaptiveScreenSampling = false;
+        bool isAntialiasingEnabled = false;
+        bool isShadowEnabled = true;
+        int shadowMapResolution = 1024;
+        // -1 (unlimited) under PathTracing, the constructor default (256)
+        // everywhere else - see applyRenderTier()'s own comment for why this
+        // one is load-bearing rather than cosmetic: the default caps how
+        // many screen TILES a single Redraw() renders, and a viewport with
+        // more tiles than that budget is left with real, unrendered black
+        // pixels - not merely noisy ones - until enough redraws have
+        // accumulated to cover every tile at least once.
+        int nbRayTracingTiles = 256;
+    };
+    RenderParamsSnapshot myRenderSavedParams;
+
+    // The path-tracing progressive-refine loop - see
+    // startPathTracingConvergence()'s own comment. Null until the first
+    // PathTracing-tier activation this session; a QTimer child of `this`,
+    // cleaned up by Qt's own parent/child ownership.
+    class QTimer* myPathTracingRefineTimer = nullptr;
+    int myPathTracingRefineTicksLeft = 0;
 };

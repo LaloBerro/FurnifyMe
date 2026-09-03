@@ -85,6 +85,7 @@
 #include <QPaintEvent>
 #include <QResizeEvent>
 #include <QTemporaryFile>
+#include <QTimer>
 #include <QVariantAnimation>
 #include <QWheelEvent>
 
@@ -2352,6 +2353,14 @@ void OcctViewWidget::applyCameraState()
     emit cameraChanged();
     myApplyingCamera = false;
     myView->Redraw();
+
+    // A camera move invalidates whatever path-tracing accumulation the last
+    // frame built up - see startPathTracingConvergence()'s own comment -
+    // so every route that lands here (orbit, pan, zoom, an animation frame,
+    // fitAll) restarts the countdown rather than leaving it running down
+    // against a scene that just changed under it.
+    if (myRenderModeActive && myRenderTier == RenderTier::PathTracing)
+        startPathTracingConvergence();
 }
 
 void OcctViewWidget::setCameraStateNow(const CameraState& state)
@@ -2688,6 +2697,31 @@ void OcctViewWidget::showRenderFloor()
         toOcctColor(QColor(static_cast<int>(floorColour.red() * 0.875),
                            static_cast<int>(floorColour.green() * 0.875),
                            static_cast<int>(floorColour.blue() * 0.875))));
+    // The PBR half of the same material, read instead of the four Phong
+    // fields above the moment ShadingModel = Pbr (this task's addition,
+    // applied for every render-mode tier - see applyRenderTier()). The
+    // default Graphic3d_PBRMaterial is pure black (Color() starts at (0,0,0))
+    // - left unset, a PBR-shaded floor would render as a black hole in the
+    // backdrop rather than the blended seam this floor exists for, exactly
+    // the "trust the pixel, not the setter" trap CLAUDE.md warns this class
+    // of change into. The fraction is NOT the same 87.5% the Phong material
+    // above uses - this task's own first calibration Dump (rasterized,
+    // Shadows tier) came back almost entirely (255,255,255): a PBR shader's
+    // Emission is unconditional linear radiance, added on top of whatever
+    // the lit Color() lobe already contributes under this app's doubled
+    // studio key light, and 0.875 plus a lit 118-grey diffuse cleared 1.0
+    // and clipped white. 0.35 is the retuned, MEASURED fraction that keeps
+    // the same shadow-immune-tone-plus-lit-diffuse shape without clipping;
+    // Metallic stays 0 - a shadow-catcher is not chrome. See the task report
+    // for the sampled before/after pixel numbers.
+    Graphic3d_PBRMaterial floorPbr;
+    floorPbr.SetMetallic(0.0f);
+    floorPbr.SetRoughness(0.95f);
+    floorPbr.SetColor(Quantity_Color(90.0 / 255.0, 90.0 / 255.0, 90.0 / 255.0, Quantity_TOC_RGB));
+    floorPbr.SetEmission(NCollection_Vec3<float>(static_cast<float>(floorColour.redF() * 0.35),
+                                                 static_cast<float>(floorColour.greenF() * 0.35),
+                                                 static_cast<float>(floorColour.blueF() * 0.35)));
+    material.SetPBRMaterial(floorPbr);
     myRenderFloor->SetMaterial(material);
     // Selection mode -1, the previews' own never-pickable path - hover can
     // never highlight it and no pick can ever land on it, which also keeps
@@ -2723,15 +2757,180 @@ void OcctViewWidget::applyRenderTier(RenderTier tier)
 {
     if (myView.IsNull()) return;
     Graphic3d_RenderingParams& params = myView->ChangeRenderingParams();
-    params.Method = (tier == RenderTier::RayTracing) ? Graphic3d_RM_RAYTRACING
-                                                      : Graphic3d_RM_RASTERIZATION;
-    if (tier == RenderTier::RayTracing) params.IsShadowEnabled = true;
+
+    // Both ray-traced tiers drive the same OCCT pipeline (Method); what
+    // separates them is global illumination and adaptive screen sampling
+    // below, PathTracing's own look, not a second rendering mode.
+    const bool rayTraced = tier == RenderTier::PathTracing || tier == RenderTier::RayTracing;
+    const bool pathTracing = tier == RenderTier::PathTracing;
+    params.Method = rayTraced ? Graphic3d_RM_RAYTRACING : Graphic3d_RM_RASTERIZATION;
+    params.IsShadowEnabled = rayTraced;
+
+    // Path tracing's own parameters, explicitly set for EVERY tier rather
+    // than only switched on for PathTracing - a probe that tries PathTracing
+    // first and falls back to RayTracing or Shadows calls this function
+    // again on the same live view, and a field this branch left untouched
+    // would carry PathTracing's value into a tier that never asked for it.
+    // AdaptiveScreenSampling is what makes the image progressively refine
+    // across repeated Redraw() calls at rest instead of computing one fixed
+    // sample count per frame - see startPathTracingConvergence() for the
+    // paint loop that actually asks for those repeated redraws.
+    params.IsGlobalIlluminationEnabled = pathTracing;
+    params.AdaptiveScreenSampling = pathTracing;
+    params.IsAntialiasingEnabled = pathTracing;
+    // Measured, not assumed: AdaptiveScreenSampling caps how many screen
+    // TILES (RayTracingTileSize, 32 px square by default) a single Redraw()
+    // renders - NbRayTracingTiles, 256 by default. A 1200x760 viewport is
+    // ~900 tiles, so at the default cap a redraw covers well under a third
+    // of the screen, and this task's first calibration Dump showed exactly
+    // that: real Dump() pixels came back almost entirely (0,0,0), not merely
+    // noisy, because most of the frame had genuinely never been rendered
+    // yet, only the OpenGl clear colour. -1 ("no limit," the header's own
+    // words) renders every tile every frame - unlimited per THIS field's own
+    // name, not literally uncapped work, since kPathTracingProbeThresholdMs
+    // still refuses a GPU too slow to do that in one frame. Every other tier
+    // puts the field back at its constructor default (256) - irrelevant
+    // there (AdaptiveScreenSampling is off), but explicit for the same
+    // "every branch writes every field" reason the rest of this function
+    // does it.
+    params.NbRayTracingTiles = pathTracing ? -1 : 256;
+
+    // The PBR look this task's brief asks for "while render mode is on" -
+    // deliberately NOT gated to the PathTracing tier alone, so Shadows and
+    // Plain (both plain rasterization) pick up the PBR shading model too;
+    // applyRenderBodyMaterials() is what gives that shading model something
+    // physically-based to read instead of the black default PBRMaterial.
+    // ToneMappingMethod's own header comment documents it as a path-tracing
+    // parameter ("tone mapping method for path tracing") - harmless to set
+    // outside PathTracing, but this class does not claim it is visible
+    // there; only the PathTracing-vs-Shadows Dump comparison in gui_smoke
+    // claims a provable pixel difference.
+    params.ShadingModel = Graphic3d_TypeOfShadingModel_Pbr;
+    params.ToneMappingMethod = Graphic3d_ToneMappingMethod_Filmic;
+
     // 4x the 1024 default while shadow-mapping, put back for every other
     // tier. At 1024 the shadow's edge on the floor is visibly blocky - the
     // map is stretched across the whole scene including the floor, so the
     // floor is exactly what made the default resolution stop being enough.
     params.ShadowMapResolution = (tier == RenderTier::Shadows) ? 4096 : 1024;
     setLightsCastShadows(tier == RenderTier::Shadows);
+}
+
+void OcctViewWidget::saveRenderParams()
+{
+    if (myView.IsNull()) return;
+    const Graphic3d_RenderingParams& params = myView->RenderingParams();
+    myRenderSavedParams.method = params.Method;
+    myRenderSavedParams.shadingModel = params.ShadingModel;
+    myRenderSavedParams.toneMappingMethod = params.ToneMappingMethod;
+    myRenderSavedParams.isGlobalIlluminationEnabled = params.IsGlobalIlluminationEnabled;
+    myRenderSavedParams.adaptiveScreenSampling = params.AdaptiveScreenSampling;
+    myRenderSavedParams.isAntialiasingEnabled = params.IsAntialiasingEnabled;
+    myRenderSavedParams.isShadowEnabled = params.IsShadowEnabled;
+    myRenderSavedParams.shadowMapResolution = params.ShadowMapResolution;
+    myRenderSavedParams.nbRayTracingTiles = params.NbRayTracingTiles;
+}
+
+void OcctViewWidget::restoreRenderParams()
+{
+    if (myView.IsNull()) return;
+    Graphic3d_RenderingParams& params = myView->ChangeRenderingParams();
+    params.Method = myRenderSavedParams.method;
+    params.ShadingModel = myRenderSavedParams.shadingModel;
+    params.ToneMappingMethod = myRenderSavedParams.toneMappingMethod;
+    params.IsGlobalIlluminationEnabled = myRenderSavedParams.isGlobalIlluminationEnabled;
+    params.AdaptiveScreenSampling = myRenderSavedParams.adaptiveScreenSampling;
+    params.IsAntialiasingEnabled = myRenderSavedParams.isAntialiasingEnabled;
+    params.IsShadowEnabled = myRenderSavedParams.isShadowEnabled;
+    params.ShadowMapResolution = myRenderSavedParams.shadowMapResolution;
+    params.NbRayTracingTiles = myRenderSavedParams.nbRayTracingTiles;
+    // Shadow-casting lights are not part of Graphic3d_RenderingParams and so
+    // are not in the snapshot above, but this class has only ever turned
+    // them on for the Shadows tier - always off before render mode ever
+    // ran - so putting that back is unconditional, applyRenderTier(Plain)'s
+    // own old behaviour, kept here rather than resurrected through a call to
+    // that function (which would also fight this function over ShadingModel
+    // and the rest, see applyRenderTier()'s own comment on why it now
+    // always writes them).
+    setLightsCastShadows(false);
+}
+
+OcctViewWidget::RenderParamsProbe OcctViewWidget::renderParamsProbe() const
+{
+    RenderParamsProbe probe;
+    if (myView.IsNull()) return probe;
+    const Graphic3d_RenderingParams& params = myView->RenderingParams();
+    probe.method = static_cast<int>(params.Method);
+    probe.shadingModel = static_cast<int>(params.ShadingModel);
+    probe.toneMappingMethod = static_cast<int>(params.ToneMappingMethod);
+    probe.isGlobalIlluminationEnabled = params.IsGlobalIlluminationEnabled;
+    probe.adaptiveScreenSampling = params.AdaptiveScreenSampling;
+    probe.isAntialiasingEnabled = params.IsAntialiasingEnabled;
+    probe.isShadowEnabled = params.IsShadowEnabled;
+    probe.shadowMapResolution = params.ShadowMapResolution;
+    probe.nbRayTracingTiles = params.NbRayTracingTiles;
+    return probe;
+}
+
+void OcctViewWidget::applyRenderBodyMaterials()
+{
+    if (myContext.IsNull()) return;
+    // A light, matte, non-metallic "furniture" material - measured against
+    // real Dump() pixels rather than guessed from the setter names,
+    // CLAUDE.md's own rule for this class of change. The Phong SetColor()
+    // stays at the ordinary GRAY70 body tone (0.70) so a body looks like the
+    // same body under a rasterization tier with no PBR contribution at all;
+    // the PBR albedo below is deliberately DARKER (0.55, not 0.70) - the
+    // same rasterized-PBR-clips-white finding showRenderFloor() documents
+    // applies here too (a lit PBR diffuse response measured brighter than
+    // its Phong equivalent under this app's doubled studio key light), and
+    // Roughness 0.55 is a middling matte, not glossy enough to add a hot
+    // specular highlight on top.
+    Graphic3d_MaterialAspect material(Graphic3d_NameOfMaterial_UserDefined);
+    material.SetColor(Quantity_Color(0.70, 0.70, 0.68, Quantity_TOC_RGB));
+    Graphic3d_PBRMaterial pbr;
+    pbr.SetColor(Quantity_Color(0.55, 0.55, 0.53, Quantity_TOC_RGB));
+    pbr.SetMetallic(0.0f);
+    pbr.SetRoughness(0.55f);
+    material.SetPBRMaterial(pbr);
+    for (auto& entry : mySolids) entry.second->SetMaterial(material);
+}
+
+void OcctViewWidget::startPathTracingConvergence()
+{
+    if (myView.IsNull()) return;
+    if (myPathTracingRefineTimer == nullptr) {
+        myPathTracingRefineTimer = new QTimer(this);
+        constexpr int kIntervalMs = 50;
+        myPathTracingRefineTimer->setInterval(kIntervalMs);
+        connect(myPathTracingRefineTimer, &QTimer::timeout, this, [this]() {
+            // Re-checked on every tick rather than trusted from whenever the
+            // timer was started - render mode can exit or the tier can only
+            // ever have been cached once, but this guards the same way every
+            // other render-mode teardown in this file does, defensively
+            // rather than because a real path to it missing stopCall was
+            // found.
+            if (!myRenderModeActive || myRenderTier != RenderTier::PathTracing ||
+                myView.IsNull() || myPathTracingRefineTicksLeft <= 0) {
+                stopPathTracingConvergence();
+                return;
+            }
+            --myPathTracingRefineTicksLeft;
+            myView->Redraw();
+        });
+    }
+    // kPathTracingConvergeMs / kIntervalMs ticks - restarted, not merely
+    // topped up, so a camera move mid-convergence gets the full window
+    // again, matching the path tracer's own accumulation buffer starting
+    // over the instant the view actually changes.
+    myPathTracingRefineTicksLeft = kPathTracingConvergeMs / myPathTracingRefineTimer->interval();
+    myPathTracingRefineTimer->start();
+}
+
+void OcctViewWidget::stopPathTracingConvergence()
+{
+    if (myPathTracingRefineTimer != nullptr) myPathTracingRefineTimer->stop();
+    myPathTracingRefineTicksLeft = 0;
 }
 
 bool OcctViewWidget::probeShadowPixelsDiffer()
@@ -2787,9 +2986,88 @@ bool OcctViewWidget::probeShadowPixelsDiffer()
     return differ;
 }
 
+bool OcctViewWidget::probePathTracingChangedImage()
+{
+    if (!myRenderModeActive || myRenderTier != RenderTier::PathTracing || myView.IsNull())
+        return false;
+
+    QTemporaryFile ptFile(QDir::tempPath() +
+                         QStringLiteral("/furnifyme-pathtracing-XXXXXX.png"));
+    QTemporaryFile shadowsFile(QDir::tempPath() +
+                              QStringLiteral("/furnifyme-shadows-compare-XXXXXX.png"));
+    if (!ptFile.open() || !shadowsFile.open()) return false;
+    const QString ptPath = ptFile.fileName();
+    const QString shadowsPath = shadowsFile.fileName();
+    ptFile.close();
+    shadowsFile.close();
+
+    // A few extra accumulation passes before the PathTracing capture - the
+    // comparison only has to show "different from Shadows," not "fully
+    // converged," but a single first frame is still the noisiest one this
+    // tier ever draws and this probe wants a representative frame, not the
+    // most-likely-to-look-different one.
+    constexpr int kSettlePasses = 5;
+    for (int i = 0; i < kSettlePasses; ++i) myView->Redraw();
+    const bool dumpedPt = myView->Dump(ptPath.toUtf8().constData()) == Standard_True;
+
+    // Shadows, temporarily - never cached, never re-probed, and restored
+    // below before this function returns. This is the one legitimate reason
+    // to call applyRenderTier() with something other than myRenderTier while
+    // render mode is on: a same-scene comparison frame, not a real tier
+    // change.
+    applyRenderTier(RenderTier::Shadows);
+    myView->Redraw();
+    const bool dumpedShadows = myView->Dump(shadowsPath.toUtf8().constData()) == Standard_True;
+
+    // Restored - this probe must never leave the session actually rendering
+    // a tier other than the one it already cached and reported in the entry
+    // toast.
+    applyRenderTier(RenderTier::PathTracing);
+    myView->Redraw();
+
+    bool differ = false;
+    if (dumpedPt && dumpedShadows) {
+        const QImage pt(ptPath);
+        const QImage shadows(shadowsPath);
+        if (!pt.isNull() && !shadows.isNull() && pt.size() == shadows.size()) {
+            constexpr int kStride = 4;
+            for (int y = 0; y < pt.height() && !differ; y += kStride) {
+                for (int x = 0; x < pt.width(); x += kStride) {
+                    if (pt.pixel(x, y) != shadows.pixel(x, y)) { differ = true; break; }
+                }
+            }
+        }
+    }
+
+    QFile::remove(ptPath);
+    QFile::remove(shadowsPath);
+    return differ;
+}
+
 OcctViewWidget::RenderTier OcctViewWidget::probeRenderTier()
 {
     if (myView.IsNull()) return RenderTier::Plain;
+
+    // Tier 0: path tracing - global illumination and adaptive screen
+    // sampling on top of GPU ray tracing, timed against a single redraw on
+    // its own, more lenient threshold (see kPathTracingProbeThresholdMs's
+    // own comment for why: that first frame pays for shader compilation, a
+    // one-time cost the plain tier-2 threshold below was never calibrated
+    // to absorb). Wrapped in try/catch on the same ruling tier 2 already
+    // follows: a driver that cannot do this is expected to REFUSE cleanly,
+    // and OCCT reports that refusal as a Standard_Failure here rather than a
+    // bool return.
+    bool pathTracingFast = false;
+    try {
+        applyRenderTier(RenderTier::PathTracing);
+        QElapsedTimer timer;
+        timer.start();
+        myView->Redraw();
+        pathTracingFast = timer.elapsed() <= kPathTracingProbeThresholdMs;
+    } catch (const Standard_Failure&) {
+        pathTracingFast = false;
+    }
+    if (pathTracingFast) return RenderTier::PathTracing;
 
     // Tier 1: GPU ray tracing with shadows, timed against a single redraw -
     // the brief's own method, not an average over several frames (a warm-up
@@ -2810,14 +3088,14 @@ OcctViewWidget::RenderTier OcctViewWidget::probeRenderTier()
     }
     if (rayTracingFast) return RenderTier::RayTracing;
 
-    // Ray tracing was refused, or too slow to be interactive - rasterization
-    // from here down. Tier 2: a shadow-mapped directional light, accepted
-    // only once a real Dump() shows a pixel actually moved.
+    // Neither ray-traced tier held up - rasterization from here down. Tier
+    // 2: a shadow-mapped directional light, accepted only once a real
+    // Dump() shows a pixel actually moved.
     applyRenderTier(RenderTier::Shadows);
     if (probeShadowPixelsDiffer()) return RenderTier::Shadows;
 
-    // Neither held up - stand plain, and undo the shadow flag probeShadow-
-    // PixelsDiffer() may have left set.
+    // Nothing held up - stand plain, and undo the shadow flag
+    // probeShadowPixelsDiffer() may have left set.
     applyRenderTier(RenderTier::Plain);
     return RenderTier::Plain;
 }
@@ -2835,6 +3113,13 @@ void OcctViewWidget::setRenderMode(bool on)
     myRenderModeActive = on;
 
     if (on) {
+        // Every Graphic3d_RenderingParams field this class is about to
+        // touch, captured from the live view BEFORE any of them change - see
+        // saveRenderParams()'s own comment. First thing in this branch,
+        // deliberately: everything below (the floor, the tier probe/apply,
+        // the PBR materials) writes into the same live params.
+        saveRenderParams();
+
         // Suppress hover and selection highlight - a REAL ClearSelected(),
         // reusing clearSelection() rather than a second copy of its body, so
         // the edge-length dimension it clears and the selectionChanged() it
@@ -2887,6 +3172,11 @@ void OcctViewWidget::setRenderMode(bool on)
                 myContext->SetDisplayMode(entry.second, AIS_Shaded, Standard_False);
             myContext->Redisplay(entry.second, Standard_False);
         }
+        // The PBR look this task adds - see applyRenderTier()'s own comment
+        // on why ShadingModel is set to Pbr for every tier, not only
+        // PathTracing. A body's own material never changes with the tier;
+        // only the rendering pipeline reading it does.
+        applyRenderBodyMaterials();
 
         // The studio key light: every directional light is angled off the
         // vertical so the shadow falls BESIDE the furniture - the default
@@ -2932,7 +3222,18 @@ void OcctViewWidget::setRenderMode(bool on)
         } else {
             applyRenderTier(myRenderTier);
         }
+
+        // The progressive-refine loop only means anything for the
+        // PathTracing tier - every other tier's Method is a fixed-cost
+        // rasterization or single-pass ray trace that Redraw() already
+        // renders in full each time, so asking Qt to repaint on a timer for
+        // one of those would just burn a GPU for no visible gain.
+        if (myRenderTier == RenderTier::PathTracing)
+            startPathTracingConvergence();
+        else
+            stopPathTracingConvergence();
     } else {
+        stopPathTracingConvergence();
         for (auto& entry : mySolids) applySelectionMode(entry.second);
         hideRenderFloor();
         // The two restorations that mirror the entry edits above: the lights
@@ -2950,6 +3251,10 @@ void OcctViewWidget::setRenderMode(bool on)
         const Standard_Integer mode = myWireframe ? AIS_WireFrame : AIS_Shaded;
         for (auto& entry : mySolids) {
             entry.second->Attributes()->SetFaceBoundaryDraw(Standard_True);
+            // The render-mode PBR material off, back to whatever stood
+            // before applyRenderBodyMaterials() ran - see that function's
+            // own comment on why UnsetMaterial() is a complete restore here.
+            entry.second->UnsetMaterial();
             myContext->SetDisplayMode(entry.second, mode, Standard_False);
             myContext->Redisplay(entry.second, Standard_False);
         }
@@ -2962,11 +3267,14 @@ void OcctViewWidget::setRenderMode(bool on)
         // however long render mode was up.
         mySymmetryIndicatorBuiltHalfSpan = 0.0;
         updateSymmetryIndicator();
-        // Ordinary modeling never ray-traces or shadow-maps - both would be
-        // an interactivity hazard mid-edit, and neither is part of the look
-        // this app had before this feature existed. Plain rasterization
-        // restores that exactly, whichever tier was live a moment ago.
-        applyRenderTier(RenderTier::Plain);
+        // Ordinary modeling never ray-traces, shadow-maps or shades PBR -
+        // all three would be an interactivity hazard or a look mid-edit was
+        // never meant to have. restoreRenderParams() puts every touched
+        // Graphic3d_RenderingParams field back to what saveRenderParams()
+        // read at entry, rather than the bare applyRenderTier(Plain) this
+        // used to be - see restoreRenderParams()'s own comment on why that
+        // used to be silently incomplete once PathTracing existed.
+        restoreRenderParams();
     }
 
     applyBackgroundForMode();

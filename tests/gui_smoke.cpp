@@ -192,7 +192,13 @@ void skipByEnvironment(int checks, const QString& why)
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 2323;
+//
+// Task 7.1 (path tracing + PBR) raised this from 2323 to 2326: the params
+// round-trip check (+1) and the PathTracing-vs-Shadows measured-pixel proof
+// (+2 when this session's GPU actually reaches PathTracing, +1 as a
+// pass-with-note otherwise - see probePathTracingChangedImage()'s own
+// comment). Measured on this machine, which reaches PathTracing.
+constexpr int kCheckFloor = 2326;
 
 void check(bool condition, const QString& what)
 {
@@ -18838,6 +18844,13 @@ int main(int argc, char* argv[])
                   .arg(gridSamplesBefore.size()));
 
         // --- entry --------------------------------------------------------
+        // The params round-trip's own "before" - every touched
+        // Graphic3d_RenderingParams field, read BEFORE render mode has ever
+        // been entered this session, so the "after" comparison below (taken
+        // once render mode has exited again) is a real round trip and not
+        // merely two reads of whatever the exit path happens to write.
+        const OcctViewWidget::RenderParamsProbe paramsBeforeEntry = rview->renderParamsProbe();
+
         Toast* toast = probe.findChild<Toast*>();
         ToastHost* toastHost = probe.findChild<ToastHost*>();
         renderAction->trigger();
@@ -18847,20 +18860,23 @@ int main(int argc, char* argv[])
         check(probe.renderModeEnabled(), "and the window's own flag agrees");
         check(rview->renderModeActive(), "and the viewport's own flag agrees too");
 
-        // The one Note toast, naming ONE of the three tiers - the probe
-        // itself is environment-dependent (this task's own ruling: all three
+        // The one Note toast, naming ONE of the four tiers - the probe
+        // itself is environment-dependent (this task's own ruling: all four
         // are passes, never a skip), so the assertion is that a tier was
         // chosen and reported, not which one.
         const QString tierText = toastHost ? toastHost->currentText() : QString();
-        const bool namesATier = tierText == QStringLiteral("Render mode — ray tracing") ||
+        const bool namesATier = tierText == QStringLiteral("Render mode — path tracing") ||
+                                tierText == QStringLiteral("Render mode — ray tracing") ||
                                 tierText == QStringLiteral("Render mode — shadows") ||
                                 tierText == QStringLiteral("Render mode");
         check(namesATier,
-              QStringLiteral("the tier toast names one of the three tiers (\"%1\")")
+              QStringLiteral("the tier toast names one of the four tiers (\"%1\")")
                   .arg(tierText));
         const OcctViewWidget::RenderTier tier = rview->renderModeTier();
-        check((tier == OcctViewWidget::RenderTier::RayTracing &&
-                  tierText == QStringLiteral("Render mode — ray tracing")) ||
+        check((tier == OcctViewWidget::RenderTier::PathTracing &&
+                  tierText == QStringLiteral("Render mode — path tracing")) ||
+                  (tier == OcctViewWidget::RenderTier::RayTracing &&
+                   tierText == QStringLiteral("Render mode — ray tracing")) ||
                   (tier == OcctViewWidget::RenderTier::Shadows &&
                    tierText == QStringLiteral("Render mode — shadows")) ||
                   (tier == OcctViewWidget::RenderTier::Plain &&
@@ -18868,6 +18884,43 @@ int main(int argc, char* argv[])
               "and the toast names the SAME tier the viewport actually chose, "
               "not a mismatched pair");
         check(rview->renderModeTierProbed(), "the tier is now cached for the session");
+
+        // --- PathTracing's own measured-pixel proof --------------------------
+        // "Trust the pixel over the setter's name," this task's own ruling
+        // extended to a new tier: IsGlobalIlluminationEnabled and
+        // AdaptiveScreenSampling succeeding as setters is not proof either
+        // reached the screen. Conditional-but-honest, per the brief - this
+        // MUST fail if PathTracing was chosen but demonstrably changed
+        // nothing, and pass-with-note (never a silent skip that drops a
+        // check from the floor) if this GPU never reached PathTracing at
+        // all, which is a real and expected outcome CLAUDE.md's own render-
+        // mode tier probe already treats as a pass, not a failure.
+        if (tier == OcctViewWidget::RenderTier::PathTracing) {
+            const bool ptChangedImage = rview->probePathTracingChangedImage();
+            check(ptChangedImage,
+                  "PathTracing actually changed the rendered image against the "
+                  "Shadows tier on the identical scene - real Dump() pixels, not "
+                  "the global-illumination/adaptive-sampling setters' own claim");
+            check(rview->renderModeTier() == OcctViewWidget::RenderTier::PathTracing &&
+                      rview->renderModeActive(),
+                  "and the comparison probe left the session actually rendering "
+                  "PathTracing again, not the Shadows tier it borrowed to compare "
+                  "against");
+        } else {
+            QString tierName;
+            switch (tier) {
+                case OcctViewWidget::RenderTier::RayTracing: tierName = QStringLiteral("RayTracing"); break;
+                case OcctViewWidget::RenderTier::Shadows:    tierName = QStringLiteral("Shadows"); break;
+                case OcctViewWidget::RenderTier::Plain:      tierName = QStringLiteral("Plain"); break;
+                default: tierName = QStringLiteral("(unknown)"); break;
+            }
+            check(true,
+                  QStringLiteral("PathTracing was refused or too slow on this GPU - probed "
+                                 "to %1 instead, so the PathTracing-vs-Shadows pixel-diff "
+                                 "proof is skipped as a pass rather than run against a tier "
+                                 "that was never actually chosen")
+                      .arg(tierName));
+        }
 
         // Vocabulary sweep, scoped to this probe's own toast history - the
         // same mechanism the versions/rename probe above uses, since this is
@@ -18964,6 +19017,55 @@ int main(int argc, char* argv[])
         settle(200);
         check(!renderAction->isChecked(), "a plain viewport press exits render mode");
         check(!rview->renderModeActive(), "and the viewport's own flag follows");
+
+        // --- the params round trip -------------------------------------------
+        // Every Graphic3d_RenderingParams field this task's render-mode work
+        // touches, back to exactly what it read before render mode was ever
+        // entered this session - restoreRenderParams()'s whole reason to
+        // exist, and the specific bug class it replaces
+        // applyRenderTier(RenderTier::Plain) to close: that call never
+        // touched ShadingModel/ToneMappingMethod/IsGlobalIlluminationEnabled/
+        // AdaptiveScreenSampling at all, so a session that ever reached
+        // PathTracing would have left global illumination and PBR shading
+        // switched on underneath ordinary modeling forever after the first
+        // exit - a bug with no visible symptom until the NEXT render-mode
+        // entry read the wrong "before" state, which is exactly why this is
+        // a value comparison and not a screenshot.
+        const OcctViewWidget::RenderParamsProbe paramsAfterExit = rview->renderParamsProbe();
+        check(paramsAfterExit.method == paramsBeforeEntry.method &&
+                  paramsAfterExit.shadingModel == paramsBeforeEntry.shadingModel &&
+                  paramsAfterExit.toneMappingMethod == paramsBeforeEntry.toneMappingMethod &&
+                  paramsAfterExit.isGlobalIlluminationEnabled ==
+                      paramsBeforeEntry.isGlobalIlluminationEnabled &&
+                  paramsAfterExit.adaptiveScreenSampling ==
+                      paramsBeforeEntry.adaptiveScreenSampling &&
+                  paramsAfterExit.isAntialiasingEnabled == paramsBeforeEntry.isAntialiasingEnabled &&
+                  paramsAfterExit.isShadowEnabled == paramsBeforeEntry.isShadowEnabled &&
+                  paramsAfterExit.shadowMapResolution == paramsBeforeEntry.shadowMapResolution &&
+                  paramsAfterExit.nbRayTracingTiles == paramsBeforeEntry.nbRayTracingTiles,
+              QStringLiteral("every rendering param this task touches round-trips exactly "
+                             "(method %1->%2, shadingModel %3->%4, toneMapping %5->%6, GI "
+                             "%7->%8, adaptiveSampling %9->%10, AA %11->%12, shadow %13->%14, "
+                             "shadowMapRes %15->%16, tileCap %17->%18)")
+                  .arg(paramsBeforeEntry.method)
+                  .arg(paramsAfterExit.method)
+                  .arg(paramsBeforeEntry.shadingModel)
+                  .arg(paramsAfterExit.shadingModel)
+                  .arg(paramsBeforeEntry.toneMappingMethod)
+                  .arg(paramsAfterExit.toneMappingMethod)
+                  .arg(int(paramsBeforeEntry.isGlobalIlluminationEnabled))
+                  .arg(int(paramsAfterExit.isGlobalIlluminationEnabled))
+                  .arg(int(paramsBeforeEntry.adaptiveScreenSampling))
+                  .arg(int(paramsAfterExit.adaptiveScreenSampling))
+                  .arg(int(paramsBeforeEntry.isAntialiasingEnabled))
+                  .arg(int(paramsAfterExit.isAntialiasingEnabled))
+                  .arg(int(paramsBeforeEntry.isShadowEnabled))
+                  .arg(int(paramsAfterExit.isShadowEnabled))
+                  .arg(paramsBeforeEntry.shadowMapResolution)
+                  .arg(paramsAfterExit.shadowMapResolution)
+                  .arg(paramsBeforeEntry.nbRayTracingTiles)
+                  .arg(paramsAfterExit.nbRayTracingTiles));
+
         // The selection render mode cleared on entry is NOT restored on
         // exit - the consistent behaviour this task shipped (a real
         // ClearSelected(), never a remembered cursor to put back), asserted
