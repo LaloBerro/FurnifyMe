@@ -482,6 +482,18 @@ void ItemsPanel::beginRenameForItem(int id, bool isOutline)
     // rebuilds the rows out from under it.
     if (!isVisible()) return;
 
+    // Fix round 1 (Task 3.2 review): refuse outright while a mirror-placement
+    // gesture is live. MainWindow's canRename now excludes it too (the
+    // discoverable half, matching canOpenSaveVersion()'s own exclusion of
+    // the pull/bevel/extrude claims), but a disabled QAction does not stop a
+    // direct trigger() call - the same reasoning the isVisible() guard just
+    // above already carries for this exact function. The gesture's own
+    // X/Y/Z filter additionally lets keystrokes through to a focused text
+    // field now (MirrorPlacementChip::eventFilter's own guard, in
+    // MainWindow.cpp), so this is belt AND suspenders, not the only thing
+    // standing between a rename and a silently eaten "x".
+    if (myView && myView->mirrorPlacementActive()) return;
+
     // Re-entrancy guard: F2 is a plain QAction shortcut, which fires
     // regardless of what currently holds focus - including the QLineEdit an
     // earlier call to this very function just opened, since that edit claims

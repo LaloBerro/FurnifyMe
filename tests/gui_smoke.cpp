@@ -17454,6 +17454,112 @@ int main(int argc, char* argv[])
         check(!probe.document().symmetryOn(), "...symmetry is still off");
         check(activeClaimCount() == 0, "no application-wide key claim after Escape");
 
+        // --- Fix round 1, Finding 1: disjointness has to hold for the
+        // gesture's WHOLE LIFETIME, not just the press that began it. A
+        // selection-mode switch mid-gesture used to leave nothing standing
+        // between the mirror chip and PullArrow/BevelArrow rising alongside
+        // it - refreshMirrorPlacement() (MainWindow.cpp), the ExtrudePreview
+        // self-cancel discipline applied one gizmo over, is what closes it.
+        probe.view()->setSelectionMode(OcctViewWidget::SelectionMode::Solid);
+        probe.view()->setSelectedSolids({bodyAId});
+        settle(80);
+        trigger(probe, QStringLiteral("Symmetry"));
+        check(pView->mirrorPlacementActive(), "re-begun on body A for the mode-switch probe");
+        check(activeClaimCount() == 1, "exactly one claim while the gesture is active");
+
+        probe.view()->setSelectionMode(OcctViewWidget::SelectionMode::Face);
+        settle(120);
+        check(!pView->mirrorPlacementActive(),
+              "switching to face selection mid-gesture self-cancels it");
+        check(activeClaimCount() <= 1,
+              "...so no second claim (PullArrow, on a face pick) can ever join it");
+        check(!probe.canBeginMirrorPlacement(),
+              "canBeginMirrorPlacement() itself now reads false - wrong selection mode, "
+              "not merely \"already active\"");
+
+        // Back to body mode, for everything that follows.
+        probe.view()->setSelectionMode(OcctViewWidget::SelectionMode::Solid);
+        probe.view()->setSelectedSolids({bodyAId});
+        settle(80);
+
+        // --- Fix round 1, Finding 3: S pressed again mid-gesture cancels
+        // it, rather than reaching a "Select one or more bodies" refusal
+        // that would have been actively WRONG (bodies genuinely are
+        // selected; the real obstacle is the gesture itself). -------------
+        trigger(probe, QStringLiteral("Symmetry"));
+        check(pView->mirrorPlacementActive(), "begun again, for the S-while-active probe");
+        const std::size_t bodiesBeforeSTwice = probe.document().count();
+        trigger(probe, QStringLiteral("Symmetry"));
+        check(!pView->mirrorPlacementActive(), "S pressed again while active cancels the gesture");
+        check(probe.document().count() == bodiesBeforeSTwice, "...with nothing built");
+        check(!probe.document().symmetryOn(), "...and symmetry stays off");
+        check(pToasts == nullptr || !pToasts->isShowing() ||
+                  !pToasts->currentText().contains(QStringLiteral("Select")),
+              "no reason-blind \"Select one or more bodies\" toast for this case - there "
+              "is nothing to explain, only a gesture to end");
+
+        // --- Fix round 1, Finding 2: Rename cannot open while a gesture is
+        // active - canRename excludes mirrorPlacementActive() AND
+        // ItemsPanel::beginRenameForItem() self-guards (reachable even past
+        // a disabled action's own programmatic trigger()), so an x/y/z
+        // keystroke meant for a rename field can never reach the chip's
+        // filter in the first place - the design this task picked over
+        // teaching the filter to detect a focused field that can now never
+        // exist alongside it. -----------------------------------------------
+        // The Items drawer starts CHECKED by default (myItemsPanelAction's
+        // own construction) - no trigger() needed, and one would only close
+        // it, since a fresh window's drawer is already open.
+        ItemsPanel* placementItems = probe.itemsPanel();
+        check(placementItems != nullptr && placementItems->isVisible(), "the Items drawer is open");
+        probe.view()->setSelectedSolids({bodyAId});
+        settle(80);
+        trigger(probe, QStringLiteral("Symmetry"));
+        check(pView->mirrorPlacementActive(), "begun again, for the rename-guard probe");
+        QAction* placementRenameAction = action(probe, QStringLiteral("Rename"));
+        check(placementRenameAction != nullptr && !placementRenameAction->isEnabled(),
+              "Rename is disabled while a mirror-placement gesture is active");
+        if (placementItems) {
+            // Called DIRECTLY, bypassing the disabled action - Qt runs a
+            // programmatic trigger() regardless of isEnabled(), which is
+            // exactly why this function needs its own guard rather than
+            // trusting the action's enabled state alone.
+            placementItems->beginRenameForItem(bodyAId, false);
+            settle(120);
+            check(placementItems->findChild<QLineEdit*>() == nullptr,
+                  "...and beginRenameForItem() itself refuses to open one");
+        }
+        // With no rename field ever able to open, Y still reaches the
+        // gesture exactly as it always did - the chip's own filter is
+        // untouched by there being nothing left for it to steal from.
+        const int axisBeforeRenameProbe = pView->mirrorPlacementAxis();
+        sendKeyTo(&probe, Qt::Key_Y);
+        settle(80);
+        check(pView->mirrorPlacementAxis() == 1 &&
+                  pView->mirrorPlacementAxis() != axisBeforeRenameProbe,
+              "Y reaches the gesture, proving the filter is still live");
+        trigger(probe, QStringLiteral("Symmetry"));   // cancel; tidy up for what follows
+        check(!pView->mirrorPlacementActive(), "cleaned up after the rename-guard probe");
+
+        // --- Fix round 1, Finding 4: confirming a genuine no-op must not
+        // announce a document change - a lone selected body's own default
+        // plane (offset zero) always straddles it, so this pairs nothing. -
+        probe.view()->setSelectedSolids({bodyAId});
+        settle(80);
+        trigger(probe, QStringLiteral("Symmetry"));
+        check(pView->mirrorPlacementActive(), "begun again, for the no-op confirm probe");
+        const std::size_t bodiesBeforeNoOp = probe.document().count();
+        int mirrorNoOpSignalCount = 0;
+        QMetaObject::Connection mirrorNoOpConn = QObject::connect(
+            &probe, &MainWindow::documentChanged, [&] { ++mirrorNoOpSignalCount; });
+        sendKeyTo(&probe, Qt::Key_Return);
+        settle(200);
+        QObject::disconnect(mirrorNoOpConn);
+        check(!pView->mirrorPlacementActive(), "the gesture ends either way");
+        check(probe.document().count() == bodiesBeforeNoOp,
+              "a lone body straddling its own centre pairs with nothing");
+        check(mirrorNoOpSignalCount == 0,
+              "...and documentChanged() is not emitted for a genuine no-op");
+
         // --- Enter pairs: twin appears, one Note toast naming the count with
         // plurals written out, one undo removes EVERYTHING it built, and
         // symmetry mode itself stays ON after that undo -----------------------

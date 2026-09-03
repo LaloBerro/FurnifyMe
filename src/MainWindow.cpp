@@ -50,6 +50,7 @@
 #include <QHideEvent>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QLineEdit>
 #include <QMenuBar>
 #include <QCloseEvent>
 #include <QPainter>
@@ -464,6 +465,21 @@ protected:
         if (!widget || widget->window() != window())
             return QWidget::eventFilter(watched, event);
 
+        // Fix round 1 (Task 3.2 review, Finding 2): never steal a keystroke
+        // out of a focused text field. This chip owns no QLineEdit of its
+        // own - unlike PullArrow/BevelArrow/ExtrudePreview, there is nothing
+        // here to type - so `widget` being a QLineEdit means some OTHER
+        // gesture's field somehow has focus while this one is live. Rename
+        // and the versions-create field are now both excluded from opening
+        // during an active gesture at their own source (canRename and
+        // canOpenSaveVersion(), both `&& !mirrorPlacementActive()`, plus
+        // ItemsPanel::beginRenameForItem()'s own belt-and-suspenders guard),
+        // but this is the independent, structural backstop: X, Y and Z are
+        // ordinary letters any typed name can contain, and a filter that
+        // only trusts its OWN callers to have gated correctly is one
+        // unguarded call site away from silently eating one again.
+        if (qobject_cast<QLineEdit*>(widget)) return QWidget::eventFilter(watched, event);
+
         auto* keyEvent = static_cast<QKeyEvent*>(event);
         const Qt::KeyboardModifiers mods = keyEvent->modifiers() & ~Qt::KeypadModifier;
         if (mods != Qt::NoModifier) return QWidget::eventFilter(watched, event);
@@ -796,6 +812,14 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // long as the arrow's own value chip is up. Only reads state and moves AIS
     // objects, so it cannot recurse back into updateActions().
     connect(this, &MainWindow::appStateChanged, this, &MainWindow::refreshEdgeAnnotation);
+
+    // The mirror-placement gesture's own self-cancel (fix round 1) - see
+    // refreshMirrorPlacement()'s own comment. Connected HERE, before
+    // buildOverlay() constructs the gesture's value chip and connects ITS
+    // refresh() to the same signal, so Qt's connected-in-order guarantee
+    // puts this slot's cancel ahead of the chip's own read of
+    // mirrorPlacementActive() within any one appStateChanged emission.
+    connect(this, &MainWindow::appStateChanged, this, &MainWindow::refreshMirrorPlacement);
 
     // Selection syncs both ways.
     connect(myItemsPanel, &ItemsPanel::solidActivated, this,
@@ -1839,17 +1863,30 @@ void MainWindow::updateActions()
     // has to be structurally impossible, not just discouraged.
     const bool drawerVisible = myItemsPanelAction && myItemsPanelAction->isChecked();
     const bool renameTargetsOutline = selectedCount == 0 && hasPendingFace();
+    // Fix round 1 (Task 3.2 review, Finding 2): a live mirror-placement
+    // gesture also has to exclude Rename, the same way canOpenSaveVersion()
+    // already excludes the pull/bevel/extrude claims - one selected body is
+    // exactly what both this and canBeginMirrorPlacement() want, so the
+    // single most ordinary case (one body, S pressed) left Rename fully
+    // reachable and typing a name containing x/y/z silently reoriented the
+    // plane instead of reaching the field. ItemsPanel::beginRenameForItem()
+    // carries the same guard directly, for the reason its own comment gives
+    // (a disabled action does not stop a programmatic trigger()).
     const bool canRename = !mySketching && !atInit && drawerVisible &&
+                           !myView->mirrorPlacementActive() &&
                            (selectedCount == 1 || renameTargetsOutline);
     myRenameAction->setEnabled(canRename);
     myRenameAction->setToolTip(
         !drawerVisible
             ? tr("Show the Items drawer to rename a row (F2, View → Items)")
-            : renameTargetsOutline
-                  ? tr("Rename the outline that's waiting (F2)")
-                  : selectedCount == 1
-                        ? tr("Rename the selected body (F2)")
-                        : tr("Select exactly one body to rename it (F2)"));
+            : myView->mirrorPlacementActive()
+                  ? tr("Unavailable while placing a mirror plane — Enter mirrors, "
+                      "Esc cancels")
+                  : renameTargetsOutline
+                        ? tr("Rename the outline that's waiting (F2)")
+                        : selectedCount == 1
+                              ? tr("Rename the selected body (F2)")
+                              : tr("Select exactly one body to rename it (F2)"));
     // Mid-sketch, Undo removes the last placed point (onUndo() reroutes to
     // onUndoSketchPoint); outside a sketch it undoes a document change. The
     // menu text stays "Undo" either way - the user's word for "take that
@@ -4574,24 +4611,85 @@ void MainWindow::onSetSymmetryPlane()
 
 // --- the mirror plane placement gesture (Milestone 4, Phase 3) -------------
 
-bool MainWindow::canBeginMirrorPlacement() const
+bool MainWindow::mirrorPlacementEnvironmentOk() const
 {
     // The same three terms canPullSelectedFace() opens with, for the same
     // reasons.
     if (mySketching || hasPendingFace() || myRenderModeOn) return false;
+    // Body mode explicitly - selectedSolidIds() reports the owning body of a
+    // selected FACE too, so without this the gesture could stand next to a
+    // face selection and collide with the pull arrow's own drag. The same
+    // mode check transformableBodyId() carries, for the same reason.
+    return myView->selectionMode() == OcctViewWidget::SelectionMode::Solid;
+}
+
+bool MainWindow::canBeginMirrorPlacement() const
+{
+    if (!mirrorPlacementEnvironmentOk()) return false;
     // A gesture already running cannot be begun a second time on top of
     // itself.
     if (myView->mirrorPlacementActive()) return false;
-    // Body mode explicitly - selectedSolidIds() reports the owning body of a
-    // selected FACE too, so without this the gesture could begin over a face
-    // selection and collide with the pull arrow's own drag. The same mode
-    // check transformableBodyId() carries, for the same reason.
-    if (myView->selectionMode() != OcctViewWidget::SelectionMode::Solid) return false;
     return !myView->selectedSolidIds().empty();
+}
+
+void MainWindow::refreshMirrorPlacement()
+{
+    // Fix round 1: disjointness held only at the press that began the
+    // gesture. Recomputed on every appStateChanged - a mode switch, a
+    // sketch starting, render mode turning on - and the gesture ends the
+    // moment its own environment stops holding, rather than leaving a
+    // stale chip up while a second gizmo claims the same keys.
+    //
+    // MUST NOT call updateActions(): this runs AS A SLOT on
+    // appStateChanged, and updateActions() is what emits it - calling it
+    // from here would re-enter the very emission this slot is already
+    // inside. myView->cancelMirrorPlacement() alone is the view-side
+    // teardown with no such call; the chip's own refresh() is connected to
+    // the SAME signal, constructed (and therefore connected) after this
+    // slot, so Qt's own connection-order guarantee is what lets it observe
+    // mirrorPlacementActive() already false within this one emission.
+    if (myView->mirrorPlacementActive() && !mirrorPlacementEnvironmentOk())
+        myView->cancelMirrorPlacement();
+}
+
+QString MainWindow::mirrorPlacementRefusalText() const
+{
+    // Reason-specific, the established convention this app already follows
+    // for Lock to Face's own planeReason/sketchReason pair and the bevel
+    // refusals - fix round 1 (Task 3.2 review, Finding 3): a single fixed
+    // string for every way canBeginMirrorPlacement() can fail named the
+    // wrong obstacle as often as the right one. Checked in the same order
+    // canBeginMirrorPlacement() itself asks them, so this can never name a
+    // reason that predicate did not actually refuse on.
+    if (mySketching)
+        return tr("Unavailable while you're drawing — press Enter to close this outline, "
+                  "or Esc to cancel it");
+    if (hasPendingFace())
+        return tr("Unavailable while an outline is waiting — press E to extrude it, "
+                  "or Delete to discard it");
+    if (myRenderModeOn) return tr("Unavailable in render mode — exit it first");
+    if (myView->selectionMode() != OcctViewWidget::SelectionMode::Solid)
+        return tr("Switch to body selection, then select one or more bodies to mirror");
+    return tr("Select one or more bodies to mirror");
 }
 
 void MainWindow::onSymmetryActionTriggered()
 {
+    // S pressed again while a gesture is already live backs out of it - the
+    // same outcome Esc gives, and the cleanest possible answer to fix round
+    // 1's Finding 3 for this specific case: a fixed "Select one or more
+    // bodies" message was actively WRONG here (bodies are in fact selected;
+    // the real obstacle is the gesture itself), and cancelling needs no
+    // message to be accurate. Checked first, before reading
+    // document().symmetryOn() below - a gesture in progress has not yet
+    // turned that on, so the two checks could not be reordered without this
+    // one falling through to the "begin" branch and immediately refusing on
+    // canBeginMirrorPlacement()'s own "already active" guard.
+    if (myView->mirrorPlacementActive()) {
+        cancelMirrorPlacement();
+        return;
+    }
+
     // Reads document().symmetryOn() as it stood BEFORE this click - Qt has
     // already flipped mySymmetryAction's own isChecked() by the time
     // triggered() fires (that is what "checkable" means), but nothing about
@@ -4607,7 +4705,7 @@ void MainWindow::onSymmetryActionTriggered()
     }
 
     if (!canBeginMirrorPlacement()) {
-        const QString reason = tr("Select one or more bodies to mirror");
+        const QString reason = mirrorPlacementRefusalText();
         statusBar()->showMessage(reason);
         if (myToasts) myToasts->show(reason, Toast::Kind::Failure, false);
         // Reverts the action's own optimistic checked-flash: nothing about
@@ -4664,7 +4762,12 @@ bool MainWindow::confirmMirrorPlacement()
         statusBar()->showMessage(reason);
         if (myToasts) myToasts->show(reason, Toast::Kind::Failure, false);
         updateActions();
-        emit documentChanged();
+        // Fix round 1 (Task 3.2 review, Finding 4): NO documentChanged()
+        // here - pairWithMirror() took no checkpoint and changed nothing on
+        // this path (confirmed by reading it: the checkpoint is gated on at
+        // least one id actually pairing), so this is a genuine no-op and
+        // announcing a document change that did not happen is an inaccurate
+        // signal, whatever its two listeners currently do with it.
         return false;
     }
 

@@ -702,6 +702,37 @@ private:
     // knows nothing about bevels. Reads state and moves AIS objects only, so
     // it cannot recurse back into updateActions().
     void refreshEdgeAnnotation();
+    // Fix round 1's own finding: a mirror-placement gesture's disjointness
+    // from the other three gizmo claims held only at the PRESS that began
+    // it, not for the gesture's whole life - switching selection mode
+    // mid-gesture (still enabled; nothing had ever re-checked it) let
+    // PullArrow or BevelArrow rise while the mirror chip was still up, two
+    // application-wide key filters live at once. ExtrudePreview's own
+    // self-cancel discipline, one gizmo over: a slot on appStateChanged
+    // that recomputes mirrorPlacementEnvironmentOk() against an ALREADY
+    // active gesture and ends it the instant that predicate fails - mode
+    // switch, sketch start, render mode, all covered by the one recompute
+    // rather than three separate reminders. Reads state and moves AIS
+    // objects only, so it cannot recurse back into updateActions() - see
+    // its own definition for why that matters here specifically.
+    void refreshMirrorPlacement();
+    // The environment half of canBeginMirrorPlacement() - no sketch, no
+    // pending outline, no render mode, body selection mode - WITHOUT that
+    // function's other two terms ("not already active", "something is
+    // selected"), which only make sense at the moment of a BEGIN and would
+    // be wrong to ask of a gesture already running. Shared by
+    // canBeginMirrorPlacement() and refreshMirrorPlacement() so the two
+    // cannot drift into different ideas of what makes the gesture's
+    // surroundings valid.
+    bool mirrorPlacementEnvironmentOk() const;
+    // The reason-specific refusal text for onSymmetryActionTriggered()'s own
+    // "cannot begin" branch - fix round 1 (Task 3.2 review, Finding 3). Asks
+    // the same terms canBeginMirrorPlacement() refuses on, in the same
+    // order, so this can never name an obstacle that predicate did not
+    // actually refuse on. The "gesture already active" case does not appear
+    // here - it never reaches this function, since onSymmetryActionTriggered()
+    // now treats S-while-active as a cancel, not a refusal to explain.
+    QString mirrorPlacementRefusalText() const;
     // The relay from Theme's broadcast into this window. Re-dresses the three
     // things a repaint cannot reach - the viewport (a driver clear colour,
     // two Prs3d drawers and a grid built out of coloured vertices), the
