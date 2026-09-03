@@ -111,14 +111,34 @@ public:
         // gesture must never do that without saying so, so these are
         // reported rather than acted on.
         std::vector<int> skippedAlreadyPaired;
+        // ids that passed every check above but whose OWN
+        // ModelingOps::mirrorShape() call refused - a kernel-level failure,
+        // not a validation failure (fix round 1). Never-silent-failure
+        // applies inside this engine, not only at its UI-facing edges: an id
+        // that reaches the kernel and still gets no twin must say why, not
+        // just show up as a lower-than-expected `paired` count.
+        std::vector<int> skippedFailed;
     };
 
     // An id outside the document (unknown, <= 0, or repeated within `ids`)
-    // is silently ignored - the two skip lists above are for ids that ARE
-    // real bodies but cannot be paired as asked. Nothing is mutated unless
-    // at least one id can actually be paired: if every id skips, no
-    // checkpoint is taken and symmetryOn()/symmetryPlane() are left exactly
-    // as they were, so a no-op call cannot dirty the document.
+    // is silently ignored - the three skip lists above are for ids that ARE
+    // real bodies but cannot be paired as asked. Every candidate that passes
+    // validation is MIRRORED before anything is mutated (fix round 1: this
+    // used to gate the checkpoint on validated candidates rather than actual
+    // outcomes), and the checkpoint/setSymmetry(true, ...) is gated on
+    // ACTUAL pairing outcomes: if not one of `ids` ends up with a twin - be
+    // it because every id was invalid, every id failed validation, or every
+    // validated id's own mirror call refused - no checkpoint is taken and
+    // symmetryOn()/symmetryPlane() are left exactly as they were, so a
+    // genuine no-op can never dirty the document.
+    //
+    // This call checkpoints ITSELF - the one place in this file that does,
+    // because only it knows in advance whether the call nets a genuine
+    // no-op. A caller wiring this into the UI must run any pre-commit hooks
+    // of its own (render mode's exit, in particular) BEFORE calling this,
+    // not after: MainWindow's checkpointDocument() choke point cannot be
+    // layered on top of an already-self-checkpointing call without
+    // double-checkpointing one gesture.
     PairResult pairWithMirror(const std::vector<int>& ids, const gp_Pln& plane);
 
     // Drops EVERY pairing, leaving symmetryOn()/symmetryPlane() untouched -

@@ -118,16 +118,19 @@ DocumentModel::PairResult DocumentModel::pairWithMirror(const std::vector<int>& 
 {
     PairResult result;
 
-    // Resolve every id BEFORE mutating anything - "never half-done" means a
-    // straddling or already-paired id partway through the list must not
-    // leave earlier ids paired while later ones silently fail. `candidates`
-    // is what actually gets mirrored below, once the whole list is known
-    // good.
-    struct Candidate {
+    // Resolve AND MIRROR every id BEFORE touching the document (fix round
+    // 1). "Never half-done" extends past validation into the kernel call
+    // itself: whether anything is mutated is gated on ACTUAL pairing
+    // outcomes, not merely on ids that passed validation - a candidate that
+    // validates cleanly but whose own ModelingOps::mirrorShape() call
+    // refuses must not silently take a checkpoint and flip the mode for a
+    // net paired == 0. `succeeded` is what actually gets committed below,
+    // once the whole list's real outcome is known.
+    struct Mirrored {
         int id;
         TopoDS_Shape shape;
     };
-    std::vector<Candidate> candidates;
+    std::vector<Mirrored> succeeded;
     std::unordered_set<int> seen;
     for (int id : ids) {
         if (id <= 0 || !contains(id)) continue;   // unknown/invalid - silently ignored
@@ -147,22 +150,31 @@ DocumentModel::PairResult DocumentModel::pairWithMirror(const std::vector<int>& 
             result.skippedStraddling.push_back(id);
             continue;
         }
-        candidates.push_back(Candidate{id, shape});
+
+        const ModelingOps::BooleanResult mirrored = ModelingOps::mirrorShape(shape, plane);
+        if (!mirrored.ok) {
+            // A kernel refusal on otherwise-valid geometry is rare, but
+            // never-silent-failure applies here exactly as it does at this
+            // engine's UI-facing edges: report it, don't just drop it and
+            // let `paired` read low with no explanation.
+            result.skippedFailed.push_back(id);
+            continue;
+        }
+        succeeded.push_back(Mirrored{id, mirrored.shape});
     }
 
-    if (candidates.empty()) return result;   // nothing to do - no checkpoint, no mode change
+    if (succeeded.empty()) return result;   // no ACTUAL pairing to commit - no checkpoint, no mode change
 
     checkpoint();
     setSymmetry(true, plane);
-    for (const Candidate& c : candidates) {
-        const ModelingOps::BooleanResult mirrored = ModelingOps::mirrorShape(c.shape, plane);
-        if (!mirrored.ok) continue;   // a kernel refusal on otherwise-valid geometry is rare
-                                       // and left unpaired rather than aborting ids that DID
-                                       // succeed - the checkpoint already taken still lets a
-                                       // single undo clean up whatever partial work happened.
-        const int twinId = addSolid(mirrored.shape);
+    for (const Mirrored& m : succeeded) {
+        // m.shape came straight from a successful mirrorShape() call, which
+        // never returns ok == true with a null shape - see BooleanResult's
+        // own contract - so addSolid() failing here is not expected. Kept
+        // defensive anyway, matching this file's existing idiom elsewhere.
+        const int twinId = addSolid(m.shape);
         if (twinId <= 0) continue;
-        pairBodies(c.id, twinId);
+        pairBodies(m.id, twinId);
         ++result.paired;
     }
     return result;

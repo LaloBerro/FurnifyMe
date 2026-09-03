@@ -11,8 +11,14 @@
 #include <cstdio>
 #include <string>
 
+#include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepGProp.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
+#include <BRep_Builder.hxx>
 #include <GProp_GProps.hxx>
+#include <TopAbs_ShapeEnum.hxx>
+#include <TopExp_Explorer.hxx>
+#include <TopoDS_Shell.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Lin.hxx>
 
@@ -47,6 +53,42 @@ gp_Pnt centreOfMass(const TopoDS_Shape& shape)
     GProp_GProps props;
     BRepGProp::VolumeProperties(shape, props);
     return props.CentreOfMass();
+}
+
+// A deliberately INVALID "solid" - a box missing one face, wrapped by
+// BRepBuilderAPI_MakeSolid anyway - built to drive
+// ModelingOps::mirrorShape() to a genuine kernel-level refusal (fix round
+// 1's PairResult::skippedFailed path) without faking BooleanResult or
+// reaching into ModelingOps at all. BRepBuilderAPI_MakeSolid does not
+// validate closure at construction (IsDone() is not the check that catches
+// this), but BRepCheck_Analyzer - the same check mirrorShape() itself runs
+// via isShapeSane() on its OWN result - does, so mirroring this shape is
+// expected to fail on the open shell surviving into the mirrored copy, not
+// on the transform itself. `addSolid()` only checks IsNull(), so a shape
+// like this - non-null but geometrically unsound - can legitimately reach
+// pairWithMirror() through the normal document API, exactly as a real
+// (if vanishingly rare) kernel-side pairing failure would.
+TopoDS_Shape makeOpenBoxSolid(const gp_Pnt& corner, double dx, double dy, double dz)
+{
+    BRepPrimAPI_MakeBox boxMaker(corner, dx, dy, dz);
+    boxMaker.Build();
+    if (!boxMaker.IsDone()) return TopoDS_Shape();
+
+    BRep_Builder builder;
+    TopoDS_Shell shell;
+    builder.MakeShell(shell);
+    bool droppedOne = false;
+    for (TopExp_Explorer it(boxMaker.Shape(), TopAbs_FACE); it.More(); it.Next()) {
+        if (!droppedOne) {
+            droppedOne = true;   // skip exactly one face - the shell stays open
+            continue;
+        }
+        builder.Add(shell, it.Current());
+    }
+
+    BRepBuilderAPI_MakeSolid solidMaker(shell);
+    if (!solidMaker.IsDone()) return TopoDS_Shape();
+    return solidMaker.Shape();
 }
 
 }  // namespace
@@ -719,6 +761,17 @@ int main()
               "and the three originals are exactly the ones that survive");
         check(doc.twinOf(idA) == -1 && doc.twinOf(idB) == -1,
               "and neither original reports a twin any more");
+        // The postcondition fix round 1 pins directly: MODE is session
+        // state, not undo content (State excludes mySymmetryOn/
+        // mySymmetryPlane - see the struct's own comment), so the undo that
+        // just erased both twins and both pairings must NOT also turn
+        // symmetry back off - that would be the exact "mode resurrected by a
+        // Ctrl+Z aimed at something else" bug CLAUDE.md calls out.
+        check(doc.symmetryOn(),
+              "symmetry stays ON after the undo - the mode is not undo content, only the "
+              "twins and pairings it created are");
+        check(doc.symmetryPlane().Axis().Direction().IsEqual(yz.Axis().Direction(), 1.0e-9),
+              "and the plane it set is likewise untouched by the undo");
 
         // Already-paired: pair A and B to EACH OTHER directly (not through
         // pairWithMirror), then ask to pair A with a mirror again - a live
@@ -753,8 +806,48 @@ int main()
         DocumentModel unknownDoc;
         const DocumentModel::PairResult unknown = unknownDoc.pairWithMirror({9999, -1, 0}, yz);
         check(unknown.paired == 0 && unknown.skippedStraddling.empty() &&
-                  unknown.skippedAlreadyPaired.empty(),
+                  unknown.skippedAlreadyPaired.empty() && unknown.skippedFailed.empty(),
               "unknown/invalid ids are ignored rather than reported as a skip");
+    }
+
+    // --- pairWithMirror: a validated candidate whose OWN mirror call
+    // refuses (fix round 1's PairResult::skippedFailed) --------------------
+    // The gate on "did anything actually mutate" has to be ACTUAL pairing
+    // success, not merely validation - a candidate that clears every check
+    // (real id, not straddling, not already paired) but whose
+    // ModelingOps::mirrorShape() itself refuses must be reported, and if
+    // it's the ONLY candidate, the call must still be a complete no-op:
+    // no checkpoint, no mode/plane change.
+    {
+        const gp_Pln yz(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0));
+
+        DocumentModel doc;
+        const TopoDS_Shape broken = makeOpenBoxSolid(gp_Pnt(10.0, 0.0, 0.0), 20.0, 10.0, 10.0);
+        check(!broken.IsNull(), "the open-shell fixture is at least a non-null shape");
+        check(!ModelingOps::mirrorShape(broken, yz).ok,
+              "setup: mirroring the open-shell fixture genuinely refuses at the kernel level "
+              "(BRepCheck_Analyzer catches the open shell surviving into the mirrored copy) - "
+              "this is a real ModelingOps::mirrorShape() refusal, not a stubbed one");
+
+        const int brokenId = doc.addSolid(broken);
+        check(brokenId != 0, "addSolid only checks IsNull(), so the broken shape is accepted");
+        check(!doc.canUndo(), "nothing on the undo stack yet");
+
+        const DocumentModel::PairResult result = doc.pairWithMirror({brokenId}, yz);
+        check(result.paired == 0, "the one candidate's mirror call refused, so nothing paired");
+        check(result.skippedFailed.size() == 1 && result.skippedFailed.front() == brokenId,
+              "and it is reported in skippedFailed, not silently dropped");
+        check(result.skippedStraddling.empty() && result.skippedAlreadyPaired.empty(),
+              "it is not miscategorised as either of the other two skip reasons");
+
+        // The no-op guarantee, at the outcome level rather than the
+        // validation level: the only id given validated cleanly, yet
+        // nothing actually paired, so this must be indistinguishable from a
+        // call given no valid ids at all.
+        check(doc.count() == 1, "no twin body was added");
+        check(doc.twinOf(brokenId) == -1, "the broken body was not paired with anything");
+        check(!doc.symmetryOn(), "a call whose only candidate failed does not turn symmetry on");
+        check(!doc.canUndo(), "and takes no checkpoint at all");
     }
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL",
