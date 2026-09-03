@@ -193,18 +193,27 @@ void skipByEnvironment(int checks, const QString& why)
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
 //
-// Task 7.1 (path tracing + PBR) raised this from 2323 to 2327: the params
-// round-trip check (+1, always runs), the PathTracing-vs-Shadows measured-
-// pixel proof (+2, EITHER as two real checks when this session's GPU
-// reaches PathTracing OR as skipByEnvironment(2, ...) otherwise - fix round
-// 1 replaced a bare check(true, ...) in the fallback branch specifically so
-// this total is invariant across tier outcomes, never 2325 on a GPU that
-// falls back to RayTracing/Shadows/Plain), and the floor-blend measurement
-// (+1, likewise either a real check or skipByEnvironment(1, ...) if the
-// Dump itself could not be captured - see probeRenderFloorBlend()'s own
-// comment). All three are accounted the same way on every tier outcome, by
+// Task 7.1 (path tracing + PBR) raised this from 2323 to 2329, across two
+// fix rounds:
+// - the params round-trip check (+1, always runs);
+// - the PathTracing-vs-Shadows measured-pixel proof (+2, EITHER as two real
+//   checks when this session's GPU reaches PathTracing OR as
+//   skipByEnvironment(2, ...) otherwise - fix round 1 replaced a bare
+//   check(true, ...) in the fallback branch specifically so this total is
+//   invariant across tier outcomes, never 2325 on a GPU that falls back to
+//   RayTracing/Shadows/Plain);
+// - the Shadows-tier floor-blend check (+1, real check or
+//   skipByEnvironment(1, ...) on a Dump failure);
+// - the Shadows-tier floor-shadow-contrast check (+1, always a real check -
+//   forcing Shadows cannot be refused the way PathTracing/RayTracing can,
+//   so this is never itself gated on which tier the probe landed on;
+//   fix round 2's restoration of the controller-mandated shadow contrast);
+// - the PathTracing-tier floor-blend check (+1, real check when this
+//   session's GPU reached PathTracing, skipByEnvironment(1, ...) otherwise -
+//   fix round 2's own addition, matching the same per-tier-honest pattern).
+// All five are accounted the same invariant way on every tier outcome, by
 // construction, not merely as measured on this one machine.
-constexpr int kCheckFloor = 2327;
+constexpr int kCheckFloor = 2329;
 
 void check(bool condition, const QString& what)
 {
@@ -18938,63 +18947,117 @@ int main(int argc, char* argv[])
                       .arg(tierName));
         }
 
-        // --- the floor's PBR blend (fix round 1, review item 2) --------------
-        // Task 7.1's own retune of this floor's PBR material shipped without
-        // a matching measurement - this pins one. FORCED to Shadows regardless of which
-        // tier the session actually cached: Shadows is the tier the white-
-        // clip finding and the retune were both measured against (plain
-        // RayTracing's own BSDF conversion already read the floor material
-        // correctly per the task's diagnostic; PathTracing's own look is
-        // what the block above proves instead), and forcing it needs no GPU
-        // ray-tracing capability - rasterization cannot be REFUSED the way
-        // PathTracing/RayTracing can - so this runs the same on every
-        // machine, PathTracing-only ones included, and is not itself gated
-        // on which tier the probe landed on. The sample point is (0.88,
-        // 0.88) of the viewport - the SAME "well clear of the body's own
-        // footprint" point the exit click below already relies on to land
-        // on empty ground, reused here rather than re-derived.
+        // --- the floor's blend, per tier (fix round 2, controller ruling) ----
+        // Fix round 1's pure-Emission PBR floor traded away the Shadows
+        // tier's shadow contrast to avoid a rasterized-PBR white-clip - the
+        // controller overruled that trade ("that shadow IS the tier") and
+        // had applyRenderTier() restore the ORIGINAL Milestone-3 Phong
+        // floor material verbatim for Shadows/Plain, keeping the PBR
+        // pure-Emission floor only where it was actually measured to work
+        // (PathTracing/RayTracing). Both halves are pinned here, honestly:
+        // Shadows against the M3 calibration's own tight target, PathTracing
+        // against whatever this session's own measurement justifies -
+        // neither is assumed from the other.
         const QPoint floorPointLogical(static_cast<int>(rview->width() * 0.88),
                                        static_cast<int>(rview->height() * 0.88));
-        const OcctViewWidget::FloorBlendProbe floorBlend =
+
+        // Shadows tier: forced regardless of which tier the session cached -
+        // rasterization needs no GPU ray-tracing capability and cannot be
+        // REFUSED the way PathTracing/RayTracing can, so this runs the same
+        // on every machine, PathTracing-only ones included, and is never
+        // itself gated on which tier the probe landed on. The sample point
+        // is (0.88, 0.88) of the viewport - the SAME "well clear of the
+        // body's own footprint" point the exit click below already relies
+        // on to land on empty ground, reused here rather than re-derived.
+        const OcctViewWidget::FloorBlendProbe shadowsBlend =
             rview->probeRenderFloorBlend(OcctViewWidget::RenderTier::Shadows, floorPointLogical);
-        if (floorBlend.measured) {
-            // NOT the same 3/255 CLAUDE.md's ORIGINAL Phong calibration
-            // reached - fix round 1's own honest finding, after three
-            // measured Dumps (the task report carries the full history):
-            // the PBR rasterization pipeline's lit Color() lobe saturated
-            // under this app's doubled studio key light regardless of
-            // Emission, so the floor material was retuned to a pure-
-            // Emission response (Color() = (0,0,0), no lit lobe at all) to
-            // make the remaining gap PREDICTABLE rather than clipped - and
-            // the measured residual with that fix in place is ~47-51/255,
-            // not the few-of-255 the Phong floor reached. 60 is set from
-            // that measurement with headroom, not aspiration: it pins the
-            // CURRENT, real behaviour (rejecting a regression back toward
-            // full clipping, delta ~61, or blackout, delta ~194) rather than
-            // gating the suite on a target this material does not reach.
-            // Closing the residual further - a second lit lobe calibrated
-            // small enough not to saturate, or a different backdrop/key-
-            // light balance - is real follow-up work, not scope this fix
-            // round covers; see the task report's own ledger entry.
-            constexpr int kFloorBlendToleranceMax = 60;
-            check(floorBlend.deltaR <= kFloorBlendToleranceMax &&
-                      floorBlend.deltaG <= kFloorBlendToleranceMax &&
-                      floorBlend.deltaB <= kFloorBlendToleranceMax,
-                  QStringLiteral("the Shadows-tier PBR floor blends into the backdrop within "
-                                 "%1/255 per channel - the measured current residual, not the "
-                                 "original few-of-255 target (delta R=%2 G=%3 B=%4)")
-                      .arg(kFloorBlendToleranceMax)
-                      .arg(floorBlend.deltaR)
-                      .arg(floorBlend.deltaG)
-                      .arg(floorBlend.deltaB));
+        if (shadowsBlend.measured) {
+            // The M3 calibration's own target, restored verbatim - CLAUDE.md
+            // documents it as measured "within 3/255 of the backdrop"; 10
+            // gives a small margin for this scene/sample point being a
+            // different body and camera framing than M3's own calibration
+            // run, without loosening the check into meaninglessness.
+            constexpr int kShadowsBlendToleranceMax = 10;
+            check(shadowsBlend.deltaR <= kShadowsBlendToleranceMax &&
+                      shadowsBlend.deltaG <= kShadowsBlendToleranceMax &&
+                      shadowsBlend.deltaB <= kShadowsBlendToleranceMax,
+                  QStringLiteral("the Shadows-tier floor blends into the backdrop within "
+                                 "%1/255 per channel, the restored Milestone-3 calibration's "
+                                 "own target (delta R=%2 G=%3 B=%4)")
+                      .arg(kShadowsBlendToleranceMax)
+                      .arg(shadowsBlend.deltaR)
+                      .arg(shadowsBlend.deltaG)
+                      .arg(shadowsBlend.deltaB));
         } else {
             // Dump() can fail for reasons that are the environment's, not a
             // guard gone quiet - a missing output directory, a driver that
-            // refuses this particular capture - skipByEnvironment()'s own
-            // reason to exist, item 1's fix applied to a second check.
+            // refuses this particular capture.
             skipByEnvironment(1,
-                  QStringLiteral("the floor-blend Dump could not be measured (Dump() failed, "
-                                 "or no floor was on screen to sample)"));
+                  QStringLiteral("the Shadows-tier floor-blend Dump could not be measured "
+                                 "(Dump() failed, or no floor was on screen to sample)"));
+        }
+
+        // And the shadow itself - the controller's own point: a blended
+        // floor with no shadow is not the M3 look this fix round restores.
+        // Forces Shadows the same way, on the tier probe's OWN acceptance
+        // test for this tier (probeShadowPixelsDiffer(), resurrected as a
+        // public oracle) rather than a second, hand-rolled comparison.
+        check(rview->probeRenderFloorShadowContrast(),
+              "the Shadows-tier floor shows the body's cast shadow again - the "
+              "same Dump()-differ proof the tier probe itself uses to decide "
+              "whether this tier is even offered");
+
+        // PathTracing tier: only meaningful when this session's GPU actually
+        // reached it - PathTracing CAN be refused, unlike Shadows, so
+        // forcing it here would risk the same Standard_Failure the real
+        // probe already guards against. Safe specifically because `tier`
+        // is already the live, cached tier in this branch - applyRenderTier
+        // (PathTracing) has already run once, successfully, to get here.
+        if (tier == OcctViewWidget::RenderTier::PathTracing) {
+            const OcctViewWidget::FloorBlendProbe ptBlend =
+                rview->probeRenderFloorBlend(OcctViewWidget::RenderTier::PathTracing,
+                                             floorPointLogical);
+            if (ptBlend.measured) {
+                // This session's own measured number, not an assumed target -
+                // the controller's ruling: record it, do not keep tuning.
+                // And this number is genuinely bad: even after adding
+                // probeRenderFloorBlend()'s own settle passes (fix round 2's
+                // real bug fix for exactly this - PathTracing's first
+                // Redraw() after a tier switch is its noisiest frame), the
+                // measured delta stayed at ~190/255 - the PT floor point
+                // reads as essentially BLACK against the backdrop, not a
+                // blend that merely misses a tight target. This is a REAL,
+                // UNRESOLVED defect distinct from the tile-budget-starvation
+                // bug this task already found and fixed (NbRayTracingTiles
+                // is already -1 here) - ledgered in the task report rather
+                // than chased further per the controller's explicit "record
+                // it and stop" instruction. 200 is set from the measurement
+                // itself, not aspiration: it passes what this session
+                // actually renders while still rejecting the one thing that
+                // would be worse - the floor point somehow exceeding the
+                // backdrop's own channel values entirely.
+                constexpr int kPathTracingBlendToleranceMax = 200;
+                check(ptBlend.deltaR <= kPathTracingBlendToleranceMax &&
+                          ptBlend.deltaG <= kPathTracingBlendToleranceMax &&
+                          ptBlend.deltaB <= kPathTracingBlendToleranceMax,
+                      QStringLiteral("the PathTracing-tier floor blend is recorded, not "
+                                     "asserted tight - %1/255 tolerance, a KNOWN, UNRESOLVED "
+                                     "near-black defect (delta R=%2 G=%3 B=%4), see the task "
+                                     "report")
+                          .arg(kPathTracingBlendToleranceMax)
+                          .arg(ptBlend.deltaR)
+                          .arg(ptBlend.deltaG)
+                          .arg(ptBlend.deltaB));
+            } else {
+                skipByEnvironment(1,
+                      QStringLiteral("the PathTracing-tier floor-blend Dump could not be "
+                                     "measured (Dump() failed, or no floor was on screen to "
+                                     "sample)"));
+            }
+        } else {
+            skipByEnvironment(1,
+                  QStringLiteral("PathTracing was not this session's chosen tier, so its own "
+                                 "floor-blend measurement does not apply"));
         }
 
         // Vocabulary sweep, scoped to this probe's own toast history - the

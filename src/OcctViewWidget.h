@@ -754,6 +754,19 @@ public:
     };
     FloorBlendProbe probeRenderFloorBlend(RenderTier forTier, const QPoint& floorPointLogical);
 
+    // gui_smoke's oracle for "does the Shadows tier's floor still show the
+    // body's cast shadow" - fix round 2's ruling that the Shadows tier
+    // losing that contrast is not acceptable, resurrecting the tier probe's
+    // OWN acceptance test (probeShadowPixelsDiffer(), private - already the
+    // thing that decides whether the Shadows tier is even offered) as a
+    // public, standalone check so a regression in the RESTORED
+    // Milestone-3 floor material is caught the same way a regression in the
+    // probe itself already would be. Forces Shadows temporarily, restored
+    // to the session's real cached tier before returning, on every other
+    // forcing probe's own rule. Returns false on any Dump failure, exactly
+    // as probeShadowPixelsDiffer() already does for the tier probe itself.
+    bool probeRenderFloorShadowContrast();
+
     // ~100 ms - the brief's own number for "is ray tracing still
     // interactive on this GPU", measured against a single redraw. A session
     // constant, not a setting: CLAUDE.md's ruling for this task is that nothing
@@ -1053,17 +1066,26 @@ private:
     // check exists because that class of bug produces no visible symptom
     // until the next render-mode entry reads the wrong "before" state.
     void restoreRenderParams();
-    // Gives every currently displayed body a render-mode material: a light,
-    // matte, non-metallic PBR look (see the .cpp for the measured constants)
-    // plus the matching classic Phong color, since ShadingModel picks which
-    // half of the material the active tier's shader actually reads and both
-    // are cheap to keep populated. Undone by a plain UnsetMaterial() per
-    // solid on exit - correct BECAUSE no code path outside this one ever
-    // calls AIS_InteractiveObject::SetMaterial() on a body (displaySolid()
-    // only ever calls SetColor()), so "unset" really does mean "back to
-    // whatever stood before render mode touched it," on the same terms
-    // UnsetMaterial() documents for itself.
+    // Gives every currently displayed body a render-mode PBR material: a
+    // light, matte, non-metallic look (see the .cpp for the measured
+    // constants). Fix round 2's scoping ruling: this runs ONLY for the two
+    // ray-traced tiers (PathTracing/RayTracing), where PBR shading is
+    // genuinely handled - Shadows/Plain get clearRenderBodyMaterials()
+    // instead, see applyRenderTier(). Undone by a plain UnsetMaterial() per
+    // solid on exit or tier switch - correct BECAUSE no code path outside
+    // this one ever calls AIS_InteractiveObject::SetMaterial() on a body
+    // (displaySolid() only ever calls SetColor()), so "unset" really does
+    // mean "back to whatever stood before render mode touched it," on the
+    // same terms UnsetMaterial() documents for itself.
     void applyRenderBodyMaterials();
+    // The Shadows/Plain half of the pair above - every displayed body back
+    // to its ordinary Phong SetColor(), no PBR material at all. Called by
+    // applyRenderTier() for the two rasterized, non-PBR tiers; also what
+    // setRenderMode(false)'s own exit loop already did unconditionally
+    // before fix round 2, now given a name so applyRenderTier() and the
+    // exit path share the one implementation instead of two copies of
+    // "loop mySolids, UnsetMaterial()".
+    void clearRenderBodyMaterials();
     // While the PathTracing tier is active, repeatedly asks Qt to repaint at
     // rest. OCCT's own progressive accumulation - AdaptiveScreenSampling
     // folds more samples into the image on every Redraw() the camera and
@@ -1112,8 +1134,27 @@ private:
     // was missing: a shadow needs a surface to land on, and outside render
     // mode this app deliberately has none. No-ops on an empty document -
     // a floor with nothing standing on it is just a wrong-coloured band.
+    // Builds the geometry and then defers to applyRenderFloorMaterialForTier()
+    // for whatever material the CURRENT myRenderTier calls for - see that
+    // function's own comment for why that is always the right material even
+    // before the first tier probe has run.
     void showRenderFloor();
     void hideRenderFloor();
+    // Fix round 2's per-tier scoping, applied to the floor: `pbrTier` true
+    // (PathTracing/RayTracing) gets the pure-Emission PBR material fix round
+    // 1 landed; false (Shadows/Plain) gets the ORIGINAL, Milestone-3-
+    // calibrated Phong material verbatim (ambient 0, diffuse 118-grey,
+    // specular 0, emissive 87.5% of the backdrop) - the controller's
+    // explicit ruling that the Shadows tier's shadow IS the tier, and a
+    // flat pure-Emission floor traded it away for nothing this tier can
+    // afford to lose. Called from showRenderFloor() (using whatever
+    // myRenderTier already is - Plain's own zero-cost default before the
+    // first probe, which is correctly the Phong branch) and from
+    // applyRenderTier() on every tier switch, so a probe trying PathTracing
+    // then falling back to Shadows leaves the floor in the material that
+    // tier actually needs, not whichever ran last. A no-op when there is no
+    // floor on screen.
+    void applyRenderFloorMaterialForTier(bool pbrTier);
 
     Handle(V3d_Viewer) myViewer;
     Handle(V3d_View) myView;

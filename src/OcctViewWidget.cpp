@@ -111,6 +111,17 @@ Quantity_Color toOcctColor(const QColor& c)
     return Quantity_Color(c.redF(), c.greenF(), c.blueF(), Quantity_TOC_sRGB);
 }
 
+// The one place "which render-mode tiers are ray-traced" is written down -
+// applyRenderTier() and showRenderFloor() both need the identical test
+// (PathTracing/RayTracing get PBR shading + materials, Shadows/Plain get
+// Phong - fix round 2's scoping ruling), and a second, hand-written copy of
+// this condition is exactly how the two could quietly drift apart.
+bool isRayTracedTier(OcctViewWidget::RenderTier tier)
+{
+    return tier == OcctViewWidget::RenderTier::PathTracing ||
+           tier == OcctViewWidget::RenderTier::RayTracing;
+}
+
 // The symmetry plane indicator's own presentation - GridRenderer's aspect
 // idiom (GridObject in GridRenderer.cpp), one pre-built segment array drawn
 // with a single Graphic3d_AspectLine3d, never pickable. A much lighter shape
@@ -2677,80 +2688,13 @@ void OcctViewWidget::showRenderFloor()
             .Face();
 
     myRenderFloor = new AIS_Shape(face);
-    // The floor has to render AT the backdrop colour or the seam between the
-    // two reads as a horizon - and measured pixels showed the default light
-    // rig is too weak for any lit material to reach that tone (a full-white
-    // diffuse floor topped out well short of it). So the tone is carried by
-    // EMISSIVE, which no light can dim, at 87.5% of the backdrop; the white
-    // diffuse layer on top adds the remaining brightness under the doubled
-    // key light and is exactly what the shadow map subtracts, giving the
-    // shadow its ~25% contrast against a floor that still blends into the
-    // background. Ambient and specular are off outright - ambient would
-    // double-count the tone, and a glossy floor is a second light source.
-    // All four factors are calibrated against sampled Dump() pixels, not
-    // derived from the lighting equations - trust the pixel.
-    const QColor floorColour = renderBackdropColour();
-    Graphic3d_MaterialAspect material(Graphic3d_NameOfMaterial_UserDefined);
-    material.SetAmbientColor(toOcctColor(QColor(0, 0, 0)));
-    material.SetDiffuseColor(toOcctColor(QColor(118, 118, 118)));
-    material.SetSpecularColor(toOcctColor(QColor(0, 0, 0)));
-    material.SetEmissiveColor(
-        toOcctColor(QColor(static_cast<int>(floorColour.red() * 0.875),
-                           static_cast<int>(floorColour.green() * 0.875),
-                           static_cast<int>(floorColour.blue() * 0.875))));
-    // The PBR half of the same material, read instead of the four Phong
-    // fields above the moment ShadingModel = Pbr (this task's addition,
-    // applied for every render-mode tier - see applyRenderTier()). The
-    // default Graphic3d_PBRMaterial is pure black (Color() starts at (0,0,0))
-    // - left unset, a PBR-shaded floor would render as a black hole in the
-    // backdrop rather than the blended seam this floor exists for, exactly
-    // the "trust the pixel, not the setter" trap CLAUDE.md warns this class
-    // of change into.
-    //
-    // THREE measured Dumps were needed to land this, not one - fix round 1's
-    // own finding, and the second attempt is the one worth recording: it
-    // moved Emission (0.35 -> 0.65) and left a *lit* Color() lobe in place
-    // (90/255 -> 100/255), reasoning from a "point 2" delta that turned out
-    // to have been sampled through `saveSnapshot()`'s render-mode-only 2x
-    // export at a DIFFERENT tier and moment (PathTracing, at entry) than the
-    // Shadows-tier-forced measurement `probeRenderFloorBlend()` actually
-    // takes - comparing across two different capture paths corrupted the
-    // fit. A THIRD, isolated Dump straight from `probeRenderFloorBlend()`
-    // (same tool the pinned check itself uses) showed the truth: the floor
-    // was STILL solid (255, 255, 255) at 0.65 emission / 100-grey diffuse -
-    // no different from the ORIGINAL, un-retuned 0.875 / 118-grey pair. The
-    // lit Color() lobe's response to this app's doubled studio key light
-    // under Graphic3d_TypeOfShadingModel_Pbr rasterization is strong enough
-    // on its own, independent of Emission entirely, to saturate at even a
-    // modest albedo - which is why halving Emission alone never moved this
-    // check's number.
-    //
-    // The fix removes that unpredictable term rather than trying to out-
-    // guess it a fourth time: Color() (the lit lobe) is now (0, 0, 0) - a
-    // material with no diffuse or specular response at all, unaffected by
-    // the key light's intensity, roughness, or any BRDF term this class does
-    // not control. The floor's ENTIRE visible tone is Emission alone - pure,
-    // linear, unclamped-until-1.0 radiance with no lighting confound - set
-    // to 95% of the backdrop's own channel value, close enough to blend
-    // while leaving real headroom below the clip ceiling. The trade this
-    // makes explicitly: the Shadows tier's floor no longer shows the body's
-    // cast shadow (a uniformly emissive surface has nothing for a shadow to
-    // darken). That tier is this app's FALLBACK when neither ray-traced tier
-    // is available - PathTracing's own look is what `probePathTracingChangedImage()`
-    // proves separately, and is unaffected by this change - so a flat,
-    // reliably-blended fallback floor is judged the better trade over a
-    // shadow-catching one that clips white on this measured hardware.
-    // Metallic stays 0 regardless - a shadow-catcher, even a flat one, is
-    // not chrome. See the task report for the full three-Dump history.
-    Graphic3d_PBRMaterial floorPbr;
-    floorPbr.SetMetallic(0.0f);
-    floorPbr.SetRoughness(0.95f);
-    floorPbr.SetColor(Quantity_Color(0.0, 0.0, 0.0, Quantity_TOC_RGB));
-    floorPbr.SetEmission(NCollection_Vec3<float>(static_cast<float>(floorColour.redF() * 0.95),
-                                                 static_cast<float>(floorColour.greenF() * 0.95),
-                                                 static_cast<float>(floorColour.blueF() * 0.95)));
-    material.SetPBRMaterial(floorPbr);
-    myRenderFloor->SetMaterial(material);
+    // The material half is per-tier - fix round 2's scoping ruling. Reads
+    // myRenderTier as it stands right now: before the first-ever probe that
+    // is RenderTier::Plain, this enum's own zero-cost default, which is
+    // correctly the Phong branch - exactly the material the Shadows-tier
+    // candidacy probe (probeShadowPixelsDiffer(), called from inside
+    // probeRenderTier()) needs on screen to judge shadow contrast against.
+    applyRenderFloorMaterialForTier(isRayTracedTier(myRenderTier));
     // Selection mode -1, the previews' own never-pickable path - hover can
     // never highlight it and no pick can ever land on it, which also keeps
     // it out of the exit-click's way.
@@ -2762,6 +2706,66 @@ void OcctViewWidget::hideRenderFloor()
     if (myRenderFloor.IsNull()) return;
     if (!myContext.IsNull()) myContext->Remove(myRenderFloor, Standard_False);
     myRenderFloor.Nullify();
+}
+
+void OcctViewWidget::applyRenderFloorMaterialForTier(bool pbrTier)
+{
+    if (myRenderFloor.IsNull()) return;
+
+    const QColor floorColour = renderBackdropColour();
+    Graphic3d_MaterialAspect material(Graphic3d_NameOfMaterial_UserDefined);
+
+    if (!pbrTier) {
+        // The ORIGINAL Milestone-3 Phong calibration, restored VERBATIM -
+        // the controller's explicit fix-round-2 ruling: "that shadow IS the
+        // tier." The floor has to render AT the backdrop colour or the seam
+        // between the two reads as a horizon - and measured pixels showed
+        // the default light rig is too weak for any lit material to reach
+        // that tone (a full-white diffuse floor topped out well short of
+        // it). So the tone is carried by EMISSIVE, which no light can dim,
+        // at 87.5% of the backdrop; the white diffuse layer on top adds the
+        // remaining brightness under the doubled key light and is exactly
+        // what the shadow map subtracts, giving the shadow its ~25%
+        // contrast against a floor that still blends into the background.
+        // Ambient and specular are off outright - ambient would double-
+        // count the tone, and a glossy floor is a second light source. All
+        // four factors were calibrated to 3/255 against sampled Dump()
+        // pixels under Phong shading, which is exactly the shading model
+        // this branch puts back (applyRenderTier() sets ShadingModel =
+        // Phong for Shadows/Plain) - so this material means the same thing
+        // now that it did in Milestone 3, unlike fix round 1's PBR attempt,
+        // which read these same four calls as unconditional linear PBR
+        // terms with no floor to land on.
+        material.SetAmbientColor(toOcctColor(QColor(0, 0, 0)));
+        material.SetDiffuseColor(toOcctColor(QColor(118, 118, 118)));
+        material.SetSpecularColor(toOcctColor(QColor(0, 0, 0)));
+        material.SetEmissiveColor(
+            toOcctColor(QColor(static_cast<int>(floorColour.red() * 0.875),
+                               static_cast<int>(floorColour.green() * 0.875),
+                               static_cast<int>(floorColour.blue() * 0.875))));
+    } else {
+        // The ray-traced tiers' own material - fix round 1's finding, kept
+        // here because it measurably works there (probePathTracingChangedImage()
+        // and the PathTracing-tier floor-blend check both pass against it):
+        // a pure-Emission PBR material, no lit Color() lobe at all. Unlike
+        // the Shadows tier's rasterized Pbr shader, the ray-traced pipeline
+        // (Method = RAYTRACING, with or without global illumination) reads
+        // this correctly without saturating - confirmed by a diagnostic
+        // Dump of the plain RayTracing tier during the original task,
+        // which rendered proper grey tones at these same values. Metallic
+        // 0 regardless of tier - a shadow-catcher is not chrome.
+        Graphic3d_PBRMaterial floorPbr;
+        floorPbr.SetMetallic(0.0f);
+        floorPbr.SetRoughness(0.95f);
+        floorPbr.SetColor(Quantity_Color(0.0, 0.0, 0.0, Quantity_TOC_RGB));
+        floorPbr.SetEmission(
+            NCollection_Vec3<float>(static_cast<float>(floorColour.redF() * 0.95),
+                                    static_cast<float>(floorColour.greenF() * 0.95),
+                                    static_cast<float>(floorColour.blueF() * 0.95)));
+        material.SetPBRMaterial(floorPbr);
+    }
+
+    myRenderFloor->SetMaterial(material);
 }
 
 void OcctViewWidget::setLightsCastShadows(bool cast)
@@ -2789,10 +2793,26 @@ void OcctViewWidget::applyRenderTier(RenderTier tier)
     // Both ray-traced tiers drive the same OCCT pipeline (Method); what
     // separates them is global illumination and adaptive screen sampling
     // below, PathTracing's own look, not a second rendering mode.
-    const bool rayTraced = tier == RenderTier::PathTracing || tier == RenderTier::RayTracing;
+    // isRayTracedTier() is the one written-down copy of this test - see its
+    // own comment.
+    const bool rayTraced = isRayTracedTier(tier);
     const bool pathTracing = tier == RenderTier::PathTracing;
     params.Method = rayTraced ? Graphic3d_RM_RAYTRACING : Graphic3d_RM_RASTERIZATION;
-    params.IsShadowEnabled = rayTraced;
+    // Fix round 2's own measured finding: this is NOT a ray-traced-only
+    // flag despite living under the header's "Ray-Tracing/Path-Tracing
+    // parameters" section - it also gates the RASTERIZED shadow-map
+    // feature Shadows relies on. The pre-Task-7.1 code never touched this
+    // field for Shadows/Plain at all, so it stayed at its Graphic3d_
+    // RenderingParams constructor default (true); this task's original
+    // `= rayTraced` (false for Shadows/Plain) silently disabled shadow
+    // rendering there entirely, which the resurrected shadow-contrast probe
+    // (probeRenderFloorShadowContrast(), fix round 2) caught: the M3
+    // material's blend measured perfectly (delta 1-3/255) but the light's
+    // SetCastShadows() toggle produced no pixel difference at all, because
+    // this flag - not the per-light one - was the one actually silencing
+    // it. Always true now, matching every tier's real pre-task behaviour
+    // rather than an unmeasured assumption about which tiers need it.
+    params.IsShadowEnabled = true;
 
     // Path tracing's own parameters, explicitly set for EVERY tier rather
     // than only switched on for PathTracing - a probe that tries PathTracing
@@ -2823,18 +2843,36 @@ void OcctViewWidget::applyRenderTier(RenderTier tier)
     // does it.
     params.NbRayTracingTiles = pathTracing ? -1 : 256;
 
-    // The PBR look this task's brief asks for "while render mode is on" -
-    // deliberately NOT gated to the PathTracing tier alone, so Shadows and
-    // Plain (both plain rasterization) pick up the PBR shading model too;
-    // applyRenderBodyMaterials() is what gives that shading model something
-    // physically-based to read instead of the black default PBRMaterial.
-    // ToneMappingMethod's own header comment documents it as a path-tracing
-    // parameter ("tone mapping method for path tracing") - harmless to set
-    // outside PathTracing, but this class does not claim it is visible
-    // there; only the PathTracing-vs-Shadows Dump comparison in gui_smoke
-    // claims a provable pixel difference.
-    params.ShadingModel = Graphic3d_TypeOfShadingModel_Pbr;
-    params.ToneMappingMethod = Graphic3d_ToneMappingMethod_Filmic;
+    // Fix round 2's scoping ruling, overriding this task's original "PBR
+    // whichever tier render mode is on" reading of the brief: PBR shading
+    // and filmic tone mapping apply ONLY to the two ray-traced tiers, where
+    // `rayTraced` is already exactly the right test - `ToneMappingMethod`
+    // genuinely only applies there (its own OCCT header comment: "for path
+    // tracing"), and fix round 1 measured, the hard way, that the
+    // RASTERIZED Pbr shader has nothing to tame its linear output the way
+    // the ray-traced pipeline (or a real tone-mapping curve) does: the lit
+    // Color() lobe alone saturated the Shadows-tier floor regardless of
+    // Emission. Shadows and Plain get the Phong shading model back -
+    // "exactly as before this task," the controller's own words - which is
+    // what lets applyRenderFloorMaterialForTier()/clearRenderBodyMaterials()
+    // below put the ORIGINAL, Milestone-3-calibrated Phong floor and body
+    // materials back for those two tiers, shadow contrast included.
+    params.ShadingModel =
+        rayTraced ? Graphic3d_TypeOfShadingModel_Pbr : Graphic3d_TypeOfShadingModel_Phong;
+    params.ToneMappingMethod =
+        rayTraced ? Graphic3d_ToneMappingMethod_Filmic : Graphic3d_ToneMappingMethod_Disabled;
+
+    // The material half of the same scoping - see each function's own
+    // comment. Every tier switch (including the temporary ones the
+    // measurement probes below make) re-applies the right pair, so a probe
+    // that tries PathTracing then falls back to Shadows leaves both the
+    // floor and the bodies in the material that tier actually needs.
+    if (rayTraced) {
+        applyRenderBodyMaterials();
+    } else {
+        clearRenderBodyMaterials();
+    }
+    applyRenderFloorMaterialForTier(rayTraced);
 
     // 4x the 1024 default while shadow-mapping, put back for every other
     // tier. At 1024 the shadow's edge on the floor is visibly blocky - the
@@ -2905,15 +2943,17 @@ void OcctViewWidget::applyRenderBodyMaterials()
     if (myContext.IsNull()) return;
     // A light, matte, non-metallic "furniture" material - measured against
     // real Dump() pixels rather than guessed from the setter names,
-    // CLAUDE.md's own rule for this class of change. The Phong SetColor()
-    // stays at the ordinary GRAY70 body tone (0.70) so a body looks like the
-    // same body under a rasterization tier with no PBR contribution at all;
-    // the PBR albedo below is deliberately DARKER (0.55, not 0.70) - the
-    // same rasterized-PBR-clips-white finding showRenderFloor() documents
-    // applies here too (a lit PBR diffuse response measured brighter than
-    // its Phong equivalent under this app's doubled studio key light), and
-    // Roughness 0.55 is a middling matte, not glossy enough to add a hot
-    // specular highlight on top.
+    // CLAUDE.md's own rule for this class of change. Called ONLY for the two
+    // ray-traced tiers as of fix round 2 - see applyRenderTier(). The Phong
+    // SetColor() stays at the ordinary GRAY70 body tone (0.70), unused while
+    // this material is active (ShadingModel = Pbr there) but harmless to
+    // keep populated; the PBR albedo below is deliberately DARKER (0.55, not
+    // 0.70) - the rasterized-PBR-clips-white finding applyRenderFloorMaterial-
+    // ForTier() documents does not apply to the ray-traced pipeline this
+    // material is now scoped to, but the darker albedo was measured against
+    // that pipeline directly and left as-is rather than re-guessed. Roughness
+    // 0.55 is a middling matte, not glossy enough to add a hot specular
+    // highlight on top.
     Graphic3d_MaterialAspect material(Graphic3d_NameOfMaterial_UserDefined);
     material.SetColor(Quantity_Color(0.70, 0.70, 0.68, Quantity_TOC_RGB));
     Graphic3d_PBRMaterial pbr;
@@ -2922,6 +2962,17 @@ void OcctViewWidget::applyRenderBodyMaterials()
     pbr.SetRoughness(0.55f);
     material.SetPBRMaterial(pbr);
     for (auto& entry : mySolids) entry.second->SetMaterial(material);
+}
+
+void OcctViewWidget::clearRenderBodyMaterials()
+{
+    if (myContext.IsNull()) return;
+    // The Shadows/Plain half of the pair - fix round 2's scoping. A plain
+    // UnsetMaterial() per solid is a complete revert to whatever stood
+    // before render mode touched it, on the exact terms
+    // applyRenderBodyMaterials()'s own header comment already establishes:
+    // no code path outside these two ever calls SetMaterial() on a body.
+    for (auto& entry : mySolids) entry.second->UnsetMaterial();
 }
 
 void OcctViewWidget::startPathTracingConvergence()
@@ -3085,7 +3136,17 @@ OcctViewWidget::FloorBlendProbe OcctViewWidget::probeRenderFloorBlend(
     // than the one it already cached and reported.
     const RenderTier cachedTier = myRenderTier;
     applyRenderTier(forTier);
-    myView->Redraw();
+    // A few extra accumulation passes before dumping -
+    // probePathTracingChangedImage()'s own kSettlePasses, needed here for
+    // the identical reason: PathTracing's first Redraw() after a tier
+    // switch is genuinely its noisiest frame (fix round 2's own measured
+    // finding - a single-redraw Dump here came back with the floor point
+    // nearly BLACK, delta ~184/255 from the backdrop, not the real
+    // pure-Emission material's actual look). Harmless for Shadows/Plain -
+    // rasterization has nothing to accumulate, so the extra redraws just
+    // repaint the identical frame.
+    constexpr int kSettlePasses = 5;
+    for (int i = 0; i < kSettlePasses; ++i) myView->Redraw();
 
     QTemporaryFile file(QDir::tempPath() +
                         QStringLiteral("/furnifyme-floorblend-XXXXXX.png"));
@@ -3147,6 +3208,29 @@ OcctViewWidget::FloorBlendProbe OcctViewWidget::probeRenderFloorBlend(
 
     QFile::remove(path);
     return result;
+}
+
+bool OcctViewWidget::probeRenderFloorShadowContrast()
+{
+    if (!myRenderModeActive || myView.IsNull()) return false;
+
+    // Forced, temporarily, on probeRenderFloorBlend()'s own rule - restored
+    // to the session's real cached tier before returning, including via the
+    // early return above (checked first, before anything is touched).
+    const RenderTier cachedTier = myRenderTier;
+    applyRenderTier(RenderTier::Shadows);
+    myView->Redraw();
+
+    // probeShadowPixelsDiffer() IS the tier probe's own acceptance test for
+    // this exact tier - reused rather than re-implemented, so a regression
+    // here is a regression in the same mechanism that decides whether the
+    // Shadows tier is ever offered at all, not a second, possibly-drifted
+    // copy of it.
+    const bool differs = probeShadowPixelsDiffer();
+
+    applyRenderTier(cachedTier);
+    myView->Redraw();
+    return differs;
 }
 
 OcctViewWidget::RenderTier OcctViewWidget::probeRenderTier()
@@ -3277,11 +3361,14 @@ void OcctViewWidget::setRenderMode(bool on)
                 myContext->SetDisplayMode(entry.second, AIS_Shaded, Standard_False);
             myContext->Redisplay(entry.second, Standard_False);
         }
-        // The PBR look this task adds - see applyRenderTier()'s own comment
-        // on why ShadingModel is set to Pbr for every tier, not only
-        // PathTracing. A body's own material never changes with the tier;
-        // only the rendering pipeline reading it does.
-        applyRenderBodyMaterials();
+        // Body materials are no longer set here directly - fix round 2
+        // scoped them per tier (applyRenderBodyMaterials() for PathTracing/
+        // RayTracing, clearRenderBodyMaterials() for Shadows/Plain), and
+        // applyRenderTier() (called below by the probe/apply sequence) is
+        // the one place that now decides which. Before the first probe has
+        // even run, bodies simply keep whatever displaySolid() already gave
+        // them - correct, since Plain/Shadows is the ShadingModel = Phong
+        // default this enum's own zero-cost value maps to.
 
         // The studio key light: every directional light is angled off the
         // vertical so the shadow falls BESIDE the furniture - the default
