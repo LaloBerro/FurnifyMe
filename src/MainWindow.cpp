@@ -4934,13 +4934,14 @@ bool MainWindow::confirmMirrorPlacement()
     if (result.paired == 0) {
         // A genuine no-op: pairWithMirror() took no checkpoint and changed
         // nothing - every id was either invalid, straddling the plane,
-        // already paired, or refused by its own mirrorShape() call.
+        // already paired, already linked (Milestone 4's own v1 exclusion -
+        // fix round 1, Finding 1), or refused by its own mirrorShape() call.
         // Never-silent-failure applies to a document mutation that can
         // genuinely net zero, the same law BooleanResult::ok already
         // enforces for a failed boolean.
         const QString reason =
             tr("Nothing to mirror — every body picked sits on the plane, is "
-              "already paired, or couldn't be mirrored");
+              "already paired, is already linked, or couldn't be mirrored");
         statusBar()->showMessage(reason);
         if (myToasts) myToasts->show(reason, Toast::Kind::Failure, false);
         updateActions();
@@ -4961,20 +4962,25 @@ bool MainWindow::confirmMirrorPlacement()
 
     // The paired count leads, plurals written out; a second sentence names
     // the ones left unpaired, and why, only when the skip lists are
-    // actually non-empty - straddling, already-paired and kernel-refused
-    // share one honest sentence rather than three, per this task's own
-    // ruling.
+    // actually non-empty - straddling, already-paired, already-linked and
+    // kernel-refused share one honest sentence rather than four, per this
+    // task's own ruling. skippedLinked (fix round 1, Finding 1) is
+    // Milestone 4's own v1 exclusion, read here for the first time - it
+    // existed on PairResult since Task 4.1 specifically for this, and a
+    // linked body silently vanishing from both the count and the message
+    // is exactly the never-silent-failure violation the review caught.
     const int skipped = static_cast<int>(result.skippedStraddling.size() +
                                          result.skippedAlreadyPaired.size() +
-                                         result.skippedFailed.size());
+                                         result.skippedFailed.size() +
+                                         result.skippedLinked.size());
     QString message = result.paired == 1 ? tr("1 body mirrored")
                                          : tr("%1 bodies mirrored").arg(result.paired);
     if (skipped > 0) {
         message += skipped == 1
                        ? tr(" — 1 body stayed unpaired: on the plane, already "
-                           "paired, or too complex to mirror")
+                           "paired, already linked, or too complex to mirror")
                        : tr(" — %1 bodies stayed unpaired: on the plane, already "
-                           "paired, or too complex to mirror")
+                           "paired, already linked, or too complex to mirror")
                              .arg(skipped);
     }
     // Undo pops pairWithMirror()'s own checkpoint, restoring the document

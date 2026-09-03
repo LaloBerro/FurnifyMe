@@ -1407,6 +1407,63 @@ int main()
         check(!oldLoaded.isLinked(oldLoaded.solids().front().id), "...and simply has nothing linked");
     }
 
+    // --- fromSerialized refuses a body BOTH mirror-paired and linked -----------
+    // Fix round 1, Finding 2: no production path can build this - the v1
+    // mirror/link exclusion is enforced at every gesture entry point
+    // (pairWithMirror()/createLinkedCopy()/linkExisting()) - but a
+    // hand-edited or corrupted manifest could still describe one, and
+    // fromSerialized() is the load-time backstop that has to catch it
+    // rather than silently picking one membership over the other.
+    {
+        DocumentModel doc;
+        doc.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 10.0, 10.0, 10.0));
+        doc.addSolid(ModelingOps::makeBox(gp_Pnt(50.0, 0.0, 0.0), 10.0, 10.0, 10.0));
+
+        DocumentModel::DocumentMeta meta;
+        const FurnifySerial::SerializedDocument serial = doc.toSerialized(meta);
+        check(meta.symmetryPairs.empty() && meta.linkGroups.empty(),
+              "setup: a clean two-body document starts with neither symmetry nor "
+              "link groups");
+
+        // Hand-build the conflict: position 0 is named in BOTH a symmetry
+        // pair (0, 1) and a link group's own members (0, 1) - the same
+        // position-based indexing DocumentMeta itself uses, since ids are
+        // never persisted.
+        meta.symmetryOn = true;
+        meta.symmetryPairs.push_back({0, 1});
+
+        const auto identityPlacement = []() -> std::array<double, 12> {
+            gp_Trsf t;
+            std::array<double, 12> values{};
+            int k = 0;
+            for (int row = 1; row <= 3; ++row) {
+                for (int col = 1; col <= 4; ++col) values[static_cast<std::size_t>(k++)] = t.Value(row, col);
+            }
+            return values;
+        };
+        DocumentModel::DocumentMeta::LinkGroupRecord conflictRecord;
+        conflictRecord.anchorPosition = 0;
+        conflictRecord.memberPositions = {0, 1};
+        conflictRecord.placements = {identityPlacement(), identityPlacement()};
+        meta.linkGroups.push_back(conflictRecord);
+
+        // The target already holds a body of its own, so a load that
+        // mutates anyway (rather than genuinely refusing) has something to
+        // corrupt - an empty target refusing would prove nothing.
+        DocumentModel target;
+        const int preexistingId =
+            target.addSolid(ModelingOps::makeBox(gp_Pnt(999.0, 0.0, 0.0), 1.0, 1.0, 1.0));
+        check(target.count() == 1, "setup: the target document already holds a body of its own");
+
+        check(!target.fromSerialized(serial, meta),
+              "fromSerialized refuses a body position named in BOTH symmetryPairs and "
+              "a link group");
+        check(target.count() == 1 && target.contains(preexistingId) &&
+                  !target.isLinked(preexistingId) && target.twinOf(preexistingId) == -1,
+              "...and the target document is completely untouched - still exactly its "
+              "own prior body, neither linked nor paired");
+    }
+
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL",
                 g_failures, g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;

@@ -441,8 +441,14 @@ public:
     //
     // Refuses (false, `this` untouched): outlineFaces/outlinePlanes size
     // mismatch, any null body or outline face, an outline "face" whose
-    // shape type is not actually TopAbs_FACE, or a names/visible vector
-    // whose length does not match its shapes vector.
+    // shape type is not actually TopAbs_FACE, a names/visible vector whose
+    // length does not match its shapes vector, or (Milestone 4, fix round 1)
+    // a body position named in BOTH `symmetryPairs` and a `linkGroups`
+    // record - the v1 mirror/link exclusion, enforced here too: a body
+    // cannot load simultaneously mirror-paired and linked, and guessing
+    // which membership to keep would be the exact silent data loss the
+    // rest of this function's validate-before-mutate discipline exists to
+    // prevent.
     bool fromSerialized(const FurnifySerial::SerializedDocument& serial, const DocumentMeta& meta);
 
     // Replaces the whole document's content - bodies, outlines, names,

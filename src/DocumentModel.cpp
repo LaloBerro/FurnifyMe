@@ -783,6 +783,33 @@ bool DocumentModel::fromSerialized(const FurnifySerial::SerializedDocument& seri
         if (s.IsNull() || s.ShapeType() != TopAbs_FACE) return false;
     }
 
+    // Milestone 4, fix round 1 (Finding 2): a body position named in BOTH
+    // symmetryPairs and a link group would load simultaneously mirror-paired
+    // and linked - the v1 exclusion commitReplaceBody()'s own comment
+    // documents as "mutually exclusive by construction... enforced both
+    // directions", but that enforcement lives only in the gesture layer
+    // (pairWithMirror()/createLinkedCopy()/linkExisting()), never at load
+    // time, so a hand-edited or corrupted manifest could still describe
+    // one. Refused outright, the same validate-before-mutate law every
+    // other structural check above follows - guessing which membership to
+    // keep and silently dropping the other is exactly the silent data loss
+    // the load laws forbid, the same reasoning a vector-length mismatch is
+    // refused rather than truncated to the shorter length.
+    {
+        std::unordered_set<int> mirroredPositions;
+        for (const std::pair<int, int>& pair : meta.symmetryPairs) {
+            mirroredPositions.insert(pair.first);
+            mirroredPositions.insert(pair.second);
+        }
+        if (!mirroredPositions.empty()) {
+            for (const DocumentMeta::LinkGroupRecord& record : meta.linkGroups) {
+                for (int pos : record.memberPositions) {
+                    if (mirroredPositions.count(pos) > 0) return false;
+                }
+            }
+        }
+    }
+
     mySolids.clear();
     myOutlines.clear();
     myUndo.clear();

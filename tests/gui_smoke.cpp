@@ -191,7 +191,7 @@ void skipByEnvironment(int checks, const QString& why)
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 2184;
+constexpr int kCheckFloor = 2192;
 
 void check(bool condition, const QString& what)
 {
@@ -18400,6 +18400,14 @@ int main(int argc, char* argv[])
         // --- pull on the ORIGINAL propagates to the copy --------------------
         const double volABeforePull = ModelingOps::volume(probe.document().shapeOf(idA));
         const double volA2BeforePull = ModelingOps::volume(probe.document().shapeOf(idA2));
+        // Centres of mass too (fix round 1, Finding 3) - the semantic undo
+        // check below reverts both, not merely volume, which a shape that
+        // happened to keep its own volume by coincidence could not catch.
+        GProp_GProps propsABeforePull, propsA2BeforePull;
+        BRepGProp::VolumeProperties(probe.document().shapeOf(idA), propsABeforePull);
+        BRepGProp::VolumeProperties(probe.document().shapeOf(idA2), propsA2BeforePull);
+        const gp_Pnt comABeforePull = propsABeforePull.CentreOfMass();
+        const gp_Pnt comA2BeforePull = propsA2BeforePull.CentreOfMass();
         const TopoDS_Face faceOfA = firstFaceOf(probe.document().shapeOf(idA));
         check(!faceOfA.IsNull(), "a face of A was found for the pull");
         const std::size_t undoDepthBeforePullA = probe.document().undoDepth();
@@ -18422,6 +18430,37 @@ int main(int argc, char* argv[])
                   linkToasts->currentText().contains(QStringLiteral("linked copy updated")),
               QStringLiteral("the pull's own toast names the propagation (\"%1\")")
                   .arg(linkToasts ? linkToasts->currentText() : QString()));
+
+        // --- fix round 1, Finding 3: undo the propagated edit and confirm --
+        // BOTH members revert - volume AND centre of mass, not merely that
+        // undoDepth() dropped by one - the Milestone 3 symmetry block's own
+        // "RED verification" idiom (see its "one undo restores body A's
+        // pre-pull volume" check), one gizmo over.
+        check(trigger(probe, QStringLiteral("Undo")), "Undo's own action triggers");
+        {
+            GProp_GProps propsAAfterUndo, propsA2AfterUndo;
+            BRepGProp::VolumeProperties(probe.document().shapeOf(idA), propsAAfterUndo);
+            BRepGProp::VolumeProperties(probe.document().shapeOf(idA2), propsA2AfterUndo);
+            check(std::fabs(propsAAfterUndo.Mass() - volABeforePull) < 1.0e-3,
+                  "one undo restores A's pre-pull volume");
+            check(std::fabs(propsA2AfterUndo.Mass() - volA2BeforePull) < 1.0e-3,
+                  "...and the copy's pre-pull volume, in the SAME undo - a propagated "
+                  "edit is one checkpoint, not two");
+            check(propsAAfterUndo.CentreOfMass().Distance(comABeforePull) < 1.0e-6,
+                  "...and A's pre-pull centre of mass too, not just its volume");
+            check(propsA2AfterUndo.CentreOfMass().Distance(comA2BeforePull) < 1.0e-6,
+                  "...and the copy's pre-pull centre of mass");
+        }
+        check(trigger(probe, QStringLiteral("Redo")), "Redo's own action triggers");
+        {
+            GProp_GProps propsAAfterRedo, propsA2AfterRedo;
+            BRepGProp::VolumeProperties(probe.document().shapeOf(idA), propsAAfterRedo);
+            BRepGProp::VolumeProperties(probe.document().shapeOf(idA2), propsA2AfterRedo);
+            check(std::fabs(propsAAfterRedo.Mass() - volAAfterPull) < 1.0e-3,
+                  "redo brings the pull back for A");
+            check(std::fabs(propsA2AfterRedo.Mass() - volA2AfterPull) < 1.0e-3,
+                  "...and for the copy too");
+        }
 
         // --- pull on the COPY propagates back to the original ---------------
         const double volABeforePull2 = ModelingOps::volume(probe.document().shapeOf(idA));
