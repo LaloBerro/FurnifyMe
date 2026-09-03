@@ -84,6 +84,7 @@ Spec graphite()
     s.highlightSelected = QColor("#ffa500");
     s.basePt = 10.0;
     s.chipStrokePx = 1.0;
+    s.gridDensity = 1.0;
     return s;
 }
 
@@ -206,7 +207,8 @@ bool operator==(const Spec& a, const Spec& b)
     }
     return a.fontFamily == b.fontFamily &&
            std::fabs(a.basePt - b.basePt) < 1.0e-9 &&
-           std::fabs(a.chipStrokePx - b.chipStrokePx) < 1.0e-9;
+           std::fabs(a.chipStrokePx - b.chipStrokePx) < 1.0e-9 &&
+           std::fabs(a.gridDensity - b.gridDensity) < 1.0e-9;
 }
 
 const QVector<ColourToken>& colourTokens()
@@ -287,6 +289,7 @@ QString serializeSpec(const Spec& s)
         parts << QStringLiteral("family=") + s.fontFamily;
     parts << QStringLiteral("base=") + QString::number(s.basePt);
     parts << QStringLiteral("chipStroke=") + QString::number(s.chipStrokePx);
+    parts << QStringLiteral("gridDensity=") + QString::number(s.gridDensity);
     return parts.join(QLatin1Char(';'));
 }
 
@@ -338,6 +341,14 @@ bool deserializeSpec(const QString& text, Spec& out)
             sawSomething = true;
             continue;
         }
+        if (key == QLatin1String("gridDensity")) {
+            bool ok = false;
+            const double density = value.toDouble(&ok);
+            if (!ok || density < kMinGridDensity || density > kMaxGridDensity) return false;
+            parsed.gridDensity = density;
+            sawSomething = true;
+            continue;
+        }
 
         QColor Spec::*member = nullptr;
         for (const ColourToken& token : colourTokens()) {
@@ -384,6 +395,7 @@ QColor highlightHover()    { return spec().highlightHover; }
 QColor highlightSelected() { return spec().highlightSelected; }
 
 double chipStrokePx() { return spec().chipStrokePx; }
+double gridDensity()  { return spec().gridDensity; }
 
 QString fontFamily() { return spec().fontFamily; }
 

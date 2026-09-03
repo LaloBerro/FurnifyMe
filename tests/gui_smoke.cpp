@@ -70,6 +70,7 @@
 #include <QComboBox>
 #include <QDialog>
 #include <QDir>
+#include <QDoubleSpinBox>
 #include <QSpinBox>
 #include <QDockWidget>
 #include <QElapsedTimer>
@@ -10842,6 +10843,78 @@ int main(int argc, char* argv[])
         const double f2 = GridRenderer::firstLineAtOrBelow(2100.0, 100.0);
         check(f2 == -2100.0,
               "an already-aligned band edge is its own first line");
+
+        // --- Task 5.2: density scales the SAME thresholds -----------------
+        // The one-argument overload is density 1.0's shorthand - byte-
+        // identical to every value pinned above, which is the guarantee an
+        // app that has never opened the panel keeps rendering the grid it
+        // always has.
+        check(GridRenderer::minorStepFor(700.0, 1.0) == GridRenderer::minorStepFor(700.0) &&
+                  GridRenderer::minorStepFor(50.0, 1.0) == GridRenderer::minorStepFor(50.0) &&
+                  GridRenderer::minorStepFor(8000.0, 1.0) == GridRenderer::minorStepFor(8000.0),
+              "density 1.0 reproduces the one-argument overload exactly");
+
+        // 180mm: at density 1.0 that is inside the 10mm band (>=120, <2500).
+        // A HIGHER density pushes the 120mm threshold out to 240mm, so the
+        // same 180mm now falls inside the finer 1mm band - a denser grid at
+        // the same camera distance, which is the documented direction.
+        check(GridRenderer::minorStepFor(180.0, 1.0) == 10.0,
+              "180mm sits in the 10mm band at the default density - the "
+              "premise the next two checks depend on");
+        check(GridRenderer::minorStepFor(180.0, 2.0) == 1.0,
+              "a higher density (2.0) refines 180mm into the 1mm band - "
+              "finer persists further out");
+
+        // 1300mm: at density 1.0 that is still inside the 10mm band. A LOWER
+        // density pulls the 2500mm threshold in to 1250mm, so 1300mm falls
+        // past it into the 100mm band - a coarser grid sooner.
+        check(GridRenderer::minorStepFor(1300.0, 1.0) == 10.0,
+              "1300mm sits in the 10mm band at the default density - the "
+              "premise the next check depends on");
+        check(GridRenderer::minorStepFor(1300.0, 0.5) == 100.0,
+              "a lower density (0.5) coarsens 1300mm into the 100mm band - "
+              "coarser sooner");
+    }
+
+    // --- Task 5.2: Theme::Spec::gridDensity - serialize, clamp, refuse -------
+    {
+        Theme::Spec base = Theme::defaultSpec();
+        check(std::fabs(base.gridDensity - 1.0) < 1e-9,
+              "defaultSpec() carries today's grid at density 1.0");
+
+        Theme::Spec withDensity = base;
+        withDensity.gridDensity = 1.7;
+        const QString serialized = Theme::serializeSpec(withDensity);
+        check(serialized.contains(QStringLiteral("gridDensity=1.7")),
+              QStringLiteral("serializeSpec() writes the gridDensity= fragment (\"%1\")")
+                  .arg(serialized));
+
+        Theme::Spec readBack;
+        check(Theme::deserializeSpec(serialized, readBack) &&
+                  std::fabs(readBack.gridDensity - 1.7) < 1e-9,
+              "and deserializeSpec() reads it straight back");
+
+        // Refuse-out-of-range, on the low and high side, following
+        // chipStroke's own rule - and leaving `out` untouched on refusal.
+        Theme::Spec sentinel = base;
+        sentinel.accent = QColor(QStringLiteral("#123456"));
+        Theme::Spec tooLow = sentinel;
+        check(!Theme::deserializeSpec(QStringLiteral("gridDensity=0.2"), tooLow) &&
+                  tooLow.accent == sentinel.accent,
+              "a gridDensity below kMinGridDensity is refused outright, `out` untouched");
+        Theme::Spec tooHigh = sentinel;
+        check(!Theme::deserializeSpec(QStringLiteral("gridDensity=3.0"), tooHigh) &&
+                  tooHigh.accent == sentinel.accent,
+              "a gridDensity above kMaxGridDensity is refused outright, `out` untouched");
+
+        // An older spec with no gridDensity= fragment at all loads at the
+        // default - the same forward-compatible reading CLAUDE.md's manifest
+        // rule already establishes for a missing key, applied here to a spec
+        // string instead of a furniture manifest.
+        Theme::Spec noDensity;
+        check(Theme::deserializeSpec(QStringLiteral("base=11"), noDensity) &&
+                  std::fabs(noDensity.gridDensity - 1.0) < 1e-9,
+              "a spec string with no gridDensity= fragment defaults to 1.0");
     }
 
     // --- vocabulary is enforced, not merely documented ------------------------
@@ -13882,6 +13955,138 @@ int main(int argc, char* argv[])
                           written.value(QStringLiteral("appearance")).toString(), readBack) &&
                           readBack.accent == burst[2],
                       "and once the edits stop, one write stores the spec that survived");
+
+                // --- Task 5.2: the row exists, an edit moves the LIVE grid,
+                // and it survives the same debounce - reusing this exact
+                // probe rather than a fourth window, since it already has
+                // its own AppearancePanel and its own persisting identity.
+                {
+                    // A furniture has to actually be open for the viewport
+                    // (and its grid) to render at all - the accent-burst
+                    // check above never needed one, since it only touches
+                    // Theme and QSettings, but this sub-block reads real
+                    // Dump pixels. And the panel itself has to be OPENED,
+                    // not merely constructed, for its row to be reachable -
+                    // the same "Appearance..." action the shared `window`'s
+                    // own Appearance block above triggers.
+                    enterFreshFurniture(persisting);
+                    QAction* densityAppearance =
+                        action(persisting, QStringLiteral("Appearance..."));
+                    if (densityAppearance && !densityAppearance->isChecked())
+                        densityAppearance->trigger();
+                    settle(200);
+
+                    AppearancePanel* densityPanel = persisting.appearancePanel();
+                    OcctViewWidget* densityView = persisting.view();
+                    check(densityPanel != nullptr && densityPanel->isVisible() &&
+                              densityPanel->gridDensityControl() != nullptr,
+                          "the panel has a grid-detail row");
+                    if (densityPanel && densityPanel->gridDensityControl() && densityView) {
+                        check(densityPanel->gridDensityControl()->isVisible(),
+                              "and it is actually reachable, not merely constructed");
+
+                        // A small body, tucked into a screen corner at the
+                        // default startup pose so it lands well away from
+                        // the origin the tight pose below scans across.
+                        // Belt-and-suspenders against an EMPTY document's own
+                        // degenerate bounding box - the same reason fitAll()
+                        // carries a fallback box (see CLAUDE.md) - rather
+                        // than something this probe's grid pixels depend on
+                        // directly.
+                        check(buildBody(persisting, 0.03, 0.03, 0.10, 0.10, 20.0),
+                              "a corner body, so the scene has real bounds");
+
+                        densityView->setAnimationsEnabled(false);
+                        CameraState fixed;
+                        fixed.target = gp_Pnt(0.0, 0.0, 0.0);
+                        fixed.distance = 180.0;
+                        fixed.azimuthDeg = 0.0;
+                        fixed.elevationDeg = 88.0;   // near top-down: a regular 2D
+                                                     // grid to scan a scanline across
+                        densityView->animateTo(fixed);
+                        settle(150);
+
+                        // 180mm sits in the 10mm band at density 1.0 and the 1mm
+                        // band at density 2.0 (the same premise the pinned
+                        // minorStepFor() checks above establish) - so a scanline
+                        // across the middle of the frame crosses far MORE grid
+                        // lines once the edit below takes. That is the live,
+                        // RENDERED proof that an edit through this row actually
+                        // rebuilds the grid, not merely that the pure function
+                        // returns a different number.
+                        auto isGridColour = [](const QColor& c) {
+                            return colorDistance(c, Theme::gridMinor()) < 8.0 ||
+                                   colorDistance(c, Theme::gridMajor()) < 8.0;
+                        };
+                        auto countCrossings = [&](const QString& path) -> int {
+                            check(densityView->saveSnapshot(path),
+                                  QStringLiteral("a snapshot is captured (%1)").arg(path));
+                            const QImage shot(path);
+                            if (shot.isNull()) return -1;
+                            // A QUARTER down, not dead centre - the target
+                            // sits at the world origin, which projects to
+                            // the exact row the RED X-axis line is drawn on
+                            // (Theme::axisX(), not gridMinor()/gridMajor()),
+                            // and that single line spans the ENTIRE row's
+                            // width. The first real capture read as 0
+                            // crossings at both densities for exactly this
+                            // reason - a visibly correct grid, sampled on
+                            // the one row that is axis-coloured rather than
+                            // grid-coloured from edge to edge. A quarter
+                            // down is comfortably clear of it while still
+                            // well inside the grid's own visible extent.
+                            const int row = shot.height() / 4;
+                            int crossings = 0;
+                            bool inRun = false;
+                            for (int x = 0; x < shot.width(); ++x) {
+                                const bool grid = isGridColour(shot.pixelColor(x, row));
+                                if (grid && !inRun) ++crossings;
+                                inRun = grid;
+                            }
+                            return crossings;
+                        };
+
+                        check(std::fabs(Theme::gridDensity() - 1.0) < 1.0e-9,
+                              "density starts at the default for this probe");
+                        const int crossingsBefore =
+                            countCrossings(outDir + QStringLiteral("/grid-density-before.png"));
+
+                        densityPanel->setGridDensity(2.0);
+                        settle(150);
+                        check(std::fabs(Theme::gridDensity() - 2.0) < 1.0e-9,
+                              "the panel's edit path lands on Theme immediately");
+                        check(std::fabs(densityPanel->gridDensityControl()->value() - 2.0) <
+                                  1.0e-9,
+                              "and the control itself reads back what was set");
+                        const int crossingsAfter =
+                            countCrossings(outDir + QStringLiteral("/grid-density-after.png"));
+
+                        check(crossingsBefore > 0 && crossingsAfter > crossingsBefore,
+                              QStringLiteral("raising Grid detail densifies the LIVE grid at a "
+                                             "fixed camera pose (%1 crossings before, %2 after)")
+                                  .arg(crossingsBefore)
+                                  .arg(crossingsAfter));
+
+                        // --- and it persists through the same debounce ----
+                        settle(MainWindow::kAppearanceWriteMs * 2);
+                        QSettings writtenDensity;
+                        Theme::Spec densityReadBack;
+                        check(Theme::deserializeSpec(writtenDensity.value(QStringLiteral("appearance"))
+                                                         .toString(),
+                                                     densityReadBack) &&
+                                  std::fabs(densityReadBack.gridDensity - 2.0) < 1.0e-9,
+                              "and the debounced write stores the density that survived");
+
+                        // Back to the default - Theme is process-global state,
+                        // and nothing past this point should inherit an edit
+                        // this probe made for its own purposes.
+                        densityPanel->setGridDensity(1.0);
+                        settle(MainWindow::kAppearanceWriteMs * 2);
+                        check(std::fabs(Theme::gridDensity() - 1.0) < 1.0e-9,
+                              "left at the default for whatever runs next");
+                    }
+                }
+
                 persisting.close();
             }
             quiet.close();

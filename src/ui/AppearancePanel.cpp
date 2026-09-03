@@ -6,6 +6,7 @@
 #include <QAbstractItemView>
 #include <QColorDialog>
 #include <QComboBox>
+#include <QDoubleSpinBox>
 #include <QEvent>
 #include <QFile>
 #include <QFileDialog>
@@ -254,6 +255,37 @@ AppearancePanel::AppearancePanel(QWidget* parent)
     sizeLine->addWidget(mySize);
     outer->addWidget(sizeRow);
 
+    // Beside Text size, the other spinbox-driven token: the work-plane
+    // grid's own density. A QDoubleSpinBox rather than the stroke row's
+    // integer QSpinBox - the spec field is a multiplier, not a pixel count,
+    // and Theme::kMinGridDensity..kMaxGridDensity is a sub-1.0 to low-single-
+    // digits band where whole numbers would waste most of the range. The
+    // suffix is a bare "x" rather than anything Measure would format: this
+    // is not a length, and routing it through Measure would be exactly the
+    // "hand-format at the call site" mistake CLAUDE.md's numbers rule warns
+    // against for lengths, applied to a value that was never a length at all.
+    auto* gridDensityRow = new QWidget(this);
+    makeTransparent(gridDensityRow, QStringLiteral("appearanceGridDensityRow"));
+    auto* gridDensityLine = new QHBoxLayout(gridDensityRow);
+    gridDensityLine->setContentsMargins(0, 0, 0, 0);
+    gridDensityLine->setSpacing(8);
+    myGridDensityLabel = new QLabel(tr("Grid detail"), gridDensityRow);
+    makeTransparent(myGridDensityLabel, QStringLiteral("appearanceGridDensityLabel"));
+    gridDensityLine->addWidget(myGridDensityLabel, 1);
+    myGridDensity = new QDoubleSpinBox(gridDensityRow);
+    myGridDensity->setRange(Theme::kMinGridDensity, Theme::kMaxGridDensity);
+    myGridDensity->setSingleStep(0.1);
+    myGridDensity->setDecimals(1);
+    myGridDensity->setSuffix(QStringLiteral("x"));
+    myGridDensity->setToolTip(tr("How many lines the work-plane grid draws — "
+                                 "higher packs more in, lower thins it out"));
+    connect(myGridDensity, &QDoubleSpinBox::valueChanged, this, [this](double density) {
+        if (mySyncing) return;
+        setGridDensity(density);
+    });
+    gridDensityLine->addWidget(myGridDensity);
+    outer->addWidget(gridDensityRow);
+
     auto* strokeRow = new QWidget(this);
     makeTransparent(strokeRow, QStringLiteral("appearanceStrokeRow"));
     auto* strokeLine = new QHBoxLayout(strokeRow);
@@ -367,6 +399,7 @@ void AppearancePanel::applyTheme()
         }
     }
     if (mySize) mySize->setValue(static_cast<int>(live.basePt));
+    if (myGridDensity) myGridDensity->setValue(live.gridDensity);
     if (myStroke) myStroke->setValue(static_cast<int>(live.chipStrokePx));
     if (myFamily) {
         const int index = myFamily->findText(live.fontFamily);
@@ -412,6 +445,13 @@ void AppearancePanel::setChipStroke(double px)
 {
     Theme::Spec next = Theme::spec();
     next.chipStrokePx = std::clamp(px, Theme::kMinChipStrokePx, Theme::kMaxChipStrokePx);
+    Theme::setSpec(next);
+}
+
+void AppearancePanel::setGridDensity(double density)
+{
+    Theme::Spec next = Theme::spec();
+    next.gridDensity = std::clamp(density, Theme::kMinGridDensity, Theme::kMaxGridDensity);
     Theme::setSpec(next);
 }
 
@@ -600,6 +640,7 @@ QStringList AppearancePanel::paintedTexts() const
     if (myTitle) texts << myTitle->text();
     for (const Row& row : myRows) texts << row.name;
     if (mySizeLabel) texts << mySizeLabel->text();
+    if (myGridDensityLabel) texts << myGridDensityLabel->text();
     if (myStrokeLabel) texts << myStrokeLabel->text();
     if (myFamilyLabel) texts << myFamilyLabel->text();
     if (mySave) texts << mySave->text();

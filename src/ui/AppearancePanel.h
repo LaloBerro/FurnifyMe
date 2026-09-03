@@ -41,6 +41,7 @@
 
 class QComboBox;
 class QColorDialog;
+class QDoubleSpinBox;
 class QLabel;
 class QSpinBox;
 class QVBoxLayout;
@@ -61,6 +62,11 @@ public:
     // ToolChip's border width - Spec::chipStrokePx, clamped to Theme's own
     // range. 0 is legal and means the chips draw no ring at all.
     void setChipStroke(double px);
+    // The work-plane grid's line density - Spec::gridDensity, clamped to
+    // Theme's own range. Above 1.0 packs more lines into the same view;
+    // below 1.0 thins it out. See GridRenderer::minorStepFor() for the exact
+    // mapping this drives.
+    void setGridDensity(double density);
     void setFontFamily(const QString& family);
     // Back to Theme::defaultSpec() - Graphite, and the bundled family at 10pt.
     void reset();
@@ -128,6 +134,7 @@ public:
     QWidget* loadButton() const;
     QSpinBox* sizeControl() const { return mySize; }
     QSpinBox* strokeControl() const { return myStroke; }
+    QDoubleSpinBox* gridDensityControl() const { return myGridDensity; }
     QComboBox* familyControl() const { return myFamily; }
     // The live modeless picker, or null when none is open. Exposed so the
     // suite can assert it is modeless and close it - a dialog left open would
@@ -181,9 +188,11 @@ private:
     std::vector<Row> myRows;
     QLabel* myTitle = nullptr;
     QLabel* mySizeLabel = nullptr;
+    QLabel* myGridDensityLabel = nullptr;
     QLabel* myStrokeLabel = nullptr;
     QLabel* myFamilyLabel = nullptr;
     QSpinBox* mySize = nullptr;
+    QDoubleSpinBox* myGridDensity = nullptr;
     QSpinBox* myStroke = nullptr;
     QComboBox* myFamily = nullptr;
     class QPushButton* myReset = nullptr;

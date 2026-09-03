@@ -22,8 +22,12 @@ public:
     // Also creates the Z-layer the grid is drawn in - see zLayer().
     void attach(const Handle(AIS_InteractiveContext)& context);
     // `plane` is the work plane the grid lies on - the ground plane by
-    // default, a locked face's own plane while one is locked.
-    void update(double cameraDistance, const gp_Pnt& cameraTarget, const gp_Pln& plane);
+    // default, a locked face's own plane while one is locked. `density`
+    // is Theme::gridDensity() - see minorStepFor() below for what it does to
+    // the grid; the caller reads it live at every update() so a theme edit's
+    // invalidate()+update() pair rebuilds against the value the user just set.
+    void update(double cameraDistance, const gp_Pnt& cameraTarget, const gp_Pln& plane,
+                double density);
 
     // Render mode (Milestone 3, item 5) hides the grid outright rather than
     // merely not rebuilding it - the viewport is meant to be the furniture
@@ -86,7 +90,16 @@ public:
     // behaves exactly as it did before this existed.
     Graphic3d_ZLayerId zLayer() const { return myLayer; }
 
-    static double minorStepFor(double cameraDistance);
+    // The minor grid step at a given camera distance and density multiplier.
+    // `density` scales the distance thresholds below which the grid holds a
+    // finer step - a HIGHER density pushes those thresholds OUT, so the finer
+    // step covers a wider range of camera distances and the grid reads as
+    // denser at any fixed zoom; a LOWER density pulls them IN and the grid
+    // coarsens sooner. 1.0 reproduces exactly the thresholds this function
+    // has always used. The one-argument overload is 1.0's shorthand, kept so
+    // every existing caller and pinned test stays exactly as it was.
+    static double minorStepFor(double cameraDistance, double density);
+    static double minorStepFor(double cameraDistance) { return minorStepFor(cameraDistance, 1.0); }
 
     // First line position at or below -limit on the absolute grid of `step`.
     static double firstLineAtOrBelow(double limit, double step);

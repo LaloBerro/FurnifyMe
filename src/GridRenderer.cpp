@@ -77,10 +77,15 @@ public:
 
 }  // namespace
 
-double GridRenderer::minorStepFor(double cameraDistance)
+double GridRenderer::minorStepFor(double cameraDistance, double density)
 {
-    if (cameraDistance < 120.0) return 1.0;
-    if (cameraDistance < 2500.0) return 10.0;
+    // Guard rather than trust: Theme::kMinGridDensity..kMaxGridDensity keeps
+    // every caller in (0, +inf), but a static function taking a bare double
+    // should not divide by (or multiply toward) zero if that guarantee is
+    // ever broken upstream.
+    const double d = density > 0.0 ? density : 1.0;
+    if (cameraDistance < 120.0 * d) return 1.0;
+    if (cameraDistance < 2500.0 * d) return 10.0;
     return 100.0;
 }
 
@@ -129,11 +134,11 @@ void GridRenderer::invalidate()
 }
 
 void GridRenderer::update(double cameraDistance, const gp_Pnt& cameraTarget,
-                          const gp_Pln& plane)
+                          const gp_Pln& plane, double density)
 {
     if (myContext.IsNull()) return;
 
-    const double step = minorStepFor(cameraDistance);
+    const double step = minorStepFor(cameraDistance, density);
     // Extent: comfortably beyond what a camera at this distance can see of the
     // work plane, snapped to the major step so lines do not crawl on rebuild.
     const double major = step * 10.0;

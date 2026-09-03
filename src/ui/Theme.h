@@ -83,6 +83,13 @@ struct Spec {
     // at all (the fill states still carry hover/pressed/checked); the default
     // is the 1px the family has always drawn.
     double chipStrokePx = 1.0;
+    // Scales GridRenderer::minorStepFor()'s distance thresholds - see that
+    // function's own comment for the exact mapping. HIGHER means MORE grid
+    // lines: the finer 1mm/10mm bands persist to a greater camera distance
+    // before coarsening, so a value above 1.0 shows a denser grid at any
+    // given zoom and a value below 1.0 coarsens sooner. 1.0 is today's grid,
+    // byte-identical - the same rule chipStrokePx's 1.0 default follows.
+    double gridDensity = 1.0;
 };
 
 bool operator==(const Spec& a, const Spec& b);
@@ -97,6 +104,13 @@ constexpr double kMaxBasePt = 14.0;
 // past 4 the border eats the 34px icon-only chip's face.
 constexpr double kMinChipStrokePx = 0.0;
 constexpr double kMaxChipStrokePx = 4.0;
+
+// The band the grid density multiplier may be set to - see Spec::gridDensity.
+// Half as fine as default at the bottom, twice as fine at the top; either end
+// is already a visibly different grid without disappearing (0) or crowding
+// into a solid wash (past a handful of times finer).
+constexpr double kMinGridDensity = 0.5;
+constexpr double kMaxGridDensity = 2.0;
 
 const Spec& spec();
 Spec defaultSpec();
@@ -208,6 +222,7 @@ QColor highlightHover();    // the viewport's hover tint
 QColor highlightSelected(); // and its selection tint
 
 double chipStrokePx();      // ToolChip border width - see Spec::chipStrokePx
+double gridDensity();       // grid line density multiplier - see Spec::gridDensity
 
 // The whole app's type scale: four sizes, and every widget that paints text
 // reads one of them - a fifth size anywhere is a smell, not a design choice.

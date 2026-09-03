@@ -304,7 +304,8 @@ void OcctViewWidget::initializeViewer()
         Graphic3d_ZLayerId layer = Graphic3d_ZLayerId_UNKNOWN;
         if (myViewer->InsertLayerAfter(layer, settings, after)) mySketchLayer = layer;
     }
-    myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane());
+    myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane(),
+                          Theme::gridDensity());
     // None of these three are ever driven for a viewer-only widget - nothing
     // calls showPullArrow()/showBevelArrow()/updateEdgeDimension() on one
     // (see the header) - so attaching them would only be inert presentation
@@ -1737,7 +1738,8 @@ void OcctViewWidget::setWorkPlane(const gp_Pln& plane)
     // than on the next camera move: locking a face and seeing the grid still
     // lying on the ground is the whole failure this call exists to prevent.
     if (myView.IsNull()) return;
-    myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane());
+    myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane(),
+                          Theme::gridDensity());
     myView->Redraw();
 }
 
@@ -2267,7 +2269,8 @@ void OcctViewWidget::applyCameraState()
         cam->SetProjectionType(Graphic3d_Camera::Projection_Perspective);
     }
 
-    myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane());
+    myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane(),
+                          Theme::gridDensity());
     // The transform gizmo is sized in world units and judged in screen ones,
     // so the zoom is half of its arithmetic - re-derived here, before the
     // redraw below carries it, rather than from a slot on cameraChanged()
@@ -2518,7 +2521,8 @@ void OcctViewWidget::applyTheme()
     // initializeViewer() this runs before attach(), where update() is a no-op
     // and the attach that follows does the first real build.
     myGridRenderer.invalidate();
-    myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane());
+    myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane(),
+                          Theme::gridDensity());
 
     // The same problem one presentation over: both drag arrows bake
     // Theme::accent() into the AIS object at build time and their show()
