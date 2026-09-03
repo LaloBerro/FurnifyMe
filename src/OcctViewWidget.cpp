@@ -3177,8 +3177,9 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
     const QPoint pos = event->position().toPoint();
 
     if (mySketchMode) {
-        // Shift here means "continue the last segment straight", not the
-        // additive-selection Shift below: nothing is selectable while
+        // Shift here means "snap this segment to the nearest of the 8
+        // compass directions from its start" (Milestone 4, Task 6.1), not
+        // the additive-selection Shift below: nothing is selectable while
         // sketching, so the two can never be asked for at once.
         const bool straight = (event->modifiers() & Qt::ShiftModifier) != 0;
         gp_Pnt hit;

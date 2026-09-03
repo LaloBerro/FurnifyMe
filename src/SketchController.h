@@ -35,16 +35,16 @@ public:
     static gp_Pnt snapToPlaneGrid(const gp_Pnt& point, const gp_Pln& plane, double step);
 
     // Projects `candidate` onto the LINE through `prev` along `dir` - the
-    // straight continuation the user asks for by holding Shift. A line and
-    // not a ray: extending the previous segment backwards through `prev` is
-    // as much a straight continuation as extending it forwards, and refusing
-    // the backward half would make the constraint snap away at exactly the
-    // moment the cursor crossed the last point.
+    // compass direction Shift chose (snapToCompass() picks which of the 8
+    // this is; this function only does the projection). A line and not a
+    // ray: the dial's opposite direction is the neighbouring sector, but a
+    // cursor crossing exactly through `prev` must not make the projection
+    // snap away for the one frame it sits on the far side.
     //
     // `dir` is a gp_Dir, so it is unit length by construction and a
-    // degenerate direction is not representable here at all - it is refused
-    // one level up, by lastSegmentDirection(), which is where two coincident
-    // points can actually occur.
+    // degenerate direction is not representable here at all - the
+    // cursor==start case is refused one level up, in snapToCompass(), which
+    // is where the coincidence can actually occur.
     //
     // Plane-safe without knowing about the plane: `prev` lies on the sketch
     // plane and `dir` is derived from two points on it, so every point of the

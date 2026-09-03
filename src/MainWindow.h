@@ -722,8 +722,8 @@ private:
     void updateActions();
 
     // Pushes both sketch constraints onto the viewport from the sketch's own
-    // points: the straight-continuation anchor (the last placed point and the
-    // direction of the segment that led into it, or nothing below two points)
+    // points: the compass anchor (the last placed point, from which Shift
+    // dials the 8 directions - one point is enough, no prior segment needed)
     // and the closing target (the first point, or nothing until the outline
     // can close). One function, because the two are derived from the same
     // list and must never describe different sketches. Called from every

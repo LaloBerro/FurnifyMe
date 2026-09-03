@@ -89,6 +89,14 @@ void AxisGizmo::computeTips(Tip tips[6]) const
     // Project each world axis into the camera frame: screen x along the
     // camera's right vector, screen y along -up, depth along the view
     // direction (pointing away from the eye).
+    //
+    // At an EXACT named view (a true pole since Task 6.2's ±90° fix), the
+    // viewed axis and its opposite both project onto the hub, so the far
+    // tip is screen-coincident with the near one and unreachable by a
+    // direct click until the user orbits away - the same property
+    // Blender's and Fusion's gizmos have, permanent and harmless: the
+    // depth sort below keeps the NEAR tip on top, so clicking the hub
+    // re-snaps the view already faced rather than flipping it.
     const CameraController& cam = myView->camera();
     const gp_Dir right = cam.rightVector();
     const gp_Dir up = cam.upVector();
