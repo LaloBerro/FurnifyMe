@@ -1847,13 +1847,47 @@ gp_Pln OcctViewWidget::gridPlane() const
     // two keeps a constant ratio to within a factor of root two while still
     // changing only when the camera moves a whole octave. At 1e-4 of the
     // viewing distance the nudge is about a tenth of a pixel at any distance.
+
+    // Task 5.1's substitution, ahead of the nudge above so it applies to
+    // whichever plane is actually chosen. Priority order:
+    //   1. A locked face's own plane (mySketchPlane, unchanged) - the grid
+    //      is a click-site preview while one is locked, never in question.
+    //   2. Otherwise, in an EFFECTIVELY orthographic look square onto a world
+    //      axis (Front/Back/Left/Right - never Top/Bottom, which already see
+    //      the ground grid face-on, and never Persp), the vertical plane
+    //      that view is actually squared up to: Front/Back share the world
+    //      XZ plane (normal +Y), Left/Right share YZ (normal +X), both
+    //      through the origin. Ground otherwise (Persp, or Top/Bottom).
+    // Without this, the unlocked ground grid - a HORIZONTAL plane - viewed
+    // face-on from Front collapses to the single line where it meets the
+    // view direction, which teaches the user nothing about scale in a face-
+    // on look, exactly the failure locking a face already solves for a real
+    // face.
+    //
+    // This is a VISUAL substitution only: it reads mySketchPlane/
+    // myWorkPlaneLocked but never writes them, so setWorkPlane() remains the
+    // one place a click's plane is decided, and sketching in this same Front
+    // ortho view still lands on the ground (or the locked face) exactly as
+    // it did before this existed - see workPlane()'s own comment.
+    gp_Pln basePlane = mySketchPlane;
+    if (!myWorkPlaneLocked && myCamera.effectiveOrtho()) {
+        const QString direction = viewDirectionName();
+        if (direction == QStringLiteral("Front") || direction == QStringLiteral("Back")) {
+            basePlane = gp_Pln(gp_Ax3(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 1.0, 0.0),
+                                      gp_Dir(1.0, 0.0, 0.0)));
+        } else if (direction == QStringLiteral("Right") || direction == QStringLiteral("Left")) {
+            basePlane = gp_Pln(gp_Ax3(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0),
+                                      gp_Dir(0.0, 1.0, 0.0)));
+        }
+    }
+
     const double distance = std::max(1.0, myCamera.state().distance);
     const double octave = std::ldexp(1.0, static_cast<int>(std::lround(std::log2(distance))));
     const double nudge = octave * 1.0e-4;
-    const gp_Dir normal = mySketchPlane.Axis().Direction();
-    const gp_Vec toEye(mySketchPlane.Location(), myCamera.eyePosition());
+    const gp_Dir normal = basePlane.Axis().Direction();
+    const gp_Vec toEye(basePlane.Location(), myCamera.eyePosition());
 
-    gp_Pln plane = mySketchPlane;
+    gp_Pln plane = basePlane;
     plane.Translate(gp_Vec(normal) * (toEye.Dot(gp_Vec(normal)) >= 0.0 ? nudge : -nudge));
     return plane;
 }

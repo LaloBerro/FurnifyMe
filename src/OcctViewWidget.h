@@ -263,14 +263,31 @@ public:
     void clearSketchCursorMarker();
     bool hasSketchCursorMarker() const;
 
-    // The plane clicks are unprojected onto AND the plane the grid lies on -
-    // one value, not two, because a grid that disagreed with where the next
-    // point will land would be worse than no grid. The ground plane until a
-    // face is locked. Setting it rebuilds the grid immediately, whether or
-    // not a sketch is in progress: locking a face has to be visible before
-    // the user starts drawing on it.
+    // The plane clicks are unprojected onto. The ground plane until a face is
+    // locked. Setting it rebuilds the grid immediately, whether or not a
+    // sketch is in progress: locking a face has to be visible before the
+    // user starts drawing on it.
+    //
+    // gridPlane() (see the .cpp) reads this AND myWorkPlaneLocked to decide
+    // where the grid itself is drawn, which is no longer always the same
+    // plane clicks land on: a locked face still outranks everything, but an
+    // UNLOCKED, effectively-orthographic Front/Back/Left/Right look shows the
+    // matching world-aligned vertical plane instead of the ground grid
+    // collapsed edge-on to a line. That is a purely visual substitution -
+    // clicks still land on this plane exactly as they always have - so
+    // setWorkPlane() itself stays the one place a click's plane is decided.
     void setWorkPlane(const gp_Pln& plane);
     const gp_Pln& workPlane() const { return mySketchPlane; }
+
+    // Whether workPlane() is a locked face rather than the ground plane -
+    // MainWindow is the owner of that fact (myFaceLocked) and reports it here
+    // purely so gridPlane() can give a locked face priority over the
+    // face-on-ortho substitution above. Call alongside setWorkPlane() at each
+    // of MainWindow's two lock/unlock sites; it does not itself touch the
+    // grid; the setWorkPlane() call that follows every real lock/unlock
+    // already forces the rebuild.
+    void setWorkPlaneLocked(bool locked) { myWorkPlaneLocked = locked; }
+    bool isWorkPlaneLocked() const { return myWorkPlaneLocked; }
 
     // The straight-continuation anchor: the last placed point and the
     // direction of the segment that led into it. While Shift is held, a
@@ -955,6 +972,10 @@ private:
     bool myInitialized = false;
     bool mySketchMode = false;
     gp_Pln mySketchPlane;
+    // See setWorkPlaneLocked() - whether mySketchPlane is a locked face
+    // rather than the ground plane. False by default, which is the ground
+    // plane's own state.
+    bool myWorkPlaneLocked = false;
     bool mySnapEnabled = true;
     double mySnapStep = 10.0;      // matches the drawn grid
 

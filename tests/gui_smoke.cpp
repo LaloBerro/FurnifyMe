@@ -10512,6 +10512,191 @@ int main(int argc, char* argv[])
               "Axonometric returns to the startup angles");
     }
 
+    // --- Task 5.1: face-on ortho grids -----------------------------------------
+    // A self-contained probe window - gridPlane() is private and reads the
+    // grid off Dump pixels rather than a test-only accessor (CLAUDE.md's own
+    // "trust the pixel" rule), and a fresh MainWindow keeps this probe's
+    // camera/lock gymnastics from disturbing the shared `window` every other
+    // block in this file depends on.
+    {
+        RequiredTempDir gridProbeLib;
+        MainWindow gridProbe(nullptr, /*persistProgress=*/false, gridProbeLib.path());
+        gridProbe.setAttribute(Qt::WA_ShowWithoutActivating);
+        gridProbe.resize(1000, 800);
+        gridProbe.move(60, 60);
+        gridProbe.show();
+        settle(300);
+        OcctViewWidget* pview = gridProbe.view();
+        pview->setAnimationsEnabled(false);
+
+        enterFreshFurniture(gridProbe);
+        // A short body: tall enough for a real top face, short enough (50mm
+        // against a several-hundred-mm sketch) to leave plenty of grid
+        // showing around its silhouette in every view below - nothing here
+        // ever calls Fit All, which would zoom in tight and defeat that.
+        check(buildBody(gridProbe, 0.35, 0.35, 0.55, 0.55, 50.0),
+              "a body for the ortho-grid probe - Lock to Face needs one too");
+
+        QAction* orthoAction = action(gridProbe, QStringLiteral("Orthographic"));
+        check(orthoAction != nullptr, "there is an Orthographic action for this probe");
+
+        auto isGridColour = [](const QColor& c) {
+            return colorDistance(c, Theme::gridMinor()) < 8.0 ||
+                   colorDistance(c, Theme::gridMajor()) < 8.0;
+        };
+        // The SPAN (max row - min row) of screen rows carrying a grid-
+        // coloured pixel, sampled sparsely across the whole frame - not a
+        // raw pixel count, because the failure mode this exists to catch is
+        // shape, not quantity. The unlocked GROUND grid viewed exactly
+        // Front or Right lies in a plane that CONTAINS the view direction -
+        // a horizontal plane looked at edge-on - so every one of its lines,
+        // whatever their world position, projects onto the same handful of
+        // screen rows near where that plane meets the view axis. A plane the
+        // camera is actually squared onto (the Task 5.1 substitution, or a
+        // locked vertical face) fills the frame top to bottom instead. Also
+        // asserts non-vacuity itself, so a span of 0 from "found nothing"
+        // cannot be mistaken for a span of 0 from "found one true row".
+        auto gridRowSpan = [&](const QString& path) -> int {
+            check(pview->saveSnapshot(path),
+                  QStringLiteral("a snapshot is captured (%1)").arg(path));
+            const QImage shot(path);
+            if (shot.isNull()) return -1;
+            int minY = shot.height(), maxY = -1, samples = 0;
+            for (int y = 0; y < shot.height(); y += 2) {
+                for (int x = 0; x < shot.width(); x += 2) {
+                    if (isGridColour(shot.pixelColor(x, y))) {
+                        minY = std::min(minY, y);
+                        maxY = std::max(maxY, y);
+                        ++samples;
+                    }
+                }
+            }
+            check(samples > 20,
+                  QStringLiteral("a non-vacuous number of grid pixels were sampled (%1) in %2")
+                      .arg(samples)
+                      .arg(path));
+            return maxY >= minY ? (maxY - minY) : -1;
+        };
+
+        // A fixed, WIDE pose for every snap below - target at the origin,
+        // 700mm out, the same "default working distance" minorStepFor()'s
+        // own comment names. Driven through animateTo() rather than the
+        // "Front"/"Right" QActions' own setViewFront()/setViewRight(),
+        // because those keep whatever target and distance the camera ALREADY
+        // holds - fine for the unlocked checks below, which never move
+        // either, but wrong the moment Lock to Face's own flyOntoFace() has
+        // reframed tightly onto the top face: reusing the action there
+        // measured 0 grid pixels because the tight reframe left the body
+        // filling the entire captured frame, no margin for any grid to show
+        // in regardless of which plane it was actually on. One helper, used
+        // for both the unlocked and the locked case, is what makes them a
+        // fair, apples-to-apples comparison rather than two different shots.
+        auto snapTo = [&](double azimuthDeg, double elevationDeg) {
+            CameraState pose;
+            pose.target = gp_Pnt(0.0, 0.0, 0.0);
+            pose.azimuthDeg = azimuthDeg;
+            pose.elevationDeg = elevationDeg;
+            pose.distance = 700.0;
+            pview->animateTo(pose);
+            settle(50);
+        };
+
+        if (orthoAction) {
+            if (!orthoAction->isChecked()) orthoAction->trigger();
+            settle(150);
+            check(pview->viewIsOrthographic(), "the probe really is in a parallel projection");
+
+            // --- Front, unlocked: the XZ substitution, not the ground -----
+            snapTo(0.0, 0.0);
+            check(pview->viewDirectionName() == QStringLiteral("Front"), "snapped onto Front");
+            const int frontSpan =
+                gridRowSpan(outDir + QStringLiteral("/grid-front-ortho-unlocked.png"));
+            check(frontSpan > pview->height() / 2,
+                  QStringLiteral("Front ortho, unlocked: the grid fills most of the frame top "
+                                 "to bottom (the XZ plane), not a single edge-on line from the "
+                                 "ground (span %1 of %2px)")
+                      .arg(frontSpan)
+                      .arg(pview->height()));
+
+            // --- Right, unlocked: the YZ substitution -----------------------
+            snapTo(-90.0, 0.0);
+            check(pview->viewDirectionName() == QStringLiteral("Right"), "snapped onto Right");
+            const int rightSpan =
+                gridRowSpan(outDir + QStringLiteral("/grid-right-ortho-unlocked.png"));
+            check(rightSpan > pview->height() / 2,
+                  QStringLiteral("Right ortho, unlocked: the grid fills the frame too (the YZ "
+                                 "plane) (span %1 of %2px)")
+                      .arg(rightSpan)
+                      .arg(pview->height()));
+
+            // --- Top: already square onto the ground - unaffected ----------
+            snapTo(0.0, 88.0);
+            const int topSpan = gridRowSpan(outDir + QStringLiteral("/grid-top-ortho.png"));
+            check(topSpan > pview->height() / 2,
+                  QStringLiteral("Top ortho already looks square onto the ground plane, so "
+                                 "Task 5.1 leaves it alone - it too fills the frame (span %1 "
+                                 "of %2px)")
+                      .arg(topSpan)
+                      .arg(pview->height()));
+
+            // --- a locked face still outranks the substitution --------------
+            // The TOP face specifically: a HORIZONTAL plane, so if the
+            // priority order were wrong (the ortho substitution checked
+            // before the lock) this would show the wide vertical XZ pattern
+            // above instead of a locked plane viewed edge-on from Front,
+            // exactly like the ground was before Task 5.1 - a real
+            // distinguishing case, not just "some grid renders".
+            TopoDS_Face topFace;
+            const TopoDS_Shape bodyShape = gridProbe.document().solids().back().shape;
+            for (TopExp_Explorer it(bodyShape, TopAbs_FACE); it.More(); it.Next()) {
+                const TopoDS_Face f = TopoDS::Face(it.Current());
+                BRepAdaptor_Surface surf(f);
+                if (surf.GetType() != GeomAbs_Plane) continue;
+                const gp_Pln p = surf.Plane();
+                if (std::fabs(std::fabs(p.Axis().Direction().Z()) - 1.0) < 1.0e-6 &&
+                    p.Location().Z() > 1.0) {
+                    topFace = f;
+                    break;
+                }
+            }
+            check(!topFace.IsNull(), "the body's top face is found directly, to Lock to Face");
+            if (!topFace.IsNull()) {
+                check(gridProbe.lockToFace(topFace), "the top face locks");
+                check(gridProbe.isFaceLocked(), "and the window agrees");
+
+                // The SAME wide Front pose as the unlocked check above -
+                // lockToFace()'s own flyOntoFace() just reframed tightly onto
+                // the face, and reusing that framing here is exactly the bug
+                // this helper exists to avoid (see snapTo()'s own comment).
+                snapTo(0.0, 0.0);
+                const int lockedFrontSpan =
+                    gridRowSpan(outDir + QStringLiteral("/grid-front-ortho-locked.png"));
+                check(lockedFrontSpan >= 0 && lockedFrontSpan < pview->height() / 3,
+                      QStringLiteral("Front ortho with the (horizontal) top face locked: the "
+                                     "grid stays on that face - a near edge-on line, not the "
+                                     "wide XZ substitution - span %1 of %2px")
+                          .arg(lockedFrontSpan)
+                          .arg(pview->height()));
+
+                gridProbe.unlockFace();
+                check(!gridProbe.isFaceLocked(), "unlocked again");
+            }
+
+            // --- perspective free-orbit: ground, unaffected -----------------
+            orthoAction->trigger();
+            settle(150);
+            check(!pview->viewIsOrthographic(), "back to perspective");
+            snapTo(-45.0, 30.0);
+            check(pview->viewDirectionName() == QStringLiteral("Persp"),
+                  "an angled perspective look is not a snapped axis direction");
+            gridRowSpan(outDir + QStringLiteral("/grid-persp-orbit.png"));
+            // gridRowSpan()'s own non-vacuity check is the assertion here -
+            // Persp is never eligible for the substitution (effectiveOrtho()
+            // is false), so the only claim worth pinning is that the ground
+            // grid is still genuinely on screen.
+        }
+    }
+
     // --- animated transitions -------------------------------------------------
     {
         view->setAnimationsEnabled(true);

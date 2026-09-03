@@ -2348,6 +2348,12 @@ void MainWindow::showInitScreen()
     myDocument = DocumentModel();
     mySelectedOutlineId = 0;
     myFaceLocked = false;
+    // Keeps the viewport's own copy (see setWorkPlaneLocked()) from outliving
+    // the furniture whose lock it described - the returning-to-the-selector
+    // path resets myFaceLocked here without going through unlockFace(), and a
+    // stale true would wrongly suppress Task 5.1's face-on-ortho grid in
+    // whatever furniture opens next.
+    myView->setWorkPlaneLocked(false);
     mySketching = false;
     mySketch.reset();
     myView->setSketchMode(false, mySketch.plane());
@@ -2400,6 +2406,8 @@ bool MainWindow::openFurniture(const QString& id)
     myShowingInitScreen = false;
     mySelectedOutlineId = 0;
     myFaceLocked = false;
+    // See showInitScreen()'s identical line - the same drift is possible here.
+    myView->setWorkPlaneLocked(false);
     mySketching = false;
     mySketch.reset();
     myView->setSketchMode(false, mySketch.plane());
@@ -4633,6 +4641,11 @@ bool MainWindow::lockToFace(const TopoDS_Face& face)
     }
     mySketch.setPlane(plane);
     myFaceLocked = true;
+    // setWorkPlaneLocked() first: gridPlane() reads it, and setWorkPlane()
+    // below is what actually triggers the rebuild that reads gridPlane() -
+    // ordering it after would rebuild once against the stale (unlocked) grid
+    // priority and rely on some later camera move to correct it.
+    myView->setWorkPlaneLocked(true);
     // One call sets both where clicks land and where the grid is drawn; they
     // are the same value inside the viewport, so they cannot disagree.
     myView->setWorkPlane(plane);
@@ -4691,6 +4704,7 @@ void MainWindow::unlockFace()
     const gp_Pln ground(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
     mySketch.setPlane(ground);
     myFaceLocked = false;
+    myView->setWorkPlaneLocked(false);
     myView->setWorkPlane(ground);
 
     updateActions();
