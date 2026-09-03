@@ -136,6 +136,81 @@ void jsonToSymmetry(const QJsonObject& obj, DocumentModel::DocumentMeta& meta)
     }
 }
 
+// Link groups (Milestone 4, Task 4.2): the manifest gap the brief names -
+// DocumentModel::toSerialized()/fromSerialized() are already group-aware
+// (see DocumentMeta::LinkGroupRecord's own comment), so this is exactly
+// symmetryToJson()/jsonToSymmetry()'s shape one level over: {"groups":
+// [{"anchor": pos, "members": [pos, ...], "placements": [[12 doubles],
+// ...]}, ...]}, one entry per DISTINCT group, "members" and "placements"
+// parallel (placements[i] is members[i]'s own gp_Trsf, identity at
+// whichever position equals "anchor"). Positions, not ids, for the same
+// reason symmetryPairs uses positions - see DocumentMeta's own comment.
+QJsonObject linkGroupsToJson(const DocumentModel::DocumentMeta& meta)
+{
+    QJsonArray groupsArr;
+    for (const DocumentModel::DocumentMeta::LinkGroupRecord& group : meta.linkGroups) {
+        QJsonArray membersArr;
+        for (int pos : group.memberPositions) membersArr.append(pos);
+
+        QJsonArray placementsArr;
+        for (const std::array<double, 12>& values : group.placements) {
+            QJsonArray row;
+            for (double v : values) row.append(v);
+            placementsArr.append(row);
+        }
+
+        QJsonObject g;
+        g[QStringLiteral("anchor")] = group.anchorPosition;
+        g[QStringLiteral("members")] = membersArr;
+        g[QStringLiteral("placements")] = placementsArr;
+        groupsArr.append(g);
+    }
+    QJsonObject obj;
+    obj[QStringLiteral("groups")] = groupsArr;
+    return obj;
+}
+
+// The inverse. Absent entirely - every furniture and version saved before
+// this task - decodes to "nothing linked", `meta.linkGroups` left exactly
+// as it default-constructs (empty), the same forward-compatibility rule
+// jsonToSymmetry() follows for its own key. A malformed entry - a
+// member/placement count mismatch, a placement that is not exactly 12
+// numbers, or too few members to be a group at all - is SKIPPED rather
+// than refusing the whole load; DocumentModel::fromSerialized() applies
+// the identical tolerance a second time on the id side (an out-of-range
+// position, a missing anchor), so a corrupt group can never take the rest
+// of the document down with it.
+void jsonToLinkGroups(const QJsonObject& obj, DocumentModel::DocumentMeta& meta)
+{
+    if (!obj.contains(QStringLiteral("groups"))) return;
+
+    const QJsonArray groupsArr = obj.value(QStringLiteral("groups")).toArray();
+    for (const QJsonValue& gv : groupsArr) {
+        const QJsonObject g = gv.toObject();
+        const QJsonArray membersArr = g.value(QStringLiteral("members")).toArray();
+        const QJsonArray placementsArr = g.value(QStringLiteral("placements")).toArray();
+        if (membersArr.size() != placementsArr.size() || membersArr.size() < 2) continue;
+
+        DocumentModel::DocumentMeta::LinkGroupRecord record;
+        record.anchorPosition = g.value(QStringLiteral("anchor")).toInt(-1);
+        record.memberPositions.reserve(static_cast<std::size_t>(membersArr.size()));
+        record.placements.reserve(static_cast<std::size_t>(membersArr.size()));
+
+        bool malformed = false;
+        for (int i = 0; i < membersArr.size(); ++i) {
+            const QJsonArray row = placementsArr.at(i).toArray();
+            if (row.size() != 12) { malformed = true; break; }
+            std::array<double, 12> values{};
+            for (int j = 0; j < 12; ++j) values[static_cast<std::size_t>(j)] = row.at(j).toDouble();
+            record.memberPositions.push_back(membersArr.at(i).toInt(-1));
+            record.placements.push_back(values);
+        }
+        if (malformed) continue;
+
+        meta.linkGroups.push_back(std::move(record));
+    }
+}
+
 }  // namespace
 
 FurnitureStore::FurnitureStore(const QString& rootDir) : myRootDir(rootDir) {}
@@ -296,6 +371,9 @@ QString FurnitureStore::createFurniture(const QString& name)
     // furniture starts symmetric-off, at DocumentModel's own default plane -
     // exactly what DocumentModel::DocumentMeta{} already default-constructs.
     manifest[QStringLiteral("symmetry")] = symmetryToJson(DocumentModel::DocumentMeta{});
+    // Same story for link groups (Milestone 4, Task 4.2's own key): a fresh
+    // furniture starts with nothing linked.
+    manifest[QStringLiteral("linkGroups")] = linkGroupsToJson(DocumentModel::DocumentMeta{});
 
     if (!writeManifestObject(id, manifest)) return QString();
 
@@ -325,6 +403,7 @@ bool FurnitureStore::saveFurniture(const QString& id, const DocumentModel& doc, 
     manifest[QStringLiteral("bodies")] = itemMetaToJson(meta.bodyNames, meta.bodyVisible);
     manifest[QStringLiteral("outlines")] = itemMetaToJson(meta.outlineNames, meta.outlineVisible);
     manifest[QStringLiteral("symmetry")] = symmetryToJson(meta);
+    manifest[QStringLiteral("linkGroups")] = linkGroupsToJson(meta);
     if (!writeManifestObject(id, manifest)) return false;
 
     // A null/empty thumbnail is not a failure - the caller may not have
@@ -372,6 +451,8 @@ bool FurnitureStore::loadFurniture(const QString& id, DocumentModel& doc, QStrin
     // Absent entirely for any furniture created before this task - decodes
     // to symmetry OFF, never a refusal. See jsonToSymmetry()'s own comment.
     jsonToSymmetry(manifest.value(QStringLiteral("symmetry")).toObject(), meta);
+    // Same forward-compatibility rule for link groups (Milestone 4).
+    jsonToLinkGroups(manifest.value(QStringLiteral("linkGroups")).toObject(), meta);
 
     // Scratch, then swap - never half-load, per the standing contract.
     DocumentModel scratch;
@@ -468,8 +549,12 @@ bool FurnitureStore::saveVersion(const QString& id, const QString& name, const D
     // A version snapshots the WHOLE document, per the plan's own ruling
     // (pairings must survive a restore or a stale live document could break
     // symmetry after an undo-of-restore) - so its symmetry state travels
-    // with it exactly as the current furniture's does.
+    // with it exactly as the current furniture's does. Link groups
+    // (Milestone 4) follow the identical reasoning: a restore that silently
+    // dropped a group would break live propagation the moment the user
+    // edited a member expecting its copies to follow.
     entry[QStringLiteral("symmetry")] = symmetryToJson(meta);
+    entry[QStringLiteral("linkGroups")] = linkGroupsToJson(meta);
     versionsArr.append(entry);
     manifest[QStringLiteral("versions")] = versionsArr;
     if (!writeManifestObject(id, manifest)) {
@@ -528,6 +613,7 @@ bool FurnitureStore::loadVersion(const QString& id, const QString& name, Documen
         // symmetry OFF, same rule as loadFurniture()'s own current-document
         // read above.
         jsonToSymmetry(entry.value(QStringLiteral("symmetry")).toObject(), meta);
+        jsonToLinkGroups(entry.value(QStringLiteral("linkGroups")).toObject(), meta);
 
         DocumentModel scratch;
         if (!scratch.fromSerialized(serial, meta)) return false;

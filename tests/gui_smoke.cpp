@@ -191,7 +191,7 @@ void skipByEnvironment(int checks, const QString& why)
 // Never lower it to make a run pass. A count that has gone DOWN means a guard
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
-constexpr int kCheckFloor = 1994;
+constexpr int kCheckFloor = 2184;
 
 void check(bool condition, const QString& what)
 {
@@ -18265,6 +18265,550 @@ int main(int argc, char* argv[])
                                  "not restarted")
                       .arg(guide ? guide->completedSteps() : -1));
         }
+    }
+
+    // --- Milestone 4, Task 4.2: linked copies - actions and propagation ------
+    // An isolated probe, on the same terms every other whole-feature block in
+    // this file uses: this exercises three new actions, a new branch in the
+    // one commit choke point (commitReplaceBody) and the boolean path, and a
+    // new persisted manifest key, none of which should be able to disturb the
+    // shared `window`'s own later checks.
+    {
+        RequiredTempDir linkLib;
+        MainWindow probe(nullptr, /*persistProgress=*/false, linkLib.path());
+        probe.setAttribute(Qt::WA_ShowWithoutActivating);
+        probe.resize(1000, 700);
+        probe.show();
+        settle(200);
+        probe.view()->setAnimationsEnabled(false);
+        enterFreshFurniture(probe);
+
+        OcctViewWidget* linkView = probe.view();
+        linkView->setSelectionMode(OcctViewWidget::SelectionMode::Solid);
+
+        QAction* dupAction = action(probe, QStringLiteral("Duplicate linked"));
+        QAction* linkAction = action(probe, QStringLiteral("Link selected"));
+        QAction* unlinkAction = action(probe, QStringLiteral("Unlink"));
+        check(dupAction != nullptr && linkAction != nullptr && unlinkAction != nullptr,
+              "all three linked-copy actions exist");
+        check(dupAction != nullptr && dupAction->shortcut() == QKeySequence(Qt::CTRL | Qt::Key_D),
+              "Duplicate linked carries Ctrl+D - checked free against every other "
+              "binding in buildActions()");
+        check(linkAction != nullptr && linkAction->shortcut().isEmpty() &&
+                  unlinkAction != nullptr && unlinkAction->shortcut().isEmpty(),
+              "Link selected and Unlink carry no shortcut of their own, matching "
+              "Union/Subtract/Intersect");
+
+        // The one FACE any TopoDS_Shape offers to a pull, picked the same way
+        // the symmetry block above does.
+        const auto firstFaceOf = [](const TopoDS_Shape& shape) -> TopoDS_Face {
+            for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+                return TopoDS::Face(it.Current());
+            }
+            return TopoDS_Face();
+        };
+
+        // --- the enablement matrix, through updateActions() alone ----------
+        check(!dupAction->isEnabled() && !linkAction->isEnabled() && !unlinkAction->isEnabled(),
+              "nothing selected - all three disabled");
+
+        trigger(probe, QStringLiteral("Start Sketch"));
+        sketchQuad(probe, 0.06, 0.06, 0.16, 0.16);
+        trigger(probe, QStringLiteral("Finish Sketch"));
+        check(probe.extrudePendingFace(30.0), "body A extrudes - the matrix's own probe body");
+        const int idA = probe.document().solids().back().id;
+
+        linkView->setSelectedSolids({idA});
+        settle(80);
+        check(dupAction->isEnabled(), "one unlinked body selected - Duplicate linked is live");
+        check(!linkAction->isEnabled(), "...Link selected needs two or more, so it is not");
+        check(!unlinkAction->isEnabled(), "...and A is not linked to anything, so Unlink is not");
+        check(unlinkAction->toolTip() == QStringLiteral("This body isn't linked to anything"),
+              QStringLiteral("Unlink's disabled tooltip says exactly why (\"%1\")")
+                  .arg(unlinkAction->toolTip()));
+
+        // Wrong mode: switching to face selection makes the environment
+        // fail regardless of what ends up selected - all three go dark with
+        // the same reason.
+        linkView->setSelectionMode(OcctViewWidget::SelectionMode::Face);
+        settle(80);
+        check(!dupAction->isEnabled() && !linkAction->isEnabled() && !unlinkAction->isEnabled(),
+              "face selection mode - all three disabled regardless of the pick");
+        check(dupAction->toolTip().contains(QStringLiteral("body selection")),
+              QStringLiteral("...and the reason names the fix (\"%1\")").arg(dupAction->toolTip()));
+        linkView->setSelectionMode(OcctViewWidget::SelectionMode::Solid);
+        linkView->setSelectedSolids({idA});
+        settle(80);
+
+        // Mid-sketch and a pending outline both close the same three doors
+        // Lock to Face and the mirror-placement gesture already answer to.
+        trigger(probe, QStringLiteral("Start Sketch"));
+        settle(80);
+        check(!dupAction->isEnabled() && !linkAction->isEnabled() && !unlinkAction->isEnabled(),
+              "mid-sketch - all three disabled");
+        trigger(probe, QStringLiteral("Cancel Sketch"));
+        settle(80);
+
+        // --- Duplicate linked: places a copy, selects it, attaches the -----
+        // transform gizmo - the EXISTING selection/gizmo machinery, not
+        // anything this task built new.
+        linkView->setSelectedSolids({idA});
+        settle(80);
+        const std::size_t bodiesBeforeDup = probe.document().count();
+        const std::size_t undoDepthBeforeDup = probe.document().undoDepth();
+        check(trigger(probe, QStringLiteral("Duplicate linked")),
+              "Duplicate linked's own action triggers - proves the menu wiring, not "
+              "just the method");
+        check(probe.document().count() == bodiesBeforeDup + 1, "one new body exists");
+        check(probe.document().undoDepth() == undoDepthBeforeDup + 1,
+              "...in exactly one checkpoint");
+        const int idA2 = probe.document().solids().back().id;
+        check(probe.document().isLinked(idA) && probe.document().isLinked(idA2),
+              "both A and its copy read back linked");
+        check(probe.document().linkAnchorOf(idA) == probe.document().linkAnchorOf(idA2),
+              "...to the SAME group");
+        check(linkView->selectedSolidIds().size() == 1 && linkView->selectedSolidIds().front() == idA2,
+              "the copy - not the source - is left selected");
+        check(probe.canTransformSelectedBody() && probe.transformableBodyId() == idA2,
+              "...which is exactly what attaches the transform gizmo to it - the "
+              "ordinary selection-driven machinery, not anything gesture-specific");
+
+        ToastHost* linkToasts = probe.findChild<ToastHost*>();
+        check(linkToasts != nullptr &&
+                  linkToasts->currentText() ==
+                      QStringLiteral("%1 duplicated — 2 bodies now linked")
+                          .arg(QString::fromStdString(probe.document().nameOf(idA2))),
+              QStringLiteral("the toast names the copy and the group size (\"%1\")")
+                  .arg(linkToasts ? linkToasts->currentText() : QString()));
+
+        // A duplicated source is no different from an unpaired one as far as
+        // Duplicate linked itself is concerned - a linked source is allowed,
+        // it just joins the same group again.
+        check(probe.canDuplicateLinked(), "A, already linked, can still be duplicated again");
+
+        // Move the copy - the placement gesture the brief itself names -
+        // through the SAME transformBody() the gizmo's own drag commits
+        // through, proving the "move the copy" step does not itself disturb
+        // the group.
+        gp_Trsf moveCopy;
+        moveCopy.SetTranslation(gp_Vec(80.0, 0.0, 0.0));
+        check(probe.transformBody(idA2, moveCopy), "the copy moves");
+        check(probe.document().isLinked(idA) && probe.document().isLinked(idA2),
+              "...and both bodies are still linked afterward - a bake is an edit "
+              "like any other, propagated through the SAME choke point");
+
+        // --- pull on the ORIGINAL propagates to the copy --------------------
+        const double volABeforePull = ModelingOps::volume(probe.document().shapeOf(idA));
+        const double volA2BeforePull = ModelingOps::volume(probe.document().shapeOf(idA2));
+        const TopoDS_Face faceOfA = firstFaceOf(probe.document().shapeOf(idA));
+        check(!faceOfA.IsNull(), "a face of A was found for the pull");
+        const std::size_t undoDepthBeforePullA = probe.document().undoDepth();
+        check(probe.pullFaceBy(faceOfA, 5.0), "pulling A's own face succeeds");
+        check(probe.document().undoDepth() == undoDepthBeforePullA + 1,
+              "the pull took exactly ONE checkpoint, even though two bodies changed shape");
+        const double volAAfterPull = ModelingOps::volume(probe.document().shapeOf(idA));
+        const double volA2AfterPull = ModelingOps::volume(probe.document().shapeOf(idA2));
+        check(std::fabs(volAAfterPull - volABeforePull) > 1.0e-3,
+              "A's own volume genuinely changed");
+        check(std::fabs(volA2AfterPull - volA2BeforePull) > 1.0e-3,
+              "...and the copy's volume changed too - propagation reached it");
+        check(std::fabs((volAAfterPull - volABeforePull) - (volA2AfterPull - volA2BeforePull)) <
+                  1.0e-3,
+              QStringLiteral("...by exactly the same amount (A: %1, copy: %2) - a rigid "
+                             "placement carries a volume delta unchanged")
+                  .arg(volAAfterPull - volABeforePull)
+                  .arg(volA2AfterPull - volA2BeforePull));
+        check(linkToasts != nullptr &&
+                  linkToasts->currentText().contains(QStringLiteral("linked copy updated")),
+              QStringLiteral("the pull's own toast names the propagation (\"%1\")")
+                  .arg(linkToasts ? linkToasts->currentText() : QString()));
+
+        // --- pull on the COPY propagates back to the original ---------------
+        const double volABeforePull2 = ModelingOps::volume(probe.document().shapeOf(idA));
+        const double volA2BeforePull2 = ModelingOps::volume(probe.document().shapeOf(idA2));
+        const TopoDS_Face faceOfA2 = firstFaceOf(probe.document().shapeOf(idA2));
+        check(!faceOfA2.IsNull(), "a face of the copy was found for the pull");
+        check(probe.pullFaceBy(faceOfA2, 3.0), "pulling the COPY's own face succeeds");
+        const double volAAfterPull2 = ModelingOps::volume(probe.document().shapeOf(idA));
+        const double volA2AfterPull2 = ModelingOps::volume(probe.document().shapeOf(idA2));
+        check(std::fabs(volA2AfterPull2 - volA2BeforePull2) > 1.0e-3,
+              "the copy's own volume genuinely changed");
+        check(std::fabs(volAAfterPull2 - volABeforePull2) > 1.0e-3,
+              "...and A's volume changed too - propagation runs both directions");
+        check(std::fabs((volAAfterPull2 - volABeforePull2) -
+                        (volA2AfterPull2 - volA2BeforePull2)) < 1.0e-3,
+              "...by exactly the same amount again");
+
+        // --- Unlink stops propagation ---------------------------------------
+        linkView->setSelectedSolids({idA2});
+        settle(80);
+        check(unlinkAction->isEnabled(), "the copy, a linked member, makes Unlink live");
+        check(trigger(probe, QStringLiteral("Unlink")), "Unlink's own action triggers");
+        check(!probe.document().isLinked(idA2), "the copy reads back unlinked");
+        check(!probe.document().isLinked(idA),
+              "...and so does A - a group of exactly two dissolves outright, per "
+              "DocumentModel::unlink()'s own rule");
+        check(linkToasts != nullptr &&
+                  linkToasts->currentText().contains(QStringLiteral("no bodies remain linked")),
+              QStringLiteral("the dissolve is named in the toast (\"%1\")")
+                  .arg(linkToasts ? linkToasts->currentText() : QString()));
+
+        const double volABeforeStopped = ModelingOps::volume(probe.document().shapeOf(idA));
+        const double volA2BeforeStopped = ModelingOps::volume(probe.document().shapeOf(idA2));
+        const TopoDS_Face faceOfAAgain = firstFaceOf(probe.document().shapeOf(idA));
+        check(!faceOfAAgain.IsNull(), "a face of A was found for the post-unlink pull");
+        check(probe.pullFaceBy(faceOfAAgain, 2.0), "A can still be pulled on its own");
+        check(std::fabs(ModelingOps::volume(probe.document().shapeOf(idA)) - volABeforeStopped) >
+                  1.0e-3,
+              "A's own volume changed");
+        check(std::fabs(ModelingOps::volume(probe.document().shapeOf(idA2)) - volA2BeforeStopped) <
+                  1.0e-9,
+              "...but the former copy's volume is untouched - Unlink genuinely stopped "
+              "propagation, not merely relabelled it");
+
+        // --- Link selected: two INDEPENDENT bodies, snapped together --------
+        trigger(probe, QStringLiteral("Start Sketch"));
+        sketchQuad(probe, 0.06, 0.40, 0.16, 0.50);
+        trigger(probe, QStringLiteral("Finish Sketch"));
+        check(probe.extrudePendingFace(12.0), "body M1 extrudes");
+        const int idM1 = probe.document().solids().back().id;
+        trigger(probe, QStringLiteral("Start Sketch"));
+        sketchQuad(probe, 0.60, 0.40, 0.78, 0.58);
+        trigger(probe, QStringLiteral("Finish Sketch"));
+        check(probe.extrudePendingFace(22.0), "body M2 extrudes - a DIFFERENT size than M1");
+        const int idM2 = probe.document().solids().back().id;
+        const double volM1BeforeLink = ModelingOps::volume(probe.document().shapeOf(idM1));
+        const double volM2BeforeLink = ModelingOps::volume(probe.document().shapeOf(idM2));
+        check(std::fabs(volM1BeforeLink - volM2BeforeLink) > 1.0,
+              "the two really do start with different volumes, or the snap check below "
+              "would be vacuous");
+
+        linkView->setSelectedSolids({idM1, idM2});
+        settle(80);
+        check(linkAction->isEnabled(), "two unlinked bodies selected - Link selected is live");
+        check(trigger(probe, QStringLiteral("Link selected")), "Link selected's action triggers");
+        check(probe.document().isLinked(idM1) && probe.document().isLinked(idM2),
+              "both read back linked");
+        // linkExisting()'s anchor is whichever id AIS's own InitSelected order
+        // reports FIRST - "OCCT's InitSelected order is the context's, not
+        // the user's" (CLAUDE.md) - so it is read back rather than assumed to
+        // be idM1, and every check below follows whichever one it really is.
+        const int mLinkAnchorId = probe.document().linkAnchorOf(idM1);
+        check(mLinkAnchorId == idM1 || mLinkAnchorId == idM2,
+              "the anchor is one of the two bodies just linked");
+        const int mLinkSnappedId = (mLinkAnchorId == idM1) ? idM2 : idM1;
+        const double snappedVolAfterLink =
+            ModelingOps::volume(probe.document().shapeOf(mLinkSnappedId));
+        const double anchorVolAfterLink =
+            ModelingOps::volume(probe.document().shapeOf(mLinkAnchorId));
+        check(std::fabs(snappedVolAfterLink - anchorVolAfterLink) < 1.0e-3,
+              "the non-anchor's shape SNAPPED onto the anchor's own - same volume now, "
+              "not its old one");
+        check(linkToasts != nullptr &&
+                  linkToasts->currentText() ==
+                      QStringLiteral("2 bodies linked — every copy now matches %1")
+                          .arg(QString::fromStdString(probe.document().nameOf(mLinkAnchorId))),
+              QStringLiteral("the stated toast names the count and the anchor (\"%1\")")
+                  .arg(linkToasts ? linkToasts->currentText() : QString()));
+
+        // Both already linked - Link selected has nothing left to do with them.
+        check(!linkAction->isEnabled(),
+              "the same two bodies, now both linked, make Link selected go dark again");
+
+        // --- same-group boolean: refused, on this task's own v1 ruling ------
+        linkView->setSelectedSolids({idM1, idM2});
+        settle(80);
+        const std::size_t bodiesBeforeSameGroup = probe.document().count();
+        const std::size_t undoDepthBeforeSameGroup = probe.document().undoDepth();
+        check(!probe.applyBooleanToSelection(static_cast<int>(ModelingOps::BooleanKind::Fuse)),
+              "Union between two members of the SAME linked group is refused");
+        check(probe.document().count() == bodiesBeforeSameGroup,
+              "...nothing was removed or added");
+        check(probe.document().undoDepth() == undoDepthBeforeSameGroup,
+              "...and no checkpoint was taken - a genuine no-op, not a silent partial one");
+        check(probe.document().isLinked(idM1) && probe.document().isLinked(idM2),
+              "...both bodies are exactly as linked as they were");
+        check(linkToasts != nullptr && linkToasts->remainingMs() > 7500,
+              QStringLiteral("the refusal is a real Failure toast, timed for 8000 ms "
+                             "(%1 ms left)")
+                  .arg(linkToasts ? linkToasts->remainingMs() : -1));
+        {
+            QStringList sameGroupOffenders;
+            for (const QString& word : bannedWords()) {
+                if (linkToasts != nullptr && usesBannedWord(linkToasts->currentText(), word))
+                    sameGroupOffenders << word;
+            }
+            check(sameGroupOffenders.isEmpty(),
+                  QStringLiteral("the same-group refusal toast uses no banned word (%1)")
+                      .arg(sameGroupOffenders.isEmpty() ? QStringLiteral("none")
+                                                        : sameGroupOffenders.join(QStringLiteral(", "))));
+        }
+
+        // A boolean between a linked member and an UNRELATED, unlinked body is
+        // not this refusal at all - it is allowed, and the linked side's own
+        // group follows the result exactly as commitReplaceBody's branch does.
+        trigger(probe, QStringLiteral("Start Sketch"));
+        sketchQuad(probe, 0.06, 0.62, 0.16, 0.72);
+        trigger(probe, QStringLiteral("Finish Sketch"));
+        check(probe.extrudePendingFace(9.0), "an unrelated third body, N, extrudes");
+        const int idN = probe.document().solids().back().id;
+        linkView->setSelectedSolids({idM1, idN});
+        settle(80);
+        const double volM2BeforeCombine = ModelingOps::volume(probe.document().shapeOf(idM2));
+        check(probe.applyBooleanToSelection(static_cast<int>(ModelingOps::BooleanKind::Fuse)),
+              "Union between a linked member and an unrelated body succeeds");
+        // Cut is not commutative and applyBooleanToSelection() sorts its two
+        // operands by id before deciding which survives (see its own
+        // comment) - idM1 is the lower id (created first) regardless of
+        // which of M1/M2 ended up as the GROUP's own anchor above, so idM1
+        // is the id that KEEPS its identity and idN is the one removed; M2
+        // is what proves propagation followed the combined result.
+        check(!probe.document().contains(idN), "N itself was consumed by the boolean");
+        check(probe.document().contains(idM1) && probe.document().isLinked(idM1),
+              "M1 survives under its own id, still linked");
+        check(probe.document().isLinked(idM2), "M2 is still linked too");
+        check(std::fabs(ModelingOps::volume(probe.document().shapeOf(idM2)) - volM2BeforeCombine) >
+                  1.0e-3,
+              "...and its shape followed the combined result - the boolean path "
+              "propagates exactly like commitReplaceBody's own branch");
+
+        // --- mirror-paired refusal: the v1 exclusion, from the LINK side ----
+        // A FRESH, isolated probe - the `probe` above is by now a cluttered
+        // scene (several bodies scattered across the viewport's own screen
+        // fractions), and fitAll()-then-click-a-world-point is exactly the
+        // idiom the Milestone 3 symmetry block above uses, at the SAME
+        // coordinates that block already proved reliable. Reusing `probe`
+        // here risked exactly the failure mode CLAUDE.md warns about
+        // elsewhere in this file: a fitAll() zoomed out far enough to frame
+        // an unrelated body could make a small quad's own click points
+        // imprecise enough to straddle the mirror plane by accident.
+        {
+            RequiredTempDir mirrorRefusalLib;
+            MainWindow mirrorProbe(nullptr, /*persistProgress=*/false, mirrorRefusalLib.path());
+            mirrorProbe.setAttribute(Qt::WA_ShowWithoutActivating);
+            mirrorProbe.resize(1000, 700);
+            mirrorProbe.show();
+            settle(200);
+            mirrorProbe.view()->setAnimationsEnabled(false);
+            enterFreshFurniture(mirrorProbe);
+
+            OcctViewWidget* mirrorView = mirrorProbe.view();
+            mirrorView->setViewTop();
+            settle(150);
+            const auto worldToScreen = [&](double x, double y) -> QPointF {
+                QPoint out;
+                mirrorView->projectToScreen(gp_Pnt(x, y, 0.0), out);
+                return QPointF(out);
+            };
+            const auto sketchQuadWorld = [&](double x0, double y0, double x1, double y1) {
+                mirrorView->fitAll();
+                mirrorView->setViewTop();
+                settle(120);
+                clickAt(mirrorView, worldToScreen(x0, y0));
+                clickAt(mirrorView, worldToScreen(x1, y0));
+                clickAt(mirrorView, worldToScreen(x1, y1));
+                clickAt(mirrorView, worldToScreen(x0, y1));
+            };
+
+            // pairWithMirror() (DocumentModel.h) is RETROACTIVE pairing, not
+            // "these two become each other's twin": it builds a FRESH
+            // mirrored COPY of every selected body and pairs each one with
+            // its own new copy - so selecting both P and Q here does not
+            // pair P with Q, it adds a new twin for P AND a new twin for Q
+            // (four bodies total afterward). Two seeds, symmetric about
+            // x=0, only because a LONE selected body always straddles its
+            // own centre (the plane's default starting position) and
+            // pairWithMirror() refuses a straddling body outright - two
+            // bodies on opposite sides give the gesture a plane that
+            // straddles neither, the same reason the Milestone 3 symmetry
+            // block above this one uses the identical trick.
+            trigger(mirrorProbe, QStringLiteral("Start Sketch"));
+            sketchQuadWorld(-30.0, -30.0, -10.0, -10.0);
+            trigger(mirrorProbe, QStringLiteral("Finish Sketch"));
+            check(mirrorProbe.extrudePendingFace(6.0), "mirror seed P extrudes, symmetry still off");
+            const int idP = mirrorProbe.document().solids().back().id;
+            trigger(mirrorProbe, QStringLiteral("Start Sketch"));
+            sketchQuadWorld(10.0, -30.0, 30.0, -10.0);
+            trigger(mirrorProbe, QStringLiteral("Finish Sketch"));
+            check(mirrorProbe.extrudePendingFace(6.0), "mirror seed Q extrudes, symmetric about x=0");
+            const int idQ = mirrorProbe.document().solids().back().id;
+            const std::size_t bodiesBeforeMirror = mirrorProbe.document().count();
+
+            mirrorView->setSelectionMode(OcctViewWidget::SelectionMode::Solid);
+            mirrorView->setSelectedSolids({idP, idQ});
+            settle(80);
+            trigger(mirrorProbe, QStringLiteral("Symmetry"));
+            check(mirrorView->mirrorPlacementActive(), "S with both seeds selected begins placement");
+            sendKeyTo(&mirrorProbe, Qt::Key_Return);
+            settle(200);
+            check(mirrorProbe.document().count() == bodiesBeforeMirror + 2,
+                  "each seed gained its OWN fresh twin - two new bodies, not a pairing "
+                  "of P with Q");
+            check(mirrorProbe.document().symmetryOn() && mirrorProbe.document().twinOf(idP) > 0 &&
+                      mirrorProbe.document().twinOf(idQ) > 0,
+                  "P and Q are both mirror-paired now, each with its own twin");
+
+            QAction* mirrorDupAction = action(mirrorProbe, QStringLiteral("Duplicate linked"));
+            QAction* mirrorLinkAction = action(mirrorProbe, QStringLiteral("Link selected"));
+            check(mirrorDupAction != nullptr && mirrorLinkAction != nullptr,
+                  "both actions exist on this probe too");
+
+            mirrorView->setSelectedSolids({idP});
+            settle(80);
+            check(mirrorDupAction != nullptr && !mirrorDupAction->isEnabled(),
+                  "a mirror-paired body cannot be duplicated linked - the v1 exclusion, "
+                  "enforced from this side");
+            check(mirrorDupAction != nullptr &&
+                      mirrorDupAction->toolTip().contains(QStringLiteral("mirrored")),
+                  QStringLiteral("...and the reason says so (\"%1\")")
+                      .arg(mirrorDupAction ? mirrorDupAction->toolTip() : QString()));
+
+            const std::size_t bodiesBeforeMirrorRefusal = mirrorProbe.document().count();
+            check(!mirrorProbe.duplicateLinkedCopy(),
+                  "calling it directly refuses too - the predicate and the operation agree");
+            check(mirrorProbe.document().count() == bodiesBeforeMirrorRefusal,
+                  "...and nothing was added");
+            ToastHost* mirrorToasts = mirrorProbe.findChild<ToastHost*>();
+            check(mirrorToasts != nullptr && mirrorToasts->remainingMs() > 7500,
+                  "a real Failure toast reports it, timed for 8000 ms");
+
+            mirrorView->setSelectedSolids({idP, idQ});
+            settle(80);
+            check(mirrorLinkAction != nullptr && !mirrorLinkAction->isEnabled(),
+                  "Link selected refuses a selection containing a mirror-paired body too");
+        }
+
+        // --- persistence: manifest round-trip, then a version round-trip ----
+        // The furniture as it stands: M2 and idM1's own surviving body are
+        // still linked.
+        check(probe.saveCurrentFurniture(), "the furniture saves with a live link group on it");
+        const QString linkFurnitureId = probe.currentFurnitureId();
+
+        {
+            DocumentModel reloaded;
+            QString reloadErr;
+            FurnitureStore reloadStore(linkLib.path());
+            check(reloadStore.loadFurniture(linkFurnitureId, reloaded, &reloadErr),
+                  QStringLiteral("the furniture reloads clean (%1)")
+                      .arg(reloadErr.isEmpty() ? QStringLiteral("ok") : reloadErr));
+
+            int reloadedLinkedId = 0;
+            for (const DocumentModel::Solid& s : reloaded.solids()) {
+                if (reloaded.isLinked(s.id)) { reloadedLinkedId = s.id; break; }
+            }
+            check(reloadedLinkedId != 0,
+                  "the reloaded document has at least one linked body - the group "
+                  "survived the manifest round trip");
+            if (reloadedLinkedId != 0) {
+                DocumentModel::LinkGroup reloadedGroup;
+                check(reloaded.linkGroupOf(reloadedLinkedId, reloadedGroup) &&
+                          reloadedGroup.placement.size() >= 2,
+                      "...and its group still has two or more members");
+
+                // "assert propagation still works": pull one member of the
+                // reloaded group and check every OTHER member's volume moved
+                // too, through the exact same propagateLinkedEdit() call the
+                // live editor uses.
+                const TopoDS_Shape reloadedShape = reloaded.shapeOf(reloadedLinkedId);
+                const ModelingOps::BooleanResult reloadedPull =
+                    ModelingOps::pullFace(reloadedShape, firstFaceOf(reloadedShape), 4.0);
+                check(reloadedPull.ok, "the reloaded body can still be pulled");
+                if (reloadedPull.ok) {
+                    int otherMemberId = 0;
+                    double otherVolBefore = 0.0;
+                    for (const auto& kv : reloadedGroup.placement) {
+                        if (kv.first == reloadedLinkedId) continue;
+                        otherMemberId = kv.first;
+                        otherVolBefore = ModelingOps::volume(reloaded.shapeOf(kv.first));
+                        break;
+                    }
+                    check(reloaded.propagateLinkedEdit(reloadedLinkedId, reloadedPull.shape),
+                          "propagateLinkedEdit() runs on the reloaded document");
+                    check(otherMemberId != 0 &&
+                              std::fabs(ModelingOps::volume(reloaded.shapeOf(otherMemberId)) -
+                                       otherVolBefore) > 1.0e-3,
+                          "...and the OTHER member's volume actually moved - "
+                          "propagation genuinely still works after reload, not just "
+                          "the bookkeeping");
+                }
+            }
+        }
+
+        check(probe.saveVersion(QStringLiteral("With links")),
+              "a version saves with the same live link group on it");
+        // Disturb the live document before restoring, so a restore that did
+        // nothing could not pass this by accident.
+        linkView->setSelectedSolids({idM2});
+        settle(80);
+        if (unlinkAction->isEnabled()) trigger(probe, QStringLiteral("Unlink"));
+        check(!probe.document().isLinked(idM2),
+              "M2 reads back unlinked, disturbing the state the restore has to undo");
+
+        check(probe.restoreVersion(QStringLiteral("With links")), "the version restores");
+        // idM2 is STALE the instant restoreVersion() returns:
+        // DocumentModel::restoreFrom() copies the freshly-LOADED snapshot's
+        // own ids in verbatim (see its own header comment), and that
+        // snapshot came through loadVersion()'s fromSerialized(), which
+        // reassigns ids from a fresh counter - exactly the same
+        // "re-fetch after any restore" discipline the Milestone 3 compare/
+        // restore block above this one already follows for bodyBId. Found
+        // by re-scanning rather than assumed, the same way the manifest
+        // round trip just above does.
+        int restoredLinkedId = 0;
+        for (const DocumentModel::Solid& s : probe.document().solids()) {
+            if (probe.document().isLinked(s.id)) { restoredLinkedId = s.id; break; }
+        }
+        check(restoredLinkedId != 0,
+              "the restored document has at least one linked body - the group "
+              "survived the version round trip");
+        if (restoredLinkedId != 0) {
+            DocumentModel::LinkGroup restoredGroup;
+            check(probe.document().linkGroupOf(restoredLinkedId, restoredGroup) &&
+                      restoredGroup.placement.size() >= 2,
+                  "...its restored group still has two or more members");
+            int otherRestoredId = 0;
+            for (const auto& kv : restoredGroup.placement) {
+                if (kv.first != restoredLinkedId) { otherRestoredId = kv.first; break; }
+            }
+            check(otherRestoredId != 0, "a fellow member exists to watch");
+            if (otherRestoredId != 0) {
+                const double otherVolBeforeRestorePull =
+                    ModelingOps::volume(probe.document().shapeOf(otherRestoredId));
+                const TopoDS_Face faceOfRestored =
+                    firstFaceOf(probe.document().shapeOf(restoredLinkedId));
+                check(!faceOfRestored.IsNull(), "a face of the restored linked body was found");
+                check(probe.pullFaceBy(faceOfRestored, 2.0),
+                      "pulling the restored body's own face succeeds");
+                check(std::fabs(ModelingOps::volume(probe.document().shapeOf(otherRestoredId)) -
+                                otherVolBeforeRestorePull) > 1.0e-3,
+                      "...and its fellow member's volume moved too - propagation "
+                      "still works after a version restore, the same assertion as "
+                      "the manifest round trip above");
+            }
+        }
+
+        // --- the general banned-word sweep covers these three actions for --
+        // free (it walks every QAction this window owns), but the group-size
+        // toast copy is exercised only through the specific scenarios above,
+        // so a targeted sweep over THIS probe's own toast history closes that
+        // gap the same way the render-mode block's own toast sweep does.
+        Toast* linkToastWidget = probe.findChild<Toast*>();
+        check(linkToastWidget != nullptr && !linkToastWidget->paintedTexts().isEmpty(),
+              "this probe has toast history to sweep, so the check below is not vacuous");
+        QStringList linkToastOffenders;
+        for (Toast* widget : probe.findChildren<Toast*>()) {
+            for (const QString& text : widget->paintedTexts()) {
+                for (const QString& word : bannedWords()) {
+                    if (usesBannedWord(text, word))
+                        linkToastOffenders << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
+                }
+            }
+        }
+        check(linkToastOffenders.isEmpty(),
+              QStringLiteral("no linked-copy toast uses a banned word (%1)")
+                  .arg(linkToastOffenders.isEmpty()
+                           ? QStringLiteral("none")
+                           : linkToastOffenders.join(QStringLiteral(", "))));
     }
 
     // The coverage floor, asserted OUTSIDE check() on purpose: an assertion

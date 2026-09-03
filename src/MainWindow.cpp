@@ -988,6 +988,23 @@ void MainWindow::buildActions()
                                             "becomes the mirror."));
     connect(mySetSymmetryPlaneAction, &QAction::triggered, this, &MainWindow::onSetSymmetryPlane);
 
+    // Linked copies (Milestone 4, Task 4.2) - see the header's own "linked
+    // copies" section for what each one does and refuses on. Ctrl+D was
+    // free (checked against every other binding in this function); the
+    // other two carry no shortcut of their own, the same as Union/Subtract/
+    // Intersect just below.
+    myDuplicateLinkedAction = new QAction(tr("Duplicate &linked"), this);
+    myDuplicateLinkedAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_D));
+    connect(myDuplicateLinkedAction, &QAction::triggered, this,
+            [this] { duplicateLinkedCopy(); });
+
+    myLinkSelectedAction = new QAction(tr("&Link selected"), this);
+    connect(myLinkSelectedAction, &QAction::triggered, this,
+            [this] { linkSelectedBodies(); });
+
+    myUnlinkAction = new QAction(tr("&Unlink"), this);
+    connect(myUnlinkAction, &QAction::triggered, this, [this] { unlinkSelectedBody(); });
+
     myExportStepAction = new QAction(tr("Export &STEP..."), this);
     // Ctrl+S is Save's now - the platform standard key and a furniture SAVE
     // is what it should mean the moment a library exists to save into.
@@ -1209,6 +1226,14 @@ void MainWindow::buildActions()
     myIntersectAction->setToolTip(tr("Keep only where two bodies overlap\n"
                                      "Everything outside the shared volume is discarded."));
 
+    // Linked copies (Milestone 4, Task 4.2). These are the ENABLED
+    // tooltips; updateActions() swaps each for a reason-specific one while
+    // disabled, the same "why not" contract Lock to Face and Set Symmetry
+    // Plane keep - see duplicateLinkedTooltipText() and its two neighbours.
+    myDuplicateLinkedAction->setToolTip(duplicateLinkedTooltipText());
+    myLinkSelectedAction->setToolTip(linkSelectedTooltipText());
+    myUnlinkAction->setToolTip(unlinkBodyTooltipText());
+
     auto* selectionGroup = new QActionGroup(this);
     selectionGroup->addAction(mySolidSelectAction);
     selectionGroup->addAction(myFaceSelectAction);
@@ -1287,6 +1312,11 @@ QMenuBar* MainWindow::buildMenus()
     // chip.
     modelMenu->addAction(mySymmetryAction);
     modelMenu->addAction(mySetSymmetryPlaneAction);
+    modelMenu->addSeparator();
+    // Linked copies (Milestone 4, Task 4.2) - menu-only, same reason.
+    modelMenu->addAction(myDuplicateLinkedAction);
+    modelMenu->addAction(myLinkSelectedAction);
+    modelMenu->addAction(myUnlinkAction);
 
     QMenu* viewMenu = bar->addMenu(tr("&View"));
     viewMenu->addAction(myFitAction);
@@ -1814,6 +1844,64 @@ void MainWindow::updateActions()
     // The same pick as Lock to Face - one flat face, no sketch, no pending
     // outline.
     if (mySetSymmetryPlaneAction) mySetSymmetryPlaneAction->setEnabled(flatFaceSelected);
+
+    // Linked copies (Milestone 4, Task 4.2). Each ENABLED state is read
+    // straight from the header's own accessor (canDuplicateLinked() and
+    // friends) rather than recomputed here, so the checkbox and the reason
+    // shown while disabled can never drift into different ideas of what is
+    // possible - canPullSelectedFace()'s own "one function, three readers"
+    // rule, one gizmo over. The reason cascade asks the same terms
+    // linkGestureEnvironmentOk() does, in the same order, for the same
+    // reason mirrorPlacementRefusalText() does.
+    {
+        const std::vector<int> linkIds = myView->selectedSolidIds();
+        const bool linkWrongMode =
+            !mySketching && !atInit && !hasPendingFace() &&
+            myView->selectionMode() != OcctViewWidget::SelectionMode::Solid;
+
+        if (myDuplicateLinkedAction) {
+            const bool enabled = canDuplicateLinked();
+            myDuplicateLinkedAction->setEnabled(enabled);
+            myDuplicateLinkedAction->setToolTip(
+                enabled                    ? duplicateLinkedTooltipText()
+                : mySketching               ? sketchReason
+                : hasPendingFace()          ? pendingReason
+                : linkWrongMode             ? tr("Switch to body selection, then select "
+                                                  "the body to duplicate")
+                : linkIds.size() != 1       ? tr("Select exactly one body to duplicate")
+                                            : tr("This body is already mirrored — duplicate "
+                                                 "its twin instead, or turn off Symmetry for "
+                                                 "it first"));
+        }
+
+        if (myLinkSelectedAction) {
+            const bool enabled = canLinkSelected();
+            myLinkSelectedAction->setEnabled(enabled);
+            myLinkSelectedAction->setToolTip(
+                enabled                    ? linkSelectedTooltipText()
+                : mySketching               ? sketchReason
+                : hasPendingFace()          ? pendingReason
+                : linkWrongMode             ? tr("Switch to body selection, then select two "
+                                                  "or more bodies")
+                : linkIds.size() < 2        ? tr("Select two or more bodies to link")
+                                            : tr("One of the selected bodies is already "
+                                                 "linked or already mirrored — unlink or "
+                                                 "turn off Symmetry for it first"));
+        }
+
+        if (myUnlinkAction) {
+            const bool enabled = canUnlink();
+            myUnlinkAction->setEnabled(enabled);
+            myUnlinkAction->setToolTip(
+                enabled                    ? unlinkBodyTooltipText()
+                : mySketching               ? sketchReason
+                : hasPendingFace()          ? pendingReason
+                : linkWrongMode             ? tr("Switch to body selection, then select a "
+                                                  "linked body")
+                : linkIds.size() != 1       ? tr("Select exactly one linked body")
+                                            : tr("This body isn't linked to anything"));
+        }
+    }
 
     myUnionAction->setEnabled(booleanReady);
     mySubtractAction->setEnabled(booleanReady);
@@ -2946,6 +3034,24 @@ QString MainWindow::unlockTooltipText() const
     return tr("Go back to drawing on the ground (Shift+L)");
 }
 
+QString MainWindow::duplicateLinkedTooltipText() const
+{
+    return tr("Copy this body and keep both in step (Ctrl+D)\n"
+              "Editing either one carries the change to every copy.");
+}
+
+QString MainWindow::linkSelectedTooltipText() const
+{
+    return tr("Snap the other selected bodies onto the first, and keep them in step\n"
+              "Editing any one of them carries the change to the rest.");
+}
+
+QString MainWindow::unlinkBodyTooltipText() const
+{
+    return tr("Stop this body following its linked copies\n"
+              "Its own shape is untouched - only the connection ends.");
+}
+
 QString MainWindow::snapTooltipText() const
 {
     return tr("Snap outline points to the %1 grid\n"
@@ -3712,14 +3818,29 @@ void MainWindow::checkpointDocument()
     myDocument.checkpoint();
 }
 
-void MainWindow::commitReplaceBody(int id, const TopoDS_Shape& newShape, bool& twinFollowed)
+void MainWindow::commitReplaceBody(int id, const TopoDS_Shape& newShape, bool& twinFollowed,
+                                   int& linkedOthersUpdated)
 {
     twinFollowed = false;
+    linkedOthersUpdated = 0;
     if (id <= 0 || newShape.IsNull()) return;
 
     checkpointDocument();
     myDocument.replaceSolid(id, newShape);
     myView->displaySolid(id, newShape);
+
+    // Linked copies (Milestone 4, Task 4.2): propagation and the mirror-twin
+    // follow below are mutually exclusive by construction - a linked member
+    // can never also carry a mirror twin, the v1 exclusion DocumentModel
+    // enforces from both directions - so exactly one of the two branches can
+    // ever run for the same `id`. propagateLinkedEdit() takes NO checkpoint
+    // of its own (see its header): it rides inside the checkpoint taken two
+    // lines up, so one undo reverts `id` and every other member together.
+    if (myDocument.isLinked(id)) {
+        myDocument.propagateLinkedEdit(id, newShape);
+        linkedOthersUpdated = resyncLinkGroupView(id);
+        return;
+    }
 
     // Symmetry (Milestone 3): the whole reason this function exists rather
     // than staying three copies of "checkpoint, replace, display" - one
@@ -3779,7 +3900,8 @@ bool MainWindow::pullFaceBy(const TopoDS_Face& face, double distance)
     myView->clearSelection();
 
     bool twinFollowed = false;
-    commitReplaceBody(id, result.shape, twinFollowed);
+    int linkedOthersUpdated = 0;
+    commitReplaceBody(id, result.shape, twinFollowed, linkedOthersUpdated);
     recordProgress("pull.completed");
 
     updateActions();
@@ -3789,6 +3911,7 @@ bool MainWindow::pullFaceBy(const TopoDS_Face& face, double distance)
             .arg(QString::fromStdString(myDocument.nameOf(id)),
                  QString::fromStdString(Measure::formatDimensions(result.shape)));
     if (twinFollowed) message += tr(" — twin followed");
+    message += linkedGroupSuffix(linkedOthersUpdated);
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
     return true;
@@ -3926,6 +4049,13 @@ QString MainWindow::transformRefusalText(const gp_Trsf& delta)
         .arg(transformPastVerb(delta));
 }
 
+QString MainWindow::linkedGroupSuffix(int othersUpdated)
+{
+    if (othersUpdated <= 0) return QString();
+    return othersUpdated == 1 ? tr(" — linked copy updated")
+                              : tr(" — %1 linked copies updated").arg(othersUpdated);
+}
+
 bool MainWindow::transformIsScale(const gp_Trsf& delta)
 {
     return std::fabs(delta.ScaleFactor() - 1.0) > 1.0e-9;
@@ -3990,7 +4120,8 @@ bool MainWindow::bevelEdgesBy(const std::vector<TopoDS_Edge>& edges, double size
     myView->clearSelection();
 
     bool twinFollowed = false;
-    commitReplaceBody(id, result.shape, twinFollowed);
+    int linkedOthersUpdated = 0;
+    commitReplaceBody(id, result.shape, twinFollowed, linkedOthersUpdated);
     recordProgress("bevel.completed");
 
     updateActions();
@@ -4012,6 +4143,7 @@ bool MainWindow::bevelEdgesBy(const std::vector<TopoDS_Edge>& edges, double size
             : (fillet ? tr("Fillet added to %1 — %2") : tr("Chamfer added to %1 — %2"))
                   .arg(name, extent);
     if (twinFollowed) message += tr(" — twin followed");
+    message += linkedGroupSuffix(linkedOthersUpdated);
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
     return true;
@@ -4116,7 +4248,8 @@ bool MainWindow::transformBody(int id, const gp_Trsf& delta)
     }
 
     bool twinFollowed = false;
-    commitReplaceBody(id, result.shape, twinFollowed);
+    int linkedOthersUpdated = 0;
+    commitReplaceBody(id, result.shape, twinFollowed, linkedOthersUpdated);
     // Selected again on purpose, unlike the face pull's clearSelection(): the
     // body is still the same body, and keeping it selected is what leaves the
     // gizmo standing on it for a second drag. displaySolid() detached the
@@ -4136,6 +4269,7 @@ bool MainWindow::transformBody(int id, const gp_Trsf& delta)
                  transformPastVerb(delta),
                  QString::fromStdString(Measure::formatDimensions(result.shape)));
     if (twinFollowed) message += tr(" — twin followed");
+    message += linkedGroupSuffix(linkedOthersUpdated);
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
     return true;
@@ -4173,6 +4307,30 @@ bool MainWindow::applyBooleanToSelection(int kind)
     // Cut is not commutative. The lower document id is the base, so the result is
     // predictable rather than dependent on pick order, which AIS does not preserve.
     std::sort(ids.begin(), ids.end());
+
+    // Linked copies (Milestone 4, Task 4.2): two members of the SAME group
+    // refuse outright, before the kernel is even asked. This is NOT the
+    // mirror-twin case just below, which is allowed and collapses cleanly -
+    // a body fused with its own mirror IS the symmetric whole, so the
+    // result genuinely has no more use for a twin. Two placements of the
+    // SAME linked shape are different: after combining them there is no
+    // longer one honest shape left to propagate FROM (the group's own
+    // "same shape, placed differently" invariant is what a combine would
+    // break), so v1's ruling is simplest-honest: refuse, and say so.
+    if (myDocument.isLinked(ids[0]) && myDocument.isLinked(ids[1]) &&
+        myDocument.linkAnchorOf(ids[0]) == myDocument.linkAnchorOf(ids[1])) {
+        // Not "refused" - the banned-word sweep matches bare substrings
+        // case-insensitively (CLAUDE.md says so), and "refused" carries
+        // "fuse" inside it. See transformRefusalText()'s own comment for the
+        // same finding, one gizmo over.
+        myToasts->show(tr("%1 can't combine two copies of the same linked group — "
+                          "Unlink one first, then try again")
+                          .arg(operationName),
+                      Toast::Kind::Failure, false);
+        statusBar()->showMessage(tr("%1 refused — nothing was changed").arg(operationName));
+        return false;
+    }
+
     const std::string nameA = myDocument.nameOf(ids[0]);
     const std::string nameB = myDocument.nameOf(ids[1]);
     const TopoDS_Shape a = myDocument.shapeOf(ids[0]);
@@ -4216,14 +4374,31 @@ bool MainWindow::applyBooleanToSelection(int kind)
         if (myDocument.twinOf(ids[0]) > 0) survivingId = ids[0];
         else if (myDocument.twinOf(ids[1]) > 0) survivingId = ids[1];
     }
+    // Linked copies (Milestone 4, Task 4.2): the identical reasoning one
+    // paragraph up, for link groups instead of a mirror twin - keep
+    // whichever operand belongs to a group, so propagateLinkedEdit() below
+    // has a valid member id to re-derive the rest of the group from. The
+    // same-group case was already refused above, so at most ONE of the two
+    // can be linked here, and a body can never carry a twin AND a group at
+    // once (the v1 exclusion), so this can never collide with the branch
+    // just above.
+    if (survivingId == 0) {
+        if (myDocument.isLinked(ids[0])) survivingId = ids[0];
+        else if (myDocument.isLinked(ids[1])) survivingId = ids[1];
+    }
 
     checkpointDocument();
     myView->clearSelection();
 
     int id = 0;
     bool twinFollowed = false;
+    int linkedOthersUpdated = 0;
     if (survivingId > 0) {
         const int otherId = (survivingId == ids[0]) ? ids[1] : ids[0];
+        // removeSolid() drops `otherId`'s own pairing/group bookkeeping (see
+        // DocumentModel.h) - if `otherId` was itself linked to a DIFFERENT
+        // group than `survivingId`'s, that group loses this one member the
+        // same way any other body removal would take it out.
         myDocument.removeSolid(otherId);
         myView->removeSolid(otherId);
         myDocument.replaceSolid(survivingId, result.shape);
@@ -4241,6 +4416,12 @@ bool MainWindow::applyBooleanToSelection(int kind)
             } else {
                 qWarning("Symmetry: twin mirror failed: %s", mirrored.error.c_str());
             }
+        } else if (myDocument.isLinked(id)) {
+            // propagateLinkedEdit() takes NO checkpoint of its own (see its
+            // header) - it rides inside the checkpoint taken two lines up,
+            // exactly as commitReplaceBody()'s own linked branch does.
+            myDocument.propagateLinkedEdit(id, result.shape);
+            linkedOthersUpdated = resyncLinkGroupView(id);
         }
     } else {
         // Both unpaired, or the two operands were each other's own twin -
@@ -4266,6 +4447,7 @@ bool MainWindow::applyBooleanToSelection(int kind)
                                QString::fromStdString(
                                    Measure::formatDimensions(result.shape)));
     if (twinFollowed) message += tr(" — twin followed");
+    message += linkedGroupSuffix(linkedOthersUpdated);
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
     return true;
@@ -4810,6 +4992,237 @@ void MainWindow::cancelMirrorPlacement()
     myView->cancelMirrorPlacement();
     updateActions();
     statusBar()->showMessage(tr("Mirror placement cancelled"));
+}
+
+// --- linked copies (Milestone 4, Task 4.2) ----------------------------------
+
+bool MainWindow::linkGestureEnvironmentOk() const
+{
+    // The same three terms canPullSelectedFace() opens with, for the same
+    // reasons - a furniture must actually be open, and neither a sketch in
+    // progress nor a waiting outline should let a body underneath either one
+    // be duplicated, linked or unlinked out from under it.
+    if (mySketching || hasPendingFace() || myShowingInitScreen) return false;
+    // Body mode explicitly - selectedSolidIds() reports the owning body of a
+    // selected face or edge too, so without this a face/edge selection could
+    // satisfy a count check that means something different in body mode. The
+    // same mode check transformableBodyId() and mirrorPlacementEnvironmentOk()
+    // each carry, for the same reason.
+    return myView->selectionMode() == OcctViewWidget::SelectionMode::Solid;
+}
+
+int MainWindow::duplicateLinkedSourceId() const
+{
+    if (!linkGestureEnvironmentOk()) return 0;
+    const std::vector<int> ids = myView->selectedSolidIds();
+    if (ids.size() != 1) return 0;
+    const int id = ids.front();
+    // The v1 mirror/link exclusion (DocumentModel.h), enforced from this
+    // side too: createLinkedCopy() itself refuses a mirror-paired source, and
+    // checking it here is what lets the disabled tooltip name the real
+    // reason instead of a kernel error nobody sees. An already-LINKED source
+    // is fine - the copy simply joins the existing group.
+    if (myDocument.symmetryOn() && myDocument.twinOf(id) > 0) return 0;
+    return id;
+}
+
+bool MainWindow::canLinkSelected() const
+{
+    if (!linkGestureEnvironmentOk()) return false;
+    const std::vector<int> ids = myView->selectedSolidIds();
+    if (ids.size() < 2) return false;
+    for (int id : ids) {
+        // linkExisting() itself refuses an id already in a group and a
+        // mirror-paired id (the same v1 exclusion above) - checked here so
+        // the disabled tooltip can say which.
+        if (myDocument.isLinked(id)) return false;
+        if (myDocument.symmetryOn() && myDocument.twinOf(id) > 0) return false;
+    }
+    return true;
+}
+
+int MainWindow::unlinkTargetId() const
+{
+    if (!linkGestureEnvironmentOk()) return 0;
+    const std::vector<int> ids = myView->selectedSolidIds();
+    if (ids.size() != 1) return 0;
+    const int id = ids.front();
+    return myDocument.isLinked(id) ? id : 0;
+}
+
+int MainWindow::resyncLinkGroupView(int editedId)
+{
+    DocumentModel::LinkGroup group;
+    if (!myDocument.linkGroupOf(editedId, group)) return 0;
+    int others = 0;
+    for (const auto& kv : group.placement) {
+        if (kv.first == editedId) continue;
+        myView->displaySolid(kv.first, myDocument.shapeOf(kv.first));
+        ++others;
+    }
+    return others;
+}
+
+bool MainWindow::duplicateLinkedCopy()
+{
+    const int sourceId = duplicateLinkedSourceId();
+    if (sourceId <= 0) {
+        // canDuplicateLinked() already gates the action itself, so a real
+        // user cannot reach this through a click - but the mirror/link
+        // exclusion is a MEANINGFUL, nameable reason, not a malformed-input
+        // guard like pullFaceBy()'s own silent early-outs, and
+        // never-silent-failure applies to a caller driving this directly
+        // (Ctrl+D, or a test) exactly as it does to a click. Reported only
+        // for that one specific, nameable reason - an empty or wrong-mode
+        // selection has nothing worth naming beyond what the disabled
+        // tooltip already says.
+        const std::vector<int> ids = myView->selectedSolidIds();
+        if (ids.size() == 1 && myDocument.symmetryOn() && myDocument.twinOf(ids.front()) > 0) {
+            myToasts->show(tr("Couldn't duplicate that body linked — it's mirrored, and a "
+                              "body can't be both at once. Turn off Symmetry for it first, "
+                              "or duplicate its twin instead"),
+                          Toast::Kind::Failure, false);
+            statusBar()->showMessage(tr("Duplicate linked refused — nothing was changed"));
+        }
+        return false;
+    }
+
+    // DocumentModel::createLinkedCopy() checkpoints ITSELF (see its own
+    // header comment, the same shape pairWithMirror()'s own header
+    // documents) - render mode's exit therefore has to run BEFORE the call
+    // rather than through checkpointDocument()'s usual choke point, the same
+    // explicit-exit rule every other self-checkpointing commit in this file
+    // follows.
+    if (myRenderModeOn) setRenderModeEnabled(false);
+
+    // A visible offset - one grid step along X and Y - so the copy never
+    // lands exactly on top of its source. snapStep() is the same length the
+    // drawn grid and Snap to Grid itself use, so the number stays meaningful
+    // regardless of unit or of whether Snap to Grid happens to be on.
+    const double step = myView->snapStep();
+    gp_Trsf offset;
+    offset.SetTranslation(gp_Vec(step, step, 0.0));
+
+    const DocumentModel::LinkResult result = myDocument.createLinkedCopy(sourceId, offset);
+    if (!result.ok) {
+        // Unreachable in practice - duplicateLinkedSourceId() already ruled
+        // out the mirror/link exclusion above, and an unknown id cannot
+        // reach here either (sourceId came from the live selection). What
+        // is left is a genuine kernel-level transform failure - the same
+        // "unreachable in practice, kept defensive" idiom
+        // commitReplaceBody()'s own twin-mirror comment follows.
+        qWarning("Duplicate linked failed: %s", result.error.c_str());
+        myToasts->show(tr("Couldn't duplicate that body — the geometry engine turned "
+                          "the copy down. Try a different body"),
+                      Toast::Kind::Failure, false);
+        statusBar()->showMessage(tr("Duplicate linked refused — nothing was changed"));
+        return false;
+    }
+
+    myView->displaySolid(result.id, myDocument.shapeOf(result.id));
+    // Body mode is already active (linkGestureEnvironmentOk() required it) -
+    // selecting the copy here is what makes refreshTransformGizmo() (an
+    // appStateChanged slot) attach the transform gizmo to it, the same
+    // machinery an ordinary click already drives.
+    myView->setSelectedSolids({result.id});
+    recordProgress("link.duplicated");
+
+    updateActions();
+    emit documentChanged();
+
+    DocumentModel::LinkGroup group;
+    myDocument.linkGroupOf(result.id, group);
+    // Always >= 2 - createLinkedCopy() either founds a fresh group of
+    // exactly two or extends an existing one, so this is never the singular
+    // "1 body" a plural rule would otherwise have to special-case.
+    const int memberCount = static_cast<int>(group.placement.size());
+    const QString message = tr("%1 duplicated — %2 bodies now linked")
+                                 .arg(QString::fromStdString(myDocument.nameOf(result.id)))
+                                 .arg(memberCount);
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    return true;
+}
+
+bool MainWindow::linkSelectedBodies()
+{
+    if (!canLinkSelected()) return false;
+    const std::vector<int> ids = myView->selectedSolidIds();
+
+    // linkExisting() checkpoints ITSELF - the same explicit render-mode-exit
+    // rule duplicateLinkedCopy() follows just above, for the same reason.
+    if (myRenderModeOn) setRenderModeEnabled(false);
+
+    const DocumentModel::LinkResult result = myDocument.linkExisting(ids);
+    if (!result.ok) {
+        // Unreachable in practice - canLinkSelected() already checked every
+        // refusal linkExisting() itself can raise beyond a kernel-level
+        // transform failure. Kept defensive, the same idiom
+        // commitReplaceBody()'s own twin-mirror comment follows; the
+        // kernel's own error string is logged, never shown - it is written
+        // for this file, not for the user.
+        qWarning("Link selected failed: %s", result.error.c_str());
+        myToasts->show(tr("Couldn't link those bodies — the geometry engine turned "
+                          "the snap down. Try moving them closer together first"),
+                      Toast::Kind::Failure, false);
+        statusBar()->showMessage(tr("Link selected refused — nothing was changed"));
+        return false;
+    }
+
+    // Every body but the anchor was just replaced with a shape snapped onto
+    // the anchor's own, centre to centre - resync each one's presentation
+    // and leave the whole group selected, so the visible snap is unmistakable.
+    for (int id : ids) {
+        if (id == result.id) continue;
+        myView->displaySolid(id, myDocument.shapeOf(id));
+    }
+    myView->setSelectedSolids(ids);
+    recordProgress("link.linked");
+
+    updateActions();
+    emit documentChanged();
+
+    const QString message =
+        tr("%1 bodies linked — every copy now matches %2")
+            .arg(static_cast<int>(ids.size()))
+            .arg(QString::fromStdString(myDocument.nameOf(result.id)));
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    return true;
+}
+
+bool MainWindow::unlinkSelectedBody()
+{
+    const int id = unlinkTargetId();
+    if (id <= 0) return false;
+
+    DocumentModel::LinkGroup group;
+    myDocument.linkGroupOf(id, group);   // true - unlinkTargetId() confirmed isLinked(id)
+    const int groupSizeBefore = static_cast<int>(group.placement.size());
+
+    // unlink() checkpoints ITSELF - the same explicit render-mode-exit rule
+    // every self-checkpointing commit in this file follows.
+    if (myRenderModeOn) setRenderModeEnabled(false);
+
+    if (!myDocument.unlink(id)) return false;   // unreachable - unlinkTargetId() already confirmed this
+
+    // Neither body's shape changed - unlink() only touches bookkeeping - so
+    // there is nothing for the viewport to resync.
+    updateActions();
+    emit documentChanged();
+    recordProgress("link.unlinked");
+
+    const QString name = QString::fromStdString(myDocument.nameOf(id));
+    // A group of exactly two dissolves outright (DocumentModel::unlink()'s
+    // own rule - "no group is a group of one"), so the "N remain linked"
+    // branch is never the singular a plural rule would have to special-case.
+    const QString message =
+        groupSizeBefore > 2
+            ? tr("%1 unlinked — %2 bodies remain linked").arg(name).arg(groupSizeBefore - 1)
+            : tr("%1 unlinked — no bodies remain linked").arg(name);
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    return true;
 }
 
 void MainWindow::onSelectionChanged()

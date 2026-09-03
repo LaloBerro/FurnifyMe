@@ -214,6 +214,14 @@ public:
     static QString transformPastVerb(const gp_Trsf& delta);
     static QString transformRefusalText(const gp_Trsf& delta);
 
+    // The success-message suffix commitReplaceBody()'s `linkedOthersUpdated`
+    // feeds into pullFaceBy()/bevelEdgesBy()/transformBody()'s own messages,
+    // on the identical " — twin followed" contract those three already read
+    // off `twinFollowed` - one implementation rather than four copies of the
+    // same plural rule (plurals written out, per the vocabulary rules).
+    // Empty when `othersUpdated` is 0, which is every unlinked edit.
+    static QString linkedGroupSuffix(int othersUpdated);
+
     // --- symmetry (Milestone 3: live mirror twins) --------------------------
     //
     // The Symmetry action's own handler: checking it turns the mode on at
@@ -275,6 +283,59 @@ public:
     // Escape's own handler: ends the gesture with nothing changed. Safe to
     // call when no gesture is active.
     void cancelMirrorPlacement();
+
+    // --- linked copies (Milestone 4, Task 4.2) ------------------------------
+    //
+    // Where symmetry keeps two bodies in step across a plane, a link group
+    // keeps N bodies in step across an arbitrary placement each - see
+    // DocumentModel.h's own "link groups" section for the whole engine this
+    // wires up. Unlike the mirror-placement gesture above, none of the three
+    // actions below is a multi-step gesture with its own Enter/Escape claim:
+    // each is one click that either commits immediately or refuses with a
+    // reason, the same shape Union/Subtract/Delete already have.
+    //
+    // Model -> Duplicate linked (Ctrl+D). Exactly one body selected, in body
+    // selection mode, no sketch in progress, no outline waiting, and not
+    // already paired with a mirror twin - see duplicateLinkedSourceId(). An
+    // already-linked source is fine: the copy simply becomes another member
+    // of its existing group (DocumentModel::createLinkedCopy()'s own rule).
+    // Offsets the copy by one visible grid step so it never lands exactly on
+    // its source, selects the copy and leaves body-selection mode as it is -
+    // refreshTransformGizmo() (an appStateChanged slot) is what attaches the
+    // transform gizmo to it, the same machinery an ordinary click already
+    // drives, nothing new. One checkpoint (createLinkedCopy() takes it
+    // itself - see its own header comment), one Note toast with Undo naming
+    // the group's new size.
+    bool duplicateLinkedCopy();
+    // The body createLinkedCopy() would copy, or 0 when the gesture is
+    // unavailable - see the predicate's own definition for the exact terms.
+    int duplicateLinkedSourceId() const;
+    bool canDuplicateLinked() const { return duplicateLinkedSourceId() > 0; }
+
+    // Model -> Link selected. Two or more selected bodies, in body selection
+    // mode, no sketch in progress, no outline waiting, none already linked
+    // and none already mirror-paired - see canLinkSelected(). Snaps every
+    // selected body but the first onto the first's own shape, centre to
+    // centre, through DocumentModel::linkExisting() - the visible shape
+    // change IS the point, not a side effect. One checkpoint
+    // (linkExisting() takes it itself), one Note toast with Undo naming how
+    // many bodies now match.
+    bool linkSelectedBodies();
+    bool canLinkSelected() const;
+
+    // Model -> Unlink. Exactly one selected body that is a linked member -
+    // see unlinkTargetId(). Removes just that body from its group through
+    // DocumentModel::unlink(); every other member keeps its own current
+    // shape exactly as it stands and simply stops following this one's
+    // future edits. Neither body's shape changes, so there is nothing for
+    // the viewport to resync. One checkpoint (unlink() takes it itself), one
+    // Note toast with Undo naming how many bodies are still linked to each
+    // other afterward.
+    bool unlinkSelectedBody();
+    // The linked member Unlink would act on, or 0 when the gesture is
+    // unavailable.
+    int unlinkTargetId() const;
+    bool canUnlink() const { return unlinkTargetId() > 0; }
 
     bool lockToFace(const TopoDS_Face& face);
     // Back to the ground plane. The ground plane is the default and is never
@@ -681,6 +742,13 @@ private:
     // an outline is pending and has to be able to put them back.
     QString lockTooltipText() const;
     QString unlockTooltipText() const;
+    // The three linked-copy actions' ordinary tooltips (Milestone 4, Task
+    // 4.2), on the identical contract: buildActions() sets these once and
+    // updateActions() swaps in a reason-specific message while disabled,
+    // restoring these exact strings the moment the action is enabled again.
+    QString duplicateLinkedTooltipText() const;
+    QString linkSelectedTooltipText() const;
+    QString unlinkBodyTooltipText() const;
     // False - with a toast naming the cause and the fix - while a closed
     // outline is waiting to be extruded. Both plane changes ask this, because
     // both would silently re-aim that outline's extrude. See its definition.
@@ -797,7 +865,36 @@ private:
     // before the body they describe is replaced, and it differs per gizmo -
     // so this owns only the part that is genuinely identical three times
     // over: the checkpoint, the replace, and the twin.
-    void commitReplaceBody(int id, const TopoDS_Shape& newShape, bool& twinFollowed);
+    //
+    // Milestone 4 (Task 4.2) extends the same choke point for linked copies:
+    // `id`'s mirror twin and its link-group membership are mutually
+    // exclusive by construction (DocumentModel's own v1 exclusion, enforced
+    // both directions), so at most one of the two follow-up branches ever
+    // runs. When `id` is linked, DocumentModel::propagateLinkedEdit() re-
+    // derives every OTHER member from `newShape` inside the SAME checkpoint
+    // taken two lines up (it takes none of its own - see its header), and
+    // this redisplays each one; `linkedOthersUpdated` reports how many, 0
+    // when `id` has no group, so a caller's toast can name the group size
+    // exactly as `twinFollowed` already lets it say "twin followed".
+    void commitReplaceBody(int id, const TopoDS_Shape& newShape, bool& twinFollowed,
+                           int& linkedOthersUpdated);
+
+    // Walks `editedId`'s link group (if it has one) and redisplays every
+    // OTHER member from the document's own now-current shape -
+    // propagateLinkedEdit() already wrote them; this is only the viewport's
+    // own resync, the same split commitReplaceBody() already draws between
+    // "document mutation" and "AIS redisplay" for a mirror twin. Returns the
+    // number of other members touched (0 when `editedId` has no group).
+    int resyncLinkGroupView(int editedId);
+
+    // The environment shared by all three linked-copy actions above: no
+    // sketch in progress, no outline waiting, a furniture actually open, and
+    // body selection mode explicitly - selectedSolidIds() reports the owning
+    // body of a selected FACE or EDGE too, so without this a face or edge
+    // selection could satisfy a count check that means something different
+    // in body mode. The same mode check transformableBodyId() and
+    // mirrorPlacementEnvironmentOk() each carry, for the same reason.
+    bool linkGestureEnvironmentOk() const;
 
     // THE single choke point every document-changing commit's checkpoint()
     // call now goes through, in place of calling myDocument.checkpoint()
@@ -994,6 +1091,11 @@ private:
     // already says it wants before it gets there.
     QAction* mySymmetryAction = nullptr;
     QAction* mySetSymmetryPlaneAction = nullptr;
+    // Linked copies (Milestone 4, Task 4.2) - menu-only for the same reason:
+    // the rail stays at thirteen tools.
+    QAction* myDuplicateLinkedAction = nullptr;
+    QAction* myLinkSelectedAction = nullptr;
+    QAction* myUnlinkAction = nullptr;
     QAction* myAppearanceAction = nullptr;
     // File -> Save / Save automatically / Close furniture - see the public
     // methods above, which every one of these three triggers into.
