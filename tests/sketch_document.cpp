@@ -850,6 +850,369 @@ int main()
         check(!doc.canUndo(), "and takes no checkpoint at all");
     }
 
+    // --- link groups (Milestone 4, Task 4.1): createLinkedCopy ---------------
+    // "N bodies declared the same shape placed differently" - a fresh
+    // engine, but built on the exact philosophy CLAUDE.md states for
+    // symmetry: nothing records the edit, only the placements, and every
+    // member's shape is re-derived from whichever one just changed.
+    {
+        DocumentModel doc;
+        const TopoDS_Shape src = ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 20.0, 10.0, 5.0);
+        const int sourceId = doc.addSolid(src);
+        check(!doc.isLinked(sourceId), "a fresh body starts unlinked");
+
+        gp_Trsf offset;
+        offset.SetTranslation(gp_Vec(50.0, 0.0, 0.0));
+        const double sourceVolume = ModelingOps::volume(doc.shapeOf(sourceId));
+        const gp_Pnt sourceCentre = ModelingOps::centreOfMass(doc.shapeOf(sourceId));
+
+        check(!doc.canUndo(), "clean slate before the copy");
+        const DocumentModel::LinkResult copyResult = doc.createLinkedCopy(sourceId, offset);
+        check(copyResult.ok, "createLinkedCopy succeeds on a plain body with a translation offset");
+        check(copyResult.id != 0 && copyResult.id != sourceId, "and hands back a fresh id");
+        check(doc.count() == 2, "exactly one new body was added");
+        check(doc.canUndo(), "and it took exactly one checkpoint");
+
+        const int copyId = copyResult.id;
+        checkNear(ModelingOps::volume(doc.shapeOf(copyId)), sourceVolume, 1.0e-6,
+                  "the copy's shape is equal under its placement - same volume as the source");
+        const gp_Pnt copyCentre = ModelingOps::centreOfMass(doc.shapeOf(copyId));
+        checkNear(copyCentre.X(), sourceCentre.X() + 50.0, 1.0e-6,
+                  "...and sits at exactly source + offset (X)");
+        checkNear(copyCentre.Y(), sourceCentre.Y(), 1.0e-6, "Y is untouched by the X-only offset");
+        checkNear(copyCentre.Z(), sourceCentre.Z(), 1.0e-6, "and so is Z");
+
+        check(doc.isLinked(sourceId) && doc.isLinked(copyId), "group membership: both ids report linked");
+        check(doc.linkAnchorOf(sourceId) == sourceId,
+              "a source not yet in a group founds one with itself as anchor");
+        check(doc.linkAnchorOf(copyId) == sourceId, "the copy's anchor is the source");
+
+        DocumentModel::LinkGroup group;
+        check(doc.linkGroupOf(copyId, group), "the copy's group is queryable");
+        check(group.anchorId == sourceId && group.placement.size() == 2,
+              "anchor + one member, two placement entries total");
+        check(ModelingOps::isIdentityTransform(group.placement.at(sourceId)),
+              "the anchor's own placement entry is identity");
+        checkNear(group.placement.at(copyId).TranslationPart().X(), 50.0, 1.0e-6,
+                  "the copy's placement entry records the offset");
+
+        check(doc.undo(), "one undo");
+        check(doc.count() == 1, "undo removes the copy");
+        check(!doc.isLinked(sourceId), "and removes the group membership too - back to a plain body");
+
+        // A kernel-level refusal (a non-positive scale factor) is refused
+        // outright: no checkpoint, id == 0, nothing linked.
+        gp_Trsf badOffset;
+        badOffset.SetScale(gp_Pnt(0.0, 0.0, 0.0), -1.0);
+        const DocumentModel::LinkResult badCopy = doc.createLinkedCopy(sourceId, badOffset);
+        check(!badCopy.ok && badCopy.id == 0 && !badCopy.error.empty(),
+              "a transform the kernel refuses refuses the whole call, with a reason");
+        check(!doc.canUndo(), "and takes no checkpoint");
+        check(!doc.isLinked(sourceId), "nor any group membership");
+
+        // Unknown source.
+        const DocumentModel::LinkResult unknownCopy = doc.createLinkedCopy(9999, offset);
+        check(!unknownCopy.ok && !unknownCopy.error.empty(), "an unknown source id refuses too");
+    }
+
+    // --- link groups: linkExisting --------------------------------------------
+    {
+        DocumentModel doc;
+        const TopoDS_Shape anchorShape = ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 20.0, 10.0, 5.0);
+        const TopoDS_Shape otherShape1 = ModelingOps::makeBox(gp_Pnt(100.0, 0.0, 0.0), 5.0, 5.0, 5.0);
+        const TopoDS_Shape otherShape2 = ModelingOps::makeBox(gp_Pnt(-50.0, 30.0, 0.0), 8.0, 8.0, 8.0);
+
+        const int anchorId = doc.addSolid(anchorShape);
+        const int otherId1 = doc.addSolid(otherShape1);
+        const int otherId2 = doc.addSolid(otherShape2);
+
+        const double anchorVolume = ModelingOps::volume(anchorShape);
+        const gp_Pnt other1OldCentre = ModelingOps::centreOfMass(otherShape1);
+        const gp_Pnt other2OldCentre = ModelingOps::centreOfMass(otherShape2);
+
+        check(!doc.canUndo(), "clean slate before linking");
+        const DocumentModel::LinkResult linkResult = doc.linkExisting({anchorId, otherId1, otherId2});
+        check(linkResult.ok, "linking three distinct, differently-shaped bodies succeeds");
+        check(doc.count() == 3, "linkExisting never adds bodies, only replaces shapes");
+        check(doc.canUndo(), "and it took exactly one checkpoint");
+
+        checkNear(ModelingOps::volume(doc.shapeOf(otherId1)), anchorVolume, 1.0e-6,
+                  "other1's OWN shape is replaced outright - its volume becomes the anchor's");
+        checkNear(ModelingOps::volume(doc.shapeOf(otherId2)), anchorVolume, 1.0e-6,
+                  "other2's shape is replaced too");
+
+        const gp_Pnt newCentre1 = ModelingOps::centreOfMass(doc.shapeOf(otherId1));
+        checkNear(newCentre1.Distance(other1OldCentre), 0.0, 1.0e-6,
+                  "other1 stays exactly where it was - the anchor's shape moved TO it, centre to centre");
+        const gp_Pnt newCentre2 = ModelingOps::centreOfMass(doc.shapeOf(otherId2));
+        checkNear(newCentre2.Distance(other2OldCentre), 0.0, 1.0e-6, "same for other2");
+
+        DocumentModel::LinkGroup group;
+        check(doc.linkGroupOf(anchorId, group) && group.anchorId == anchorId,
+              "the FIRST id in the list is recorded as the anchor");
+        check(group.placement.size() == 3, "anchor + two members, three entries total");
+        for (const auto& kv : group.placement) {
+            gp_Trsf noTranslation = kv.second;
+            noTranslation.SetTranslationPart(gp_Vec(0.0, 0.0, 0.0));
+            check(ModelingOps::isIdentityTransform(noTranslation),
+                  "every placement in a v1 link group is translation-only (no rotation/scale)");
+        }
+
+        // One undo restores originals byte-identically - undo() copies the
+        // exact TopoDS_Shape handles State captured, it never rebuilds.
+        check(doc.undo(), "one undo");
+        check(doc.shapeOf(otherId1).IsEqual(otherShape1),
+              "other1 is back to the EXACT original shape (handle-identical, not just close)");
+        check(doc.shapeOf(otherId2).IsEqual(otherShape2), "same for other2");
+        check(!doc.isLinked(anchorId) && !doc.isLinked(otherId1) && !doc.isLinked(otherId2),
+              "and the whole group is gone - back to three independent bodies");
+
+        // Fewer than two ids.
+        const DocumentModel::LinkResult tooFew = doc.linkExisting({anchorId});
+        check(!tooFew.ok, "linking fewer than two bodies refuses");
+
+        // All-or-nothing: one unknown id in the middle refuses the WHOLE call.
+        const std::size_t depthBeforeBad = doc.undoDepth();
+        const DocumentModel::LinkResult badList = doc.linkExisting({anchorId, 9999, otherId1});
+        check(!badList.ok && !badList.error.empty(), "one unknown id in the list refuses the whole call");
+        check(doc.undoDepth() == depthBeforeBad, "no checkpoint was taken");
+        check(!doc.isLinked(anchorId) && !doc.isLinked(otherId1),
+              "and neither valid body was linked - all or nothing, the bevels' own discipline");
+
+        // Duplicate id in the list.
+        const DocumentModel::LinkResult dupList = doc.linkExisting({anchorId, otherId1, anchorId});
+        check(!dupList.ok, "a duplicated id in the list also refuses the whole call");
+        check(doc.undoDepth() == depthBeforeBad, "still no checkpoint");
+    }
+
+    // --- link groups: propagateLinkedEdit -------------------------------------
+    // Editing the COPY, not the anchor - the harder direction, since an
+    // anchor edit's own placement is identity and would leave
+    // placement(edited)^-1 untested.
+    {
+        DocumentModel doc;
+        const TopoDS_Shape anchorShape = ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 20.0, 10.0, 5.0);
+        const int anchorId = doc.addSolid(anchorShape);
+        gp_Trsf offset;
+        offset.SetTranslation(gp_Vec(60.0, 0.0, 0.0));
+        const DocumentModel::LinkResult copyResult = doc.createLinkedCopy(anchorId, offset);
+        check(copyResult.ok, "setup: a linked copy exists");
+        const int copyId = copyResult.id;
+
+        DocumentModel::LinkGroup groupBefore;
+        check(doc.linkGroupOf(copyId, groupBefore), "setup: group is queryable before the edit");
+
+        // A pure translation of a box stays an axis-aligned box, so the
+        // copy is known exactly: x in [60, 80], y in [0, 10], z in [0, 5].
+        // A cut fully inside it stands in for "some direct-modeling
+        // gesture landed on this member's own current shape".
+        const TopoDS_Shape notch = ModelingOps::makeBox(gp_Pnt(60.0, 2.0, 0.0), 5.0, 5.0, 5.0);
+        const ModelingOps::BooleanResult cutResult =
+            ModelingOps::applyBoolean(ModelingOps::BooleanKind::Cut, doc.shapeOf(copyId), notch);
+        check(cutResult.ok, "the fixture edit (a cut on the copy's own shape) succeeds");
+        checkNear(ModelingOps::volume(cutResult.shape), 1000.0 - 125.0, 1.0e-6,
+                  "setup: the cut removed exactly the notch's volume");
+
+        // propagateLinkedEdit takes NO checkpoint of its own - the caller
+        // (here, the test) checkpoints first, exactly as MainWindow's own
+        // pull/bevel/transform commits already do before calling it.
+        doc.checkpoint();
+        const bool propagated = doc.propagateLinkedEdit(copyId, cutResult.shape);
+        check(propagated, "propagateLinkedEdit reports success");
+
+        checkNear(ModelingOps::volume(doc.shapeOf(copyId)), ModelingOps::volume(cutResult.shape), 1.0e-6,
+                  "the edited member's own shape is exactly the edit's result");
+        checkNear(ModelingOps::volume(doc.shapeOf(anchorId)), ModelingOps::volume(cutResult.shape), 1.0e-6,
+                  "the anchor's volume moved to match - every member is the transformed anchor");
+
+        const gp_Pnt anchorCentreAfter = ModelingOps::centreOfMass(doc.shapeOf(anchorId));
+        const gp_Pnt copyCentreAfter = ModelingOps::centreOfMass(doc.shapeOf(copyId));
+        checkNear(copyCentreAfter.X() - anchorCentreAfter.X(), 60.0, 1.0e-6,
+                  "the copy is still exactly the placement's offset away from the anchor");
+
+        DocumentModel::LinkGroup groupAfter;
+        check(doc.linkGroupOf(copyId, groupAfter), "the group survives the propagated edit");
+        const gp_Trsf beforeEntry = groupBefore.placement.at(copyId);
+        const gp_Trsf afterEntry = groupAfter.placement.at(copyId);
+        checkNear(beforeEntry.TranslationPart().Subtracted(afterEntry.TranslationPart()).Modulus(), 0.0,
+                  1.0e-9, "the placement itself is unchanged by propagation - only shapes move");
+
+        // A null new shape, or an id with no group, both refuse cleanly.
+        check(!doc.propagateLinkedEdit(copyId, TopoDS_Shape()), "a null new shape refuses");
+        const int loneId = doc.addSolid(ModelingOps::makeBox(gp_Pnt(500.0, 0.0, 0.0), 1.0, 1.0, 1.0));
+        check(!doc.propagateLinkedEdit(loneId, doc.shapeOf(loneId)),
+              "an id with no link group refuses too - nothing to propagate");
+    }
+
+    // --- link groups: unlinking the anchor (deterministic promotion) ---------
+    {
+        DocumentModel doc;
+        const TopoDS_Shape base = ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 10.0, 10.0, 10.0);
+        const int anchorId = doc.addSolid(base);
+        gp_Trsf off1;
+        off1.SetTranslation(gp_Vec(20.0, 0.0, 0.0));
+        gp_Trsf off2;
+        off2.SetTranslation(gp_Vec(40.0, 0.0, 0.0));
+        const int memberId1 = doc.createLinkedCopy(anchorId, off1).id;
+        const int memberId2 = doc.createLinkedCopy(anchorId, off2).id;
+        check(memberId1 != 0 && memberId2 != 0, "setup: a three-member group exists");
+        check(doc.linkAnchorOf(memberId1) == anchorId && doc.linkAnchorOf(memberId2) == anchorId,
+              "both members share the same anchor");
+
+        const std::size_t depthBeforeUnknown = doc.undoDepth();
+        check(!doc.unlink(9999), "unlinking an unknown id reports false");
+        check(doc.undoDepth() == depthBeforeUnknown, "and takes no checkpoint");
+
+        const std::size_t depthBeforeUnlink = doc.undoDepth();
+        check(doc.unlink(anchorId), "unlinking the anchor succeeds");
+        check(doc.undoDepth() == depthBeforeUnlink + 1, "and takes exactly one checkpoint");
+
+        check(!doc.isLinked(anchorId), "the old anchor is no longer part of any group");
+        // Ids are assigned in creation order and never reused (memberId1
+        // was created before memberId2), so the deterministic rule -
+        // lowest surviving id is promoted - picks memberId1.
+        check(doc.linkAnchorOf(memberId1) == memberId1, "the lowest surviving id is promoted to anchor");
+        check(doc.linkAnchorOf(memberId2) == memberId1, "and the other member now points at the new anchor");
+
+        DocumentModel::LinkGroup regrouped;
+        check(doc.linkGroupOf(memberId2, regrouped), "the regrouped placement is queryable");
+        check(ModelingOps::isIdentityTransform(regrouped.placement.at(memberId1)),
+              "the new anchor's own placement entry is an exact identity, not a numerically-close one");
+
+        const gp_Pnt member1Centre = ModelingOps::centreOfMass(doc.shapeOf(memberId1));
+        const gp_Pnt member2Centre = ModelingOps::centreOfMass(doc.shapeOf(memberId2));
+        checkNear(member2Centre.X() - member1Centre.X(), 20.0, 1.0e-6,
+                  "the real-world spacing between the two survivors is unchanged by the promotion");
+
+        check(doc.undo(), "one undo");
+        check(doc.linkAnchorOf(memberId1) == anchorId && doc.linkAnchorOf(memberId2) == anchorId,
+              "restores the original anchor and both placements exactly");
+    }
+
+    // --- link groups: dissolution below two members ---------------------------
+    {
+        DocumentModel doc;
+        const TopoDS_Shape base = ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 10.0, 10.0, 10.0);
+        const int anchorId = doc.addSolid(base);
+        gp_Trsf off;
+        off.SetTranslation(gp_Vec(30.0, 0.0, 0.0));
+        const int memberId = doc.createLinkedCopy(anchorId, off).id;
+        check(doc.isLinked(anchorId) && doc.isLinked(memberId), "setup: a two-member group exists");
+
+        check(doc.unlink(memberId), "unlinking the non-anchor member succeeds");
+        check(!doc.isLinked(anchorId) && !doc.isLinked(memberId),
+              "a group of one is not a group - it dissolves entirely, not just for the id that left");
+
+        check(doc.undo(), "one undo");
+        check(doc.isLinked(anchorId) && doc.isLinked(memberId), "the group is back");
+        check(doc.linkAnchorOf(memberId) == anchorId, "with the same anchor as before");
+
+        // Deleting a linked member (not through unlink()) dissolves the
+        // group the same way - removeSolid() runs the same internal path.
+        doc.checkpoint();
+        check(doc.removeSolid(memberId), "removing a linked member succeeds like any other body");
+        check(!doc.isLinked(anchorId), "and its group dissolves too - the survivor is unlinked");
+    }
+
+    // --- link groups: mirror <-> link exclusion, both directions -------------
+    {
+        const gp_Pln yz(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0));
+
+        // Direction 1: linkExisting()/createLinkedCopy() refuse a body that
+        // already has a live mirror twin.
+        {
+            DocumentModel doc;
+            const int idA = doc.addSolid(ModelingOps::makeBox(gp_Pnt(10.0, 0.0, 0.0), 10.0, 10.0, 10.0));
+            const int idB = doc.addSolid(ModelingOps::makeBox(gp_Pnt(50.0, 0.0, 0.0), 5.0, 5.0, 5.0));
+            const DocumentModel::PairResult pairResult = doc.pairWithMirror({idA}, yz);
+            check(pairResult.paired == 1, "setup: idA has a live mirror twin");
+
+            gp_Trsf offset;
+            offset.SetTranslation(gp_Vec(5.0, 0.0, 0.0));
+            const DocumentModel::LinkResult copyOnPaired = doc.createLinkedCopy(idA, offset);
+            check(!copyOnPaired.ok && !copyOnPaired.error.empty(),
+                  "createLinkedCopy refuses a body with a live mirror twin");
+
+            const DocumentModel::LinkResult linkOnPaired = doc.linkExisting({idA, idB});
+            check(!linkOnPaired.ok && !linkOnPaired.error.empty(),
+                  "linkExisting refuses too, when ANY id in the list has a live mirror twin");
+            check(!doc.isLinked(idA) && !doc.isLinked(idB), "neither body was linked");
+        }
+
+        // Direction 2: pairWithMirror refuses (and reports) a linked body.
+        {
+            DocumentModel doc;
+            const int anchorId =
+                doc.addSolid(ModelingOps::makeBox(gp_Pnt(10.0, 0.0, 0.0), 10.0, 10.0, 10.0));
+            gp_Trsf offset;
+            offset.SetTranslation(gp_Vec(0.0, 20.0, 0.0));
+            const int memberId = doc.createLinkedCopy(anchorId, offset).id;
+            check(doc.isLinked(anchorId), "setup: anchorId is linked");
+
+            const DocumentModel::PairResult result = doc.pairWithMirror({anchorId}, yz);
+            check(result.paired == 0, "pairWithMirror pairs nothing for a linked body");
+            check(result.skippedLinked.size() == 1 && result.skippedLinked.front() == anchorId,
+                  "and reports it in skippedLinked rather than silently dropping it");
+            check(!doc.symmetryOn(), "a call whose only candidate is linked does not turn symmetry on");
+            check(doc.isLinked(memberId), "the link group itself is untouched by the refused mirror call");
+        }
+    }
+
+    // --- link groups: serialization round trip ---------------------------------
+    {
+        DocumentModel doc;
+        const TopoDS_Shape base = ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 20.0, 10.0, 5.0);
+        const int anchorId = doc.addSolid(base);
+        gp_Trsf offset;
+        offset.SetTranslation(gp_Vec(60.0, 0.0, 0.0));
+        const DocumentModel::LinkResult copyResult = doc.createLinkedCopy(anchorId, offset);
+        check(copyResult.ok, "setup: a linked pair exists");
+        const int copyId = copyResult.id;
+        // A third, unrelated body - proves the position-based translation
+        // isn't fooled by an id that is NOT part of any group.
+        doc.addSolid(ModelingOps::makeBox(gp_Pnt(200.0, 0.0, 0.0), 3.0, 3.0, 3.0));
+
+        DocumentModel::DocumentMeta meta;
+        const FurnifySerial::SerializedDocument serial = doc.toSerialized(meta);
+        check(meta.linkGroups.size() == 1, "one group is persisted, position-based");
+        check(meta.linkGroups.front().memberPositions.size() == 2, "with both of its members");
+
+        DocumentModel loaded;
+        check(loaded.fromSerialized(serial, meta), "the round trip loads cleanly");
+        check(loaded.count() == 3, "all three bodies are back");
+
+        // toSerialized() walked mySolids in order (anchor added first, then
+        // the copy, then the lone body), and fromSerialized() assigns fresh
+        // ids in serial.bodies' own order, so loaded.solids() is in the
+        // same order.
+        const std::vector<DocumentModel::Solid>& loadedSolids = loaded.solids();
+        check(loadedSolids.size() == 3, "sanity: three solids in the loaded document");
+        const int loadedAnchor = loadedSolids[0].id;
+        const int loadedCopy = loadedSolids[1].id;
+        const int loadedLone = loadedSolids[2].id;
+
+        check(loaded.isLinked(loadedAnchor) && loaded.isLinked(loadedCopy),
+              "the group survives the round trip");
+        check(!loaded.isLinked(loadedLone), "and the unrelated body still is not part of it");
+        check(loaded.linkAnchorOf(loadedCopy) == loadedAnchor, "with the same anchor relationship");
+
+        DocumentModel::LinkGroup loadedGroup;
+        check(loaded.linkGroupOf(loadedCopy, loadedGroup), "the loaded group is queryable");
+        checkNear(loadedGroup.placement.at(loadedCopy).TranslationPart().X(), 60.0, 1.0e-6,
+                  "and the placement's own values survived the round trip exactly");
+        checkNear(ModelingOps::volume(loaded.shapeOf(loadedCopy)), ModelingOps::volume(doc.shapeOf(copyId)),
+                  1.0e-6, "and the copy's actual geometry round-tripped too");
+
+        // Forward-compatible absent key: a meta with an EMPTY linkGroups
+        // vector (an older save, or one that never had any) loads as
+        // "nothing linked", not a refusal.
+        DocumentModel::DocumentMeta oldMeta = meta;
+        oldMeta.linkGroups.clear();
+        DocumentModel oldLoaded;
+        check(oldLoaded.fromSerialized(serial, oldMeta), "a meta with no linkGroups key loads fine");
+        check(!oldLoaded.isLinked(oldLoaded.solids().front().id), "...and simply has nothing linked");
+    }
+
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL",
                 g_failures, g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;

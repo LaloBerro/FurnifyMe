@@ -65,12 +65,11 @@ void checkNear(double actual, double expected, double tolerance, const std::stri
     if (!ok) ++g_failures;
 }
 
-gp_Pnt centreOfMass(const TopoDS_Shape& shape)
-{
-    GProp_GProps props;
-    BRepGProp::VolumeProperties(shape, props);
-    return props.CentreOfMass();
-}
+// centreOfMass() used to be defined here; it is now ModelingOps::centreOfMass
+// (Milestone 4, Task 4.1 - DocumentModel::linkExisting needed the same
+// GProp_GProps call this file already had its own copy of), reached through
+// the file-wide `using namespace ModelingOps;` in main() below with zero
+// behaviour change - the two implementations were byte-for-byte identical.
 
 // The one planar face of `box` whose whole extent sits at Z == z - used to
 // pick the top face of the known box without depending on face order.

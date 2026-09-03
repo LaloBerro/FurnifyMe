@@ -312,4 +312,11 @@ double volume(const TopoDS_Shape& shape);
 int countFaces(const TopoDS_Shape& shape);
 int countSolids(const TopoDS_Shape& shape);
 
+// BRepGProp::VolumeProperties' own centre of mass - the same measure
+// `volume()` reads Mass() off. Origin for a null shape. Milestone 4's
+// linked copies use this to place a translation-only link "centre to
+// centre" (DocumentModel::linkExisting) without duplicating the
+// GProp_GProps call the headless suite already had its own local copy of.
+gp_Pnt centreOfMass(const TopoDS_Shape& shape);
+
 }  // namespace ModelingOps

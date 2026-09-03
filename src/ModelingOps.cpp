@@ -929,6 +929,14 @@ double volume(const TopoDS_Shape& shape)
     return props.Mass();
 }
 
+gp_Pnt centreOfMass(const TopoDS_Shape& shape)
+{
+    if (shape.IsNull()) return gp_Pnt(0.0, 0.0, 0.0);
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(shape, props);
+    return props.CentreOfMass();
+}
+
 static int countOf(const TopoDS_Shape& shape, TopAbs_ShapeEnum type)
 {
     if (shape.IsNull()) return 0;

@@ -8,8 +8,32 @@
 
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopoDS.hxx>
+#include <gp_Vec.hxx>
 
 namespace {
+
+// gp_Trsf <-> 12 doubles, row-major (3 rows x 4 columns) via the same
+// Value()/SetValues() OCCT itself exposes. The only place a link group's
+// placement crosses into DocumentMeta::LinkGroupRecord, so a general
+// (not just translation-only) gp_Trsf round-trips exactly - propagation and
+// a future rotate/scale placement need that, even though v1's own
+// linkExisting() never builds anything but a translation.
+std::array<double, 12> trsfToArray(const gp_Trsf& t)
+{
+    std::array<double, 12> a{};
+    int k = 0;
+    for (int row = 1; row <= 3; ++row) {
+        for (int col = 1; col <= 4; ++col) a[k++] = t.Value(row, col);
+    }
+    return a;
+}
+
+gp_Trsf trsfFromArray(const std::array<double, 12>& a)
+{
+    gp_Trsf t;
+    t.SetValues(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11]);
+    return t;
+}
 
 std::string defaultName(int index)
 {
@@ -66,6 +90,11 @@ bool DocumentModel::removeSolid(int id)
     // body's twin must read back unpaired (twinOf() == -1), not point at an
     // id nothing in the document owns any more.
     unpairInternal(id);
+    // Same discipline for link groups (Milestone 4) - a removed member must
+    // not leave the survivors' placements pointing at an id nothing in the
+    // document owns, and a removed ANCHOR needs the same promotion rule
+    // unlink() uses.
+    unlinkGroupInternal(id);
     ++myRevision;
     return true;
 }
@@ -75,6 +104,7 @@ void DocumentModel::clear()
     mySolids.clear();
     myOutlines.clear();
     myTwin.clear();
+    myLinkGroups.clear();
     ++myRevision;
     // Ids are not reused: a stale id must never silently resolve to a new solid.
 }
@@ -136,6 +166,13 @@ DocumentModel::PairResult DocumentModel::pairWithMirror(const std::vector<int>& 
         if (id <= 0 || !contains(id)) continue;   // unknown/invalid - silently ignored
         if (!seen.insert(id).second) continue;    // duplicate within this call
 
+        // v1 mirror/link exclusion, enforced from this side too - a linked
+        // body (Milestone 4) cannot also take a mirror twin.
+        if (isLinked(id)) {
+            result.skippedLinked.push_back(id);
+            continue;
+        }
+
         // symmetryOn() gates every twinOf() read - CLAUDE.md's rule. A
         // pairing entry can survive in State (undo-tracked) even while the
         // live mode is off, and such an entry is inert, not "already
@@ -184,6 +221,255 @@ bool DocumentModel::unpairAll()
 {
     if (myTwin.empty()) return false;
     myTwin.clear();
+    ++myRevision;
+    return true;
+}
+
+// --- link groups (Milestone 4) ----------------------------------------------
+
+void DocumentModel::unlinkGroupInternal(int memberId)
+{
+    const auto found = myLinkGroups.find(memberId);
+    if (found == myLinkGroups.end()) return;
+
+    LinkGroup group = found->second;   // copy - about to erase the map entry it came from
+    group.placement.erase(memberId);
+    myLinkGroups.erase(memberId);
+
+    if (group.placement.size() < 2) {
+        // A "group" of fewer than two members is not a group - dissolve
+        // the survivor(s) outright rather than leaving a one-member group
+        // with nothing to stay in step with.
+        for (const auto& kv : group.placement) myLinkGroups.erase(kv.first);
+        return;
+    }
+
+    if (memberId == group.anchorId) {
+        // Deterministic promotion: the lowest surviving id becomes anchor.
+        // group.placement is a std::map<int, gp_Trsf>, so begin()->first is
+        // exactly that id with no separate scan. Every remaining placement
+        // is re-expressed relative to the NEW anchor's own frame:
+        //   shape(X) = shape(oldAnchor).transformed(placement[X])
+        //            = shape(newAnchor).transformed(placement[newAnchor]^-1)
+        //                                .transformed(placement[X])
+        // and "apply A, then B" is B.Multiplied(A) - the same composition
+        // rule snapTransform() uses elsewhere in this codebase.
+        const int newAnchorId = group.placement.begin()->first;
+        const gp_Trsf oldAnchorToNew = group.placement.at(newAnchorId);
+        const gp_Trsf newToOldAnchor = oldAnchorToNew.Inverted();
+        std::map<int, gp_Trsf> reprojected;
+        for (const auto& kv : group.placement) {
+            reprojected[kv.first] = kv.second.Multiplied(newToOldAnchor);
+        }
+        reprojected[newAnchorId] = gp_Trsf();   // exact identity, no numerical drift
+        group.anchorId = newAnchorId;
+        group.placement = reprojected;
+    }
+
+    for (const auto& kv : group.placement) myLinkGroups[kv.first] = group;
+}
+
+bool DocumentModel::isLinked(int id) const
+{
+    return myLinkGroups.find(id) != myLinkGroups.end();
+}
+
+int DocumentModel::linkAnchorOf(int id) const
+{
+    const auto it = myLinkGroups.find(id);
+    return it == myLinkGroups.end() ? -1 : it->second.anchorId;
+}
+
+bool DocumentModel::linkGroupOf(int id, LinkGroup& out) const
+{
+    const auto it = myLinkGroups.find(id);
+    if (it == myLinkGroups.end()) return false;
+    out = it->second;
+    return true;
+}
+
+DocumentModel::LinkResult DocumentModel::createLinkedCopy(int sourceId, const gp_Trsf& offset)
+{
+    LinkResult result;
+    if (sourceId <= 0 || !contains(sourceId)) {
+        result.error = "unknown body";
+        return result;
+    }
+    // v1 mirror/link exclusion, enforced from this side (pairWithMirror
+    // enforces it from the mirror side, above).
+    if (symmetryOn() && twinOf(sourceId) != -1) {
+        result.error = "already mirrored - cannot also be linked";
+        return result;
+    }
+
+    const TopoDS_Shape sourceShape = shapeOf(sourceId);
+
+    // Resolve which group the copy joins, and its OWN placement within it,
+    // before touching the kernel or the document - `sourceId` may already
+    // be a member (not necessarily the anchor) of an existing group, in
+    // which case the copy attaches to that group's existing anchor rather
+    // than founding a redundant second one.
+    int anchorId = sourceId;
+    gp_Trsf basePlacement;   // identity - used when sourceId founds a fresh group
+    const auto groupIt = myLinkGroups.find(sourceId);
+    if (groupIt != myLinkGroups.end()) {
+        anchorId = groupIt->second.anchorId;
+        basePlacement = groupIt->second.placement.at(sourceId);
+    }
+    // "Apply basePlacement, then offset" - see unlinkGroupInternal()'s own
+    // comment on the composition rule.
+    const gp_Trsf newPlacement = offset.Multiplied(basePlacement);
+
+    const ModelingOps::BooleanResult transformed = ModelingOps::transformShape(sourceShape, offset);
+    if (!transformed.ok) {
+        result.error = transformed.error;
+        return result;
+    }
+
+    checkpoint();
+    const int newId = addSolid(transformed.shape);
+    if (newId <= 0) {
+        // transformShape() never returns ok == true with a null shape (its
+        // own contract), so addSolid() failing here is not expected - kept
+        // defensive anyway, matching this file's existing idiom.
+        result.error = "failed to add the copy";
+        return result;
+    }
+
+    LinkGroup group;
+    if (groupIt != myLinkGroups.end()) {
+        group = groupIt->second;
+    } else {
+        group.anchorId = anchorId;
+        group.placement[anchorId] = gp_Trsf();
+    }
+    group.placement[newId] = newPlacement;
+    for (const auto& kv : group.placement) myLinkGroups[kv.first] = group;
+
+    result.ok = true;
+    result.id = newId;
+    return result;
+}
+
+DocumentModel::LinkResult DocumentModel::linkExisting(const std::vector<int>& ids)
+{
+    LinkResult result;
+    if (ids.size() < 2) {
+        result.error = "need at least two bodies to link";
+        return result;
+    }
+
+    std::unordered_set<int> seen;
+    for (int id : ids) {
+        if (id <= 0 || !contains(id)) {
+            result.error = "unknown body";
+            return result;
+        }
+        if (!seen.insert(id).second) {
+            result.error = "duplicate body in the list";
+            return result;
+        }
+        if (isLinked(id)) {
+            result.error = "already linked";
+            return result;
+        }
+        if (symmetryOn() && twinOf(id) != -1) {
+            result.error = "already mirrored - cannot also be linked";
+            return result;
+        }
+    }
+
+    const int anchorId = ids.front();
+    const TopoDS_Shape anchorShape = shapeOf(anchorId);
+    const gp_Pnt anchorCentre = ModelingOps::centreOfMass(anchorShape);
+
+    // Resolve-before-mutate, all-or-nothing - the bevels' own discipline:
+    // every replacement shape is built BEFORE anything is written, so one
+    // kernel refusal refuses the whole call with nothing changed.
+    struct Placed {
+        int id;
+        gp_Trsf placement;
+        TopoDS_Shape shape;
+    };
+    std::vector<Placed> placed;
+    placed.reserve(ids.size() - 1);
+    for (std::size_t i = 1; i < ids.size(); ++i) {
+        const int id = ids[i];
+        const gp_Pnt oldCentre = ModelingOps::centreOfMass(shapeOf(id));
+        gp_Trsf trsf;
+        trsf.SetTranslation(gp_Vec(anchorCentre, oldCentre));   // anchor -> this member's own old centre
+        const ModelingOps::BooleanResult placedShape = ModelingOps::transformShape(anchorShape, trsf);
+        if (!placedShape.ok) {
+            result.error = placedShape.error;
+            return result;
+        }
+        placed.push_back(Placed{id, trsf, placedShape.shape});
+    }
+
+    checkpoint();
+    for (const Placed& p : placed) replaceSolid(p.id, p.shape);
+
+    LinkGroup group;
+    group.anchorId = anchorId;
+    group.placement[anchorId] = gp_Trsf();
+    for (const Placed& p : placed) group.placement[p.id] = p.placement;
+    for (const auto& kv : group.placement) myLinkGroups[kv.first] = group;
+
+    result.ok = true;
+    result.id = anchorId;
+    return result;
+}
+
+bool DocumentModel::unlink(int memberId)
+{
+    if (!isLinked(memberId)) return false;
+    checkpoint();
+    unlinkGroupInternal(memberId);
+    ++myRevision;
+    return true;
+}
+
+bool DocumentModel::propagateLinkedEdit(int editedMemberId, const TopoDS_Shape& newShape)
+{
+    if (newShape.IsNull()) return false;
+    const auto found = myLinkGroups.find(editedMemberId);
+    if (found == myLinkGroups.end()) return false;
+
+    const LinkGroup& group = found->second;
+    const auto editedPlacement = group.placement.find(editedMemberId);
+    if (editedPlacement == group.placement.end()) return false;   // defensive; kept in sync by construction
+
+    const gp_Trsf inv = editedPlacement->second.Inverted();
+    const ModelingOps::BooleanResult anchorResult = ModelingOps::transformShape(newShape, inv);
+    if (!anchorResult.ok) return false;
+
+    // Resolve every member's new shape BEFORE writing any of them.
+    std::vector<std::pair<int, TopoDS_Shape>> resolved;
+    resolved.reserve(group.placement.size());
+    for (const auto& kv : group.placement) {
+        if (kv.first == group.anchorId) {
+            resolved.push_back({kv.first, anchorResult.shape});
+            continue;
+        }
+        const ModelingOps::BooleanResult memberResult =
+            ModelingOps::transformShape(anchorResult.shape, kv.second);
+        if (!memberResult.ok) return false;
+        resolved.push_back({kv.first, memberResult.shape});
+    }
+
+    // ONE State mutation, written directly rather than through N calls to
+    // replaceSolid() - see the header's own comment on why this function,
+    // alone among the checkpointed commit paths, never calls checkpoint()
+    // itself: the caller is already inside its own checkpointed edit, and
+    // from that edit's point of view this IS one change, not N.
+    for (const auto& kv : resolved) {
+        for (Solid& s : mySolids) {
+            if (s.id == kv.first) {
+                s.shape = kv.second;
+                break;
+            }
+        }
+    }
     ++myRevision;
     return true;
 }
@@ -279,7 +565,7 @@ bool DocumentModel::contains(int id) const
 
 void DocumentModel::checkpoint()
 {
-    myUndo.push_back(State{mySolids, myOutlines, myTwin});
+    myUndo.push_back(State{mySolids, myOutlines, myTwin, myLinkGroups});
     if (myUndo.size() > kMaxHistory) myUndo.erase(myUndo.begin());
 
     // Anything redoable described a future that no longer follows from here.
@@ -290,12 +576,13 @@ bool DocumentModel::undo()
 {
     if (myUndo.empty()) return false;
 
-    myRedo.push_back(State{mySolids, myOutlines, myTwin});
+    myRedo.push_back(State{mySolids, myOutlines, myTwin, myLinkGroups});
     mySolids = myUndo.back().solids;
     myOutlines = myUndo.back().outlines;
     // symmetryOn/symmetryPlane are NOT part of State - see its own comment.
-    // Only the pairing map moves with undo/redo.
+    // Only the pairing map and the link groups move with undo/redo.
     myTwin = myUndo.back().twin;
+    myLinkGroups = myUndo.back().linkGroups;
     myUndo.pop_back();
     ++myRevision;
     return true;
@@ -305,10 +592,11 @@ bool DocumentModel::redo()
 {
     if (myRedo.empty()) return false;
 
-    myUndo.push_back(State{mySolids, myOutlines, myTwin});
+    myUndo.push_back(State{mySolids, myOutlines, myTwin, myLinkGroups});
     mySolids = myRedo.back().solids;
     myOutlines = myRedo.back().outlines;
     myTwin = myRedo.back().twin;
+    myLinkGroups = myRedo.back().linkGroups;
     myRedo.pop_back();
     ++myRevision;
     return true;
@@ -415,6 +703,34 @@ FurnifySerial::SerializedDocument DocumentModel::toSerialized(DocumentMeta& meta
         meta.symmetryPairs.push_back({static_cast<int>(twinPos->second), static_cast<int>(i)});
     }
 
+    // Link groups (Milestone 4): one record per DISTINCT group, emitted the
+    // first time mySolids' own order reaches any of its members - so which
+    // group is "first" is deterministic run to run, the same property the
+    // byte-identical round-trip check above relies on for pairs.
+    std::unordered_set<int> emittedAnchors;
+    for (std::size_t i = 0; i < mySolids.size(); ++i) {
+        const int id = mySolids[i].id;
+        const auto groupIt = myLinkGroups.find(id);
+        if (groupIt == myLinkGroups.end()) continue;
+        const LinkGroup& group = groupIt->second;
+        if (!emittedAnchors.insert(group.anchorId).second) continue;   // already written
+
+        const auto anchorPos = positionOfId.find(group.anchorId);
+        if (anchorPos == positionOfId.end()) continue;   // defensive - should never miss
+
+        DocumentMeta::LinkGroupRecord record;
+        record.anchorPosition = static_cast<int>(anchorPos->second);
+        record.memberPositions.reserve(group.placement.size());
+        record.placements.reserve(group.placement.size());
+        for (const auto& kv : group.placement) {
+            const auto pos = positionOfId.find(kv.first);
+            if (pos == positionOfId.end()) continue;   // defensive - should never miss
+            record.memberPositions.push_back(static_cast<int>(pos->second));
+            record.placements.push_back(trsfToArray(kv.second));
+        }
+        if (record.memberPositions.size() >= 2) meta.linkGroups.push_back(std::move(record));
+    }
+
     return serial;
 }
 
@@ -452,6 +768,9 @@ bool DocumentModel::fromSerialized(const FurnifySerial::SerializedDocument& seri
     // still stale state this function's own job is to replace wholesale, not
     // merge onto.
     myTwin.clear();
+    // Same reasoning for link groups (Milestone 4) - a second load onto the
+    // same instance must not carry the OLD document's groups forward.
+    myLinkGroups.clear();
     ++myRevision;
 
     std::vector<int> bodyIds;
@@ -484,6 +803,44 @@ bool DocumentModel::fromSerialized(const FurnifySerial::SerializedDocument& seri
         }
     }
 
+    // Link groups (Milestone 4): translate meta's position-based records
+    // back into the ids addSolid() just assigned, the same
+    // forward-compatible rule symmetryPairs follows just above - a
+    // malformed record (a position out of range, mismatched array sizes,
+    // or fewer than two members after filtering) is skipped rather than
+    // refusing the whole load. An empty/absent `meta.linkGroups` (an older
+    // save with no such key) naturally round-trips as "nothing linked",
+    // since the vector default-constructs empty and this loop simply never
+    // runs.
+    for (const DocumentMeta::LinkGroupRecord& record : meta.linkGroups) {
+        if (record.memberPositions.size() != record.placements.size()) continue;
+        if (record.memberPositions.size() < 2) continue;
+        if (record.anchorPosition < 0 ||
+            record.anchorPosition >= static_cast<int>(bodyIds.size())) {
+            continue;
+        }
+
+        std::map<int, gp_Trsf> placement;
+        bool malformed = false;
+        bool anchorSeen = false;
+        for (std::size_t i = 0; i < record.memberPositions.size(); ++i) {
+            const int pos = record.memberPositions[i];
+            if (pos < 0 || pos >= static_cast<int>(bodyIds.size())) {
+                malformed = true;
+                break;
+            }
+            const int id = bodyIds[static_cast<std::size_t>(pos)];
+            placement[id] = trsfFromArray(record.placements[i]);
+            if (pos == record.anchorPosition) anchorSeen = true;
+        }
+        if (malformed || !anchorSeen || placement.size() < 2) continue;
+
+        LinkGroup group;
+        group.anchorId = bodyIds[static_cast<std::size_t>(record.anchorPosition)];
+        group.placement = placement;
+        for (const auto& kv : placement) myLinkGroups[kv.first] = group;
+    }
+
     return true;
 }
 
@@ -499,6 +856,9 @@ void DocumentModel::restoreFrom(const DocumentModel& snapshot)
     mySymmetryOn = snapshot.mySymmetryOn;
     mySymmetryPlane = snapshot.mySymmetryPlane;
     myTwin = snapshot.myTwin;
+    // Link groups travel the same way symmetry pairing does - `snapshot`'s
+    // ids are copied in verbatim, so no position translation is needed.
+    myLinkGroups = snapshot.myLinkGroups;
     // Never shrink: `this`'s own counters may already be ahead of
     // `snapshot`'s (this document had more history before the restore than
     // the version ever saw), and `snapshot`'s may be ahead of `this`'s (the

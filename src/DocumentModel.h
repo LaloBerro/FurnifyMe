@@ -9,6 +9,8 @@
 // tree, so nothing persists them - see the topological naming note in CLAUDE.md
 // before giving them any longer life.
 //
+#include <array>
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -19,6 +21,7 @@
 #include <gp_Dir.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
+#include <gp_Trsf.hxx>
 
 #include "FurnifySerial.h"
 
@@ -118,6 +121,13 @@ public:
         // that reaches the kernel and still gets no twin must say why, not
         // just show up as a lower-than-expected `paired` count.
         std::vector<int> skippedFailed;
+        // ids skipped because they belong to a link group (Milestone 4:
+        // isLinked(id)) - the spec's v1 mirror-and-link exclusion, enforced
+        // from this side too (linkExisting()/createLinkedCopy() refuse a
+        // mirror-paired id the other way round). A body cannot be asked to
+        // carry both propagation rules at once, so it is reported here
+        // exactly like skippedAlreadyPaired rather than silently mirrored.
+        std::vector<int> skippedLinked;
     };
 
     // An id outside the document (unknown, <= 0, or repeated within `ids`)
@@ -154,6 +164,122 @@ public:
     // MainWindow's plane-pick route needs this) can announce it - or stay
     // silent - rather than reporting an unpairing that changed nothing.
     bool unpairAll();
+
+    // --- link groups (Milestone 4: linked copies) --------------------------
+    //
+    // Where mirror symmetry (above) keeps exactly two bodies in step across
+    // one plane, a link group keeps N bodies in step across an arbitrary
+    // placement each - "the same shape placed differently", per the spec.
+    // The mechanism is the same philosophy CLAUDE.md states for symmetry
+    // ("twins, not replay"): nothing records the EDIT that changed a member,
+    // only the placements between members, and propagateLinkedEdit()
+    // re-derives every shape from whichever member's edit just landed. A
+    // link group never stores a shape of its own - the anchor's shape is a
+    // real body like any other, and `placement[anchorId]` is always
+    // identity, kept as an explicit entry rather than an implicit special
+    // case so every member (anchor included) is one lookup away.
+    //
+    // `placement[m]` maps the ANCHOR's frame to member `m`'s frame: member
+    // m's shape is always the anchor's shape transformed by `placement[m]`.
+    // v1 (this task) only ever builds translation-only placements
+    // (createLinkedCopy takes a caller-supplied gp_Trsf offset, which need
+    // not be translation-only, but linkExisting's own placements always
+    // are, per the spec) - general rotation/scale placements are accepted
+    // by propagateLinkedEdit() and the query API without restriction, since
+    // gp_Trsf itself does not know which flavour it is.
+    struct LinkGroup {
+        int anchorId = 0;
+        std::map<int, gp_Trsf> placement;   // keyed by member id, anchor included
+    };
+
+    // Outcome of createLinkedCopy()/linkExisting(): `ok` false always
+    // carries an empty `id`/non-empty `error`, the same refusal contract
+    // BooleanResult uses. `id` is the new copy's id for createLinkedCopy(),
+    // and the anchor's id (informational only) for linkExisting().
+    struct LinkResult {
+        bool ok = false;
+        int id = 0;
+        std::string error;
+    };
+
+    // Adds a new body that is `sourceId`'s own shape transformed by
+    // `offset`, and records it as a member of `sourceId`'s link group -
+    // founding a fresh one (with `sourceId` as anchor) if `sourceId` was not
+    // already in one. One checkpoint. Refuses (no checkpoint, no mutation,
+    // `id == 0`): an unknown/invalid `sourceId`, a `sourceId` that already
+    // has a live mirror twin (symmetryOn() && twinOf() != -1 - the v1
+    // mirror/link exclusion, enforced from this side), or a kernel-level
+    // transform failure (ModelingOps::transformShape, e.g. `offset`'s scale
+    // factor <= 0).
+    LinkResult createLinkedCopy(int sourceId, const gp_Trsf& offset);
+
+    // Links `ids` into one group: `ids.front()` becomes the anchor, and
+    // every other id's shape is REPLACED by the anchor's shape translated
+    // centre-to-centre (ModelingOps::centreOfMass of each original shape) -
+    // a translation-only placement, v1's whole scope per the spec. One
+    // checkpoint. Resolve-before-mutate and ALL-OR-NOTHING, the bevels'
+    // own discipline: every id is validated and every replacement shape is
+    // built BEFORE anything is written, so one bad id refuses the whole
+    // call with nothing changed. Refuses (no checkpoint, no mutation):
+    // fewer than two ids, an unknown/invalid or duplicated id, an id
+    // already in a link group, an id with a live mirror twin (the same v1
+    // exclusion createLinkedCopy() enforces), or a kernel-level transform
+    // failure.
+    LinkResult linkExisting(const std::vector<int>& ids);
+
+    // Removes `memberId` from its link group, if it has one - false, no
+    // checkpoint, for an id that is not linked. One checkpoint otherwise.
+    // Neither `memberId`'s own shape nor any other member's shape changes;
+    // only the bookkeeping is undone. A group left with fewer than two
+    // members dissolves outright (no group is a group of one).
+    //
+    // Unlinking the ANCHOR needs a rule, since every other member's
+    // placement is expressed relative to it: the DETERMINISTIC choice made
+    // here is to promote the lowest surviving member id to anchor (ids are
+    // assigned in creation order and never reused - see the header note at
+    // the top of this file - so "lowest id" is "oldest surviving member",
+    // not an arbitrary tiebreak) and re-express every remaining placement
+    // relative to the new anchor's own frame. The promoted member's own
+    // placement becomes an exact identity rather than a numerically-close
+    // one, so re-promoting it again later never drifts.
+    bool unlink(int memberId);
+
+    // The propagation engine: `editedMemberId` just became `newShape`
+    // (typically the result of a pull/bevel/transform run on that member's
+    // OWN current shape) - this re-derives the anchor's shape as
+    // `placement(editedMemberId)^-1 . newShape`, then every member
+    // (including the anchor and `editedMemberId` itself) as
+    // `placement(member) . anchor`, through ModelingOps::transformShape.
+    // False, nothing changed, for an id with no link group, a null
+    // `newShape`, or a kernel-level transform failure on any member
+    // (resolve-before-mutate: every member's new shape is built before any
+    // is written, so a mid-list failure leaves the document untouched).
+    //
+    // Unlike every other checkpointed API on this page, this call takes NO
+    // checkpoint of its own - the header's own general rule
+    // ("call checkpoint() before mutating") does not apply here because
+    // this is always run from INSIDE an edit that already checkpointed
+    // itself (a pull, a bevel, a transform) before producing `newShape` in
+    // the first place; a second checkpoint here would split one gesture
+    // into two undo steps. This is the same asymmetry pairWithMirror's own
+    // header calls out in the opposite direction - THAT call checkpoints
+    // itself because it is its own gesture with no earlier checkpoint to
+    // sit behind. All of the shape writes below happen in ONE pass, so the
+    // whole propagated edit is one State mutation for the checkpoint the
+    // caller already took to restore.
+    bool propagateLinkedEdit(int editedMemberId, const TopoDS_Shape& newShape);
+
+    // True when `id` belongs to a link group (a body with no group answers
+    // false, including an unknown id).
+    bool isLinked(int id) const;
+    // `id`'s group's anchor id, or -1 when `id` is not linked (including an
+    // unknown id). Answers `id` itself when `id` IS the anchor.
+    int linkAnchorOf(int id) const;
+    // Copies `id`'s whole LinkGroup into `out` and returns true; false (`out`
+    // untouched) when `id` is not linked. Every member id in the same group
+    // answers with an equal LinkGroup - see the struct's own comment on why
+    // it is duplicated per member rather than looked up through the anchor.
+    bool linkGroupOf(int id, LinkGroup& out) const;
 
     // Renames whichever kind of item `id` belongs to - a body or an
     // outline, since the two share one id space. Milestone 3 introduces
@@ -269,6 +395,28 @@ public:
         bool symmetryOn = false;
         gp_Pln symmetryPlane{gp_Pnt(0.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0)};
         std::vector<std::pair<int, int>> symmetryPairs;
+
+        // Link groups (Milestone 4), position-based for exactly the reason
+        // symmetryPairs is - ids are session-only handles that cannot be
+        // persisted directly. One record per DISTINCT group (never one per
+        // member - see LinkGroup's own comment on the in-memory map's
+        // per-member duplication, which this does NOT mirror): every
+        // position in `memberPositions` indexes into `serial.bodies`,
+        // `placements` is its own gp_Trsf stored as the 12 values
+        // `Value(row, col)`/`SetValues()` read and write (row-major, 3 rows
+        // x 4 columns), and the two arrays are parallel - placements[i] is
+        // memberPositions[i]'s own placement, identity for whichever
+        // position equals `anchorPosition`. Always empty when nothing is
+        // linked, the same "absent means off" rule symmetry's own fields
+        // follow, so an unlinked document persists nothing new here and an
+        // OLDER file with no key at all round-trips as "no groups" for
+        // free.
+        struct LinkGroupRecord {
+            int anchorPosition = -1;
+            std::vector<int> memberPositions;
+            std::vector<std::array<double, 12>> placements;
+        };
+        std::vector<LinkGroupRecord> linkGroups;
     };
 
     // Walks mySolids/myOutlines in order, building the kernel-side shapes
@@ -342,6 +490,11 @@ private:
         // exactly this reason: a pairing entry surviving in State is inert
         // the moment the live mode is off, whatever undo does to it.
         std::unordered_map<int, int> twin;
+        // Link groups (Milestone 4) ride along in State for the same reason
+        // the pairing map does: linking/unlinking/propagating all happen
+        // inside checkpointed commits, so undoing one must restore group
+        // membership and every placement exactly as they stood.
+        std::map<int, LinkGroup> linkGroups;
     };
 
     // Drops `id`'s existing pairing, both directions, if it has one. The one
@@ -349,12 +502,26 @@ private:
     // or re-paired body can never leave a stale half-entry pointing at it.
     void unpairInternal(int id);
 
+    // Removes `memberId` from its link group (promoting a new anchor, or
+    // dissolving the group outright, exactly as unlink()'s own header
+    // describes) with NO checkpoint and no revision bump - the one
+    // implementation unlink() and removeSolid() both call, matching
+    // unpairInternal()'s own split between "what changes the bookkeeping"
+    // and "who checkpoints for it". A no-op for an id with no group.
+    void unlinkGroupInternal(int memberId);
+
     std::vector<Solid> mySolids;
     std::vector<Outline> myOutlines;
     bool mySymmetryOn = false;
     gp_Pln mySymmetryPlane{gp_Pnt(0.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0)};
     // Both directions, so twinOf() is a single lookup either way round.
     std::unordered_map<int, int> myTwin;
+    // Keyed by MEMBER id, anchor included - the same "duplicate for O(1)
+    // lookup from any member" idiom myTwin uses, one level richer: every id
+    // in a group maps to an equal copy of the whole LinkGroup (not just the
+    // other end of a pair), so "which group is X in, and where does every
+    // member sit" is one lookup regardless of which member id is in hand.
+    std::map<int, LinkGroup> myLinkGroups;
     int myNextId = 1;
     int myRevision = 0;   // see revision() - monotonic, never rolled back
     // Like ids, never rolled back by undo: a name reappearing on a different
