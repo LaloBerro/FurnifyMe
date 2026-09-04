@@ -78,7 +78,10 @@ add_test(NAME headless_furnify_serial COMMAND headless_furnify_serial)
 # Application (Qt + OCCT visualization)
 # ---------------------------------------------------------------------------
 if(FURNIFYME_BUILD_APP)
-  find_package(Qt6 REQUIRED COMPONENTS Widgets)
+  # OpenGLWidgets since the QOpenGLWidget migration: the viewport is no longer a
+  # native OS window OCCT owns, it is a QOpenGLWidget whose FBO OCCT renders into
+  # (see OcctViewWidget's own header). Qt6::Widgets does not pull that module in.
+  find_package(Qt6 REQUIRED COMPONENTS Widgets OpenGLWidgets)
   set(CMAKE_AUTOMOC ON)
 
   set(APP_SOURCES
@@ -138,8 +141,16 @@ if(FURNIFYME_BUILD_APP)
     target_link_libraries(furnify_app PUBLIC
       furnify_geometry
       Qt6::Widgets
+      Qt6::OpenGLWidgets
       TKService TKV3d TKOpenGl
     )
+    if(WIN32)
+      # wglGetCurrentDC, for the one question OpenGl_Window has to be able to
+      # answer about the context Qt handed us - see currentGlNativeWindow() in
+      # OcctViewWidget.cpp. Qt links opengl32 for its own use but does not
+      # export it to consumers.
+      target_link_libraries(furnify_app PUBLIC opengl32)
+    endif()
 
     add_executable(furnifyme src/main.cpp)
     target_link_libraries(furnifyme PRIVATE furnify_app)

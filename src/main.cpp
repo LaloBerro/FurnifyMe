@@ -1,10 +1,12 @@
 #include "EditorSelectorHandoff.h"
 #include "IconSet.h"
 #include "MainWindow.h"
+#include "OcctViewWidget.h"
 #include "SelectorWindow.h"
 #include "Theme.h"
 
 #include <QApplication>
+#include <QSurfaceFormat>
 
 int main(int argc, char* argv[])
 {
@@ -16,6 +18,26 @@ int main(int argc, char* argv[])
         qputenv("QT_QPA_PLATFORM", "xcb");
     }
 #endif
+
+    // BEFORE QApplication, which is the only moment it can be set: the first
+    // OpenGL context this process creates reads the application default
+    // format, and the 3D viewport needs a depth and a stencil buffer that Qt's
+    // own default does not promise. One derivation, in OcctViewWidget itself,
+    // because the widget's driver options have to agree with the profile this
+    // asks for - see OcctViewWidget::surfaceFormat().
+    QSurfaceFormat::setDefaultFormat(OcctViewWidget::surfaceFormat());
+    // Also before QApplication, and load-bearing rather than an optimisation.
+    // Without it Qt DESTROYS a QOpenGLWidget's OpenGL context whenever the
+    // widget is reparented (QOpenGLWidget::event, QEvent::WindowChangeInternal)
+    // and builds a fresh one - and this application reparents its viewport for
+    // real: opening the compare pane moves the live view into a QSplitter and
+    // closing it moves it back. OCCT holds GPU resources against that context
+    // and is given no chance to release them, so the re-attach on the next
+    // frame tears down an OpenGl_Window whose context no longer exists, which
+    // is a hard crash rather than a glitch (measured, at exactly that reparent).
+    // With the attribute set Qt keeps the context across the reparent, and the
+    // two viewports share GPU resources besides.
+    QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
 
     QApplication app(argc, argv);
     QApplication::setApplicationName(QStringLiteral("FurnifyMe"));

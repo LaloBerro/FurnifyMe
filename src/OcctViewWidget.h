@@ -6,6 +6,7 @@
 #include <AIS_Manipulator.hxx>
 #include <AIS_ManipulatorMode.hxx>
 #include <AIS_Shape.hxx>
+#include <Aspect_NeutralWindow.hxx>
 #include <Graphic3d_CLight.hxx>
 #include <Graphic3d_RenderingParams.hxx>
 #include <Graphic3d_ToneMappingMethod.hxx>
@@ -28,18 +29,50 @@
 #include "PullArrow.h"
 
 #include <QImage>
+#include <QOpenGLWidget>
 #include <QPoint>
+#include <QSize>
 #include <QString>
 #include <QStringList>
-#include <QWidget>
+#include <QSurfaceFormat>
 
 #include <map>
 #include <utility>
 #include <vector>
 
-// The Qt <-> OCCT bridge. Hosts a V3d_View on this widget's native window and
-// forwards Qt input to the OCCT camera and selector.
-class OcctViewWidget : public QWidget {
+// The Qt <-> OCCT bridge. Hosts a V3d_View inside a QOpenGLWidget - OCCT renders
+// into the framebuffer object Qt hands it, and Qt composites that frame with the
+// rest of the widget tree - and forwards Qt input to the OCCT camera and selector.
+//
+// It used to be a plain QWidget carrying WA_PaintOnScreen with a real WNT_Window
+// (Xw_Window off Windows) attached to its own HWND. That made the 3D frame a
+// native OS surface Qt could not see, which is what forced this app's whole
+// opaque-paint stratum (no translucency over the viewport, ground fills under
+// every floating card, window masks for rounded corners) and produced the
+// stale-native-HWND pitfall the compare pane hit in Milestone 3. Hosting OCCT in
+// a QOpenGLWidget puts the frame through Qt's own compositor instead. Phase 1 is
+// the hosting swap ALONE: the masks and the opaque paint family stay exactly
+// where they are, and Phase 2 is what deletes them.
+//
+// Three things carry the port, and each replaces something the old architecture
+// did implicitly:
+//   - initializeGL() attaches the view. initializeViewer() still exists and is
+//     still lazy, but it no longer touches a window at all - it builds the
+//     driver, viewer, view and interactive context, which need no GL context -
+//     so the CLAUDE.md pitfall about an unconditional initializeViewer() forcing
+//     winId()/native-window realization is retired by construction rather than
+//     worked around.
+//   - The window OCCT measures itself against is an Aspect_NeutralWindow sized
+//     in DEVICE pixels through toDevicePixels(), exactly as the WNT_Window's own
+//     client rect was. Aspect_Window::DevicePixelRatio() is deliberately left at
+//     its 1.0 default (WNT_Window never overrode it either), so this file's one
+//     logical<->device conversion point is still the only place the ratio is
+//     applied.
+//   - paintGL() is the only place OCCT draws a frame on its own schedule.
+//     Everything that used to call V3d_View::Redraw() to put a scene change on
+//     screen now calls scheduleRedraw(); the measuring probes, which need pixels
+//     before they return, wrap themselves in GlScope instead (see below).
+class OcctViewWidget : public QOpenGLWidget {
     Q_OBJECT
 
 public:
@@ -71,8 +104,36 @@ public:
     // is supposed to be locked to.
     void setCameraStateNow(const CameraState& state);
 
-    // Qt must not paint here or it fights OpenGL for the surface.
-    QPaintEngine* paintEngine() const override { return nullptr; }
+    // The GL surface every OcctViewWidget in this process needs, in ONE place:
+    // 24-bit depth and 8-bit stencil (OCCT's own minimum for a 3D view), and a
+    // compatibility profile, which is what OCCT's ray-tracing tiers have
+    // historically wanted - Phase 3 is what finalizes that choice against
+    // measured tiers rather than assumption.
+    //
+    // Callers set it as the APPLICATION default before QApplication is
+    // constructed (main.cpp and gui_smoke both do; a format chosen after the
+    // first context exists is a format nothing reads), and this widget also
+    // installs it on itself in its constructor so a third entry point cannot
+    // silently get a viewport with no depth buffer. Two call sites, one
+    // derivation - the discipline Theme::defaultSpec() already keeps for
+    // colour.
+    static QSurfaceFormat surfaceFormat();
+
+    // gui_smoke's oracle for the hosting layer, and the two halves of one
+    // question: is the window OCCT measures itself against still exactly the
+    // widget's own size in DEVICE pixels?
+    //
+    // It replaces Milestone 3's GetClientRect pin on the native HWND, which
+    // asked the same question of an architecture that no longer exists (there
+    // is no HWND of our own any more, and asking Qt for one through winId()
+    // would itself force the native window this migration exists to remove).
+    // hostWindowSize() reads what the Aspect_NeutralWindow actually holds;
+    // viewportDeviceSize() is this file's own logical->device conversion point
+    // answering for the widget - so a check comparing the two tests the real
+    // mechanism rather than re-deriving the ratio itself. Both are QSize()
+    // before the GL context exists.
+    QSize hostWindowSize() const;
+    QSize viewportDeviceSize() const;
 
     void displaySolid(int id, const TopoDS_Shape& shape);
     void removeSolid(int id);
@@ -486,7 +547,9 @@ public:
     // Redraws whatever dimension is on screen without changing which span it
     // measures - for a display-unit switch, which changes the label's text
     // under an annotation nothing else would touch until the next mouse move.
-    void refreshDimension() { myDimension.refresh(); }
+    // scheduleRedraw() because DimensionRenderer redraws the OCCT viewer
+    // itself and Qt is what composites the result - see updateEdgeDimension().
+    void refreshDimension() { myDimension.refresh(); scheduleRedraw(); }
 
     // Screen position of a world point, in this widget's coordinates. False
     // when there is no view yet. Exposed for gui_smoke: a test that hardcodes
@@ -1135,8 +1198,14 @@ signals:
     void renderModeExitRequested();
 
 protected:
-    void paintEvent(QPaintEvent* event) override;
-    void resizeEvent(QResizeEvent* event) override;
+    // Qt's three GL callbacks, and the only places a current OpenGL context is
+    // guaranteed without asking for one. initializeGL() is where the lazy
+    // initializeViewer() contract lands: Qt calls it once, on the first show,
+    // which is exactly when the old paintEvent() used to force the native
+    // window into existence.
+    void initializeGL() override;
+    void paintGL() override;
+    void resizeGL(int w, int h) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
@@ -1163,7 +1232,46 @@ private:
         double value = 0.0;
     };
 
+    // Builds the viewer, the view and the interactive context - and NOTHING
+    // that needs an OpenGL context or a window. Still lazy, still called
+    // defensively from every entry point that displays something, and now
+    // genuinely safe to call before the widget has ever been shown, which is
+    // what the old spelling could not promise (it reached winId()).
     void initializeViewer();
+    // Attaches the view to the Aspect_NeutralWindow wrapping Qt's GL context.
+    // Called from initializeGL() only - it is the one step that needs a bound
+    // context - and re-run whenever Qt rebuilds the context under us.
+    bool attachGlWindow();
+    // Wraps the framebuffer object Qt is currently rendering into as OCCT's
+    // default FBO, and syncs the neutral window to its size. Run before every
+    // frame OCCT draws, because QOpenGLWidget recreates that FBO on resize and
+    // on a device-pixel-ratio change without telling anyone.
+    bool wrapDefaultFramebuffer();
+    // Asks Qt for a frame. THE replacement for every V3d_View::Redraw() that
+    // used to mean "put this scene change on screen": OCCT no longer owns the
+    // surface, so it does not get to decide when a frame is presented - Qt
+    // does, through paintGL(). A no-op with no view.
+    void scheduleRedraw();
+    // Makes this widget's GL context current for the life of the scope, with
+    // OCCT's default framebuffer wrapper in step - what a SYNCHRONOUS
+    // V3d_View::Redraw()/Dump() outside paintGL() needs, since Qt only
+    // guarantees a current context inside its own three GL callbacks. Every
+    // render-mode measuring probe and every snapshot path opens one.
+    //
+    // Nesting-safe and re-entrant from inside paintGL(): it only takes (and
+    // only releases) the context when it was not already current, so a probe
+    // calling another probe cannot leave the outer one running uncurrent.
+    class GlScope {
+    public:
+        explicit GlScope(OcctViewWidget* view);
+        ~GlScope();
+        GlScope(const GlScope&) = delete;
+        GlScope& operator=(const GlScope&) = delete;
+
+    private:
+        OcctViewWidget* myWidget = nullptr;
+        bool myTook = false;
+    };
     // The work plane, nudged a hair toward the eye. Locking a face makes the
     // grid exactly coplanar with a shaded face, and two coplanar surfaces are
     // a depth-buffer tie - stipple, and flicker under camera motion. See the
@@ -1491,6 +1599,12 @@ private:
     Handle(V3d_Viewer) myViewer;
     Handle(V3d_View) myView;
     Handle(AIS_InteractiveContext) myContext;
+    // The window OCCT measures itself against - see the class comment. Sized in
+    // DEVICE pixels through toDevicePixels(), never logical ones, and its
+    // DevicePixelRatio() left at the 1.0 default so this file's one conversion
+    // point stays the only place the ratio is applied. Null until the first
+    // initializeGL().
+    Handle(Aspect_NeutralWindow) myHostWindow;
     // See sketchZLayer(). Graphic3d_ZLayerId_UNKNOWN until the viewer exists,
     // and if the viewer ever refuses the layer everything below simply
     // displays into the default layer as it did before.

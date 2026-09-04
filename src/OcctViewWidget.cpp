@@ -2,14 +2,19 @@
 // windows.h", and for the same reason gui_smoke.cpp takes it (see that
 // file's own top-of-file comment): OCCT's own Standard_Macro.hxx includes
 // windows.h itself, but with NOUSER defined first, which excludes the
-// entire User32 window-management API. resizeEvent() below needs
-// SetWindowPos and its SWP_* flags from that API (see its own comment for
-// why), and windows.h's include guard means a second, unrestricted
-// #include after OCCT's own restricted one is a silent no-op - the only
-// way to get the real declarations is to be the FIRST includer. Handle()
-// (OCCT's macro that collides with some Windows headers) does not exist
-// yet at this point in the file, so there is nothing for windows.h to
-// collide with here.
+// entire User32 window-management API. attachGlWindow() below needs
+// WindowFromDC from that API (and wglGetCurrentDC from wingdi.h beside it),
+// and windows.h's include guard means a second, unrestricted #include after
+// OCCT's own restricted one is a silent no-op - the only way to get the real
+// declarations is to be the FIRST includer. Handle() (OCCT's macro that
+// collides with some Windows headers) does not exist yet at this point in
+// the file, so there is nothing for windows.h to collide with here.
+//
+// It used to be SetWindowPos that needed this, for the Milestone-3 stale-HWND
+// safety net in resizeEvent(). That whole hazard is gone with the native
+// window it was about; what is left is the one question OpenGl_Window has to
+// be able to answer - which window does the GL context Qt handed us actually
+// belong to.
 #ifdef _WIN32
   #define NOMINMAX
   #include <windows.h>
@@ -47,8 +52,19 @@
 #include <Graphic3d_Vec2.hxx>
 #include <Graphic3d_ZLayerSettings.hxx>
 #include <Image_AlienPixMap.hxx>
+#include <Message.hxx>
 #include <NCollection_HArray1.hxx>
+// The GL-hosting half of the bridge. These pull in OCCT's own OpenGL enum and
+// entry-point declarations, which is why every Qt header in this file stays
+// below them - Qt's <qopengl.h> declares the same family, and only the first
+// one seen may define the types.
+#include <OpenGl_Caps.hxx>
+#include <OpenGl_Context.hxx>
+#include <OpenGl_FrameBuffer.hxx>
+#include <OpenGl_GlCore20.hxx>
 #include <OpenGl_GraphicDriver.hxx>
+#include <OpenGl_View.hxx>
+#include <OpenGl_Window.hxx>
 #include <Prs3d_Drawer.hxx>
 #include <Prs3d_LineAspect.hxx>
 #include <Prs3d_ShadingAspect.hxx>
@@ -74,20 +90,13 @@
 #include <gp_Lin.hxx>
 #include <gp_Vec.hxx>
 
-#ifdef _WIN32
-  #include <WNT_Window.hxx>
-#else
-  #include <Xw_Window.hxx>
-#endif
-
 #include <QDir>
 #include <QEasingCurve>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QImage>
 #include <QMouseEvent>
-#include <QPaintEvent>
-#include <QResizeEvent>
+#include <QOpenGLContext>
 #include <QSet>
 #include <QTemporaryFile>
 #include <QTimer>
@@ -272,19 +281,103 @@ Handle(SketchPointMarker) makeFilledSquareMarker(const gp_Pnt& point,
         new Graphic3d_AspectMarker3d(colour, kStartMarkerPx, kStartMarkerPx, bits);
     return marker;
 }
+
+// The framebuffer OCCT draws this app's 3D frame into, which since the
+// QOpenGLWidget migration is Qt's own - QOpenGLWidget renders into an FBO and
+// composites it with the rest of the widget tree, so there is no window
+// backbuffer for OCCT to own any more.
+//
+// The subclass exists for one reason, and it is a colour-correctness reason
+// rather than a plumbing one: Qt's FBO carries a GL_RGBA8 colour attachment,
+// not GL_SRGB8_ALPHA8, so OCCT must be told to leave GL_FRAMEBUFFER_SRGB alone
+// and apply the sRGB transfer itself. Without that flag every colour this app
+// measures out of a V3d_View::Dump - and this suite measures a great many -
+// would come back through the wrong curve. It is OCCT's own answer to its own
+// question (occt-samples-qopenglwidget's OcctQtFrameBuffer), copied rather
+// than invented.
+class HostFrameBuffer : public OpenGl_FrameBuffer {
+    DEFINE_STANDARD_RTTI_INLINE(HostFrameBuffer, OpenGl_FrameBuffer)
+public:
+    HostFrameBuffer() = default;
+
+    void BindBuffer(const Handle(OpenGl_Context)& context) override
+    {
+        OpenGl_FrameBuffer::BindBuffer(context);
+        context->SetFrameBufferSRGB(true, false);
+    }
+
+    void BindDrawBuffer(const Handle(OpenGl_Context)& context) override
+    {
+        OpenGl_FrameBuffer::BindDrawBuffer(context);
+        context->SetFrameBufferSRGB(true, false);
+    }
+
+    void BindReadBuffer(const Handle(OpenGl_Context)& context) override
+    {
+        OpenGl_FrameBuffer::BindReadBuffer(context);
+    }
+};
+
+// The OCCT-side GL context this view is rendering through, or a null handle
+// before one exists. Reached the only way OCCT exposes it - down through the
+// OpenGl_View and its OpenGl_Window - because everything the hosting layer has
+// to do to a frame (wrap Qt's FBO, put GL state back the way Qt left it) is
+// addressed to that context and not to the V3d_View.
+Handle(OpenGl_Context) hostGlContext(const Handle(V3d_View)& view)
+{
+    if (view.IsNull()) return Handle(OpenGl_Context)();
+    Handle(OpenGl_View) glView = Handle(OpenGl_View)::DownCast(view->View());
+    if (glView.IsNull() || glView->GlWindow().IsNull()) return Handle(OpenGl_Context)();
+    return glView->GlWindow()->GetGlContext();
+}
+
+// The native window the CURRENTLY BOUND GL context belongs to.
+//
+// Not this widget's own: a QOpenGLWidget deliberately has no native window,
+// and asking for one through winId() would re-create exactly the native
+// surface this migration exists to remove. OpenGl_Window::Init does
+// GetDC(NativeHandle()) and hands the result to wglMakeCurrent alongside the
+// rendering context it was given, so the handle has to be one whose device
+// context is COMPATIBLE with that rendering context - which is precisely the
+// window the context is already current on. OCCT's own sample answers it the
+// same way (OcctGlTools::GetGlNativeWindow).
+Aspect_Drawable currentGlNativeWindow()
+{
+#ifdef _WIN32
+    return reinterpret_cast<Aspect_Drawable>(WindowFromDC(wglGetCurrentDC()));
+#else
+    return 0;
+#endif
+}
 }  // namespace
 
+QSurfaceFormat OcctViewWidget::surfaceFormat()
+{
+    QSurfaceFormat format;
+    // OCCT's 3D view wants both, and neither is guaranteed by Qt's default.
+    format.setDepthBufferSize(24);
+    format.setStencilBufferSize(8);
+    // Compatibility rather than core: OCCT's ray-tracing tiers have
+    // historically wanted the fixed-function-capable context, and Phase 1 is
+    // the hosting swap alone - Phase 3 is what re-measures the tiers and
+    // settles this for real. initializeViewer() feeds the same choice through
+    // to OpenGl_Caps::contextCompatible, so the driver and the surface cannot
+    // disagree about which profile is live.
+    format.setProfile(QSurfaceFormat::CompatibilityProfile);
+    return format;
+}
+
 OcctViewWidget::OcctViewWidget(QWidget* parent, bool viewerOnly)
-    : QWidget(parent)
+    : QOpenGLWidget(parent)
     , mySketchPlane(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0))
     , myViewerOnly(viewerOnly)
 {
-    // Omit any of these and the viewport flickers or renders black.
-    setAttribute(Qt::WA_PaintOnScreen);
-    setAttribute(Qt::WA_NoSystemBackground);
-    setAttribute(Qt::WA_OpaquePaintEvent);
-    setAttribute(Qt::WA_NativeWindow);
-    setAutoFillBackground(false);
+    // Belt to main.cpp's braces: the application default format is what
+    // actually decides the context (it is set before QApplication exists, which
+    // is the only moment that can), and this makes the widget carry the same
+    // answer so a third entry point cannot silently produce a viewport with no
+    // depth buffer.
+    setFormat(surfaceFormat());
     setMouseTracking(true);          // hover highlight needs move events with no button down
     setFocusPolicy(Qt::StrongFocus);
     // A bare floor - this class knows nothing about the rail or any other
@@ -308,7 +401,22 @@ void OcctViewWidget::initializeViewer()
     if (myInitialized) return;
 
     Handle(Aspect_DisplayConnection) display = new Aspect_DisplayConnection();
-    Handle(OpenGl_GraphicDriver) driver = new OpenGl_GraphicDriver(display);
+    // FALSE: the driver must not create an OpenGL context of its own. Qt owns
+    // the one this widget renders through, and a second context would be a
+    // second GPU-resource namespace - the framebuffer attachGlWindow() wraps
+    // does not live in it.
+    Handle(OpenGl_GraphicDriver) driver = new OpenGl_GraphicDriver(display, Standard_False);
+    // Qt presents the frame, so OCCT must not swap buffers under it, must not
+    // reach for a system backbuffer it does not own, and must treat the alpha
+    // channel of the shared FBO as opaque - the three options OCCT's own
+    // QOpenGLWidget sample sets, for the same three reasons.
+    driver->ChangeOptions().buffersNoSwap = Standard_True;
+    driver->ChangeOptions().buffersOpaqueAlpha = Standard_True;
+    driver->ChangeOptions().useSystemBuffer = Standard_False;
+    // Told, not guessed: the profile the surface format above actually asks
+    // for is the profile OCCT's context wrapper has to be initialized with.
+    driver->ChangeOptions().contextCompatible =
+        surfaceFormat().profile() != QSurfaceFormat::CoreProfile;
 
     myViewer = new V3d_Viewer(driver);
     myViewer->SetDefaultLights();
@@ -316,14 +424,14 @@ void OcctViewWidget::initializeViewer()
 
     myView = myViewer->CreateView();
     myContext = new AIS_InteractiveContext(myViewer);
-
-#ifdef _WIN32
-    Handle(WNT_Window) window = new WNT_Window(reinterpret_cast<Aspect_Handle>(winId()));
-#else
-    Handle(Xw_Window) window = new Xw_Window(display, static_cast<Aspect_Drawable>(winId()));
-#endif
-    myView->SetWindow(window);
-    if (!window->IsMapped()) window->Map();
+    // Nothing below this line touches a window or a GL context, and that is
+    // the point: this function is reached from every entry point that displays
+    // something, including ones that run long before the widget is first shown
+    // (a furniture loaded straight into a constructed-but-unshown MainWindow).
+    // The old spelling attached a WNT_Window here, which meant realizing
+    // winId() - which is what made an unconditional call to this function break
+    // startup determinism once, and is the pitfall CLAUDE.md records. The
+    // attach now lives in initializeGL(), where Qt hands us a live context.
 
     // No corner trihedron: AxisGizmo (top right) is the orientation surface,
     // and since the rail took the left edge the trihedron sat behind it with
@@ -387,48 +495,215 @@ void OcctViewWidget::initializeViewer()
     // model serve both projections.
     myView->Camera()->SetFOVy(effectiveFovyDeg());
     applyCameraState();
-    myView->MustBeResized();
 
     myInitialized = true;
 
 }
 
-void OcctViewWidget::paintEvent(QPaintEvent* /*event*/)
+bool OcctViewWidget::attachGlWindow()
 {
-    // Lazy init: winId() is only meaningful once the widget has a native window.
-    initializeViewer();
-    if (!myView.IsNull()) myView->Redraw();
+    if (myView.IsNull() || myViewer.IsNull()) return false;
+
+    Handle(OpenGl_GraphicDriver) driver =
+        Handle(OpenGl_GraphicDriver)::DownCast(myViewer->Driver());
+    if (driver.IsNull()) return false;
+
+    // Wrapping Qt's live context is what tells us which rendering context the
+    // view has to be handed. The wrapper itself is throw-away - only
+    // RenderingContext() survives the call - because SetWindow() below builds
+    // the OpenGl_Window (and the OpenGl_Context the rest of this file reaches
+    // through hostGlContext()) that OCCT actually keeps.
+    Handle(OpenGl_Context) bound = new OpenGl_Context();
+    if (!bound->Init(!driver->Options().contextCompatible)) {
+        Message::SendFail() << "FurnifyMe: unable to wrap Qt's OpenGL context";
+        return false;
+    }
+
+    if (myHostWindow.IsNull()) {
+        myHostWindow = new Aspect_NeutralWindow();
+        // Virtual: window management is this application's business, not
+        // OCCT's - which is exactly what Aspect_NeutralWindow is for.
+        myHostWindow->SetVirtual(Standard_True);
+    }
+    myHostWindow->SetNativeHandle(currentGlNativeWindow());
+    const QSize device = viewportDeviceSize();
+    myHostWindow->SetSize(std::max(1, device.width()), std::max(1, device.height()));
+
+    myView->SetWindow(myHostWindow, bound->RenderingContext());
+    myView->MustBeResized();
+    myView->Invalidate();
+    return true;
 }
 
-void OcctViewWidget::resizeEvent(QResizeEvent* /*event*/)
+bool OcctViewWidget::wrapDefaultFramebuffer()
 {
-#ifdef _WIN32
-    // A safety net for a real, measured defect (fix round 1, Important 1 /
-    // Minor 3 on Milestone 3's Task 3): reparenting this widget's native
-    // window OUT of a QSplitter and back - MainWindow's compare pane,
-    // closeCompare() - left Qt's own WIDGET-LEVEL geometry correctly
-    // updated (width()/height() agreed with the window) while the ACTUAL
-    // underlying HWND's client rect stayed at its old, splitter-constrained
-    // size. Confirmed with GetClientRect, and unmoved by resize(),
-    // repaint(), hide()/show(), or even a full top-level window resize
-    // round trip - none of which reach whatever is actually caching the
-    // native surface's extent here. SetWindowPos, synced to Qt's own idea
-    // of this widget's size on EVERY resize, closes the gap regardless of
-    // what caused it - a defensive, always-on correction that costs
-    // nothing when the two already agree (SetWindowPos with an unchanged
-    // size is a cheap no-op) rather than a special case wired only into
-    // the one call site that happened to find it.
+    const Handle(OpenGl_Context) context = hostGlContext(myView);
+    if (context.IsNull() || myHostWindow.IsNull()) return false;
+
+    Handle(HostFrameBuffer) fbo =
+        Handle(HostFrameBuffer)::DownCast(context->DefaultFrameBuffer());
+    if (fbo.IsNull()) fbo = new HostFrameBuffer();
+    // InitWrapper reads whatever framebuffer is bound RIGHT NOW, which is why
+    // every caller of this either is paintGL() or holds a GlScope: Qt binds its
+    // own FBO in both cases and nowhere else.
+    if (!fbo->InitWrapper(context)) {
+        context->SetDefaultFrameBuffer(Handle(OpenGl_FrameBuffer)());
+        return false;
+    }
+    // Cleared before the resize below and set again after - OCCT's own sample
+    // does this and names it a workaround; the resize path inside
+    // MustBeResized() otherwise reasons about a default framebuffer that is
+    // mid-rebuild.
+    context->SetDefaultFrameBuffer(Handle(OpenGl_FrameBuffer)());
+
+    // The FBO is the authority on the size OCCT is actually drawing into.
+    // resizeGL() gets there first in the ordinary case; this is what catches
+    // the cases Qt does not announce - a device-pixel-ratio change when the
+    // window is dragged to another monitor, and the FBO Qt silently rebuilds
+    // around a reparent.
+    const Graphic3d_Vec2i fboSize = fbo->GetVPSize();
+    Graphic3d_Vec2i windowSize(0, 0);
+    myHostWindow->Size(windowSize.x(), windowSize.y());
+    if (fboSize != windowSize) {
+        myHostWindow->SetSize(fboSize.x(), fboSize.y());
+        myView->MustBeResized();
+        myView->Invalidate();
+    }
+    context->SetDefaultFrameBuffer(fbo);
+    return true;
+}
+
+void OcctViewWidget::initializeGL()
+{
+    // The lazy contract, landing where Qt puts it: first show, once. Everything
+    // that does not need a context was already built by whichever earlier call
+    // reached initializeViewer() first - or is built now, if this is the first.
+    initializeViewer();
+    if (myView.IsNull()) return;
+    if (!attachGlWindow()) return;
+
+    // The camera has to be pushed again now that the view has a window to
+    // measure: initializeViewer()'s own applyCameraState() ran with nothing
+    // attached, and the orthographic branch derives its parallel scale from
+    // this widget's height.
+    myView->Camera()->SetFOVy(effectiveFovyDeg());
+    applyCameraState();
+}
+
+void OcctViewWidget::paintGL()
+{
+    if (myView.IsNull()) return;
+
+    // Qt can rebuild its OpenGL context under us, and the view would then be
+    // holding a rendering context that no longer exists. Re-attaching is the
+    // only recovery on offer - and it is a POOR one, honestly: SetWindow()
+    // tears the old OpenGl_Window down, which releases GPU resources against
+    // the dead context, which is a hard crash rather than a glitch. It was
+    // measured, at exactly the compare pane's reparent.
     //
-    // DEVICE pixels, not logical - toDevicePixels() is this file's one
-    // conversion point (see its own comment), and a raw HWND client rect is
-    // unambiguously a device-pixel quantity. Passing width()/height()
-    // straight through would undersize the native surface at any scale
-    // other than 100%, the exact class of bug that helper exists to close.
-    const QPoint deviceSize = toDevicePixels(QPoint(width(), height()));
-    SetWindowPos(reinterpret_cast<HWND>(winId()), nullptr, 0, 0, deviceSize.x(), deviceSize.y(),
-                SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOMOVE);
-#endif
-    if (!myView.IsNull()) myView->MustBeResized();
+    // Qt::AA_ShareOpenGLContexts (main.cpp, before QApplication) is what keeps
+    // this branch unreached: with it set Qt preserves the context across a
+    // reparent, which is the only context-rebuilding event this application
+    // actually performs. The branch stays because a view silently rendering
+    // through a dead context is worse than a crash that says so, and because
+    // OCCT's own sample answers it the same way - but the fix for anything
+    // that reaches it is to stop the context being destroyed, not to make the
+    // teardown survive it.
+    if (myView->Window().IsNull() ||
+        myHostWindow.IsNull() ||
+        myHostWindow->NativeHandle() != currentGlNativeWindow()) {
+        if (!attachGlWindow()) return;
+    }
+    if (!wrapDefaultFramebuffer()) return;
+
+    const Handle(OpenGl_Context) context = hostGlContext(myView);
+    if (context.IsNull()) return;
+
+    // Qt leaves GL state behind that OCCT does not reset before drawing opaque
+    // geometry - a bound shader program, a bound texture, blending enabled -
+    // and OCCT leaves state behind that Qt's own compositor assumes is at its
+    // default, most visibly the pixel-store alignment its glyph textures are
+    // uploaded with. Both directions are cleaned here rather than hoped about;
+    // OCCT's own sample carries the identical pair.
+    if (context->core20fwd != nullptr) context->core20fwd->glUseProgram(0);
+    if (context->core11fwd != nullptr) {
+        context->core11fwd->glBindTexture(GL_TEXTURE_2D, 0);
+        context->core11fwd->glDisable(GL_BLEND);
+    }
+
+    myView->Redraw();
+
+    if (context->core11fwd != nullptr) {
+        context->core11fwd->glPixelStorei(GL_PACK_ALIGNMENT, 4);
+        context->core11fwd->glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    }
+    if (context->core15fwd != nullptr) context->core15fwd->glActiveTexture(GL_TEXTURE0);
+}
+
+void OcctViewWidget::resizeGL(int w, int h)
+{
+    if (myView.IsNull() || myHostWindow.IsNull()) return;
+    // DEVICE pixels, through this file's one conversion point - the window
+    // OCCT measures itself against is device-sized exactly as the WNT_Window's
+    // client rect was, and Aspect_Window::DevicePixelRatio() is left at its 1.0
+    // default (WNT_Window never overrode it either) so the ratio is applied
+    // here and nowhere else.
+    const QPoint device = toDevicePixels(QPoint(std::max(1, w), std::max(1, h)));
+    myHostWindow->SetSize(std::max(1, device.x()), std::max(1, device.y()));
+    myView->MustBeResized();
+    myView->Invalidate();
+}
+
+void OcctViewWidget::scheduleRedraw()
+{
+    if (myView.IsNull()) return;
+    // Invalidate first: OCCT is entitled to reuse the last main-buffer content
+    // when only the immediate layer changed, and every caller of this is
+    // telling us the scene itself moved.
+    myView->Invalidate();
+    update();
+}
+
+QSize OcctViewWidget::hostWindowSize() const
+{
+    if (myHostWindow.IsNull()) return QSize();
+    Standard_Integer w = 0, h = 0;
+    myHostWindow->Size(w, h);
+    return QSize(w, h);
+}
+
+QSize OcctViewWidget::viewportDeviceSize() const
+{
+    const QPoint device = toDevicePixels(QPoint(width(), height()));
+    return QSize(device.x(), device.y());
+}
+
+OcctViewWidget::GlScope::GlScope(OcctViewWidget* view)
+{
+    if (view == nullptr || view->myView.IsNull() || view->myView->Window().IsNull()) return;
+    QOpenGLContext* context = view->context();
+    if (context == nullptr) return;
+
+    myWidget = view;
+    // Only take it when it is not already ours - a probe that calls another
+    // probe, or anything reached from inside paintGL(), must not have the
+    // context released out from under it by the inner scope's destructor.
+    if (QOpenGLContext::currentContext() != context) {
+        myWidget->makeCurrent();
+        myTook = true;
+    }
+    myWidget->wrapDefaultFramebuffer();
+}
+
+OcctViewWidget::GlScope::~GlScope()
+{
+    if (myWidget == nullptr || !myTook) return;
+    myWidget->doneCurrent();
+    // Whatever was rendered inside this scope went into Qt's framebuffer
+    // without Qt knowing, so nothing has composited it. Ask for the frame that
+    // does - the same rule scheduleRedraw() states, applied to the synchronous
+    // half of the bridge.
+    myWidget->update();
 }
 
 void OcctViewWidget::displaySolid(int id, const TopoDS_Shape& shape)
@@ -464,7 +739,7 @@ void OcctViewWidget::displaySolid(int id, const TopoDS_Shape& shape)
     // "never pickable", on the same terms an outline already is.
     if (!myViewerOnly) applySelectionMode(presentation);
 
-    myContext->UpdateCurrentViewer();
+    scheduleRedraw();
 }
 
 void OcctViewWidget::removeSolid(int id)
@@ -501,7 +776,7 @@ void OcctViewWidget::removeSolid(int id)
     // removes a body while a sketch is in progress (Undo and Redo are disabled
     // while sketching, and the booleans need a selection sketch mode clears).
     myDimension.clear();
-    myContext->UpdateCurrentViewer();
+    scheduleRedraw();
 }
 
 void OcctViewWidget::clearSolids()
@@ -517,7 +792,7 @@ void OcctViewWidget::clearSolids()
     for (auto& entry : mySolids) myContext->Remove(entry.second, Standard_False);
     mySolids.clear();
     myDimension.clear();   // same rule as removeSolid(): nothing left to measure
-    myContext->UpdateCurrentViewer();
+    scheduleRedraw();
 }
 
 void OcctViewWidget::setSolidVisible(int id, bool visible)
@@ -532,14 +807,14 @@ void OcctViewWidget::setSolidVisible(int id, bool visible)
         myContext->Display(it->second, myWireframe ? AIS_WireFrame : AIS_Shaded,
                            kSelectionModeWholeShape, Standard_False);
         if (!myViewerOnly) applySelectionMode(it->second);
-        myContext->UpdateCurrentViewer();
+        scheduleRedraw();
     } else {
         // Erase also drops it from the selection, which is what we want: acting
         // on something you cannot see would be a nasty surprise. The selection
         // can genuinely change here, unlike on the show path, so this is the
         // only branch that should tell the status bar to re-check it.
         myContext->Erase(it->second, Standard_False);
-        myContext->UpdateCurrentViewer();
+        scheduleRedraw();
         emit selectionChanged();
     }
 }
@@ -575,7 +850,7 @@ void OcctViewWidget::displayOutline(int id, const TopoDS_Face& face)
     myContext->Display(presentation, AIS_Shaded, -1, Standard_False);
     myOutlines[id] = presentation;
 
-    myContext->UpdateCurrentViewer();
+    scheduleRedraw();
 }
 
 void OcctViewWidget::removeOutline(int id)
@@ -585,7 +860,7 @@ void OcctViewWidget::removeOutline(int id)
 
     myContext->Remove(it->second, Standard_False);
     myOutlines.erase(it);
-    myContext->UpdateCurrentViewer();
+    scheduleRedraw();
 }
 
 void OcctViewWidget::clearOutlines()
@@ -594,7 +869,7 @@ void OcctViewWidget::clearOutlines()
 
     for (auto& entry : myOutlines) myContext->Remove(entry.second, Standard_False);
     myOutlines.clear();
-    myContext->UpdateCurrentViewer();
+    scheduleRedraw();
 }
 
 bool OcctViewWidget::hasOutline(int id) const
@@ -619,7 +894,7 @@ void OcctViewWidget::setOutlineVisible(int id, bool visible)
     // No selectionChanged() either way, unlike setSolidVisible(): an outline is
     // not selectable, so hiding one cannot have dropped anything from the
     // selection.
-    myContext->UpdateCurrentViewer();
+    scheduleRedraw();
 }
 
 bool OcctViewWidget::isOutlineVisible(int id) const
@@ -671,7 +946,7 @@ void OcctViewWidget::setPreview(const TopoDS_Shape& shape, bool shaded)
     markInSketchLayer(myPreview);
     // Selection mode -1: feedback only, never pickable.
     myContext->Display(myPreview, shaded ? AIS_Shaded : AIS_WireFrame, -1, Standard_False);
-    myContext->UpdateCurrentViewer();
+    scheduleRedraw();
 }
 
 void OcctViewWidget::clearPreview()
@@ -680,7 +955,7 @@ void OcctViewWidget::clearPreview()
 
     myContext->Remove(myPreview, Standard_False);
     myPreview.Nullify();
-    myContext->UpdateCurrentViewer();
+    scheduleRedraw();
 }
 
 bool OcctViewWidget::hasPreview() const
@@ -731,7 +1006,7 @@ void OcctViewWidget::setModelingPreview(const TopoDS_Shape& shape, int replacesS
         myModelingPreviewSolid = replacesSolidId;
     }
 
-    myContext->UpdateCurrentViewer();
+    scheduleRedraw();
 }
 
 void OcctViewWidget::clearModelingPreview()
@@ -755,7 +1030,7 @@ void OcctViewWidget::clearModelingPreview()
         myModelingPreview.Nullify();
         changed = true;
     }
-    if (changed) myContext->UpdateCurrentViewer();
+    if (changed) scheduleRedraw();
 }
 
 bool OcctViewWidget::hasModelingPreview() const
@@ -778,12 +1053,17 @@ void OcctViewWidget::showPullArrow(const gp_Pnt& centre, const gp_Dir& outward)
     // every orbit step pay for two vsync-bound frames instead of one.
     myPullArrow.show(centre, outward, myView->Camera()->Direction(), worldPerPixel(),
                      /*updateViewer=*/!myApplyingCamera);
+    // PullArrowRenderer redraws the OCCT viewer for us; Qt is what presents
+    // the frame. Skipped under myApplyingCamera for the same reason the
+    // renderer's own update is - applyCameraState()'s redraw carries it.
+    if (!myApplyingCamera) scheduleRedraw();
 }
 
 void OcctViewWidget::clearPullArrow()
 {
     myPullArrow.clear();
     myPullDrag.active = false;
+    scheduleRedraw();
 }
 
 bool OcctViewWidget::pullArrowHead(gp_Pnt& out) const
@@ -801,12 +1081,14 @@ void OcctViewWidget::showBevelArrow(const gp_Pnt& centre, const gp_Dir& outward)
     // same rule showPullArrow() keeps, and for the same measured reason.
     myBevelArrow.show(centre, outward, myView->Camera()->Direction(), worldPerPixel(),
                       /*updateViewer=*/!myApplyingCamera);
+    if (!myApplyingCamera) scheduleRedraw();
 }
 
 void OcctViewWidget::clearBevelArrow()
 {
     myBevelArrow.clear();
     myBevelDrag.active = false;
+    scheduleRedraw();
 }
 
 bool OcctViewWidget::bevelArrowHead(gp_Pnt& out) const
@@ -826,7 +1108,7 @@ void OcctViewWidget::setEdgeDimensionSuppressed(bool suppressed)
     // be a state that only one direction maintains - the rule this file's
     // sibling-visibility comments already record twice.
     updateEdgeDimension();
-    if (!myView.IsNull()) myView->Redraw();
+    scheduleRedraw();
 }
 
 bool OcctViewWidget::arrowHit(const PullArrowRenderer& arrow, const QPoint& point) const
@@ -1071,7 +1353,18 @@ void OcctViewWidget::attachManipulator(int solidId)
     // per frame - and the alternative is a gizmo that is the right size only
     // after the user touches the camera, which is never the frame they are
     // shown first.
-    myContext->UpdateCurrentViewer();
+    //
+    // This is one of the few places a SYNCHRONOUS frame is the requirement
+    // rather than a habit - "a Redisplay() issued before the object has been
+    // through a redraw does not dislodge it" only means anything if the redraw
+    // has actually happened before applyCameraState() re-sizes below. Since the
+    // QOpenGLWidget migration that means holding the GL context ourselves;
+    // scheduling a Qt frame would put the redraw AFTER the resize, which is the
+    // ordering this whole comment exists to avoid.
+    {
+        GlScope gl(this);
+        myContext->UpdateCurrentViewer();
+    }
     myManipulatorAppliedSize = 0.0;   // nothing of ours installed yet: force it
     applyCameraState();
 }
@@ -1217,7 +1510,7 @@ void OcctViewWidget::setSymmetryIndicator(bool on, const gp_Pln& plane)
     if (!on) {
         if (!mySymmetryIndicator.IsNull()) {
             myContext->Remove(mySymmetryIndicator, Standard_False);
-            myContext->UpdateCurrentViewer();
+            scheduleRedraw();
         }
         mySymmetryIndicator.Nullify();
         mySymmetryIndicatorBuiltHalfSpan = 0.0;
@@ -1294,7 +1587,7 @@ void OcctViewWidget::updateSymmetryIndicator()
     mySymmetryIndicator = indicator;
     // Selection mode -1: an indicator, never pickable.
     myContext->Display(mySymmetryIndicator, 0, -1, Standard_False);
-    myContext->UpdateCurrentViewer();
+    scheduleRedraw();
     mySymmetryIndicatorBuiltHalfSpan = halfSpan;
 }
 
@@ -1372,7 +1665,7 @@ void OcctViewWidget::cancelMirrorPlacement()
             myContext->Remove(myMirrorPlacementHandleObject, Standard_False);
             myMirrorPlacementHandleObject.Nullify();
         }
-        myContext->UpdateCurrentViewer();
+        scheduleRedraw();
     }
     // The twin ghost preview lives on the dedicated modeling-preview channel,
     // never replacing a body (replacesSolidId is -1 throughout this gesture -
@@ -1507,7 +1800,7 @@ void OcctViewWidget::updateMirrorPlacementIndicator()
     myMirrorPlacementHandleObject = handle;
     myContext->Display(myMirrorPlacementHandleObject, 0, -1, Standard_False);
 
-    myContext->UpdateCurrentViewer();
+    scheduleRedraw();
     myMirrorPlacementBuiltHalfSpan = halfSpan;
     myMirrorPlacementBuiltOrigin = origin0;
     myMirrorPlacementBuiltNormal = normal0;
@@ -1549,7 +1842,7 @@ void OcctViewWidget::detachManipulator()
     myManipulator->Detach();
     if (!myContext.IsNull()) {
         myContext->Remove(myManipulator, Standard_False);
-        myContext->UpdateCurrentViewer();
+        scheduleRedraw();
     }
     myManipulator.Nullify();
     myManipulatorSolid = -1;
@@ -1630,7 +1923,7 @@ void OcctViewWidget::endGizmoDrag()
     // document instead of showing a pose that exists nowhere.
     myManipulator->StopTransform(Standard_False);
     myManipulator->DeactivateCurrentMode();
-    if (!myView.IsNull()) myView->Redraw();
+    scheduleRedraw();
 
     if (mySnapEnabled) {
         // The same 10 mm grid outline points and face pulls land on, plus the
@@ -1687,7 +1980,7 @@ void OcctViewWidget::setSketchPointMarkers(const std::vector<gp_Pnt>& points)
     myContext->Display(square, 0, -1, Standard_False);
     myFirstPointMarker = square;
 
-    myContext->UpdateCurrentViewer();
+    scheduleRedraw();
 }
 
 void OcctViewWidget::clearSketchPointMarkers()
@@ -1698,7 +1991,7 @@ void OcctViewWidget::clearSketchPointMarkers()
     }
     myPlacedMarkers.clear();
     myFirstPointMarker.Nullify();
-    if (!myContext.IsNull()) myContext->UpdateCurrentViewer();
+    scheduleRedraw();
 }
 
 int OcctViewWidget::sketchPointMarkerCount() const
@@ -1732,14 +2025,14 @@ void OcctViewWidget::setSketchCursorMarker(const gp_Pnt& point)
     markInSketchLayer(cursor);
     myContext->Display(cursor, 0, -1, Standard_False);
     myCursorMarker = cursor;
-    myContext->UpdateCurrentViewer();
+    scheduleRedraw();
 }
 
 void OcctViewWidget::clearSketchCursorMarker()
 {
     if (!myContext.IsNull() && !myCursorMarker.IsNull()) myContext->Remove(myCursorMarker, Standard_False);
     myCursorMarker.Nullify();
-    if (!myContext.IsNull()) myContext->UpdateCurrentViewer();
+    scheduleRedraw();
 }
 
 bool OcctViewWidget::hasSketchCursorMarker() const
@@ -1797,7 +2090,7 @@ void OcctViewWidget::setSelectionMode(SelectionMode mode)
 
     myContext->ClearSelected(Standard_False);
     for (auto& entry : mySolids) applySelectionMode(entry.second);
-    myContext->UpdateCurrentViewer();
+    scheduleRedraw();
     emit selectionChanged();
 }
 
@@ -1816,7 +2109,7 @@ void OcctViewWidget::setWorkPlane(const gp_Pln& plane)
     if (myView.IsNull()) return;
     myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane(),
                           Theme::gridDensity());
-    myView->Redraw();
+    scheduleRedraw();
 }
 
 TopoDS_Face OcctViewWidget::selectedFace() const
@@ -2254,6 +2547,16 @@ TopoDS_Edge OcctViewWidget::lastSelectedEdge() const
 
 void OcctViewWidget::updateEdgeDimension()
 {
+    // DimensionRenderer redraws the OCCT viewer itself whenever the annotation
+    // changes, and since the QOpenGLWidget migration that frame still has to be
+    // composited by Qt before anyone sees it. One exit for the six branches
+    // below, rather than a scheduleRedraw() at each of them - and cheap, since
+    // update() coalesces to a single frame per turn of the event loop.
+    struct PresentOnReturn {
+        OcctViewWidget* widget;
+        ~PresentOnReturn() { widget->scheduleRedraw(); }
+    } present{this};
+
     // Suppressed while the bevel arrow's value chip is up: two annotations on
     // one edge is noise, and the chip is the more specific of the two. See
     // setEdgeDimensionSuppressed(), which MainWindow drives off the same
@@ -2349,12 +2652,16 @@ void OcctViewWidget::setSelectedSolids(const std::vector<int>& ids)
         myContext->AddOrRemoveSelected(it->second, Standard_False);
     }
     updateEdgeDimension();
-    myContext->UpdateCurrentViewer();
+    scheduleRedraw();
     emit selectionChanged();
 }
 
 bool OcctViewWidget::saveSnapshot(const QString& path)
 {
+    // Pixels before this returns, so the GL context has to be OURS for the
+    // duration - Qt only guarantees a current context inside its own three GL
+    // callbacks. See GlScope on the header.
+    GlScope gl(this);
     if (myView.IsNull()) return false;
 
     myView->Redraw();
@@ -2403,6 +2710,10 @@ bool OcctViewWidget::saveSnapshot(const QString& path)
 
 void OcctViewWidget::awaitPathTracingConvergence()
 {
+    // Pixels before this returns, so the GL context has to be OURS for the
+    // duration - Qt only guarantees a current context inside its own three GL
+    // callbacks. See GlScope on the header.
+    GlScope gl(this);
     if (myView.IsNull() || !myRenderModeActive || myRenderTier != RenderTier::PathTracing)
         return;
 
@@ -2525,7 +2836,7 @@ void OcctViewWidget::applyCameraState()
     myApplyingCamera = true;
     emit cameraChanged();
     myApplyingCamera = false;
-    myView->Redraw();
+    scheduleRedraw();
 
     // A camera move invalidates whatever path-tracing accumulation the last
     // frame built up - see startPathTracingConvergence()'s own comment -
@@ -2784,8 +3095,7 @@ void OcctViewWidget::applyTheme()
     myPullArrow.reapplyTheme();
     myBevelArrow.reapplyTheme();
 
-    myContext->UpdateCurrentViewer();
-    update();
+    scheduleRedraw();
 }
 
 QColor OcctViewWidget::renderBackdropColourImpl() const
@@ -3039,6 +3349,10 @@ void OcctViewWidget::applyRenderBackgroundColourForTier(RenderTier tier)
 
 void OcctViewWidget::redrawRenderModeLive()
 {
+    // Pixels before this returns, so the GL context has to be OURS for the
+    // duration - Qt only guarantees a current context inside its own three GL
+    // callbacks. See GlScope on the header.
+    GlScope gl(this);
     if (myView.IsNull()) return;
     // MEASURED FINDING, recorded here because every setter that calls this
     // function documents it and this is the one place the actual evidence
@@ -3504,7 +3818,7 @@ void OcctViewWidget::startPathTracingConvergence()
                 return;
             }
             --myPathTracingRefineTicksLeft;
-            myView->Redraw();
+            scheduleRedraw();
         });
     }
     // kPathTracingConvergeMs / kIntervalMs ticks - restarted, not merely
@@ -3523,6 +3837,10 @@ void OcctViewWidget::stopPathTracingConvergence()
 
 bool OcctViewWidget::probeShadowPixelsDiffer()
 {
+    // Pixels before this returns, so the GL context has to be OURS for the
+    // duration - Qt only guarantees a current context inside its own three GL
+    // callbacks. See GlScope on the header.
+    GlScope gl(this);
     // Real Dump() pixels, not the setter's own claim - CLAUDE.md's
     // zoom-persistence lesson, restated for this task: SetCastShadows(true)
     // returning does not mean a shadow actually reached the screen, and a
@@ -3576,6 +3894,10 @@ bool OcctViewWidget::probeShadowPixelsDiffer()
 
 bool OcctViewWidget::probePathTracingChangedImage()
 {
+    // Pixels before this returns, so the GL context has to be OURS for the
+    // duration - Qt only guarantees a current context inside its own three GL
+    // callbacks. See GlScope on the header.
+    GlScope gl(this);
     if (!myRenderModeActive || myRenderTier != RenderTier::PathTracing || myView.IsNull())
         return false;
 
@@ -3635,6 +3957,10 @@ bool OcctViewWidget::probePathTracingChangedImage()
 OcctViewWidget::FloorBlendProbe OcctViewWidget::probeRenderFloorBlend(
     RenderTier forTier, const QPoint& floorPointLogical)
 {
+    // Pixels before this returns, so the GL context has to be OURS for the
+    // duration - Qt only guarantees a current context inside its own three GL
+    // callbacks. See GlScope on the header.
+    GlScope gl(this);
     FloorBlendProbe result;
     if (!myRenderModeActive || myView.IsNull() || myRenderFloor.IsNull()) return result;
 
@@ -3722,6 +4048,10 @@ OcctViewWidget::FloorBlendProbe OcctViewWidget::probeRenderFloorBlend(
 
 bool OcctViewWidget::probeRenderFloorShadowContrast()
 {
+    // Pixels before this returns, so the GL context has to be OURS for the
+    // duration - Qt only guarantees a current context inside its own three GL
+    // callbacks. See GlScope on the header.
+    GlScope gl(this);
     if (!myRenderModeActive || myView.IsNull()) return false;
 
     // Forced, temporarily, on probeRenderFloorBlend()'s own rule - restored
@@ -3746,6 +4076,10 @@ bool OcctViewWidget::probeRenderFloorShadowContrast()
 OcctViewWidget::ShadowRatioProbe OcctViewWidget::probeRenderShadowRatio(
     RenderTier forTier, const QPoint& litFloorPointLogical)
 {
+    // Pixels before this returns, so the GL context has to be OURS for the
+    // duration - Qt only guarantees a current context inside its own three GL
+    // callbacks. See GlScope on the header.
+    GlScope gl(this);
     ShadowRatioProbe result;
     if (!myRenderModeActive || myView.IsNull() || myRenderFloor.IsNull()) return result;
 
@@ -3822,6 +4156,10 @@ OcctViewWidget::ShadowRatioProbe OcctViewWidget::probeRenderShadowRatio(
 
 OcctViewWidget::RenderTier OcctViewWidget::probeRenderTier()
 {
+    // Pixels before this returns, so the GL context has to be OURS for the
+    // duration - Qt only guarantees a current context inside its own three GL
+    // callbacks. See GlScope on the header.
+    GlScope gl(this);
     if (myView.IsNull()) return RenderTier::Plain;
 
     // Tier 0: path tracing - global illumination and adaptive screen
@@ -3886,6 +4224,10 @@ OcctViewWidget::RenderTier OcctViewWidget::probeRenderTier()
 
 void OcctViewWidget::setRenderMode(bool on)
 {
+    // Pixels before this returns, so the GL context has to be OURS for the
+    // duration - Qt only guarantees a current context inside its own three GL
+    // callbacks. See GlScope on the header.
+    GlScope gl(this);
     // Never on the compare pane - it is read-only furniture from a saved
     // version, not a scene anyone renders a shot of, and this widget's own
     // header says so. A no-op when already in the requested state, so a
@@ -4094,8 +4436,7 @@ void OcctViewWidget::setRenderMode(bool on)
     applyCameraState();
 
     applyBackgroundForMode();
-    myContext->UpdateCurrentViewer();
-    myView->Redraw();
+    scheduleRedraw();
 }
 
 void OcctViewWidget::setWireframe(bool wireframe)
@@ -4112,7 +4453,7 @@ void OcctViewWidget::setWireframe(bool wireframe)
 
     const Standard_Integer mode = wireframe ? AIS_WireFrame : AIS_Shaded;
     for (auto& entry : mySolids) myContext->SetDisplayMode(entry.second, mode, Standard_False);
-    myContext->UpdateCurrentViewer();
+    scheduleRedraw();
 }
 
 bool OcctViewWidget::isSolidWireframe(int id) const
@@ -4370,7 +4711,7 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
     // well as the hover - selecting a second edge has to stop the annotation
     // claiming to measure the one before it.
     updateEdgeDimension();
-    myView->Redraw();
+    scheduleRedraw();
     emit selectionChanged();
 }
 
@@ -4397,7 +4738,7 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
             if (myManipulator->ObjectTransformation(device.x(), device.y(), myView, trsf)) {
                 myManipulator->Transform(trsf);
                 myGizmoDelta = trsf;
-                myView->Redraw();
+                scheduleRedraw();
             }
         }
     } else if (myMirrorDrag.active) {
@@ -4532,7 +4873,7 @@ void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
         myContext->DetectedShape().ShapeType() == TopAbs_FACE) {
         // Select it too, so the actions agree with what was just locked.
         myContext->SelectDetected(AIS_SelectionScheme_Replace);
-        myView->Redraw();
+        scheduleRedraw();
         emit selectionChanged();
         emit faceDoubleClicked(TopoDS::Face(myContext->DetectedShape()));
         return;
