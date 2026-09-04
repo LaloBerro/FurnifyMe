@@ -6,6 +6,7 @@
 
 #include "AppBar.h"
 #include "AppearancePanel.h"
+#include "RenderSettingsPanel.h"
 #include "AxisGizmo.h"
 #include "BevelArrow.h"
 #include "ExtrudePreview.h"
@@ -668,6 +669,43 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         if (Theme::deserializeSpec(
                 settings.value(QStringLiteral("appearance")).toString(), stored))
             Theme::setSpec(stored);
+
+        // The six render-settings values (Task 7.2), on myStartOrthographic's
+        // own terms - read here, before the viewport exists, applied to it
+        // the moment it does (a few lines down). Render mode ITSELF stays
+        // session-only per CLAUDE.md; these six are not that flag and DO
+        // persist, the same way autosave and the unit choice do. Absent
+        // keys fall back to exactly OcctViewWidget's own defaults, so a
+        // first-ever run changes nothing about what render mode already
+        // looks like. Slash-separated keys rather than beginGroup()/
+        // endGroup() - `settings` is a `const QSettings` (the same guard
+        // every preference above already reads through), and beginGroup()
+        // is not a const member.
+        myStartRenderRoughness =
+            settings.value(QStringLiteral("renderMode/roughness"), myStartRenderRoughness)
+                .toDouble();
+        myStartRenderMetallic =
+            settings.value(QStringLiteral("renderMode/metallic"), myStartRenderMetallic)
+                .toDouble();
+        myStartRenderLightAngleDeg =
+            settings
+                .value(QStringLiteral("renderMode/lightAngleDeg"), myStartRenderLightAngleDeg)
+                .toDouble();
+        myStartRenderLightStrength =
+            settings
+                .value(QStringLiteral("renderMode/lightStrength"), myStartRenderLightStrength)
+                .toDouble();
+        // Empty string (the absent-key default too) means "no stored
+        // override" - OcctViewWidget::renderBackgroundOverride()'s own
+        // invalid-QColor convention, carried across the QSettings boundary
+        // as an empty vs. non-empty name rather than a second bool key.
+        const QString bg = settings.value(QStringLiteral("renderMode/background")).toString();
+        if (!bg.isEmpty()) {
+            const QColor colour(bg);
+            if (colour.isValid()) myStartRenderBackground = colour;
+        }
+        myStartRenderFov =
+            settings.value(QStringLiteral("renderMode/fov"), myStartRenderFov).toDouble();
     }
 
     // The title bar's and the taskbar's mark, painted rather than loaded - see
@@ -686,6 +724,24 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // frame is already drawn in the mode the user left.
     if (myStartOrthographic)
         myView->camera().setBaseProjection(CameraController::Projection::Orthographic);
+    // The six render-settings values, applied the moment the viewport
+    // exists - myStartOrthographic's own two-step pattern just above.
+    // Harmless before render mode has ever been entered: every setter
+    // simply records the value as session state (see OcctViewWidget.h),
+    // and only the light-angle default is worth a word here - a light
+    // angle of exactly -1.0 (myStartRenderLightAngleDeg's own sentinel)
+    // means "nothing was ever persisted," so this leaves the viewport's own
+    // constructor-computed default (which reproduces the Milestone-3
+    // studio key exactly) rather than overwriting it with a bogus negative
+    // angle.
+    myView->setRenderSurfaceRoughness(myStartRenderRoughness);
+    myView->setRenderMetal(myStartRenderMetallic);
+    if (myStartRenderLightAngleDeg >= 0.0)
+        myView->setRenderLightAngleDeg(myStartRenderLightAngleDeg);
+    myView->setRenderLightStrength(myStartRenderLightStrength);
+    if (myStartRenderBackground.isValid())
+        myView->setRenderBackgroundOverride(myStartRenderBackground);
+    myView->setRenderFov(myStartRenderFov);
     // Full bleed: the central widget is the viewport and nothing else. The
     // items panel used to take a splitter pane out of the window's width;
     // it is a floating drawer over the viewport now (see buildOverlay()),
@@ -787,6 +843,12 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         // simply their whole predicate rather than one term of it.
         if (myRail) myRail->setVisible(!hiddenForRenderMode);
         if (myAxisGizmo) myAxisGizmo->setVisible(!hiddenForRenderMode);
+        // The render settings card and the shutter (Task 7.2) - the exact
+        // opposite predicate: neither has a QAction of its own either, and
+        // both exist ONLY while render mode is on, so `hiddenForRenderMode`
+        // is read as their whole visibility rather than negated into it.
+        if (myRenderSettingsPanel) myRenderSettingsPanel->setVisible(hiddenForRenderMode);
+        if (myRenderShutter) myRenderShutter->setVisible(hiddenForRenderMode);
         if (myOverlay) myOverlay->relayout();
     });
 
@@ -1578,6 +1640,71 @@ void MainWindow::buildOverlay()
     myAppearancePanel->hide();
     myOverlay->addWidget(myAppearancePanel, ViewportOverlay::Anchor::TopRight);
 
+    // The render settings card (Task 7.2, Option A - "one floating card"),
+    // anchored at the SAME TopRight slot the gizmo and the Appearance card
+    // already stack under - safe because the three are mutually exclusive
+    // by construction: the gizmo and the Appearance card both hide
+    // unconditionally the instant render mode turns on (see the
+    // appStateChanged-driven visibility lambda below, extended by this
+    // task to derive this card's own visibility the opposite way - visible
+    // ONLY while render mode is on), so no two of them are ever anchored
+    // there at once. Hidden before it is added, on the Appearance
+    // card's own terms: its visibility belongs to the render-mode-derived
+    // lambda alone, never to addWidget()'s default show().
+    myRenderSettingsPanel = new RenderSettingsPanel(myView);
+    myRenderSettingsPanel->hide();
+    myOverlay->addWidget(myRenderSettingsPanel, ViewportOverlay::Anchor::TopRight);
+    // Seeded from whatever the constructor already applied to the viewport
+    // (QSettings, or OcctViewWidget's own shipped defaults) - setValuesSilently()
+    // so this first sync does not immediately re-emit six signals and
+    // persist six values nothing actually changed. renderSurfaceRoughness()
+    // is inverted into this panel's own "glossiness" convention - see
+    // RenderSettingsPanel.h's own note on why the inversion lives at this
+    // wiring site and nowhere else.
+    myRenderSettingsPanel->setValuesSilently(
+        1.0 - myView->renderSurfaceRoughness(), myView->renderMetal(),
+        myView->renderLightAngleDeg(), myView->renderLightStrength(),
+        myView->renderBackdropColour(), myView->renderFov());
+    connect(myRenderSettingsPanel, &RenderSettingsPanel::surfaceGlossinessChanged, this,
+            [this](double glossiness01) {
+                myView->setRenderSurfaceRoughness(1.0 - glossiness01);
+                persistRenderSettings();
+            });
+    connect(myRenderSettingsPanel, &RenderSettingsPanel::metalChanged, this,
+            [this](double metallic01) {
+                myView->setRenderMetal(metallic01);
+                persistRenderSettings();
+            });
+    connect(myRenderSettingsPanel, &RenderSettingsPanel::lightAngleChanged, this,
+            [this](double azimuthDeg) {
+                myView->setRenderLightAngleDeg(azimuthDeg);
+                persistRenderSettings();
+            });
+    connect(myRenderSettingsPanel, &RenderSettingsPanel::lightStrengthChanged, this,
+            [this](double multiplier) {
+                myView->setRenderLightStrength(multiplier);
+                persistRenderSettings();
+            });
+    connect(myRenderSettingsPanel, &RenderSettingsPanel::backgroundChanged, this,
+            [this](const QColor& colour) {
+                myView->setRenderBackgroundOverride(colour);
+                persistRenderSettings();
+            });
+    connect(myRenderSettingsPanel, &RenderSettingsPanel::fovChanged, this,
+            [this](double fovyDeg) {
+                myView->setRenderFov(fovyDeg);
+                persistRenderSettings();
+            });
+
+    // The camera shutter - a round, standalone control at the viewport's
+    // bottom-right corner, holding no state of its own: it triggers the
+    // EXISTING Save Screenshot action, exactly as the mockup calls for,
+    // rather than growing a second export path. Same hidden-before-added,
+    // render-mode-derived visibility as the settings card above.
+    myRenderShutter = new RenderShutterButton(myScreenshotAction, myView);
+    myRenderShutter->hide();
+    myOverlay->addWidget(myRenderShutter, ViewportOverlay::Anchor::BottomRight);
+
     // Every outcome the app reports - success or failure - goes through this
     // one host rather than a modal dialog. It parents itself (and its Toast)
     // to the viewport and positions itself, so it needs no overlay anchor of
@@ -2269,6 +2396,42 @@ void MainWindow::writeAppearanceNow()
     settings.setValue(QStringLiteral("appearance"), Theme::serializeSpec());
 }
 
+void MainWindow::persistRenderSettings()
+{
+    // persistAppearance()'s own shape - see its comment for why this is
+    // debounced at all (a slider drag fires per mouse-move) and why the
+    // timer is built lazily rather than in the constructor.
+    if (!myPersistProgress) return;
+
+    if (!myRenderSettingsWrite) {
+        myRenderSettingsWrite = new QTimer(this);
+        myRenderSettingsWrite->setSingleShot(true);
+        myRenderSettingsWrite->setInterval(kRenderSettingsWriteMs);
+        connect(myRenderSettingsWrite, &QTimer::timeout, this,
+                &MainWindow::writeRenderSettingsNow);
+    }
+    myRenderSettingsWrite->start();
+}
+
+void MainWindow::writeRenderSettingsNow()
+{
+    // The ONE place the six values reach QSettings - writeAppearanceNow()'s
+    // own reason to be a single function rather than inlined at both call
+    // sites (the debounce timer and closeEvent()'s flush).
+    QSettings settings;
+    settings.setValue(QStringLiteral("renderMode/roughness"), myView->renderSurfaceRoughness());
+    settings.setValue(QStringLiteral("renderMode/metallic"), myView->renderMetal());
+    settings.setValue(QStringLiteral("renderMode/lightAngleDeg"), myView->renderLightAngleDeg());
+    settings.setValue(QStringLiteral("renderMode/lightStrength"), myView->renderLightStrength());
+    // Empty string for "no override" - renderBackgroundOverride()'s own
+    // invalid-QColor convention, carried across the QSettings boundary the
+    // same way the constructor's read-back interprets it.
+    const QColor bg = myView->renderBackgroundOverride();
+    settings.setValue(QStringLiteral("renderMode/background"),
+                      bg.isValid() ? bg.name(QColor::HexArgb) : QString());
+    settings.setValue(QStringLiteral("renderMode/fov"), myView->renderFov());
+}
+
 void MainWindow::closeEvent(QCloseEvent* event)
 {
     // Milestone 4: this window is never actually destroyed. Closing it -
@@ -2289,6 +2452,11 @@ void MainWindow::closeEvent(QCloseEvent* event)
     if (myAppearanceWrite && myAppearanceWrite->isActive()) {
         myAppearanceWrite->stop();
         writeAppearanceNow();
+    }
+    // The render-settings debounce, on the same terms (Task 7.2).
+    if (myRenderSettingsWrite && myRenderSettingsWrite->isActive()) {
+        myRenderSettingsWrite->stop();
+        writeRenderSettingsNow();
     }
 
     // Close-saves-first, exactly as File -> Close furniture's own law - the

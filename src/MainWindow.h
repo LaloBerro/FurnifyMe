@@ -24,6 +24,8 @@ class PullArrow;
 class QAction;
 class QMenuBar;
 class QSplitter;
+class RenderSettingsPanel;
+class RenderShutterButton;
 class ToastHost;
 class ToolCluster;
 class VersionsPanel;
@@ -139,6 +141,12 @@ public:
     // all. Public so the suite waits on the real number rather than a second
     // copy of it that could drift out of step with this one.
     static constexpr int kAppearanceWriteMs = 400;
+
+    // The same debounce, for the six render-settings values (Task 7.2) - a
+    // slider drag fires per mouse-move exactly as the colour wheel does, so
+    // this follows persistAppearance()'s own reasoning and its own number
+    // rather than inventing a second one.
+    static constexpr int kRenderSettingsWriteMs = 400;
 
     // The document id of the body `face` belongs to, or 0. Derived by walking
     // the document rather than remembered: face indices are not stable across
@@ -397,6 +405,8 @@ public:
     OcctViewWidget* view() const { return myView; }
     class ItemsPanel* itemsPanel() const { return myItemsPanel; }
     AppearancePanel* appearancePanel() const { return myAppearancePanel; }
+    RenderSettingsPanel* renderSettingsPanel() const { return myRenderSettingsPanel; }
+    RenderShutterButton* renderShutter() const { return myRenderShutter; }
 
     UserProgress& progress() { return myProgress; }
     const UserProgress& progress() const { return myProgress; }
@@ -838,6 +848,17 @@ private:
     // debounce timer and closeEvent()'s flush - call this rather than carrying
     // a copy of the write each.
     void writeAppearanceNow();
+    // persistAppearance()'s own shape, for the six render-settings values
+    // (Task 7.2) - a no-op under the same myPersistProgress guard, debounced
+    // on the same kRenderSettingsWriteMs, restarted by every one of the six
+    // RenderSettingsPanel signals rather than by any one of them alone,
+    // since a burst that touches several controls in one drag should still
+    // land one write.
+    void persistRenderSettings();
+    // The ONE place the six values reach QSettings - the debounce timer and
+    // closeEvent()'s flush both call this rather than carrying a copy of
+    // the write each, persistAppearance()/writeAppearanceNow()'s own split.
+    void writeRenderSettingsNow();
     // Rounds the two chrome strips' heights up to whole device pixels, so the
     // viewport's top and bottom edges cannot land on a fractional device row
     // and leave an unpainted black line across the window. Called from the
@@ -1062,6 +1083,9 @@ private:
     // colour the user just chose - a debounce that can drop the last write is
     // not a debounce, it is a bug with a timer.
     class QTimer* myAppearanceWrite = nullptr;
+    // persistRenderSettings()'s own debounce, myAppearanceWrite's exact shape
+    // for the six render-settings values (Task 7.2).
+    class QTimer* myRenderSettingsWrite = nullptr;
 
     QAction* myStartSketchAction = nullptr;
     QAction* myFinishSketchAction = nullptr;
@@ -1138,11 +1162,31 @@ private:
     // and only under myPersistProgress.
     bool myStartOrthographic = false;
 
+    // The six render-settings values (Task 7.2), read from QSettings in the
+    // constructor on myStartOrthographic's own terms - before myView
+    // exists, applied to it the moment it does - and pushed silently into
+    // RenderSettingsPanel once buildOverlay() constructs it. Defaults match
+    // OcctViewWidget's own (see its header), so a first-ever run applies
+    // nothing different from what the viewport already defaults to.
+    double myStartRenderRoughness = 0.55;
+    double myStartRenderMetallic = 0.0;
+    double myStartRenderLightAngleDeg = -1.0;   // sentinel: "use the viewport's own default"
+    double myStartRenderLightStrength = 2.0;
+    QColor myStartRenderBackground;             // invalid = no stored override
+    double myStartRenderFov = 45.0;
+
     AppBar* myAppBar = nullptr;
     class ViewportOverlay* myOverlay = nullptr;
     class QLabel* myStateLabel = nullptr;
     class ItemsPanel* myItemsPanel = nullptr;
     AppearancePanel* myAppearancePanel = nullptr;
+    // The render settings card and the camera shutter (Task 7.2) - both
+    // constructed in buildOverlay(), both derived-visible off myRenderModeOn
+    // alone (neither has a QAction of its own to check; they exist exactly
+    // when render mode does), kept here on myRail/myAxisGizmo's own terms so
+    // the appStateChanged-driven visibility lambda can reach them.
+    RenderSettingsPanel* myRenderSettingsPanel = nullptr;
+    RenderShutterButton* myRenderShutter = nullptr;
     class ShortcutSheet* myShortcutSheet = nullptr;
     ToastHost* myToasts = nullptr;
     ExtrudePreview* myExtrudePreview = nullptr;

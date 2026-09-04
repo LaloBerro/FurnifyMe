@@ -35,6 +35,7 @@
 #include <Graphic3d_AspectMarker3d.hxx>
 #include <Graphic3d_Camera.hxx>
 #include <Graphic3d_CLight.hxx>
+#include <Graphic3d_CView.hxx>
 #include <Graphic3d_Group.hxx>
 #include <Graphic3d_MaterialAspect.hxx>
 #include <Graphic3d_NameOfMaterial.hxx>
@@ -255,6 +256,12 @@ OcctViewWidget::OcctViewWidget(QWidget* parent, bool viewerOnly)
     // guarantees the rail itself fits; see that call for why 300 alone is not
     // enough to keep the rail's own buttons on screen.
     setMinimumSize(400, 300);
+
+    // The render-mode studio key's own default azimuth (Task 7.2), computed
+    // rather than hardcoded to a rounded literal so it reproduces the old
+    // hardcoded gp_Dir(-0.45, 0.35, -0.82) exactly - see
+    // studioKeyDirectionForAzimuth()'s own comment.
+    myRenderLightAngleDeg = std::atan2(0.35, -0.45) * 180.0 / 3.14159265358979323846;
 }
 
 OcctViewWidget::~OcctViewWidget() = default;   // OCCT handles are refcounted; never delete them
@@ -333,12 +340,15 @@ void OcctViewWidget::initializeViewer()
         myBevelArrow.attach(myContext);
     }
 
-    // The field of view is fixed for the life of the view; WHICH projection is
-    // drawn with it moves, so applyCameraState() owns that and this does not
-    // set it here as well. See applyCameraState() for how the orthographic
-    // scale is kept tied to the turntable's distance, which is what lets one
-    // distance-based camera model serve both projections.
-    myView->Camera()->SetFOVy(kFovyDeg);
+    // The field of view is fixed at kFovyDeg for ordinary modeling; render
+    // mode (Task 7.2) can override it session-to-session through
+    // setRenderFov()/effectiveFovyDeg(). WHICH projection is drawn with it,
+    // and now the FOV itself, both move, so applyCameraState() owns both and
+    // this initial call only seeds the same value it would read anyway. See
+    // applyCameraState() for how the orthographic scale is kept tied to the
+    // turntable's distance, which is what lets one distance-based camera
+    // model serve both projections.
+    myView->Camera()->SetFOVy(effectiveFovyDeg());
     applyCameraState();
     myView->MustBeResized();
 
@@ -2112,8 +2122,15 @@ double OcctViewWidget::worldPerPixel() const
     // agree by construction. If that ever stops being true, every screen-sized
     // piece of furniture in the scene (dimension arrowheads and gaps, both
     // drag arrows) is wrong in ortho, and this is the single place to branch.
+    // effectiveFovyDeg(), not kFovyDeg directly - Task 7.2's render-settings
+    // FOV override changes this while render mode is on, and the invariant
+    // this function documents (one formula, both projections, because
+    // applyCameraState() ties the orthographic Scale to exactly this height)
+    // has to keep holding under a live FOV exactly as it did under a fixed
+    // one, or every screen-sized thing in the scene goes wrong the moment
+    // the slider moves.
     return 2.0 * myCamera.state().distance *
-           std::tan(0.5 * kFovyDeg * 3.14159265358979323846 / 180.0) /
+           std::tan(0.5 * effectiveFovyDeg() * 3.14159265358979323846 / 180.0) /
            std::max(1, height());
 }
 
@@ -2318,6 +2335,13 @@ void OcctViewWidget::applyCameraState()
     cam->SetEye(eye);
     cam->SetCenter(at);
     cam->SetUp(up);
+    // Live every call, not seeded once at initializeViewer() and left alone -
+    // Task 7.2's render-settings FOV can change while render mode is on, and
+    // effectiveFovyDeg() is the ONE place that decides which value is live
+    // (kFovyDeg outside render mode, the override while it is on). Cheap
+    // when nothing changed; OCCT does not distinguish a no-op SetFOVy() from
+    // any other.
+    cam->SetFOVy(effectiveFovyDeg());
 
     // The projection, from the ONE piece of state that decides it. There is no
     // second camera and no second turntable: the eye, the target and the up
@@ -2410,7 +2434,12 @@ void OcctViewWidget::fitAll()
     }
     if (box.IsVoid()) box.Update(-250.0, -250.0, 0.0, 250.0, 250.0, 10.0);
     CameraController scratch = myCamera;
-    scratch.frame(box, kFovyDeg);
+    // effectiveFovyDeg(), not kFovyDeg - Fit All stays reachable while
+    // render mode is on (CLAUDE.md's "framing a shot is not a modeling
+    // gesture"), and framing against a stale 45 degrees while the live FOV
+    // is something else would compute a distance that does not actually
+    // fit the box in what the camera is really showing.
+    scratch.frame(box, effectiveFovyDeg());
     animateTo(scratch.state());
 }
 
@@ -2622,8 +2651,15 @@ void OcctViewWidget::applyTheme()
     update();
 }
 
-QColor OcctViewWidget::renderBackdropColour() const
+QColor OcctViewWidget::renderBackdropColourImpl() const
 {
+    // Task 7.2's background swatch overrides this outright, once set - the
+    // ONE derivation both the clear colour (applyBackgroundForMode()) and
+    // the floor material (applyRenderFloorMaterialForTier()) read, so the
+    // two can never independently drift the way two separate overrides
+    // could.
+    if (myRenderBackgroundOverride.isValid()) return myRenderBackgroundOverride;
+
     // A light warm grey - the user's own reference shot, not a taste call -
     // blended 4:1 toward the viewport token so an Appearance edit still
     // shifts it while the resting look stays a studio neutral. A gradient
@@ -2646,7 +2682,7 @@ void OcctViewWidget::applyBackgroundForMode()
         return;
     }
 
-    myView->SetBackgroundColor(toOcctColor(renderBackdropColour()));
+    myView->SetBackgroundColor(toOcctColor(renderBackdropColourImpl()));
     // The floor wears the same colour, so a theme edit landing here while
     // render mode is up has to re-dress it too - rebuilt outright, the same
     // way the grid is rebuilt on a theme edit, because its colour is baked
@@ -2712,7 +2748,7 @@ void OcctViewWidget::applyRenderFloorMaterialForTier(bool pbrTier)
 {
     if (myRenderFloor.IsNull()) return;
 
-    const QColor floorColour = renderBackdropColour();
+    const QColor floorColour = renderBackdropColourImpl();
     Graphic3d_MaterialAspect material(Graphic3d_NameOfMaterial_UserDefined);
 
     if (!pbrTier) {
@@ -2791,6 +2827,177 @@ void OcctViewWidget::applyRenderFloorMaterialForTier(bool pbrTier)
     }
 
     myRenderFloor->SetMaterial(material);
+    // Redisplay(), on applyRenderBodyMaterials()'s own newly-measured terms:
+    // SetMaterial() on an object already Display()ed does not by itself
+    // guarantee the next redraw picks it up. showRenderFloor()'s own
+    // Display() call (immediately after this function returns, on first
+    // build) already forces a fresh presentation regardless, so this only
+    // matters on the OTHER caller - applyRenderTier()'s tier-switch and
+    // Task 7.2's live background-override path - where the floor is
+    // already on screen and only its material is changing.
+    if (!myContext.IsNull()) myContext->Redisplay(myRenderFloor, Standard_False);
+}
+
+gp_Dir OcctViewWidget::studioKeyDirectionForAzimuth(double azimuthDeg) const
+{
+    // The Milestone-3 calibrated studio key was the hardcoded
+    // gp_Dir(-0.45, 0.35, -0.82) - this reproduces it exactly at this
+    // class's own default azimuth (set in the constructor via std::atan2)
+    // and holds the elevation fixed while azimuth sweeps around the
+    // vertical axis. The vertical component is what keeps the shadow
+    // beside the furniture rather than under it or off the floor's far
+    // edge, which is why "Light angle" is azimuth-only per the mockup
+    // rather than a second elevation control.
+    constexpr double kHorizontalMag = 0.5700701699971242;   // std::hypot(-0.45, 0.35)
+    constexpr double kVertical = -0.82;
+    const double az = azimuthDeg * 3.14159265358979323846 / 180.0;
+    return gp_Dir(kHorizontalMag * std::cos(az), kHorizontalMag * std::sin(az), kVertical);
+}
+
+void OcctViewWidget::applyRenderLightAngleAndStrength()
+{
+    if (myRenderSavedLights.empty()) return;   // render mode is off - nothing to move
+    const gp_Dir direction = studioKeyDirectionForAzimuth(myRenderLightAngleDeg);
+    for (auto& saved : myRenderSavedLights) {
+        saved.light->SetDirection(direction);
+        saved.light->SetIntensity(
+            static_cast<Standard_ShortReal>(saved.intensity * myRenderLightStrength));
+    }
+}
+
+void OcctViewWidget::redrawRenderModeLive()
+{
+    if (myView.IsNull()) return;
+    // MEASURED FINDING, recorded here because every setter that calls this
+    // function documents it and this is the one place the actual evidence
+    // belongs. gui_smoke's own per-control Dump checks (Task 7.2) pinned
+    // that on this build's OCCT 8.0.1 / GPU / driver combination, a live
+    // SetMaterial() (roughness/metallic) or Graphic3d_CLight::SetIntensity()
+    // edit on an object already ray-traced once does NOT reach the next
+    // Dump()/ToPixMap(), while renderSurfaceRoughness()/renderMetal()/
+    // renderLightStrength() themselves correctly read back the new value
+    // throughout - the DATA is right, only the RENDER on this session is
+    // not picking it up. Five genuinely distinct mechanisms were tried, in
+    // this order, each measured against real Dump() pixels rather than
+    // trusted by name (CLAUDE.md's zoom-persistence lesson): a plain
+    // Redisplay() on the changed object; a settle loop of several
+    // Redraw() calls (probeRenderFloorBlend()'s own kSettlePasses shape,
+    // reused here); Graphic3d_CView::InvalidateBVHData() (the one public
+    // hook OpenGl_View.hxx exposes over its own ray-trace BVH cache); an
+    // unconditional camera-state poke (applyCameraState(), since an ORBIT
+    // reliably re-renders a ray-traced scene - that IS render mode's own
+    // frame-a-shot gesture); and finally the round trip below, forcing a
+    // genuine Graphic3d_RenderingMode transition through rasterization and
+    // back, which is the one thing this class already KNOWS rebuilds the
+    // ray-traced scene correctly (applyRenderTier()'s own path at render-
+    // mode ENTRY, why the FIRST frame after entering always shows the
+    // right material). NONE of the five moved a single sampled pixel.
+    //
+    // A light's DIRECTION is the one exception - SetDirection() on the
+    // SAME light object reliably reaches the render every time, because it
+    // moves WHICH PIXELS fall in shadow, a per-pixel geometric query OCCT
+    // must recompute every redraw regardless of any material/intensity
+    // cache. That asymmetry is what rules out "the redraw path is broken
+    // generally" and narrows this to a genuine, environment-specific
+    // caching limitation on UNIFORM material/intensity properties
+    // specifically - ledgered rather than chased further, the treatment
+    // this file already gives the PathTracing GI floor defect and the
+    // AIS_Manipulator styling wall. The round trip stays as the
+    // implementation regardless: it is the textbook-correct way to force
+    // a ray-trace scene rebuild, on the off chance a different OCCT
+    // version, GPU or driver responds to it even though this one measured
+    // does not.
+    if (isRayTracedTier(myRenderTier) && !myView.IsNull()) {
+        Graphic3d_RenderingParams& params = myView->ChangeRenderingParams();
+        const Graphic3d_RenderingMode wasMethod = params.Method;
+        params.Method = Graphic3d_RM_RASTERIZATION;
+        myView->Redraw();
+        params.Method = wasMethod;
+    }
+    if (!myContext.IsNull()) myContext->UpdateCurrentViewer();
+    myView->Redraw();
+}
+
+void OcctViewWidget::setRenderSurfaceRoughness(double roughness01)
+{
+    myRenderRoughness = std::clamp(roughness01, 0.0, 1.0);
+    // No-op on Shadows/Plain by design - see this setter's own header
+    // comment. isRayTracedTier() is the one written-down copy of "which
+    // tiers are PBR", reused rather than re-tested here.
+    if (myRenderModeActive && isRayTracedTier(myRenderTier) && !myContext.IsNull()) {
+        applyRenderBodyMaterials();
+        redrawRenderModeLive();
+    }
+}
+
+void OcctViewWidget::setRenderMetal(double metallic01)
+{
+    myRenderMetallic = std::clamp(metallic01, 0.0, 1.0);
+    if (myRenderModeActive && isRayTracedTier(myRenderTier) && !myContext.IsNull()) {
+        applyRenderBodyMaterials();
+        redrawRenderModeLive();
+    }
+}
+
+void OcctViewWidget::setRenderLightAngleDeg(double azimuthDeg)
+{
+    // Wrapped rather than clamped - an azimuth is a compass heading, not a
+    // bounded quantity, and a slider that refused to cross 359->0 would
+    // read as broken.
+    myRenderLightAngleDeg = std::fmod(azimuthDeg, 360.0);
+    if (myRenderLightAngleDeg < 0.0) myRenderLightAngleDeg += 360.0;
+    if (myRenderModeActive) {
+        applyRenderLightAngleAndStrength();
+        if (!myViewer.IsNull()) myViewer->UpdateLights();
+        redrawRenderModeLive();
+    }
+}
+
+void OcctViewWidget::setRenderLightStrength(double multiplier)
+{
+    // 0.2x..4x - the same "usable photographic range" reasoning
+    // kMinRenderFovDeg/kMaxRenderFovDeg apply to the FOV slider: a light
+    // that could be dragged to zero or to a blown-out multiple is not a
+    // control, it is a way to lose the shot.
+    myRenderLightStrength = std::clamp(multiplier, 0.2, 4.0);
+    if (myRenderModeActive) {
+        applyRenderLightAngleAndStrength();
+        if (!myViewer.IsNull()) myViewer->UpdateLights();
+        redrawRenderModeLive();
+    }
+}
+
+void OcctViewWidget::setRenderBackgroundOverride(const QColor& colour)
+{
+    if (!colour.isValid()) return;
+    myRenderBackgroundOverride = colour;
+    // applyBackgroundForMode() re-reads renderBackdropColour() - which this
+    // override now answers for - and, per its own comment, rebuilds the
+    // floor too when one is on screen, so the two never drift apart.
+    if (myRenderModeActive) {
+        applyBackgroundForMode();
+        redrawRenderModeLive();
+    }
+}
+
+void OcctViewWidget::clearRenderBackgroundOverride()
+{
+    if (!myRenderBackgroundOverride.isValid()) return;
+    myRenderBackgroundOverride = QColor();
+    if (myRenderModeActive) {
+        applyBackgroundForMode();
+        redrawRenderModeLive();
+    }
+}
+
+void OcctViewWidget::setRenderFov(double fovyDeg)
+{
+    myRenderFovyDeg = std::clamp(fovyDeg, kMinRenderFovDeg, kMaxRenderFovDeg);
+    // Off while render mode is off: effectiveFovyDeg() would ignore the
+    // stored value anyway, and calling applyCameraState() on a Null myView
+    // (a fresh widget the viewer has never initialized) is a no-op there
+    // too - this guard just skips the pointless work.
+    if (myRenderModeActive && !myView.IsNull()) applyCameraState();
 }
 
 void OcctViewWidget::setLightsCastShadows(bool cast)
@@ -2979,14 +3186,31 @@ void OcctViewWidget::applyRenderBodyMaterials()
     // that pipeline directly and left as-is rather than re-guessed. Roughness
     // 0.55 is a middling matte, not glossy enough to add a hot specular
     // highlight on top.
+    // Roughness/metallic now come from Task 7.2's Surface/Metal controls
+    // (myRenderRoughness/myRenderMetallic) rather than the hardcoded
+    // 0.55/0.0 this used to carry - their defaults reproduce those two
+    // literals exactly, so a session that never opens the render settings
+    // card gets the identical look this always shipped.
     Graphic3d_MaterialAspect material(Graphic3d_NameOfMaterial_UserDefined);
     material.SetColor(Quantity_Color(0.70, 0.70, 0.68, Quantity_TOC_RGB));
     Graphic3d_PBRMaterial pbr;
     pbr.SetColor(Quantity_Color(0.55, 0.55, 0.53, Quantity_TOC_RGB));
-    pbr.SetMetallic(0.0f);
-    pbr.SetRoughness(0.55f);
+    pbr.SetMetallic(static_cast<float>(myRenderMetallic));
+    pbr.SetRoughness(static_cast<float>(myRenderRoughness));
     material.SetPBRMaterial(pbr);
-    for (auto& entry : mySolids) entry.second->SetMaterial(material);
+    for (auto& entry : mySolids) {
+        entry.second->SetMaterial(material);
+        // Every OTHER place in this file that changes a displayed
+        // AIS_Shape's attributes follows it with exactly this call - see
+        // setRenderMode(true)'s own SetFaceBoundaryDraw() loop - so this
+        // does too, the textbook-correct sequence for a live presentation
+        // change. It is NOT, on its own, what makes a live Surface/Metal
+        // drag reach this session's ray-traced Dump - see
+        // redrawRenderModeLive()'s own comment (called by both setters
+        // right after this function returns) for the measured finding on
+        // what does and does not.
+        myContext->Redisplay(entry.second, Standard_False);
+    }
 }
 
 void OcctViewWidget::clearRenderBodyMaterials()
@@ -2997,7 +3221,14 @@ void OcctViewWidget::clearRenderBodyMaterials()
     // before render mode touched it, on the exact terms
     // applyRenderBodyMaterials()'s own header comment already establishes:
     // no code path outside these two ever calls SetMaterial() on a body.
-    for (auto& entry : mySolids) entry.second->UnsetMaterial();
+    // Redisplay() for the same reason applyRenderBodyMaterials() now
+    // carries one on its own SetMaterial() call - a presentation change
+    // that is not followed by one is not guaranteed to reach the next
+    // redraw.
+    for (auto& entry : mySolids) {
+        entry.second->UnsetMaterial();
+        myContext->Redisplay(entry.second, Standard_False);
+    }
 }
 
 void OcctViewWidget::startPathTracingConvergence()
@@ -3192,7 +3423,7 @@ OcctViewWidget::FloorBlendProbe OcctViewWidget::probeRenderFloorBlend(
         const QPoint floorDevice = toDevicePixels(floorPointLogical);
         if (!shot.isNull() && shot.rect().contains(floorDevice)) {
             const QColor floorColour = shot.pixelColor(floorDevice);
-            const QColor target = renderBackdropColour();
+            const QColor target = renderBackdropColourImpl();
 
             // Scan the top of the frame for the pixel closest to the TRUE
             // backdrop colour, rather than trusting one hardcoded corner to
@@ -3416,23 +3647,26 @@ void OcctViewWidget::setRenderMode(bool on)
         // render mode is not this feature's to change.
         myRenderSavedLights.clear();
         if (!myViewer.IsNull()) {
-            const gp_Dir studioKey(-0.45, 0.35, -0.82);
             for (const Handle(Graphic3d_CLight)& light : myViewer->ActiveLights()) {
                 if (light->Type() != Graphic3d_TypeOfLightSource_Directional) continue;
                 myRenderSavedLights.push_back(
                     {light, light->Direction(), light->Intensity(), light->IsHeadlight()});
-                // World-space, or the studio direction below is silently read
-                // in VIEW space and the "key light" follows the camera - the
+                // World-space, or the studio direction is silently read in
+                // VIEW space and the "key light" follows the camera - the
                 // first calibration round's top face stayed dark through a
                 // doubled intensity precisely because of this flag.
                 light->SetHeadlight(false);
-                light->SetDirection(studioKey);
-                // Doubled, by measurement: under the default rig at unit
-                // strength the fully lit floor could not reach the backdrop
-                // tone even painted full white - the whole scene photographs
-                // dim, floor and furniture both.
-                light->SetIntensity(light->Intensity() * 2.0f);
             }
+            // Direction and intensity themselves now go through the SAME
+            // live application Task 7.2's setRenderLightAngleDeg()/
+            // setRenderLightStrength() use - the studio key is "the Light
+            // angle/Light strength controls" now, not a second copy of it,
+            // so a session that never opens the render settings card still
+            // gets exactly the old calibrated look: myRenderLightAngleDeg's
+            // own default reproduces gp_Dir(-0.45, 0.35, -0.82) exactly (see
+            // the constructor), and myRenderLightStrength defaults to 2.0,
+            // the old hardcoded doubling.
+            applyRenderLightAngleAndStrength();
         }
 
         // Before the tier probe, deliberately: the floor is the surface the
@@ -3506,6 +3740,18 @@ void OcctViewWidget::setRenderMode(bool on)
         // used to be silently incomplete once PathTracing existed.
         restoreRenderParams();
     }
+
+    // The camera's live FOV, on both edges - myRenderModeActive already
+    // reads as the NEW state above, so effectiveFovyDeg() now answers
+    // correctly (the render setting on entry, kFovyDeg on exit) and this is
+    // what actually PUSHES it into the OCCT camera immediately. Without
+    // this, exiting render mode left the camera's own Graphic3d_Camera
+    // sitting at whatever FOV the settings card was last dragged to until
+    // some UNRELATED camera move (an orbit, a Fit All) happened to call
+    // applyCameraState() again - measured: cameraViewHeightAtTarget()
+    // stayed at the render-mode value straight through an exit with no
+    // camera move in between.
+    applyCameraState();
 
     applyBackgroundForMode();
     myContext->UpdateCurrentViewer();

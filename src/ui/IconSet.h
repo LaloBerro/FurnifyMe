@@ -15,6 +15,13 @@ namespace IconSet {
 enum class Glyph {
     Sketch, Extrude, Fuse, Cut, Intersect, Delete,
     Undo, Redo, Items, Snap, SelectSolid, SelectFace, SelectEdge,
+    // The render-mode shutter (Task 7.2) - a camera body with a lens ring,
+    // reintroduced on the same 24x24 grid the removed Screenshot glyph
+    // above's comment describes, drawn fresh rather than resurrected: that
+    // one was a toolbar-sized icon for an IconOnly rail chip, and this
+    // shutter is a much bigger, round, standalone control, so the two would
+    // never have shared a paintGlyph() case anyway.
+    Camera,
 };
 
 // Returns an icon with Normal and Disabled modes already filled in.

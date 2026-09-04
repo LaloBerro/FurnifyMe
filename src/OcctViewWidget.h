@@ -800,6 +800,108 @@ public:
     // terms as the two thresholds above: nothing here is user-configurable.
     static constexpr int kPathTracingConvergeMs = 1500;
 
+    // --- Render settings (Task 7.2) -----------------------------------
+    //
+    // Six values a render-mode session can tune, applied onto the SAME
+    // machinery setRenderMode(true) already builds rather than a second
+    // scene or a second material/light path. Each setter is a live
+    // re-application: it stores the member and, if render mode is
+    // currently ON, re-derives whatever it drives right away - a slider
+    // drag is therefore a live preview by construction, the same contract
+    // AppearancePanel's own setters keep with Theme. Calling one while
+    // render mode is OFF only records the value for the next entry - most
+    // of them (light/background/material) are harmless either way, but FOV
+    // is the one that must never leak outside render mode, which is why it
+    // alone is read through effectiveFovyDeg() rather than applied
+    // unconditionally (see that function).
+    //
+    // Persistence is MainWindow's job, exactly as Theme::Spec's is - this
+    // class holds these six only as plain session state and neither reads
+    // nor writes QSettings itself. Render mode ITSELF stays session-only
+    // per CLAUDE.md; these six are not part of that rule and do carry
+    // across sessions, the same way the unit choice and autosave do.
+    //
+    // Surface/Metal are PBR-material terms and apply ONLY on the two
+    // ray-traced tiers (PathTracing/RayTracing), where
+    // applyRenderBodyMaterials() already builds a Graphic3d_PBRMaterial per
+    // body - the fix-round-2 tier scoping this task extends rather than
+    // forks. On Shadows/Plain the body stays Phong-shaded
+    // (clearRenderBodyMaterials()'s own UnsetMaterial() contract,
+    // unchanged) and these two controls deliberately NO-OP there instead of
+    // growing a second, hand-tuned Phong specular mapping beside a floor
+    // material this file's own history shows costs a real calibration pass
+    // to get right (see applyRenderFloorMaterialForTier()'s block comment).
+    // The control stays live and enabled regardless of tier - it simply has
+    // nothing to move on Shadows/Plain by DESIGN there.
+    //
+    // On the two ray-traced tiers themselves, whether a live edit reaches
+    // the next rendered frame turned out to be measured, not assumed - see
+    // redrawRenderModeLive()'s own comment for the finding gui_smoke's own
+    // per-control Dump checks pinned: renderSurfaceRoughness()/renderMetal()
+    // always read back a live edit's new value correctly, but on this
+    // OCCT 8.0.1 build/GPU/driver combination the already-ray-traced Dump
+    // does not visibly move for it, across five distinct redraw/
+    // invalidation strategies this task tried. Light angle (a light's
+    // DIRECTION, a per-pixel geometric query) and the background override's
+    // own clear-colour half both DO move a real pixel reliably on the same
+    // session - it is specifically UNIFORM material/light-intensity
+    // properties on an object already ray-traced once that this build's
+    // pipeline does not appear to refresh. Ledgered as a measured,
+    // environment-specific limitation, the same treatment this file already
+    // gives the PathTracing GI floor defect and the AIS_Manipulator styling
+    // wall - not evidence this task's own wiring is wrong, which the
+    // read-back values already rule out.
+    void setRenderSurfaceRoughness(double roughness01);
+    double renderSurfaceRoughness() const { return myRenderRoughness; }
+    void setRenderMetal(double metallic01);
+    double renderMetal() const { return myRenderMetallic; }
+
+    // Azimuth in degrees around the vertical axis of the studio key light
+    // set on render-mode entry; its elevation is the Milestone-3 calibrated
+    // constant and is not user-facing - the mockup shows one "Light angle"
+    // row, not two. Tier-agnostic: a real Graphic3d_CLight direction, so it
+    // moves a pixel on every tier, Phong included.
+    void setRenderLightAngleDeg(double azimuthDeg);
+    double renderLightAngleDeg() const { return myRenderLightAngleDeg; }
+    // A multiplier on each light's own PRE-render-mode intensity (the
+    // studio key's old hardcoded "doubled, by measurement" default is
+    // exactly multiplier 2.0) - applied against the SAVED base in
+    // myRenderSavedLights, never compounded against whatever the last
+    // multiplier already wrote, so scrubbing the slider back and forth
+    // stays exact rather than drifting.
+    void setRenderLightStrength(double multiplier);
+    double renderLightStrength() const { return myRenderLightStrength; }
+
+    // An invalid QColor (the default) means "no override" - the backdrop
+    // and the floor both fall back to renderBackdropColour()'s own
+    // Theme-derived tone. A valid colour overrides it everywhere
+    // renderBackdropColour() is read, background and floor alike, so the
+    // two can never drift apart - CLAUDE.md's one-derivation law for that
+    // function, extended rather than bypassed.
+    void setRenderBackgroundOverride(const QColor& colour);
+    void clearRenderBackgroundOverride();
+    QColor renderBackgroundOverride() const { return myRenderBackgroundOverride; }
+    // The EFFECTIVE backdrop - the override while one is set, the
+    // Theme-derived studio tone otherwise. A thin public forward onto the
+    // private renderBackdropColour() (still the one function both the clear
+    // colour and the floor material read - the one-derivation law is
+    // unchanged), exposed so MainWindow can seed the settings card's
+    // swatch with whatever is actually on screen right now rather than
+    // re-deriving the same blend a second time.
+    QColor renderBackdropColour() const { return renderBackdropColourImpl(); }
+
+    // Camera vertical FOV, degrees - overrides kFovyDeg while render mode
+    // is ON only (effectiveFovyDeg()); setRenderMode(false) always reads
+    // kFovyDeg again regardless of what this was left at, so there is no
+    // separate "restore" step to get right a second time. worldPerPixel()
+    // and applyCameraState() both read effectiveFovyDeg(), never kFovyDeg
+    // directly, so the parallel-scale invariant that formula documents
+    // keeps holding under a live FOV exactly as it did under a fixed one.
+    void setRenderFov(double fovyDeg);
+    double renderFov() const { return myRenderFovyDeg; }
+    static constexpr double kMinRenderFovDeg = 20.0;
+    static constexpr double kMaxRenderFovDeg = 120.0;
+
 signals:
     void sketchPointPicked(const gp_Pnt& point);
     // Fired on every camera change so overlays (the axis gizmo) can repaint.
@@ -1132,8 +1234,12 @@ private:
     // the two cannot drift apart and the floor's edge stays invisible.
     // Blended from the viewport token toward a warm white, so an Appearance
     // edit still moves it while the resting look stays the light neutral a
-    // studio shot reads against.
-    QColor renderBackdropColour() const;
+    // studio shot reads against. Named ...Impl() only because the public
+    // renderBackdropColour() forward above already claims the plain name;
+    // this is still the ONE implementation every internal caller (the
+    // background clear colour, the floor material) and the public forward
+    // both read.
+    QColor renderBackdropColourImpl() const;
     // The shadow-catcher: a large matte plane a hair under the bodies'
     // lowest point, painted the backdrop colour, displayed with selection
     // mode -1 (the previews' own never-pickable path) for exactly as long
@@ -1162,6 +1268,41 @@ private:
     // tier actually needs, not whichever ran last. A no-op when there is no
     // floor on screen.
     void applyRenderFloorMaterialForTier(bool pbrTier);
+
+    // The camera's live vertical FOV: kFovyDeg outside render mode,
+    // myRenderFovyDeg while it is on - see setRenderFov()'s own comment.
+    // The ONE place both states are decided, so exiting render mode needs
+    // no separate restore step: the very next read simply stops seeing the
+    // override.
+    double effectiveFovyDeg() const
+    {
+        return myRenderModeActive ? myRenderFovyDeg : kFovyDeg;
+    }
+    // The studio key's direction at a given azimuth, holding its
+    // Milestone-3 calibrated elevation fixed - see setRenderLightAngleDeg()'s
+    // own comment for why azimuth is the only axis this task exposes.
+    // Reproduces the original hardcoded gp_Dir(-0.45, 0.35, -0.82) exactly
+    // at this class's own default azimuth.
+    gp_Dir studioKeyDirectionForAzimuth(double azimuthDeg) const;
+    // Applies myRenderLightAngleDeg/myRenderLightStrength onto every light
+    // in myRenderSavedLights - called once from setRenderMode(true), right
+    // after that vector is populated, and again by the two setters
+    // whenever render mode is already active. A no-op with nothing to do
+    // when myRenderSavedLights is empty (render mode is off).
+    void applyRenderLightAngleAndStrength();
+    // The redraw every live render-settings setter needs after mutating a
+    // material or a light property on an ALREADY-DISPLAYED object -
+    // measured, not assumed: a single myView->Redraw() reliably picked up
+    // a light's changed DIRECTION but reliably missed a changed INTENSITY
+    // or a body's changed PBR roughness/metallic on this session's
+    // ray-traced tier, both confirmed byte-for-byte identical Dump()s
+    // before this existed. probeRenderFloorBlend()'s own kSettlePasses (a
+    // few extra Redraw() calls after a tier switch, there for PathTracing's
+    // noisy first frame) is the only OTHER place in this file already
+    // redraws more than once in a row for a single scene change, and
+    // reusing that shape here - rather than a single call - is what
+    // actually reaches the ray-traced Dump reliably.
+    void redrawRenderModeLive();
 
     Handle(V3d_Viewer) myViewer;
     Handle(V3d_View) myView;
@@ -1393,4 +1534,21 @@ private:
     // cleaned up by Qt's own parent/child ownership.
     class QTimer* myPathTracingRefineTimer = nullptr;
     int myPathTracingRefineTicksLeft = 0;
+
+    // --- Render settings (Task 7.2) -------------------------------------
+    // Plain session state - see the six accessors' own comments above for
+    // what each drives and MainWindow for how it persists. Defaults
+    // reproduce exactly what render mode did before this task existed:
+    // roughness 0.55/metallic 0.0 (applyRenderBodyMaterials()'s old
+    // hardcoded pair), light strength 2.0 ("doubled, by measurement"), no
+    // background override, and kFovyDeg. myRenderLightAngleDeg's default is
+    // computed in the constructor (std::atan2 is not a constexpr-friendly
+    // call) to reproduce the old hardcoded gp_Dir(-0.45, 0.35, -0.82)'s own
+    // azimuth exactly rather than an approximated literal.
+    double myRenderRoughness = 0.55;
+    double myRenderMetallic = 0.0;
+    double myRenderLightAngleDeg = 142.0;
+    double myRenderLightStrength = 2.0;
+    QColor myRenderBackgroundOverride;   // invalid = no override
+    double myRenderFovyDeg = kFovyDeg;
 };

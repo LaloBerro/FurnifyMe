@@ -90,6 +90,15 @@ void paintGlyph(QPainter& p, Glyph glyph)
             p.drawLine(6, 6, 18, 6);
             break;
         }
+        case Glyph::Camera: {                     // a camera body, lens and shutter button
+            p.drawRoundedRect(QRectF(3.5, 8.0, 17.0, 12.0), 2.0, 2.0);
+            p.drawLine(8, 8, 10, 5);
+            p.drawLine(10, 5, 15, 5);
+            p.drawLine(15, 5, 17, 8);
+            p.drawEllipse(QPoint(12, 14), 4, 4);
+            p.drawEllipse(QPoint(18, 10), 1, 1);
+            break;
+        }
     }
 }
 

@@ -131,6 +131,7 @@ if(FURNIFYME_BUILD_APP)
       src/ui/InlineRename.cpp
       src/ui/SelectorWindow.cpp
       src/ui/VersionsPanel.cpp
+      src/ui/RenderSettingsPanel.cpp
       src/FurnitureStore.cpp
     )
     target_include_directories(furnify_app PUBLIC src/ui)
