@@ -122,6 +122,15 @@ void GridRenderer::attach(const Handle(AIS_InteractiveContext)& context)
         myLayer = layer;
 }
 
+void GridRenderer::detach()
+{
+    if (!myContext.IsNull() && !myGrid.IsNull()) myContext->Remove(myGrid, Standard_False);
+    myGrid.Nullify();
+    myContext.Nullify();
+    myLayer = Graphic3d_ZLayerId_UNKNOWN;
+    invalidate();
+}
+
 void GridRenderer::invalidate()
 {
     // Both halves, not just the step: update()'s early-out is a conjunction,
@@ -133,10 +142,10 @@ void GridRenderer::invalidate()
     myBuiltExtent = 0.0;
 }
 
-void GridRenderer::update(double cameraDistance, const gp_Pnt& cameraTarget,
+bool GridRenderer::update(double cameraDistance, const gp_Pnt& cameraTarget,
                           const gp_Pln& plane, double density)
 {
-    if (myContext.IsNull()) return;
+    if (myContext.IsNull()) return false;
 
     const double step = minorStepFor(cameraDistance, density);
     // Extent: comfortably beyond what a camera at this distance can see of the
@@ -162,13 +171,14 @@ void GridRenderer::update(double cameraDistance, const gp_Pnt& cameraTarget,
     const bool centered = center.Distance(myBuiltCenter) < myBuiltExtent * 0.25;
     const bool sized = myBuiltExtent > 0.0 &&
                        extent < myBuiltExtent * 2.0 && extent > myBuiltExtent * 0.5;
-    if (sameLevel && samePlane && centered && sized) return;
+    if (sameLevel && samePlane && centered && sized) return false;
 
     rebuild(step, centerU, centerV, extent, plane);
     myBuiltStep = step;
     myBuiltCenter = center;
     myBuiltExtent = extent;
     myBuiltPlane = plane;
+    return true;
 }
 
 void GridRenderer::rebuild(double minorStep, double centerU, double centerV,
@@ -317,15 +327,16 @@ void GridRenderer::rebuild(double minorStep, double centerU, double centerV,
     // cache current, so the grid is correct the moment it is shown again
     // rather than one camera move stale.
     if (myVisible) myContext->Display(myGrid, 0, -1, Standard_False);   // mode -1: not selectable
-    myContext->UpdateCurrentViewer();
+    // No UpdateCurrentViewer() here since the QOpenGLWidget migration - see
+    // update()'s own comment on the header. The caller owns the frame.
 }
 
-void GridRenderer::setVisible(bool visible)
+bool GridRenderer::setVisible(bool visible)
 {
-    if (myVisible == visible) return;
+    if (myVisible == visible) return false;
     myVisible = visible;
-    if (myContext.IsNull() || myGrid.IsNull()) return;   // nothing built yet - update() will honour it
+    if (myContext.IsNull() || myGrid.IsNull()) return false;   // nothing built yet - update() will honour it
     if (myVisible) myContext->Display(myGrid, 0, -1, Standard_False);
     else           myContext->Erase(myGrid, Standard_False);
-    myContext->UpdateCurrentViewer();
+    return true;
 }

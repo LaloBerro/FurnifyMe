@@ -1173,7 +1173,9 @@ Construction splits in two, and the split is what retires the old lazy-init pitf
   any entry point at any time. The driver is constructed with `theToInitialize = false` (Qt
   owns the context) and carries `buffersNoSwap` / `buffersOpaqueAlpha` /
   `useSystemBuffer=false` / `contextCompatible` matching `OcctViewWidget::surfaceFormat()`.
-- `initializeGL()` — Qt's own callback, first show, once — wraps the bound Qt context with
+- `initializeGL()` — Qt's own callback, first at the first show, and **again after any
+  context reset**, which is not the same as "once" and is exactly the case
+  `releaseGlResources()` exists for — wraps the bound Qt context with
   a throw-away `OpenGl_Context` and hands its `RenderingContext()` to
   `myView->SetWindow(Aspect_NeutralWindow, ctx)`. The neutral window is **virtual**, sized
   in DEVICE pixels through `toDevicePixels()`, and its `DevicePixelRatio()` is left at the
@@ -1198,12 +1200,71 @@ documented on-screen-first ordering): those open a `GlScope`, which makes the co
 current, keeps the framebuffer wrapper in step, and asks for a composite on the way out. It
 is nesting-safe, so a probe calling a probe cannot have the context pulled from under it.
 
+**Context lifetime is OWNED, and it is the one thing this migration could not leave to
+chance.** OCCT holds real GPU resources against Qt's context, and they can only be released
+while that context is alive and current. `releaseGlResources()` does it in OCCT's own
+order — sub-renderers detach, `RemoveAll`, `myView->Remove()`, viewer, window, display
+connection last — under a `makeCurrent()`, and leaves the widget in its
+never-initialized state so a later `initializeGL()` rebuilds instead of reviving dead
+handles. Two callers, and they are the only two moments a context can die under the widget:
+
+- **a real destructor**, not `= default`. `~QOpenGLWidget` has not run yet at that point,
+  which is what makes `makeCurrent()` still work; member-order destruction released those
+  resources with no context current and in no defined order. `MainWindow` does
+  `delete myCompareView` on *every* compare-pane close, so this is routine, not exit-only.
+  It disconnects the hook below first — Qt disconnects in `~QObject`, which runs *after* the
+  derived destructor body, so a live connection would call back into a half-destroyed object.
+- **`QOpenGLContext::aboutToBeDestroyed`**, Qt's only hook for releasing while the dying
+  context still exists — a driver reset, a reparent the attribute below does not cover.
+  Direct connection; the widget then renders empty until the document is re-displayed, which
+  is the honest price of a context loss and is not the crash it replaces.
+
 **`Qt::AA_ShareOpenGLContexts` is set before `QApplication`, in `main.cpp` and in
 `gui_smoke`, and it is load-bearing.** Without it Qt destroys a `QOpenGLWidget`'s context on
 every reparent — and this app reparents its viewport for real, into and out of the compare
-pane's `QSplitter` — leaving OCCT holding GPU resources against a dead context. The
-re-attach on the next frame then tears down an `OpenGl_Window` whose context is gone, which
-was measured as a hard process crash, not a glitch. `gui_smoke` pins the attribute.
+pane's `QSplitter`. Measured as a hard process crash before the teardown above existed.
+`gui_smoke` pins the attribute, pins repeated compare open/close cycles, and pins the
+*ordering* through a monotonic sequence the two events share
+(`lastGlReleaseTick() < lastGlContextDeathTick()`) rather than trusting that the destructor
+did the right thing.
+
+**`paintGL()`'s re-attach branch is a backstop, not the recovery**, and it compares
+**context identity**, never the native window handle: a context rebuilt on the same
+top-level window leaves that handle unchanged.
+
+**`SetImmediateModeDrawToFront(false)` is PARKED, on a measurement, not omitted.**
+`Graphic3d_CView` defaults it to TRUE, which draws immediate structures — the hover
+highlight, the manipulator mid-drag — "directly to the front buffer", and warns they "will
+be missed in image dump since it is performed from back buffer"; a QOpenGLWidget has no
+front buffer, so turning it off looks obligatory. A/B measured against the same build, it
+moves a pixel it has no business moving: the path-traced **backdrop** renders (232,231,229)
+against a calibrated token of (193,191,186), and a user-chosen background lands 118 from the
+colour they picked instead of 26 — while the rest of the frame stays byte-identical, so it
+is specifically the clear colour's route through OCCT's main-scene framebuffer and its blit
+that the flag changes. Re-deriving `kPathTracingBackdropGain` against a changed compositing
+path is Phase 3's remit, and the harm the flag guards against **is not real in this hosting
+layer**: OCCT's front-buffer writes land in the bound default framebuffer, which is the one
+Qt composites and the one `Dump` reads. That is a pinned fact, not a claim — `gui_smoke`
+Dumps a hovered body and finds 13,941 hover-tinted pixels against 0 unhovered.
+
+**`wrapDefaultFramebuffer()` binds `defaultFramebufferObject()` before `InitWrapper`.**
+`InitWrapper` wraps *whatever is bound*, and this function then treats that framebuffer's
+size as authoritative — so a nested `GlScope` (which binds nothing, by design) entered right
+after an OCCT redraw could have wrapped a shadow map or a ray-tracing accumulation buffer,
+resized the view to it, taken a pixel measurement at the wrong size, and self-healed on the
+next frame with nothing ever reporting it.
+
+**No class outside `OcctViewWidget` redraws the viewer any more.** `GridRenderer`,
+`DimensionRenderer` and `PullArrowRenderer` each dropped their `UpdateCurrentViewer()` and
+return **whether anything actually changed** instead; `OcctViewWidget` asks for the frame,
+and only on a true return. Two reasons, and the second is the sharper one: those calls ran
+from ordinary Qt slots with no Qt context current and worked only because OCCT re-made *its*
+context current behind Qt's back, and `updateEdgeDimension()` runs on **every hover mouse
+move**, so an unconditional `Invalidate()` + `update()` there cost a discarded-and-rebuilt
+OCCT frame per mouse event — three of them in edge mode. `DimensionRenderer::show()` now
+carries an equal-guard on the span, the extension normal *and* `worldPerPixel`, because all
+three are built into the annotation; `refresh()` deliberately bypasses it, which is its
+whole job.
 
 `QSurfaceFormat` (depth 24, stencil 8, compatibility profile) has ONE derivation,
 `OcctViewWidget::surfaceFormat()`, read by `main.cpp` and `gui_smoke` before

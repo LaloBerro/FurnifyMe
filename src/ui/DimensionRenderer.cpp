@@ -107,34 +107,69 @@ void DimensionRenderer::attach(const Handle(AIS_InteractiveContext)& context)
     myContext = context;
 }
 
-void DimensionRenderer::clear()
+void DimensionRenderer::detach()
 {
-    if (!myContext.IsNull() && !myObjects.empty()) {
+    if (!myContext.IsNull()) {
         for (auto& obj : myObjects) myContext->Remove(obj, Standard_False);
-        myContext->UpdateCurrentViewer();
     }
     myObjects.clear();
     myLabelText.clear();
+    myContext.Nullify();
+    myLayer = Graphic3d_ZLayerId_UNKNOWN;
 }
 
-void DimensionRenderer::refresh()
+bool DimensionRenderer::clear()
+{
+    const bool had = !myObjects.empty();
+    if (!myContext.IsNull() && had) {
+        for (auto& obj : myObjects) myContext->Remove(obj, Standard_False);
+        // No UpdateCurrentViewer() since the QOpenGLWidget migration: OCCT does
+        // not own the surface any more, so a redraw from an ordinary Qt slot
+        // has no Qt context current and nothing composites it. The caller owns
+        // the frame - see OcctViewWidget::scheduleRedraw().
+    }
+    myObjects.clear();
+    myLabelText.clear();
+    return had;
+}
+
+bool DimensionRenderer::refresh()
 {
     // Only ever redraws what is already on screen: a renderer that could
     // resurrect a cleared annotation would put one back every time the app
     // state changed.
-    if (myObjects.empty()) return;
-    show(myFrom, myTo, myNormal, myWorldPerPixel);
+    if (myObjects.empty()) return false;
+    // Past show()'s equal-guard deliberately - refresh() exists precisely to
+    // rebuild the SAME span when the display unit changed under it, which the
+    // guard would otherwise refuse as "nothing moved".
+    myForceRebuild = true;
+    return show(myFrom, myTo, myNormal, myWorldPerPixel);
 }
 
-void DimensionRenderer::show(const gp_Pnt& from, const gp_Pnt& to, const gp_Dir& normalIn,
+bool DimensionRenderer::show(const gp_Pnt& from, const gp_Pnt& to, const gp_Dir& normalIn,
                              double worldPerPixel)
 {
-    if (myContext.IsNull()) return;
+    const bool force = myForceRebuild;
+    myForceRebuild = false;
+
+    if (myContext.IsNull()) return false;
 
     const double length = from.Distance(to);
     if (length < 1.0e-4) {   // shorter than a hair - never divide by this
-        clear();
-        return;
+        return clear();
+    }
+
+    // The equal-guard - see the header. Everything the built annotation
+    // depends on is compared, not merely the endpoints: the normal orients the
+    // extension lines and worldPerPixel sizes every piece of furniture on
+    // them, so a rebuild is owed if either moved. Tolerances rather than
+    // equality because all four come from projected floating-point geometry
+    // that a still cursor still jitters by a last bit.
+    if (!force && isShowing() &&
+        from.Distance(myFrom) < 1.0e-7 && to.Distance(myTo) < 1.0e-7 &&
+        normalIn.IsEqual(myNormal, 1.0e-7) &&
+        std::abs(worldPerPixel - myWorldPerPixel) < 1.0e-9) {
+        return false;
     }
 
     clear();   // drop whatever was drawn before, same as GridRenderer's rebuild
@@ -245,5 +280,7 @@ void DimensionRenderer::show(const gp_Pnt& from, const gp_Pnt& to, const gp_Dir&
     myContext->Display(label, 0, -1, Standard_False);
     myObjects.push_back(label);
 
-    myContext->UpdateCurrentViewer();
+    // No UpdateCurrentViewer() - see clear()'s own comment. The caller owns
+    // the frame, and only asks for one because this returned true.
+    return true;
 }

@@ -21,12 +21,24 @@ class GridRenderer {
 public:
     // Also creates the Z-layer the grid is drawn in - see zLayer().
     void attach(const Handle(AIS_InteractiveContext)& context);
+    // Drops the context and everything built against it, WITHOUT touching the
+    // viewer - the caller has already torn that down, or is about to. Called
+    // from OcctViewWidget::releaseGlResources(), which is the one place that
+    // knows a GL context is dying; after it, this renderer is exactly as it
+    // was before attach() and the next attach()/update() pair rebuilds.
+    void detach();
     // `plane` is the work plane the grid lies on - the ground plane by
     // default, a locked face's own plane while one is locked. `density`
     // is Theme::gridDensity() - see minorStepFor() below for what it does to
     // the grid; the caller reads it live at every update() so a theme edit's
     // invalidate()+update() pair rebuilds against the value the user just set.
-    void update(double cameraDistance, const gp_Pnt& cameraTarget, const gp_Pln& plane,
+    // Returns TRUE when it actually rebuilt or redisplayed something, so the
+    // caller knows whether a frame is owed. This class no longer redraws the
+    // viewer itself: OCCT does not own the surface since the QOpenGLWidget
+    // migration, so a synchronous UpdateCurrentViewer() from an ordinary Qt
+    // slot would draw into Qt's framebuffer with no Qt context current and
+    // nothing to composite it - see OcctViewWidget::scheduleRedraw().
+    bool update(double cameraDistance, const gp_Pnt& cameraTarget, const gp_Pln& plane,
                 double density);
 
     // Render mode (Milestone 3, item 5) hides the grid outright rather than
@@ -37,7 +49,8 @@ public:
     // here. Restoring visibility does not force a rebuild - the cached grid
     // (if any) is simply redisplayed, and the next camera move corrects it
     // exactly as it always does.
-    void setVisible(bool visible);
+    // TRUE when the visibility actually changed - update()'s own contract.
+    bool setVisible(bool visible);
     bool isVisible() const { return myVisible; }
 
     // Forces the next update() to rebuild, whatever the camera is doing.

@@ -359,7 +359,22 @@ void skipByEnvironment(int checks, const QString& why)
 // none of its own for the compare pane: Milestone 3's native-HWND client-rect
 // pin was REWRITTEN in place to ask the identical question of the neutral
 // window, one check for one. 2475 + 3 = 2478.
-constexpr int kCheckFloor = 2478;
+//
+// Fix round 1 adds 6, all in the compare block, all about the one thing the
+// migration had to own and had not: context lifetime. Four open/close cycles
+// survived with the live viewport still central; at least one GL release per
+// destroyed viewport; both halves of the teardown actually happened (the
+// non-vacuity guard the ordering check needs); the release stamped BEFORE the
+// context death; the live view still holding a valid context after four
+// reparent round trips; and its window still its own device-pixel size.
+// 2478 + 6 = 2484.
+//
+// And 2 more in the device-pixel boundary block, standing in for a flag this
+// phase deliberately does NOT set: both immediate-layer dumps were written
+// (the non-vacuity guard), and the dynamic hover highlight actually reaches
+// V3d_View::Dump. See attachGlWindow()'s parked block for the measurement that
+// decided it. 2484 + 2 = 2486.
+constexpr int kCheckFloor = 2486;
 
 void check(bool condition, const QString& what)
 {
@@ -4510,6 +4525,63 @@ int main(int argc, char* argv[])
                                  "size in DEVICE pixels (%1x%2 against %3x%4)")
                       .arg(hostSize.width()).arg(hostSize.height())
                       .arg(wantSize.width()).arg(wantSize.height()));
+        }
+
+        // THE IMMEDIATE LAYER REACHES A DUMP, and this is the pin standing in
+        // for a flag that is deliberately not set. Graphic3d_CView's
+        // SetImmediateModeDrawToFront defaults to TRUE - immediate structures
+        // (the dynamic hover highlight, the manipulator mid-drag) drawn
+        // "directly to the front buffer", where OCCT's own doc warns they
+        // "will be missed in image dump". A QOpenGLWidget has no front buffer,
+        // so turning it off looks obligatory; measured, it re-routes the
+        // path-traced backdrop off its calibration and breaks a user-visible
+        // colour (see attachGlWindow()'s parked block for the A/B). It stays
+        // off because the harm is not real here - OCCT's front-buffer writes
+        // land in the bound default framebuffer, which is the one Qt
+        // composites and the one Dump reads - and THIS is what turns that
+        // sentence from a claim into a check.
+        {
+            GProp_GProps hoverProps;
+            BRepGProp::VolumeProperties(window.document().solids().front().shape, hoverProps);
+            const QColor hoverTint = Theme::highlightHover();
+            const QString hoverPath = outDir + QStringLiteral("/immediate-hover.png");
+            const QString plainPath = outDir + QStringLiteral("/immediate-plain.png");
+
+            // Counts pixels reading as the viewport's own hover tint. A tint,
+            // not a fill: the tolerance is wide enough for shaded geometry
+            // under it and far narrower than the grey the body wears unhovered.
+            const auto tintedPixels = [&](const QString& path) {
+                const QImage shot(path);
+                if (shot.isNull()) return -1;
+                int count = 0;
+                for (int y = 0; y < shot.height(); y += 2)
+                    for (int x = 0; x < shot.width(); x += 2)
+                        if (colorDistance(shot.pixelColor(x, y), hoverTint) < 60.0) ++count;
+                return count;
+            };
+
+            QPoint bodyAt;
+            const bool bodyProjected = view->projectToScreen(hoverProps.CentreOfMass(), bodyAt);
+            moveTo(view, QPointF(4, 4));   // clear of everything: nothing detected
+            settle(60);
+            const bool plainDumped = view->saveSnapshot(plainPath);
+            if (bodyProjected) moveTo(view, QPointF(bodyAt));
+            settle(60);
+            const bool hoverDumped = view->saveSnapshot(hoverPath);
+
+            const int plainCount = plainDumped ? tintedPixels(plainPath) : -1;
+            const int hoverCount = hoverDumped ? tintedPixels(hoverPath) : -1;
+            check(bodyProjected && plainDumped && hoverDumped && plainCount >= 0 &&
+                      hoverCount >= 0,
+                  "both immediate-layer dumps were written, so the comparison below is "
+                  "not vacuous");
+            check(hoverCount > plainCount + 200,
+                  QStringLiteral("the dynamic hover highlight reaches V3d_View::Dump - the "
+                                 "immediate layer is not lost to a front buffer that does "
+                                 "not exist (%1 tinted pixels hovered against %2 not)")
+                      .arg(hoverCount).arg(plainCount));
+            moveTo(view, QPointF(4, 4));
+            settle(60);
         }
 
         QPoint targetAt;
@@ -17759,6 +17831,17 @@ int main(int argc, char* argv[])
         // OcctViewWidget's own one logical->device conversion point rather
         // than a second copy of the ratio in this file. Still after settle(),
         // for the same reason: it is the queued resize event that carries it.
+        //
+        // FORCE A FRAME FIRST, and that is what keeps the check honest rather
+        // than tidy. With no paintGL since the round trip, the neutral window
+        // still holds resizeGL()'s own toDevicePixels(width(), height()) - which
+        // IS viewportDeviceSize() by construction, so the check would agree with
+        // itself, exactly the "probe that can quietly skip" this project bans.
+        // After a real frame the size is FBO-derived (wrapDefaultFramebuffer()
+        // makes Qt's own framebuffer the authority), so the two sides come from
+        // genuinely different places and the comparison means something.
+        probe.view()->repaint();
+        settle(50);
         {
             const QSize hostSize = probe.view()->hostWindowSize();
             const QSize wantSize = probe.view()->viewportDeviceSize();
@@ -17774,6 +17857,65 @@ int main(int argc, char* argv[])
         const QImage afterCompareShot = printWindowCapture(
             &probe, snapDir + QStringLiteral("/after-compare-composited.png"));
         checkNoBlackLine(afterCompareShot, QStringLiteral("post-compare live view"));
+
+        // --- context lifetime: the compare pane is a teardown, four times over
+        //
+        // `closeCompare()` does a synchronous `delete myCompareView`, so every
+        // open/close pair destroys a QOpenGLWidget and, with it, the OpenGL
+        // context OCCT held real GPU resources against. That is the reachable
+        // half of the migration's one genuinely dangerous question, and it used
+        // to be answered by `~OcctViewWidget() = default` - member-order
+        // destruction with no context current, which is how you crash rather
+        // than how you release. Repeated, because a teardown bug that leaks
+        // rather than faults shows up on the second or the fourth cycle, not
+        // the first, and surviving to the check below is half the assertion.
+        {
+            const int releasesBefore = OcctViewWidget::glReleaseCount();
+            for (int cycle = 0; cycle < 4; ++cycle) {
+                if (!probe.openCompare(QStringLiteral("Original"))) break;
+                settle(80);
+                probe.closeCompare();
+                settle(80);
+            }
+            check(!probe.isCompareOpen() && probe.centralWidget() == probe.view(),
+                  "four compare open/close cycles later the live viewport is still the "
+                  "central widget, and the process is still here");
+            const int releases = OcctViewWidget::glReleaseCount() - releasesBefore;
+            check(releases >= 4,
+                  QStringLiteral("each of those destroyed a viewport released OCCT's GL "
+                                 "resources rather than letting member destruction do it "
+                                 "(%1 releases for 4 cycles)")
+                      .arg(releases));
+            // THE ORDER, which is the whole point and the thing a crash-free run
+            // alone does not prove. Both events stamp one monotonic sequence:
+            // releaseGlResources() from the destructor, and a pure observer on
+            // QOpenGLContext::aboutToBeDestroyed scoped to the context itself.
+            // Release must come FIRST - resources can only be released while the
+            // context that owns them is alive.
+            check(OcctViewWidget::lastGlContextDeathTick() > 0 &&
+                      OcctViewWidget::lastGlReleaseTick() > 0,
+                  "both halves of the teardown actually happened, so the ordering check "
+                  "below is not vacuous");
+            check(OcctViewWidget::lastGlReleaseTick() <
+                      OcctViewWidget::lastGlContextDeathTick(),
+                  QStringLiteral("and OCCT let go BEFORE the context died, not after "
+                                 "(release at %1, context death at %2)")
+                      .arg(OcctViewWidget::lastGlReleaseTick())
+                      .arg(OcctViewWidget::lastGlContextDeathTick()));
+            // The live view is unharmed by all of it - it was reparented into
+            // and out of a splitter four times, and it still renders and still
+            // holds the context it was attached to.
+            check(probe.view()->context() != nullptr && probe.view()->context()->isValid(),
+                  "the LIVE viewport still holds a valid OpenGL context after four "
+                  "reparent round trips - the thing AA_ShareOpenGLContexts buys");
+            probe.view()->repaint();
+            settle(50);
+            check(probe.view()->hostWindowSize() == probe.view()->viewportDeviceSize(),
+                  QStringLiteral("...and still renders through a window its own device-pixel "
+                                 "size (%1x%2)")
+                      .arg(probe.view()->hostWindowSize().width())
+                      .arg(probe.view()->hostWindowSize().height()));
+        }
 
         // --- Restore: one checkpoint, undo returns the whole pre-restore document
         trigger(probe, QStringLiteral("Start Sketch"));

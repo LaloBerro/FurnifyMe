@@ -102,17 +102,27 @@ void PullArrowRenderer::attach(const Handle(AIS_InteractiveContext)& context)
     myContext = context;
 }
 
-void PullArrowRenderer::clear(bool updateViewer)
+void PullArrowRenderer::detach()
 {
-    if (!myContext.IsNull() && !myObjects.empty()) {
+    if (!myContext.IsNull()) {
         for (auto& obj : myObjects) myContext->Remove(obj, Standard_False);
-        // UpdateCurrentViewer() is a full viewer redraw and this build blocks
-        // on vsync for it - measured at ~16 ms a call. show() therefore
-        // clears with updateViewer = false and updates ONCE at the end,
-        // rather than paying for two frames to replace one arrow.
-        if (updateViewer) myContext->UpdateCurrentViewer();
     }
     myObjects.clear();
+    myContext.Nullify();
+}
+
+bool PullArrowRenderer::clear()
+{
+    const bool had = !myObjects.empty();
+    if (!myContext.IsNull() && had) {
+        for (auto& obj : myObjects) myContext->Remove(obj, Standard_False);
+        // No UpdateCurrentViewer(): the caller owns the frame since the
+        // QOpenGLWidget migration - see show()'s comment on the header. It
+        // also happens to be free where the old code paid a vsync to remove an
+        // arrow it was about to redraw anyway.
+    }
+    myObjects.clear();
+    return had;
 }
 
 void PullArrowRenderer::reapplyTheme()
@@ -121,7 +131,7 @@ void PullArrowRenderer::reapplyTheme()
     // an arrow appear that no gesture asked for.
     if (!isShowing()) return;
     myForceRebuild = true;
-    show(myCentre, myOutward, myViewDirection, myWorldPerPixel);
+    show(myCentre, myOutward, myViewDirection, myWorldPerPixel);   // caller owns the frame
 }
 
 gp_Pnt PullArrowRenderer::head() const
@@ -134,11 +144,10 @@ gp_Pnt PullArrowRenderer::tail() const
     return myCentre.Translated(gp_Vec(myOutward) * -myHalfLength);
 }
 
-void PullArrowRenderer::show(const gp_Pnt& centre, const gp_Dir& outward,
-                             const gp_Dir& viewDirection, double worldPerPixel,
-                             bool updateViewer)
+bool PullArrowRenderer::show(const gp_Pnt& centre, const gp_Dir& outward,
+                             const gp_Dir& viewDirection, double worldPerPixel)
 {
-    if (myContext.IsNull()) return;
+    if (myContext.IsNull()) return false;
 
     // Nothing to do when nothing has actually moved.
     //
@@ -155,11 +164,13 @@ void PullArrowRenderer::show(const gp_Pnt& centre, const gp_Dir& outward,
     //   - clear() no longer updates the viewer on show()'s internal path:
     //     33.3 ms -> 16.3 ms, which is one vsync and therefore what that
     //     figure almost entirely IS;
-    //   - applyCameraState() emits cameraChanged() before its own Redraw(),
-    //     so a rebuild driven by a camera move passes updateViewer = false
-    //     and rides along with the redraw already coming - no viewer update
-    //     at all on that path, leaving just the AIS rebuild, which the
-    //     16.3-ms-is-one-vsync figure shows is well under a millisecond;
+    //   - applyCameraState() emits cameraChanged() before its own redraw, so
+    //     a rebuild driven by a camera move rides along with the frame already
+    //     coming rather than forcing one of its own, leaving just the AIS
+    //     rebuild, which the 16.3-ms-is-one-vsync figure shows is well under a
+    //     millisecond. Both of those were spelled `updateViewer = false` until
+    //     the QOpenGLWidget migration; this class now never redraws at all and
+    //     the saving is the caller's `if (changed && !myApplyingCamera)`;
     //   - and a call asking for the arrow already on screen returns right
     //     here without touching AIS: 0.17 ms. That is the common case -
     //     every pan, every zoom notch inside the same octave, and every
@@ -175,13 +186,13 @@ void PullArrowRenderer::show(const gp_Pnt& centre, const gp_Dir& outward,
         viewDirection.IsEqual(myViewDirection, kHalfDegree) &&
         std::fabs(worldPerPixel - myWorldPerPixel) <=
             std::max(myWorldPerPixel, 1.0e-9) * 0.01) {
-        return;
+        return false;
     }
     // Consumed here, not at the end: every path below rebuilds, and a flag
     // left set would defeat the cache for the next camera step too.
     myForceRebuild = false;
 
-    clear(/*updateViewer=*/false);
+    clear();
 
     myCentre = centre;
     myOutward = outward;
@@ -243,11 +254,10 @@ void PullArrowRenderer::show(const gp_Pnt& centre, const gp_Dir& outward,
     myContext->SetZLayer(arrow, Graphic3d_ZLayerId_Topmost);
     myObjects.push_back(arrow);
 
-    // Skipped when the caller is about to redraw anyway - see
-    // OcctViewWidget::applyCameraState(), which now emits cameraChanged()
-    // BEFORE its own Redraw() precisely so this rebuild can ride along with
-    // it instead of forcing a second frame of its own.
-    if (updateViewer) myContext->UpdateCurrentViewer();
+    // The caller redraws - and, on the applyCameraState() path that this
+    // renderer's own measurements were taken against, it is about to anyway,
+    // which is exactly the saving the old `updateViewer` parameter bought.
+    return true;
 }
 
 // --- the value chip ---------------------------------------------------------

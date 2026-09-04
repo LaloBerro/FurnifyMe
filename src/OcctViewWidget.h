@@ -29,7 +29,9 @@
 #include "PullArrow.h"
 
 #include <QImage>
+#include <QOpenGLContext>
 #include <QOpenGLWidget>
+#include <QPointer>
 #include <QPoint>
 #include <QSize>
 #include <QString>
@@ -134,6 +136,28 @@ public:
     // before the GL context exists.
     QSize hostWindowSize() const;
     QSize viewportDeviceSize() const;
+
+    // --- context lifetime, and the suite's oracle for it -------------------
+    //
+    // The one thing this migration had to OWN. OCCT holds real GPU resources
+    // against the OpenGL context Qt gives this widget, and those resources can
+    // only be released while that context is alive and current. There are
+    // exactly two moments it can die under us - this widget being destroyed
+    // (`delete myCompareView`, which MainWindow does on EVERY compare-pane
+    // close, and application exit) and Qt destroying the context itself (a
+    // driver reset, a reparent `AA_ShareOpenGLContexts` does not cover) - and
+    // both now run releaseGlResources() first. Tearing an OpenGl_Window down
+    // against a context that is already gone is a hard process crash, measured
+    // during this migration; `= default` did exactly that, in member order,
+    // with no context current.
+    //
+    // These three are a MONOTONIC SEQUENCE shared by the two events, so
+    // "OCCT's resources were released BEFORE the context died" is a comparison
+    // the suite can make rather than a hope. Process-wide, because the thing
+    // being asserted is an ORDER between two objects' lifetimes.
+    static long long lastGlReleaseTick();
+    static long long lastGlContextDeathTick();
+    static int glReleaseCount();
 
     void displaySolid(int id, const TopoDS_Shape& shape);
     void removeSolid(int id);
@@ -547,9 +571,11 @@ public:
     // Redraws whatever dimension is on screen without changing which span it
     // measures - for a display-unit switch, which changes the label's text
     // under an annotation nothing else would touch until the next mouse move.
-    // scheduleRedraw() because DimensionRenderer redraws the OCCT viewer
-    // itself and Qt is what composites the result - see updateEdgeDimension().
-    void refreshDimension() { myDimension.refresh(); scheduleRedraw(); }
+    // The frame is this class's to ask for since the QOpenGLWidget migration,
+    // and only when something moved - refresh() answers that, and returns
+    // false outright when nothing is on screen to refresh. See
+    // updateEdgeDimension() for why an unconditional redraw here is not free.
+    void refreshDimension() { if (myDimension.refresh()) scheduleRedraw(); }
 
     // Screen position of a world point, in this widget's coordinates. False
     // when there is no view yet. Exposed for gui_smoke: a test that hardcodes
@@ -1242,6 +1268,17 @@ private:
     // Called from initializeGL() only - it is the one step that needs a bound
     // context - and re-run whenever Qt rebuilds the context under us.
     bool attachGlWindow();
+    // Releases everything OCCT holds on the GPU, in the order OCCT's own
+    // QOpenGLWidget sample tears it down, WITH THE OWNING CONTEXT ALIVE AND
+    // CURRENT. See the public tick accessors above for why this exists and
+    // when it runs. Afterwards this widget is exactly as it was before
+    // initializeViewer(): no viewer, no view, no context, no presentations,
+    // myInitialized false - so a later initializeGL() rebuilds from scratch
+    // rather than reviving handles into a dead context. On the destructor path
+    // that is the end of it; on the context-loss path the viewport is empty
+    // until the document is re-displayed, which is the honest price of a
+    // context loss and still enormously better than the crash it replaces.
+    void releaseGlResources();
     // Wraps the framebuffer object Qt is currently rendering into as OCCT's
     // default FBO, and syncs the neutral window to its size. Run before every
     // frame OCCT draws, because QOpenGLWidget recreates that FBO on resize and
@@ -1605,6 +1642,14 @@ private:
     // point stays the only place the ratio is applied. Null until the first
     // initializeGL().
     Handle(Aspect_NeutralWindow) myHostWindow;
+    // The QOpenGLContext the view was last attached to, compared by IDENTITY
+    // rather than by native window handle: a context rebuilt on the SAME
+    // top-level window - the actual shape of a context loss - leaves that
+    // handle unchanged and would sail straight through a handle comparison,
+    // leaving the view rendering through a dangling HGLRC. A QPointer so the
+    // comparison can never be against a freed object. Null before the first
+    // attach and after releaseGlResources().
+    QPointer<QOpenGLContext> myAttachedContext;
     // See sketchZLayer(). Graphic3d_ZLayerId_UNKNOWN until the viewer exists,
     // and if the viewer ever refuses the layer everything below simply
     // displays into the default layer as it did before.

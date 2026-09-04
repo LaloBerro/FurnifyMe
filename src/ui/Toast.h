@@ -88,14 +88,20 @@ public:
     // Drives the fade ToastHost animates. QPainter::setOpacity(), not a
     // QGraphicsEffect: this widget is a plain composited child of
     // OcctViewWidget, the way every overlay in this app is (see the class
-    // comment on ToolCluster) - OcctViewWidget itself paints on screen via
-    // OpenGL with Qt's own paint engine disabled (paintEngine() returns
-    // nullptr, per CLAUDE.md), and QGraphicsEffect requires rendering its
-    // source widget through Qt's normal offscreen raster path first, which
-    // does not exist here. A prior version of this fade used
-    // QGraphicsOpacityEffect and crashed - reliably, a few hundred
-    // milliseconds into any later repaint-heavy stretch of gui_smoke - for
-    // exactly that reason.
+    // comment on ToolCluster) - and OcctViewWidget renders its content through
+    // OpenGL rather than through Qt's raster paint engine, while
+    // QGraphicsEffect requires rendering its source widget through that raster
+    // path first. A prior version of this fade used QGraphicsOpacityEffect and
+    // crashed - reliably, a few hundred milliseconds into any later
+    // repaint-heavy stretch of gui_smoke - for exactly that reason.
+    //
+    // The reason used to be written as "paintEngine() returns nullptr, per
+    // CLAUDE.md", which was true while the viewport was a WA_PaintOnScreen
+    // widget owning a native GL surface. Since the QOpenGLWidget migration it
+    // is not: the widget overrides no paint engine and Qt composites its
+    // framebuffer normally. The CONCLUSION is unchanged - the source widget
+    // still never goes through the offscreen raster path a QGraphicsEffect
+    // needs - which is why this stays a QPainter::setOpacity() fade.
     void setOpacity(double opacity);
     double opacity() const { return myOpacity; }
 

@@ -58,6 +58,7 @@
 // entry-point declarations, which is why every Qt header in this file stays
 // below them - Qt's <qopengl.h> declares the same family, and only the first
 // one seen may define the types.
+#include <OpenGl_ArbFBO.hxx>
 #include <OpenGl_Caps.hxx>
 #include <OpenGl_Context.hxx>
 #include <OpenGl_FrameBuffer.hxx>
@@ -341,6 +342,15 @@ Handle(OpenGl_Context) hostGlContext(const Handle(V3d_View)& view)
 // context is COMPATIBLE with that rendering context - which is precisely the
 // window the context is already current on. OCCT's own sample answers it the
 // same way (OcctGlTools::GetGlNativeWindow).
+// The monotonic sequence CRITICAL 1's ordering is asserted against - see the
+// tick accessors on the header. File-scope rather than per-widget because the
+// thing being proved is an ORDER between two objects' lifetimes: this widget's
+// teardown, and the death of the context it was rendering through.
+long long ourGlTeardownTick = 0;
+long long ourLastGlReleaseTick = 0;
+long long ourLastGlContextDeathTick = 0;
+int ourGlReleaseCount = 0;
+
 Aspect_Drawable currentGlNativeWindow()
 {
 #ifdef _WIN32
@@ -394,7 +404,103 @@ OcctViewWidget::OcctViewWidget(QWidget* parent, bool viewerOnly)
     myRenderLightAngleDeg = std::atan2(0.35, -0.45) * 180.0 / 3.14159265358979323846;
 }
 
-OcctViewWidget::~OcctViewWidget() = default;   // OCCT handles are refcounted; never delete them
+OcctViewWidget::~OcctViewWidget()
+{
+    // NOT `= default`, and the difference is a crash. OCCT handles are
+    // refcounted and must never be deleted - but the resources BEHIND them
+    // live on the GPU, inside the OpenGL context Qt owns, and member-order
+    // destruction would release them with no context current and in no
+    // particular order. `~QOpenGLWidget` has not run yet at this point, which
+    // is exactly why this has to be here: the context is still alive and
+    // makeCurrent() still works. MainWindow does `delete myCompareView` on
+    // every compare-pane close, so this is a routine path, not an exit-only
+    // one.
+    //
+    // The context-loss connection goes first. Qt disconnects a QObject's
+    // connections in ~QObject, which runs AFTER this body, so leaving it live
+    // would let ~QOpenGLWidget's own context destruction call
+    // releaseGlResources() on a half-destroyed object.
+    if (!myAttachedContext.isNull()) disconnect(myAttachedContext, nullptr, this, nullptr);
+    releaseGlResources();
+}
+
+long long OcctViewWidget::lastGlReleaseTick() { return ourLastGlReleaseTick; }
+long long OcctViewWidget::lastGlContextDeathTick() { return ourLastGlContextDeathTick; }
+int OcctViewWidget::glReleaseCount() { return ourGlReleaseCount; }
+
+void OcctViewWidget::releaseGlResources()
+{
+    if (myViewer.IsNull() && myView.IsNull() && myContext.IsNull()) {
+        myAttachedContext.clear();
+        return;
+    }
+
+    ourLastGlReleaseTick = ++ourGlTeardownTick;
+    ++ourGlReleaseCount;
+
+    // The whole point: the resources go while the context that owns them is
+    // current. GlScope would do it, but it needs a view with a window and this
+    // has to work when the window is exactly what is being taken away.
+    const bool took = context() != nullptr && QOpenGLContext::currentContext() != context();
+    if (took) makeCurrent();
+
+    // Nothing may be driving a frame while the viewer is torn down.
+    stopCameraAnimation();
+    stopPathTracingConvergence();
+
+    // Held across the teardown deliberately: OCCT's own sample keeps the
+    // display connection alive until another context is made current, to
+    // dodge a crash in the X11 case. It costs one refcount on Win32.
+    Handle(Aspect_DisplayConnection) display;
+    if (!myViewer.IsNull() && !myViewer->Driver().IsNull())
+        display = myViewer->Driver()->GetDisplayConnection();
+
+    // The three sub-renderers hold presentations and a context handle of their
+    // own; they let go first, before the context they were built against does.
+    myGridRenderer.detach();
+    myDimension.detach();
+    myPullArrow.detach();
+    myBevelArrow.detach();
+
+    // OCCT's own order: remove every presentation, drop the context, destroy
+    // the view, then the viewer.
+    if (!myContext.IsNull()) myContext->RemoveAll(Standard_False);
+    myContext.Nullify();
+    if (!myView.IsNull()) myView->Remove();
+    myView.Nullify();
+    myViewer.Nullify();
+    myHostWindow.Nullify();
+    display.Nullify();
+
+    // Every handle this class held pointed into what has just gone. Cleared
+    // rather than left dangling, because on the context-loss path this object
+    // keeps living and initializeViewer() will build a fresh viewer that knows
+    // nothing about them.
+    mySolids.clear();
+    myOutlines.clear();
+    myPreview.Nullify();
+    myModelingPreview.Nullify();
+    myModelingPreviewSolid = -1;
+    myPlacedMarkers.clear();
+    myFirstPointMarker.Nullify();
+    myCursorMarker.Nullify();
+    myManipulator.Nullify();
+    myManipulatorSolid = -1;
+    myGizmoDragActive = false;
+    mySymmetryIndicator.Nullify();
+    mySymmetryIndicatorBuiltHalfSpan = 0.0;
+    myMirrorPlacementPlaneObject.Nullify();
+    myMirrorPlacementHandleObject.Nullify();
+    myRenderFloor.Nullify();
+    myRenderSavedLights.clear();
+    myRenderSavedAmbients.clear();
+    myRenderModeActive = false;
+    mySketchLayer = Graphic3d_ZLayerId_UNKNOWN;
+    myInitialized = false;
+    myAttachedContext.clear();
+
+    if (took) doneCurrent();
+}
 
 void OcctViewWidget::initializeViewer()
 {
@@ -530,8 +636,40 @@ bool OcctViewWidget::attachGlWindow()
     myHostWindow->SetSize(std::max(1, device.width()), std::max(1, device.height()));
 
     myView->SetWindow(myHostWindow, bound->RenderingContext());
+    // SetImmediateModeDrawToFront(false) BELONGS HERE ON THE ARGUMENT, AND IS
+    // PARKED ON THE MEASUREMENT (fix round 1, 2026-09-04). Graphic3d_CView
+    // documents the flag default as TRUE, meaning immediate structures - the
+    // dynamic hover highlight, the manipulator mid-drag - are drawn "directly
+    // to the front buffer", and warns such content "will be missed in image
+    // dump since it is performed from back buffer". A QOpenGLWidget has no
+    // front buffer at all, so the reasoning that it should be turned off here
+    // is sound and was acted on.
+    //
+    // Then it was A/B-measured against the parent build, which is this
+    // project's law before any claim about a rendering change, and it moved a
+    // pixel it had no business moving: with the flag set, the path-traced
+    // BACKDROP renders (232,231,229) where the calibrated token is
+    // (193,191,186), and a user-chosen background lands 118 away from the
+    // colour they picked instead of 26. Everything else in the frame is
+    // byte-identical - the floor pixel does not move at all - so it is
+    // specifically the clear colour's trip through OCCT's main-scene
+    // framebuffer and its blit that the flag re-routes. Turning the one line
+    // off restored the calibration exactly (2484 checks, 0 failures) and
+    // turning it on broke it, deterministically, on the same build.
+    //
+    // Two reasons it stays off in Phase 1 rather than shipping with a fudged
+    // constant. kPathTracingBackdropGain is a MEASURED calibration and
+    // re-deriving it against a changed compositing path is Phase 3's own
+    // remit, not a number to guess at here. And the harm the flag guards
+    // against is not real in this hosting layer: OCCT's "front buffer" writes
+    // land in the bound default framebuffer, which is exactly the one Qt
+    // composites and exactly the one V3d_View::Dump reads - so the immediate
+    // layer reaches both. That is not left as an assertion: gui_smoke Dumps a
+    // hovered body and finds the dynamic highlight in the pixels, which is the
+    // property this flag was going to buy.
     myView->MustBeResized();
     myView->Invalidate();
+    myAttachedContext = context();
     return true;
 }
 
@@ -543,9 +681,25 @@ bool OcctViewWidget::wrapDefaultFramebuffer()
     Handle(HostFrameBuffer) fbo =
         Handle(HostFrameBuffer)::DownCast(context->DefaultFrameBuffer());
     if (fbo.IsNull()) fbo = new HostFrameBuffer();
-    // InitWrapper reads whatever framebuffer is bound RIGHT NOW, which is why
-    // every caller of this either is paintGL() or holds a GlScope: Qt binds its
-    // own FBO in both cases and nowhere else.
+
+    // BIND QT'S OWN FRAMEBUFFER FIRST, rather than trusting whatever happens
+    // to be bound. InitWrapper is documented as initializing "from currently
+    // bound FBO", and this function then treats that FBO's size as
+    // authoritative - it calls SetSize() + MustBeResized() from it. A nested
+    // GlScope takes no context and binds nothing (that is the whole point of
+    // the nesting guard), and nesting is the NORMAL case for the measuring
+    // probes, each entered straight after an OCCT Redraw() that may well have
+    // left a shadow map or a ray-tracing accumulation buffer bound. Wrapping
+    // one of those would silently resize the view to it, take the pixel
+    // measurement this project treats as ground truth at the wrong size, and
+    // then self-heal on the next paintGL so nothing ever reported it.
+    // defaultFramebufferObject() is Qt's own answer to "which framebuffer is
+    // this widget's", and it is the only honest input here.
+    if (context->arbFBO != nullptr) {
+        context->arbFBO->glBindFramebuffer(
+            GL_FRAMEBUFFER, static_cast<GLuint>(defaultFramebufferObject()));
+    }
+
     if (!fbo->InitWrapper(context)) {
         context->SetDefaultFrameBuffer(Handle(OpenGl_FrameBuffer)());
         return false;
@@ -575,19 +729,51 @@ bool OcctViewWidget::wrapDefaultFramebuffer()
 
 void OcctViewWidget::initializeGL()
 {
-    // The lazy contract, landing where Qt puts it: first show, once. Everything
-    // that does not need a context was already built by whichever earlier call
-    // reached initializeViewer() first - or is built now, if this is the first.
+    // The lazy contract, landing where Qt puts it. NOT "once": Qt calls this
+    // again after any context reset, which is exactly the case
+    // releaseGlResources() exists for - and by then that function has put this
+    // widget back to its never-initialized state, so initializeViewer() below
+    // rebuilds rather than reviving handles into a context that is gone.
     initializeViewer();
     if (myView.IsNull()) return;
     if (!attachGlWindow()) return;
+
+    // The ONE hook Qt offers for releasing GPU resources while the dying
+    // context is still alive. Direct connection, because the handler has to
+    // run inside the emission rather than after it, and receiver `this` so it
+    // dies with the widget - the destructor disconnects it explicitly first,
+    // since that path releases explicitly and must not be called back into
+    // half-destroyed. Re-armed on every attach, because a rebuilt context is a
+    // different QObject.
+    if (context() != nullptr) {
+        connect(context(), &QOpenGLContext::aboutToBeDestroyed, this,
+                [this]() { releaseGlResources(); }, Qt::DirectConnection);
+        // A pure observer, receiver-scoped to the CONTEXT rather than to this
+        // widget, so it lives exactly as long as the thing it watches and can
+        // still record the death after the widget has released and
+        // disconnected. It is what makes the ordering ASSERTABLE: the suite
+        // compares lastGlReleaseTick() against lastGlContextDeathTick() rather
+        // than trusting that the destructor did the right thing.
+        connect(context(), &QOpenGLContext::aboutToBeDestroyed, context(),
+                []() { ourLastGlContextDeathTick = ++ourGlTeardownTick; },
+                Qt::DirectConnection);
+    }
 
     // The camera has to be pushed again now that the view has a window to
     // measure: initializeViewer()'s own applyCameraState() ran with nothing
     // attached, and the orthographic branch derives its parallel scale from
     // this widget's height.
-    myView->Camera()->SetFOVy(effectiveFovyDeg());
-    applyCameraState();
+    //
+    // QUEUED, not called here. applyCameraState() emits cameraChanged() and
+    // asks for a frame, and doing either from inside Qt's own GL callback
+    // re-enters arbitrary overlay slots during the paint pass. The old
+    // paintEvent did the same thing through initializeViewer(); making the
+    // hosting swap explicit is the moment to stop.
+    QMetaObject::invokeMethod(this, [this]() {
+        if (myView.IsNull()) return;
+        myView->Camera()->SetFOVy(effectiveFovyDeg());
+        applyCameraState();
+    }, Qt::QueuedConnection);
 }
 
 void OcctViewWidget::paintGL()
@@ -604,14 +790,21 @@ void OcctViewWidget::paintGL()
     // Qt::AA_ShareOpenGLContexts (main.cpp, before QApplication) is what keeps
     // this branch unreached: with it set Qt preserves the context across a
     // reparent, which is the only context-rebuilding event this application
-    // actually performs. The branch stays because a view silently rendering
-    // through a dead context is worse than a crash that says so, and because
-    // OCCT's own sample answers it the same way - but the fix for anything
-    // that reaches it is to stop the context being destroyed, not to make the
-    // teardown survive it.
+    // actually performs.
+    //
+    // IT IS A BACKSTOP, NOT THE RECOVERY, and the comment used to claim
+    // otherwise. The real recovery from a context death is
+    // releaseGlResources() on QOpenGLContext::aboutToBeDestroyed followed by
+    // Qt's own second initializeGL(); by the time this branch could matter,
+    // that has already happened. What it catches is the case where neither
+    // did - and it compares CONTEXT IDENTITY, not the native window handle it
+    // used to, because a context rebuilt on the SAME top-level window leaves
+    // that handle identical and would sail straight through, leaving the view
+    // rendering on a dangling HGLRC.
     if (myView->Window().IsNull() ||
         myHostWindow.IsNull() ||
-        myHostWindow->NativeHandle() != currentGlNativeWindow()) {
+        myAttachedContext.isNull() ||
+        myAttachedContext != context()) {
         if (!attachGlWindow()) return;
     }
     if (!wrapDefaultFramebuffer()) return;
@@ -1051,19 +1244,20 @@ void OcctViewWidget::showPullArrow(const gp_Pnt& centre, const gp_Dir& outward)
     // applyCameraState() emits cameraChanged() and then redraws, and this
     // rebuild rides along with that redraw. Forcing one here as well made
     // every orbit step pay for two vsync-bound frames instead of one.
-    myPullArrow.show(centre, outward, myView->Camera()->Direction(), worldPerPixel(),
-                     /*updateViewer=*/!myApplyingCamera);
-    // PullArrowRenderer redraws the OCCT viewer for us; Qt is what presents
-    // the frame. Skipped under myApplyingCamera for the same reason the
-    // renderer's own update is - applyCameraState()'s redraw carries it.
-    if (!myApplyingCamera) scheduleRedraw();
+    // The renderer draws; THIS asks for the frame - and only when the arrow
+    // actually moved, which is its own equal-guard's answer. Skipped under
+    // myApplyingCamera because applyCameraState()'s own redraw is already
+    // coming, which is the measured saving PullArrowRenderer's comment records.
+    const bool arrowChanged =
+        myPullArrow.show(centre, outward, myView->Camera()->Direction(), worldPerPixel());
+    if (arrowChanged && !myApplyingCamera) scheduleRedraw();
 }
 
 void OcctViewWidget::clearPullArrow()
 {
-    myPullArrow.clear();
+    const bool arrowRemoved = myPullArrow.clear();
     myPullDrag.active = false;
-    scheduleRedraw();
+    if (arrowRemoved) scheduleRedraw();
 }
 
 bool OcctViewWidget::pullArrowHead(gp_Pnt& out) const
@@ -1079,16 +1273,16 @@ void OcctViewWidget::showBevelArrow(const gp_Pnt& centre, const gp_Dir& outward)
     if (myView.IsNull()) return;
     // No viewer update of its own while a camera change is being applied - the
     // same rule showPullArrow() keeps, and for the same measured reason.
-    myBevelArrow.show(centre, outward, myView->Camera()->Direction(), worldPerPixel(),
-                      /*updateViewer=*/!myApplyingCamera);
-    if (!myApplyingCamera) scheduleRedraw();
+    const bool arrowChanged =
+        myBevelArrow.show(centre, outward, myView->Camera()->Direction(), worldPerPixel());
+    if (arrowChanged && !myApplyingCamera) scheduleRedraw();
 }
 
 void OcctViewWidget::clearBevelArrow()
 {
-    myBevelArrow.clear();
+    const bool arrowRemoved = myBevelArrow.clear();
     myBevelDrag.active = false;
-    scheduleRedraw();
+    if (arrowRemoved) scheduleRedraw();
 }
 
 bool OcctViewWidget::bevelArrowHead(gp_Pnt& out) const
@@ -2547,15 +2741,23 @@ TopoDS_Edge OcctViewWidget::lastSelectedEdge() const
 
 void OcctViewWidget::updateEdgeDimension()
 {
-    // DimensionRenderer redraws the OCCT viewer itself whenever the annotation
-    // changes, and since the QOpenGLWidget migration that frame still has to be
-    // composited by Qt before anyone sees it. One exit for the six branches
-    // below, rather than a scheduleRedraw() at each of them - and cheap, since
-    // update() coalesces to a single frame per turn of the event loop.
-    struct PresentOnReturn {
-        OcctViewWidget* widget;
-        ~PresentOnReturn() { widget->scheduleRedraw(); }
-    } present{this};
+    // A FRAME IS ONLY OWED WHEN THE ANNOTATION ACTUALLY CHANGED, and this
+    // function is the hottest caller of scheduleRedraw() in the file: it runs
+    // from the hover branch of every mouse move, so an unconditional
+    // Invalidate()+update() here means idle cursor motion over the viewport
+    // discards and rebuilds a whole OCCT frame per mouse event - in Solid and
+    // Face mode, where the very first branch below is a clear() over an
+    // already-empty annotation and does nothing at all. The first cut of this
+    // migration did exactly that (a PresentOnReturn guard on every exit) and
+    // it was wrong.
+    //
+    // DimensionRenderer::show()/clear() now answer "did anything move" - the
+    // equal-guard compares the span, the extension normal and worldPerPixel,
+    // because all three are built into the annotation - and every branch here
+    // simply forwards that answer. One exit shape, no unconditional frame.
+    const auto present = [this](bool changed) {
+        if (changed) scheduleRedraw();
+    };
 
     // Suppressed while the bevel arrow's value chip is up: two annotations on
     // one edge is noise, and the chip is the more specific of the two. See
@@ -2563,7 +2765,7 @@ void OcctViewWidget::updateEdgeDimension()
     // predicate that raises the arrow.
     if (myEdgeDimensionSuppressed || mySelectionMode != SelectionMode::Edge ||
         myContext.IsNull() || myView.IsNull()) {
-        myDimension.clear();
+        present(myDimension.clear());
         return;
     }
 
@@ -2581,14 +2783,14 @@ void OcctViewWidget::updateEdgeDimension()
         edge = selectedEdge();
     }
     if (edge.IsNull()) {
-        myDimension.clear();
+        present(myDimension.clear());
         return;
     }
 
     TopoDS_Vertex v1, v2;
     TopExp::Vertices(edge, v1, v2);
     if (v1.IsNull() || v2.IsNull()) {
-        myDimension.clear();
+        present(myDimension.clear());
         return;
     }
 
@@ -2596,7 +2798,7 @@ void OcctViewWidget::updateEdgeDimension()
     const gp_Pnt to = BRep_Tool::Pnt(v2);
     const gp_Vec along(from, to);
     if (along.Magnitude() < 1.0e-7) {
-        myDimension.clear();
+        present(myDimension.clear());
         return;
     }
 
@@ -2607,7 +2809,7 @@ void OcctViewWidget::updateEdgeDimension()
     if (sideways.Magnitude() < 1.0e-7) sideways = gp_Vec(0.0, 0.0, 1.0).Crossed(along);
     if (sideways.Magnitude() < 1.0e-7) sideways = gp_Vec(1.0, 0.0, 0.0);
 
-    myDimension.show(from, to, gp_Dir(sideways), worldPerPixel());
+    present(myDimension.show(from, to, gp_Dir(sideways), worldPerPixel()));
 }
 
 std::vector<int> OcctViewWidget::selectedSolidIds() const
@@ -4224,17 +4426,24 @@ OcctViewWidget::RenderTier OcctViewWidget::probeRenderTier()
 
 void OcctViewWidget::setRenderMode(bool on)
 {
-    // Pixels before this returns, so the GL context has to be OURS for the
-    // duration - Qt only guarantees a current context inside its own three GL
-    // callbacks. See GlScope on the header.
-    GlScope gl(this);
     // Never on the compare pane - it is read-only furniture from a saved
     // version, not a scene anyone renders a shot of, and this widget's own
     // header says so. A no-op when already in the requested state, so a
     // caller need not guard the call itself.
+    //
+    // EVERY early-out is taken before the GlScope below, not after. A scope
+    // opened first would makeCurrent/doneCurrent and ask for a frame on every
+    // no-op toggle, and would open on a view that initializeViewer() has not
+    // even built yet.
     if (myViewerOnly || on == myRenderModeActive) return;
     initializeViewer();
     if (myContext.IsNull() || myView.IsNull()) return;
+
+    // Pixels before this returns - the tier probe times real redraws and the
+    // measuring probes Dump - so the GL context has to be OURS for the
+    // duration; Qt only guarantees a current context inside its own three GL
+    // callbacks. See GlScope on the header.
+    GlScope gl(this);
 
     myRenderModeActive = on;
 

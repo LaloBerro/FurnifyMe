@@ -22,6 +22,11 @@
 class DimensionRenderer {
 public:
     void attach(const Handle(AIS_InteractiveContext)& context);
+    // Drops the context and everything built against it, WITHOUT touching the
+    // viewer - GridRenderer::detach()'s own contract, for the same one caller
+    // (OcctViewWidget::releaseGlResources(), the one place that knows a GL
+    // context is dying).
+    void detach();
 
     // The Z-layer the lines and the label are displayed in. An annotation is
     // sketch work, so it belongs in the same layer as the outline and the
@@ -43,8 +48,19 @@ public:
     // measured span itself (from to to) stays true to world scale, which is
     // the whole point of a dimension. A segment shorter than a hair draws
     // nothing and leaves isShowing() false.
-    void show(const gp_Pnt& from, const gp_Pnt& to, const gp_Dir& normal, double worldPerPixel);
-    void clear();
+    //
+    // Returns TRUE only when the annotation on screen ACTUALLY CHANGED. The
+    // equal-guard is load-bearing rather than a tidiness: this is driven from
+    // the hover branch of every mouse move, and it used to rebuild - and
+    // redraw the whole viewer, twice - on each one, so idle cursor motion over
+    // an edge cost three discarded OCCT frames per event. The caller owns the
+    // frame now (OcctViewWidget::scheduleRedraw()) and only asks for one when
+    // this says something moved. refresh() bypasses the guard on purpose; that
+    // is its whole job.
+    bool show(const gp_Pnt& from, const gp_Pnt& to, const gp_Dir& normal, double worldPerPixel);
+    // TRUE when something was actually removed - show()'s own contract, so a
+    // clear() over an already-empty annotation costs no frame.
+    bool clear();
     bool isShowing() const { return !myObjects.empty(); }
 
     // Redraws the span that is already up, from the arguments it was last
@@ -55,7 +71,7 @@ public:
     // happened to rebuild it. Not a QObject - this class draws, it does not
     // listen - so MainWindow drives it from appStateChanged, the same signal
     // every other unit-following surface refreshes on.
-    void refresh();
+    bool refresh();
 
     // The label's text, for the suite and the banned-word sweep. Empty when
     // nothing is shown.
@@ -73,4 +89,8 @@ private:
     gp_Pnt myTo;
     gp_Dir myNormal;
     double myWorldPerPixel = 1.0;
+    // Set by refresh() for exactly one show() call, so the same span can be
+    // rebuilt against a changed display unit - PullArrowRenderer's own
+    // myForceRebuild idiom, one renderer over.
+    bool myForceRebuild = false;
 };

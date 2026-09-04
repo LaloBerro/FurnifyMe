@@ -59,19 +59,29 @@ class QShowEvent;
 class PullArrowRenderer {
 public:
     void attach(const Handle(AIS_InteractiveContext)& context);
+    // Drops the context and everything built against it, WITHOUT touching the
+    // viewer - GridRenderer::detach()'s own contract, same one caller
+    // (OcctViewWidget::releaseGlResources()).
+    void detach();
 
     // Draws the arrow centred on `centre`, along `outward`. `viewDirection`
     // only orients the arrowheads' two strokes so they fan out across the
     // screen rather than edge-on to it; `worldPerPixel` sizes the whole
     // thing in screen pixels. Replaces whatever was drawn before.
-    // `updateViewer` false leaves the redraw to the caller, for the one
-    // caller that is about to redraw anyway - see
-    // OcctViewWidget::applyCameraState(). UpdateCurrentViewer() blocks on
-    // vsync in this build (~16 ms), so an arrow that forced its own frame on
-    // every camera step doubled the cost of an orbit.
-    void show(const gp_Pnt& centre, const gp_Dir& outward, const gp_Dir& viewDirection,
-              double worldPerPixel, bool updateViewer = true);
-    void clear(bool updateViewer = true);
+    //
+    // Returns TRUE only when the arrow on screen actually changed - the
+    // equal-guard below decides, and it was always here; what moved with the
+    // QOpenGLWidget migration is WHO redraws. This class no longer calls
+    // UpdateCurrentViewer() at all: OCCT does not own the surface any more, so
+    // a redraw from an ordinary Qt slot has no Qt context current and nothing
+    // composites it. The caller owns the frame and asks for one only on a
+    // true return - which preserves the measured saving the old
+    // `updateViewer` parameter existed for (a rebuild riding along with
+    // applyCameraState()'s own redraw rather than forcing a second vsync).
+    bool show(const gp_Pnt& centre, const gp_Dir& outward, const gp_Dir& viewDirection,
+              double worldPerPixel);
+    // TRUE when something was actually removed - show()'s own contract.
+    bool clear();
     bool isShowing() const { return !myObjects.empty(); }
 
     // Rebuilds whatever is on screen, from the parameters it was built with.
