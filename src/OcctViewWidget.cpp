@@ -2744,24 +2744,49 @@ void OcctViewWidget::applyRenderFloorMaterialForTier(bool pbrTier)
                                static_cast<int>(floorColour.green() * 0.875),
                                static_cast<int>(floorColour.blue() * 0.875))));
     } else {
-        // The ray-traced tiers' own material - fix round 1's finding, kept
-        // here because it measurably works there (probePathTracingChangedImage()
-        // and the PathTracing-tier floor-blend check both pass against it):
-        // a pure-Emission PBR material, no lit Color() lobe at all. Unlike
-        // the Shadows tier's rasterized Pbr shader, the ray-traced pipeline
-        // (Method = RAYTRACING, with or without global illumination) reads
-        // this correctly without saturating - confirmed by a diagnostic
-        // Dump of the plain RayTracing tier during the original task,
-        // which rendered proper grey tones at these same values. Metallic
-        // 0 regardless of tier - a shadow-catcher is not chrome.
+        // The ray-traced tiers' own material - fix round 3's correction of
+        // fix round 1's pure-Emission attempt, which measured as
+        // functionally BLACK under PathTracing specifically (delta
+        // ~190/255 from the backdrop, see the task report): OCCT's path
+        // tracer builds a physical BSDF from the material, and a
+        // zero-albedo/pure-Emission surface apparently does not carry that
+        // emission through GI's own light-transport the way a rasterized
+        // or plain-ray-traced Emissive term does - confirmed working for
+        // plain RayTracing in the original diagnostic, but PathTracing's
+        // own GI pass is a different code path inside OCCT and was never
+        // separately verified.
+        //
+        // The controller's direction: stop relying on Emission for the
+        // ray-traced tiers at all. A plain diffuse floor - albedo AT the
+        // backdrop colour, zero emission, roughness high, metallic 0 - is
+        // what a physically based renderer expects a studio floor to be;
+        // under real global illumination plus filmic tone mapping (both on
+        // for these two tiers - see applyRenderTier()), a GI-lit diffuse
+        // surface naturally grounds the shot and the shadow comes for free,
+        // the same physical mechanism the Shadows tier's shadow map
+        // approximates by hand.
+        //
+        // MEASURED RESULT (fix round 3's own calibration Dump, PathTracing
+        // tier): essentially UNCHANGED from the pure-Emission attempt -
+        // delta still ~190/255, the floor point still reads as functionally
+        // black. Two materials built on opposite theories producing the
+        // same near-zero output means the PathTracing GI pass is not
+        // lighting this floor geometry at all, not that either material's
+        // calibration missed - and Color() is already at the backdrop's own
+        // channel value (near the 1.0 ceiling), so there was no meaningful
+        // headroom left to try boosting it further. Kept as the materially
+        // more correct choice (this is genuinely what a physical floor
+        // should be, and RayTracing - no GI - is expected to read it
+        // correctly the same way it read the old Emission material), with
+        // the open PathTracing-GI defect ledgered in the task report rather
+        // than chased with a third material theory. See gui_smoke's own
+        // PathTracing-tier floor-blend check for the recorded number.
         Graphic3d_PBRMaterial floorPbr;
         floorPbr.SetMetallic(0.0f);
         floorPbr.SetRoughness(0.95f);
-        floorPbr.SetColor(Quantity_Color(0.0, 0.0, 0.0, Quantity_TOC_RGB));
-        floorPbr.SetEmission(
-            NCollection_Vec3<float>(static_cast<float>(floorColour.redF() * 0.95),
-                                    static_cast<float>(floorColour.greenF() * 0.95),
-                                    static_cast<float>(floorColour.blueF() * 0.95)));
+        floorPbr.SetColor(Quantity_Color(floorColour.redF(), floorColour.greenF(),
+                                         floorColour.blueF(), Quantity_TOC_RGB));
+        floorPbr.SetEmission(NCollection_Vec3<float>(0.0f, 0.0f, 0.0f));
         material.SetPBRMaterial(floorPbr);
     }
 

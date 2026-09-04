@@ -210,10 +210,13 @@ void skipByEnvironment(int checks, const QString& why)
 //   fix round 2's restoration of the controller-mandated shadow contrast);
 // - the PathTracing-tier floor-blend check (+1, real check when this
 //   session's GPU reached PathTracing, skipByEnvironment(1, ...) otherwise -
-//   fix round 2's own addition, matching the same per-tier-honest pattern).
-// All five are accounted the same invariant way on every tier outcome, by
+//   fix round 2's own addition, matching the same per-tier-honest pattern);
+// - the RayTracing-tier floor-blend check (+1, likewise - fix round 3's
+//   addition, "measure RT too" alongside the PathTracing floor material
+//   both tiers now share).
+// All six are accounted the same invariant way on every tier outcome, by
 // construction, not merely as measured on this one machine.
-constexpr int kCheckFloor = 2329;
+constexpr int kCheckFloor = 2330;
 
 void check(bool condition, const QString& what)
 {
@@ -18947,17 +18950,22 @@ int main(int argc, char* argv[])
                       .arg(tierName));
         }
 
-        // --- the floor's blend, per tier (fix round 2, controller ruling) ----
+        // --- the floor's blend, per tier (fix rounds 2 and 3) -----------------
         // Fix round 1's pure-Emission PBR floor traded away the Shadows
         // tier's shadow contrast to avoid a rasterized-PBR white-clip - the
         // controller overruled that trade ("that shadow IS the tier") and
-        // had applyRenderTier() restore the ORIGINAL Milestone-3 Phong
-        // floor material verbatim for Shadows/Plain, keeping the PBR
-        // pure-Emission floor only where it was actually measured to work
-        // (PathTracing/RayTracing). Both halves are pinned here, honestly:
-        // Shadows against the M3 calibration's own tight target, PathTracing
-        // against whatever this session's own measurement justifies -
-        // neither is assumed from the other.
+        // fix round 2 had applyRenderTier() restore the ORIGINAL Milestone-3
+        // Phong floor material verbatim for Shadows/Plain. That same round's
+        // OWN PathTracing-tier measurement then exposed pure-Emission as
+        // functionally black there too (a separate, GI-specific defect,
+        // NOT the rasterization clip) - fix round 3 replaced it with a
+        // plain diffuse-albedo material (backdrop-coloured Color(), zero
+        // Emission) for the two ray-traced tiers, on the reasoning that
+        // real global illumination plus filmic tone mapping is what should
+        // ground a GI-lit diffuse floor, the same physical mechanism a real
+        // studio shot uses. All three tier-shaped checks below are pinned
+        // honestly against whatever each round's own measurement justifies -
+        // none is assumed from another.
         const QPoint floorPointLogical(static_cast<int>(rview->width() * 0.88),
                                        static_cast<int>(rview->height() * 0.88));
 
@@ -19018,32 +19026,33 @@ int main(int argc, char* argv[])
                 rview->probeRenderFloorBlend(OcctViewWidget::RenderTier::PathTracing,
                                              floorPointLogical);
             if (ptBlend.measured) {
-                // This session's own measured number, not an assumed target -
-                // the controller's ruling: record it, do not keep tuning.
-                // And this number is genuinely bad: even after adding
-                // probeRenderFloorBlend()'s own settle passes (fix round 2's
-                // real bug fix for exactly this - PathTracing's first
-                // Redraw() after a tier switch is its noisiest frame), the
-                // measured delta stayed at ~190/255 - the PT floor point
-                // reads as essentially BLACK against the backdrop, not a
-                // blend that merely misses a tight target. This is a REAL,
-                // UNRESOLVED defect distinct from the tile-budget-starvation
-                // bug this task already found and fixed (NbRayTracingTiles
-                // is already -1 here) - ledgered in the task report rather
-                // than chased further per the controller's explicit "record
-                // it and stop" instruction. 200 is set from the measurement
-                // itself, not aspiration: it passes what this session
-                // actually renders while still rejecting the one thing that
-                // would be worse - the floor point somehow exceeding the
-                // backdrop's own channel values entirely.
+                // Fix round 3's own measurement, against a diffuse-albedo
+                // floor material (Color() at the backdrop colour, zero
+                // Emission) that round put in place specifically to replace
+                // fix round 2's pure-Emission attempt - and the number came
+                // back essentially IDENTICAL: delta ~190/255, the floor
+                // point still reads as functionally black. That is itself
+                // the informative result: two materials built on opposite
+                // theories (emission-only vs. lit-diffuse-only) producing
+                // the same near-zero output means the floor is not being
+                // lit by PathTracing's GI pass AT ALL for this geometry,
+                // not that either material's calibration missed. The
+                // diffuse Color() is already set at the backdrop's own
+                // channel value (~0.76-0.79, near the 1.0 ceiling), so
+                // there is no meaningful headroom left to "boost the
+                // albedo" - a further adjustment was judged futile rather
+                // than attempted, per this fix round's own budget ("if the
+                // delta is still large, STOP, record the numbers"). 200 is
+                // set from the measurement, not aspiration - see the task
+                // report for the open-item writeup this points to.
                 constexpr int kPathTracingBlendToleranceMax = 200;
                 check(ptBlend.deltaR <= kPathTracingBlendToleranceMax &&
                           ptBlend.deltaG <= kPathTracingBlendToleranceMax &&
                           ptBlend.deltaB <= kPathTracingBlendToleranceMax,
                       QStringLiteral("the PathTracing-tier floor blend is recorded, not "
                                      "asserted tight - %1/255 tolerance, a KNOWN, UNRESOLVED "
-                                     "near-black defect (delta R=%2 G=%3 B=%4), see the task "
-                                     "report")
+                                     "near-black defect surviving TWO different material "
+                                     "theories (delta R=%2 G=%3 B=%4), see the task report")
                           .arg(kPathTracingBlendToleranceMax)
                           .arg(ptBlend.deltaR)
                           .arg(ptBlend.deltaG)
@@ -19057,6 +19066,40 @@ int main(int argc, char* argv[])
         } else {
             skipByEnvironment(1,
                   QStringLiteral("PathTracing was not this session's chosen tier, so its own "
+                                 "floor-blend measurement does not apply"));
+        }
+
+        // RayTracing tier: fix round 3's own reminder to itself - the
+        // controller's direction was "measure RT too... don't regress it,"
+        // since RT is what the original task's diagnostic showed handling a
+        // lit PBR material correctly in the first place. Same safety rule
+        // as PathTracing's own block: only forced when `tier` already IS
+        // RayTracing (the real probe already proved this GPU can do it),
+        // never forced speculatively.
+        if (tier == OcctViewWidget::RenderTier::RayTracing) {
+            const OcctViewWidget::FloorBlendProbe rtBlend =
+                rview->probeRenderFloorBlend(OcctViewWidget::RenderTier::RayTracing,
+                                             floorPointLogical);
+            if (rtBlend.measured) {
+                constexpr int kRayTracingBlendToleranceMax = 30;
+                check(rtBlend.deltaR <= kRayTracingBlendToleranceMax &&
+                          rtBlend.deltaG <= kRayTracingBlendToleranceMax &&
+                          rtBlend.deltaB <= kRayTracingBlendToleranceMax,
+                      QStringLiteral("the RayTracing-tier floor blends into the backdrop "
+                                     "within %1/255 per channel (delta R=%2 G=%3 B=%4)")
+                          .arg(kRayTracingBlendToleranceMax)
+                          .arg(rtBlend.deltaR)
+                          .arg(rtBlend.deltaG)
+                          .arg(rtBlend.deltaB));
+            } else {
+                skipByEnvironment(1,
+                      QStringLiteral("the RayTracing-tier floor-blend Dump could not be "
+                                     "measured (Dump() failed, or no floor was on screen to "
+                                     "sample)"));
+            }
+        } else {
+            skipByEnvironment(1,
+                  QStringLiteral("RayTracing was not this session's chosen tier, so its own "
                                  "floor-blend measurement does not apply"));
         }
 
