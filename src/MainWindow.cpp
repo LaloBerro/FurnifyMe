@@ -2038,8 +2038,8 @@ void MainWindow::updateActions()
                                                   "the body to duplicate")
                 : linkIds.size() != 1       ? tr("Select exactly one body to duplicate")
                                             : tr("This body is already mirrored — duplicate "
-                                                 "its twin instead, or turn off Symmetry for "
-                                                 "it first"));
+                                                 "its twin instead, or turn mirroring off "
+                                                 "first"));
         }
 
         if (myLinkSelectedAction) {
@@ -2053,8 +2053,8 @@ void MainWindow::updateActions()
                                                   "or more bodies")
                 : linkIds.size() < 2        ? tr("Select two or more bodies to link")
                                             : tr("One of the selected bodies is already "
-                                                 "linked or already mirrored — unlink or "
-                                                 "turn off Symmetry for it first"));
+                                                 "linked or already mirrored — unlink it or "
+                                                 "turn mirroring off first"));
         }
 
         if (myUnlinkAction) {
@@ -5418,8 +5418,8 @@ bool MainWindow::duplicateLinkedCopy()
         const std::vector<int> ids = myView->selectedSolidIds();
         if (ids.size() == 1 && myDocument.symmetryOn() && myDocument.twinOf(ids.front()) > 0) {
             myToasts->show(tr("Couldn't duplicate that body linked — it's mirrored, and a "
-                              "body can't be both at once. Turn off Symmetry for it first, "
-                              "or duplicate its twin instead"),
+                              "body can't be both at once. Turn mirroring off first, or "
+                              "duplicate its twin instead"),
                           Toast::Kind::Failure, false);
             statusBar()->showMessage(tr("Duplicate linked refused — nothing was changed"));
         }
