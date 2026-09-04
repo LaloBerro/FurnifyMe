@@ -371,11 +371,21 @@ public:
     // `ids` is captured BY VALUE at the call and never re-read from the live
     // selection afterwards - the gesture describes exactly the bodies
     // selected when it began, PullArrow's face and BevelArrow's edges are
-    // captured the same way. The plane starts at the COMBINED centre of
-    // their bounding boxes (Bnd_Box, unioned) with its normal along world X -
-    // the same default DocumentModel's own constructed symmetry plane uses,
-    // so a gesture that never drags or reorients reproduces exactly the old
-    // toggle's starting plane. A no-op when `ids` is empty.
+    // captured the same way.
+    //
+    // The plane starts TANGENT to the combined bounding box (Bnd_Box,
+    // unioned) on the POSITIVE side of the active axis, normal along world
+    // X. It used to start at the combined CENTRE, and that default was
+    // self-contradictory with the straddle rule this gesture commits
+    // through: a plane through a lone body's own centre cuts that body, so
+    // DocumentModel::pairWithMirror() skipped it and the headline flow -
+    // select one body, S, Enter - refused deterministically, every time,
+    // unless the user first discovered they had to drag a 14 px handle
+    // clear of the body. Tangent instead, the ghost twin stands beside the
+    // body the instant the plane appears and a lone body can never straddle
+    // at spawn. Dragging still moves the plane anywhere, including back
+    // through the body - the skip rule then applies exactly as designed and
+    // the refusal toast says so. A no-op when `ids` is empty.
     void beginMirrorPlacement(const std::vector<int>& ids);
     // Ends the gesture with NOTHING changed - the drag, the orientation and
     // the twin preview are all discarded. Safe to call when nothing is
@@ -398,14 +408,23 @@ public:
     std::vector<int> mirrorPlacementIds() const { return myMirrorPlacement.ids; }
     // Jumps the orientation straight to one of the three axis-aligned
     // presets - 0 = X, 1 = Y, 2 = Z, clamped - the X/Y/Z keys' one
-    // implementation. Resets the dragged offset to zero: an offset measured
-    // along the old normal has no honest meaning projected onto a different
-    // one. A no-op while no gesture is active or the axis is unchanged.
+    // implementation. Re-places the plane TANGENT on the new axis rather
+    // than keeping the dragged offset: an offset measured along the old
+    // normal has no honest meaning projected onto a different one, and the
+    // spawn rule (see beginMirrorPlacement()) has to hold for every axis a
+    // flip can land on, not only the one the gesture opened with. A no-op
+    // while no gesture is active or the axis is unchanged.
     void setMirrorPlacementAxis(int axis);
     int mirrorPlacementAxis() const { return myMirrorPlacement.axis; }
     // The plane's signed offset from the selection's own combined centre,
     // along its CURRENT normal, in millimetres - the chip's own number.
+    // Starts at the selection's own half-extent along that normal, which is
+    // what puts the plane tangent to the box rather than through it.
     double mirrorPlacementOffset() const { return myMirrorPlacement.offset; }
+    // The offset that puts the plane tangent to the selection's combined
+    // bounding box on the positive side of `axis` - the spawn default and
+    // what an X/Y/Z flip re-places to. Zero while no gesture is active.
+    double mirrorPlacementTangentOffset(int axis) const;
     // The handle's world position, for placing the value chip and hit-testing
     // the drag - the plane's own location. False while no gesture is active.
     bool mirrorPlacementHandle(gp_Pnt& out) const;
@@ -612,6 +631,15 @@ public:
     // is already drawn on, rather than a second construction of the same
     // two planes that could silently drift from this one.
     gp_Pln faceOnOrthoPlane() const;
+
+    // The plane the ground grid is actually STANDING in right now - the one
+    // GridRenderer last built from, not gridPlane()'s freshly-computed
+    // answer, so a caller reads the state on screen rather than the formula
+    // that produced it. Exposed for gui_smoke's pin on gridPlane()'s
+    // priority order (locked face > sketch in progress > face-on ortho >
+    // ground); the drawn grid's own APPEARANCE is still measured off Dump
+    // pixels, per CLAUDE.md, and this answers a different question.
+    gp_Pln drawnGridPlane() const { return myGridRenderer.builtPlane(); }
 
     // Re-dresses everything on the OCCT side of the bridge from the current
     // Theme spec: the background the view clears to, the two highlight
@@ -937,20 +965,31 @@ public:
     // per CLAUDE.md; these six are not part of that rule and do carry
     // across sessions, the same way the unit choice and autosave do.
     //
-    // Surface/Metal are PBR-material terms and apply ONLY on the two
-    // ray-traced tiers (PathTracing/RayTracing), where
-    // applyRenderBodyMaterials() already builds a Graphic3d_PBRMaterial per
-    // body - the fix-round-2 tier scoping this task extends rather than
-    // forks. On Shadows/Plain the body stays Phong-shaded
+    // Surface/Metal are PBR-material terms and apply ONLY on the DEEPEST
+    // tier, PathTracing - renderMaterialControlsApply() below is the one
+    // written-down copy of that, and usesPbrMaterials() in the .cpp is what
+    // it reads. Fix round 2 scoped these to the two ray-traced tiers; the
+    // user-feedback round then narrowed them to path tracing alone, for a
+    // measured reason recorded at usesPbrMaterials() (Whitted ray tracing
+    // does not tone-map and has no indirect bounce, so a PBR floor under it
+    // rendered its cast shadow as the near-black the user rejected). This
+    // comment claimed the older, wider rule for a whole branch after the
+    // narrowing shipped.
+    //
+    // On RayTracing, Shadows and Plain the body stays Phong-shaded
     // (clearRenderBodyMaterials()'s own UnsetMaterial() contract,
     // unchanged) and these two controls deliberately NO-OP there instead of
     // growing a second, hand-tuned Phong specular mapping beside a floor
     // material this file's own history shows costs a real calibration pass
     // to get right (see applyRenderFloorMaterialForTier()'s block comment).
-    // The control stays live and enabled regardless of tier - it simply has
-    // nothing to move on Shadows/Plain by DESIGN there.
+    // The control stays live and enabled regardless of tier - the value it
+    // holds is real and takes effect the moment a session lands on a tier
+    // that reads it - but the settings card raises a muted note saying so
+    // while the active tier does not, because an enabled control that
+    // silently does nothing reads exactly as broken as a disabled one that
+    // will not say why.
     //
-    // On the two ray-traced tiers themselves, whether a live edit reaches
+    // On the deepest tier itself, whether a live edit reaches
     // the next rendered frame turned out to be measured, not assumed - see
     // redrawRenderModeLive()'s own comment for the finding gui_smoke's own
     // per-control Dump checks pinned: renderSurfaceRoughness()/renderMetal()
@@ -971,6 +1010,11 @@ public:
     double renderSurfaceRoughness() const { return myRenderRoughness; }
     void setRenderMetal(double metallic01);
     double renderMetal() const { return myRenderMetallic; }
+    // Whether the CURRENT tier actually reads Surface and Metal - the same
+    // usesPbrMaterials() gate the two setters above are wrapped in, exposed
+    // so the settings card's own note is derived from the real condition
+    // rather than from a second copy of the tier list.
+    bool renderMaterialControlsApply() const;
 
     // Azimuth in degrees around the vertical axis of the studio key light
     // set on render-mode entry; its elevation is the Milestone-3 calibrated
@@ -1579,10 +1623,15 @@ private:
     // beginMirrorPlacement(). `centre` is the FIXED combined centre computed
     // once at begin(); `axis` is 0/1/2 for X/Y/Z; `offset` is the plane's
     // current signed distance from `centre` along the current normal.
+    // `halfExtent` is the combined box's half-size on each world axis,
+    // captured once beside `centre` - what mirrorPlacementTangentOffset()
+    // reads to place the plane clear of the selection on spawn and on every
+    // X/Y/Z flip.
     struct MirrorPlacement {
         bool active = false;
         std::vector<int> ids;
         gp_Pnt centre{0.0, 0.0, 0.0};
+        gp_XYZ halfExtent{0.0, 0.0, 0.0};
         int axis = 0;
         double offset = 0.0;
     };

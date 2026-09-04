@@ -89,6 +89,19 @@ public:
     void setValuesSilently(double glossiness01, double metallic01, double lightAngleDeg,
                             double lightStrength, const QColor& background, double fovyDeg);
 
+    // Whether the active render tier actually applies Surface and Metal.
+    // False raises a muted one-line note under those two rows saying where
+    // they do apply, and nothing else - the sliders stay live and enabled,
+    // because the value they hold is real and takes effect the moment the
+    // session lands on a tier that reads it. CLAUDE.md's "a disabled control
+    // that will not say why reads as broken" applies at least as strongly to
+    // an ENABLED control that silently does nothing, which is what these two
+    // were on three of the four tiers. Derived by MainWindow from
+    // OcctViewWidget::renderMaterialControlsApply() on every appStateChanged
+    // - never a one-shot at the toggle site.
+    void setMaterialRowsApply(bool apply);
+    bool materialRowsApply() const { return myMaterialRowsApply; }
+
     double surfaceGlossiness() const;
     double metal() const;
     double lightAngle() const;
@@ -96,10 +109,16 @@ public:
     QColor background() const { return myBackground; }
     double fov() const;
 
-    // Every string this card paints - the title, the six row labels - swept
-    // by gui_smoke's vocabulary check on AppearancePanel::paintedTexts()'s
-    // own terms.
+    // Every string this card paints - the title, the six row labels and the
+    // material note - swept by gui_smoke's vocabulary check on
+    // AppearancePanel::paintedTexts()'s own terms. The note is reported
+    // whether or not it is currently SHOWN: a sweep that only saw the copy
+    // on the tier that happens to be running would be a coin toss, which is
+    // Toast::paintedTexts()'s own recorded lesson.
     QStringList paintedTexts() const;
+    // The note row itself, so the suite can assert it appears and
+    // disappears rather than trusting the flag.
+    QWidget* materialNoteRow() const;
 
     // The six controls, for childAt() hit tests and direct suite drives -
     // AppearancePanel's own sizeControl()/swatchFor() shape.
@@ -143,6 +162,10 @@ private:
     QSlider* myLightAngleSlider = nullptr;
     QSlider* myLightStrengthSlider = nullptr;
     QSlider* myFovSlider = nullptr;
+    // The muted one-liner under Surface/Metal, and the flag it is derived
+    // from - see setMaterialRowsApply().
+    QLabel* myMaterialNote = nullptr;
+    bool myMaterialRowsApply = true;
     class Swatch* myBackgroundSwatch = nullptr;
     QColor myBackground;
     QColorDialog* myDialog = nullptr;

@@ -313,7 +313,21 @@ void skipByEnvironment(int checks, const QString& why)
 // this session's tier is PathTracing, skipByEnvironment(1, ...) otherwise,
 // since every other tier exports immediately exactly as before.
 // 2382 + 1 = 2383.
-constexpr int kCheckFloor = 2383;
+//
+// The final fix wave adds 36. The mirror gesture's own block carries most of
+// them: the default plane is now TANGENT to the selection rather than through
+// its centre (C1), so the headline flow - one body, S, Enter - is pinned as a
+// SUCCESS path for the first time (twin built, one checkpoint, singular toast,
+// one undo takes it back), the X/Y/Z flips are pinned re-placing tangent on
+// each new axis, a deliberately dragged-inside plane is pinned still skipping
+// with the honest refusal, and the editor/selector seam is pinned killing a
+// live gesture rather than carrying stale body ids into a different furniture
+// (C2). S with mirroring already on is pinned BEGINNING a placement, with the
+// off switch its own shortcut-less entry (I2); the render card's material note
+// is pinned appearing exactly on the tiers that ignore Surface and Metal (I3);
+// and the drawn grid is pinned holding the pinned sketch plane across a
+// mid-sketch orbit (M2). 2383 + 36 = 2419.
+constexpr int kCheckFloor = 2419;
 
 void check(bool condition, const QString& what)
 {
@@ -709,7 +723,8 @@ QStringList bannedWords()
             QStringLiteral("OCCT"),  QStringLiteral("mm3"),
             QStringLiteral("(s)"),   QStringLiteral("Merge"),
             QStringLiteral("Join"),  QStringLiteral("bevel"),
-            QStringLiteral("round"), QStringLiteral("flatten")};
+            QStringLiteral("round"), QStringLiteral("flatten"),
+            QStringLiteral("symmetry")};
 }
 
 // Which of the banned words are matched at a word boundary rather than as a
@@ -11231,6 +11246,16 @@ int main(int argc, char* argv[])
         check(std::fabs(sketchProbe.sketch().plane().Axis().Direction().Y()) > 0.999,
               "the sketch plane itself is unchanged by the orbit - it is not re-derived "
               "from the live camera mid-sketch");
+        // M2: and neither does the GRID. gridPlane() used to give the pinned
+        // sketch plane no priority at all - myWorkPlaneLocked is true only
+        // for a locked FACE - so orbiting away from Front mid-sketch dropped
+        // the drawn grid back to the ground while the outline was still
+        // being built on XZ. A grid that stops showing where the next click
+        // lands has stopped doing its job. Read off the plane GridRenderer
+        // actually built from, not gridPlane()'s formula.
+        check(std::fabs(pview->drawnGridPlane().Axis().Direction().Y()) > 0.999,
+              "...and the drawn grid stayed on that same XZ plane across the orbit - "
+              "the grid stands where the clicks land");
 
         // Re-clicking near the FIRST point, now projected through the NEW,
         // angled camera, closes the outline only if the ray from this new
@@ -11752,7 +11777,13 @@ int main(int argc, char* argv[])
                 }
             }
         }
-        check(initScreenOffenders.isEmpty(),
+        // Guarded the way the RenderSettingsPanel sweep immediately above is:
+        // asserting only that the offender list is empty lets a null (or
+        // silent) selector pass a sweep that ran zero iterations - "a probe
+        // guarded by a condition that can quietly skip", exactly the pattern
+        // CLAUDE.md names.
+        check(windowSelector != nullptr && !windowSelector->paintedTexts().isEmpty() &&
+                  initScreenOffenders.isEmpty(),
               QStringLiteral("no selector window text uses a banned word (%1)")
                   .arg(initScreenOffenders.isEmpty()
                            ? QStringLiteral("none")
@@ -17813,9 +17844,9 @@ int main(int argc, char* argv[])
             clickAt(symView, worldToScreen(x0, y1));
         };
 
-        QAction* symmetryAction = action(probe, QStringLiteral("Symmetry"));
-        check(symmetryAction != nullptr, "the Symmetry action exists");
-        check(symmetryAction != nullptr && !symmetryAction->isChecked(), "symmetry starts off");
+        QAction* symmetryAction = action(probe, QStringLiteral("Mirror"));
+        check(symmetryAction != nullptr, "the Mirror action exists");
+        check(symmetryAction != nullptr && !symmetryAction->isChecked(), "mirroring starts off");
         check(!probe.document().symmetryOn(), "and document() agrees");
         check(!probe.view()->symmetryIndicatorShown(), "no plane indicator while off");
 
@@ -17827,29 +17858,31 @@ int main(int argc, char* argv[])
         // WORLD DEFAULT PLANE (x=0) as its own starting condition, since
         // every check further down (comA.X() + comB.X() == 0, the straddle
         // test at x=-30..30, and so on) is pinned against that plane - so
-        // two throwaway seed bodies are built symmetric about x=0 and BOTH
-        // selected together: their COMBINED centre is exactly x=0 with no
-        // drag needed (a single seed body's own centre would also start the
-        // plane there, but pairWithMirror() refuses a body straddling the
-        // plane it would be mirrored across, and a lone body always
-        // straddles its own centre - two bodies on opposite sides do not).
-        // Comfortably away from every coordinate range the rest of this
-        // block uses (a Y band no other quad in this block ever visits).
+        // two throwaway seed bodies are built whose COMBINED bounding box
+        // ends exactly at x=0. The gesture's default plane is TANGENT to
+        // that box on the positive side of the active axis (the fix wave's
+        // C1 ruling - a plane through the centre cut a lone body in half and
+        // pairWithMirror() then skipped it), so a combined box ending at
+        // x=0 puts the plane exactly on the world default with no drag
+        // needed, and neither seed straddles it. Comfortably away from every
+        // coordinate range the rest of this block uses (a Y band no other
+        // quad in this block ever visits).
         trigger(probe, QStringLiteral("Start Sketch"));
-        sketchQuadWorld(-30.0, -400.0, -10.0, -380.0);
+        sketchQuadWorld(-30.0, -400.0, -20.0, -380.0);
         trigger(probe, QStringLiteral("Finish Sketch"));
-        check(probe.extrudePendingFace(10.0), "the first seed body extrudes, symmetry still off");
+        check(probe.extrudePendingFace(10.0), "the first seed body extrudes, mirroring still off");
         const int seedIdA = probe.document().solids().back().id;
         trigger(probe, QStringLiteral("Start Sketch"));
-        sketchQuadWorld(10.0, -400.0, 30.0, -380.0);
+        sketchQuadWorld(-10.0, -400.0, 0.0, -380.0);
         trigger(probe, QStringLiteral("Finish Sketch"));
-        check(probe.extrudePendingFace(10.0), "the second seed body extrudes, symmetric about x=0");
+        check(probe.extrudePendingFace(10.0),
+              "the second seed body extrudes, its far edge exactly on x=0");
         const int seedIdB = probe.document().solids().back().id;
 
         probe.view()->setSelectionMode(OcctViewWidget::SelectionMode::Solid);
         probe.view()->setSelectedSolids({seedIdA, seedIdB});
         settle(80);
-        trigger(probe, QStringLiteral("Symmetry"));
+        trigger(probe, QStringLiteral("Mirror"));
         check(probe.view()->mirrorPlacementActive(),
               "S with both seed bodies selected begins the mirror-placement gesture");
         check(std::fabs(probe.view()->mirrorPlacementPlane().Location().X()) < 1.0e-6,
@@ -17874,8 +17907,8 @@ int main(int argc, char* argv[])
         // the message happens to say "Symmetry on" too, which let the
         // original check pass without ever reading the label CLAUDE.md's
         // own words actually describe.
-        check(stateLabelText(probe).startsWith(QStringLiteral("Symmetry on — ")),
-              QStringLiteral("the persistent state label leads with \"Symmetry on\" (\"%1\")")
+        check(stateLabelText(probe).startsWith(QStringLiteral("Mirror on — ")),
+              QStringLiteral("the persistent state label leads with \"Mirror on\" (\"%1\")")
                   .arg(stateLabelText(probe)));
 
         ToastHost* symToasts = probe.findChild<ToastHost*>();
@@ -18071,8 +18104,8 @@ int main(int argc, char* argv[])
         check(probe.document().twinOf(idC) == idD, "...still paired with each other");
 
         // --- toggle off: edits stop propagating -----------------------------
-        trigger(probe, QStringLiteral("Symmetry"));
-        check(!probe.document().symmetryOn(), "symmetry is off now");
+        trigger(probe, QStringLiteral("Turn Mirroring Off"));
+        check(!probe.document().symmetryOn(), "mirroring is off now");
         check(probe.document().twinOf(idC) == -1, "...and C/D are unpaired - turning off unpairs");
         check(!probe.view()->symmetryIndicatorShown(), "the plane indicator goes away");
 
@@ -18100,30 +18133,29 @@ int main(int argc, char* argv[])
         // mode must stay off, and a pairing the undo brings back must stay
         // INERT: the very next edit must not propagate.
         {
-            // Back on, through the gesture: two FRESH throwaway bodies,
-            // symmetric about x=0 (a Y band this block has not touched
-            // anywhere else), selected together so the plane needs no drag -
-            // NOT idD, which is a single body and would leave the plane
-            // dragged off x=0 exactly the way a single-body pairing would
-            // have to (see the very first "symmetry on" setup earlier in
-            // this block for the full reasoning). Keeping the plane pinned
-            // to x=0 is load-bearing for K/L's own centre-of-mass shape
-            // further down.
+            // Back on, through the gesture: two FRESH throwaway bodies in a
+            // Y band this block has not touched anywhere else, whose
+            // COMBINED box again ends exactly at x=0, so the tangent default
+            // plane lands on the world default with no drag - the same trick
+            // the very first "mirroring on" setup earlier in this block
+            // uses, and for the same reason. Keeping the plane pinned to x=0
+            // is load-bearing for K/L's own centre-of-mass shape further
+            // down.
             trigger(probe, QStringLiteral("Start Sketch"));
-            sketchQuadWorld(-30.0, -440.0, -10.0, -420.0);
+            sketchQuadWorld(-30.0, -440.0, -20.0, -420.0);
             trigger(probe, QStringLiteral("Finish Sketch"));
-            check(probe.extrudePendingFace(10.0), "a fresh symmetric seed extrudes");
+            check(probe.extrudePendingFace(10.0), "a fresh seed extrudes");
             const int reseedA = probe.document().solids().back().id;
             trigger(probe, QStringLiteral("Start Sketch"));
-            sketchQuadWorld(10.0, -440.0, 30.0, -420.0);
+            sketchQuadWorld(-10.0, -440.0, 0.0, -420.0);
             trigger(probe, QStringLiteral("Finish Sketch"));
-            check(probe.extrudePendingFace(10.0), "...and its mirror-image partner");
+            check(probe.extrudePendingFace(10.0), "...and its partner, ending exactly on x=0");
             const int reseedB = probe.document().solids().back().id;
 
             probe.view()->setSelectionMode(OcctViewWidget::SelectionMode::Solid);
             probe.view()->setSelectedSolids({reseedA, reseedB});
             settle(80);
-            trigger(probe, QStringLiteral("Symmetry"));
+            trigger(probe, QStringLiteral("Mirror"));
             check(probe.view()->mirrorPlacementActive(),
                   "S with the two fresh seeds selected begins the gesture");
             check(std::fabs(probe.view()->mirrorPlacementPlane().Location().X()) < 1.0e-6,
@@ -18154,8 +18186,8 @@ int main(int argc, char* argv[])
                   "pulling K (paired, symmetry on) succeeds - this checkpoint's State "
                   "carries the K/L pairing");
 
-            trigger(probe, QStringLiteral("Symmetry"));   // off - takes NO checkpoint
-            check(!probe.document().symmetryOn(), "symmetry is off - no checkpoint for this");
+            trigger(probe, QStringLiteral("Turn Mirroring Off"));   // takes NO checkpoint
+            check(!probe.document().symmetryOn(), "mirroring is off - no checkpoint for this");
 
             trigger(probe, QStringLiteral("Undo"));   // pops the PULL's own checkpoint
             check(!probe.document().symmetryOn(),
@@ -18185,31 +18217,32 @@ int main(int argc, char* argv[])
 
             // Leave symmetry off, matching the state the save/load section
             // below expects to turn back on itself.
-            if (probe.document().symmetryOn()) trigger(probe, QStringLiteral("Symmetry"));
+            if (probe.document().symmetryOn())
+                trigger(probe, QStringLiteral("Turn Mirroring Off"));
         }
 
         // --- state survives save/load: on/off, plane and pairing all persist
-        // Back on through the gesture again - two more fresh symmetric seeds
-        // (a Y band nothing else in this block visits), so the plane needs
-        // no drag and stays pinned at x=0 for the plane-change check further
-        // down. idC and idD are untouched by this gesture at all, which is
-        // the cleanest possible proof that re-enabling does not resurrect
-        // their old pairing with each other.
+        // Back on through the gesture again - two more fresh seeds (a Y band
+        // nothing else in this block visits) whose combined box ends at x=0,
+        // so the plane needs no drag and stays pinned at x=0 for the
+        // plane-change check further down. idC and idD are untouched by this
+        // gesture at all, which is the cleanest possible proof that
+        // re-enabling does not resurrect their old pairing with each other.
         trigger(probe, QStringLiteral("Start Sketch"));
-        sketchQuadWorld(-30.0, -480.0, -10.0, -460.0);
+        sketchQuadWorld(-30.0, -480.0, -20.0, -460.0);
         trigger(probe, QStringLiteral("Finish Sketch"));
-        check(probe.extrudePendingFace(10.0), "a third fresh symmetric seed extrudes");
+        check(probe.extrudePendingFace(10.0), "a third fresh seed extrudes");
         const int reseedC = probe.document().solids().back().id;
         trigger(probe, QStringLiteral("Start Sketch"));
-        sketchQuadWorld(10.0, -480.0, 30.0, -460.0);
+        sketchQuadWorld(-10.0, -480.0, 0.0, -460.0);
         trigger(probe, QStringLiteral("Finish Sketch"));
-        check(probe.extrudePendingFace(10.0), "...and its mirror-image partner");
+        check(probe.extrudePendingFace(10.0), "...and its partner, ending exactly on x=0");
         const int reseedD = probe.document().solids().back().id;
 
         probe.view()->setSelectionMode(OcctViewWidget::SelectionMode::Solid);
         probe.view()->setSelectedSolids({reseedC, reseedD});
         settle(80);
-        trigger(probe, QStringLiteral("Symmetry"));
+        trigger(probe, QStringLiteral("Mirror"));
         check(probe.view()->mirrorPlacementActive(),
               "S with the third seed pair selected begins the gesture");
         sendKeyTo(&probe, Qt::Key_Return);
@@ -18302,7 +18335,7 @@ int main(int argc, char* argv[])
                   "against the old plane cannot mean anything against the new one");
             check(symToasts != nullptr &&
                       symToasts->currentText() ==
-                          QStringLiteral("Symmetry plane moved — bodies unpaired"),
+                          QStringLiteral("Mirror plane moved — bodies unpaired"),
                   QStringLiteral("...and the Note toast says so (\"%1\")")
                       .arg(symToasts ? symToasts->currentText() : QString()));
         }
@@ -18329,8 +18362,8 @@ int main(int argc, char* argv[])
 
         OcctViewWidget* pView = probe.view();
         ToastHost* pToasts = probe.findChild<ToastHost*>();
-        QAction* symAction = action(probe, QStringLiteral("Symmetry"));
-        check(symAction != nullptr, "the Symmetry action exists");
+        QAction* symAction = action(probe, QStringLiteral("Mirror"));
+        check(symAction != nullptr, "the Mirror action exists");
 
         // WORLD coordinates, not viewport fractions - buildBody()'s own
         // screen-fraction clicks are fine for a single throwaway body, but
@@ -18367,13 +18400,25 @@ int main(int argc, char* argv[])
                 if (w->isVisible()) ++count;
             for (BevelArrow* w : probe.findChildren<BevelArrow*>())
                 if (w->isVisible()) ++count;
-            if (pView->mirrorPlacementActive()) ++count;
+            // The mirror chip's own WIDGET, never the gesture's state flag.
+            // The chip installs its application-wide Enter/Escape/X/Y/Z
+            // filter in showEvent() and removes it in hideEvent(), so
+            // isVisible() IS the installed-filter state - which is exactly
+            // the thing this count exists to bound. Reading
+            // mirrorPlacementActive() instead reported ZERO claims for the
+            // one failure mode that matters here: a visible chip with a live
+            // filter standing over a gesture that has already ended, which
+            // is what the constructor's inverted connection order actually
+            // produced. CLAUDE.md's "assert isVisible(), or a stub that
+            // never calls show() sails through", applied backwards.
+            if (QWidget* chip = probe.mirrorPlacementChip())
+                if (chip->isVisible()) ++count;
             return count;
         };
         check(activeClaimCount() == 0, "no application-wide key claim at the start");
 
         // --- S with no selection refuses, with a reason ---------------------
-        trigger(probe, QStringLiteral("Symmetry"));
+        trigger(probe, QStringLiteral("Mirror"));
         check(!pView->mirrorPlacementActive(),
               "S with nothing selected does not begin a gesture");
         check(pToasts != nullptr && pToasts->isShowing() &&
@@ -18381,12 +18426,16 @@ int main(int argc, char* argv[])
               QStringLiteral("...and refuses with a reason (\"%1\")")
                   .arg(pToasts ? pToasts->currentText() : QString()));
 
-        // --- one body, selected: S raises the plane at its own COMPUTED
-        // combined centre - assert against real Bnd_Box bounds, not a
-        // hardcoded coordinate. WORLD coordinates, comfortably on the
-        // negative side of x=0 - body B (built later, on the positive side)
-        // is what the two-body Enter/pairing test at the end of this block
-        // needs neither of them to straddle their own combined centre. -----
+        // --- one body, selected: S raises the plane TANGENT to that
+        // body's own bounding box on the positive side of the active axis -
+        // asserted against real Bnd_Box bounds, not a hardcoded coordinate.
+        // The plane used to spawn at the box CENTRE, which cut the body in
+        // half; pairWithMirror() skips a body straddling the plane it would
+        // be mirrored across, so the headline flow (one body, S, Enter)
+        // refused deterministically and the only way past it was dragging a
+        // 14 px handle nothing told the user about. Tangent, the ghost twin
+        // is beside the body from the first frame and Enter confirms on the
+        // default state - which this block now pins as a success path. -----
         trigger(probe, QStringLiteral("Start Sketch"));
         sketchQuadWorld(-150.0, 0.0, -100.0, 50.0);
         trigger(probe, QStringLiteral("Finish Sketch"));
@@ -18397,8 +18446,13 @@ int main(int argc, char* argv[])
         BRepBndLib::Add(probe.document().shapeOf(bodyAId), boxA);
         Standard_Real axmin, aymin, azmin, axmax, aymax, azmax;
         boxA.Get(axmin, aymin, azmin, axmax, aymax, azmax);
-        const gp_Pnt expectedCentreA((axmin + axmax) * 0.5, (aymin + aymax) * 0.5,
-                                     (azmin + azmax) * 0.5);
+        const gp_Pnt centreA((axmin + axmax) * 0.5, (aymin + aymax) * 0.5,
+                             (azmin + azmax) * 0.5);
+        // The three tangent placements, one per axis - each is the box
+        // centre pushed out to the box's own positive face along that axis.
+        const gp_Pnt tangentAX(axmax, centreA.Y(), centreA.Z());
+        const gp_Pnt tangentAY(centreA.X(), aymax, centreA.Z());
+        const gp_Pnt tangentAZ(centreA.X(), centreA.Y(), azmax);
 
         probe.view()->setSelectionMode(OcctViewWidget::SelectionMode::Solid);
         probe.view()->setSelectedSolids({bodyAId});
@@ -18406,14 +18460,19 @@ int main(int argc, char* argv[])
         check(probe.canBeginMirrorPlacement(),
               "one body selected, in body mode, nothing else pending - S can begin");
 
-        trigger(probe, QStringLiteral("Symmetry"));
+        trigger(probe, QStringLiteral("Mirror"));
         check(pView->mirrorPlacementActive(), "S with a selection raises the plane");
-        check(pView->mirrorPlacementPlane().Location().Distance(expectedCentreA) < 1.0e-6,
-              "...at exactly the selection's own computed combined centre");
+        check(pView->mirrorPlacementPlane().Location().Distance(tangentAX) < 1.0e-6,
+              "...TANGENT to the selection's own box on the positive X side, not "
+              "through its centre");
+        check(!ModelingOps::boundingBoxStraddlesPlane(probe.document().shapeOf(bodyAId),
+                                                      pView->mirrorPlacementPlane()),
+              "...so the body does not straddle its own default plane - which is what "
+              "makes the default state confirmable at all");
         check(pView->mirrorPlacementAxis() == 0, "...normal along world X, the default");
         check(symAction != nullptr && !symAction->isChecked(),
-              "the Symmetry checkbox itself stays unchecked through the gesture - "
-              "Enter is what turns symmetryOn() on, not this click");
+              "the Mirror checkbox itself stays unchecked through the gesture - "
+              "Enter is what turns mirroring on, not this click");
         check(activeClaimCount() == 1, "exactly one application-wide key claim is now active");
 
         // --- disjointness: the OTHER three gizmo predicates all read false
@@ -18461,13 +18520,15 @@ int main(int argc, char* argv[])
         sendKeyTo(&probe, Qt::Key_Y);
         settle(80);
         check(pView->mirrorPlacementAxis() == 1, "Y jumps the plane to the Y-normal preset");
-        check(pView->mirrorPlacementPlane().Location().Distance(expectedCentreA) < 1.0e-6,
-              "...back at the selection's own centre, offset reset to zero");
+        check(pView->mirrorPlacementPlane().Location().Distance(tangentAY) < 1.0e-6,
+              "...re-placed TANGENT on the NEW axis - an offset measured along the old "
+              "normal has no meaning here, and the spawn rule has to hold on every axis "
+              "a flip can land on");
         sendKeyTo(&probe, Qt::Key_Z);
         settle(80);
         check(pView->mirrorPlacementAxis() == 2, "Z jumps to the Z-normal preset");
-        check(pView->mirrorPlacementPlane().Location().Distance(expectedCentreA) < 1.0e-6,
-              "...also reset to the centre");
+        check(pView->mirrorPlacementPlane().Location().Distance(tangentAZ) < 1.0e-6,
+              "...tangent again, on Z this time");
         sendKeyTo(&probe, Qt::Key_X);
         settle(80);
         check(pView->mirrorPlacementAxis() == 0,
@@ -18495,13 +18556,14 @@ int main(int argc, char* argv[])
             // handful of discrete move events and the aim was deliberately
             // angled off-axis (see the comment above), so the settled,
             // snapped value is close to 60 rather than exact.
-            check(std::fabs(after.X() - (expectedCentreA.X() + 60.0)) < 20.0,
-                  QStringLiteral("the plane moved ~60mm along its own X normal (landed at X=%1)")
+            check(std::fabs(after.X() - (tangentAX.X() + 60.0)) < 20.0,
+                  QStringLiteral("the plane moved ~60mm along its own X normal, from the "
+                                 "tangent placement it spawned at (landed at X=%1)")
                       .arg(after.X()));
-            check(std::fabs(after.Y() - expectedCentreA.Y()) < 1.0e-6,
+            check(std::fabs(after.Y() - centreA.Y()) < 1.0e-6,
                   "...and Y did NOT move - the drag is constrained to the normal alone, "
                   "however the on-screen aim was angled");
-            check(std::fabs(after.Z() - expectedCentreA.Z()) < 1.0e-6, "...neither did Z");
+            check(std::fabs(after.Z() - centreA.Z()) < 1.0e-6, "...neither did Z");
         }
 
         // --- Escape leaves the document untouched -----------------------------
@@ -18524,7 +18586,7 @@ int main(int argc, char* argv[])
         probe.view()->setSelectionMode(OcctViewWidget::SelectionMode::Solid);
         probe.view()->setSelectedSolids({bodyAId});
         settle(80);
-        trigger(probe, QStringLiteral("Symmetry"));
+        trigger(probe, QStringLiteral("Mirror"));
         check(pView->mirrorPlacementActive(), "re-begun on body A for the mode-switch probe");
         check(activeClaimCount() == 1, "exactly one claim while the gesture is active");
 
@@ -18547,10 +18609,10 @@ int main(int argc, char* argv[])
         // it, rather than reaching a "Select one or more bodies" refusal
         // that would have been actively WRONG (bodies genuinely are
         // selected; the real obstacle is the gesture itself). -------------
-        trigger(probe, QStringLiteral("Symmetry"));
+        trigger(probe, QStringLiteral("Mirror"));
         check(pView->mirrorPlacementActive(), "begun again, for the S-while-active probe");
         const std::size_t bodiesBeforeSTwice = probe.document().count();
-        trigger(probe, QStringLiteral("Symmetry"));
+        trigger(probe, QStringLiteral("Mirror"));
         check(!pView->mirrorPlacementActive(), "S pressed again while active cancels the gesture");
         check(probe.document().count() == bodiesBeforeSTwice, "...with nothing built");
         check(!probe.document().symmetryOn(), "...and symmetry stays off");
@@ -18574,7 +18636,7 @@ int main(int argc, char* argv[])
         check(placementItems != nullptr && placementItems->isVisible(), "the Items drawer is open");
         probe.view()->setSelectedSolids({bodyAId});
         settle(80);
-        trigger(probe, QStringLiteral("Symmetry"));
+        trigger(probe, QStringLiteral("Mirror"));
         check(pView->mirrorPlacementActive(), "begun again, for the rename-guard probe");
         QAction* placementRenameAction = action(probe, QStringLiteral("Rename"));
         check(placementRenameAction != nullptr && !placementRenameAction->isEnabled(),
@@ -18598,16 +18660,73 @@ int main(int argc, char* argv[])
         check(pView->mirrorPlacementAxis() == 1 &&
                   pView->mirrorPlacementAxis() != axisBeforeRenameProbe,
               "Y reaches the gesture, proving the filter is still live");
-        trigger(probe, QStringLiteral("Symmetry"));   // cancel; tidy up for what follows
+        trigger(probe, QStringLiteral("Mirror"));   // cancel; tidy up for what follows
         check(!pView->mirrorPlacementActive(), "cleaned up after the rename-guard probe");
 
-        // --- Fix round 1, Finding 4: confirming a genuine no-op must not
-        // announce a document change - a lone selected body's own default
-        // plane (offset zero) always straddles it, so this pairs nothing. -
+        // --- THE headline flow, pinned as a SUCCESS path: one body
+        // selected, S, Enter, nothing else. This is what the user could not
+        // make work, and what nothing in the suite exercised - every
+        // previous mirrorPlacementActive() assertion stopped short of
+        // confirming from the default state. -------------------------------
         probe.view()->setSelectedSolids({bodyAId});
         settle(80);
-        trigger(probe, QStringLiteral("Symmetry"));
-        check(pView->mirrorPlacementActive(), "begun again, for the no-op confirm probe");
+        trigger(probe, QStringLiteral("Mirror"));
+        check(pView->mirrorPlacementActive(), "begun again, for the default-state confirm");
+        const std::size_t bodiesBeforeLoneConfirm = probe.document().count();
+        const std::size_t undoDepthBeforeLoneConfirm = probe.document().undoDepth();
+        sendKeyTo(&probe, Qt::Key_Return);
+        settle(200);
+        check(!pView->mirrorPlacementActive(), "Enter ends the gesture");
+        check(probe.document().count() == bodiesBeforeLoneConfirm + 1,
+              "a LONE body confirms from the untouched default state and gains a twin - "
+              "no drag, no axis flip, nothing the interface never mentioned");
+        check(probe.document().twinOf(bodyAId) > 0, "...and reads back paired");
+        check(probe.document().symmetryOn(), "...with mirroring now on");
+        check(probe.document().undoDepth() == undoDepthBeforeLoneConfirm + 1,
+              "...in exactly one checkpoint");
+        check(pToasts != nullptr && pToasts->isShowing() &&
+                  pToasts->currentText() == QStringLiteral("1 body mirrored"),
+              QStringLiteral("...and the Note toast names it, singular (\"%1\")")
+                  .arg(pToasts ? pToasts->currentText() : QString()));
+        trigger(probe, QStringLiteral("Undo"));
+        settle(200);
+        check(probe.document().count() == bodiesBeforeLoneConfirm,
+              "one undo takes the twin back");
+        check(probe.document().twinOf(bodyAId) == -1, "...and the pairing with it");
+
+        // Mirroring itself stays on across that undo (it is a mode, not undo
+        // State) and would pair every body built after it, so it is turned
+        // off through its OWN menu entry before this block builds anything
+        // else. S never does this any more - it always begins a placement,
+        // which is what makes pairing ADDITIONAL bodies possible.
+        trigger(probe, QStringLiteral("Turn Mirroring Off"));
+        check(!probe.document().symmetryOn(), "mirroring off again, for what follows");
+
+        // --- and the other half of the C1 ruling: the plane can still be
+        // DRAGGED into the body, and then the straddle rule applies exactly
+        // as designed and the refusal says so. A user can reach this; it is
+        // simply no longer where the gesture starts. --------------------------
+        probe.view()->setSelectedSolids({bodyAId});
+        settle(80);
+        trigger(probe, QStringLiteral("Mirror"));
+        check(pView->mirrorPlacementActive(), "begun again, for the dragged-inside probe");
+        {
+            gp_Pnt handlePoint;
+            QPoint handleAt, dragTo;
+            const bool haveAim =
+                pView->mirrorPlacementHandle(handlePoint) &&
+                pView->projectToScreen(handlePoint, handleAt) &&
+                pView->projectToScreen(handlePoint.Translated(gp_Vec(-1.0, 0.0, 0.0) * 25.0),
+                                       dragTo);
+            check(haveAim, "the handle and an inward 25mm aim both project");
+            if (haveAim) dragButton(pView, QPointF(handleAt), QPointF(dragTo), Qt::LeftButton);
+            settle(150);
+        }
+        // Non-vacuity: if the drag did not actually move the plane INSIDE
+        // the body, the refusal below would be testing nothing at all.
+        check(ModelingOps::boundingBoxStraddlesPlane(probe.document().shapeOf(bodyAId),
+                                                     pView->mirrorPlacementPlane()),
+              "the drag really did put the plane through the body");
         const std::size_t bodiesBeforeNoOp = probe.document().count();
         int mirrorNoOpSignalCount = 0;
         QMetaObject::Connection mirrorNoOpConn = QObject::connect(
@@ -18617,7 +18736,12 @@ int main(int argc, char* argv[])
         QObject::disconnect(mirrorNoOpConn);
         check(!pView->mirrorPlacementActive(), "the gesture ends either way");
         check(probe.document().count() == bodiesBeforeNoOp,
-              "a lone body straddling its own centre pairs with nothing");
+              "a body straddling the plane it was dragged onto pairs with nothing");
+        check(!probe.document().symmetryOn(), "...and mirroring is not switched on");
+        check(pToasts != nullptr && pToasts->isShowing() &&
+                  pToasts->currentText().contains(QStringLiteral("Nothing to mirror")),
+              QStringLiteral("...and the refusal is a Failure toast that says so (\"%1\")")
+                  .arg(pToasts ? pToasts->currentText() : QString()));
         check(mirrorNoOpSignalCount == 0,
               "...and documentChanged() is not emitted for a genuine no-op");
 
@@ -18639,14 +18763,14 @@ int main(int argc, char* argv[])
         boxAB.Add(boxBOnly);
         Standard_Real cxmin, cymin, czmin, cxmax, cymax, czmax;
         boxAB.Get(cxmin, cymin, czmin, cxmax, cymax, czmax);
-        const gp_Pnt expectedCentreAB((cxmin + cxmax) * 0.5, (cymin + cymax) * 0.5,
-                                      (czmin + czmax) * 0.5);
+        const gp_Pnt tangentAB(cxmax, (cymin + cymax) * 0.5, (czmin + czmax) * 0.5);
 
         const std::size_t undoDepthBeforeConfirm = probe.document().undoDepth();
-        trigger(probe, QStringLiteral("Symmetry"));
+        trigger(probe, QStringLiteral("Mirror"));
         check(pView->mirrorPlacementActive(), "S with two bodies selected begins the gesture");
-        check(pView->mirrorPlacementPlane().Location().Distance(expectedCentreAB) < 1.0e-6,
-              "...at the TWO bodies' own combined centre");
+        check(pView->mirrorPlacementPlane().Location().Distance(tangentAB) < 1.0e-6,
+              "...tangent to the TWO bodies' own COMBINED box, so neither of them "
+              "straddles it either");
 
         sendKeyTo(&probe, Qt::Key_Return);
         settle(200);
@@ -18670,8 +18794,51 @@ int main(int argc, char* argv[])
         check(probe.document().twinOf(bodyAId) == -1 && probe.document().twinOf(bodyBId) == -1,
               "...and both pairings with them");
         check(probe.document().symmetryOn(),
-              "symmetry mode itself STAYS ON after that undo - the mode is not part of "
+              "mirroring itself STAYS ON after that undo - the mode is not part of "
               "undo State, the same rule the legacy toggle already follows");
+
+        // --- I2, and the ledger's own parked gap: with mirroring ALREADY
+        // ON, S begins a placement for ADDITIONAL bodies. It used to mean
+        // "turn mirroring off" in that state, so a user who had ever
+        // mirrored anything had to press S twice - the first press silently
+        // unpairing every body in the document - to pair one more. Turning
+        // mirroring off is its own menu entry now, deliberately without a
+        // shortcut. ---------------------------------------------------------
+        QAction* mirrorOffAction = action(probe, QStringLiteral("Turn Mirroring Off"));
+        check(mirrorOffAction != nullptr && mirrorOffAction->isEnabled(),
+              "the off switch is an action of its own, available while mirroring is on");
+        check(mirrorOffAction == nullptr || mirrorOffAction->shortcut().isEmpty(),
+              "...and carries no shortcut - unpairing everything must not share a key "
+              "with the gesture people reach for constantly");
+        probe.view()->setSelectionMode(OcctViewWidget::SelectionMode::Solid);
+        probe.view()->setSelectedSolids({bodyAId});
+        settle(80);
+        const std::size_t bodiesBeforeAdditional = probe.document().count();
+        trigger(probe, QStringLiteral("Mirror"));
+        check(pView->mirrorPlacementActive(),
+              "S with mirroring already on BEGINS a placement rather than turning it off");
+        check(probe.document().symmetryOn(),
+              "...with nothing unpaired to get there - no destructive side trip");
+        sendKeyTo(&probe, Qt::Key_Return);
+        settle(200);
+        check(probe.document().count() == bodiesBeforeAdditional + 1 &&
+                  probe.document().twinOf(bodyAId) > 0,
+              "...and Enter pairs the body that was not yet paired, adding it to the "
+              "existing mirror");
+        trigger(probe, QStringLiteral("Undo"));
+        settle(200);
+        check(probe.document().count() == bodiesBeforeAdditional,
+              "one undo takes that additional pairing back too");
+
+        // Mirroring is still on, and it pairs every body created while it is
+        // (creation pairing, Milestone 3) - so it goes off through its own
+        // entry BEFORE the isolated probe body below is built, or that body
+        // would arrive with a twin already attached and solids().back()
+        // would name the twin rather than the body. This also drops A and
+        // B's now-empty pairing state, read by nothing past this point.
+        if (probe.document().symmetryOn())
+            trigger(probe, QStringLiteral("Turn Mirroring Off"));
+        check(!probe.document().symmetryOn(), "mirroring off, for the isolated bevel probe");
 
         // --- the mirrored-body bevel ledger item, re-run against a twin THIS
         // gesture built (CLAUDE.md: bevelAxis()/outwardNormalNear() carry the
@@ -18693,19 +18860,10 @@ int main(int argc, char* argv[])
         check(probe.extrudePendingFace(20.0), "an isolated body extrudes, for the bevel probe");
         const int bodyCId = probe.document().solids().back().id;
 
-        // Symmetry mode is still ON from the A/B pairing above (an undo does
-        // not turn it off - see the check right before this section), which
-        // means the SAME "Symmetry" action would turn it OFF rather than
-        // begin a new placement (onSymmetryActionTriggered()'s own branch).
-        // Turned off first, so S means "begin" again - this drops A and B's
-        // now-empty pairing state, which nothing past this point reads.
-        if (probe.document().symmetryOn()) trigger(probe, QStringLiteral("Symmetry"));
-        check(!probe.document().symmetryOn(), "symmetry off, so S means begin again");
-
         probe.view()->setSelectionMode(OcctViewWidget::SelectionMode::Solid);
         probe.view()->setSelectedSolids({bodyCId});
         settle(80);
-        trigger(probe, QStringLiteral("Symmetry"));
+        trigger(probe, QStringLiteral("Mirror"));
         check(pView->mirrorPlacementActive(), "S with the isolated body selected begins the gesture");
         {
             gp_Pnt handlePoint;
@@ -18868,6 +19026,44 @@ int main(int argc, char* argv[])
                 }
             }
         }
+
+        // --- the editor/selector seam: a live gesture must not survive it,
+        // and must not carry its captured body ids into a DIFFERENT
+        // furniture. mirrorPlacementEnvironmentOk() was missing the
+        // myShowingInitScreen term its Phase-4 sibling
+        // linkGestureEnvironmentOk() already carried, so
+        // refreshMirrorPlacement()'s self-cancel found the environment still
+        // valid on the handoff and kept the gesture - plane, ids and the
+        // application-wide Enter claim all - across the close. Ids restart at
+        // 1 for every fresh document, so those stale ids resolve to real,
+        // unrelated bodies in whatever opens next. -------------------------
+        probe.view()->setSelectionMode(OcctViewWidget::SelectionMode::Solid);
+        probe.view()->setSelectedSolids({bodyAId});
+        settle(80);
+        trigger(probe, QStringLiteral("Mirror"));
+        check(pView->mirrorPlacementActive(), "a gesture is live, going into the handoff");
+        check(activeClaimCount() == 1, "...with its one application-wide claim installed");
+
+        trigger(probe, QStringLiteral("Close furniture"));
+        settle(250);
+        check(probe.isShowingInitScreen(), "Close furniture returns to the selector");
+        check(!pView->mirrorPlacementActive(),
+              "...and the gesture is cancelled by the handoff itself");
+        check(activeClaimCount() == 0,
+              "...so no application-wide Enter/Escape/X-Y-Z claim outlives the furniture");
+
+        enterFreshFurniture(probe);
+        settle(200);
+        check(!probe.isShowingInitScreen(), "a different furniture opens");
+        check(!pView->mirrorPlacementActive(),
+              "...with no plane redrawn from the furniture that closed");
+        const std::size_t bodiesInFreshFurniture = probe.document().count();
+        sendKeyTo(&probe, Qt::Key_Return);
+        settle(200);
+        check(probe.document().count() == bodiesInFreshFurniture &&
+                  !probe.document().symmetryOn(),
+              "...and Enter does nothing at all here - no bodies the user never "
+              "selected, paired through a plane from a document that is no longer open");
     }
 
     // --- Render mode (Milestone 3, item 5) --------------------------------
@@ -19805,6 +20001,36 @@ int main(int argc, char* argv[])
               "the card appears the moment render mode is on");
         check(shutter != nullptr && shutter->isVisible(), "and so does the shutter");
 
+        // --- Surface and Metal are read by the deepest tier alone, and the
+        // card says so whenever the active tier is not it. An ENABLED
+        // control that silently does nothing reads exactly as broken as a
+        // disabled one that will not say why, and on most hardware two of
+        // these six sliders moved and changed nothing with no cue at all.
+        // Asserted BOTH ways off the tier the probe actually landed on, so
+        // this cannot pass by never running: the note is up exactly when
+        // renderMaterialControlsApply() is false.
+        {
+            const bool materialsApply = rview->renderMaterialControlsApply();
+            check(materialsApply ==
+                      (rview->renderModeTier() == OcctViewWidget::RenderTier::PathTracing),
+                  "the card's own condition IS the tier gate the two setters are wrapped "
+                  "in - one written-down copy, not a second tier list");
+            check(panel != nullptr && panel->materialRowsApply() == materialsApply,
+                  "the card is told the truth about the active tier");
+            QWidget* materialNote = panel ? panel->materialNoteRow() : nullptr;
+            check(materialNote != nullptr, "the card carries a material note row");
+            check(materialNote != nullptr && materialNote->isVisible() == !materialsApply,
+                  materialsApply
+                      ? QStringLiteral("...hidden on this tier, which does apply Surface "
+                                       "and Metal")
+                      : QStringLiteral("...and shown on this tier, which does not"));
+            check(panel != nullptr && panel->surfaceControl() != nullptr &&
+                      panel->surfaceControl()->isEnabled() && panel->metalControl() != nullptr &&
+                      panel->metalControl()->isEnabled(),
+                  "both controls stay live either way - the value they hold is real and "
+                  "takes effect on a tier that reads it");
+        }
+
         // --- real hit-testing, not merely isVisible() -------------------------
         const QPoint panelCentre = panel->mapTo(rview, panel->rect().center());
         QWidget* hitPanel = rview->childAt(panelCentre);
@@ -20650,13 +20876,12 @@ int main(int argc, char* argv[])
             // mirrored COPY of every selected body and pairs each one with
             // its own new copy - so selecting both P and Q here does not
             // pair P with Q, it adds a new twin for P AND a new twin for Q
-            // (four bodies total afterward). Two seeds, symmetric about
-            // x=0, only because a LONE selected body always straddles its
-            // own centre (the plane's default starting position) and
-            // pairWithMirror() refuses a straddling body outright - two
-            // bodies on opposite sides give the gesture a plane that
-            // straddles neither, the same reason the Milestone 3 symmetry
-            // block above this one uses the identical trick.
+            // (four bodies total afterward). Two seeds rather than one
+            // purely so that "each seed gained its OWN twin" is a
+            // distinguishable outcome from "these two got paired to each
+            // other"; the gesture's default plane is TANGENT to their
+            // combined box (the fix wave's C1 ruling), so neither of them
+            // straddles it and both pair on the default state alone.
             trigger(mirrorProbe, QStringLiteral("Start Sketch"));
             sketchQuadWorld(-30.0, -30.0, -10.0, -10.0);
             trigger(mirrorProbe, QStringLiteral("Finish Sketch"));
@@ -20672,7 +20897,7 @@ int main(int argc, char* argv[])
             mirrorView->setSelectionMode(OcctViewWidget::SelectionMode::Solid);
             mirrorView->setSelectedSolids({idP, idQ});
             settle(80);
-            trigger(mirrorProbe, QStringLiteral("Symmetry"));
+            trigger(mirrorProbe, QStringLiteral("Mirror"));
             check(mirrorView->mirrorPlacementActive(), "S with both seeds selected begins placement");
             sendKeyTo(&mirrorProbe, Qt::Key_Return);
             settle(200);

@@ -1325,23 +1325,38 @@ void OcctViewWidget::beginMirrorPlacement(const std::vector<int>& ids)
         box.Add(b);
     }
     gp_Pnt centre(0.0, 0.0, 0.0);
+    gp_XYZ halfExtent(0.0, 0.0, 0.0);
     if (!box.IsVoid()) {
         Standard_Real xmin, ymin, zmin, xmax, ymax, zmax;
         box.Get(xmin, ymin, zmin, xmax, ymax, zmax);
         centre = gp_Pnt((xmin + xmax) * 0.5, (ymin + ymax) * 0.5, (zmin + zmax) * 0.5);
+        halfExtent = gp_XYZ((xmax - xmin) * 0.5, (ymax - ymin) * 0.5, (zmax - zmin) * 0.5);
     }
 
     myMirrorPlacement.active = true;
     myMirrorPlacement.ids = ids;
     myMirrorPlacement.centre = centre;
-    // World X, normal-along-YZ-through-the-centre - DocumentModel's own
-    // constructed default (see its header), so a gesture that never drags or
-    // reorients reproduces exactly the plane the old direct toggle started
-    // at.
+    myMirrorPlacement.halfExtent = halfExtent;
+    // World X, the same axis DocumentModel's own constructed symmetry plane
+    // starts on (see its header) - but TANGENT to the selection rather than
+    // through its centre. The centre default cut a lone body in half, which
+    // pairWithMirror()'s straddle rule then skipped, so the gesture's own
+    // headline flow could not confirm without a drag nothing told the user
+    // to make. See beginMirrorPlacement()'s header comment.
     myMirrorPlacement.axis = 0;
-    myMirrorPlacement.offset = 0.0;
+    myMirrorPlacement.offset = mirrorPlacementTangentOffset(0);
 
     updateMirrorPlacementIndicator();
+}
+
+double OcctViewWidget::mirrorPlacementTangentOffset(int axis) const
+{
+    if (!myMirrorPlacement.active) return 0.0;
+    switch (std::clamp(axis, 0, 2)) {
+        case 1: return myMirrorPlacement.halfExtent.Y();
+        case 2: return myMirrorPlacement.halfExtent.Z();
+        default: return myMirrorPlacement.halfExtent.X();
+    }
 }
 
 void OcctViewWidget::cancelMirrorPlacement()
@@ -1400,8 +1415,10 @@ void OcctViewWidget::setMirrorPlacementAxis(int axis)
     if (axis == myMirrorPlacement.axis) return;
     myMirrorPlacement.axis = axis;
     // An offset measured along the OLD normal has no honest meaning against a
-    // different one - see the header comment.
-    myMirrorPlacement.offset = 0.0;
+    // different one - see the header comment. Re-placed TANGENT on the new
+    // axis rather than zeroed, so the spawn rule holds on every axis a flip
+    // can land on and a lone body never straddles its own flipped plane.
+    myMirrorPlacement.offset = mirrorPlacementTangentOffset(axis);
     updateMirrorPlacementIndicator();
 }
 
@@ -1982,7 +1999,21 @@ gp_Pln OcctViewWidget::gridPlane() const
     // itself to derive the ACTUAL click plane too - see
     // MainWindow::onStartSketch() - so the two no longer disagree the way
     // the first round of this task left them.
-    const gp_Pln basePlane = myWorkPlaneLocked ? mySketchPlane : faceOnOrthoPlane();
+    //
+    // And priority 1.5, this fix wave: while a SKETCH is in progress, the
+    // pinned plane outranks the live camera too. onStartSketch() captures
+    // faceOnOrthoPlane() BY VALUE into SketchController and pushes it to
+    // setWorkPlane(), so clicks keep landing on it however the camera moves
+    // - but this line asked myWorkPlaneLocked, which is true only for a
+    // locked FACE, so orbiting away from Front mid-sketch dropped the drawn
+    // grid back to the ground while the outline was still being built on
+    // XZ. The status label already handles exactly this case and says so in
+    // its own comment; the grid has to follow the same rule or it stops
+    // showing where the next click lands, which is its entire job. Task
+    // 5.1's fix round unified the two planes' DERIVATION; this unifies
+    // their LIFETIME.
+    const gp_Pln basePlane =
+        (myWorkPlaneLocked || mySketchMode) ? mySketchPlane : faceOnOrthoPlane();
 
     const double distance = std::max(1.0, myCamera.state().distance);
     const double octave = std::ldexp(1.0, static_cast<int>(std::lround(std::log2(distance))));
@@ -3067,11 +3098,27 @@ void OcctViewWidget::redrawRenderModeLive()
         Graphic3d_RenderingParams& params = myView->ChangeRenderingParams();
         const Graphic3d_RenderingMode wasMethod = params.Method;
         params.Method = Graphic3d_RM_RASTERIZATION;
-        myView->Redraw();
+        // The same try/catch discipline every other Redraw() on a ray-traced
+        // path in this file carries, and for a sharper reason here: an
+        // escape would leave params.Method stranded at RASTERIZATION under a
+        // tier that claims to be ray-traced, for the rest of the session.
+        // The restore below runs whether the redraw threw or not.
+        try {
+            myView->Redraw();
+        } catch (const Standard_Failure&) {
+        }
         params.Method = wasMethod;
     }
     if (!myContext.IsNull()) myContext->UpdateCurrentViewer();
-    myView->Redraw();
+    try {
+        myView->Redraw();
+    } catch (const Standard_Failure&) {
+    }
+}
+
+bool OcctViewWidget::renderMaterialControlsApply() const
+{
+    return usesPbrMaterials(myRenderTier);
 }
 
 void OcctViewWidget::setRenderSurfaceRoughness(double roughness01)

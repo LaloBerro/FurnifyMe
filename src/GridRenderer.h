@@ -55,6 +55,13 @@ public:
     // update() does the work exactly once.
     void invalidate();
 
+    // The plane the grid was actually BUILT in - not the one last handed to
+    // update(), which may have been cached away. This is what a caller
+    // asking "where is the grid standing right now" has to read, and what
+    // gui_smoke reads to pin gridPlane()'s own priority rules without a
+    // test-only hook on the widget.
+    gp_Pln builtPlane() const { return myBuiltPlane; }
+
     // The Z-layer the grid is displayed in: a layer of this class's own,
     // inserted immediately AFTER Graphic3d_ZLayerId_Default, with depth
     // testing ON and depth WRITING OFF. OcctViewWidget then puts every piece

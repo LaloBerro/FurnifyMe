@@ -779,6 +779,26 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
 
     buildActions();
     buildAppBar(buildMenus());
+
+    // The mirror-placement gesture's own self-cancel (fix round 1) - see
+    // refreshMirrorPlacement()'s own comment. Connected HERE, genuinely
+    // before buildOverlay() constructs the gesture's value chip and connects
+    // ITS refresh() to the same signal, so Qt's connected-in-order guarantee
+    // puts this slot's cancel ahead of the chip's own read of
+    // mirrorPlacementActive() within any one appStateChanged emission.
+    //
+    // It used to sit with the other appStateChanged connections BELOW
+    // buildOverlay(), while two comments (here and at
+    // refreshMirrorPlacement()) both claimed this ordering - so the chip
+    // refreshed FIRST, saw a still-active gesture, stayed visible, and the
+    // cancel landed second, leaving a visible chip with a live
+    // application-wide Enter/Escape/X/Y/Z filter over a gesture that had
+    // already ended. It was cleared only by accident, because the one
+    // reachable self-cancel trigger happens to emit appStateChanged twice.
+    // Moved rather than re-documented: the ordering is the mechanism, and
+    // an accident is not one.
+    connect(this, &MainWindow::appStateChanged, this, &MainWindow::refreshMirrorPlacement);
+
     buildOverlay();
 
     myShortcutSheet = new ShortcutSheet(this);
@@ -847,7 +867,16 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         // opposite predicate: neither has a QAction of its own either, and
         // both exist ONLY while render mode is on, so `hiddenForRenderMode`
         // is read as their whole visibility rather than negated into it.
-        if (myRenderSettingsPanel) myRenderSettingsPanel->setVisible(hiddenForRenderMode);
+        if (myRenderSettingsPanel) {
+            myRenderSettingsPanel->setVisible(hiddenForRenderMode);
+            // Two of the six controls are read only by the deepest tier
+            // (OcctViewWidget::renderMaterialControlsApply(), which IS the
+            // gate the setters are wrapped in, not a second copy of the
+            // tier list). Derived here, on every appStateChanged, so the
+            // note follows the tier the session actually probed into rather
+            // than being set once at the toggle site.
+            myRenderSettingsPanel->setMaterialRowsApply(myView->renderMaterialControlsApply());
+        }
         if (myRenderShutter) myRenderShutter->setVisible(hiddenForRenderMode);
         if (myOverlay) myOverlay->relayout();
     });
@@ -874,14 +903,6 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // long as the arrow's own value chip is up. Only reads state and moves AIS
     // objects, so it cannot recurse back into updateActions().
     connect(this, &MainWindow::appStateChanged, this, &MainWindow::refreshEdgeAnnotation);
-
-    // The mirror-placement gesture's own self-cancel (fix round 1) - see
-    // refreshMirrorPlacement()'s own comment. Connected HERE, before
-    // buildOverlay() constructs the gesture's value chip and connects ITS
-    // refresh() to the same signal, so Qt's connected-in-order guarantee
-    // puts this slot's cancel ahead of the chip's own read of
-    // mirrorPlacementActive() within any one appStateChanged emission.
-    connect(this, &MainWindow::appStateChanged, this, &MainWindow::refreshMirrorPlacement);
 
     // Selection syncs both ways.
     connect(myItemsPanel, &ItemsPanel::solidActivated, this,
@@ -1016,35 +1037,52 @@ void MainWindow::buildActions()
     myUnlockFaceAction->setToolTip(unlockTooltipText());
     connect(myUnlockFaceAction, &QAction::triggered, this, &MainWindow::unlockFace);
 
-    // Symmetry (Milestone 3, rebound in Milestone 4 Phase 3). Still
-    // checkable, and its checked state is STILL document().symmetryOn() -
-    // updateActions() reads that back onto it, never the reverse - but
-    // TRIGGERING it no longer flips that checked state directly the way a
-    // plain checkable toggle would. onSymmetryActionTriggered() reads
-    // symmetryOn() itself (the state as of BEFORE this click - Qt has
-    // already flipped isChecked() by the time triggered() fires, but
-    // nothing about the DOCUMENT has) and picks one of two things S has
-    // always meant: turn mirroring off when it is already on (the old
-    // toggle-off semantics, kept reachable exactly as CLAUDE.md's Task 3.2
-    // ruling requires), or begin the retroactive mirror-placement gesture
-    // when it is not - Enter, not this click, is what actually turns
-    // symmetry back on, so updateActions() at the end of either branch
-    // resyncs the checkbox to whatever document().symmetryOn() genuinely
-    // is, undoing Qt's own optimistic flip when it does not yet agree.
-    mySymmetryAction = new QAction(tr("&Symmetry"), this);
+    // Mirror (Milestone 3, rebound in Milestone 4 Phase 3, renamed and
+    // re-scoped in the final fix wave). The user-facing word for this whole
+    // concept is Mirror - the kernel-facing symmetryOn()/setSymmetry() names
+    // and every private member keep their own spelling, but nothing painted
+    // says "symmetry" any more, and the vocabulary sweep enforces that
+    // (CLAUDE.md's table has the row). The old name was the one direction
+    // that matters most: the word on the control the user must press was
+    // not the word any of its own feedback used.
+    //
+    // Still checkable, and its checked state is STILL document().symmetryOn()
+    // - updateActions() reads that back onto it, never the reverse - but
+    // TRIGGERING it always means "begin a placement" now. It used to mean
+    // "turn mirroring off" whenever mirroring was already on, which made
+    // pairing ADDITIONAL bodies impossible without first unpairing
+    // everything: two presses, the first silently destroying every pairing
+    // in the document. DocumentModel::pairWithMirror() already skips a body
+    // that is already paired and reports it, so beginning a placement over
+    // live mirroring is honest work, not a second meaning. Turning mirroring
+    // OFF is its own menu entry below, deliberately without a shortcut - a
+    // destructive unpair-everything should not share a key with the gesture
+    // people reach for constantly. Qt has already flipped isChecked() by the
+    // time triggered() fires; updateActions() at the end of every branch
+    // resyncs it to whatever document().symmetryOn() genuinely is.
+    mySymmetryAction = new QAction(tr("&Mirror"), this);
     mySymmetryAction->setCheckable(true);
     // No "(S)" here - the banned-word sweep matches "(s)" as a bare
     // substring, case-insensitive, for the vocabulary rule against a typed
     // plural marker, and this shortcut's own letter collides with it.
     mySymmetryAction->setToolTip(
-        tr("Turn mirroring off, or place a plane to pair the selected bodies — "
+        tr("Place a plane and pair the selected bodies with mirrored twins — "
           "shortcut S\n"
           "Select one or more bodies first — Enter mirrors them, Esc cancels."));
     mySymmetryAction->setShortcut(QKeySequence(Qt::Key_S));
     connect(mySymmetryAction, &QAction::triggered, this,
             &MainWindow::onSymmetryActionTriggered);
 
-    mySetSymmetryPlaneAction = new QAction(tr("Set Symmetry &Plane"), this);
+    // The off switch, on its own. No shortcut by design (see the comment
+    // above), and enabled only while there is something to turn off.
+    mySymmetryOffAction = new QAction(tr("Turn Mirroring O&ff"), this);
+    mySymmetryOffAction->setToolTip(tr("Stop pairing bodies with mirrored twins\n"
+                                       "Every existing pairing is dropped — the bodies "
+                                       "themselves stay."));
+    connect(mySymmetryOffAction, &QAction::triggered, this,
+            [this] { setSymmetryEnabled(false); });
+
+    mySetSymmetryPlaneAction = new QAction(tr("Set Mirror &Plane"), this);
     mySetSymmetryPlaneAction->setToolTip(tr("Mirror across this face instead of the middle\n"
                                             "Pick one flat face - the plane it lies on "
                                             "becomes the mirror."));
@@ -1374,6 +1412,7 @@ QMenuBar* MainWindow::buildMenus()
     // chip.
     modelMenu->addAction(mySymmetryAction);
     modelMenu->addAction(mySetSymmetryPlaneAction);
+    modelMenu->addAction(mySymmetryOffAction);
     modelMenu->addSeparator();
     // Linked copies (Milestone 4, Task 4.2) - menu-only, same reason.
     modelMenu->addAction(myDuplicateLinkedAction);
@@ -1968,6 +2007,8 @@ void MainWindow::updateActions()
         mySymmetryAction->setChecked(myDocument.symmetryOn());
     }
     if (mySymmetryAction) mySymmetryAction->setEnabled(!atInit);
+    // The off switch has something to do exactly while mirroring is on.
+    if (mySymmetryOffAction) mySymmetryOffAction->setEnabled(!atInit && myDocument.symmetryOn());
     // The same pick as Lock to Face - one flat face, no sketch, no pending
     // outline.
     if (mySetSymmetryPlaneAction) mySetSymmetryPlaneAction->setEnabled(flatFaceSelected);
@@ -3346,13 +3387,18 @@ void MainWindow::updateStateLabel()
     // whether the next body gets a mirrored twin governs how to read
     // everything after it, the same argument the face lock makes one layer
     // in.
-    if (myDocument.symmetryOn()) state = tr("Symmetry on — %1").arg(state);
+    if (myDocument.symmetryOn()) state = tr("Mirror on — %1").arg(state);
 
     myStateLabel->setText(state);
 }
 
 QString MainWindow::faceOnDirectionLabel(const gp_Dir& normal) const
 {
+    // THE one name for a face-on world plane, read by updateStateLabel()'s
+    // persistent cue and by onStartSketch()'s opening sentence alike (M3).
+    // Two names for one plane is a bug even when both are defensible: the
+    // world XZ plane is "Front" and the world YZ plane is "Right", whichever
+    // side of either the camera happens to be on.
     if (std::fabs(std::fabs(normal.Y()) - 1.0) < 1.0e-6) return tr("Front");
     if (std::fabs(std::fabs(normal.X()) - 1.0) < 1.0e-6) return tr("Right");
     return QString();
@@ -3698,7 +3744,22 @@ void MainWindow::onStartSketch()
     // progress. Skipped entirely while locked - the locked face already
     // outranks this, and re-deriving here would overwrite lockToFace()'s
     // own plane with the ground or the substitution.
-    const QString faceOnDirection = myView->faceOnOrthoDirection();
+    // The PLANE's own name, through faceOnDirectionLabel() - the same one
+    // source updateStateLabel() reads, so the sentence that starts a sketch
+    // and the persistent cue that follows it can never name the same plane
+    // two different things. faceOnOrthoDirection() answers a different
+    // question (which way the CAMERA is looking) and can say "Left" or
+    // "Back" where the label says "Right" and "Front": a sketch started
+    // from a Left view used to read "Click points on the Left plane" and
+    // then persistently "Facing Right — …" about the identical world YZ
+    // plane. The label cannot recover Left from Back once the plane is
+    // pinned by value and the camera has moved on, so the plane's name is
+    // the one that survives, and it is the one both now use. Empty when the
+    // current look is not face-on at all, exactly as before -
+    // faceOnOrthoPlane() returns the ground plane then, whose normal
+    // faceOnDirectionLabel() has no name for.
+    const QString faceOnDirection =
+        faceOnDirectionLabel(myView->faceOnOrthoPlane().Axis().Direction());
     if (!myFaceLocked) mySketch.setPlane(myView->faceOnOrthoPlane());
     myView->setSketchMode(true, mySketch.plane());
     myView->setPreview(TopoDS_Shape());
@@ -4071,8 +4132,18 @@ void MainWindow::commitReplaceBody(int id, const TopoDS_Shape& newShape, bool& t
     // of its own (see its header): it rides inside the checkpoint taken two
     // lines up, so one undo reverts `id` and every other member together.
     if (myDocument.isLinked(id)) {
-        myDocument.propagateLinkedEdit(id, newShape);
-        linkedOthersUpdated = resyncLinkGroupView(id);
+        // The return value is READ, not dropped: propagateLinkedEdit()
+        // returns false having written NOTHING when a member's own
+        // transformShape() refuses, while resyncLinkGroupView() counts group
+        // MEMBERSHIP rather than what actually changed - so taking the count
+        // unconditionally is how "— linked copy updated" got appended to an
+        // edit that reached nobody. Never-silent-failure applies to the one
+        // silent-lie path left in this chain exactly as it does to every
+        // neighbouring branch. -1 is linkedGroupSuffix()'s refusal sentinel,
+        // never a count.
+        const bool propagated = myDocument.propagateLinkedEdit(id, newShape);
+        const int others = resyncLinkGroupView(id);
+        linkedOthersUpdated = propagated ? others : (others > 0 ? -1 : 0);
         return;
     }
 
@@ -4285,7 +4356,13 @@ QString MainWindow::transformRefusalText(const gp_Trsf& delta)
 
 QString MainWindow::linkedGroupSuffix(int othersUpdated)
 {
-    if (othersUpdated <= 0) return QString();
+    // Negative is the refusal sentinel both commit sites set when
+    // propagateLinkedEdit() returned false having written nothing (M1). The
+    // primary edit stands and its own toast still reports it, but claiming
+    // the copies followed would be a silent lie about a document the user
+    // is about to keep editing.
+    if (othersUpdated < 0) return tr(" — the linked copies could not follow this edit");
+    if (othersUpdated == 0) return QString();
     return othersUpdated == 1 ? tr(" — linked copy updated")
                               : tr(" — %1 linked copies updated").arg(othersUpdated);
 }
@@ -4653,9 +4730,11 @@ bool MainWindow::applyBooleanToSelection(int kind)
         } else if (myDocument.isLinked(id)) {
             // propagateLinkedEdit() takes NO checkpoint of its own (see its
             // header) - it rides inside the checkpoint taken two lines up,
-            // exactly as commitReplaceBody()'s own linked branch does.
-            myDocument.propagateLinkedEdit(id, result.shape);
-            linkedOthersUpdated = resyncLinkGroupView(id);
+            // exactly as commitReplaceBody()'s own linked branch does - and
+            // its refusal is read here on exactly the same terms (M1).
+            const bool propagated = myDocument.propagateLinkedEdit(id, result.shape);
+            const int others = resyncLinkGroupView(id);
+            linkedOthersUpdated = propagated ? others : (others > 0 ? -1 : 0);
         }
     } else {
         // Both unpaired, or the two operands were each other's own twin -
@@ -4962,8 +5041,8 @@ void MainWindow::setSymmetryEnabled(bool on)
     updateActions();
     emit documentChanged();
     statusBar()->showMessage(
-        on ? tr("Symmetry on — new bodies get a mirrored twin")
-           : tr("Symmetry off — bodies keep their own shape now"));
+        on ? tr("Mirror on — new bodies get a mirrored twin")
+           : tr("Mirror off — bodies keep their own shape now"));
 }
 
 bool MainWindow::setSymmetryPlaneFromFace(const TopoDS_Face& face)
@@ -4972,7 +5051,7 @@ bool MainWindow::setSymmetryPlaneFromFace(const TopoDS_Face& face)
 
     const BRepAdaptor_Surface surface(face);
     if (surface.GetType() != GeomAbs_Plane) {
-        myToasts->show(tr("This face isn't flat, so it can't hold the symmetry plane. "
+        myToasts->show(tr("This face isn't flat, so it can't hold the mirror plane. "
                           "Pick a flat face and try again."),
                       Toast::Kind::Failure, false);
         return false;
@@ -5015,8 +5094,8 @@ bool MainWindow::setSymmetryPlaneFromFace(const TopoDS_Face& face)
 
     updateActions();
     emit documentChanged();
-    const QString message = hadPairings ? tr("Symmetry plane moved — bodies unpaired")
-                                        : tr("Symmetry plane set to this face");
+    const QString message = hadPairings ? tr("Mirror plane moved — bodies unpaired")
+                                        : tr("Mirror plane set to this face");
     statusBar()->showMessage(message);
     // No checkpoint behind this (a plane change is a mode switch, not an
     // edit - the same rule turning symmetry off follows), so no Undo either.
@@ -5038,6 +5117,25 @@ bool MainWindow::mirrorPlacementEnvironmentOk() const
     // The same three terms canPullSelectedFace() opens with, for the same
     // reasons.
     if (mySketching || hasPendingFace() || myRenderModeOn) return false;
+    // And the two this predicate was MISSING, which its Phase-4 sibling
+    // linkGestureEnvironmentOk() already carried for exactly this reason:
+    // a furniture must actually be open, and a compare session is not a
+    // place to be committing to a document.
+    //
+    // Without myShowingInitScreen the gesture SURVIVED the editor-to-
+    // selector handoff. Nothing on that path cancels it - showInitScreen()
+    // and openFurniture() do not, and resyncView() clears solids, outlines
+    // and the plane indicator but not this gesture's own objects - so the
+    // self-cancel below found the environment still valid, kept the ids it
+    // captured, and openFurniture()'s fitAll() redrew the old plane over a
+    // DIFFERENT furniture. DocumentModel::myNextId restarts at 1 for every
+    // fresh document, so those stale ids resolve to real, unrelated bodies:
+    // Enter would have paired bodies the user never selected, through a
+    // plane computed from a document that is no longer open. With the term
+    // here, refreshMirrorPlacement()'s existing self-cancel discipline kills
+    // the gesture on the handoff itself, with no second mechanism to keep in
+    // step.
+    if (myShowingInitScreen || isCompareOpen()) return false;
     // Body mode explicitly - selectedSolidIds() reports the owning body of a
     // selected FACE too, so without this the gesture could stand next to a
     // face selection and collide with the pull arrow's own drag. The same
@@ -5067,8 +5165,9 @@ void MainWindow::refreshMirrorPlacement()
     // from here would re-enter the very emission this slot is already
     // inside. myView->cancelMirrorPlacement() alone is the view-side
     // teardown with no such call; the chip's own refresh() is connected to
-    // the SAME signal, constructed (and therefore connected) after this
-    // slot, so Qt's own connection-order guarantee is what lets it observe
+    // the SAME signal from inside buildOverlay(), which the constructor now
+    // genuinely runs AFTER this connection is made (see the connect site),
+    // so Qt's own connection-order guarantee is what lets the chip observe
     // mirrorPlacementActive() already false within this one emission.
     if (myView->mirrorPlacementActive() && !mirrorPlacementEnvironmentOk())
         myView->cancelMirrorPlacement();
@@ -5090,6 +5189,9 @@ QString MainWindow::mirrorPlacementRefusalText() const
         return tr("Unavailable while an outline is waiting — press E to extrude it, "
                   "or Delete to discard it");
     if (myRenderModeOn) return tr("Unavailable in render mode — exit it first");
+    if (myShowingInitScreen) return tr("Open a furniture first");
+    if (isCompareOpen())
+        return tr("Unavailable while comparing versions — close the compare pane first");
     if (myView->selectionMode() != OcctViewWidget::SelectionMode::Solid)
         return tr("Switch to body selection, then select one or more bodies to mirror");
     return tr("Select one or more bodies to mirror");
@@ -5102,30 +5204,21 @@ void MainWindow::onSymmetryActionTriggered()
     // 1's Finding 3 for this specific case: a fixed "Select one or more
     // bodies" message was actively WRONG here (bodies are in fact selected;
     // the real obstacle is the gesture itself), and cancelling needs no
-    // message to be accurate. Checked first, before reading
-    // document().symmetryOn() below - a gesture in progress has not yet
-    // turned that on, so the two checks could not be reordered without this
-    // one falling through to the "begin" branch and immediately refusing on
+    // message to be accurate. Checked first, or it would fall through to
+    // the "begin" branch and immediately refuse on
     // canBeginMirrorPlacement()'s own "already active" guard.
     if (myView->mirrorPlacementActive()) {
         cancelMirrorPlacement();
         return;
     }
 
-    // Reads document().symmetryOn() as it stood BEFORE this click - Qt has
-    // already flipped mySymmetryAction's own isChecked() by the time
-    // triggered() fires (that is what "checkable" means), but nothing about
-    // the DOCUMENT has, so branching on the action's own new checked state
-    // here would be branching on Qt's optimism rather than reality.
-    if (myDocument.symmetryOn()) {
-        // The old toggle-off semantics, kept reachable through this same
-        // Model-menu entry exactly as CLAUDE.md's Task 3.2 ruling requires -
-        // see DocumentModel::setSymmetry() for why turning off unpairs
-        // everything with no checkpoint of its own.
-        setSymmetryEnabled(false);
-        return;
-    }
-
+    // No symmetryOn() branch any more. S means "begin a placement",
+    // whether or not mirroring is already on: pairWithMirror() skips a body
+    // that already carries a twin and says so in its own toast, so a second
+    // placement over live mirroring pairs the bodies that are NOT yet
+    // paired - which is the only way to add bodies to an existing mirror
+    // and the ledger's own parked gap. Turning mirroring off is
+    // mySymmetryOffAction's job alone (see buildActions()).
     if (!canBeginMirrorPlacement()) {
         const QString reason = mirrorPlacementRefusalText();
         statusBar()->showMessage(reason);

@@ -206,6 +206,19 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
         emit metalChanged(v / 100.0);
     });
 
+    // The muted note under those two rows - shown only while the active
+    // tier does not read them (see setMaterialRowsApply()). Word-wrapped
+    // rather than elided: the card's width is fixed, and a truncated
+    // explanation explains nothing. Built here, hidden, so nothing about
+    // its existence depends on which tier the session happens to probe
+    // into.
+    myMaterialNote = new QLabel(
+        tr("Surface and Metal apply in the deepest render tier"), this);
+    myMaterialNote->setObjectName(QStringLiteral("renderSettingsMaterialNote"));
+    myMaterialNote->setWordWrap(true);
+    myMaterialNote->hide();
+    outer->addWidget(myMaterialNote);
+
     addRule();
 
     // --- section 2: Light angle, Light strength -------------------------
@@ -368,7 +381,23 @@ QStringList RenderSettingsPanel::paintedTexts() const
     QStringList texts;
     if (myTitle) texts << myTitle->text();
     for (QLabel* label : myRowLabels) texts << label->text();
+    // Reported whether or not it is currently shown - see the header.
+    if (myMaterialNote) texts << myMaterialNote->text();
     return texts;
+}
+
+QWidget* RenderSettingsPanel::materialNoteRow() const
+{
+    return myMaterialNote;
+}
+
+void RenderSettingsPanel::setMaterialRowsApply(bool apply)
+{
+    myMaterialRowsApply = apply;
+    // Derived, never a one-shot: this is called on every appStateChanged,
+    // so the note's visibility follows the tier rather than remembering
+    // whatever it was told once.
+    if (myMaterialNote) myMaterialNote->setVisible(!apply);
 }
 
 void RenderSettingsPanel::applyTheme()
@@ -384,6 +413,15 @@ void RenderSettingsPanel::applyTheme()
                                             "font-size: %2pt;")
                                  .arg(Theme::text().name())
                                  .arg(Theme::labelFont().pointSizeF()));
+    }
+    // Muted, and at the badge size - the smallest step on Theme's own type
+    // scale, which is where a footnote belongs and what gui_smoke's
+    // font-size sweep expects to find.
+    if (myMaterialNote) {
+        myMaterialNote->setStyleSheet(QStringLiteral("background: transparent; color: %1; "
+                                                     "font-size: %2pt;")
+                                          .arg(Theme::textMuted().name())
+                                          .arg(Theme::badgeFont().pointSizeF()));
     }
     update();
 }

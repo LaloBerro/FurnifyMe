@@ -576,6 +576,16 @@ public:
     // sees - its own labelText()/hintText() call straight through to these.
     static QString mirrorPlacementLabelText();
     static QString mirrorPlacementHintText();
+    // The live chip WIDGET, for gui_smoke's application-wide-claim count.
+    // The chip installs its filter on show and removes it on hide (its own
+    // showEvent()/hideEvent()), so this widget's isVisible() IS the
+    // installed-filter state - which is the whole reason the suite must
+    // read it rather than OcctViewWidget::mirrorPlacementActive(). A
+    // visible chip over an inactive gesture is a live Enter/Escape/X/Y/Z
+    // claim, and counting the state flag instead reported ZERO claims for
+    // exactly that case: CLAUDE.md's "assert isVisible(), or a stub that
+    // never calls show() sails through", applied backwards.
+    QWidget* mirrorPlacementChip() const { return myMirrorChip; }
 
     // --- Render mode (Milestone 3, item 5) ----------------------------------
     //
@@ -905,7 +915,11 @@ private:
     // taken two lines up (it takes none of its own - see its header), and
     // this redisplays each one; `linkedOthersUpdated` reports how many, 0
     // when `id` has no group, so a caller's toast can name the group size
-    // exactly as `twinFollowed` already lets it say "twin followed".
+    // exactly as `twinFollowed` already lets it say "twin followed". It is
+    // -1 - never a count - when propagateLinkedEdit() REFUSED, having
+    // written nothing; linkedGroupSuffix() turns that into a sentence
+    // saying the copies did not follow, because a group's membership count
+    // is not evidence that anything was written to it (M1).
     void commitReplaceBody(int id, const TopoDS_Shape& newShape, bool& twinFollowed,
                            int& linkedOthersUpdated);
 
@@ -1123,6 +1137,10 @@ private:
     // at its height floor and a fourteenth chip is the rework CLAUDE.md
     // already says it wants before it gets there.
     QAction* mySymmetryAction = nullptr;
+    // "Turn Mirroring Off" - the destructive unpair-everything half, split
+    // out of mySymmetryAction when S was re-scoped to always begin a
+    // placement (see buildActions()). Menu-only, no shortcut.
+    QAction* mySymmetryOffAction = nullptr;
     QAction* mySetSymmetryPlaneAction = nullptr;
     // Linked copies (Milestone 4, Task 4.2) - menu-only for the same reason:
     // the rail stays at thirteen tools.
