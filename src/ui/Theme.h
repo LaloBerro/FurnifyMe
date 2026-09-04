@@ -13,6 +13,7 @@
 
 class QApplication;
 class QPainter;
+class QWidget;
 
 namespace Theme {
 
@@ -386,6 +387,50 @@ int snapToDevicePixels(int value, int offsetToWindow, double devicePixelRatio);
 // room for. A widget's painted card and its widget rect are therefore the
 // same rectangle.
 int surfaceShadowMargin();   // 0
+
+// Clips `w` to the same rounded rect (or, at radiusPx == half the widget's
+// shorter side, a circle) its own paintEvent() paints its card with -
+// Milestone 5 item 2's fix for the floating family's square corners.
+//
+// paintSurface()'s `ground` fill covers the corners a rounded panel does not
+// reach with an opaque colour so they read as flat viewport()/chrome() grey
+// instead of the GL driver's black - a paint-something answer. A window
+// MASK is the other lawful answer "One opaque paint family" leaves open: it
+// does not paint a translucent pixel over OCCT's surface, it simply never
+// paints THOSE pixels at all, so there is nothing there for the driver's
+// leftover content to show through. Every member of the floating family
+// still needs the `ground` fill underneath its own mask - the two are not
+// alternatives, because a resize between paintEvent() and the next
+// applied mask (or a mask this function's own caller has not been taught
+// about) would otherwise bare the old black corners for one frame - but the
+// mask is what actually stops the corner from being SQUARE, which the fill
+// alone never did.
+//
+// Installs a small QObject (parented to `w`, torn down with it) that applies
+// a QRegion built from QPainterPath::addRoundedRect(w->rect(), radiusPx,
+// radiusPx) immediately, and again on every QEvent::Resize `w` receives, so
+// a card that grows or shrinks after construction (the drawer's row count,
+// a value chip whose text changed width, ExtrudePreview's field re-measured
+// at a new base size) keeps a mask that matches its current rect rather than
+// the one it had when this was called. The rect and radius are exactly the
+// ones the caller's own paintEvent() passes to paintSurface() (or, for the
+// circular shutter, the same rect at radius = side/2) - read from that
+// file's own kRadius, never guessed here, so a mask can never drift from the
+// card it is meant to trace.
+//
+// A mask clips INPUT along with paint: Qt never delivers a mouse event to a
+// masked-out pixel, so a press on the cut corner falls straight through to
+// whatever is underneath - ordinarily the viewport itself. That is the
+// desired behaviour, not a side effect to work around: nothing this app
+// paints puts an interactive control in a card's own cut corner. Two
+// widgets named in the same review as candidates for this - Toast's
+// UndoControl and WalkthroughPanel's SkipControl - paint nothing of their
+// own at all (WA_TranslucentBackground siblings that exist purely as a
+// hit-target over a pill the OTHER widget paints) and are deliberately left
+// unmasked: there is no card on them to round, and masking a hit-target
+// widget smaller than its own clickable pill would shrink what the user can
+// press for no visual gain.
+void installCardMask(QWidget* w, int radiusPx);
 
 // Installs the palette, the bundled font and the stylesheet. Call once, before
 // any window is built.

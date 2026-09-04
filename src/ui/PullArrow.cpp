@@ -302,6 +302,11 @@ PullArrow::PullArrow(MainWindow* window, OcctViewWidget* view)
         connect(myView, &OcctViewWidget::pullDragged, this, &PullArrow::onDragged);
         connect(myView, &OcctViewWidget::pullReleased, this, &PullArrow::onReleased);
     }
+
+    // Milestone 5 item 2: this card's own corners over the GL surface, at
+    // the same radius paintEvent() paints its card with. myField is NOT
+    // masked - see markInvalid()'s own comment: border-radius 0, deliberately.
+    Theme::installCardMask(this, 8);
 }
 
 PullArrow::~PullArrow()

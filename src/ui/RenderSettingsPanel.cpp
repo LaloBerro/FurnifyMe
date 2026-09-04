@@ -265,6 +265,13 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
     applyTheme();
     connect(Theme::notifier(), &Theme::Notifier::changed, this,
             &RenderSettingsPanel::applyTheme);
+
+    // Milestone 5 item 2: this card's own corners over the GL surface, at
+    // the same kRadius paintEvent() paints its card with. Only the width is
+    // fixed above - the layout settles the height - so the mask's initial
+    // apply() may be against a not-yet-final rect; Theme::installCardMask()'s
+    // resize hook catches the layout's own resize once it runs.
+    Theme::installCardMask(this, kRadius);
 }
 
 void RenderSettingsPanel::setSurfaceGlossiness(double glossiness01)
@@ -469,6 +476,13 @@ RenderShutterButton::RenderShutterButton(QAction* action, QWidget* parent)
         connect(myAction, &QAction::changed, this, &RenderShutterButton::syncFromAction);
         syncFromAction();
     }
+
+    // Milestone 5 item 2: the user's own "dark square patch over the light
+    // render backdrop" report - this is the shutter. Radius = half the
+    // fixed side, exactly what paintEvent() computes for its own disc
+    // (`body.width() / 2.0`), which is what turns the family's rounded-rect
+    // mask into a full circle rather than a small corner cut.
+    Theme::installCardMask(this, kShutterSide / 2);
 }
 
 void RenderShutterButton::syncFromAction()

@@ -154,6 +154,12 @@ VersionsPanel::VersionsPanel(MainWindow* window, OcctViewWidget* view, QWidget* 
     // so nothing further is needed here on first build.
     refresh();
     connect(Theme::notifier(), &Theme::Notifier::changed, this, &VersionsPanel::applyTheme);
+
+    // Milestone 5 item 2: this drawer's own corners over the GL surface, at
+    // the same kRadius its paintEvent() paints with - NOT kCardRadius, which
+    // belongs to VersionCardWidget, a child of this panel rather than of the
+    // viewport, and already fine (see that class's own comment).
+    Theme::installCardMask(this, kRadius);
 }
 
 int VersionsPanel::cardWidth()

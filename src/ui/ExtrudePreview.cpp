@@ -87,6 +87,13 @@ ExtrudePreview::ExtrudePreview(MainWindow* window, OcctViewWidget* view)
     // must not be trusted to remember to call cancel() individually.
     if (myWindow) connect(myWindow, &MainWindow::appStateChanged, this,
                           &ExtrudePreview::onAppStateChanged);
+
+    // Milestone 5 item 2: this card's own corners over the GL surface, at
+    // the same radius paintEvent() paints its card with. myField is NOT
+    // masked - see markInvalid()'s own comment: it is deliberately painted
+    // with border-radius 0 for exactly this reason, so there is no rounded
+    // shape on it to trace.
+    Theme::installCardMask(this, 8);
 }
 
 ExtrudePreview::~ExtrudePreview()

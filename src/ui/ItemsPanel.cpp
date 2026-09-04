@@ -77,6 +77,11 @@ ItemsPanel::ItemsPanel(DocumentModel* document, OcctViewWidget* view, QWidget* p
     refresh();
     applyTheme();
     connect(Theme::notifier(), &Theme::Notifier::changed, this, &ItemsPanel::applyTheme);
+
+    // Milestone 5 item 2: this drawer's own corners over the GL surface -
+    // the same kRadius paintEvent() paints its card with, tracked through
+    // every row add/remove the layout resizes this widget for.
+    Theme::installCardMask(this, kRadius);
 }
 
 int ItemsPanel::cardWidth()

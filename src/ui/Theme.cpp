@@ -1,12 +1,15 @@
 #include "Theme.h"
 
 #include <QApplication>
+#include <QEvent>
 #include <QFont>
 #include <QFontDatabase>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPalette>
+#include <QRegion>
 #include <QStringList>
+#include <QWidget>
 
 #include <cmath>
 #include <utility>
@@ -535,6 +538,64 @@ int snapToDevicePixels(int value, int offsetToWindow, double devicePixelRatio)
     const int inWindow = value + offsetToWindow;
     const int remainder = ((inWindow % step) + step) % step;   // never negative
     return inWindow - remainder - offsetToWindow;
+}
+
+namespace {
+
+// The event-filter half of installCardMask() below - torn down with the
+// widget it masks because it is a QObject child of it, never stored or
+// named by any caller.
+class CardMask : public QObject {
+public:
+    CardMask(QWidget* w, int radius) : QObject(w), myWidget(w), myRadius(radius)
+    {
+        apply();
+        // Installed AFTER the first apply() rather than instead of it - a
+        // widget already sized when this is called (every caller applies it
+        // once its own applyTheme()/setFixedSize() has run) must not wait
+        // for a resize that may never come before its first paint.
+        myWidget->installEventFilter(this);
+    }
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        if (watched == myWidget && event->type() == QEvent::Resize) apply();
+        // Never consumed - a mask is an side effect of observing the resize,
+        // not a reason to stop the event reaching the widget's own
+        // resizeEvent() or anyone else's filter on it.
+        return false;
+    }
+
+private:
+    void apply()
+    {
+        // The exact rect and radius the widget's own paintEvent() paints its
+        // card with - see the header for why that agreement matters. A
+        // QPainterPath's rounded-rect arcs are tessellated to a polygon
+        // before QRegion can rasterise them, which is the standard shape of
+        // a window mask (always an integer-pixel region, never
+        // antialiased) - the antialiasing the card's OWN paintEvent() still
+        // applies is what makes its border read as smooth; the mask only
+        // decides which of those already-smooth pixels are shown.
+        QPainterPath path;
+        path.addRoundedRect(myWidget->rect(), myRadius, myRadius);
+        myWidget->setMask(QRegion(path.toFillPolygon().toPolygon()));
+    }
+
+    QWidget* myWidget;
+    int myRadius;
+};
+
+}  // namespace
+
+void installCardMask(QWidget* w, int radiusPx)
+{
+    if (!w) return;
+    // Parented to `w` via the QObject constructor above, so it lives and
+    // dies with the widget it masks - no pointer for this function to
+    // return or its caller to manage.
+    new CardMask(w, radiusPx);
 }
 
 void apply(QApplication& app)

@@ -82,6 +82,15 @@ Toast::Toast(QWidget* parent)
     myUndo = new UndoControl([this] { emit undoClicked(); }, parent);
     myUndo->hide();
     hide();
+
+    // Milestone 5 item 2: this card's own corners over the GL surface, at
+    // the same radius paintEvent() paints its card with. myUndo is NOT
+    // masked - see UndoControl's own class comment: it paints nothing of its
+    // own, so there is no card on it to round, and its 160ms dismiss fade
+    // (Toast::paintEvent()'s ruled opacity exception) is unaffected either
+    // way - a mask clips WHICH pixels show, never how opaque the ones inside
+    // it are.
+    Theme::installCardMask(this, 8);
 }
 
 Toast::~Toast()

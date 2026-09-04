@@ -183,6 +183,12 @@ public:
         applyTheme();
         connect(Theme::notifier(), &Theme::Notifier::changed, this,
                 [this] { applyTheme(); });
+
+        // Milestone 5 item 2: this badge's own corners over the compare
+        // pane's own GL surface (myCompareView, not myView - a second,
+        // read-only OcctViewWidget, but the same law applies to it), at the
+        // same radius paintEvent() below paints its card with.
+        Theme::installCardMask(this, 8);
     }
 
     // The version's name is USER TEXT - painted here raw and unmangled
@@ -329,6 +335,11 @@ public:
             connect(myView, &OcctViewWidget::mirrorPlaneDragged, this,
                     [this](double) { onPlaneChanged(); });
         }
+
+        // Milestone 5 item 2: this chip's own corners over the GL surface,
+        // at the same radius paintEvent() paints its card with. applySize()
+        // above has already settled this widget's size.
+        Theme::installCardMask(this, 8);
     }
 
     // THE predicate's own mirror, in one place, used to show and to hide -

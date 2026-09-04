@@ -57,6 +57,12 @@ HintBalloon::HintBalloon(MainWindow* window, QWidget* parent)
     // MainWindow drives reposition() from ViewportOverlay::laidOut()
     // instead, which is by construction after every anchored widget is at
     // its final rectangle. See that signal's comment.
+
+    // Milestone 5 item 2: this card's own corners over the GL surface, at
+    // the same radius paintEvent() paints its card with (see the literal
+    // there). Installed before this widget is ever sized - the mask keeps
+    // tracking it through every resize() call reposition() below makes.
+    Theme::installCardMask(this, 8);
 }
 
 bool HintBalloon::conditionHolds(const QString& event) const

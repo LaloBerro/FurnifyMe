@@ -386,6 +386,12 @@ AppearancePanel::AppearancePanel(QWidget* parent)
     applyTheme();
     connect(Theme::notifier(), &Theme::Notifier::changed, this,
             &AppearancePanel::applyTheme);
+
+    // Milestone 5 item 2: this card's own corners over the GL surface, at
+    // the same kRadius its paintEvent() paints with. setFixedSize() above
+    // already settled this widget's size, so the mask is correct from its
+    // very first paint.
+    Theme::installCardMask(this, kRadius);
 }
 
 void AppearancePanel::applyTheme()

@@ -36,6 +36,13 @@ constexpr double kConeSize = 9.0;     // positive-tip cone
 constexpr double kBallSize = 5.5;     // negative-tip hollow ball
 constexpr double kHitRadius = 11.0;   // click tolerance around a tip
 
+// The card's OWN corner radius - paintEvent() below calls
+// Theme::paintSurface(painter, rect()) with no third argument, so this is
+// that default (see Theme.h). Named apart from kRadius above, which is the
+// arm length in pixels and an unrelated number that happens to share the
+// family default's old value.
+constexpr int kCardRadius = 8;
+
 // The widget's own centre. It used to be the centre of the area ABOVE the
 // label chip, which needed the chip's height repeated here; with the chip gone
 // the axes have the whole widget, so this reads the height rather than keeping
@@ -65,6 +72,11 @@ AxisGizmo::AxisGizmo(OcctViewWidget* view, QWidget* parent)
     // Repaint whenever the camera moves, so the gizmo rotates with the scene.
     connect(myView, &OcctViewWidget::cameraChanged, this,
             static_cast<void (QWidget::*)()>(&QWidget::update));
+
+    // Milestone 5 item 2: this card's own corners over the GL surface, at
+    // the same default radius paintEvent()'s bare paintSurface() call uses.
+    // applyTheme() above has already set the fixed size.
+    Theme::installCardMask(this, kCardRadius);
 }
 
 void AxisGizmo::applyTheme()

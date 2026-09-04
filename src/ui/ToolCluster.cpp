@@ -89,6 +89,15 @@ ToolCluster::ToolCluster(QWidget* parent)
     myLayout->setContentsMargins(kCardPad, kCardPad, kCardPad, kCardPad);
     myLayout->setSpacing(kPaintedGap);
     myLayout->setSizeConstraint(QLayout::SetFixedSize);
+
+    // Milestone 5 item 2: this card's own corners, over the GL surface the
+    // rail floats on - the fill above already reads flat viewport() grey
+    // there, but a mask is what actually stops the corner being SQUARE. The
+    // layout has added nothing yet, so this starts at whatever size an empty
+    // QVBoxLayout gives a QWidget and tracks every resize the first chip -
+    // and every one after it - triggers, through Theme::installCardMask()'s
+    // own resize hook.
+    Theme::installCardMask(this, kCardRadius);
 }
 
 void ToolCluster::paintEvent(QPaintEvent* /*event*/)

@@ -27,6 +27,10 @@ constexpr int kBottomPad = 14;   // breathing room below the last step
 // skipRect()'s own width - shared with sizeHint() below so the title row's
 // reserved space for the pill can never disagree with the pill itself.
 constexpr int kSkipWidth = 34;
+// paintEvent()'s own radius argument to Theme::paintSurface() - named here
+// so Theme::installCardMask() below can share it rather than repeating the
+// literal.
+constexpr int kCardRadius = 10;
 
 // The one interactive spot on an otherwise click-through overlay.
 //
@@ -132,6 +136,11 @@ WalkthroughPanel::WalkthroughPanel(MainWindow* window, QWidget* parent)
     connect(myWindow, &MainWindow::appStateChanged, this, &WalkthroughPanel::refresh);
     connect(Theme::notifier(), &Theme::Notifier::changed, this, &WalkthroughPanel::applyTheme);
     refresh();
+
+    // Milestone 5 item 2: this card's own corners over the GL surface, at
+    // the same radius paintEvent() paints its card with. setFixedSize()
+    // above has already settled this widget's size.
+    Theme::installCardMask(this, kCardRadius);
 }
 
 void WalkthroughPanel::applyTheme()
@@ -426,7 +435,7 @@ void WalkthroughPanel::paintEvent(QPaintEvent* /*event*/)
     // skipRect() for the sibling that also has to agree on where it landed.
     const int margin = Theme::surfaceShadowMargin();
     const QRect body = rect().adjusted(margin, margin, -margin, -margin);
-    Theme::paintSurface(painter, body, 10);
+    Theme::paintSurface(painter, body, kCardRadius);
 
     // The guide keeps its own accent() outline, unconditionally, over the
     // family's plain border() paintSurface() just drew - the mockup's one
