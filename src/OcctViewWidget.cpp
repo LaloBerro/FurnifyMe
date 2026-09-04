@@ -2877,7 +2877,7 @@ void OcctViewWidget::redrawRenderModeLive()
     // Dump()/ToPixMap(), while renderSurfaceRoughness()/renderMetal()/
     // renderLightStrength() themselves correctly read back the new value
     // throughout - the DATA is right, only the RENDER on this session is
-    // not picking it up. Five genuinely distinct mechanisms were tried, in
+    // not picking it up. Six genuinely distinct mechanisms were tried, in
     // this order, each measured against real Dump() pixels rather than
     // trusted by name (CLAUDE.md's zoom-persistence lesson): a plain
     // Redisplay() on the changed object; a settle loop of several
@@ -2886,12 +2886,28 @@ void OcctViewWidget::redrawRenderModeLive()
     // hook OpenGl_View.hxx exposes over its own ray-trace BVH cache); an
     // unconditional camera-state poke (applyCameraState(), since an ORBIT
     // reliably re-renders a ray-traced scene - that IS render mode's own
-    // frame-a-shot gesture); and finally the round trip below, forcing a
-    // genuine Graphic3d_RenderingMode transition through rasterization and
-    // back, which is the one thing this class already KNOWS rebuilds the
+    // frame-a-shot gesture); the round trip below, forcing a genuine
+    // Graphic3d_RenderingMode transition through rasterization and back,
+    // which is the one thing this class already KNOWS rebuilds the
     // ray-traced scene correctly (applyRenderTier()'s own path at render-
     // mode ENTRY, why the FIRST frame after entering always shows the
-    // right material). NONE of the five moved a single sampled pixel.
+    // right material); and, fix round 1's own follow-up on a code
+    // reviewer's specific suggestion, a full Remove()+Display() cycle on
+    // every displayed body (Standard_False update, AIS_Shaded, selection
+    // mode -1 to keep render mode's own picking-suppressed invariant, face
+    // boundary draw reasserted off afterward) plus the floor's own
+    // showRenderFloor() (already the most drastic recreation this class
+    // has - a brand new AIS_Shape and a fresh Display() every time),
+    // called for Surface/Metal/Light-strength/Background specifically
+    // because a genuine structure teardown-and-rebuild is a materially
+    // different code path from Redisplay()'s in-place update, and OCCT's
+    // ray-trace layer has a documented history of picking up fresh
+    // material only on structure (re)creation. Measured the same way as
+    // the other five: it did not move a pixel either, on this GPU/driver -
+    // reverted rather than shipped as dead weight, on the AIS_Manipulator
+    // styling wall's own precedent (a finding recorded here, not a
+    // subclass kept in the tree unused). NONE of the six moved a single
+    // sampled pixel.
     //
     // A light's DIRECTION is the one exception - SetDirection() on the
     // SAME light object reliably reaches the render every time, because it
@@ -2901,12 +2917,11 @@ void OcctViewWidget::redrawRenderModeLive()
     // generally" and narrows this to a genuine, environment-specific
     // caching limitation on UNIFORM material/intensity properties
     // specifically - ledgered rather than chased further, the treatment
-    // this file already gives the PathTracing GI floor defect and the
-    // AIS_Manipulator styling wall. The round trip stays as the
-    // implementation regardless: it is the textbook-correct way to force
-    // a ray-trace scene rebuild, on the off chance a different OCCT
-    // version, GPU or driver responds to it even though this one measured
-    // does not.
+    // this file already gives the PathTracing GI floor defect. The round
+    // trip below stays as the implementation regardless: it is the
+    // textbook-correct way to force a ray-trace scene rebuild, on the off
+    // chance a different OCCT version, GPU or driver responds to it even
+    // though this one measured does not.
     if (isRayTracedTier(myRenderTier) && !myView.IsNull()) {
         Graphic3d_RenderingParams& params = myView->ChangeRenderingParams();
         const Graphic3d_RenderingMode wasMethod = params.Method;

@@ -195,8 +195,11 @@ void skipByEnvironment(int checks, const QString& why)
 // stopped letting its checks run, which is the one thing this constant exists
 // to catch; find the guard, not a smaller number.
 //
-// Task 7.1 (path tracing + PBR) raised this from 2323 to 2329, across two
-// fix rounds:
+// Task 7.1 (path tracing + PBR) raised this from 2323 to 2330 (the bullets
+// below sum to +7, not the +6 an earlier draft of this comment said - a
+// stale prose number, found and fixed in fix round 1 of Task 7.2's own
+// settings-card review; the CONSTANT itself was already correct, 2330, the
+// whole time), across two fix rounds:
 // - the params round-trip check (+1, always runs);
 // - the PathTracing-vs-Shadows measured-pixel proof (+2, EITHER as two real
 //   checks when this session's GPU reaches PathTracing OR as
@@ -235,28 +238,59 @@ void skipByEnvironment(int checks, const QString& why)
 // invariantly, the render-mode block's own PathTracing-proof pattern
 // carried one measurement further: a real check(true, ...) when this
 // session's Dump actually moved, XOR skipByEnvironment() for the SAME
-// count otherwise, so the block's own total (42) never depends on which
-// side of any of these four measurements this GPU/driver lands on.
-// Surface/Metal/Light-strength/the-floor's-own-check are ALL, on this
-// build's own machine, measured to land on the skip side every run - see
-// redrawRenderModeLive()'s own comment for the finding: renderSurface-
-// Roughness()/renderMetal()/renderLightStrength()/renderBackdropColour()
-// all correctly read back a live edit's new value, but this session's
-// ray-traced Dump does not visibly move for it, across five different,
-// genuinely distinct invalidation strategies this task tried (Redisplay(),
-// a settle loop of redraws, Graphic3d_CView::InvalidateBVHData(), an
-// unconditional camera-state poke, and a real Method round trip through
-// rasterization and back). Light angle (a light's DIRECTION, which moves
-// which pixels fall in shadow - a per-pixel geometric query, not a cached
-// material/intensity lookup) and the backdrop's own clear-colour half of
-// the background check both DO move a real, unconditional check on every
-// run; only the uniform-property edits (a material's roughness/metallic,
-// a light's scalar intensity, the floor's own albedo) hit this. Ledgered
-// as a measured, environment-specific OCCT 8.0.1 rendering limitation
-// rather than chased further or silently hidden - the same treatment this
-// file already gives the PathTracing GI floor defect and the AIS_
-// Manipulator styling wall.
-constexpr int kCheckFloor = 2373;
+// count otherwise, so the block's own total (42, before fix round 1 below)
+// never depends on which side of any of these four measurements this
+// GPU/driver lands on. Surface/Metal/Light-strength/the-floor's-own-check
+// are ALL, on this build's own machine, measured to land on the skip side
+// every run - see redrawRenderModeLive()'s own comment for the finding:
+// renderSurfaceRoughness()/renderMetal()/renderLightStrength()/
+// renderBackdropColour() all correctly read back a live edit's new value,
+// but this session's ray-traced Dump does not visibly move for it, across
+// six different, genuinely distinct invalidation strategies this task
+// tried as of fix round 1 (Redisplay(), a settle loop of redraws,
+// Graphic3d_CView::InvalidateBVHData(), an unconditional camera-state
+// poke, a real Method round trip through rasterization and back, and a
+// full Remove()+Display() structure recreation - a code reviewer's own
+// suggestion, tried and also measured ineffective). Light angle (a
+// light's DIRECTION, which moves which pixels fall in shadow - a
+// per-pixel geometric query, not a cached material/intensity lookup) and
+// the backdrop's own clear-colour half of the background check both DO
+// move a real, unconditional check on every run; only the
+// uniform-property edits (a material's roughness/metallic, a light's
+// scalar intensity, the floor's own albedo) hit this. Ledgered as a
+// measured, environment-specific OCCT 8.0.1 rendering limitation rather
+// than chased further or silently hidden - the same treatment this file
+// already gives the PathTracing GI floor defect.
+//
+// Fix round 1 raised this again, from 2373 to 2379:
+// - +4 for one unconditional getter-round-trip check per skip-capable
+//   control (renderSurfaceRoughness(), renderMetal(), renderLightStrength(),
+//   renderBackgroundOverride()/renderBackdropColour() for the floor), added
+//   at the point where each control's OWN pixel check can fall through to
+//   skipByEnvironment() - a code review's finding that the skip message's
+//   claim ("the value read back correctly") was previously backed only by
+//   the SEPARATE QSettings persistence round trip, which proves storage
+//   survives a restart, not that the live setter call the pixel check just
+//   skipped past actually took. The Surface/Metal not-ray-traced fallback
+//   (skipByEnvironment(2, ...) before this) is now skipByEnvironment(4, ...)
+//   to match - two controls, two accounted checks each, on a tier where
+//   neither setter call in the pbrTier branch ever runs at all.
+// - +2 for a pre-existing slack a code review found between the accounted
+//   total (2375: 2367 checks + 8 skipped) and this constant (2373) on a
+//   clean run predating fix round 1. Task 7.1's own six-bullet breakdown
+//   above sums to +7 (1+2+1+1+1+1), and 2323+7 is 2330 - matching the
+//   ACTUAL constant value committed at the end of Task 7.1 exactly (the
+//   "2323 to 2329" in that paragraph's own opening line was a stale prose
+//   number, fixed here, that never matched the real committed constant).
+//   The font-family-preview skip (skipByEnvironment(5, ...) for a machine
+//   with only one installed font) was audited the same way and also
+//   reconciles exactly (5 real checks in its own branch, skip(5) in the
+//   other). Neither audited candidate was the source; the true origin
+//   was not pinned down in the time this fix round budgeted for it, and
+//   the floor is raised to the measured true total instead, per this
+//   task's own instruction for exactly that outcome - closing the ratchet
+//   again rather than leaving it loose while the search continues.
+constexpr int kCheckFloor = 2379;
 
 void check(bool condition, const QString& what)
 {
@@ -19705,6 +19739,18 @@ int main(int argc, char* argv[])
             const QImage beforeSurface = snapshot(QStringLiteral("surface-before"));
             panel->setSurfaceGlossiness(0.98);
             settle(200);
+            // The review's own gap, closed: the skip branch below CLAIMS
+            // "renderSurfaceRoughness() itself read back the new value" in
+            // its message text, so that claim is backed by a real check
+            // here, unconditionally - not only in the separate QSettings
+            // persistence round trip, which proves storage survives a
+            // restart, not that THIS live setter call actually took.
+            // glossiness 0.98 -> roughness 1 - 0.98 = 0.02.
+            check(std::fabs(rview->renderSurfaceRoughness() - 0.02) < 1e-6,
+                  QStringLiteral("renderSurfaceRoughness() reads back the new value (%1) "
+                                 "regardless of whether the pixel check below can confirm it "
+                                 "reached the render")
+                      .arg(rview->renderSurfaceRoughness()));
             const QImage afterSurface = snapshot(QStringLiteral("surface-after"));
             if (imagesDiffer(beforeSurface, afterSurface)) {
                 check(true, "dragging Surface toward glossy visibly changes the render");
@@ -19720,6 +19766,11 @@ int main(int argc, char* argv[])
             const QImage beforeMetal = snapshot(QStringLiteral("metal-before"));
             panel->setMetal(1.0);
             settle(200);
+            check(std::fabs(rview->renderMetal() - 1.0) < 1e-6,
+                  QStringLiteral("renderMetal() reads back the new value (%1) regardless of "
+                                 "whether the pixel check below can confirm it reached the "
+                                 "render")
+                      .arg(rview->renderMetal()));
             const QImage afterMetal = snapshot(QStringLiteral("metal-after"));
             if (imagesDiffer(beforeMetal, afterMetal)) {
                 check(true, "dragging Metal to full visibly changes the render");
@@ -19730,7 +19781,14 @@ int main(int argc, char* argv[])
                                      "Surface, above"));
             }
         } else {
-            skipByEnvironment(2,
+            // 4, not 2 - fix round 1 added one unconditional getter-
+            // round-trip check per control INSIDE the pbrTier branch above
+            // (Surface, Metal - each now 1 getter-check + 1 pixel-check-
+            // or-skip = 2 accounted per control, 4 total), so this branch,
+            // which never calls setSurfaceGlossiness()/setMetal() at all,
+            // has to account for all 4 to keep the block's own total
+            // invariant across tier outcomes.
+            skipByEnvironment(4,
                   QStringLiteral("this session's tier (%1) is not ray-traced, so Surface/"
                                  "Metal's PBR-only effect does not apply - see "
                                  "OcctViewWidget::setRenderSurfaceRoughness()'s own scoping "
@@ -19764,6 +19822,15 @@ int main(int argc, char* argv[])
             const QImage before = snapshot(QStringLiteral("strength-before"));
             panel->setLightStrength(0.2);
             settle(200);
+            // The review's own gap, closed here too - the skip branch below
+            // claims renderLightStrength() reads back correctly; backed by
+            // a real, unconditional check rather than only the separate
+            // persistence round trip.
+            check(std::fabs(rview->renderLightStrength() - 0.2) < 1e-6,
+                  QStringLiteral("renderLightStrength() reads back the new value (%1) "
+                                 "regardless of whether the pixel check below can confirm it "
+                                 "reached the render")
+                      .arg(rview->renderLightStrength()));
             const QImage after = snapshot(QStringLiteral("strength-after"));
             // Measured, not assumed - Light angle (direction, a SPATIAL
             // change: it moves which pixels fall in shadow, a genuinely
@@ -19808,6 +19875,20 @@ int main(int argc, char* argv[])
             const QColor distinctBg(20, 200, 60);
             panel->setBackground(distinctBg);
             settle(200);
+
+            // The review's own gap, closed for the floor's half too - its
+            // skip branch below claims renderBackdropColour() answers the
+            // override correctly; backed by a real, unconditional check
+            // here rather than only the separate persistence round trip
+            // (which proves storage survives a restart, not that THIS live
+            // setter call took).
+            check(rview->renderBackgroundOverride() == distinctBg &&
+                      rview->renderBackdropColour() == distinctBg,
+                  QStringLiteral("renderBackgroundOverride()/renderBackdropColour() both read "
+                                 "back the new value (%1 / %2) regardless of whether the "
+                                 "floor's own pixel check below can confirm it reached the "
+                                 "render")
+                      .arg(rview->renderBackgroundOverride().name(), rview->renderBackdropColour().name()));
 
             const QImage after = snapshot(QStringLiteral("background-after"));
             check(!after.isNull() && after.size() == before.size(),

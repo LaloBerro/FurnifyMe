@@ -22,11 +22,17 @@ namespace {
 // wears the same family, so a different width or radius between immediate
 // neighbours would read as a mistake. Narrower than the 296 Appearance
 // needs (that card carries a scrolling list of colour tokens; this one is
-// six fixed rows), but still a multiple of 4 - Theme::wholeDevicePixels()'s
-// own rule for a size that must land whole at every quarter Windows scale -
-// so ViewportOverlay::relayout()'s later resize() to a rounded size can
-// never need to WIDEN this fixed width past what setFixedWidth() already
-// clamped it to.
+// six fixed rows). Routed through Theme::wholeDevicePixels() at the
+// setFixedWidth() call site below, AppearancePanel's own idiom for a card
+// that pins its own size - ViewportOverlay::relayout()'s generic
+// resize(Theme::wholeDevicePixels(placed->size())) is a documented no-op on
+// a fixed dimension, so a caller that pins one has to do the rounding
+// itself. 260 already lands on a whole device pixel at every quarter
+// Windows scale (it is a multiple of 4, wholeDevicePixels()'s own rounding
+// step), so this call is a no-op today - but reading the value through the
+// function rather than trusting that arithmetic by eye is what keeps a
+// future editor from copying the LITERAL instead of the PATTERN and
+// shipping a width that is not.
 constexpr int kWidth = 260;
 constexpr int kRadius = 10;
 constexpr int kPad = 12;
@@ -131,7 +137,7 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
     // never exit render mode.
     setAttribute(Qt::WA_NoSystemBackground);
     setAttribute(Qt::WA_NoMousePropagation);
-    setFixedWidth(kWidth);
+    setFixedWidth(Theme::wholeDevicePixels(kWidth));
 
     auto* outer = new QVBoxLayout(this);
     outer->setContentsMargins(kPad, kPad, kPad, kPad);

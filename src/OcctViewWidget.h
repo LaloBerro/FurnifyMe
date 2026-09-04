@@ -1291,17 +1291,17 @@ private:
     // when myRenderSavedLights is empty (render mode is off).
     void applyRenderLightAngleAndStrength();
     // The redraw every live render-settings setter needs after mutating a
-    // material or a light property on an ALREADY-DISPLAYED object -
-    // measured, not assumed: a single myView->Redraw() reliably picked up
-    // a light's changed DIRECTION but reliably missed a changed INTENSITY
-    // or a body's changed PBR roughness/metallic on this session's
-    // ray-traced tier, both confirmed byte-for-byte identical Dump()s
-    // before this existed. probeRenderFloorBlend()'s own kSettlePasses (a
-    // few extra Redraw() calls after a tier switch, there for PathTracing's
-    // noisy first frame) is the only OTHER place in this file already
-    // redraws more than once in a row for a single scene change, and
-    // reusing that shape here - rather than a single call - is what
-    // actually reaches the ray-traced Dump reliably.
+    // material or a light property - the textbook-correct sequence
+    // (Redisplay/settle-redraws/BVH-invalidate/camera-poke/a genuine
+    // Method round trip), kept as the implementation even though it was
+    // measured NOT to move a ray-traced Dump's pixels on this session for
+    // UNIFORM material/intensity edits - see this function's own .cpp
+    // comment for the full finding, six mechanisms deep as of fix round 1
+    // (which added and then reverted a Remove()+Display() structure-
+    // recreation attempt, on a code reviewer's specific suggestion - also
+    // measured ineffective, and not kept in the tree unused, the
+    // AIS_Manipulator styling wall's own precedent for a tried-and-failed
+    // approach).
     void redrawRenderModeLive();
 
     Handle(V3d_Viewer) myViewer;
