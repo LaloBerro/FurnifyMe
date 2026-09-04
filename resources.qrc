@@ -5,4 +5,7 @@
          list), which is awkward to reference in code. -->
     <file alias="DMSans.ttf">assets/fonts/DMSans-VariableFont_opsz,wght.ttf</file>
   </qresource>
+  <qresource prefix="/icons">
+    <file alias="app.png">assets/Icon.png</file>
+  </qresource>
 </RCC>

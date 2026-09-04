@@ -255,7 +255,20 @@ const Spec& spec() { return mutableSpec(); }
 
 Spec defaultSpec()
 {
+    // The user's own shipped look — assets/defaultcolors.furnifytheme, baked
+    // in as the default 2026-09-04 (Milestone 5, item 1). Graphite stays
+    // above as the base it was derived from; the six assignments below are
+    // exactly the deltas the user's file carries, so the diff against
+    // graphite() IS the user's taste, readable at a glance: a near-black
+    // viewport with grids to match, a violet accent, a tinted hover cyan,
+    // and chips stroked at 2px.
     Spec s = graphite();
+    s.viewport       = QColor("#1c1c1e");
+    s.gridMinor      = QColor("#2d2d31");
+    s.gridMajor      = QColor("#35353b");
+    s.accent         = QColor("#6a00ff");
+    s.highlightHover = QColor("#06d1ff");
+    s.chipStrokePx   = 2.0;
     s.fontFamily = g_bundledFamily;
     return s;
 }

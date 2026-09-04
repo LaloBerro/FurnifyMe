@@ -639,9 +639,12 @@ hazard the transform gizmo's `Deactivate` closes, one layer up and by a differen
 
 **`Theme` is spec-backed** since the Appearance panel: every colour accessor and the four
 derived fonts (badge = base−2, label = base−1, body = base, title = base+3 pt) read
-`Theme::Spec`; `defaultSpec()` is Graphite byte-for-byte and all 24 defaults are pinned to
-hex in the suite (three of them, `gizmoAxisX/Y/Z`, added in Milestone 3 — see "Direct
-modeling"'s gizmo restyle note). Edits apply live through one `themeChanged` broadcast — no
+`Theme::Spec`; `defaultSpec()` is **the user's own look** — Graphite plus six baked deltas
+from `assets/defaultcolors.furnifytheme` (near-black viewport and grids, `#6a00ff` accent,
+tinted hover cyan, 2px chip strokes; Milestone 5 item 1) — and all 24 defaults are pinned
+to hex in the suite (three of them, `gizmoAxisX/Y/Z`, added in Milestone 3 — see "Direct
+modeling"'s gizmo restyle note). `graphite()` stays as the readable base the deltas
+diff against. Edits apply live through one `themeChanged` broadcast — no
 widget may cache a colour across it — and persist **debounced** (400 ms, flushed on close),
 because a colour-wheel drag fires per mouse-move. The picker opens with `show()`, never
 `open()`: `QDialog::open()` forces window-modality regardless of `setModal(false)`, and

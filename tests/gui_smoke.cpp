@@ -2557,21 +2557,33 @@ int main(int argc, char* argv[])
         check(!mark.isNull() && mark.width() >= 32 && mark.height() >= 32,
               QStringLiteral("and it really has pixels at the size an OS asks for "
                              "(%1x%2)").arg(mark.width()).arg(mark.height()));
-        // It is the shell's own palette, not a default: the accent colour has
-        // to actually appear in it. Sampled over the whole image rather than at
-        // one point, since the mark's position within the tile is the icon's
-        // business and not this check's.
+        // The icon is the USER'S OWN ARTWORK since Milestone 5 item 1
+        // (assets/Icon.png through the resource system), so the check matches
+        // the window icon against the bundled image rather than hunting for
+        // palette colours a piece of artwork need not contain. The painted
+        // fallback glyph would fail this comparison, which is the point: the
+        // artwork must actually reach the window icon, not merely something.
         const QImage markImage = mark.toImage().convertToFormat(QImage::Format_ARGB32);
-        int accentPixels = 0;
-        for (int y = 0; y < markImage.height(); ++y) {
-            for (int x = 0; x < markImage.width(); ++x) {
-                if (colorDistance(markImage.pixelColor(x, y), Theme::accent()) < 20.0)
-                    ++accentPixels;
+        const QImage want = QImage(QStringLiteral(":/icons/app.png"))
+                                .scaled(markImage.width(), markImage.height(),
+                                        Qt::KeepAspectRatio, Qt::SmoothTransformation)
+                                .convertToFormat(QImage::Format_ARGB32);
+        int sampled = 0;
+        int matching = 0;
+        for (int y = 0; y < markImage.height() && y < want.height(); y += 4) {
+            for (int x = 0; x < markImage.width() && x < want.width(); x += 4) {
+                if (want.pixelColor(x, y).alpha() < 200) continue;   // artwork's own
+                                                                     // transparent corners
+                ++sampled;
+                if (colorDistance(markImage.pixelColor(x, y), want.pixelColor(x, y)) < 30.0)
+                    ++matching;
             }
         }
-        check(accentPixels > 100,
-              QStringLiteral("and it is painted in this app's own accent (%1 px)")
-                  .arg(accentPixels));
+        check(sampled > 20 && matching * 10 >= sampled * 8,
+              QStringLiteral("and it is the bundled artwork - %1 of %2 sampled pixels "
+                             "match assets/Icon.png")
+                  .arg(matching)
+                  .arg(sampled));
     }
 
     // --- the walkthrough appears for a newcomer -------------------------------
@@ -13178,10 +13190,10 @@ int main(int argc, char* argv[])
         // silently drift.
         check(Theme::chip() == QColor(QStringLiteral("#2c2c31")),
               "chip() is the Graphite token");
-        check(Theme::gridMinor() == QColor(QStringLiteral("#3e3e44")),
-              "gridMinor() is the Graphite token");
-        check(Theme::gridMajor() == QColor(QStringLiteral("#4d4d55")),
-              "gridMajor() is the Graphite token");
+        check(Theme::gridMinor() == QColor(QStringLiteral("#2d2d31")),
+              "gridMinor() is the shipped default token");
+        check(Theme::gridMajor() == QColor(QStringLiteral("#35353b")),
+              "gridMajor() is the shipped default token");
         // Was 3, for a soft shadow ring paintSurface() painted around every
         // card. Fix round 1 removed the shadow entirely: translucent pixels
         // over OCCT's GL surface have nothing behind them in the widget's
@@ -13564,14 +13576,14 @@ int main(int argc, char* argv[])
                 {QStringLiteral("chip"), QStringLiteral("#2c2c31")},
                 {QStringLiteral("chipHover"), QStringLiteral("#34343a")},
                 {QStringLiteral("chipActive"), QStringLiteral("#3d3d45")},
-                {QStringLiteral("accent"), QStringLiteral("#3d7eff")},
+                {QStringLiteral("accent"), QStringLiteral("#6a00ff")},
                 {QStringLiteral("text"), QStringLiteral("#f0f0f0")},
                 {QStringLiteral("textMuted"), QStringLiteral("#9a9aa2")},
                 {QStringLiteral("textDisabled"), QStringLiteral("#5c5c64")},
                 {QStringLiteral("border"), QStringLiteral("#3a3a40")},
-                {QStringLiteral("viewport"), QStringLiteral("#45454b")},
-                {QStringLiteral("gridMinor"), QStringLiteral("#3e3e44")},
-                {QStringLiteral("gridMajor"), QStringLiteral("#4d4d55")},
+                {QStringLiteral("viewport"), QStringLiteral("#1c1c1e")},
+                {QStringLiteral("gridMinor"), QStringLiteral("#2d2d31")},
+                {QStringLiteral("gridMajor"), QStringLiteral("#35353b")},
                 {QStringLiteral("axisX"), QStringLiteral("#7a4a4a")},
                 {QStringLiteral("axisY"), QStringLiteral("#4a7a4a")},
                 // The gizmo's own three hues - Milestone 3, Task 5. Byte-
@@ -13584,7 +13596,7 @@ int main(int argc, char* argv[])
                 {QStringLiteral("danger"), QStringLiteral("#e0564a")},
                 {QStringLiteral("focusRing"), QStringLiteral("#ffca4a")},
                 {QStringLiteral("focusRingMuted"), QStringLiteral("#9f7e2e")},
-                {QStringLiteral("highlightHover"), QStringLiteral("#00ffff")},
+                {QStringLiteral("highlightHover"), QStringLiteral("#06d1ff")},
                 {QStringLiteral("highlightSelected"), QStringLiteral("#ffa500")},
             };
             const Theme::Spec shippedSpec = Theme::defaultSpec();
@@ -13632,9 +13644,20 @@ int main(int argc, char* argv[])
               "there is a checked rail chip to sample the accent ring on");
 
         const QImage graphiteChip = checkedChip ? renderExact(checkedChip) : QImage();
-        // ToolChip::paintEvent() draws the inset ring 2px in from the card's
-        // left edge - the same point the Graphite anatomy probe samples.
-        const QPoint ringPoint(2, checkedChip ? checkedChip->height() / 2 : 0);
+        // ToolChip::paintEvent() draws the checked ring inset stroke+1 from
+        // the card edge at the LIVE stroke width - which the default look now
+        // sets to 2px (Milestone 5, item 1), so a hardcoded 1px-era offset
+        // reads the fill between the two rings instead. The probe follows
+        // CLAUDE.md's rule that a pixel probe must FIND the mark it
+        // questions: scan the card's left band at mid-height and answer with
+        // the pixel nearest the colour being asked about.
+        const auto nearestInLeftBand = [](const QImage& img, const QColor& target) {
+            double best = 1.0e9;
+            const int y = img.height() / 2;
+            for (int x = 0; x < 10 && x < img.width(); ++x)
+                best = std::min(best, colorDistance(img.pixelColor(x, y), target));
+            return best;
+        };
 
         appearance->trigger();
         settle(200);
@@ -14000,16 +14023,17 @@ int main(int argc, char* argv[])
             check(Theme::accent() == probeAccent,
                   "setting the accent token through the panel moves Theme::accent()");
             const QImage themedChip = renderExact(checkedChip);
-            const QColor before = graphiteChip.pixelColor(ringPoint);
-            const QColor after = themedChip.pixelColor(ringPoint);
-            check(colorDistance(after, probeAccent) < colorDistance(before, probeAccent),
-                  QStringLiteral("and the checked chip's ring pixel now reads as the new "
-                                 "accent rather than the old one (was %1, now %2)")
-                      .arg(before.name(), after.name()));
-            check(colorDistance(after, probeAccent) < 40.0,
+            const double beforeDist = nearestInLeftBand(graphiteChip, probeAccent);
+            const double afterDist = nearestInLeftBand(themedChip, probeAccent);
+            check(afterDist < beforeDist,
+                  QStringLiteral("and the checked chip's ring now reads as the new "
+                                 "accent rather than the old one (nearest %1 -> %2)")
+                      .arg(beforeDist, 0, 'f', 1)
+                      .arg(afterDist, 0, 'f', 1));
+            check(afterDist < 40.0,
                   QStringLiteral("- close enough to be that colour and not merely "
                                  "different (distance %1)")
-                      .arg(colorDistance(after, probeAccent), 0, 'f', 1));
+                      .arg(afterDist, 0, 'f', 1));
         }
 
         // --- and the one thing on that chip that is genuinely CACHED --------

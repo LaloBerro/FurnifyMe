@@ -178,11 +178,22 @@ QPixmap appIconPixmap(int px)
 
 QIcon appIcon()
 {
+    // The user's own artwork (assets/Icon.png, Milestone 5 item 1), bundled
+    // through the same resource system the font uses. Scaled per size by Qt
+    // from the 2000px original - at these target sizes a high-quality
+    // downscale of real artwork beats a painted glyph.
+    const QPixmap art(QStringLiteral(":/icons/app.png"));
+    if (!art.isNull()) {
+        QIcon result;
+        for (int size : {16, 24, 32, 48, 64, 128, 256})
+            result.addPixmap(
+                art.scaled(size, size, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        return result;
+    }
+
+    // Fallback only - the painted tile from before the artwork existed, kept
+    // so a broken resource build still shows SOMETHING in the title bar.
     QIcon result;
-    // The sizes Windows actually asks for - a title bar takes 16, the task
-    // switcher 32, the taskbar 48 at 100% and 256 at high scalings - painted
-    // rather than scaled, since the whole point of drawing in code is that
-    // every one of them is crisp.
     for (int size : {16, 24, 32, 48, 64, 128, 256}) result.addPixmap(appIconPixmap(size));
     return result;
 }
