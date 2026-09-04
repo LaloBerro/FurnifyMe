@@ -3272,14 +3272,27 @@ OcctViewWidget::RenderTier OcctViewWidget::probeRenderTier()
     // and OCCT reports that refusal as a Standard_Failure here rather than a
     // bool return.
     bool pathTracingFast = false;
-    try {
-        applyRenderTier(RenderTier::PathTracing);
-        QElapsedTimer timer;
-        timer.start();
-        myView->Redraw();
-        pathTracingFast = timer.elapsed() <= kPathTracingProbeThresholdMs;
-    } catch (const Standard_Failure&) {
-        pathTracingFast = false;
+    // PARKED (controller ruling, Milestone 4 Task 7.1 fix round 3): the
+    // probe does not offer PathTracing until the GI floor defect is solved.
+    // Two structurally opposite floor materials - pure emission and pure
+    // diffuse albedo near the 1.0 ceiling - both measured functionally BLACK
+    // under the GI pass (delta ~192/255 against the backdrop) while the
+    // same scene renders correctly under plain RayTracing, so the best tier
+    // the probe can HONESTLY hand a user today is RayTracing, which still
+    // carries the PBR shading and tone mapping. Everything PathTracing
+    // needs stays built and tested behind kPathTracingEnabled so the fix,
+    // when it lands, is one constant away - and the suite's PT checks
+    // already skip-by-environment on a machine whose probe lands elsewhere.
+    if (kPathTracingEnabled) {
+        try {
+            applyRenderTier(RenderTier::PathTracing);
+            QElapsedTimer timer;
+            timer.start();
+            myView->Redraw();
+            pathTracingFast = timer.elapsed() <= kPathTracingProbeThresholdMs;
+        } catch (const Standard_Failure&) {
+            pathTracingFast = false;
+        }
     }
     if (pathTracingFast) return RenderTier::PathTracing;
 

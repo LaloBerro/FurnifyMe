@@ -785,6 +785,13 @@ public:
     // chosen to comfortably clear shader-compile cost while staying far
     // short of "the app looks hung."
     static constexpr int kPathTracingProbeThresholdMs = 1500;
+    // False until the PathTracing GI floor defect is solved (Task 7.1 fix
+    // round 3's measured finding: the GI pass renders the studio floor
+    // functionally black under two opposite material theories while plain
+    // RayTracing renders it correctly). With this false the probe starts at
+    // RayTracing - still PBR + tone mapping - and every PathTracing check in
+    // the suite skips by environment exactly as on a GPU that refuses PT.
+    static constexpr bool kPathTracingEnabled = false;
 
     // How long, in milliseconds, a PathTracing-tier activation keeps asking
     // Qt to repaint at rest once the camera stops moving - see
