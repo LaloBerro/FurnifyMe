@@ -290,7 +290,22 @@ void skipByEnvironment(int checks, const QString& why)
 //   the floor is raised to the measured true total instead, per this
 //   task's own instruction for exactly that outcome - closing the ratchet
 //   again rather than leaving it loose while the search continues.
-constexpr int kCheckFloor = 2379;
+//
+// The user-feedback round raised this from 2379 to 2381: +2 for the
+// shadow-ratio pair - one forced Shadows-tier measurement, which
+// rasterization can never refuse and which therefore runs identically on
+// every machine, and one of whichever tier this session's probe actually
+// chose. Both are accounted the same invariant way as everything above:
+// a real check, XOR skipByEnvironment(1, ...) when the Dump itself fails.
+// They are the check the round existed to add - the user's rejection was
+// about a shadow reading black (0.32 of the lit floor on the Whitted tier,
+// 0.00 across the entire path-traced frame), and nothing in this file had
+// ever measured that number. And +1 more for the light rig's own round
+// trip beside the rendering params' - that round is what first gave this
+// class an ambient light and a cone angle to move, and an unrestored one of
+// those washes out ORDINARY MODELING with no symptom inside render mode at
+// all. 2379 + 3 = 2382.
+constexpr int kCheckFloor = 2382;
 
 void check(bool condition, const QString& what)
 {
@@ -18970,6 +18985,11 @@ int main(int argc, char* argv[])
         // once render mode has exited again) is a real round trip and not
         // merely two reads of whatever the exit path happens to write.
         const OcctViewWidget::RenderParamsProbe paramsBeforeEntry = rview->renderParamsProbe();
+        // And the studio rig's own "before" - the user-feedback round gave
+        // this class an ambient light and a cone angle to move, and an
+        // unrestored one of those is invisible until ordinary modeling
+        // comes back washed out.
+        const OcctViewWidget::LightRigProbe lightsBeforeEntry = rview->lightRigProbe();
 
         Toast* toast = probe.findChild<Toast*>();
         ToastHost* toastHost = probe.findChild<ToastHost*>();
@@ -19128,33 +19148,27 @@ int main(int argc, char* argv[])
                 rview->probeRenderFloorBlend(OcctViewWidget::RenderTier::PathTracing,
                                              floorPointLogical);
             if (ptBlend.measured) {
-                // Fix round 3's own measurement, against a diffuse-albedo
-                // floor material (Color() at the backdrop colour, zero
-                // Emission) that round put in place specifically to replace
-                // fix round 2's pure-Emission attempt - and the number came
-                // back essentially IDENTICAL: delta ~190/255, the floor
-                // point still reads as functionally black. That is itself
-                // the informative result: two materials built on opposite
-                // theories (emission-only vs. lit-diffuse-only) producing
-                // the same near-zero output means the floor is not being
-                // lit by PathTracing's GI pass AT ALL for this geometry,
-                // not that either material's calibration missed. The
-                // diffuse Color() is already set at the backdrop's own
-                // channel value (~0.76-0.79, near the 1.0 ceiling), so
-                // there is no meaningful headroom left to "boost the
-                // albedo" - a further adjustment was judged futile rather
-                // than attempted, per this fix round's own budget ("if the
-                // delta is still large, STOP, record the numbers"). 200 is
-                // set from the measurement, not aspiration - see the task
-                // report for the open-item writeup this points to.
-                constexpr int kPathTracingBlendToleranceMax = 200;
+                // Tight again. Fix rounds 1-3 left this at 200/255 because
+                // the path-traced floor genuinely rendered black - the
+                // number was pinned from a measurement of a defect, and
+                // said so. The user-feedback round found the defect
+                // (Graphic3d_MaterialAspect::myBSDF was never written, and
+                // OCCT's path tracer reads nothing else) and this check
+                // goes back to asserting what it was always supposed to:
+                // that the studio floor dissolves into the studio backdrop.
+                // 18 rather than the Shadows tier's 10 for one honest
+                // reason - a path-traced frame carries real per-pixel
+                // variance, and the backdrop side of the comparison is
+                // pre-scaled by a measured constant
+                // (kPathTracingBackdropGain) rather than being the token
+                // itself.
+                constexpr int kPathTracingBlendToleranceMax = 18;
                 check(ptBlend.deltaR <= kPathTracingBlendToleranceMax &&
                           ptBlend.deltaG <= kPathTracingBlendToleranceMax &&
                           ptBlend.deltaB <= kPathTracingBlendToleranceMax,
-                      QStringLiteral("the PathTracing-tier floor blend is recorded, not "
-                                     "asserted tight - %1/255 tolerance, a KNOWN, UNRESOLVED "
-                                     "near-black defect surviving TWO different material "
-                                     "theories (delta R=%2 G=%3 B=%4), see the task report")
+                      QStringLiteral("the PathTracing-tier floor blends into the backdrop "
+                                     "within %1/255 per channel - the seam the BSDF fix "
+                                     "closed (delta R=%2 G=%3 B=%4)")
                           .arg(kPathTracingBlendToleranceMax)
                           .arg(ptBlend.deltaR)
                           .arg(ptBlend.deltaG)
@@ -19204,6 +19218,70 @@ int main(int argc, char* argv[])
                   QStringLiteral("RayTracing was not this session's chosen tier, so its own "
                                  "floor-blend measurement does not apply"));
         }
+
+        // --- nothing in the render is black (the user-feedback round) ------
+        // The rejection this round answered was not about the floor's blend
+        // at all: it was that a studio shot's shadow sits well UNDER the lit
+        // floor and never at zero, and this app's shadows measured 0.32 of
+        // the lit floor on the Whitted tier and 0.00 across the whole frame
+        // on the path-traced one. Both numbers came from real Dumps, and so
+        // does this check - the darkest box anywhere below the frame's top
+        // fifth, against a box on open floor.
+        //
+        // The band is a guard, not a target. 0.65-0.75 is what the
+        // reference photograph reads and what the path-traced tier was
+        // calibrated to, but the exact ratio is a function of the BODY -
+        // its height decides how far the cast shadow reaches past its own
+        // footprint, and its proportions decide whether the darkest thing
+        // in frame is that shadow, the contact shadow under it or an unlit
+        // face. Pinning 0.65-0.75 against this one 40mm test slab would be
+        // pinning the slab. 0.40 rejects every black this round fixed
+        // (0.00, 0.32) with room to spare; 0.95 rejects the opposite
+        // failure, a render with no shadow in it at all. The measured
+        // number rides in the message either way, which is where a
+        // regression that stays inside the band would still be visible.
+        constexpr double kShadowRatioFloorMin = 0.40;
+        constexpr double kShadowRatioFloorMax = 0.95;
+        auto shadowRatioCheck = [&](OcctViewWidget::RenderTier probeTier,
+                                    const QString& tierName) {
+            const OcctViewWidget::ShadowRatioProbe ratio =
+                rview->probeRenderShadowRatio(probeTier, floorPointLogical);
+            if (!ratio.measured || ratio.lit <= 0) {
+                skipByEnvironment(1,
+                      QStringLiteral("the %1-tier shadow-ratio Dump could not be measured "
+                                     "(Dump() failed, or no floor was on screen to sample)")
+                          .arg(tierName));
+                return;
+            }
+            const double r = static_cast<double>(ratio.darkest) / ratio.lit;
+            check(r >= kShadowRatioFloorMin && r <= kShadowRatioFloorMax,
+                  QStringLiteral("the %1 tier draws a shadow that is dark but not black - "
+                                 "darkest %2 against a lit floor of %3, ratio %4, inside "
+                                 "%5-%6")
+                      .arg(tierName)
+                      .arg(ratio.darkest).arg(ratio.lit)
+                      .arg(r, 0, 'f', 3)
+                      .arg(kShadowRatioFloorMin, 0, 'f', 2)
+                      .arg(kShadowRatioFloorMax, 0, 'f', 2));
+        };
+
+        // Shadows first, forced on every machine for the reason its own
+        // floor-blend check above is: rasterization cannot be refused, so
+        // this one number is measured identically everywhere.
+        shadowRatioCheck(OcctViewWidget::RenderTier::Shadows, QStringLiteral("Shadows"));
+
+        // And the tier this session actually chose, whichever it is -
+        // Shadows measured twice is still one honest measurement of the
+        // tier the user is being shown, and forcing a ray-traced tier that
+        // this GPU refused is exactly what the blocks above will not do.
+        QString liveTierName;
+        switch (tier) {
+            case OcctViewWidget::RenderTier::PathTracing: liveTierName = QStringLiteral("PathTracing"); break;
+            case OcctViewWidget::RenderTier::RayTracing:  liveTierName = QStringLiteral("RayTracing"); break;
+            case OcctViewWidget::RenderTier::Shadows:     liveTierName = QStringLiteral("Shadows"); break;
+            default:                                      liveTierName = QStringLiteral("Plain"); break;
+        }
+        shadowRatioCheck(tier, liveTierName);
 
         // Vocabulary sweep, scoped to this probe's own toast history - the
         // same mechanism the versions/rename probe above uses, since this is
@@ -19314,6 +19392,32 @@ int main(int argc, char* argv[])
         // exit - a bug with no visible symptom until the NEXT render-mode
         // entry read the wrong "before" state, which is exactly why this is
         // a value comparison and not a screenshot.
+        // The lights, first, on exactly the params round trip's own terms:
+        // render mode turns the key's headlight flag off, swings it to the
+        // studio direction, scales its intensity by the tier's gain, opens
+        // a cone angle on it for the path-traced tier and moves the ambient
+        // fill in whichever direction that tier needs - and every one of
+        // those has to be back where it started, because the modeling look
+        // outside render mode is not this feature's to change.
+        const OcctViewWidget::LightRigProbe lightsAfterExit = rview->lightRigProbe();
+        check(qFuzzyCompare(1.0 + lightsAfterExit.keyIntensity,
+                            1.0 + lightsBeforeEntry.keyIntensity) &&
+                  qFuzzyCompare(1.0 + lightsAfterExit.keySmoothness,
+                                1.0 + lightsBeforeEntry.keySmoothness) &&
+                  qFuzzyCompare(1.0 + lightsAfterExit.ambientIntensity,
+                                1.0 + lightsBeforeEntry.ambientIntensity) &&
+                  lightsAfterExit.keyHeadlight == lightsBeforeEntry.keyHeadlight,
+              QStringLiteral("the studio light rig round-trips exactly too (key intensity "
+                             "%1->%2, cone angle %3->%4, ambient %5->%6, headlight %7->%8)")
+                  .arg(lightsBeforeEntry.keyIntensity)
+                  .arg(lightsAfterExit.keyIntensity)
+                  .arg(lightsBeforeEntry.keySmoothness)
+                  .arg(lightsAfterExit.keySmoothness)
+                  .arg(lightsBeforeEntry.ambientIntensity)
+                  .arg(lightsAfterExit.ambientIntensity)
+                  .arg(int(lightsBeforeEntry.keyHeadlight))
+                  .arg(int(lightsAfterExit.keyHeadlight)));
+
         const OcctViewWidget::RenderParamsProbe paramsAfterExit = rview->renderParamsProbe();
         check(paramsAfterExit.method == paramsBeforeEntry.method &&
                   paramsAfterExit.shadingModel == paramsBeforeEntry.shadingModel &&

@@ -29,7 +29,10 @@
 #include <Bnd_Box.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
 #include <Graphic3d_ArrayOfPoints.hxx>
+#include <Graphic3d_BSDF.hxx>
+#include <Graphic3d_PBRMaterial.hxx>
 #include <Graphic3d_ArrayOfSegments.hxx>
 #include <Graphic3d_AspectLine3d.hxx>
 #include <Graphic3d_AspectMarker3d.hxx>
@@ -85,6 +88,7 @@
 #include <QMouseEvent>
 #include <QPaintEvent>
 #include <QResizeEvent>
+#include <QSet>
 #include <QTemporaryFile>
 #include <QTimer>
 #include <QVariantAnimation>
@@ -92,6 +96,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 
 namespace {
@@ -112,16 +117,30 @@ Quantity_Color toOcctColor(const QColor& c)
     return Quantity_Color(c.redF(), c.greenF(), c.blueF(), Quantity_TOC_sRGB);
 }
 
-// The one place "which render-mode tiers are ray-traced" is written down -
-// applyRenderTier() and showRenderFloor() both need the identical test
-// (PathTracing/RayTracing get PBR shading + materials, Shadows/Plain get
-// Phong - fix round 2's scoping ruling), and a second, hand-written copy of
-// this condition is exactly how the two could quietly drift apart.
+// The one place "which render-mode tiers drive OCCT's ray-tracing Method"
+// is written down - a second, hand-written copy of this condition is
+// exactly how two call sites quietly drift apart.
 bool isRayTracedTier(OcctViewWidget::RenderTier tier)
 {
     return tier == OcctViewWidget::RenderTier::PathTracing ||
            tier == OcctViewWidget::RenderTier::RayTracing;
 }
+
+// How many accumulation passes a MEASURING probe lets the path tracer take
+// before it dumps. Every probe that reports a NUMBER shares this, because
+// an under-converged path-traced frame is not merely noisy, it is
+// systematically DARK - the accumulation buffer is a running mean and the
+// early samples that have not arrived yet read as zero. The first shipped
+// value here was 5, and it cost a real, wrong conclusion: the same scene
+// that measures a 194 floor against a 194 backdrop after this many passes
+// measured 172 after five, which read as a failing seam. 24 is where the
+// running mean has settled - a user at rest gets more than three times as
+// many passes (kPathTracingConvergeMs), but those buy less VARIANCE, not a
+// different level, so a probe that only reads levels does not have to pay
+// for them in every measurement it takes.
+// probePathTracingChangedImage() deliberately keeps its own smaller count -
+// it asks whether two frames DIFFER, not what either one reads.
+constexpr int kMeasurementSettlePasses = 24;
 
 // The symmetry plane indicator's own presentation - GridRenderer's aspect
 // idiom (GridObject in GridRenderer.cpp), one pre-built segment array drawn
@@ -2677,12 +2696,8 @@ void OcctViewWidget::applyBackgroundForMode()
 {
     if (myView.IsNull()) return;
 
-    if (!myRenderModeActive) {
-        myView->SetBackgroundColor(toOcctColor(Theme::viewport()));
-        return;
-    }
-
-    myView->SetBackgroundColor(toOcctColor(renderBackdropColourImpl()));
+    applyRenderBackgroundColourForTier(myRenderTier);
+    if (!myRenderModeActive) return;
     // The floor wears the same colour, so a theme edit landing here while
     // render mode is up has to re-dress it too - rebuilt outright, the same
     // way the grid is rebuilt on a theme edit, because its colour is baked
@@ -2780,43 +2795,27 @@ void OcctViewWidget::applyRenderFloorMaterialForTier(bool pbrTier)
                                static_cast<int>(floorColour.green() * 0.875),
                                static_cast<int>(floorColour.blue() * 0.875))));
     } else {
-        // The ray-traced tiers' own material - fix round 3's correction of
-        // fix round 1's pure-Emission attempt, which measured as
-        // functionally BLACK under PathTracing specifically (delta
-        // ~190/255 from the backdrop, see the task report): OCCT's path
-        // tracer builds a physical BSDF from the material, and a
-        // zero-albedo/pure-Emission surface apparently does not carry that
-        // emission through GI's own light-transport the way a rasterized
-        // or plain-ray-traced Emissive term does - confirmed working for
-        // plain RayTracing in the original diagnostic, but PathTracing's
-        // own GI pass is a different code path inside OCCT and was never
-        // separately verified.
+        // The path-traced tier's own material. Fix rounds 1 and 3 tried a
+        // pure-Emission floor and then a pure-diffuse-albedo one, measured
+        // BOTH as functionally black (delta ~190/255 from the backdrop),
+        // and concluded from two opposite theories giving one answer that
+        // the GI pass was not lighting this geometry at all. Two theories
+        // out of two were right about the material's SHAPE and wrong about
+        // which field the path tracer reads: neither of them, and not the
+        // classic reflectance set either. It reads Graphic3d_BSDF, which
+        // nothing here had ever written, so the floor and every body
+        // integrated an all-zero BSDF - see applyRenderBodyMaterials() and
+        // kPathTracingEnabled for the whole finding, including the
+        // reversed-face and box-slab controls that ruled the geometry out.
         //
-        // The controller's direction: stop relying on Emission for the
-        // ray-traced tiers at all. A plain diffuse floor - albedo AT the
-        // backdrop colour, zero emission, roughness high, metallic 0 - is
-        // what a physically based renderer expects a studio floor to be;
-        // under real global illumination plus filmic tone mapping (both on
-        // for these two tiers - see applyRenderTier()), a GI-lit diffuse
-        // surface naturally grounds the shot and the shadow comes for free,
-        // the same physical mechanism the Shadows tier's shadow map
-        // approximates by hand.
-        //
-        // MEASURED RESULT (fix round 3's own calibration Dump, PathTracing
-        // tier): essentially UNCHANGED from the pure-Emission attempt -
-        // delta still ~190/255, the floor point still reads as functionally
-        // black. Two materials built on opposite theories producing the
-        // same near-zero output means the PathTracing GI pass is not
-        // lighting this floor geometry at all, not that either material's
-        // calibration missed - and Color() is already at the backdrop's own
-        // channel value (near the 1.0 ceiling), so there was no meaningful
-        // headroom left to try boosting it further. Kept as the materially
-        // more correct choice (this is genuinely what a physical floor
-        // should be, and RayTracing - no GI - is expected to read it
-        // correctly the same way it read the old Emission material), with
-        // the open PathTracing-GI defect ledgered in the task report rather
-        // than chased with a third material theory. See gui_smoke's own
-        // PathTracing-tier floor-blend check for the recorded number.
+        // The surface itself is what a physically based renderer expects a
+        // studio floor to be, and now that the BSDF says so it behaves like
+        // one: albedo AT the backdrop colour, no emission, rough, not
+        // metallic, grounding the shot with a real integrated shadow rather
+        // than a shadow map's approximation of one. MEASURED, against the
+        // studio rig this round calibrated (see kPathTracingAmbientGain):
+        // the lit floor reads 194 against a 194 backdrop token, and the
+        // darkest point in the frame 0.65 of it.
         Graphic3d_PBRMaterial floorPbr;
         floorPbr.SetMetallic(0.0f);
         floorPbr.SetRoughness(0.95f);
@@ -2824,6 +2823,15 @@ void OcctViewWidget::applyRenderFloorMaterialForTier(bool pbrTier)
                                          floorColour.blueF(), Quantity_TOC_RGB));
         floorPbr.SetEmission(NCollection_Vec3<float>(0.0f, 0.0f, 0.0f));
         material.SetPBRMaterial(floorPbr);
+        // CreateDiffuse() rather than the bodies' CreateMetallicRoughness():
+        // the floor is a matte Lambertian sweep with no specular lobe worth
+        // carrying, and a diffuse BSDF is the exact description of that. Its
+        // weight is the same channel values the PBR albedo above carries, so
+        // the two descriptions of this one surface agree by construction.
+        material.SetBSDF(Graphic3d_BSDF::CreateDiffuse(
+            NCollection_Vec3<float>(static_cast<float>(floorColour.redF()),
+                                    static_cast<float>(floorColour.greenF()),
+                                    static_cast<float>(floorColour.blueF()))));
     }
 
     myRenderFloor->SetMaterial(material);
@@ -2856,13 +2864,59 @@ gp_Dir OcctViewWidget::studioKeyDirectionForAzimuth(double azimuthDeg) const
 
 void OcctViewWidget::applyRenderLightAngleAndStrength()
 {
+    applyRenderLightsForTier(myRenderTier);
+}
+
+void OcctViewWidget::applyRenderLightsForTier(RenderTier tier)
+{
     if (myRenderSavedLights.empty()) return;   // render mode is off - nothing to move
+    const bool pathTracing = tier == RenderTier::PathTracing;
+    // Gains, not replacements: myRenderLightStrength still opens and closes
+    // the key by the factor the Light strength control has always applied,
+    // and the tier gain is what stops OCCT's modeling-legibility rig from
+    // clipping a physically integrated frame to white. Every number here was
+    // read off sampled Dump() pixels - see the constants' own comments.
+    const double keyGain = pathTracing ? kPathTracingKeyGain : 1.0;
+    const double ambientGain = pathTracing ? kPathTracingAmbientGain : 1.0;
     const gp_Dir direction = studioKeyDirectionForAzimuth(myRenderLightAngleDeg);
     for (auto& saved : myRenderSavedLights) {
         saved.light->SetDirection(direction);
-        saved.light->SetIntensity(
-            static_cast<Standard_ShortReal>(saved.intensity * myRenderLightStrength));
+        saved.light->SetIntensity(static_cast<Standard_ShortReal>(
+            saved.intensity * myRenderLightStrength * keyGain));
+        // A cone angle only means anything to the path tracer, which
+        // samples it as an area light and draws the penumbra that follows.
+        // Every other tier gets the angle it came in with, which is the
+        // hard directional light the shadow map and the Whitted pass both
+        // expect.
+        saved.light->SetSmoothAngle(static_cast<Standard_ShortReal>(
+            pathTracing ? kPathTracingKeySmoothAngleRad : saved.smoothness));
     }
+    for (auto& saved : myRenderSavedAmbients)
+        saved.light->SetIntensity(static_cast<Standard_ShortReal>(saved.intensity * ambientGain));
+    if (!myViewer.IsNull()) myViewer->UpdateLights();
+}
+
+void OcctViewWidget::applyRenderBackgroundColourForTier(RenderTier tier)
+{
+    if (myView.IsNull()) return;
+    if (!myRenderModeActive) {
+        myView->SetBackgroundColor(toOcctColor(Theme::viewport()));
+        return;
+    }
+    const Quantity_Color backdrop = toOcctColor(renderBackdropColourImpl());
+    if (tier != RenderTier::PathTracing) {
+        myView->SetBackgroundColor(backdrop);
+        return;
+    }
+    // Path tracing encodes its output to sRGB and applies that encode to the
+    // background colour as well, so the token that rasterizes correctly
+    // path-traces roughly 33/255 too light and draws a horizon across the
+    // top of the shot. kPathTracingBackdropGain is the measured
+    // pre-scale that lands it back on the token - see its own comment.
+    myView->SetBackgroundColor(Quantity_Color(backdrop.Red() * kPathTracingBackdropGain,
+                                              backdrop.Green() * kPathTracingBackdropGain,
+                                              backdrop.Blue() * kPathTracingBackdropGain,
+                                              Quantity_TOC_RGB));
 }
 
 void OcctViewWidget::redrawRenderModeLive()
@@ -3127,6 +3181,16 @@ void OcctViewWidget::applyRenderTier(RenderTier tier)
     // floor is exactly what made the default resolution stop being enough.
     params.ShadowMapResolution = (tier == RenderTier::Shadows) ? 4096 : 1024;
     setLightsCastShadows(tier == RenderTier::Shadows);
+
+    // The studio rig and the clear colour are per-tier too since the
+    // user-feedback round - a path-traced frame needs a fraction of the
+    // ambient the rasterized ones want, a cone angle on the key, and a
+    // pre-scaled backdrop (see kPathTracingBackdropGain). Both are applied
+    // for the tier being SWITCHED TO rather than myRenderTier, which is
+    // what makes the tier probe and every forcing measurement probe measure
+    // the rig the user would actually be shown.
+    applyRenderLightsForTier(tier);
+    applyRenderBackgroundColourForTier(tier);
 }
 
 void OcctViewWidget::saveRenderParams()
@@ -3185,6 +3249,26 @@ OcctViewWidget::RenderParamsProbe OcctViewWidget::renderParamsProbe() const
     return probe;
 }
 
+OcctViewWidget::LightRigProbe OcctViewWidget::lightRigProbe() const
+{
+    LightRigProbe probe;
+    if (myViewer.IsNull()) return probe;
+    bool haveKey = false;
+    bool haveAmbient = false;
+    for (const Handle(Graphic3d_CLight)& light : myViewer->ActiveLights()) {
+        if (!haveKey && light->Type() == Graphic3d_TypeOfLightSource_Directional) {
+            probe.keyIntensity = light->Intensity();
+            probe.keySmoothness = light->Smoothness();
+            probe.keyHeadlight = light->IsHeadlight();
+            haveKey = true;
+        } else if (!haveAmbient && light->Type() == Graphic3d_TypeOfLightSource_Ambient) {
+            probe.ambientIntensity = light->Intensity();
+            haveAmbient = true;
+        }
+    }
+    return probe;
+}
+
 void OcctViewWidget::applyRenderBodyMaterials()
 {
     if (myContext.IsNull()) return;
@@ -3213,6 +3297,19 @@ void OcctViewWidget::applyRenderBodyMaterials()
     pbr.SetMetallic(static_cast<float>(myRenderMetallic));
     pbr.SetRoughness(static_cast<float>(myRenderRoughness));
     material.SetPBRMaterial(pbr);
+    // The line whose absence made every path-traced frame black.
+    // Graphic3d_MaterialAspect carries a THIRD description of a surface
+    // beside the classic reflectance colours and the PBR block - a
+    // Graphic3d_BSDF - and OCCT's path tracer reads that one and nothing
+    // else. SetPBRMaterial() is an inline that assigns myPBRMaterial, so a
+    // material built the way this function built it left myBSDF at its
+    // default-constructed all-zero state, and an all-zero BSDF returns zero
+    // radiance for every incoming ray. Whitted ray tracing and both
+    // rasterized tiers never noticed, because they read the other two
+    // descriptions - which is exactly why this looked like a floor-specific
+    // GI defect for three fix rounds. CreateMetallicRoughness() is OCCT's
+    // own conversion, so the BSDF cannot drift from the PBR block above it.
+    material.SetBSDF(Graphic3d_BSDF::CreateMetallicRoughness(pbr));
     for (auto& entry : mySolids) {
         entry.second->SetMaterial(material);
         // Every OTHER place in this file that changes a displayed
@@ -3415,9 +3512,10 @@ OcctViewWidget::FloorBlendProbe OcctViewWidget::probeRenderFloorBlend(
     // nearly BLACK, delta ~184/255 from the backdrop, not the real
     // pure-Emission material's actual look). Harmless for Shadows/Plain -
     // rasterization has nothing to accumulate, so the extra redraws just
-    // repaint the identical frame.
-    constexpr int kSettlePasses = 5;
-    for (int i = 0; i < kSettlePasses; ++i) myView->Redraw();
+    // repaint the identical frame. The count is shared with every other
+    // measuring probe - see kMeasurementSettlePasses for what five of them
+    // cost.
+    for (int i = 0; i < kMeasurementSettlePasses; ++i) myView->Redraw();
 
     QTemporaryFile file(QDir::tempPath() +
                         QStringLiteral("/furnifyme-floorblend-XXXXXX.png"));
@@ -3504,6 +3602,83 @@ bool OcctViewWidget::probeRenderFloorShadowContrast()
     return differs;
 }
 
+OcctViewWidget::ShadowRatioProbe OcctViewWidget::probeRenderShadowRatio(
+    RenderTier forTier, const QPoint& litFloorPointLogical)
+{
+    ShadowRatioProbe result;
+    if (!myRenderModeActive || myView.IsNull() || myRenderFloor.IsNull()) return result;
+
+    // Forced temporarily and restored before every return, including the
+    // failure paths - probeRenderFloorBlend()'s rule, and the same settle
+    // pass, which the path-traced tier genuinely needs and the others
+    // simply repaint through.
+    const RenderTier cachedTier = myRenderTier;
+    applyRenderTier(forTier);
+    for (int i = 0; i < kMeasurementSettlePasses; ++i) myView->Redraw();
+
+    QTemporaryFile file(QDir::tempPath() +
+                        QStringLiteral("/furnifyme-shadowratio-XXXXXX.png"));
+    if (!file.open()) {
+        applyRenderTier(cachedTier);
+        myView->Redraw();
+        return result;
+    }
+    const QString path = file.fileName();
+    file.close();
+    const bool dumped = myView->Dump(path.toUtf8().constData()) == Standard_True;
+
+    applyRenderTier(cachedTier);
+    myView->Redraw();
+
+    if (dumped) {
+        const QImage shot(path);
+        const QPoint litDevice = toDevicePixels(litFloorPointLogical);
+        if (!shot.isNull() && shot.rect().contains(litDevice)) {
+            // Boxes rather than single pixels throughout: a path-traced
+            // frame carries real per-pixel variance, and a probe that
+            // sampled one pixel of it would be reading noise.
+            constexpr int kBox = 13;
+            auto boxLuma = [&shot](int x0, int y0, int size) {
+                qint64 total = 0;
+                int count = 0;
+                for (int y = y0; y < y0 + size && y < shot.height(); y += 2) {
+                    for (int x = x0; x < x0 + size && x < shot.width(); x += 2) {
+                        const QColor c = shot.pixelColor(x, y);
+                        total += (c.red() + c.green() + c.blue()) / 3;
+                        ++count;
+                    }
+                }
+                return count > 0 ? static_cast<int>(total / count) : -1;
+            };
+
+            const int lit = boxLuma(std::max(0, litDevice.x() - kBox / 2),
+                                    std::max(0, litDevice.y() - kBox / 2), kBox);
+            // Everything below the top fifth, which is the only part of the
+            // frame the backdrop can reach - probeRenderFloorBlend()'s own
+            // reading of this camera's framing, reused rather than
+            // re-derived. Skipping it matters: the path-traced backdrop is
+            // not the darkest thing in the shot, but a future framing where
+            // it were would turn this into a measurement of the background.
+            int darkest = -1;
+            const int firstRow = shot.height() / 5;
+            for (int y = firstRow; y + kBox < shot.height(); y += 6) {
+                for (int x = 0; x + kBox < shot.width(); x += 6) {
+                    const int v = boxLuma(x, y, kBox);
+                    if (v >= 0 && (darkest < 0 || v < darkest)) darkest = v;
+                }
+            }
+            if (lit > 0 && darkest >= 0) {
+                result.measured = true;
+                result.lit = lit;
+                result.darkest = darkest;
+            }
+        }
+    }
+
+    QFile::remove(path);
+    return result;
+}
+
 OcctViewWidget::RenderTier OcctViewWidget::probeRenderTier()
 {
     if (myView.IsNull()) return RenderTier::Plain;
@@ -3518,17 +3693,12 @@ OcctViewWidget::RenderTier OcctViewWidget::probeRenderTier()
     // and OCCT reports that refusal as a Standard_Failure here rather than a
     // bool return.
     bool pathTracingFast = false;
-    // PARKED (controller ruling, Milestone 4 Task 7.1 fix round 3): the
-    // probe does not offer PathTracing until the GI floor defect is solved.
-    // Two structurally opposite floor materials - pure emission and pure
-    // diffuse albedo near the 1.0 ceiling - both measured functionally BLACK
-    // under the GI pass (delta ~192/255 against the backdrop) while the
-    // same scene renders correctly under plain RayTracing, so the best tier
-    // the probe can HONESTLY hand a user today is RayTracing, which still
-    // carries the PBR shading and tone mapping. Everything PathTracing
-    // needs stays built and tested behind kPathTracingEnabled so the fix,
-    // when it lands, is one constant away - and the suite's PT checks
-    // already skip-by-environment on a machine whose probe lands elsewhere.
+    // Offered again since the user-feedback round: the black frame was an
+    // unwritten Graphic3d_BSDF, not a defect in the GI pass, and every
+    // surface carries one now. kPathTracingEnabled stays as the one
+    // constant that parks this tier if it ever has to be parked again - the
+    // suite's PT checks already skip-by-environment on a machine whose
+    // probe lands elsewhere, so switching it costs nothing else.
     if (kPathTracingEnabled) {
         try {
             applyRenderTier(RenderTier::PathTracing);
@@ -3661,11 +3831,20 @@ void OcctViewWidget::setRenderMode(bool on)
         // first and restored on exit, because the modeling look outside
         // render mode is not this feature's to change.
         myRenderSavedLights.clear();
+        myRenderSavedAmbients.clear();
         if (!myViewer.IsNull()) {
             for (const Handle(Graphic3d_CLight)& light : myViewer->ActiveLights()) {
+                // The ambient fill is this class's to move too since the
+                // user-feedback round: the path-traced tier integrates its
+                // own bounce and clips to white against OCCT's
+                // modeling-legibility rig, so it needs this turned down.
+                if (light->Type() == Graphic3d_TypeOfLightSource_Ambient) {
+                    myRenderSavedAmbients.push_back({light, light->Intensity()});
+                    continue;
+                }
                 if (light->Type() != Graphic3d_TypeOfLightSource_Directional) continue;
-                myRenderSavedLights.push_back(
-                    {light, light->Direction(), light->Intensity(), light->IsHeadlight()});
+                myRenderSavedLights.push_back({light, light->Direction(), light->Intensity(),
+                                               light->IsHeadlight(), light->Smoothness()});
                 // World-space, or the studio direction is silently read in
                 // VIEW space and the "key light" follows the camera - the
                 // first calibration round's top face stayed dark through a
@@ -3725,8 +3904,12 @@ void OcctViewWidget::setRenderMode(bool on)
             saved.light->SetHeadlight(saved.headlight);
             saved.light->SetDirection(saved.direction);
             saved.light->SetIntensity(saved.intensity);
+            saved.light->SetSmoothAngle(saved.smoothness);
         }
+        for (auto& saved : myRenderSavedAmbients) saved.light->SetIntensity(saved.intensity);
         myRenderSavedLights.clear();
+        myRenderSavedAmbients.clear();
+        if (!myViewer.IsNull()) myViewer->UpdateLights();
         const Standard_Integer mode = myWireframe ? AIS_WireFrame : AIS_Shaded;
         for (auto& entry : mySolids) {
             entry.second->Attributes()->SetFaceBoundaryDraw(Standard_True);

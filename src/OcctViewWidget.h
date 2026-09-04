@@ -707,6 +707,25 @@ public:
     };
     RenderParamsProbe renderParamsProbe() const;
 
+    // The LIGHT half of the same round trip, and new with the user-feedback
+    // round because that round is what first gave this class a reason to
+    // move an ambient light and a cone angle at all. The failure it guards
+    // is the one restoreRenderParams() already guards for the rendering
+    // params and for the same reason: an ambient left at
+    // kRasterAmbientGain, or a key left at kPathTracingKeyGain, has no
+    // visible symptom inside render mode - it is only ORDINARY MODELING
+    // that comes back washed out or unlit, once, forever, and the next
+    // render-mode entry then saves the wrong "before" state on top of it.
+    // Plain values, never a Graphic3d_CLight handle, on
+    // renderParamsProbe()'s own terms.
+    struct LightRigProbe {
+        double keyIntensity = 0.0;
+        double keySmoothness = 0.0;
+        double ambientIntensity = 0.0;
+        bool keyHeadlight = false;
+    };
+    LightRigProbe lightRigProbe() const;
+
     // gui_smoke's own oracle for "did the PathTracing tier actually change
     // what is on screen, compared with what the Shadows tier draws on the
     // IDENTICAL scene" - CLAUDE.md's zoom-persistence lesson applied to this
@@ -767,6 +786,32 @@ public:
     // as probeShadowPixelsDiffer() already does for the tier probe itself.
     bool probeRenderFloorShadowContrast();
 
+    // gui_smoke's oracle for "is anything in this render BLACK" - the
+    // user-feedback round's own measurement, and the one number their
+    // rejection was actually about: a studio shot's shadow sits well under
+    // the lit floor but never at zero, and both tiers were measured failing
+    // that (Whitted ray tracing's cast shadow read 0.32 of the lit floor;
+    // path tracing's whole frame read 0.00, because no material carried a
+    // BSDF at all). `lit` is the mean luminance of a small box around a
+    // point the CALLER already knows lands on open floor - the same
+    // contract probeRenderFloorBlend() uses, for the same reason: this
+    // widget has no notion of where the test built a body. `darkest` is the
+    // darkest small box anywhere below the frame's top fifth, which is the
+    // cast shadow, the contact shadow or an unlit face, whichever this
+    // scene makes darkest - deliberately not "the cast shadow"
+    // specifically, since which of the three is darkest depends on the
+    // body's own proportions, and a probe that had to find one of them by
+    // name would be pinned to one test body. Forces `forTier` for exactly
+    // one Dump and restores the session's cached tier before returning,
+    // probeRenderFloorBlend()'s own rule.
+    struct ShadowRatioProbe {
+        bool measured = false;
+        int lit = 0;
+        int darkest = 0;
+    };
+    ShadowRatioProbe probeRenderShadowRatio(RenderTier forTier,
+                                            const QPoint& litFloorPointLogical);
+
     // ~100 ms - the brief's own number for "is ray tracing still
     // interactive on this GPU", measured against a single redraw. A session
     // constant, not a setting: CLAUDE.md's ruling for this task is that nothing
@@ -785,20 +830,76 @@ public:
     // chosen to comfortably clear shader-compile cost while staying far
     // short of "the app looks hung."
     static constexpr int kPathTracingProbeThresholdMs = 1500;
-    // False until the PathTracing GI floor defect is solved (Task 7.1 fix
-    // round 3's measured finding: the GI pass renders the studio floor
-    // functionally black under two opposite material theories while plain
-    // RayTracing renders it correctly). With this false the probe starts at
-    // RayTracing - still PBR + tone mapping - and every PathTracing check in
-    // the suite skips by environment exactly as on a GPU that refuses PT.
-    static constexpr bool kPathTracingEnabled = false;
+    // True again since the user-feedback round found what was actually
+    // black: not the floor's geometry and not its material's shape, but
+    // Graphic3d_MaterialAspect::myBSDF, which no code path here had ever
+    // written. OCCT's path tracer shades from the BSDF alone -
+    // SetPBRMaterial() is an inline that assigns myPBRMaterial and touches
+    // nothing else, and the classic ambient/diffuse/specular/emissive
+    // fields the rasterized and Whitted-ray-traced pipelines read are
+    // invisible to it - so every surface in the scene integrated an
+    // all-zero BSDF and returned zero radiance. Measured on one scene and
+    // camera: floor and bodies at (0,0,0) with the BSDF unset, a correct
+    // studio render the moment they carry one, and unchanged black under
+    // both a reversed floor face and a closed box slab, which is what
+    // ruled the geometry out. See applyRenderBodyMaterials() and
+    // applyRenderFloorMaterialForTier().
+    static constexpr bool kPathTracingEnabled = true;
+
+    // The studio rig's per-tier gains, every one read off sampled Dump()
+    // pixels rather than derived from the lighting equations - CLAUDE.md's
+    // rule for this floor, applied to the lights that fall on it. OCCT's
+    // SetDefaultLights() rig is a directional key at intensity 20 beside an
+    // ambient at 1, calibrated for flat modeling legibility and wildly
+    // over-driven for a physically integrated render: with it unchanged the
+    // path-traced floor clipped to (255,255,255) at every exposure worth
+    // having.
+    //
+    // PathTracing's pair lands the lit floor on the backdrop tone exactly
+    // (measured 194 against a 194 token) with the shadow at 0.65 of it -
+    // inside the reference photograph's own 0.65-0.75 band - and they are
+    // gains on top of myRenderLightStrength, not replacements for it, so
+    // the Light strength control still opens and closes the key by the
+    // factor it always did. kPathTracingKeyGain is quoted against the
+    // DEFAULT strength of 2.0: 2.0 x 0.08 is the 0.16 that was measured.
+    static constexpr double kPathTracingAmbientGain = 0.25;
+    static constexpr double kPathTracingKeyGain = 0.08;
+    // A directional light with a cone angle is an area light, and an area
+    // light is what casts a penumbra - the second thing the user's
+    // reference has and this app did not. 0.30 rad (about 17 degrees) is
+    // the widest setting that still let the lit floor sit on the backdrop
+    // tone: OCCT does not normalize the cone's solid angle, so a wider cone
+    // is also a brighter light. It converges far faster than a hard
+    // directional light too, which is not incidental - a delta light under
+    // this path tracer still showed tile-sized variance after 24
+    // accumulation passes where the soft one was clean.
+    static constexpr double kPathTracingKeySmoothAngleRad = 0.30;
+    // Path tracing writes its output through an sRGB encode the rasterized
+    // and Whitted paths do not, and applies it to the BACKGROUND colour as
+    // well - so the same Quantity_Color that rasterizes to the backdrop
+    // token (194,191,186) path-traces to (227,225,222), a horizon line
+    // across the top of every shot. Measured both ways (the token's own
+    // linear value, and a second decode of it) and interpolated between
+    // them: 0.632 of the linear value renders the token. A calibration
+    // constant on exactly the terms the floor's emissive fraction is one,
+    // and a FRACTION of the token rather than a colour, so it tracks an
+    // Appearance edit instead of pinning one grey.
+    static constexpr double kPathTracingBackdropGain = 0.632;
 
     // How long, in milliseconds, a PathTracing-tier activation keeps asking
     // Qt to repaint at rest once the camera stops moving - see
     // startPathTracingConvergence()'s own comment for why a live paint loop
     // has to ask for those frames at all. A session constant on the same
     // terms as the two thresholds above: nothing here is user-configurable.
-    static constexpr int kPathTracingConvergeMs = 1500;
+    // 1500 until the user-feedback round, which is 30 accumulation passes
+    // at the paint loop's 50 ms tick and is visibly grainy on a scene this
+    // open - and grain is not a cosmetic complaint here, it is the thing
+    // that destroys the subtle floor and face gradients the reference shot
+    // is made of. Path-tracing variance falls as 1/sqrt(samples), so 80
+    // passes is a little under half the noise of 30 for work the GPU only
+    // does while the camera is at rest, in a mode the user entered
+    // specifically to look at a picture.
+    static constexpr int kPathTracingConvergeMs = 4000;
 
     // --- Render settings (Task 7.2) -----------------------------------
     //
@@ -1290,6 +1391,19 @@ private:
     // whenever render mode is already active. A no-op with nothing to do
     // when myRenderSavedLights is empty (render mode is off).
     void applyRenderLightAngleAndStrength();
+    // The same application for a tier that is not (yet) myRenderTier - the
+    // tier probe and every forcing measurement probe switch tiers on a live
+    // view, and the studio rig is per-tier since the user-feedback round
+    // (see kPathTracingAmbientGain and its neighbours). applyRenderTier()
+    // calls this; applyRenderLightAngleAndStrength() is the myRenderTier
+    // spelling the live setters use.
+    void applyRenderLightsForTier(RenderTier tier);
+    // The view's clear colour for one tier - split out of
+    // applyBackgroundForMode() because path tracing needs the backdrop
+    // pre-scaled (kPathTracingBackdropGain), and because applyRenderTier()
+    // has to be able to set it WITHOUT also rebuilding the floor, which is
+    // what applyBackgroundForMode() does and what would recurse from there.
+    void applyRenderBackgroundColourForTier(RenderTier tier);
     // The redraw every live render-settings setter needs after mutating a
     // material or a light property - the textbook-correct sequence
     // (Redisplay/settle-redraws/BVH-invalidate/camera-poke/a genuine
@@ -1494,8 +1608,24 @@ private:
         // still in the world while the camera orbits the shot, so render
         // mode turns the flag off and this remembers it was on.
         bool headlight;
+        // The cone angle, which render mode opens for the path-traced tier
+        // (see kPathTracingKeySmoothAngleRad) and which is no more part of
+        // the modeling look than the direction is.
+        Standard_ShortReal smoothness;
     };
     std::vector<SavedLight> myRenderSavedLights;
+
+    // The ambient half of the same round trip. It was left out until the
+    // user-feedback round because nothing here had ever moved it - the fill
+    // that lifts an unlit face off black is the one thing the rasterized
+    // tiers were missing, and the path-traced tier needs it turned DOWN
+    // rather than up, so both directions belong to this class now and both
+    // are put back on the way out.
+    struct SavedAmbient {
+        Handle(Graphic3d_CLight) light;
+        Standard_ShortReal intensity;
+    };
+    std::vector<SavedAmbient> myRenderSavedAmbients;
 
     // saveRenderParams()/restoreRenderParams()'s own snapshot - every
     // Graphic3d_RenderingParams field applyRenderTier() or this task's PBR

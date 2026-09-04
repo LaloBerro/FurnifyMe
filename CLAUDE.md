@@ -1242,6 +1242,38 @@ document-only predicate.
   Follow `GridRenderer::update()`'s existing rule instead: a no-op until a context already
   exists, with the desired state recorded first and `applyCameraState()` re-applying it on the
   first real `paintEvent()`.
+- **`Graphic3d_MaterialAspect` describes a surface THREE times, and OCCT's path
+  tracer reads only the third.** The classic reflectance colours (ambient/diffuse/
+  specular/emissive) drive rasterization and Whitted ray tracing; `Graphic3d_PBRMaterial`
+  drives the PBR rasterizer; and `Graphic3d_BSDF` — a separate `myBSDF` member — is what
+  the *path tracer* integrates, exclusively. **`SetPBRMaterial()` is an inline that
+  assigns `myPBRMaterial` and nothing else**, so a material built with `SetColor` +
+  `SetPBRMaterial` leaves the BSDF default-constructed and all-zero, and an all-zero BSDF
+  returns zero radiance for every ray. That is the whole of the "path tracing renders the
+  studio floor black" defect that survived three fix rounds and two structurally opposite
+  material theories: pure-emission and pure-diffuse-albedo both measured `(0,0,0)`, which
+  looked like proof the GI pass was not lighting the geometry, and was actually proof that
+  neither theory was writing the field the GI pass reads. `Graphic3d_BSDF::CreateDiffuse`
+  and `::CreateMetallicRoughness(pbr)` are OCCT's own conversions — use them beside
+  `SetPBRMaterial` rather than instead of it, so the two descriptions of one surface cannot
+  drift. The tell that a *material* rather than the *scene* is at fault: the same scene
+  renders correctly under `RayTracing` and black under `PathTracing`, because only one of
+  the two reads the BSDF. **Geometry was ruled out by measurement, not argument** — a
+  reversed (single-sided, inward-normal) floor face and a closed `BRepPrimAPI_MakeBox` slab
+  both rendered exactly as black as the original face.
+- **An under-converged path-traced Dump is systematically DARK, not merely noisy.** The
+  accumulation buffer is a running mean and the samples that have not arrived yet read as
+  zero, so a probe that dumps too early measures a level that is wrong in a consistent
+  direction. Five settle passes read a floor at 172 where twenty-four read 194 — and 172
+  against a 194 backdrop is a failing seam that does not exist. `kMeasurementSettlePasses`
+  is the one count every *measuring* probe shares for exactly this reason;
+  `probePathTracingChangedImage()` keeps a smaller one deliberately, because it asks
+  whether two frames differ rather than what either one reads.
+- **Path tracing sRGB-encodes its output, including the background colour; the other
+  tiers do not.** The same `Quantity_Color` that rasterizes to the backdrop token
+  `(194,191,186)` path-traces to `(227,225,222)`, which draws a horizon line across the top
+  of every shot. `kPathTracingBackdropGain` is the measured pre-scale that lands it back on
+  the token, kept as a *fraction* of the token so an Appearance edit still moves it.
 - **`AIS_Manipulator` styling has a real API wall for colour and a separate, only
   pixel-measurable one for proportions (OCCT 8.0.1).** No setter reaches a per-axis colour at
   any access level — `Axis::myColor` has none — so restyling the 3D transform gizmo to match
