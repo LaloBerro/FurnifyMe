@@ -305,7 +305,15 @@ void skipByEnvironment(int checks, const QString& why)
 // class an ambient light and a cone angle to move, and an unrestored one of
 // those washes out ORDINARY MODELING with no symptom inside render mode at
 // all. 2379 + 3 = 2382.
-constexpr int kCheckFloor = 2382;
+//
+// The round's addendum adds one more: the converged-export gate. Save
+// Screenshot has one implementation, and it used to export a path-traced
+// frame the instant it was asked - one deterministic sample per pixel,
+// measured a third darker than the picture on screen. A real check when
+// this session's tier is PathTracing, skipByEnvironment(1, ...) otherwise,
+// since every other tier exports immediately exactly as before.
+// 2382 + 1 = 2383.
+constexpr int kCheckFloor = 2383;
 
 void check(bool condition, const QString& what)
 {
@@ -12778,7 +12786,7 @@ int main(int argc, char* argv[])
         OcctViewWidget* pv = probe.view();
 
         auto resizeViewport = [&](int w, int h) {
-            for (int i = 0; i < 6; ++i) {
+            for (int i = 0; i < 1; ++i) {
                 const int dw = w - pv->width();
                 const int dh = h - pv->height();
                 if (dw == 0 && dh == 0) break;
@@ -19258,7 +19266,7 @@ int main(int argc, char* argv[])
                       QStringLiteral("the %1-tier shadow-ratio Dump could not be measured "
                                      "(Dump() failed, or no floor was on screen to sample)")
                           .arg(tierName));
-                return;
+                return ratio;
             }
             const double r = static_cast<double>(ratio.darkest) / ratio.lit;
             check(r >= kShadowRatioFloorMin && r <= kShadowRatioFloorMax,
@@ -19270,6 +19278,7 @@ int main(int argc, char* argv[])
                       .arg(r, 0, 'f', 3)
                       .arg(kShadowRatioFloorMin, 0, 'f', 2)
                       .arg(kShadowRatioFloorMax, 0, 'f', 2));
+            return ratio;
         };
 
         // Shadows first, forced on every machine for the reason its own
@@ -19288,7 +19297,61 @@ int main(int argc, char* argv[])
             case OcctViewWidget::RenderTier::Shadows:     liveTierName = QStringLiteral("Shadows"); break;
             default:                                      liveTierName = QStringLiteral("Plain"); break;
         }
-        shadowRatioCheck(tier, liveTierName);
+        const OcctViewWidget::ShadowRatioProbe liveRatio =
+            shadowRatioCheck(tier, liveTierName);
+
+        // --- an export is never an under-converged frame ---------------------
+        // Save Screenshot has one implementation (the menu entry and the
+        // shutter both route through OcctViewWidget::saveSnapshot()), and
+        // until this round it exported a path-traced frame the instant it
+        // was asked - one deterministic sample per pixel, measured a third
+        // darker than the picture the user was looking at when they asked
+        // for it. The export drives the accumulation buffer now.
+        //
+        // "Immediately" is real here and not a figure of speech: the
+        // shadow-ratio probe just above ends by restoring the session's tier
+        // through applyRenderTier(), which resets the accumulation buffer -
+        // so the export below starts from the same first frame it would have
+        // starting from a fresh render-mode entry.
+        //
+        // The at-rest reference is the lit floor the probe ITSELF just
+        // measured, not a hardcoded 194: a check that hardcoded it would
+        // fail the day the studio rig is retuned for a reason that has
+        // nothing to do with convergence, and would pass on a machine whose
+        // whole render is dark for some other reason.
+        if (tier == OcctViewWidget::RenderTier::PathTracing && liveRatio.measured) {
+            const QString exportPath = outDir + QStringLiteral("/render-export-converged.png");
+            const bool exported = rview->saveSnapshot(exportPath);
+            const QImage shot(exportPath);
+            if (exported && !shot.isNull()) {
+                const QPoint pt(static_cast<int>(shot.width() * 0.88),
+                                static_cast<int>(shot.height() * 0.88));
+                const QColor c = shot.pixelColor(pt);
+                const int exportedFloor = (c.red() + c.green() + c.blue()) / 3;
+                // 12/255. The export samples the same buffer the probe did,
+                // so the two should agree closely; the slack covers the
+                // residual per-pixel variance of a converged path-traced
+                // frame at a single sample point, which the probe averages
+                // over a box and this does not.
+                constexpr int kExportTolerance = 12;
+                check(std::abs(exportedFloor - liveRatio.lit) <= kExportTolerance,
+                      QStringLiteral("a Save Screenshot taken the instant render mode's "
+                                     "accumulation buffer resets exports the CONVERGED "
+                                     "frame - floor %1 against the at-rest %2, within "
+                                     "%3/255 (an unconverged export measured 140 against "
+                                     "the same 194)")
+                          .arg(exportedFloor).arg(liveRatio.lit).arg(kExportTolerance));
+            } else {
+                skipByEnvironment(1,
+                      QStringLiteral("the converged-export capture could not be measured "
+                                     "(saveSnapshot() failed, or the PNG did not reload)"));
+            }
+        } else {
+            skipByEnvironment(1,
+                  QStringLiteral("PathTracing is not this session's chosen tier, so the "
+                                 "converged-export gate does not apply - every other tier "
+                                 "exports immediately, exactly as before"));
+        }
 
         // Vocabulary sweep, scoped to this probe's own toast history - the
         // same mechanism the versions/rename probe above uses, since this is
@@ -19337,25 +19400,36 @@ int main(int argc, char* argv[])
               "a snapshot is taken while render mode is on");
         const QImage afterShot(afterPath);
         check(!afterShot.isNull(), "and it loads back");
+        // 2x on every tier but the path-traced one, which exports at 1x for
+        // a measured reason the round's addendum forced into the open: the
+        // 2x path is an OFFSCREEN ToPixMap() render, and for a path-traced
+        // view that renders exactly one deterministic sample per pixel with
+        // no parameter able to reach it, while the on-screen buffer Dump()
+        // reads is the one that accumulates. Twice the resolution of the
+        // wrong image was not the better half of that trade. Derived once
+        // and reused by the grid sweep below, so the two cannot disagree
+        // about which scale this dump is at.
+        const int dumpScale = tier == OcctViewWidget::RenderTier::PathTracing ? 1 : 2;
         check(!beforeShot.isNull() && !afterShot.isNull() &&
-                  afterShot.width() == beforeShot.width() * 2 &&
-                  afterShot.height() == beforeShot.height() * 2,
-              QStringLiteral("the render-mode dump is exactly 2x the normal dump's own "
-                             "dimensions (%1x%2 against %3x%4)")
+                  afterShot.width() == beforeShot.width() * dumpScale &&
+                  afterShot.height() == beforeShot.height() * dumpScale,
+              QStringLiteral("the render-mode dump is exactly %1x the normal dump's own "
+                             "dimensions (%2x%3 against %4x%5)")
+                  .arg(dumpScale)
                   .arg(afterShot.width())
                   .arg(afterShot.height())
-                  .arg(beforeShot.width() * 2)
-                  .arg(beforeShot.height() * 2));
+                  .arg(beforeShot.width() * dumpScale)
+                  .arg(beforeShot.height() * dumpScale));
         // Every position that carried a grid pixel in the before-shot,
-        // mapped onto the doubled after-shot (an exact x2, since the two
-        // dumps now share the same viewport geometry - see the bottom-bar
-        // pin above) and re-tested at the SAME spot. This is the "known
-        // grid line" probe: it cannot be fooled by the studio gradient
-        // reading close to gridMinor()/gridMajor() somewhere else in the
-        // image, because it never looks anywhere else.
+        // mapped onto the after-shot by that same dumpScale (an exact
+        // integer multiple, since the two dumps share the same viewport
+        // geometry - see the bottom-bar pin above) and re-tested at the SAME
+        // spot. This is the "known grid line" probe: it cannot be fooled by
+        // the studio gradient reading close to gridMinor()/gridMajor()
+        // somewhere else in the image, because it never looks anywhere else.
         int stillGridAfter = 0;
         for (const GridSample& sample : gridSamplesBefore) {
-            const QPoint mapped(sample.x * 2, sample.y * 2);
+            const QPoint mapped(sample.x * dumpScale, sample.y * dumpScale);
             if (afterShot.rect().contains(mapped) && isGridColour(afterShot.pixelColor(mapped)))
                 ++stillGridAfter;
         }

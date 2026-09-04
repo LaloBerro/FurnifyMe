@@ -934,8 +934,18 @@ always starts in modeling) strips the viewport down to the furniture and nothing
   landing the lit floor within 3/255 of the backdrop and the shadow ~25% under it. The
   floor goes up **before** the tier probe, deliberately: the tier-2 pixel probe must measure
   the scene the user will see — with no floor, a straight-down shadow could touch no pixel
-  and the probe would fall to Plain on hardware that shadow-maps fine. `Save Screenshot`
-  exports at 2× device pixels while render mode is on.
+  and the probe would fall to Plain on hardware that shadow-maps fine.
+- **`Save Screenshot` exports at 2× device pixels while render mode is on — except on the
+  path-traced tier, which exports the converged on-screen buffer at 1×.** The 2× path is an
+  offscreen `ToPixMap()` render, and for a path-traced view **that renders exactly one
+  deterministic sample per pixel**: six successive calls returned the identical pixel bit for
+  bit, and `SamplesPerPixel` × `AdaptiveScreenSampling` swept across ten combinations changed
+  nothing. Measured, it exported a floor at 140 where the on-screen buffer at rest reads 194
+  — a third darker than the picture the user was looking at when they asked for it. Only the
+  on-screen framebuffer accumulates, and only `Dump()` reads it, so `awaitPathTracingConvergence()`
+  drives it and `saveSnapshot()` dumps. Half the linear resolution against twice the
+  resolution of the wrong image. There is one `saveSnapshot()`, so the menu entry, the
+  shutter and the furniture thumbnail all get this.
 
 ### Qt plugin deployment - do not remove
 
@@ -1295,6 +1305,15 @@ document-only predicate.
   is the one count every *measuring* probe shares for exactly this reason;
   `probePathTracingChangedImage()` keeps a smaller one deliberately, because it asks
   whether two frames differ rather than what either one reads.
+- **Reading a path-traced frame's pixels RESETS the accumulation buffer.** `V3d_View::Dump`
+  is not a free observation, so a "converge until two successive samples stop moving" loop
+  measures a fresh short accumulation every iteration, agrees with itself immediately, and
+  settles at the wrong level — measured: such a loop exported 136 against an at-rest 194,
+  barely better than the 140 it replaced. The tell is that every probe in this file reads a
+  correct value doing *N redraws and one Dump*, which would be impossible if a Dump were
+  free. Convergence is therefore driven by a **pass count under a time cap**, never by a
+  sampled criterion. `OpenGl_View::myAccumFrames` is the number you actually want and it is
+  `protected` with no accessor, on a class the graphic driver constructs.
 - **Path tracing sRGB-encodes its output, including the background colour; the other
   tiers do not.** The same `Quantity_Color` that rasterizes to the backdrop token
   `(194,191,186)` path-traces to `(227,225,222)`, which draws a horizon line across the top

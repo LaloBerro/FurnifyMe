@@ -909,6 +909,13 @@ public:
     // specifically to look at a picture.
     static constexpr int kPathTracingConvergeMs = 4000;
 
+    // The hard cap on how long an EXPORT will drive convergence before it
+    // writes whatever it has - see awaitPathTracingConvergence(). The resting
+    // window plus margin: a scene that converges normally never reaches this,
+    // and a pathological one still exports rather than hanging on a file
+    // dialog the user already dismissed.
+    static constexpr int kExportConvergenceCapMs = kPathTracingConvergeMs + 1500;
+
     // --- Render settings (Task 7.2) -----------------------------------
     //
     // Six values a render-mode session can tune, applied onto the SAME
@@ -1412,6 +1419,17 @@ private:
     // has to be able to set it WITHOUT also rebuilding the floor, which is
     // what applyBackgroundForMode() does and what would recurse from there.
     void applyRenderBackgroundColourForTier(RenderTier tier);
+    // Drives the on-screen path-tracing accumulation buffer through enough
+    // passes to settle, bounded by kExportConvergenceCapMs. A no-op on every
+    // other tier and outside render mode. See saveSnapshot() for why an
+    // export has to do this at all - the offscreen 2x path renders exactly
+    // one sample per pixel and no parameter reaches it, so "export what the
+    // user is looking at" and "export at 2x" turned out to be different
+    // pictures - and see this function's own body for why the criterion is a
+    // pass count rather than two settling samples: reading the pixels resets
+    // the buffer being read, which makes a sampling loop agree with itself
+    // immediately and at the wrong level.
+    void awaitPathTracingConvergence();
     // The redraw every live render-settings setter needs after mutating a
     // material or a light property - the textbook-correct sequence
     // (Redisplay/settle-redraws/BVH-invalidate/camera-poke/a genuine

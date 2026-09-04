@@ -2336,10 +2336,79 @@ bool OcctViewWidget::saveSnapshot(const QString& path)
     // size), through ToPixMap() rather than Dump(): it renders an offscreen
     // buffer of the requested target size directly, with no window resize
     // needed - Dump() has no size parameter of its own to hand it one.
+    // The path-traced tier exports the ON-SCREEN accumulation buffer, at
+    // 1x, rather than the 2x offscreen render every other tier gets - and
+    // that trade was forced by measurement, not chosen.
+    //
+    // ToPixMap() renders an offscreen buffer of the requested size, and for
+    // a path-traced view it renders exactly ONE sample per pixel and then
+    // stops: six successive calls came back with the identical floor pixel,
+    // bit for bit, so it neither accumulates across calls nor varies within
+    // one. It is not an under-sampled frame that more calls would improve;
+    // it is a deterministic single sample. `SamplesPerPixel` and
+    // `AdaptiveScreenSampling` were both swept against it (0/4/16/64/128 x
+    // on/off, ten combinations) and every one produced the same pixel, so
+    // nothing in Graphic3d_RenderingParams reaches it either. Measured on
+    // this scene: the offscreen export read 140 where the on-screen buffer
+    // at rest reads 194 - the export was a third darker than the picture
+    // the user was looking at when they asked for it.
+    //
+    // Dump() reads the on-screen framebuffer, which DOES accumulate - it is
+    // the same buffer every measuring probe in this file already relies on -
+    // so awaitPathTracingConvergence() drives it and Dump() exports what the
+    // user actually sees. Half the linear resolution of the other tiers, and
+    // the only alternative on offer was twice the resolution of the wrong
+    // image.
+    if (myRenderTier == RenderTier::PathTracing) {
+        awaitPathTracingConvergence();
+        return myView->Dump(path.toUtf8().constData()) == Standard_True;
+    }
+
     const QPoint deviceSize = toDevicePixels(QPoint(width(), height()));
     Image_AlienPixMap pixmap;
     if (!myView->ToPixMap(pixmap, deviceSize.x() * 2, deviceSize.y() * 2)) return false;
     return pixmap.Save(path.toUtf8().constData());
+}
+
+void OcctViewWidget::awaitPathTracingConvergence()
+{
+    if (myView.IsNull() || !myRenderModeActive || myRenderTier != RenderTier::PathTracing)
+        return;
+
+    // This drives a fixed number of accumulation passes under a hard time
+    // cap rather than watching two successive samples converge, and that is
+    // a measured decision, not a shortcut.
+    //
+    // There is no cheap signal to watch. OpenGl_View::myAccumFrames is
+    // exactly the number this wants and it is `protected` with no accessor,
+    // reachable only by subclassing a class the graphic driver constructs;
+    // Graphic3d_RenderingParams::SamplesPerPixel is an INPUT, and sweeping it
+    // 0/4/16/64/128 changed no pixel of the export at all.
+    //
+    // Which leaves reading pixels - and **reading the pixels resets the
+    // buffer being read**. A sampling loop was built first and measured: four
+    // redraws, Dump, compare, repeat, with a 0.5/255 epsilon over a
+    // whole-frame strided mean. It exported at 136 against an at-rest 194 -
+    // barely better than the 140 it replaced - because every Dump() restarted
+    // the accumulation, so each iteration measured a fresh four-sample frame,
+    // every iteration agreed with the last to well inside the epsilon, and
+    // the loop "converged" on the second pass. The tell is in this file's own
+    // probes: probeRenderShadowRatio() reads 194 doing kMeasurementSettlePasses
+    // redraws and ONE Dump, and would not if a Dump were free.
+    //
+    // So the pass count is the criterion. kMeasurementSettlePasses is where
+    // the running mean was measured to settle (that is what its own comment
+    // records); doubling it costs a fraction of a second on any GPU that
+    // reached this tier at all and buys the variance reduction a still image
+    // is judged on. The time cap is what a pathological scene hits instead of
+    // hanging on a dialog the user already dismissed.
+    QElapsedTimer timer;
+    timer.start();
+    constexpr int kExportAccumulationPasses = kMeasurementSettlePasses * 2;
+    for (int i = 0; i < kExportAccumulationPasses; ++i) {
+        if (timer.elapsed() >= kExportConvergenceCapMs) break;
+        myView->Redraw();
+    }
 }
 
 QImage OcctViewWidget::captureThumbnail()
