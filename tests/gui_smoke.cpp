@@ -13643,6 +13643,24 @@ int main(int argc, char* argv[])
         check(checkedChip != nullptr,
               "there is a checked rail chip to sample the accent ring on");
 
+        // The corner fix (Milestone 5, item 2): a chip's rounded corners show
+        // the parent card's panel ground, not the chrome square the app-wide
+        // stylesheet used to stamp behind every styled widget. Sampled
+        // COMPOSITED - the chip rendered through its parent - because
+        // renderExact() draws the chip alone, where a transparent corner has
+        // nothing behind it to read.
+        if (checkedChip && checkedChip->parentWidget()) {
+            QWidget* card = checkedChip->parentWidget();
+            QImage composited(card->size(), QImage::Format_ARGB32);
+            composited.fill(Qt::black);
+            card->render(&composited);
+            const QColor got = composited.pixelColor(checkedChip->pos());
+            check(colorDistance(got, Theme::panel()) < 8.0,
+                  QStringLiteral("a chip's corner shows its card's panel ground, not "
+                                 "the stylesheet's chrome square (%1)")
+                      .arg(got.name()));
+        }
+
         const QImage graphiteChip = checkedChip ? renderExact(checkedChip) : QImage();
         // ToolChip::paintEvent() draws the checked ring inset stroke+1 from
         // the card edge at the LIVE stroke width - which the default look now

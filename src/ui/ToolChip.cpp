@@ -68,7 +68,18 @@ void ToolChip::applyTheme()
     // checks): the chip's own text is a chip label. A per-widget stylesheet
     // wins over the app-wide one regardless of selector specificity, so this
     // sticks reliably rather than fighting the cascade.
-    setStyleSheet(QStringLiteral("font-size: %1pt;").arg(Theme::labelFont().pointSizeF()));
+    //
+    // `background: transparent` is the corner fix (Milestone 5, item 2): the
+    // app-wide `QWidget { background-color: @chrome }` rule stamps every
+    // styled widget's FULL RECT before paintEvent() runs, so each chip wore
+    // an opaque chrome square behind its rounded card - visibly darker than
+    // the panel-coloured cluster card it sits on. A chip is always a child
+    // of an already-opaquely-painted card (the rail cluster, the bar), never
+    // a direct child of the GL surface, so letting the parent's paint show
+    // through the corners breaks no law - the opaque-family rule governs
+    // what touches OCCT's surface, and the parent still does that part.
+    setStyleSheet(QStringLiteral("background: transparent; font-size: %1pt;")
+                      .arg(Theme::labelFont().pointSizeF()));
     // A labelled chip's width is measured with labelFont()/badgeFont(), so a
     // base-size change moves it - the rail's icon-only chips are a fixed
     // square and are unaffected, but sizeHint() is one function for both.
