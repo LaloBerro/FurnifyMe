@@ -14,11 +14,17 @@ for it if you need the verbatim original). Milestone 1 scope is exactly: **sketc
 plus STEP export. **Milestone 2 (direct modeling) is merged**: push/pull on faces,
 fillets, chamfers, and a transform gizmo now exist — see "Direct modeling" below.
 **Milestone 3 (files, versions, symmetry and render) is merged**: a managed library of
-`.furnify` furniture with an init screen and autosave, named versions with a side-by-side
-compare, live mirror symmetry, inline rename, a render mode, and a bottom-bar toggle — see
-"Files, versions and the library" below. Still out
-of scope: history/parametric tree, constraint solver, 2D drawings, assemblies, materials,
-and any file format beyond STEP.
+`.furnify` furniture with autosave, named versions with a side-by-side
+compare, live mirror twins, inline rename, a render mode, and a bottom-bar toggle — see
+"Files, versions and the library" below.
+**Milestone 4 (two windows, mirror, links, deeper render) is merged**: the library moved
+out of the editor into a `SelectorWindow` of its own, versions grew thumbnails, Mirror
+became a placed-plane gesture that pairs bodies retroactively, linked copies arrived, the
+grid follows a face-on orthographic look, sketching snaps to eight compass directions, and
+render mode gained a path-tracing tier with its own settings card — see "Milestone 4: two
+windows, Mirror, links and render tiers" below. Still out of scope: history/parametric
+tree, constraint solver, 2D drawings, assemblies, materials, and any file format beyond
+STEP.
 
 ### Stack decisions — settled, do not re-litigate
 
@@ -223,10 +229,11 @@ Source files under `src/`, plus `tests/`:
 | `ui/AppBar.{h,cpp}` | the menu strip: wordmark, real `QMenuBar`, view controls |
 | `FurnifySerial.{h,cpp}` | binary shape (de)serialization via `BinTools`, **zero Qt includes** |
 | `FurnitureStore.{h,cpp}` | owns the managed library — enumerate/create/save/load/rename/versions |
-| `ui/InitScreen.{h,cpp}` | the gallery-of-furniture state that replaces the empty viewport at launch |
-| `ui/InlineRename.{h,cpp}` | the one `QLineEdit`-in-place helper: init cards and drawer rows both use it |
-| `ui/VersionsPanel.{h,cpp}` | versions drawer: list, Compare, Restore, two-click Delete |
-| `ui/SaveVersionCard.{h,cpp}` | name-a-version card, the `ExtrudePreview` contract |
+| `ui/SelectorWindow.{h,cpp}` | the library, a top-level window of its own — cards, New, rename, delete |
+| `EditorSelectorHandoff.{h,cpp}` | the ONE wiring that swaps editor and selector; `main.cpp` and `gui_smoke` share it |
+| `ui/InlineRename.{h,cpp}` | the one `QLineEdit`-in-place helper: selector cards and drawer rows both use it |
+| `ui/VersionsPanel.{h,cpp}` | versions drawer: thumbnail cards, Compare, Restore, two-click Delete |
+| `ui/RenderSettingsPanel.{h,cpp}` | the render-mode settings card and its shutter (`RenderShutterButton`, same file) |
 
 ### The vocabulary — enforced by test
 
@@ -247,6 +254,8 @@ tooltip contains a banned word, so this table is executable, not aspirational.
 | Rounding an edge | Fillet, `R 20 mm` | bevel, round-over, round |
 | Flattening an edge | Chamfer, `C 20 mm` | bevel, break, flatten |
 | Repositioning a body | Move / Rotate / Scale | transform, translate |
+| A live mirrored twin | Mirror | symmetry, mirroring-mode, reflect |
+| A copy that follows its source | Linked copy, `Duplicate linked` | instance, clone, reference |
 | The colours-and-fonts panel | Appearance | theme, settings, preferences |
 
 Extrude and Pull are two rows, not one, and the Extrude row no longer bans "pull":
@@ -263,7 +272,14 @@ a user who reads "Body 03 rounded" has no word to look for in the interface.
 user never sees them, and renaming them would churn the geometry library and its
 tests for no visible gain. The enforced bans match the bare word (case-insensitive):
 `OCCT`, `Fuse`, `Solid`, `mm3`, `(s)`, `Merge`, `Join` and `bevel` are forbidden
-everywhere in action text and widget tooltips, regardless of capitalization.
+everywhere in action text and widget tooltips, regardless of capitalization —
+and so is `symmetry`, added in Milestone 4's fix wave. The kernel-facing
+`DocumentModel::symmetryOn()`/`setSymmetry()` and every private member keep that spelling
+for the same reason `BooleanKind::Fuse` does; nothing PAINTED may. The Model menu reads
+**Mirror** (`S`) and **Turn Mirroring Off**, the status label reads `Mirror on — …`, and
+the plane messages read `Mirror plane …`. The old `&Symmetry` entry was the vocabulary
+law broken in the one direction that matters most: the word on the control the user had
+to press was not the word any of its own feedback used.
 
 **`round` and `flatten` are banned too, but matched at a word boundary.** They are the
 Never column for Fillet and Chamfer and they shipped for a whole branch inside two Failure
@@ -279,7 +295,7 @@ site sweeps exactly as before) that short-circuits to "clean" outright — an it
 furniture's name, a version's name is the owner's word choice, not this app's copy, and
 "Fuse My Table" must pass the same sweep that correctly fails an action tooltip saying "Fuse
 the two bodies". Each surface that paints user text — `ItemsPanel::paintedTexts()`,
-`InitScreen`'s cards, `VersionsPanel`'s rows — exposes it and passes `isUserData=true` at its
+`SelectorWindow`'s cards, `VersionsPanel`'s rows — exposes it and passes `isUserData=true` at its
 own sweep site, following `WalkthroughPanel`/`HintBalloon`/`ShortcutSheet`'s existing
 generate-don't-duplicate pattern. **`Toast` has no user-data channel of its own** — it paints
 one plain string with no way to mark part of it exempt, so a rename toast that reads
@@ -947,6 +963,77 @@ always starts in modeling) strips the viewport down to the furniture and nothing
   resolution of the wrong image. There is one `saveSnapshot()`, so the menu entry, the
   shutter and the furniture thumbnail all get this.
 
+### Milestone 4: two windows, Mirror, links and render tiers
+
+**The library is a second top-level window, and that is a quit trap unless wired once.**
+`SelectorWindow` replaced the in-editor init screen; `EditorSelectorHandoff::wire()` is
+the ONE implementation of the swap, called by both `main.cpp` and `gui_smoke` — a suite
+driving its own copy of the handoff proves nothing about the app, and the first review
+round caught exactly that drift. Two belts, both required: every leg shows the **target
+first** and hides the source second, so at least one window is always visible; and
+`setQuitOnLastWindowClosed(false)`, because Qt fires the last-window-closed check on a
+mere `hide()` and a posted `QEvent::Quit` cannot be taken back later in the same call
+stack. Closing the selector is the one honest quit gesture in this model.
+
+**Mirror is a placed plane, not a toggle.** `S` begins a gesture: a plane with a draggable
+handle, `X`/`Y`/`Z` to aim, Enter to commit, Escape to back out — one application-wide key
+claim, disjoint from the other three by construction. The plane spawns **tangent** to the
+selection's combined bounding box on the positive side of the active axis, never through
+its centre: `DocumentModel::pairWithMirror()` skips a body straddling the plane it would be
+mirrored across, so a centred default made the headline flow (one body, `S`, Enter) refuse
+deterministically — the whole-branch review's C1, and the mechanism behind the user's
+"could not make it work". An X/Y/Z flip re-places tangent on the new axis for the same
+reason. Dragging can still put the plane inside a body; the skip rule then applies and the
+refusal says so. `S` **always begins a placement**, including while mirroring is already on,
+so additional bodies can join an existing mirror (`pairWithMirror()` skips already-paired
+ones honestly); turning mirroring off is its own shortcut-less Model-menu entry, because
+unpairing everything must not share a key with the gesture people reach for constantly.
+`mirrorPlacementEnvironmentOk()` carries `myShowingInitScreen` and `isCompareOpen()` as well
+as the sketch/pending-outline/render-mode terms — without them a live gesture survived the
+editor↔selector handoff and carried stale body ids into a **different** furniture, where
+they resolve to real, unrelated bodies because `myNextId` restarts at 1 per document.
+
+**Linked copies are a group, and a body may not be both linked and mirrored.**
+`DocumentModel::createLinkedCopy()`/`linkExisting()`/`unlink()` own `LinkGroup`; an edit to
+any member re-derives every other through `propagateLinkedEdit()`, inside the **same**
+checkpoint the edit took, at `commitReplaceBody()`'s choke. Link propagation and mirror-twin
+follow are mutually exclusive by construction (the v1 exclusion, enforced from both
+directions, and a serialized document naming a body in both is refused validate-before-
+mutate). A refused propagation writes nothing and must not be reported as "linked copy
+updated" — `linkedGroupSuffix()` takes a negative sentinel and says the copies could not
+follow, because a group's membership count is not evidence anything was written to it.
+
+**The grid follows a face-on orthographic look, and a sketch pins it.** `gridPlane()`'s
+priority is: a locked face's plane → the plane of a sketch **in progress** (pinned by value
+at Start Sketch) → the vertical world plane an effectively-orthographic Front/Back/Left/Right
+look is squared onto (`faceOnOrthoPlane()`, the same construction `onStartSketch()` reads) →
+the ground. The sketch term is what keeps an orbit mid-sketch from dropping the grid back to
+the ground while the outline is still being built on XZ — a grid that stops showing where the
+next click lands has stopped doing its job. One name per plane, too:
+`MainWindow::faceOnDirectionLabel()` is read by both the Start Sketch message and the
+persistent cue, so the world XZ plane is "Front" and YZ is "Right" whichever side the camera
+is on. `Theme::Spec::gridDensity` is an Appearance token; the camera's elevation clamp is a
+true ±90° with a pole-safe `upVector()`.
+
+**Render tiers, best first: PathTracing → RayTracing → Shadows → Plain**, probed once per
+session at first activation and cached. The lesson that cost the most: `SetPBRMaterial()`
+never writes `Graphic3d_BSDF`, and the BSDF is the only description OCCT's path tracer
+integrates — so the whole path-traced scene rendered black, bodies included, and three
+rounds of floor-material theories chased a symptom. PBR + tone mapping are **PathTracing's
+alone** (`usesPbrMaterials()`); Whitted ray tracing does not tone-map and has no indirect
+bounce, so it and the two rasterizing tiers keep Phong and the Milestone-3-calibrated
+shadow-catcher floor. Consequence the settings card has to admit: **Surface and Metal are
+read by PathTracing only**, so on every other tier those two sliders move and change
+nothing — the card shows a muted note saying where they apply, derived on every
+`appStateChanged` from `OcctViewWidget::renderMaterialControlsApply()`, which IS the gate
+the setters are wrapped in rather than a second copy of the tier list. On a ray-traced tier
+a live material edit does not reach the next frame on this build at all (six distinct
+redraw strategies measured, none moved a pixel); the value applies on re-entering render
+mode, and the forced rasterize-and-back round trip that stays as the implementation is
+wrapped in `try/catch` so a throw cannot strand `params.Method`. An **under-converged
+path-traced Dump is systematically dark** — the accumulation buffer is a running mean — so
+every measuring probe and `Save Screenshot` wait for convergence first.
+
 ### Qt plugin deployment - do not remove
 
 Qt will not start without a platform plugin, and it looks for one in a `platforms/`
@@ -1076,7 +1163,7 @@ Required `QWidget` setup — omitting any of these gives flicker or a black view
 `setAutoFillBackground(false)`, `setMouseTracking(true)` (needed for hover highlight), and
 `paintEngine()` overridden to return `nullptr`.
 
-Event wiring: `paintEvent`→`Redraw()`, `resizeEvent`→`MustBeResized()`, RMB drag→turntable orbit around the current view target (Unity-style, the user's explicit preference — no cursor-anchored pivoting), MMB drag→pan, wheel→zoomToward cursor; camera state lives in CameraController and is pushed via SetEye/SetCenter/SetUp. FOVy is fixed at 45° for the life of the view; **which projection is drawn with it moves** — see below.
+Event wiring: `paintEvent`→`Redraw()`, `resizeEvent`→`MustBeResized()`, RMB drag→turntable orbit around the current view target (Unity-style, the user's explicit preference — no cursor-anchored pivoting), MMB drag→pan, wheel→zoomToward cursor; camera state lives in CameraController and is pushed via SetEye/SetCenter/SetUp. FOVy is fixed at 45° for the life of the view **except while render mode is on**, where the settings card's Camera FOV override is read through `OcctViewWidget::effectiveFovyDeg()` by both `applyCameraState()` and `worldPerPixel()` and pushed back through `applyCameraState()` on exit, so no override ever leaks outside render mode; **which projection is drawn with it moves** — see below.
 
 #### Projection: a base mode and a loan
 
@@ -1190,8 +1277,13 @@ lets Ctrl+double-click in edge mode yank the mode out from under a live bevel ar
 never-silent-failure law, so `Failure` bypasses the toggle unconditionally. Every Note is
 a success report carrying Undo; every refusal is a Failure — the taxonomy is load-bearing.
 
-**Sketching**: Shift snaps the cursor onto the previous segment's direction (parameter
-then grid-snapped along the line); the close-hit on the first point is tested on the
+**Sketching**: Shift snaps the cursor onto the nearest of EIGHT directions at 45° steps
+from the previous point (`SketchController::snapToCompass`), rather than only the previous
+segment's own direction — which could not draw a square corner. The dial is measured in
+the sketch **plane's own (u, v) axes**, not world X/Y, so a locked or face-on plane gets
+the same dial in its own coordinates; a candidate coinciding with the start is refused
+rather than guessed at, and the projection onto the chosen line is grid-snapped along it.
+The close-hit on the first point is tested on the
 plane hit **snapped first when Snap to Grid is on** (raw otherwise) and outranks the
 straight constraint, with the radius in one place
 (`OcctViewWidget::sketchCloseTolerance()`). The raw-only comparison it replaced was the
