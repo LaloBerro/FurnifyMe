@@ -19197,7 +19197,14 @@ int main(int argc, char* argv[])
                 rview->probeRenderFloorBlend(OcctViewWidget::RenderTier::RayTracing,
                                              floorPointLogical);
             if (rtBlend.measured) {
-                constexpr int kRayTracingBlendToleranceMax = 30;
+                // 30 was fix round 3's guess at a tier it could not reach on
+                // that hardware. The user-feedback round moved this tier off
+                // PBR and onto the same Phong shading and the same
+                // Milestone-3-calibrated floor material the Shadows tier
+                // uses (see usesPbrMaterials()), which is calibrated to
+                // 3/255 - so the honest tolerance here is the Shadows
+                // tier's own, not a wider one.
+                constexpr int kRayTracingBlendToleranceMax = 12;
                 check(rtBlend.deltaR <= kRayTracingBlendToleranceMax &&
                           rtBlend.deltaG <= kRayTracingBlendToleranceMax &&
                           rtBlend.deltaB <= kRayTracingBlendToleranceMax,

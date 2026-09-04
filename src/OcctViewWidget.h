@@ -874,6 +874,14 @@ public:
     // this path tracer still showed tile-sized variance after 24
     // accumulation passes where the soft one was clean.
     static constexpr double kPathTracingKeySmoothAngleRad = 0.30;
+    // The rasterized and Whitted tiers keep their key exactly as Milestone 3
+    // calibrated it and lift only the ambient fill, which is what their
+    // near-black unlit faces needed - measured 0.55 of the lit floor before
+    // and 0.72 (Shadows) / 0.65 (RayTracing) after. The floor does not move
+    // with it: the Milestone-3 floor material's ambient reflectance is zero
+    // by construction, so its calibrated blend against the backdrop is
+    // untouched, which a measurement confirmed rather than assumed.
+    static constexpr double kRasterAmbientGain = 2.0;
     // Path tracing writes its output through an sRGB encode the rasterized
     // and Whitted paths do not, and applies it to the BACKGROUND colour as
     // well - so the same Quantity_Color that rasterizes to the backdrop

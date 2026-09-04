@@ -876,6 +876,32 @@ always starts in modeling) strips the viewport down to the furniture and nothing
   same test every other exit uses. A viewport press is intercepted at the top of
   `mousePressEvent()` (left button only) and swallowed; orbit/pan/zoom/Fit All are untouched,
   because framing a shot is not a modeling gesture.
+- **PBR belongs to path tracing alone; every other tier is Phong.** Milestone 4 fix round 2
+  scoped the PBR shading model, filmic tone mapping and the PBR material set to *both*
+  ray-traced tiers (`isRayTracedTier()`); the user-feedback round narrowed it to
+  PathTracing (`usesPbrMaterials()`), for a measured reason. Whitted ray tracing does not
+  tone-map — OCCT's own header says `ToneMappingMethod` is for path tracing — and has no
+  indirect bounce to fill a shadow, so a PBR floor under it rendered its cast shadow at
+  **0.32 of the lit floor**, the near-black the user rejected. Handed the same Phong model
+  and the same Milestone-3-calibrated floor and body materials the Shadows tier has always
+  used, the identical scene measures a floor that blends to 2/255 and a **0.86** cast
+  shadow: not the reference's 0.70, but a readable shadow rather than a hole. `isRayTracedTier()`
+  still answers "which tiers drive OCCT's ray-tracing `Method`"; the two questions are now
+  two predicates.
+- **The studio rig is per-tier, and its gains are sampled pixels.** `SetDefaultLights()`
+  gives a directional key at intensity **20** beside an ambient at **1** — calibrated for
+  flat modeling legibility and wildly over-driven for an integrated render, which clipped
+  the path-traced floor to white at every exposure worth having. `applyRenderLightsForTier()`
+  applies `kPathTracingAmbientGain`/`kPathTracingKeyGain`/`kPathTracingKeySmoothAngleRad`
+  for PathTracing and `kRasterAmbientGain` for the rest, **on top of** `myRenderLightStrength`
+  rather than instead of it, so the Light strength control still opens the key by the factor
+  it always did. The rasterized tiers' unlit faces read 0.55 of the lit floor before that
+  ambient fill and 0.72 (Shadows) / 0.65 (RayTracing) after, **and the floor does not move
+  with it** — the Milestone-3 floor material's ambient reflectance is zero by construction,
+  which a measurement confirmed rather than assumed. Ambient lights and the key's cone angle
+  are saved at entry and restored at exit like the direction and intensity already were:
+  an ambient left scaled has *no symptom inside render mode*, only ordinary modeling coming
+  back washed out, once, forever.
 - **The tier probe** tries `Graphic3d_RM_RAYTRACING` first, timed against one redraw at a
   roughly **100 ms** threshold (try/catch around the OCCT call, since ray tracing can throw on
   hardware that does not support it), falls back to shadow-mapped rasterization

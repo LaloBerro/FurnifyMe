@@ -126,6 +126,24 @@ bool isRayTracedTier(OcctViewWidget::RenderTier tier)
            tier == OcctViewWidget::RenderTier::RayTracing;
 }
 
+// And the one place "which tier gets PBR shading, filmic tone mapping and
+// the PBR material set" is written down. Fix round 2 scoped that to
+// isRayTracedTier(); the user-feedback round narrowed it to PathTracing
+// alone, for a measured reason rather than a tidier reading of the brief.
+// Whitted ray tracing does not tone-map (OCCT's own header says
+// ToneMappingMethod is for path tracing) and has no indirect bounce to fill
+// a shadow, so a PBR floor under it rendered its cast shadow at 0.32 of the
+// lit floor - the near-black the user rejected. Handed the SAME Phong
+// shading model and the SAME Milestone-3-calibrated floor and body
+// materials the Shadows tier has always used, the identical scene measured
+// a blended floor and a 0.86 cast shadow: nothing like the reference's
+// 0.70, but a real, readable shadow rather than a hole. So PBR is path
+// tracing's, and every other tier is Phong.
+bool usesPbrMaterials(OcctViewWidget::RenderTier tier)
+{
+    return tier == OcctViewWidget::RenderTier::PathTracing;
+}
+
 // How many accumulation passes a MEASURING probe lets the path tracer take
 // before it dumps. Every probe that reports a NUMBER shares this, because
 // an under-converged path-traced frame is not merely noisy, it is
@@ -2745,7 +2763,7 @@ void OcctViewWidget::showRenderFloor()
     // correctly the Phong branch - exactly the material the Shadows-tier
     // candidacy probe (probeShadowPixelsDiffer(), called from inside
     // probeRenderTier()) needs on screen to judge shadow contrast against.
-    applyRenderFloorMaterialForTier(isRayTracedTier(myRenderTier));
+    applyRenderFloorMaterialForTier(usesPbrMaterials(myRenderTier));
     // Selection mode -1, the previews' own never-pickable path - hover can
     // never highlight it and no pick can ever land on it, which also keeps
     // it out of the exit-click's way.
@@ -2877,7 +2895,7 @@ void OcctViewWidget::applyRenderLightsForTier(RenderTier tier)
     // clipping a physically integrated frame to white. Every number here was
     // read off sampled Dump() pixels - see the constants' own comments.
     const double keyGain = pathTracing ? kPathTracingKeyGain : 1.0;
-    const double ambientGain = pathTracing ? kPathTracingAmbientGain : 1.0;
+    const double ambientGain = pathTracing ? kPathTracingAmbientGain : kRasterAmbientGain;
     const gp_Dir direction = studioKeyDirectionForAzimuth(myRenderLightAngleDeg);
     for (auto& saved : myRenderSavedLights) {
         saved.light->SetDirection(direction);
@@ -2993,7 +3011,7 @@ void OcctViewWidget::setRenderSurfaceRoughness(double roughness01)
     // No-op on Shadows/Plain by design - see this setter's own header
     // comment. isRayTracedTier() is the one written-down copy of "which
     // tiers are PBR", reused rather than re-tested here.
-    if (myRenderModeActive && isRayTracedTier(myRenderTier) && !myContext.IsNull()) {
+    if (myRenderModeActive && usesPbrMaterials(myRenderTier) && !myContext.IsNull()) {
         applyRenderBodyMaterials();
         redrawRenderModeLive();
     }
@@ -3002,7 +3020,7 @@ void OcctViewWidget::setRenderSurfaceRoughness(double roughness01)
 void OcctViewWidget::setRenderMetal(double metallic01)
 {
     myRenderMetallic = std::clamp(metallic01, 0.0, 1.0);
-    if (myRenderModeActive && isRayTracedTier(myRenderTier) && !myContext.IsNull()) {
+    if (myRenderModeActive && usesPbrMaterials(myRenderTier) && !myContext.IsNull()) {
         applyRenderBodyMaterials();
         redrawRenderModeLive();
     }
@@ -3097,6 +3115,7 @@ void OcctViewWidget::applyRenderTier(RenderTier tier)
     // isRayTracedTier() is the one written-down copy of this test - see its
     // own comment.
     const bool rayTraced = isRayTracedTier(tier);
+    const bool pbr = usesPbrMaterials(tier);
     const bool pathTracing = tier == RenderTier::PathTracing;
     params.Method = rayTraced ? Graphic3d_RM_RAYTRACING : Graphic3d_RM_RASTERIZATION;
     // Fix round 2's own measured finding: this is NOT a ray-traced-only
@@ -3158,22 +3177,28 @@ void OcctViewWidget::applyRenderTier(RenderTier tier)
     // what lets applyRenderFloorMaterialForTier()/clearRenderBodyMaterials()
     // below put the ORIGINAL, Milestone-3-calibrated Phong floor and body
     // materials back for those two tiers, shadow contrast included.
+    //
+    // The user-feedback round narrowed `rayTraced` to `pbr` here - see
+    // usesPbrMaterials() for the measurement that moved it. Whitted ray
+    // tracing joins the rasterized tiers on Phong and the Milestone-3
+    // materials; only path tracing, which actually integrates light and
+    // actually tone-maps, keeps PBR.
     params.ShadingModel =
-        rayTraced ? Graphic3d_TypeOfShadingModel_Pbr : Graphic3d_TypeOfShadingModel_Phong;
+        pbr ? Graphic3d_TypeOfShadingModel_Pbr : Graphic3d_TypeOfShadingModel_Phong;
     params.ToneMappingMethod =
-        rayTraced ? Graphic3d_ToneMappingMethod_Filmic : Graphic3d_ToneMappingMethod_Disabled;
+        pbr ? Graphic3d_ToneMappingMethod_Filmic : Graphic3d_ToneMappingMethod_Disabled;
 
     // The material half of the same scoping - see each function's own
     // comment. Every tier switch (including the temporary ones the
     // measurement probes below make) re-applies the right pair, so a probe
     // that tries PathTracing then falls back to Shadows leaves both the
     // floor and the bodies in the material that tier actually needs.
-    if (rayTraced) {
+    if (pbr) {
         applyRenderBodyMaterials();
     } else {
         clearRenderBodyMaterials();
     }
-    applyRenderFloorMaterialForTier(rayTraced);
+    applyRenderFloorMaterialForTier(pbr);
 
     // 4x the 1024 default while shadow-mapping, put back for every other
     // tier. At 1024 the shadow's edge on the floor is visibly blocky - the
@@ -3835,9 +3860,10 @@ void OcctViewWidget::setRenderMode(bool on)
         if (!myViewer.IsNull()) {
             for (const Handle(Graphic3d_CLight)& light : myViewer->ActiveLights()) {
                 // The ambient fill is this class's to move too since the
-                // user-feedback round: the path-traced tier integrates its
-                // own bounce and clips to white against OCCT's
-                // modeling-legibility rig, so it needs this turned down.
+                // user-feedback round - up for the rasterized tiers, whose
+                // unlit faces read near-black without it, and down for the
+                // path-traced one, which integrates its own bounce and
+                // clips to white against OCCT's modeling-legibility rig.
                 if (light->Type() == Graphic3d_TypeOfLightSource_Ambient) {
                     myRenderSavedAmbients.push_back({light, light->Intensity()});
                     continue;
