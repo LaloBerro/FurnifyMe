@@ -67,6 +67,7 @@
 #include <QAbstractButton>
 #include <QAction>
 #include <QApplication>
+#include <QCoreApplication>
 #include <QColorDialog>
 #include <QComboBox>
 #include <QDialog>
@@ -89,6 +90,7 @@
 #include <QLineEdit>
 #include <QMenuBar>
 #include <QMouseEvent>
+#include <QOpenGLContext>
 #include <QPainter>
 #include <QPointF>
 #include <QPointer>
@@ -98,6 +100,7 @@
 #include <QSlider>
 #include <QSplitter>
 #include <QStatusBar>
+#include <QSurfaceFormat>
 #include <QString>
 #include <QTemporaryDir>
 #include <QTemporaryFile>
@@ -347,7 +350,16 @@ void skipByEnvironment(int checks, const QString& why)
 // anonymous-namespace-local classes this file cannot name, so they carry no
 // dedicated pin - "reachable in the suite" is this task's own qualifier for
 // what gets one. 2419 + 56 = 2475.
-constexpr int kCheckFloor = 2475;
+//
+// The QOpenGLWidget migration (Phase 1) adds 3, all in the device-pixel
+// boundary block: the context Qt GRANTED carries depth and stencil (a request
+// is not a grant), Qt::AA_ShareOpenGLContexts is set (without it a reparent
+// destroys the context OCCT holds resources against - measured, a crash), and
+// the Aspect_NeutralWindow holds this widget's own device-pixel size. It adds
+// none of its own for the compare pane: Milestone 3's native-HWND client-rect
+// pin was REWRITTEN in place to ask the identical question of the neutral
+// window, one check for one. 2475 + 3 = 2478.
+constexpr int kCheckFloor = 2478;
 
 void check(bool condition, const QString& what)
 {
@@ -918,11 +930,11 @@ void checkNoBlackLine(const QImage& shot, const QString& label)
 
 // The ONE capture that shows the app as the user sees it: Qt's overlay
 // widgets composited over OCCT's on-screen GL surface. Neither half-measure
-// can do that alone - QWidget::grab() renders the widget tree and the
-// viewport paints nothing into it (paintEngine() is null, by design), while
-// V3d_View::Dump() renders the 3D scene and knows nothing about the Qt cards
-// floating on top. PW_RENDERFULLCONTENT asks DWM for the window's real
-// composited content, which is exactly both.
+// can do that alone - QWidget::grab() renders the widget tree through Qt's
+// raster paint engine, which never runs the viewport's paintGL(), so the 3D
+// area comes back empty; V3d_View::Dump() renders the 3D scene and knows
+// nothing about the Qt cards floating on top. PW_RENDERFULLCONTENT asks DWM
+// for the window's real composited content, which is exactly both.
 //
 // In-process and CAPTURE ONLY: it reads the window this suite already owns
 // and injects nothing, so it does not break the no-OS-input rule the way
@@ -1192,6 +1204,17 @@ int main(int argc, char* argv[])
 #ifndef _WIN32
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) qputenv("QT_QPA_PLATFORM", "xcb");
 #endif
+    // Exercise what actually ships, and for once that is load-bearing rather
+    // than tidiness: main.cpp sets the application default surface format
+    // before QApplication exists because that is the only moment it can be
+    // read, so a suite that skipped it would drive its viewport through a
+    // context with no depth or stencil buffer - a different renderer from the
+    // one the user gets. Same one derivation both call sites read.
+    QSurfaceFormat::setDefaultFormat(OcctViewWidget::surfaceFormat());
+    // The other half of what main.cpp sets before QApplication, and the
+    // compare-pane block far below is precisely the check that needs it - see
+    // main.cpp's own comment for what a reparent costs without it.
+    QCoreApplication::setAttribute(Qt::AA_ShareOpenGLContexts);
     QApplication app(argc, argv);
     // Exercise what actually ships: main.cpp sets this before building
     // anything (see EditorSelectorHandoff.h's own comment on why), so this
@@ -4451,6 +4474,44 @@ int main(int argc, char* argv[])
     // viewport, which makes it the one point whose projection is known
     // without reference to any model.
     {
+        // The hosting layer itself, pinned first, because the two directions
+        // below are only meaningful if the window OCCT measures against is the
+        // one this widget actually occupies. Three separate facts, and each is
+        // a thing that has genuinely gone wrong once:
+        //   - the context Qt granted carries the depth and stencil buffers a
+        //     3D view needs. QSurfaceFormat is a REQUEST; format() after the
+        //     context exists is what was granted, and a viewport with no depth
+        //     buffer renders a plausible-looking scene with the wrong faces in
+        //     front. Reading the requested format back would be a self-oracle.
+        //   - Qt::AA_ShareOpenGLContexts is set. Without it Qt destroys a
+        //     QOpenGLWidget's context on every reparent, and this app reparents
+        //     its viewport for real when the compare pane opens - which crashed
+        //     the process outright, measured, during the migration.
+        //   - the neutral window holds the widget's own size in DEVICE pixels,
+        //     through OcctViewWidget's own conversion point rather than a
+        //     second copy of the ratio here.
+        check(view->context() != nullptr && view->context()->isValid() &&
+                  view->format().depthBufferSize() >= 24 &&
+                  view->format().stencilBufferSize() >= 8,
+              QStringLiteral("the viewport's OpenGL context is real and was GRANTED depth "
+                             "and stencil, not merely asked for them (depth %1, stencil %2)")
+                  .arg(view->format().depthBufferSize())
+                  .arg(view->format().stencilBufferSize()));
+        check(QCoreApplication::testAttribute(Qt::AA_ShareOpenGLContexts),
+              "OpenGL contexts are shared application-wide, so a reparented viewport "
+              "keeps the context OCCT holds resources against");
+        {
+            const QSize hostSize = view->hostWindowSize();
+            const QSize wantSize = view->viewportDeviceSize();
+            check(!hostSize.isEmpty() &&
+                      std::abs(hostSize.width() - wantSize.width()) <= 1 &&
+                      std::abs(hostSize.height() - wantSize.height()) <= 1,
+                  QStringLiteral("and the window OCCT renders through is this widget's own "
+                                 "size in DEVICE pixels (%1x%2 against %3x%4)")
+                      .arg(hostSize.width()).arg(hostSize.height())
+                      .arg(wantSize.width()).arg(wantSize.height()));
+        }
+
         QPoint targetAt;
         const bool projected = view->projectToScreen(view->camera().state().target, targetAt);
         check(projected && std::abs(targetAt.x() - view->width() / 2) <= 3 &&
@@ -13195,10 +13256,10 @@ int main(int argc, char* argv[])
                           .arg(pv->width()).arg(pv->height()));
 
                 // Saved for the visual check the numbers above stand in for.
-                // QWidget::grab() on the window renders the widget tree; the
-                // viewport itself paints nothing into it (paintEngine() is
-                // null, by design - see CLAUDE.md), but every card floating
-                // over it does, at its real position. That is exactly the
+                // QWidget::grab() on the window renders the widget tree
+                // through Qt's raster engine, which never runs the viewport's
+                // paintGL(), so the 3D area comes back empty - but every card
+                // floating over it does paint, at its real position. That is exactly the
                 // layout evidence this case needs, and it comes from the
                 // same in-process rendering the rest of this file uses
                 // rather than from OS-level capture.
@@ -17669,40 +17730,47 @@ int main(int argc, char* argv[])
         probe.view()->clearSelection();
 
         // Fix round 1, Minor 3: neither of the two checks above actually
-        // touches the native HWND. saveSnapshot() is V3d_View::Dump, an
-        // OFFSCREEN render into a file that says nothing about what DWM is
-        // compositing on screen; picking is pure maths against the OCCT
-        // scene graph and would answer the same whether or not a single
-        // pixel of it ever reached a window. A PrintWindow-based composited
-        // capture - the same machinery checkNoBlackLine()'s own callers use
-        // elsewhere in this file - is the one proof that actually reads
-        // what the window manager is showing, which is the only place a
-        // broken native window (a stale HWND, a GL context still bound to a
+        // touches the surface OCCT renders into. saveSnapshot() is
+        // V3d_View::Dump, an OFFSCREEN render into a file that says nothing
+        // about what DWM is compositing on screen; picking is pure maths
+        // against the OCCT scene graph and would answer the same whether or
+        // not a single pixel of it ever reached a window. A PrintWindow-based
+        // composited capture - the same machinery checkNoBlackLine()'s own
+        // callers use elsewhere in this file - is the one proof that actually
+        // reads what the window manager is showing, which is the only place a
+        // broken hosting layer (a stale window size, a GL context bound to a
         // destroyed surface) would ever show up.
         settle(200);
-#ifdef _WIN32
-        // The real regression pin (fix round 1, Important 1 / Minor 3): the
-        // NATIVE HWND's own client rect, read directly with GetClientRect
-        // rather than through any Qt bookkeeping. This is exactly the check
-        // that first caught the bug the composited capture right below only
-        // shows the SYMPTOM of - Qt's widget geometry and OCCT's V3d_View
-        // both agreed the view was full-width (V3d_View::Dump() rendered
-        // correctly at that width) while the actual on-screen HWND stayed
-        // at its old, splitter-constrained size until this settle() gave
-        // the queued resize event - and the fix inside it,
-        // OcctViewWidget::resizeEvent()'s explicit SetWindowPos - a turn of
-        // the event loop to actually run.
+        // The real regression pin (fix round 1, Important 1 / Minor 3),
+        // REWRITTEN for the QOpenGLWidget hosting layer - same truth, new
+        // mechanism. It used to read the viewport's own native HWND with
+        // GetClientRect, because Milestone 3's defect was precisely that Qt's
+        // widget geometry and OCCT's V3d_View both agreed the view was
+        // full-width while the on-screen HWND stayed at its old,
+        // splitter-constrained size.
+        //
+        // There is no HWND of ours to read any more, and asking Qt for one
+        // through winId() would itself force the native window the migration
+        // exists to remove - which would make the check the thing it is
+        // testing against. The window OCCT now measures itself against is an
+        // Aspect_NeutralWindow, and the identical question asked of it is
+        // "does it still hold this widget's size in DEVICE pixels" -
+        // hostWindowSize() against viewportDeviceSize(), the latter being
+        // OcctViewWidget's own one logical->device conversion point rather
+        // than a second copy of the ratio in this file. Still after settle(),
+        // for the same reason: it is the queued resize event that carries it.
         {
-            RECT clientRect{};
-            GetClientRect(reinterpret_cast<HWND>(probe.view()->winId()), &clientRect);
-            const int nativeWidth = clientRect.right - clientRect.left;
-            check(nativeWidth >= probe.view()->width() - 4,
-                  QStringLiteral("the native HWND's own client rect actually matches - "
-                                 "%1 device px against a %2 logical-px-wide widget")
-                      .arg(nativeWidth)
-                      .arg(probe.view()->width()));
+            const QSize hostSize = probe.view()->hostWindowSize();
+            const QSize wantSize = probe.view()->viewportDeviceSize();
+            check(!hostSize.isEmpty() &&
+                      std::abs(hostSize.width() - wantSize.width()) <= 1 &&
+                      std::abs(hostSize.height() - wantSize.height()) <= 1,
+                  QStringLiteral("the window OCCT renders through is back to the widget's "
+                                 "own device-pixel size after the splitter round trip "
+                                 "(%1x%2 against %3x%4)")
+                      .arg(hostSize.width()).arg(hostSize.height())
+                      .arg(wantSize.width()).arg(wantSize.height()));
         }
-#endif
         const QImage afterCompareShot = printWindowCapture(
             &probe, snapDir + QStringLiteral("/after-compare-composited.png"));
         checkNoBlackLine(afterCompareShot, QStringLiteral("post-compare live view"));

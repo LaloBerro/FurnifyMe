@@ -1153,20 +1153,65 @@ OCCT 7.8 renamed the data-exchange toolkits — `CMakeLists.txt` branches on
 `OpenCASCADE_VERSION` (`TKDESTEP`/`TKDESTL` for ≥7.8, `TKSTEP`/`TKSTL` below). Modeling
 toolkit names are unchanged across those versions.
 
+Since the QOpenGLWidget migration the app also needs `Qt6::OpenGLWidgets` (a separate
+`find_package` component from `Widgets`; the installed `qtbase[...opengl...]` feature set
+already provides it) and, on Windows, `opengl32` — `wglGetCurrentDC` is the one Win32 GL
+call `OcctViewWidget.cpp` makes, and Qt links opengl32 for itself without exporting it.
+
 ### `OcctViewWidget` — the bridge
 
-Construction order: `Aspect_DisplayConnection` → `OpenGl_GraphicDriver` → `V3d_Viewer`
-(`SetDefaultLights()` + `SetLightOn()`) → `viewer->CreateView()` → `AIS_InteractiveContext`.
+**`OcctViewWidget` is a `QOpenGLWidget`** since the migration's Phase 1 (2026-09-04). OCCT
+renders into the framebuffer object Qt hands it and Qt composites that frame with the rest
+of the widget tree; the 3D view is no longer a native OS window. Everything above the
+hosting layer is unchanged.
 
-Native window attach is platform-specific: `WNT_Window(winId())` on Win32, `Xw_Window(disp,
-winId())` elsewhere; then `SetWindow(wind)` and `Map()` if not mapped.
+Construction splits in two, and the split is what retires the old lazy-init pitfall:
 
-Required `QWidget` setup — omitting any of these gives flicker or a black viewport:
-`WA_PaintOnScreen`, `WA_NoSystemBackground`, `WA_OpaquePaintEvent`,
-`setAutoFillBackground(false)`, `setMouseTracking(true)` (needed for hover highlight), and
-`paintEngine()` overridden to return `nullptr`.
+- `initializeViewer()` builds `Aspect_DisplayConnection` → `OpenGl_GraphicDriver` →
+  `V3d_Viewer` (`SetDefaultLights()` + `SetLightOn()`) → `viewer->CreateView()` →
+  `AIS_InteractiveContext`, and **touches no window and no GL context**, so it is safe from
+  any entry point at any time. The driver is constructed with `theToInitialize = false` (Qt
+  owns the context) and carries `buffersNoSwap` / `buffersOpaqueAlpha` /
+  `useSystemBuffer=false` / `contextCompatible` matching `OcctViewWidget::surfaceFormat()`.
+- `initializeGL()` — Qt's own callback, first show, once — wraps the bound Qt context with
+  a throw-away `OpenGl_Context` and hands its `RenderingContext()` to
+  `myView->SetWindow(Aspect_NeutralWindow, ctx)`. The neutral window is **virtual**, sized
+  in DEVICE pixels through `toDevicePixels()`, and its `DevicePixelRatio()` is left at the
+  1.0 default (`WNT_Window` never overrode it either), so the one logical↔device conversion
+  point is still the only place the ratio is applied. Its native handle is
+  `WindowFromDC(wglGetCurrentDC())` — the window the *bound context* belongs to, never
+  `winId()`, which would re-create the native surface this migration removed.
 
-Event wiring: `paintEvent`→`Redraw()`, `resizeEvent`→`MustBeResized()`, RMB drag→turntable orbit around the current view target (Unity-style, the user's explicit preference — no cursor-anchored pivoting), MMB drag→pan, wheel→zoomToward cursor; camera state lives in CameraController and is pushed via SetEye/SetCenter/SetUp. FOVy is fixed at 45° for the life of the view **except while render mode is on**, where the settings card's Camera FOV override is read through `OcctViewWidget::effectiveFovyDeg()` by both `applyCameraState()` and `worldPerPixel()` and pushed back through `applyCameraState()` on exit, so no override ever leaks outside render mode; **which projection is drawn with it moves** — see below.
+`paintGL()` wraps Qt's current FBO (`OpenGl_FrameBuffer::InitWrapper`, through a subclass
+that calls `SetFrameBufferSRGB(true, false)` because Qt's colour attachment is `GL_RGBA8`
+and not sRGB — without it every measured `Dump` colour comes back through the wrong curve),
+syncs the neutral window to the FBO's size, scrubs the GL state in both directions (Qt's
+bound program/texture/blend before; pixel-store alignment and active texture after) and
+calls `Redraw()`. `resizeGL()` resizes the neutral window and calls `MustBeResized()`.
+
+**`scheduleRedraw()` replaced every `Redraw()`/`UpdateCurrentViewer()` that meant "put this
+on screen".** OCCT no longer owns the surface, so it does not get to decide when a frame is
+presented — `update()` does. The exceptions are the paths that need pixels *before they
+return* (`saveSnapshot`, the render-mode tier probe and every measuring probe,
+`awaitPathTracingConvergence`, `redrawRenderModeLive`, and the manipulator attach's
+documented on-screen-first ordering): those open a `GlScope`, which makes the context
+current, keeps the framebuffer wrapper in step, and asks for a composite on the way out. It
+is nesting-safe, so a probe calling a probe cannot have the context pulled from under it.
+
+**`Qt::AA_ShareOpenGLContexts` is set before `QApplication`, in `main.cpp` and in
+`gui_smoke`, and it is load-bearing.** Without it Qt destroys a `QOpenGLWidget`'s context on
+every reparent — and this app reparents its viewport for real, into and out of the compare
+pane's `QSplitter` — leaving OCCT holding GPU resources against a dead context. The
+re-attach on the next frame then tears down an `OpenGl_Window` whose context is gone, which
+was measured as a hard process crash, not a glitch. `gui_smoke` pins the attribute.
+
+`QSurfaceFormat` (depth 24, stencil 8, compatibility profile) has ONE derivation,
+`OcctViewWidget::surfaceFormat()`, read by `main.cpp` and `gui_smoke` before
+`QApplication` — the only moment the application default can be set — and by the widget's
+own constructor. The suite asserts what the context was **granted**, not what was requested.
+Phase 3 finalizes the profile against measured render tiers.
+
+Event wiring: RMB drag→turntable orbit around the current view target (Unity-style, the user's explicit preference — no cursor-anchored pivoting), MMB drag→pan, wheel→zoomToward cursor; camera state lives in CameraController and is pushed via SetEye/SetCenter/SetUp. FOVy is fixed at 45° for the life of the view **except while render mode is on**, where the settings card's Camera FOV override is read through `OcctViewWidget::effectiveFovyDeg()` by both `applyCameraState()` and `worldPerPixel()` and pushed back through `applyCameraState()` on exit, so no override ever leaks outside render mode; **which projection is drawn with it moves** — see below.
 
 #### Projection: a base mode and a loan
 
@@ -1313,7 +1358,12 @@ document-only predicate.
 - **Wayland breaks the native window handle.** `winId()` under Wayland gives OCCT something
   it cannot use. Force XCB: `qputenv("QT_QPA_PLATFORM", "xcb")` before constructing
   `QApplication`, or run with `QT_QPA_PLATFORM=xcb`. This costs an afternoon if unknown.
-- **`paintEngine()` must return `nullptr`** or Qt and OpenGL fight over the surface.
+- **HISTORICAL (pre-Phase-1): `paintEngine()` must return `nullptr`.** That was the law for a
+  `WA_PaintOnScreen` widget owning a native GL surface. `OcctViewWidget` is a
+  `QOpenGLWidget` now: it overrides no paint engine, sets none of `WA_PaintOnScreen` /
+  `WA_NoSystemBackground` / `WA_OpaquePaintEvent` / `WA_NativeWindow`, and paints through
+  `initializeGL`/`paintGL`/`resizeGL`. Kept only so the phrase, which still appears in older
+  comments elsewhere in the tree, is findable and dated.
 - **Never `delete` an OCCT handle.** `Handle(Foo)` is refcounted; let it go out of scope.
 - **`AIS_InteractiveContext::DetectedInteractive()` dereferences a null on its own.** It is
   an inline that returns `myLastPicked->Selectable()` with no check, and any `MoveTo` that
@@ -1349,30 +1399,27 @@ document-only predicate.
 - **Topological naming:** face indices are not stable across a rebuild. Milestone 1 dodges
   this by having no history tree — do not design in an assumption of stable IDs, because a
   real naming scheme will be needed when history lands.
-- **Reparenting a native GL widget out of a `QSplitter` and back can leave the real HWND
-  client rect stale, while Qt geometry, `V3d_View`, and even its own `Dump` all agree on the
-  WRONG size.** Closing the Milestone 3 compare pane moved `OcctViewWidget` out of the
-  splitter; `width()`/`height()` correctly reported the full viewport afterward, but the
-  underlying native surface stayed at its old, splitter-constrained size — unmoved by
-  `resize()`, `repaint()`, `hide()`/`show()`, or even a full top-level resize round trip. Only
-  `GetClientRect` or a composited `PrintWindow` capture ever saw the real size; a snapshot or a
-  picking proof built from Qt's own numbers stayed green while the app was visibly broken. The
-  fix is a defensive, always-on `SetWindowPos` in `resizeEvent()`, in **device** pixels
-  (`toDevicePixels()`, this file's one conversion point — a raw HWND client rect is
-  unambiguously device-pixel), synced to Qt's own idea of the widget's size on every resize
-  regardless of what caused the drift. `windows.h` can be hoisted above the OCCT includes for
-  the `SetWindowPos`/`HWND` types using the same `NOMINMAX`-style guard `gui_smoke` already
-  uses, without colliding with `Handle()` or the `near`/`far` traps above.
-- **`initializeViewer()` must stay lazy — an unconditional call reached from inside the
-  constructor deterministically breaks startup.** `resyncView()` (undo/redo/open/restore,
-  symmetry on/off) legitimately needs the viewer to exist, but calling `initializeViewer()`
-  unconditionally to guarantee that reached it from `showInitScreen()`'s own path inside the
-  constructor — ahead of the window's first `show()` — and forced `winId()`/native-window
-  realization far earlier than this widget's lazy-init contract intends, which broke camera
-  and focus determinism (`startup distance is 700 mm`, focus-visible checks) in `gui_smoke`.
-  Follow `GridRenderer::update()`'s existing rule instead: a no-op until a context already
-  exists, with the desired state recorded first and `applyCameraState()` re-applying it on the
-  first real `paintEvent()`.
+- **HISTORICAL (pre-Phase-1): reparenting a native GL widget out of a `QSplitter` and back
+  left the real HWND client rect stale**, while Qt geometry, `V3d_View` and its own `Dump`
+  all agreed on the WRONG size — Milestone 3's compare pane, closed by a defensive,
+  always-on `SetWindowPos` in `resizeEvent()`. There is no HWND of ours to go stale now: the
+  view renders through an `Aspect_NeutralWindow` whose size `resizeGL()` sets and `paintGL()`
+  re-syncs from the FBO itself, and the `SetWindowPos` hack is deleted. `gui_smoke`'s pin was
+  rewritten to the same truth on the new mechanism — `hostWindowSize()` against
+  `viewportDeviceSize()` after the splitter round trip. **What the reparent can still do is
+  destroy the GL context**, which is a different and worse failure — see
+  `Qt::AA_ShareOpenGLContexts` in the bridge section above.
+- **`initializeViewer()` must stay lazy, and since Phase 1 it is lazy BY CONSTRUCTION.**
+  The old hazard: `resyncView()` legitimately needs the viewer to exist, and calling
+  `initializeViewer()` unconditionally to guarantee that reached it from
+  `showInitScreen()`'s path inside the constructor, ahead of the window's first `show()`,
+  forcing `winId()`/native-window realization far earlier than the contract intended — which
+  broke camera and focus determinism (`startup distance is 700 mm`, focus-visible) in
+  `gui_smoke`. `initializeViewer()` no longer touches a window or a GL context at all, so
+  that specific trap is gone; the window attach lives in `initializeGL()`, which only Qt
+  calls. The rule it stood for still holds for anything that needs the CONTEXT:
+  `GridRenderer::update()`'s discipline — a no-op until one exists, desired state recorded
+  first and re-applied on the first real frame.
 - **`Graphic3d_MaterialAspect` describes a surface THREE times, and OCCT's path
   tracer reads only the third.** The classic reflectance colours (ambient/diffuse/
   specular/emissive) drive rasterization and Whitted ray tracing; `Graphic3d_PBRMaterial`
