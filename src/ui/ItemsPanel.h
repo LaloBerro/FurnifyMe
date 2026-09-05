@@ -11,12 +11,17 @@
 // inside a splitter, and both are CLAUDE.md rules that a dock never had to
 // satisfy:
 //
-//   - It paints its ENTIRE rect, opaquely, in paintEvent(). An unpainted
-//     region of a child widget over that surface is not transparent - it is
-//     whatever the driver left there, which reads as black. Its own child
-//     rows and labels therefore paint no background of their own and let this
-//     card show through, rather than each stamping a rectangle of its own
-//     colour.
+//   - It paints its own rounded card in paintEvent() - Theme::paintSurface() -
+//     and its own child rows and labels paint no background of their own, so
+//     the card shows through them rather than each stamping a rectangle of
+//     its own colour. (Historical: before the QOpenGLWidget migration, this
+//     card had to paint its ENTIRE rect opaquely, corners included, because an
+//     unpainted pixel over the viewport's old native-window GL surface read
+//     as whatever the driver had left there, which was black. Since the
+//     migration, paintSurface() paints only the rounded shape and the drawer's
+//     own corners genuinely composite through to the live scene - see
+//     Theme::makeSurfaceTransparent() for what keeps the app-wide stylesheet
+//     from painting a flat square there instead.)
 //   - It carries Qt::WA_NoMousePropagation, so a press or release that lands
 //     on the drawer never reaches the viewport underneath and re-picks behind
 //     it.

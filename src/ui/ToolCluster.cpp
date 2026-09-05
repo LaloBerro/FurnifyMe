@@ -81,36 +81,29 @@ ToolCluster::ToolCluster(QWidget* parent)
     // uncovered pixel to see; the rail, stretched to the viewport's full
     // height with slack between the select group and history, has hundreds
     // of them. Over OCCT's on-screen GL surface an unpainted region of a
-    // child widget is not transparent - it is whatever the driver left
-    // there, which reads as a solid black band down the viewport (caught in
-    // the first capture of this task, green suite and all). Painting the
-    // family's own card is the fix, and it is also what the design asks for.
+    // child widget used to be black rather than transparent, back when the
+    // viewport was a native window Qt's own backing store knew nothing
+    // about (caught in the first capture of the task that added this card,
+    // green suite and all) - painting the family's own card was the fix.
+    // See Theme::makeSurfaceTransparent()'s own comment for what stands in
+    // for that fill's job now.
+    Theme::makeSurfaceTransparent(this);
     myLayout = new QVBoxLayout(this);
     myLayout->setContentsMargins(kCardPad, kCardPad, kCardPad, kCardPad);
     myLayout->setSpacing(kPaintedGap);
     myLayout->setSizeConstraint(QLayout::SetFixedSize);
-
-    // Milestone 5 item 2: this card's own corners, over the GL surface the
-    // rail floats on - the fill above already reads flat viewport() grey
-    // there, but a mask is what actually stops the corner being SQUARE. The
-    // layout has added nothing yet, so this starts at whatever size an empty
-    // QVBoxLayout gives a QWidget and tracks every resize the first chip -
-    // and every one after it - triggers, through Theme::installCardMask()'s
-    // own resize hook.
-    Theme::installCardMask(this, kCardRadius);
 }
 
 void ToolCluster::paintEvent(QPaintEvent* /*event*/)
 {
     QPainter painter(this);
-    // Every pixel of this widget is the card: fill and border, both opaque,
-    // no reserved margin and no shadow. Theme::paintSurface() is now the
-    // whole of that - it owns the crisp-border alignment this file used to
-    // do for itself with a local half-pixel translate, and now fills the
-    // widget's full rect with an opaque ground (viewport() by default, this
-    // rail's own ground) before the rounded panel, so the corners the
-    // rounded shape does not reach read as flat viewport() grey rather than
-    // the black an unpainted pixel would read as over the GL surface.
+    // The rounded panel and its crisp border, both opaque, no reserved
+    // margin and no shadow - Theme::paintSurface() owns all of it, including
+    // the crisp-border alignment this file used to do for itself with a
+    // local half-pixel translate. Outside the rounded shape, nothing is
+    // painted here at all: the corners genuinely composite through to the
+    // live scene the rail floats on, kept from an opaque QSS stamp by
+    // Theme::makeSurfaceTransparent() in the constructor.
     Theme::paintSurface(painter, rect(), kCardRadius);
 }
 

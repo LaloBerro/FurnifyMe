@@ -11,13 +11,14 @@
 // on the theory that the panel would disappear against the sky - which it
 // did, right up until the viewport painted a ground grid over its own flat
 // background colour, after which the flat fill read as a lighter box pasted
-// onto the scene. Nothing over this surface is translucent (see Theme.h), so
-// an honest card is the only alternative to a fake one; paintSurface()'s
-// opaque ground fill is what lets this card round its corners without
-// leaving the small triangles outside the rounded shape and inside the
-// widget's own rect unpainted - the reason it no longer needs the radius-zero
-// stopgap it once carried. See AxisGizmo.cpp's paintEvent() for the whole
-// argument.
+// onto the scene. That was the case for an honest card over the fake one, and
+// it still is - but the small triangles outside the rounded shape and inside
+// the widget's own rect used to need paintSurface()'s own opaque fill just to
+// round the corner at all. Since the QOpenGLWidget migration they no longer
+// do: paintSurface() paints nothing out there any more, and the pixels behind
+// this card's corners are the live scene itself - see Theme.h's paintSurface()
+// and makeSurfaceTransparent() for the mechanism. See AxisGizmo.cpp's
+// paintEvent() for the whole argument.
 //
 // Axes and tips, and nothing else. It used to carry a chip below them naming
 // the current view, and that chip's job - showing the name, and snapping back

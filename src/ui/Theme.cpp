@@ -1,13 +1,11 @@
 #include "Theme.h"
 
 #include <QApplication>
-#include <QEvent>
 #include <QFont>
 #include <QFontDatabase>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPalette>
-#include <QRegion>
 #include <QStringList>
 #include <QWidget>
 
@@ -475,21 +473,15 @@ void drawCrispRule(QPainter& p, const QPointF& from, const QPointF& to, const QC
     p.restore();
 }
 
-void paintSurface(QPainter& p, const QRect& rect, int radius, const QColor& ground)
+void paintSurface(QPainter& p, const QRect& rect, int radius)
 {
-    // `ground` first, filling `rect` in full - the area a rounded panel does
-    // not reach, at each of its four corners, included. See the header for
-    // why that area cannot be left unpainted over OCCT's GL surface: nothing
-    // behind a Qt child's backing store there means an unpainted pixel reads
-    // as black, not as transparent.
-    p.fillRect(rect, ground);
-
-    // The rounded panel on top - opaque, and no shadow - see the header for
-    // why translucent pixels cannot be painted over OCCT's GL surface either.
-    // The border is then stroked crisply along the panel's outer edge, so the
-    // outermost row and column of the ROUNDED shape are its border rather
-    // than a half-covered blend of border and fill; outside that shape,
-    // within `rect`, is the ground fill above.
+    // The rounded panel, opaque, no shadow - see the header for why
+    // translucent pixels have no place in this family. The border is then
+    // stroked crisply along the panel's outer edge, so the outermost row and
+    // column of the ROUNDED shape are its border rather than a half-covered
+    // blend of border and fill. Outside that shape, within `rect`, nothing is
+    // painted at all any more - see the header for what used to fill that
+    // area and why it does not any more.
     p.save();
     p.setRenderHint(QPainter::Antialiasing, true);
     QPainterPath surface;
@@ -540,62 +532,16 @@ int snapToDevicePixels(int value, int offsetToWindow, double devicePixelRatio)
     return inWindow - remainder - offsetToWindow;
 }
 
-namespace {
-
-// The event-filter half of installCardMask() below - torn down with the
-// widget it masks because it is a QObject child of it, never stored or
-// named by any caller.
-class CardMask : public QObject {
-public:
-    CardMask(QWidget* w, int radius) : QObject(w), myWidget(w), myRadius(radius)
-    {
-        apply();
-        // Installed AFTER the first apply() rather than instead of it - a
-        // widget already sized when this is called (every caller applies it
-        // once its own applyTheme()/setFixedSize() has run) must not wait
-        // for a resize that may never come before its first paint.
-        myWidget->installEventFilter(this);
-    }
-
-protected:
-    bool eventFilter(QObject* watched, QEvent* event) override
-    {
-        if (watched == myWidget && event->type() == QEvent::Resize) apply();
-        // Never consumed - a mask is an side effect of observing the resize,
-        // not a reason to stop the event reaching the widget's own
-        // resizeEvent() or anyone else's filter on it.
-        return false;
-    }
-
-private:
-    void apply()
-    {
-        // The exact rect and radius the widget's own paintEvent() paints its
-        // card with - see the header for why that agreement matters. A
-        // QPainterPath's rounded-rect arcs are tessellated to a polygon
-        // before QRegion can rasterise them, which is the standard shape of
-        // a window mask (always an integer-pixel region, never
-        // antialiased) - the antialiasing the card's OWN paintEvent() still
-        // applies is what makes its border read as smooth; the mask only
-        // decides which of those already-smooth pixels are shown.
-        QPainterPath path;
-        path.addRoundedRect(myWidget->rect(), myRadius, myRadius);
-        myWidget->setMask(QRegion(path.toFillPolygon().toPolygon()));
-    }
-
-    QWidget* myWidget;
-    int myRadius;
-};
-
-}  // namespace
-
-void installCardMask(QWidget* w, int radiusPx)
+void makeSurfaceTransparent(QWidget* w)
 {
     if (!w) return;
-    // Parented to `w` via the QObject constructor above, so it lives and
-    // dies with the widget it masks - no pointer for this function to
-    // return or its caller to manage.
-    new CardMask(w, radiusPx);
+    // Plain "background: transparent", no selector: a per-widget stylesheet
+    // needs none, since it only ever applies to the widget it is set on, and
+    // it wins over the app-wide `QWidget { background-color: @chrome }` rule
+    // for this widget regardless of that rule's own selector specificity -
+    // see the header for the mechanism and ToolChip::applyTheme(), which
+    // found it first.
+    w->setStyleSheet(QStringLiteral("background: transparent;"));
 }
 
 void apply(QApplication& app)

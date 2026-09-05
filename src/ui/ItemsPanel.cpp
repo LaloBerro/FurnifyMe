@@ -55,6 +55,8 @@ ItemsPanel::ItemsPanel(DocumentModel* document, OcctViewWidget* view, QWidget* p
     // splitter.
     setAttribute(Qt::WA_NoSystemBackground);
     setAttribute(Qt::WA_NoMousePropagation);
+    // See Theme::makeSurfaceTransparent()'s own comment.
+    Theme::makeSurfaceTransparent(this);
     setFixedWidth(cardWidth());
 
     myOuter = new QVBoxLayout(this);
@@ -77,11 +79,6 @@ ItemsPanel::ItemsPanel(DocumentModel* document, OcctViewWidget* view, QWidget* p
     refresh();
     applyTheme();
     connect(Theme::notifier(), &Theme::Notifier::changed, this, &ItemsPanel::applyTheme);
-
-    // Milestone 5 item 2: this drawer's own corners over the GL surface -
-    // the same kRadius paintEvent() paints its card with, tracked through
-    // every row add/remove the layout resizes this widget for.
-    Theme::installCardMask(this, kRadius);
 }
 
 int ItemsPanel::cardWidth()
@@ -184,10 +181,13 @@ QSize ItemsPanel::sizeHint() const
 void ItemsPanel::paintEvent(QPaintEvent* /*event*/)
 {
     QPainter painter(this);
-    // Every pixel of this widget is the card. The rows and labels above it
-    // paint no background of their own, so this is what shows between and
-    // behind them - and over the GL surface, anything this does not cover is
-    // not transparent but whatever the driver left there.
+    // The rows and labels above paint no background of their own, so this
+    // rounded card is what shows between and behind them. Outside the
+    // rounded shape - this widget's own four corners - paintSurface() paints
+    // nothing at all, and Theme::makeSurfaceTransparent() in the constructor
+    // is what keeps the app-wide stylesheet from painting a flat square
+    // there instead: the live scene shows through genuinely, not a colour
+    // standing in for it.
     Theme::paintSurface(painter, rect(), kRadius);
 }
 

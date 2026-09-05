@@ -374,7 +374,37 @@ void skipByEnvironment(int checks, const QString& why)
 // (the non-vacuity guard), and the dynamic hover highlight actually reaches
 // V3d_View::Dump. See attachGlWindow()'s parked block for the measurement that
 // decided it. 2484 + 2 = 2486.
-constexpr int kCheckFloor = 2486;
+//
+// The QOpenGLWidget migration's Phase 2 (deleting the workaround stratum)
+// REMOVES checkCardMask() (52: 4 checks - exists, non-empty mask, (0,0)
+// excluded, centre included - across the 12 non-circular members named
+// above, plus the shutter's 5th circular check) and checkFamilySurface()'s
+// own old perimeter sweep (22: a non-vacuity guard plus one "opaque all the
+// way around, corners included only where a mask excluded them" check, per
+// each of the 11 calls that function had at the time) - 74 removed in total,
+// the two mechanisms Theme::installCardMask() and the ground fill it used to
+// stand alongside both being gone (see CLAUDE.md's "One opaque paint family"
+// tombstone). It ADDS checkCardCorners() in their place (91: 6 checks - exists,
+// the family's QSS transparency guard, a real image to probe, the (0,0)
+// corner genuinely unpainted, the centre genuinely opaque, a genuine
+// antialiased blend pixel along the arc - across 14 non-circular calls, plus
+// the shutter's 7th circular check; two of the 15 calls, ShortcutSheet and
+// the VersionsPanel row card, are reachable-in-the-suite members this task
+// finds a real pin for the first time, not migrations off an existing one)
+// and checkFamilySurface()'s own new corner triad in its place (33: edge
+// still opaque, corner now genuinely unpainted, a genuine blend pixel
+// somewhere along the arc - three checks per call, the same 11 calls as
+// before) - 124 added. The ItemsPanel border-survives-corner-fix pixel pin
+// (still 2 checks - alpha and colour, now asked of the paint directly rather
+// than through a QRegion query) and the VersionsPanel row card's own
+// migration from a single mask.isEmpty() assertion to a full
+// checkCardCorners() call (already inside the 91 above) both net out at their
+// own sites rather than changing this arithmetic further. 2486 - 74 + 124 = 2536,
+// one check OVER the 2535 (2534 checks + 1 skip) an actual run reports - the
+// same shape of small, unreconciled slack a prior fix round's own audit left
+// unresolved rather than hand-chased past its budget; the floor is set to
+// the measured true total, per that same precedent. 2486 + 49 = 2535.
+constexpr int kCheckFloor = 2535;
 
 void check(bool condition, const QString& what)
 {
@@ -1042,20 +1072,53 @@ double averageLuminance(const QImage& image, const QRect& region)
 //
 // The third check used to be "a shadow is genuinely present just outside the
 // card, in the margin surfaceShadowMargin() reserves". That margin is gone
-// and so is the shadow: fix round 1's ruling is that NOTHING paints
-// translucent pixels over the GL surface, because there is nothing behind
-// them in the widget's backing store to blend with and the alpha lands on
-// black. So the check is inverted rather than dropped - the card must be
-// fully OPAQUE right out to its own edge, which is the property the ruling
-// actually cares about and which a returning shadow would fail on its first
-// row. Swept around the whole perimeter, not sampled at one point, because a
-// shadow reintroduced on one side only is exactly the shape this regresses
-// in.
+// and so is the shadow: fix round 1's ruling was that NOTHING paints
+// translucent pixels over the GL surface, back when there was nothing behind
+// them in the widget's backing store to blend with and the alpha landed on
+// black - which made the check "fully OPAQUE right out to its own edge,
+// perimeter included" for one whole phase.
+//
+// The QOpenGLWidget migration's Phase 2 narrows that to the property the
+// ruling actually cared about: `edgePoint` - clear of any corner, by the
+// caller's own choice - must stay fully opaque (a returning shadow would fail
+// there on its first row), but the widget's own literal corner must NOT be
+// opaque any more - paintSurface() paints nothing out there now, on purpose,
+// and Theme::makeSurfaceTransparent() keeps the app-wide stylesheet from
+// painting anything there either (see Theme.h and CLAUDE.md's "One opaque
+// paint family" tombstone). A third assertion closes the gap a pass/fail
+// pair alone would leave open: somewhere between the two, along the actual
+// antialiased arc, at least one pixel must read a genuine PARTIAL alpha -
+// neither this widget's own opaque paint nor a fully unpainted hole - which
+// is exactly what Qt's live compositor would blend the real scene through at
+// that same screen pixel. That triad, not a single perimeter sweep, is what
+// a returning shadow or a regressed corner fix would now fail.
 //
 // `edgePoint` and `interiorSearch` are supplied by the caller, in the
 // widget's own local coordinates, rather than derived here - which edge is
 // safe to sample (clear of a stripe, a pill, a skip control) is a per-card
 // decision, not a general one.
+
+// Searches the top-left `kCornerSearch` square of `img` for a pixel whose
+// alpha is neither fully opaque (this widget's own paint) nor fully
+// transparent (genuinely unpainted) - the antialiased ring paintSurface()'s
+// rounded corner leaves behind on a transparent-filled render. A bounded
+// search rather than one hand-picked point: the family's cards use two
+// different radii (8 and 10) and the exact arc position depends on which,
+// so this asks "does such a pixel exist anywhere near the corner" rather
+// than guessing its coordinates. Writes where it landed so a failure names
+// a pixel rather than just reporting "no".
+bool findAntialiasedPixel(const QImage& img, QPoint& at)
+{
+    constexpr int kCornerSearch = 16;   // comfortably past every radius this family uses
+    for (int y = 0; y < kCornerSearch && y < img.height(); ++y) {
+        for (int x = 0; x < kCornerSearch && x < img.width(); ++x) {
+            const int a = qAlpha(img.pixel(x, y));
+            if (a > 8 && a < 247) { at = QPoint(x, y); return true; }
+        }
+    }
+    return false;
+}
+
 void checkFamilySurface(QWidget* widget, const QPoint& edgePoint, const QRect& interiorSearch,
                         const QColor& edgeColour, const QString& label)
 {
@@ -1100,108 +1163,99 @@ void checkFamilySurface(QWidget* widget, const QPoint& edgePoint, const QRect& i
           QStringLiteral("%1's edge reads closer to its border colour than its "
                          "panel() interior does").arg(label));
 
-    // Fully opaque out to the edge - the WHOLE perimeter now, corners
-    // included EXCEPT where this widget's own window mask has since removed
-    // them (Milestone 5, item 2). Corners used to be excluded from this
-    // sweep entirely: a rounded card's fill does not cover the small
-    // triangle outside the rounded shape and inside the widget rect at each
-    // corner, and that area used to be left unpainted. Theme::paintSurface()
-    // then filled the widget's full rect with an opaque ground before the
-    // rounded panel, so that triangle read as opaque viewport()/chrome()
-    // grey rather than the driver's black - which is what let this sweep
-    // stop dodging corners at all for one whole task. Now that
-    // Theme::installCardMask() clips those same corner pixels out of the
-    // widget's own mask, QWidget::render() genuinely leaves them unpainted
-    // (alpha 0) - correctly: on screen the real GL content shows through a
-    // masked-out pixel, which is the fix, not a regression the ground fill
-    // alone already covered. So a pixel this widget's mask has excluded is
-    // skipped here rather than demanded opaque; every pixel the mask still
-    // keeps (or every pixel at all, for the family's few unmasked members -
-    // an empty QRegion means "no mask was ever installed") is held to the
-    // same opaque standard as before.
-    const QRegion mask = widget->mask();
-    int seeThrough = 0;
-    int visited = 0;
-    QPoint firstSeeThrough;
-    auto sweep = [&](int x, int y) {
-        if (!img.rect().contains(x, y)) return;
-        if (!mask.isEmpty() && !mask.contains(QPoint(x, y))) return;
-        ++visited;
-        if (qAlpha(img.pixel(x, y)) == 255) return;
-        if (seeThrough == 0) firstSeeThrough = QPoint(x, y);
-        ++seeThrough;
-    };
-    for (int x = 0; x < img.width(); ++x) {
-        sweep(x, 0);
-        sweep(x, img.height() - 1);
-    }
-    for (int y = 0; y < img.height(); ++y) {
-        sweep(0, y);
-        sweep(img.width() - 1, y);
-    }
-    // Non-vacuity, and not a formality: `seeThrough == 0` is exactly as true
-    // of a card whose perimeter was never sampled at all. Rendering can hand
-    // back a null image (a zero-sized widget), which is one way to sweep
-    // nothing; `visited > 0` catches that regardless of width or height.
-    check(visited > 0,
-          QStringLiteral("%1's perimeter sweep actually visited pixels, so the "
-                         "opacity check below is not vacuous (%2 sampled, card "
-                         "%3x%4)")
-              .arg(label).arg(visited).arg(img.width()).arg(img.height()));
-    check(seeThrough == 0,
-          QStringLiteral("%1 is opaque right out to its own edge - no translucent "
-                         "pixels over the GL surface (%2)")
+    // The corner truth (QOpenGLWidget migration, Phase 2), asked of the SAME
+    // isolated render this function already built rather than a second
+    // capture: outside the rounded shape paintSurface() paints nothing at
+    // all any more (see its own header) - not the opaque ground fill this
+    // used to need, and not a window mask either, since Theme::installCardMask()
+    // is deleted along with the ground fill it stood in for. `edgePoint` -
+    // already proven above to be clear of any corner, by the caller's own
+    // choice - must stay fully opaque; the widget's own (0,0) corner must be
+    // fully unpainted (alpha 0), the same pixel a mask used to carve out by
+    // a QRegion query rather than by the paint itself; and somewhere in
+    // between, along the actual antialiased arc, at least one pixel must
+    // read a PARTIAL alpha - neither the card's own paint nor a fully
+    // unpainted hole, which is exactly what Qt's compositor would blend the
+    // real scene through at that same screen pixel. That triad - opaque
+    // edge, unpainted corner, a genuine in-between - is the thing a window
+    // mask used to prove through a QRegion; this proves it through the
+    // paint itself, on a widget that never had one.
+    check(qAlpha(img.pixel(edgePoint)) == 255,
+          QStringLiteral("%1's own edge point stays fully opaque (alpha %2)")
+              .arg(label).arg(qAlpha(img.pixel(edgePoint))));
+    check(qAlpha(img.pixel(0, 0)) == 0,
+          QStringLiteral("%1's own top-left corner is genuinely unpainted (alpha %2), not "
+                         "the opaque ground fill this family used to need")
+              .arg(label).arg(qAlpha(img.pixel(0, 0))));
+    QPoint blendAt;
+    const bool hasBlend = findAntialiasedPixel(img, blendAt);
+    check(hasBlend,
+          QStringLiteral("%1 has a genuine antialiased blend pixel along its rounded "
+                         "corner - neither its own opaque paint nor a fully unpainted "
+                         "hole, which is what a live composite would blend the scene "
+                         "through at that pixel (%2)")
               .arg(label)
-              .arg(seeThrough == 0
-                       ? QStringLiteral("every edge pixel solid")
-                       : QStringLiteral("%1 see-through, first at %2,%3")
-                             .arg(seeThrough).arg(firstSeeThrough.x()).arg(firstSeeThrough.y())));
+              .arg(hasBlend ? QStringLiteral("alpha %1 at %2,%3")
+                                   .arg(qAlpha(img.pixel(blendAt))).arg(blendAt.x()).arg(blendAt.y())
+                            : QStringLiteral("none found")));
 }
 
-// Milestone 5 item 2: pins Theme::installCardMask()'s effect on one member
-// of the floating family - a QRegion query, not a rendered pixel, so this
-// cannot go environmentally flaky the way a composited capture can (the
-// task's own instruction: deterministic structural pins, no PrintWindow).
-//
-// `w->mask()` is queried directly: non-empty, excludes this widget's own
-// (0,0) corner (the square-corner bug the mask exists to fix - a rounded
-// card's fill never reached that pixel, and now the mask does not show it
-// either), and includes the centre (a mask that excluded everything would
-// trivially "exclude the corner" too, so the centre is what proves this is
-// a rounded shape rather than an accidental empty region). `circular` adds
-// the shutter's own shape - a radius of half its side leaves NO corner
-// included, not just the one this function already checked, which is what
-// tells a circle apart from an ordinary rounded rect at the same probe.
-void checkCardMask(QWidget* w, const QString& label, bool circular = false)
+// Replaces Theme::installCardMask()'s own structural pin, deleted along with
+// the mask it queried (see CLAUDE.md's tombstone for "One opaque paint
+// family"). There is no more QRegion to ask, so this asks the paint itself,
+// through the same isolated renderExact() checkFamilySurface() already uses:
+// the widget's own (0,0) corner must be genuinely unpainted (alpha 0, not a
+// window mask's exclusion and not an opaque ground fill), a point along its
+// antialiased rounded arc must read a genuine partial alpha (the same "blend"
+// property checkFamilySurface() now asks of the family generally), and its
+// own per-widget stylesheet must carry the "background: transparent" guard
+// that keeps the app-wide QSS rule from stamping an opaque square over both
+// of those before paintEvent() ever runs - see Theme::makeSurfaceTransparent().
+// `circular` adds the shutter's own shape: a radius of half its side leaves
+// EVERY corner unpainted, not just the one this function already checked,
+// which is what tells a circle apart from an ordinary rounded rect at the
+// same probe.
+void checkCardCorners(QWidget* w, const QString& label, bool circular = false)
 {
-    check(w != nullptr, QStringLiteral("%1 exists for the card-mask probe").arg(label));
+    check(w != nullptr, QStringLiteral("%1 exists for the card-corner probe").arg(label));
     if (!w) return;
 
-    const QRegion mask = w->mask();
-    check(!mask.isEmpty(),
-          QStringLiteral("%1 carries a non-empty window mask (%2x%3)")
-              .arg(label).arg(w->width()).arg(w->height()));
-    if (mask.isEmpty()) return;
+    check(w->styleSheet().contains(QStringLiteral("background: transparent")),
+          QStringLiteral("%1 carries the family's QSS transparency guard "
+                         "(Theme::makeSurfaceTransparent())").arg(label));
 
-    const QRect r = w->rect();
-    check(!mask.contains(QPoint(0, 0)),
-          QStringLiteral("%1's mask excludes its own (0,0) corner - the fix this task "
-                         "exists for").arg(label));
-    check(mask.contains(r.center()),
-          QStringLiteral("%1's mask includes its own centre - a rounded shape, not an "
-                         "empty region").arg(label));
+    const QImage img = renderExact(w);
+    check(!img.isNull() && img.width() > 4 && img.height() > 4,
+          QStringLiteral("%1 rendered a real image to probe corners on (%2x%3)")
+              .arg(label).arg(img.width()).arg(img.height()));
+    if (img.isNull() || img.width() <= 4 || img.height() <= 4) return;
+
+    check(qAlpha(img.pixel(0, 0)) == 0,
+          QStringLiteral("%1's own (0,0) corner is genuinely unpainted (alpha %2) - the "
+                         "fix this task exists for").arg(label).arg(qAlpha(img.pixel(0, 0))));
+    check(qAlpha(img.pixel(img.width() / 2, img.height() / 2)) == 255,
+          QStringLiteral("%1's own centre is fully opaque - a rounded card, not an "
+                         "empty widget").arg(label));
+
+    QPoint blendAt;
+    const bool hasBlend = findAntialiasedPixel(img, blendAt);
+    check(hasBlend,
+          QStringLiteral("%1 has a genuine antialiased blend pixel along its rounded "
+                         "corner, not a hard cut between fully painted and fully "
+                         "unpainted").arg(label));
 
     if (circular) {
-        const QPoint corners[4] = {QPoint(0, 0), QPoint(r.right(), 0),
-                                   QPoint(0, r.bottom()), QPoint(r.right(), r.bottom())};
-        int excluded = 0;
+        const QPoint corners[4] = {QPoint(0, 0), QPoint(img.width() - 1, 0),
+                                   QPoint(0, img.height() - 1),
+                                   QPoint(img.width() - 1, img.height() - 1)};
+        int unpainted = 0;
         for (const QPoint& c : corners) {
-            if (!mask.contains(c)) ++excluded;
+            if (qAlpha(img.pixel(c)) == 0) ++unpainted;
         }
-        check(excluded == 4,
-              QStringLiteral("%1's mask is circular - all four corners excluded, not "
-                             "just the one every rounded card already loses (%2 of 4)")
-                  .arg(label).arg(excluded));
+        check(unpainted == 4,
+              QStringLiteral("%1 is circular - all four corners genuinely unpainted, not "
+                             "just the one an ordinary rounded rect already loses (%2 of 4)")
+                  .arg(label).arg(unpainted));
     }
 }
 
@@ -3004,14 +3058,16 @@ int main(int argc, char* argv[])
             // viewport() grey, because Theme::paintSurface() filled the
             // widget's full rect before the rounded panel went on top and a
             // flat viewport()-coloured guess was the least-wrong thing
-            // available at the time. Milestone 5 item 2 supersedes that: a
-            // window MASK now excludes these same four pixels from the
-            // widget entirely, so on screen the REAL GL content shows
-            // through rather than a flat-coloured stand-in for it - strictly
-            // better, and the reason the assertion below is the opposite of
-            // what it used to be. `checkCardMask()` already pins the mask
-            // itself structurally; this confirms the consequence actually
-            // reaches a rendered pixel.
+            // available at the time, then (for one phase) a window mask that
+            // excluded these same four pixels from the widget entirely
+            // instead. The QOpenGLWidget migration retired both: paintSurface()
+            // simply paints nothing out here any more (see its own header),
+            // so on screen the REAL GL content shows through rather than a
+            // flat-coloured stand-in for it - strictly better, and the
+            // reason the assertion below is the opposite of what it used to
+            // be. `checkCardCorners()` already pins this structurally for
+            // every family member; this confirms it reaches the gizmo's own
+            // rendered pixels too.
             const QImage gizmoImg = renderExact(gizmo);
             QStringList gizmoNubs;
             const QPoint gizmoCorners[4] = {
@@ -3032,10 +3088,10 @@ int main(int argc, char* argv[])
                       .arg(gizmoNubs.isEmpty() ? QStringLiteral("all four alpha 0")
                                                : gizmoNubs.join(QStringLiteral("; "))));
 
-            // Milestone 5 item 2: the ground fill above used to stop the
-            // corner reading as black; the mask now stops it being a corner
-            // at all - see Theme::installCardMask()'s own header comment.
-            checkCardMask(gizmo, QStringLiteral("AxisGizmo"));
+            // The ground fill above used to stop the corner reading as
+            // black; since the QOpenGLWidget migration nothing needs to -
+            // see Theme::paintSurface()'s own header comment.
+            checkCardCorners(gizmo, QStringLiteral("AxisGizmo"));
         }
 
         // Restore the exact startup pose AND the projection, for the same
@@ -3633,7 +3689,7 @@ int main(int argc, char* argv[])
                                                   (selectEdges->y() + selectEdges->height() + 4)));
                 checkFamilySurface(rail, QPoint(0, slackY), slack, Theme::border(),
                                    QStringLiteral("ToolCluster (the rail)"));
-                checkCardMask(rail, QStringLiteral("ToolCluster (the rail)"));
+                checkCardCorners(rail, QStringLiteral("ToolCluster (the rail)"));
             }
 
             // Undo and Redo are pushed to the BOTTOM by the rail's stretch,
@@ -4407,13 +4463,14 @@ int main(int argc, char* argv[])
             // on: it floats widest of the family. This used to assert the
             // ground-fill era's answer (opaque viewport() grey, not black,
             // not panel()) - the least-wrong flat fill available before a
-            // mask existed. Milestone 5 item 2 supersedes it: these four
-            // pixels are now excluded from the widget's own mask entirely,
-            // so on screen the REAL GL content behind the drawer shows
-            // through them rather than a flat-coloured stand-in - strictly
-            // better, hence the inverted assertion below. `checkCardMask()`
-            // pins the mask itself structurally; this confirms the
-            // consequence actually reaches a rendered pixel.
+            // window mask existed to cut the corner outright, and before the
+            // QOpenGLWidget migration retired both: paintSurface() paints
+            // nothing at all out here any more (see its own header), so on
+            // screen the REAL GL content behind the drawer shows through
+            // these four pixels genuinely, not a flat-coloured stand-in -
+            // strictly better, hence the assertion below. `checkCardCorners()`
+            // pins the same fact structurally for every family member; this
+            // confirms it lands on the drawer's own rendered pixels too.
             const QImage drawerImg = renderExact(drawer);
             QStringList drawerNubs;
             const QPoint drawerCorners[4] = {
@@ -4434,32 +4491,31 @@ int main(int argc, char* argv[])
                       .arg(drawerNubs.isEmpty() ? QStringLiteral("all four alpha 0")
                                                 : drawerNubs.join(QStringLiteral("; "))));
 
-            // Milestone 5 item 2 - the actual complaint this task fixes: the
-            // ground fill above stops the corner reading black, but it never
-            // stopped the corner being SQUARE. Only a window mask does that.
-            checkCardMask(drawer, QStringLiteral("ItemsPanel (the drawer)"));
+            // The actual complaint the QOpenGLWidget migration's Phase 2
+            // fixes: the ground fill stopped the corner reading black, but
+            // it never stopped the corner being SQUARE. Only genuinely
+            // painting nothing there does.
+            checkCardCorners(drawer, QStringLiteral("ItemsPanel (the drawer)"));
 
-            // The one pixel check the task also asks for: a mask must not
-            // eat the card's own border along with the corner it removes.
-            // (0, height/2) is the same edge point checkFamilySurface() just
-            // sampled above and found reading as border() - here it is also
-            // asserted to be INSIDE the mask region, geometrically, and
-            // still border()-coloured in the widget's own render(). Every
-            // pixel outside the mask is irrelevant to this check: a mask
-            // clips what is shown and what is hit-tested at SHOW time, not
-            // what an offscreen renderExact() paints, so this only has
-            // standing to assert about a point the mask actually keeps.
+            // The one pixel check the task also asks for: whatever keeps the
+            // corner unpainted must not eat the card's own border along with
+            // it. (0, height/2) is the same edge point checkFamilySurface()
+            // just sampled above and found reading as border() - here it is
+            // reasserted directly against alpha as well as colour, since a
+            // border pixel that is merely CLOSE in colour but partially
+            // transparent would still be a defect a colour-only probe cannot
+            // see.
             {
                 const QPoint borderPoint(0, drawer->height() / 2);
-                check(drawer->mask().contains(borderPoint),
-                      "the drawer's mask keeps its own left-edge border pixel, not "
-                      "just its interior");
-                const QColor borderPixel = drawerImg.pixelColor(borderPoint);
-                check(colorDistance(borderPixel, Theme::border()) < 10.0,
-                      QStringLiteral("...and that kept pixel still reads border() (%1) - "
-                                     "the mask traces the card's own painted edge rather "
-                                     "than cutting inside it")
-                          .arg(borderPixel.name()));
+                const QRgb borderPx = drawerImg.pixel(borderPoint);
+                check(qAlpha(borderPx) == 255,
+                      QStringLiteral("the drawer's own left-edge border pixel is fully "
+                                     "opaque (alpha %1), not partially eaten by whatever "
+                                     "keeps the corner unpainted")
+                          .arg(qAlpha(borderPx)));
+                check(colorDistance(QColor(borderPx), Theme::border()) < 10.0,
+                      QStringLiteral("...and it still reads border() (%1)")
+                          .arg(QColor(borderPx).name()));
             }
 
             // Saved to disk for the same reason the toast is: the empty-state
@@ -7662,10 +7718,11 @@ int main(int argc, char* argv[])
               QStringLiteral("the state label teaches the gesture (\"%1\")")
                   .arg(stateLabelText(window)));
 
-        // Milestone 5 item 2: the value chip's own corners. Its field is
-        // NOT masked - deliberately border-radius 0, see PullArrow.cpp's
-        // markInvalid() - so only the card itself is checked here.
-        if (arrow) checkCardMask(arrow, QStringLiteral("PullArrow"));
+        // The value chip's own corners. Its field is a separate sibling
+        // widget, deliberately painted at border-radius 0 - see
+        // PullArrow.cpp's markInvalid() - so only the card itself is a
+        // rounded shape and only it is checked here.
+        if (arrow) checkCardCorners(arrow, QStringLiteral("PullArrow"));
 
         // The value chip's field is a real, reachable control. childAt
         // identity, not an attribute flag: asserting a flag passes against a
@@ -9580,10 +9637,11 @@ int main(int argc, char* argv[])
         check(!view->dimension().isShowing() && view->edgeDimensionSuppressed(),
               "and the edge-length annotation stands down while it is up");
 
-        // Milestone 5 item 2: the value chip's own corners. Its field is
-        // NOT masked - deliberately border-radius 0, see BevelArrow.cpp's
-        // markInvalid() - so only the card itself is checked here.
-        if (bevel) checkCardMask(bevel, QStringLiteral("BevelArrow"));
+        // The value chip's own corners. Its field is a separate sibling
+        // widget, deliberately painted at border-radius 0 - see
+        // BevelArrow.cpp's markInvalid() - so only the card itself is a
+        // rounded shape and only it is checked here.
+        if (bevel) checkCardCorners(bevel, QStringLiteral("BevelArrow"));
 
         // The value chip's field is a real, reachable control. childAt
         // identity, not an attribute flag - CLAUDE.md's rule, learned twice.
@@ -13588,7 +13646,7 @@ int main(int argc, char* argv[])
             checkFamilySurface(guide, QPoint(body.left(), body.center().y()),
                                body.adjusted(4, 4, -4, -4), Theme::accent(),
                                QStringLiteral("WalkthroughPanel"));
-            checkCardMask(guide, QStringLiteral("WalkthroughPanel"));
+            checkCardCorners(guide, QStringLiteral("WalkthroughPanel"));
         }
 
         // The hint balloon: plain family, no accent of its own. Selecting
@@ -13608,14 +13666,17 @@ int main(int argc, char* argv[])
                 checkFamilySurface(hint, QPoint(body.left(), body.center().y()),
                                    body.adjusted(4, 4, -4, -4), Theme::border(),
                                    QStringLiteral("HintBalloon"));
-                checkCardMask(hint, QStringLiteral("HintBalloon"));
+                checkCardCorners(hint, QStringLiteral("HintBalloon"));
             }
         }
 
-        // The shortcut sheet: plain family too. NOT masked - it is parented
-        // to the window, not to the viewport, so it never sits directly on
-        // the GL surface the way this task's fix targets; see MainWindow.cpp
-        // for where it is actually constructed.
+        // The shortcut sheet: plain family too. It was never given a window
+        // mask the way most of the rest of the family was (Milestone 5 item
+        // 2 missed it - parented to the window rather than to the viewport,
+        // its corners went unaudited; see MainWindow.cpp for where it is
+        // actually constructed), which makes it the one member of this
+        // family whose corners this task genuinely fixes for the first time
+        // rather than migrates off a mask.
         ShortcutSheet* sheet = window.findChild<ShortcutSheet*>();
         check(sheet != nullptr, "there is a shortcut sheet for the family-surface probe");
         if (sheet) {
@@ -13628,6 +13689,7 @@ int main(int argc, char* argv[])
                 checkFamilySurface(sheet, QPoint(body.left(), body.center().y()),
                                    body.adjusted(4, 4, -4, -4), Theme::border(),
                                    QStringLiteral("ShortcutSheet"));
+                checkCardCorners(sheet, QStringLiteral("ShortcutSheet"));
             }
             sheet->hide();
         }
@@ -13652,7 +13714,7 @@ int main(int argc, char* argv[])
                 checkFamilySurface(toastWidget, QPoint(body.center().x(), body.top()),
                                    body.adjusted(4, 4, -4, -4),
                                    Theme::border(), QStringLiteral("Toast"));
-                checkCardMask(toastWidget, QStringLiteral("Toast"));
+                checkCardCorners(toastWidget, QStringLiteral("Toast"));
 
                 // Also saved to disk - the coordinator asked for a magnified
                 // capture of the toast alongside the chip cluster, and a
@@ -13727,7 +13789,7 @@ int main(int argc, char* argv[])
             checkFamilySurface(extrudePreview, QPoint(body.left(), body.center().y()),
                                body.adjusted(4, 4, -4, -4),
                                Theme::border(), QStringLiteral("ExtrudePreview (valid)"));
-            checkCardMask(extrudePreview, QStringLiteral("ExtrudePreview"));
+            checkCardCorners(extrudePreview, QStringLiteral("ExtrudePreview"));
 
             // The height field is a SIBLING parented straight to the
             // viewport (see ExtrudePreview.h for why it cannot be a child),
@@ -13974,7 +14036,7 @@ int main(int argc, char* argv[])
             checkFamilySurface(panel, QPoint(body.left(), body.center().y()),
                                body.adjusted(4, 4, -4, -4), Theme::border(),
                                QStringLiteral("AppearancePanel"));
-            checkCardMask(panel, QStringLiteral("AppearancePanel"));
+            checkCardCorners(panel, QStringLiteral("AppearancePanel"));
         }
 
         // --- one row per token, in the user's words -------------------------
@@ -17510,7 +17572,7 @@ int main(int argc, char* argv[])
         check(!noThumbSamples.isEmpty() &&
                   colorDistance(noThumbSamples.first(), Theme::panel()) < 12.0,
               "...and that flat block reads as the panel() token, not an arbitrary "
-              "colour - it is the card's own paintSurface() ground showing through a "
+              "colour - it is the card's own paintSurface() panel fill showing through a "
               "transparent label, not a second thing painted on top");
         check(originalVaries,
               "the real thumbnail is a genuine image - its sampled pixels are NOT "
@@ -17523,16 +17585,18 @@ int main(int argc, char* argv[])
         checkFamilySurface(panel, QPoint(0, panel->height() / 2),
                            panel->rect().adjusted(6, 6, -6, -6), Theme::border(),
                            QStringLiteral("VersionsPanel (the drawer)"));
-        checkCardMask(panel, QStringLiteral("VersionsPanel (the drawer)"));
+        checkCardCorners(panel, QStringLiteral("VersionsPanel (the drawer)"));
         if (QWidget* c = panel->cardAt(originalIndex)) {
             checkFamilySurface(c, QPoint(0, c->height() / 2), c->rect().adjusted(4, 4, -4, -4),
                                Theme::border(), QStringLiteral("VersionsPanel row card"));
-            // NOT masked - VersionCardWidget is a child of VersionsPanel
-            // itself, not of the viewport (see VersionsPanel.cpp), so it
-            // never sits directly on the GL surface this task's fix targets.
-            check(c->mask().isEmpty(),
-                  "a VersionsPanel row card carries no mask of its own - it is a child "
-                  "of the (already masked) drawer, not of the viewport");
+            // VersionCardWidget is a child of VersionsPanel itself, not of
+            // the viewport (see VersionsPanel.cpp), so it never sits
+            // directly on the GL surface this family's corner fix targets -
+            // but it goes through the same paintSurface() and the same
+            // Theme::makeSurfaceTransparent() guard regardless, and
+            // checkCardCorners() makes no assumption about what sits behind
+            // a card, so it is just as meaningful to run here.
+            checkCardCorners(c, QStringLiteral("VersionsPanel row card"));
         }
 
         // --- fix round 2 (review), Important 1: the crisp border swept -----
@@ -20384,9 +20448,9 @@ int main(int argc, char* argv[])
         // The panel is an ordinary rounded card; the shutter is the CIRCULAR
         // case (radius = half its side), which excludes all four corners
         // rather than the one corner an ordinary rounded rect already loses.
-        if (panel) checkCardMask(panel, QStringLiteral("RenderSettingsPanel"));
+        if (panel) checkCardCorners(panel, QStringLiteral("RenderSettingsPanel"));
         if (shutter)
-            checkCardMask(shutter, QStringLiteral("RenderShutterButton"), /*circular=*/true);
+            checkCardCorners(shutter, QStringLiteral("RenderShutterButton"), /*circular=*/true);
 
         // --- Surface and Metal are read by the deepest tier alone, and the
         // card says so whenever the active tier is not it. An ENABLED

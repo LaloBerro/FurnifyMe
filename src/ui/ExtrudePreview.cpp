@@ -48,6 +48,8 @@ ExtrudePreview::ExtrudePreview(MainWindow* window, OcctViewWidget* view)
     // means the field cannot be a child of this widget.
     setAttribute(Qt::WA_NoSystemBackground);
     setAttribute(Qt::WA_TransparentForMouseEvents);
+    // See Theme::makeSurfaceTransparent()'s own comment.
+    Theme::makeSurfaceTransparent(this);
 
     myField = new QLineEdit(view);
     // Closes the same class of bug documented on HintBalloon's balloon and
@@ -88,12 +90,6 @@ ExtrudePreview::ExtrudePreview(MainWindow* window, OcctViewWidget* view)
     if (myWindow) connect(myWindow, &MainWindow::appStateChanged, this,
                           &ExtrudePreview::onAppStateChanged);
 
-    // Milestone 5 item 2: this card's own corners over the GL surface, at
-    // the same radius paintEvent() paints its card with. myField is NOT
-    // masked - see markInvalid()'s own comment: it is deliberately painted
-    // with border-radius 0 for exactly this reason, so there is no rounded
-    // shape on it to trace.
-    Theme::installCardMask(this, 8);
 }
 
 ExtrudePreview::~ExtrudePreview()

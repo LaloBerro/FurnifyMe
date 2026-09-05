@@ -1090,25 +1090,66 @@ composites plain children over OCCT's OpenGL surface correctly on Windows - but 
 opacity rule below: translucency over that surface is the unreliable variant, and this
 project no longer paints any.
 
-### One opaque paint family, and the rule that made it
+### TOMBSTONE: one opaque paint family, and the rule that made it
 
-**No widget paints a translucent pixel over the GL surface.** Phase 5 paid twice to learn
-this was already the law: the chip shadows introduced early in the phase "worked" only by
-blending alpha over garbage, and the rail's unpainted slack rendered as a solid black band
-down the app. `Theme::paintSurface()` is the one implementation of the floating-surface
-family - an **opaque ground fill across the full widget rect** (`viewport()` by default,
-`chrome()` for any future caller painted on a non-viewport ground - the bar's own buttons
-paint their own body directly and never call this), then the rounded panel card and a crisp
-1px border on top, so a rounded card's corners are flat viewport-grey instead of black.
-There are no shadows;
-borders carry the separation. `surfaceShadowMargin()` returns 0 and stays only so caller
-arithmetic keeps working. `Theme::drawCrispBorder` is the one half-pixel-alignment idiom -
-an antialiased 1px pen at an integer coordinate smears across two rows at half intensity.
+**This law is retired (QOpenGLWidget migration, Phase 2, 2026-09-04).** It held from
+Milestone 3 through Phase 1 of the migration: **no widget could paint a translucent pixel
+over the GL surface, and no widget could leave a rounded card's corners unpainted either.**
+Both halves traced back to the same root cause, not two - the viewport was a native OS window
+(`WNT_Window` over a `WA_PaintOnScreen` widget), so Qt's own backing store held nothing behind
+a Qt child floating over it. An unpainted pixel there was not transparent, it was whatever the
+GL driver had last left, which read as black; a translucent pixel blended against that same
+garbage, which read as noise. Phase 5 paid twice to learn this was already the law: the chip
+shadows introduced early in that phase "worked" only by blending alpha over garbage, and the
+rail's unpainted slack rendered as a solid black band down the app.
 
-**One ruled exception:** `Toast::paintEvent()`'s `painter.setOpacity(myOpacity)` blends the
-whole toast during its 160 ms dismiss fade - permitted because it is transient and
-motion-token-driven rather than a resting translucent surface, and because gui_smoke runs
-with animations off, so the opacity/colour sweeps never actually see a blended pixel.
+Two workarounds stood in for what genuine compositing would have given for free:
+`Theme::paintSurface()` filled every card's **entire widget rect** with an opaque ground colour
+(`viewport()` by default, `chrome()` for a card sitting on the chrome bar instead) before
+painting the rounded panel and border on top, so an unpainted corner read as flat
+viewport()/chrome() grey rather than black - a paint-something answer. `Theme::installCardMask()`
+was the other lawful answer the same constraint left open: a `QRegion` window mask, rebuilt
+from the same rounded-rect path on every resize, that stopped Qt from painting - or hit-testing
+- those corner pixels at all, which is what actually cut the corner rather than merely
+recolouring it. Both existed at once for a while (the mask on top of the fill, never as an
+alternative to it), because a resize landing between a repaint and the next mask update would
+otherwise bare the old flat corners for one frame.
+
+**Hosting `OcctViewWidget` in a `QOpenGLWidget` (Phase 1) removed the root cause; deleting both
+workarounds (Phase 2) is what actually cashes that out.** Qt's compositor now holds the real,
+live GL frame behind every overlay child, the same as it holds any other widget's content, so
+an unpainted pixel is finally what it always should have been: genuinely see-through, showing
+whatever is really there. `paintSurface()` therefore paints **only** the rounded panel and its
+crisp border now - nothing fills the four small triangles outside the rounded shape any more,
+and nothing needs to. `installCardMask()` is deleted outright, not replaced by anything that
+also cuts a shape: cutting is no longer necessary once nothing is painted there in the first
+place. What replaced the mask's OTHER job - keeping the app-wide
+`QMainWindow, QWidget { background-color: @chrome }` stylesheet rule from stamping an opaque
+square over that same unpainted area before `paintEvent()` ever runs - is
+`Theme::makeSurfaceTransparent()`: a plain `background: transparent` per-widget stylesheet,
+the exact mechanism `ToolChip::applyTheme()` had already found and fixed for its own corners
+one task earlier, now applied to the family's own top-level members (every one of them, in
+its own constructor, beside the `Qt::WA_NoSystemBackground` it already carried). `gui_smoke`'s
+`checkCardCorners()` is the replacement for the mask's own structural pin: rendered in
+isolation (`renderExact()`, transparent fill), a family card's own corner reads alpha 0 (paint
+never reaches it), its straight edge reads alpha 255 (the border still does), and somewhere
+along the actual antialiased arc a pixel reads a genuine partial alpha - neither the card's own
+paint nor a bare hole, which is exactly what Qt's live compositor blends the real scene through
+at that same screen pixel. A `QRegion` query used to prove the shape; the paint itself proves
+it now.
+
+There are still no shadows; borders still carry the separation, unaffected by any of this.
+`surfaceShadowMargin()` still returns 0 and stays only so caller arithmetic keeps working.
+`Theme::drawCrispBorder` is still the one half-pixel-alignment idiom - an antialiased 1px pen
+at an integer coordinate smears across two rows at half intensity - and none of that changed;
+only what happened *outside* the rounded shape did.
+
+**One ruled exception, unaffected by any of this:** `Toast::paintEvent()`'s
+`painter.setOpacity(myOpacity)` blends the whole toast during its 160 ms dismiss fade -
+permitted because it is transient and motion-token-driven rather than a resting translucent
+surface, and because gui_smoke runs with animations off, so the opacity/colour sweeps never
+actually see a blended pixel. It was never part of the ground-fill/mask stratum and needed no
+change when that stratum was deleted.
 
 **A floating card's logical size must cover whole device pixels**, through
 `Theme::wholeDevicePixels()` at its `setFixedSize`. Widget geometry is logical and the
@@ -1116,11 +1157,16 @@ backing store is device-sized, so a card 93 logical rows tall at 150% scaling oc
 139.5 device rows: Qt flushes 140 and the paint event's clip - logical too - stops the
 widget's own painter at 139. Nothing the widget paints can cross its own clip and the
 viewport cannot paint underneath a child, so `paintSurface()` cannot save it and the size
-is the only cure. The leftover row is the corner-nub failure one scale down, and it is
-exactly as black: the bevel chip's first magnified capture carried a 264-device-pixel
-`0,0,0` hairline along its bottom edge. Rounding to a multiple of four is whole at every
-quarter-step Windows scale, so it does not read `devicePixelRatioF()` - a size that is only
-right on the monitor it was written on is the same bug with a longer fuse.
+is the only cure. The leftover row is the corner-nub failure one scale down: the bevel chip's
+first magnified capture, taken while the viewport was still the native window this migration
+has since replaced, carried a 264-device-pixel `0,0,0` hairline along its bottom edge - exactly
+as black as an unpainted corner was, back when Qt's own backing store held nothing behind it.
+Since the QOpenGLWidget migration the same leftover row instead shows whatever is genuinely
+behind the card there - a far smaller defect than a black hairline, but still a defect: the
+rule below exists so no card ever has a row to leave unpainted in the first place. Rounding to
+a multiple of four is whole at every quarter-step Windows scale, so it does not read
+`devicePixelRatioF()` - a size that is only right on the monitor it was written on is the same
+bug with a longer fuse.
 
 **A whole size only helps if the near edge is whole too**, so a card's POSITION goes through
 `Theme::snapToDevicePixels()`. `ViewportOverlay::relayout()` grows every anchored card and

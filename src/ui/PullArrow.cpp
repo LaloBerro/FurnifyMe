@@ -272,6 +272,8 @@ PullArrow::PullArrow(MainWindow* window, OcctViewWidget* view)
     // header for why that means the field cannot be a child of this widget.
     setAttribute(Qt::WA_NoSystemBackground);
     setAttribute(Qt::WA_TransparentForMouseEvents);
+    // See Theme::makeSurfaceTransparent()'s own comment.
+    Theme::makeSurfaceTransparent(this);
     {
         const int margin = Theme::surfaceShadowMargin();
         // Through Theme::wholeDevicePixels() - see Theme.h. This card's 176x80
@@ -313,10 +315,6 @@ PullArrow::PullArrow(MainWindow* window, OcctViewWidget* view)
         connect(myView, &OcctViewWidget::pullReleased, this, &PullArrow::onReleased);
     }
 
-    // Milestone 5 item 2: this card's own corners over the GL surface, at
-    // the same radius paintEvent() paints its card with. myField is NOT
-    // masked - see markInvalid()'s own comment: border-radius 0, deliberately.
-    Theme::installCardMask(this, 8);
 }
 
 PullArrow::~PullArrow()

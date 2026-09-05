@@ -101,8 +101,8 @@ public:
     // a renderExact(cardAt(index)) capture's pixels line up against.
     // Rendering the card rather than the thumbnail label alone is
     // deliberate: the label paints nothing of its own for the placeholder
-    // case (a transparent QLabel with no pixmap), and it is the CARD's
-    // paintSurface() ground showing through that IS the flat placeholder
+    // case (a transparent QLabel with no pixmap), and it is the CARD's own
+    // paintSurface() panel fill showing through that IS the flat placeholder
     // block - rendering the label in isolation would show nothing at all,
     // proving neither case.
     QRect thumbnailRectAt(int index) const;

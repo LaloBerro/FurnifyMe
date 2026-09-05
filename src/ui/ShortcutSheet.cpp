@@ -60,6 +60,12 @@ ShortcutSheet::ShortcutSheet(QWidget* parent)
     // the same reasoning as HintBalloon's, and cheaper than enumerating
     // handlers as bugs turn up.
     setAttribute(Qt::WA_NoMousePropagation);
+    // See Theme::makeSurfaceTransparent()'s own comment. This sheet was never
+    // given a window mask the way the rest of the paintSurface() family was
+    // (Milestone 5 item 2 missed it - it is parented to MainWindow itself
+    // rather than to the viewport, and its corners went unaudited), so this
+    // is its first genuinely transparent, antialiased corner.
+    Theme::makeSurfaceTransparent(this);
     setFocusPolicy(Qt::StrongFocus);
     // A sheet centred on the viewport at the moment it opened is off-centre
     // the moment the window is resized. HintBalloon solved exactly this with

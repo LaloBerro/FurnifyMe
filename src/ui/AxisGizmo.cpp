@@ -72,11 +72,6 @@ AxisGizmo::AxisGizmo(OcctViewWidget* view, QWidget* parent)
     // Repaint whenever the camera moves, so the gizmo rotates with the scene.
     connect(myView, &OcctViewWidget::cameraChanged, this,
             static_cast<void (QWidget::*)()>(&QWidget::update));
-
-    // Milestone 5 item 2: this card's own corners over the GL surface, at
-    // the same default radius paintEvent()'s bare paintSurface() call uses.
-    // applyTheme() above has already set the fixed size.
-    Theme::installCardMask(this, kCardRadius);
 }
 
 void AxisGizmo::applyTheme()
@@ -92,7 +87,15 @@ void AxisGizmo::applyTheme()
     // which are badge-sized. A per-widget stylesheet wins over the app-wide
     // one regardless of selector specificity, so this sticks reliably rather
     // than fighting the cascade.
-    setStyleSheet(QStringLiteral("font-size: %1pt;").arg(Theme::badgeFont().pointSizeF()));
+    //
+    // "background: transparent" rides along in the SAME string rather than a
+    // separate Theme::makeSurfaceTransparent(this) call - see that function's
+    // header comment for why this is the one family member that folds it in
+    // here instead: this is the one place this widget's own stylesheet is
+    // set at all, and it runs again on every Theme broadcast, so a second
+    // call would just replace whichever of the two ran last.
+    setStyleSheet(QStringLiteral("background: transparent; font-size: %1pt;")
+                      .arg(Theme::badgeFont().pointSizeF()));
     update();
 }
 
@@ -248,11 +251,11 @@ void AxisGizmo::paintEvent(QPaintEvent* /*event*/)
     //
     // Radius 8, the family default - not the 0 this widget carried as a
     // stopgap while its rounded corners had nowhere honest to land. That gap
-    // is closed now: Theme::paintSurface() fills the widget's full rect with
-    // an opaque ground - viewport() by default, which is what this card sits
-    // on - before painting the rounded panel on top, so the area outside the
-    // rounded shape and inside the widget rect reads as flat viewport() grey
-    // rather than the driver's black. This is the settlement Task 4
+    // is closed now for a second reason as well as the first: the QOpenGLWidget
+    // migration means the area outside the rounded shape and inside the
+    // widget rect genuinely composites through to the live scene behind it
+    // (see paintSurface()'s own header), rather than needing a flat viewport()
+    // fill to stand in for "transparent". This is the settlement Task 4
     // referenced; the gizmo rejoins the family radius rather than being the
     // one card that dodges it.
     Theme::paintSurface(painter, rect());

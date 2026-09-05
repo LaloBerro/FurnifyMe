@@ -52,9 +52,10 @@
 // opaque-paint stratum (no translucency over the viewport, ground fills under
 // every floating card, window masks for rounded corners) and produced the
 // stale-native-HWND pitfall the compare pane hit in Milestone 3. Hosting OCCT in
-// a QOpenGLWidget puts the frame through Qt's own compositor instead. Phase 1 is
-// the hosting swap ALONE: the masks and the opaque paint family stay exactly
-// where they are, and Phase 2 is what deletes them.
+// a QOpenGLWidget puts the frame through Qt's own compositor instead. Phase 1 was
+// the hosting swap ALONE - the masks and the opaque paint family stayed exactly
+// where they were - and Phase 2 deleted them: see CLAUDE.md's "One opaque paint
+// family" tombstone for the whole story.
 //
 // Three things carry the port, and each replaces something the old architecture
 // did implicitly:

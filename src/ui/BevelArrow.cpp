@@ -58,6 +58,8 @@ BevelArrow::BevelArrow(MainWindow* window, OcctViewWidget* view)
     // hit-testing.
     setAttribute(Qt::WA_NoSystemBackground);
     setAttribute(Qt::WA_TransparentForMouseEvents);
+    // See Theme::makeSurfaceTransparent()'s own comment.
+    Theme::makeSurfaceTransparent(this);
 
     myField = new QLineEdit(view);
     myField->setAttribute(Qt::WA_NoMousePropagation);
@@ -82,10 +84,6 @@ BevelArrow::BevelArrow(MainWindow* window, OcctViewWidget* view)
         connect(myView, &OcctViewWidget::bevelReleased, this, &BevelArrow::onReleased);
     }
 
-    // Milestone 5 item 2: this card's own corners over the GL surface, at
-    // the same radius paintEvent() paints its card with. myField is NOT
-    // masked - see markInvalid()'s own comment: border-radius 0, deliberately.
-    Theme::installCardMask(this, 8);
 }
 
 BevelArrow::~BevelArrow()

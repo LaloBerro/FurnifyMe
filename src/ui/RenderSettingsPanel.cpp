@@ -127,16 +127,17 @@ private:
 RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
     : QWidget(parent)
 {
-    // The floating-surface family's two mouse rules - see ItemsPanel.h/
-    // AppearancePanel.h for the full reasoning: this card paints its own
-    // whole rect opaquely (paintEvent()), and it must swallow every press
-    // and release rather than let one fall through to the viewport
+    // The floating-surface family's mouse rule - see ItemsPanel.h/
+    // AppearancePanel.h for the full reasoning: this card must swallow every
+    // press and release rather than let one fall through to the viewport
     // underneath, where it would either re-pick the model or - render
     // mode's own hazard - trigger the exit gesture a plain viewport press
     // performs. Pinned by gui_smoke: a click anywhere on this card must
     // never exit render mode.
     setAttribute(Qt::WA_NoSystemBackground);
     setAttribute(Qt::WA_NoMousePropagation);
+    // See Theme::makeSurfaceTransparent()'s own comment.
+    Theme::makeSurfaceTransparent(this);
     setFixedWidth(Theme::wholeDevicePixels(kWidth));
 
     auto* outer = new QVBoxLayout(this);
@@ -265,13 +266,6 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
     applyTheme();
     connect(Theme::notifier(), &Theme::Notifier::changed, this,
             &RenderSettingsPanel::applyTheme);
-
-    // Milestone 5 item 2: this card's own corners over the GL surface, at
-    // the same kRadius paintEvent() paints its card with. Only the width is
-    // fixed above - the layout settles the height - so the mask's initial
-    // apply() may be against a not-yet-final rect; Theme::installCardMask()'s
-    // resize hook catches the layout's own resize once it runs.
-    Theme::installCardMask(this, kRadius);
 }
 
 void RenderSettingsPanel::setSurfaceGlossiness(double glossiness01)
@@ -458,6 +452,10 @@ RenderShutterButton::RenderShutterButton(QAction* action, QWidget* parent)
     // must take its own presses and releases rather than letting either one
     // reach the viewport and trigger the render-mode exit gesture.
     setAttribute(Qt::WA_NoMousePropagation);
+    // See Theme::makeSurfaceTransparent()'s own comment. QAbstractButton is a
+    // QWidget subclass, so the app-wide QSS rule matches it exactly as it
+    // matches any other member of this family.
+    Theme::makeSurfaceTransparent(this);
     setAttribute(Qt::WA_Hover, true);
     setCursor(Qt::PointingHandCursor);
     setFocusPolicy(Qt::StrongFocus);
@@ -476,13 +474,6 @@ RenderShutterButton::RenderShutterButton(QAction* action, QWidget* parent)
         connect(myAction, &QAction::changed, this, &RenderShutterButton::syncFromAction);
         syncFromAction();
     }
-
-    // Milestone 5 item 2: the user's own "dark square patch over the light
-    // render backdrop" report - this is the shutter. Radius = half the
-    // fixed side, exactly what paintEvent() computes for its own disc
-    // (`body.width() / 2.0`), which is what turns the family's rounded-rect
-    // mask into a full circle rather than a small corner cut.
-    Theme::installCardMask(this, kShutterSide / 2);
 }
 
 void RenderShutterButton::syncFromAction()
@@ -509,12 +500,12 @@ void RenderShutterButton::paintEvent(QPaintEvent*)
     const QRectF body(rect());
     const double radius = body.width() / 2.0;
 
-    // The floating-surface family's ground fill FIRST, across the whole
-    // widget rect - Theme::paintSurface()'s own reasoning: the four corners
-    // outside the circle have to read as viewport-grey, not whatever the
-    // backing store held, over the GL surface underneath.
-    painter.fillRect(rect(), Theme::viewport());
-
+    // No ground fill outside the circle any more - Theme::paintSurface()'s
+    // own header explains why: the four corners genuinely composite through
+    // to the live scene behind this button now, the same as every other
+    // family member, rather than reading a flat viewport()-grey square.
+    // Theme::makeSurfaceTransparent(this) in the constructor is what keeps
+    // the app-wide QSS rule from painting one there first.
     QColor background = Theme::panel();
     if (!isEnabled())   background = Theme::panel().darker(115);
     else if (isDown())  background = Theme::chipActive();

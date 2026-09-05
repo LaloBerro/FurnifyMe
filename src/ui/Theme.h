@@ -280,67 +280,65 @@ void drawCrispBorder(QPainter& p, const QRectF& rect, const QColor& colour,
 // snapped to a half-integer so the line fills exactly one row or column.
 void drawCrispRule(QPainter& p, const QPointF& from, const QPointF& to, const QColor& colour);
 
-// The one implementation of the floating-surface family: fills `rect` with
-// `ground` FIRST - opaque, covering the widget's full rect, corners included -
-// then fills a rounded panel() rect on top and strokes a crisp 1px border()
-// around it, corners rounded to `radius`. Every floating card in the shell
+// The one implementation of the floating-surface family: fills a rounded
+// panel() rect over `rect` and strokes a crisp 1px border() around it,
+// corners rounded to `radius`. Every floating card in the shell
 // (WalkthroughPanel, HintBalloon, Toast, ShortcutSheet, ExtrudePreview,
-// ToolCluster's rail, ItemsPanel's drawer, AxisGizmo) calls this for its
-// background instead of hand-rolling its own; a chip's body counts too,
-// painted over before its state colour and content. Three cards each keep
-// one thing of their own painted on TOP of this shared base rather than
-// folding it in here: WalkthroughPanel's unconditional accent() outline,
-// Toast's kind-tinted left stripe, and ExtrudePreview's danger() outline
-// while its field's text is invalid - each is a single card's own accent,
-// not something every floating surface needs, so it stays out of the one
-// shared implementation.
+// ToolCluster's rail, ItemsPanel's drawer, AxisGizmo, VersionsPanel and its
+// row cards, RenderSettingsPanel and its shutter, MainWindow's CompareBadge
+// and MirrorPlacementChip) calls this for its background instead of
+// hand-rolling its own; a chip's body counts too, painted over before its
+// state colour and content. Three cards each keep one thing of their own
+// painted on TOP of this shared base rather than folding it in here:
+// WalkthroughPanel's unconditional accent() outline, Toast's kind-tinted
+// left stripe, and ExtrudePreview's danger() outline while its field's text
+// is invalid - each is a single card's own accent, not something every
+// floating surface needs, so it stays out of the one shared implementation.
 //
-// The `ground` fill is what a rounded card's corners rest on. A rounded rect
-// does not cover the area outside itself and inside the widget's rect - the
-// four small triangles at each corner - and every other call this file makes
-// paints only the rounded shape, never that corner area. Over an ordinary
-// widget that is fine, because whatever sits behind (a parent's background)
-// shows through. Over OCCT's on-screen GL surface there IS nothing behind a
-// Qt child in its own backing store, so an unpainted pixel there is not
-// transparent but whatever the driver left, which is black - the drawer
-// showed it worst, and the gizmo dodged the whole question at radius 0 as a
-// stopgap. Filling `rect` with an opaque ground before the rounded panel
-// settles it family-wide: the default is viewport(), near-invisible against
-// the real viewport behind every card that floats directly over the GL
-// surface. The `ground` parameter exists for a future caller painted on a
-// non-viewport ground - a card sitting on the chrome bar would pass chrome()
-// so its corners read as flat chrome-grey rather than a viewport-grey nub.
-// No such caller exists today: AppBar's own buttons paint their own body
-// directly (see BarButton::paintEvent()) rather than routing through this.
+// Outside the rounded shape - the four small triangles at each corner of
+// `rect` a rounded rect does not cover - this function paints NOTHING. That
+// is the point, not an oversight: see makeSurfaceTransparent() below for why
+// a corner left unpainted here now composites as the genuine pixel behind
+// the widget, GL scene included, instead of the flat opaque square a `ground`
+// argument used to fill in for.
+//
+// (Historical: this function used to take a third `ground` colour and fill
+// `rect` with it before the rounded panel, because a Qt child painted
+// directly over OCCT's native-window GL surface had nothing behind it in
+// Qt's own backing store - an unpainted pixel there read as whatever the
+// driver last left, which is black. The QOpenGLWidget migration retired that
+// architecture; see CLAUDE.md's "One opaque paint family" section, now a
+// tombstone, for the full history and makeSurfaceTransparent()'s role in
+// finishing the job.)
 //
 // A card whose logical size does not land on a whole number of DEVICE pixels
 // cannot be saved by anything this function does - see wholeDevicePixels()
 // below, which is the other half of the same rule and belongs at the caller's
 // setFixedSize(), not here.
 //
-// It still paints NO shadow, and that is a rule rather than a simplification.
-// CLAUDE.md's probe result is that Qt composites plain OPAQUE children over
-// OCCT's GL surface correctly on Windows and that translucency is the
-// unreliable variant. A drop shadow is translucent pixels by definition, and
-// the ground fill above does not change that - it is opaque, not blended. On
-// this ground the family is carried by the 1px border() anyway, which is
-// what the mockup's near-invisible rgba-on-dark shadows amounted to.
-void paintSurface(QPainter& p, const QRect& rect, int radius = 8,
-                  const QColor& ground = Theme::viewport());
+// It still paints NO shadow. A drop shadow is translucent pixels, and this
+// family carries its separation with the 1px border() instead - which is
+// what the mockup's near-invisible rgba-on-dark shadows amounted to anyway.
+void paintSurface(QPainter& p, const QRect& rect, int radius = 8);
 
 // Rounds a floating card's logical size UP to one that covers a WHOLE number
 // of device pixels at every display scale Windows offers.
 //
-// paintSurface() above fills the card's whole rect and still cannot reach
-// every pixel Qt flushes for it. Widget geometry is logical and the backing
-// store is device-sized, so a card 93 logical rows tall at 150% scaling
-// occupies 139.5 device rows; Qt flushes 140 and the paint event's clip -
-// logical too - stops the widget's own painter at 139. Nothing the widget
-// paints can cross its own clip and the parent cannot paint underneath a
-// child, so the leftover row keeps whatever the backing store held. Over
-// OCCT's GL surface that is not transparent: the round/flatten chip's first
-// magnified capture carried an exact 0,0,0 hairline 264 device pixels wide
-// along its bottom edge, which is the corner-nub failure one scale down.
+// paintSurface() above cannot reach every pixel Qt flushes for a card whose
+// logical size does not land on a whole device pixel. Widget geometry is
+// logical and the backing store is device-sized, so a card 93 logical rows
+// tall at 150% scaling occupies 139.5 device rows; Qt flushes 140 and the
+// paint event's clip - logical too - stops the widget's own painter at 139,
+// leaving one leftover device row this widget's own paintEvent() genuinely
+// never touches. (Historical: the round/flatten chip's first magnified
+// capture, taken while the viewport was still a native window Qt's own
+// backing store knew nothing about, carried an exact 0,0,0 hairline 264
+// device pixels wide along that row - the corner-nub failure one scale
+// down. Since the QOpenGLWidget migration the same leftover row instead
+// shows whatever is genuinely behind the card there, the same as an
+// unpainted corner does - see makeSurfaceTransparent() - which is a much
+// smaller defect than a black hairline but still a defect: the rule below
+// exists so no card ever has a row to leave unpainted in the first place.)
 //
 // The only cure is to not have a fractional row, so a card asks for its size
 // through this. Windows scales in quarter steps (100/125/150/175/200/225/250%)
@@ -388,49 +386,36 @@ int snapToDevicePixels(int value, int offsetToWindow, double devicePixelRatio);
 // same rectangle.
 int surfaceShadowMargin();   // 0
 
-// Clips `w` to the same rounded rect (or, at radiusPx == half the widget's
-// shorter side, a circle) its own paintEvent() paints its card with -
-// Milestone 5 item 2's fix for the floating family's square corners.
+// Stops the app-wide `QMainWindow, QWidget { background-color: @chrome }`
+// stylesheet rule from stamping `w`'s full rect opaque before its own
+// paintEvent() runs - a per-widget stylesheet always wins over that rule
+// regardless of selector specificity (ToolChip::applyTheme() found the
+// mechanism first, fixing its own corners the same way before this task
+// existed; that call site is unrelated to this one and stays as it is).
 //
-// paintSurface()'s `ground` fill covers the corners a rounded panel does not
-// reach with an opaque colour so they read as flat viewport()/chrome() grey
-// instead of the GL driver's black - a paint-something answer. A window
-// MASK is the other lawful answer "One opaque paint family" leaves open: it
-// does not paint a translucent pixel over OCCT's surface, it simply never
-// paints THOSE pixels at all, so there is nothing there for the driver's
-// leftover content to show through. Every member of the floating family
-// still needs the `ground` fill underneath its own mask - the two are not
-// alternatives, because a resize between paintEvent() and the next
-// applied mask (or a mask this function's own caller has not been taught
-// about) would otherwise bare the old black corners for one frame - but the
-// mask is what actually stops the corner from being SQUARE, which the fill
-// alone never did.
+// Every member of the paintSurface() family calls this once, in its own
+// constructor, right alongside the `Qt::WA_NoSystemBackground` it already
+// sets. Without it, a corner paintSurface() leaves unpainted (see that
+// function's own comment - it paints only the rounded shape, nothing
+// outside it any more) would risk showing the QSS rule's own flat
+// chrome()-square instead of genuinely compositing through to whatever
+// widget - or, over the viewport, whatever live GL frame - actually sits
+// behind it. This is the mechanism the "install a window mask" answer
+// (`installCardMask`, deleted with this task - see CLAUDE.md's tombstone)
+// used to stand in for: a mask stopped Qt from painting those pixels at
+// all, which was the only way to get a genuinely see-through corner while
+// the viewport was a native window with nothing Qt's own backing store knew
+// about behind it. Now that the viewport is a QOpenGLWidget and Qt's
+// compositor genuinely holds every frame's pixels, an unpainted corner is
+// already correct - this call only has to keep the QSS rule from painting
+// something there in the first place.
 //
-// Installs a small QObject (parented to `w`, torn down with it) that applies
-// a QRegion built from QPainterPath::addRoundedRect(w->rect(), radiusPx,
-// radiusPx) immediately, and again on every QEvent::Resize `w` receives, so
-// a card that grows or shrinks after construction (the drawer's row count,
-// a value chip whose text changed width, ExtrudePreview's field re-measured
-// at a new base size) keeps a mask that matches its current rect rather than
-// the one it had when this was called. The rect and radius are exactly the
-// ones the caller's own paintEvent() passes to paintSurface() (or, for the
-// circular shutter, the same rect at radius = side/2) - read from that
-// file's own kRadius, never guessed here, so a mask can never drift from the
-// card it is meant to trace.
-//
-// A mask clips INPUT along with paint: Qt never delivers a mouse event to a
-// masked-out pixel, so a press on the cut corner falls straight through to
-// whatever is underneath - ordinarily the viewport itself. That is the
-// desired behaviour, not a side effect to work around: nothing this app
-// paints puts an interactive control in a card's own cut corner. Two
-// widgets named in the same review as candidates for this - Toast's
-// UndoControl and WalkthroughPanel's SkipControl - paint nothing of their
-// own at all (WA_TranslucentBackground siblings that exist purely as a
-// hit-target over a pill the OTHER widget paints) and are deliberately left
-// unmasked: there is no card on them to round, and masking a hit-target
-// widget smaller than its own clickable pill would shrink what the user can
-// press for no visual gain.
-void installCardMask(QWidget* w, int radiusPx);
+// AxisGizmo folds the identical "background: transparent" fragment into its
+// own applyTheme() stylesheet string instead of calling this separately -
+// documented at that call site - because it already rebuilds its whole
+// per-widget stylesheet there on every theme change, and a second
+// setStyleSheet() call would simply replace the first rather than add to it.
+void makeSurfaceTransparent(QWidget* w);
 
 // Installs the palette, the bundled font and the stylesheet. Call once, before
 // any window is built.

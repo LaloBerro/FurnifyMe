@@ -73,18 +73,16 @@ QString actionButtonCss()
 
 // The bordered, rounded thumbnail - the "card" proper. A plain QWidget
 // cannot paint its own rounded background (InitScreen.cpp's own precedent),
-// so this paints Theme::paintSurface() with `ground` = Theme::chrome() (this
-// widget sits on the window's own chrome-filled background, never on OCCT's
-// GL surface - see the header for why that distinction does not matter for
-// the opaque-paint law itself, only for which ground colour is correct), then
-// redraws the border in accent() while hovered - same geometry
-// paintSurface() already stroked in border(), so the swap fully replaces it
-// rather than adding a second ring.
+// so this paints Theme::paintSurface(), same as every other paintSurface-
+// family member, then redraws the border in accent() while hovered - same
+// geometry paintSurface() already stroked in border(), so the swap fully
+// replaces it rather than adding a second ring.
 class ThumbCardWidget : public QWidget {
 public:
     explicit ThumbCardWidget(QWidget* parent) : QWidget(parent)
     {
         setAttribute(Qt::WA_NoSystemBackground);
+        Theme::makeSurfaceTransparent(this);
         setCursor(Qt::PointingHandCursor);
         setFixedSize(Theme::wholeDevicePixels(QSize(kThumbWidth, thumbHeight())));
     }
@@ -122,7 +120,7 @@ protected:
     {
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing, true);
-        Theme::paintSurface(painter, rect(), kCardRadius, Theme::chrome());
+        Theme::paintSurface(painter, rect(), kCardRadius);
 
         if (myHasImage) {
             QPainterPath clip;

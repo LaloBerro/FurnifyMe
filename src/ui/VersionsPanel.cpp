@@ -75,15 +75,16 @@ constexpr int kActionsRowHeight = 34;
 // already-saved row and the in-progress "create" gesture share. A plain
 // QWidget cannot paint its own rounded card background (see
 // InitScreen.cpp's InitCardWidget for the exact same reasoning), so this
-// is the one place that does: Theme::paintSurface() with `ground` =
-// Theme::panel(), the colour actually sitting behind it (this widget is a
-// child of VersionsPanel, not of the viewport - see paintSurface()'s own
-// comment on why the ground parameter exists at all).
+// is the one place that does: Theme::paintSurface(), same as every other
+// paintSurface-family member. This one is a child of VersionsPanel, not of
+// the viewport, but the QSS transparency guard applies regardless of what
+// sits behind a card - see Theme::makeSurfaceTransparent()'s own comment.
 class VersionCardWidget : public QWidget {
 public:
     explicit VersionCardWidget(QWidget* parent) : QWidget(parent)
     {
         setAttribute(Qt::WA_NoSystemBackground);
+        Theme::makeSurfaceTransparent(this);
     }
 
 protected:
@@ -91,7 +92,7 @@ protected:
     {
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing, true);
-        Theme::paintSurface(painter, rect(), kCardRadius, Theme::panel());
+        Theme::paintSurface(painter, rect(), kCardRadius);
     }
 };
 
@@ -121,6 +122,8 @@ VersionsPanel::VersionsPanel(MainWindow* window, OcctViewWidget* view, QWidget* 
 {
     setAttribute(Qt::WA_NoSystemBackground);
     setAttribute(Qt::WA_NoMousePropagation);
+    // See Theme::makeSurfaceTransparent()'s own comment.
+    Theme::makeSurfaceTransparent(this);
     setFixedWidth(cardWidth());
 
     myOuter = new QVBoxLayout(this);
@@ -154,12 +157,6 @@ VersionsPanel::VersionsPanel(MainWindow* window, OcctViewWidget* view, QWidget* 
     // so nothing further is needed here on first build.
     refresh();
     connect(Theme::notifier(), &Theme::Notifier::changed, this, &VersionsPanel::applyTheme);
-
-    // Milestone 5 item 2: this drawer's own corners over the GL surface, at
-    // the same kRadius its paintEvent() paints with - NOT kCardRadius, which
-    // belongs to VersionCardWidget, a child of this panel rather than of the
-    // viewport, and already fine (see that class's own comment).
-    Theme::installCardMask(this, kRadius);
 }
 
 int VersionsPanel::cardWidth()
@@ -502,7 +499,7 @@ void VersionsPanel::buildRealRow(const QString& name, const QDateTime& saved, bo
 
     // The full-width thumbnail (full width of the INSET content area, not
     // of the card's own outer rect - see kCardBorderInset). A transparent
-    // QLabel with no pixmap shows the card's OWN paintSurface() ground
+    // QLabel with no pixmap shows the card's OWN paintSurface() panel fill
     // through it unmangled - that flat fill IS the "flat neutral
     // placeholder block" the mockup calls for, not a second thing this
     // code has to paint - see thumbnailRectAt()'s own comment for why a

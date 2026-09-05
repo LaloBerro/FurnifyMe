@@ -27,9 +27,7 @@ constexpr int kBottomPad = 14;   // breathing room below the last step
 // skipRect()'s own width - shared with sizeHint() below so the title row's
 // reserved space for the pill can never disagree with the pill itself.
 constexpr int kSkipWidth = 34;
-// paintEvent()'s own radius argument to Theme::paintSurface() - named here
-// so Theme::installCardMask() below can share it rather than repeating the
-// literal.
+// paintEvent()'s own radius argument to Theme::paintSurface().
 constexpr int kCardRadius = 10;
 
 // The one interactive spot on an otherwise click-through overlay.
@@ -102,6 +100,8 @@ WalkthroughPanel::WalkthroughPanel(MainWindow* window, QWidget* parent)
     , myWindow(window)
 {
     setAttribute(Qt::WA_NoSystemBackground);
+    // See Theme::makeSurfaceTransparent()'s own comment.
+    Theme::makeSurfaceTransparent(this);
     // Through Theme::wholeDevicePixels() - see Theme.h. setFixedSize() is
     // why this cannot be left to ViewportOverlay: a fixed-size widget IGNORES
     // resize() silently, so the overlay's rounding is a no-op here and this
@@ -136,11 +136,6 @@ WalkthroughPanel::WalkthroughPanel(MainWindow* window, QWidget* parent)
     connect(myWindow, &MainWindow::appStateChanged, this, &WalkthroughPanel::refresh);
     connect(Theme::notifier(), &Theme::Notifier::changed, this, &WalkthroughPanel::applyTheme);
     refresh();
-
-    // Milestone 5 item 2: this card's own corners over the GL surface, at
-    // the same radius paintEvent() paints its card with. setFixedSize()
-    // above has already settled this widget's size.
-    Theme::installCardMask(this, kCardRadius);
 }
 
 void WalkthroughPanel::applyTheme()

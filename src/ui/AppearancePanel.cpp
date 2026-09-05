@@ -168,12 +168,13 @@ QString AppearancePanel::nameForToken(const QString& id)
 AppearancePanel::AppearancePanel(QWidget* parent)
     : QWidget(parent)
 {
-    // A floating card, painted in paintEvent(). See ItemsPanel.h for the two
-    // rules that follow from sitting over OCCT's GL surface: it paints its
-    // entire rect opaquely, and it swallows the mouse rather than letting a
-    // press through to re-pick the model behind it.
+    // A floating card, painted in paintEvent(). See ItemsPanel.h for the
+    // reasoning: it swallows the mouse rather than letting a press through to
+    // re-pick the model behind it.
     setAttribute(Qt::WA_NoSystemBackground);
     setAttribute(Qt::WA_NoMousePropagation);
+    // See Theme::makeSurfaceTransparent()'s own comment.
+    Theme::makeSurfaceTransparent(this);
     // Through Theme::wholeDevicePixels() - see Theme.h. setFixedSize() is why
     // this card has to do it for itself: ViewportOverlay's own rounding is a
     // silent no-op on a fixed-size widget, and a card whose logical height is
@@ -387,11 +388,6 @@ AppearancePanel::AppearancePanel(QWidget* parent)
     connect(Theme::notifier(), &Theme::Notifier::changed, this,
             &AppearancePanel::applyTheme);
 
-    // Milestone 5 item 2: this card's own corners over the GL surface, at
-    // the same kRadius its paintEvent() paints with. setFixedSize() above
-    // already settled this widget's size, so the mask is correct from its
-    // very first paint.
-    Theme::installCardMask(this, kRadius);
 }
 
 void AppearancePanel::applyTheme()
