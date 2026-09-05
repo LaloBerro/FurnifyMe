@@ -199,20 +199,31 @@ QIcon appIcon()
     // through the same resource system the font uses. Scaled per size by Qt
     // from the 2000px original - at these target sizes a high-quality
     // downscale of real artwork beats a painted glyph.
-    const QPixmap art(QStringLiteral(":/icons/app.png"));
-    if (!art.isNull()) {
+    //
+    // Built ONCE per process (the modeling-lag investigation's ledgered
+    // sibling of the appMarkPixmap() defect it fixed): decoding and
+    // smooth-scaling the 2000px source seven times costs real milliseconds,
+    // and every MainWindow/SelectorWindow construction - including each
+    // editor<->selector handoff - was paying it. A QIcon is cheap to copy;
+    // the artwork in the binary cannot change mid-run, so a function-local
+    // static is the honest lifetime.
+    static const QIcon cached = [] {
+        const QPixmap art(QStringLiteral(":/icons/app.png"));
         QIcon result;
+        if (!art.isNull()) {
+            for (int size : {16, 24, 32, 48, 64, 128, 256})
+                result.addPixmap(
+                    art.scaled(size, size, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+            return result;
+        }
+        // Fallback only - the painted tile from before the artwork existed,
+        // kept so a broken resource build still shows SOMETHING in the title
+        // bar.
         for (int size : {16, 24, 32, 48, 64, 128, 256})
-            result.addPixmap(
-                art.scaled(size, size, Qt::KeepAspectRatio, Qt::SmoothTransformation));
+            result.addPixmap(appIconPixmap(size));
         return result;
-    }
-
-    // Fallback only - the painted tile from before the artwork existed, kept
-    // so a broken resource build still shows SOMETHING in the title bar.
-    QIcon result;
-    for (int size : {16, 24, 32, 48, 64, 128, 256}) result.addPixmap(appIconPixmap(size));
-    return result;
+    }();
+    return cached;
 }
 
 QPixmap appMarkPixmap(int px)
