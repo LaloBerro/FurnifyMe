@@ -68,6 +68,7 @@
 #include <algorithm>
 #include <cmath>
 #include <initializer_list>
+#include <map>
 #include <utility>
 #include <vector>
 
@@ -4210,6 +4211,16 @@ void MainWindow::commitReplaceBody(int id, const TopoDS_Shape& newShape, bool& t
     if (id <= 0 || newShape.IsNull()) return;
 
     checkpointDocument();
+    applyBodyReplacement(id, newShape, twinFollowed, linkedOthersUpdated);
+}
+
+void MainWindow::applyBodyReplacement(int id, const TopoDS_Shape& newShape, bool& twinFollowed,
+                                      int& linkedOthersUpdated)
+{
+    twinFollowed = false;
+    linkedOthersUpdated = 0;
+    if (id <= 0 || newShape.IsNull()) return;
+
     myDocument.replaceSolid(id, newShape);
     myView->displaySolid(id, newShape);
 
@@ -4336,39 +4347,41 @@ bool MainWindow::bevelTarget(std::vector<TopoDS_Edge>& edges, TopoDS_Edge& edge,
     const std::vector<TopoDS_Edge> selected = myView->selectedEdges();
     if (selected.empty()) return false;
 
-    // ALL ON ONE BODY. Not "the body the first edge happens to belong to":
-    // one gesture is one kernel build on one shape, so a selection reaching
-    // across two bodies raises nothing at all rather than quietly bevelling
-    // whichever body won. The mixed case is a real one - Shift-click makes it
-    // in two clicks - and the honest answer to it is no arrow.
-    const int id = bodyIdForEdge(selected.front());
-    const TopoDS_Shape body = myDocument.shapeOf(id);
-    if (id <= 0 || body.IsNull()) return false;
+    // Milestone 5's cross-body bevel: every edge must belong to SOME document
+    // body (never a foreign or stale edge) and pass ModelingOps::bevelAxis()
+    // on ITS OWN body - straightness, the two adjacent faces and the outward
+    // bisector are all bevelAxis()'s to decide, and it decides them once for
+    // the predicate and the gizmo both. EVERY edge has to pass, not just the
+    // one the arrow will stand on: the gesture commits all of them together
+    // (one build per body), so a curved edge among them, on ANY body, makes
+    // the whole selection unbevellable rather than silently dropping itself
+    // out of the build. There is no longer a single shared `body` to test
+    // against - the whole point of this widening is that the selection can
+    // span more than one.
     for (const TopoDS_Edge& candidate : selected) {
-        if (bodyIdForEdge(candidate) != id) return false;
-    }
-
-    // Straightness, the two adjacent faces and the outward bisector are all
-    // ModelingOps::bevelAxis()'s to decide, and it decides them once for the
-    // predicate and the gizmo both. EVERY edge has to pass, not just the one
-    // the arrow will stand on: the gesture commits all of them together, so a
-    // curved edge among them makes the whole selection unbevellable rather
-    // than silently dropping itself out of the build.
-    gp_Pnt at;
-    gp_Dir axis;
-    for (const TopoDS_Edge& candidate : selected) {
+        const int candidateId = bodyIdForEdge(candidate);
+        const TopoDS_Shape candidateBody = myDocument.shapeOf(candidateId);
+        if (candidateId <= 0 || candidateBody.IsNull()) return false;
         gp_Pnt ignoredPoint;
         gp_Dir ignoredAxis;
-        if (!ModelingOps::bevelAxis(body, candidate, ignoredPoint, ignoredAxis)) return false;
+        if (!ModelingOps::bevelAxis(candidateBody, candidate, ignoredPoint, ignoredAxis))
+            return false;
     }
 
-    // The arrow stands on the edge picked LAST, which is where the hand is.
+    // The arrow stands on the edge picked LAST, which is where the hand is -
+    // on ITS OWN body, which may not be the body the FIRST edge belonged to.
     const TopoDS_Edge arrowEdge = myView->lastSelectedEdge();
-    if (arrowEdge.IsNull() || !ModelingOps::bevelAxis(body, arrowEdge, at, axis)) return false;
+    if (arrowEdge.IsNull()) return false;
+    const int arrowBodyId = bodyIdForEdge(arrowEdge);
+    const TopoDS_Shape arrowBody = myDocument.shapeOf(arrowBodyId);
+    if (arrowBodyId <= 0 || arrowBody.IsNull()) return false;
+    gp_Pnt at;
+    gp_Dir axis;
+    if (!ModelingOps::bevelAxis(arrowBody, arrowEdge, at, axis)) return false;
 
     edges = selected;
     edge = arrowEdge;
-    bodyId = id;
+    bodyId = arrowBodyId;
     centre = at;
     outward = axis;
     return true;
@@ -4394,7 +4407,7 @@ QString MainWindow::bevelRefusalText(bool fillet)
                        "would eat a neighbouring face. Try a smaller size");
 }
 
-QString MainWindow::bevelCombinationRefusalText(bool fillet)
+QString MainWindow::bevelCombinationRefusalText(bool fillet, int totalBodies)
 {
     // The OTHER refusal, and the reason it needed its own sentence: the size
     // is not what was turned down here, so telling the user to shrink it
@@ -4409,12 +4422,42 @@ QString MainWindow::bevelCombinationRefusalText(bool fillet)
     // itself instead. The sweep can see this pair now - `round` and `flatten`
     // joined the banned list with word-boundary matching, so "background"
     // stays legal and "rounded" does not.
-    return fillet ? tr("These edges can't take a fillet together — the geometry "
-                       "engine would build it on only some of them. Try them one "
-                       "at a time")
-                  : tr("These edges can't take a chamfer together — the geometry "
-                       "engine would build it on only some of them. Try them one "
-                       "at a time");
+    const QString base = fillet
+        ? tr("These edges can't take a fillet together — the geometry "
+             "engine would build it on only some of them. Try them one "
+             "at a time")
+        : tr("These edges can't take a chamfer together — the geometry "
+             "engine would build it on only some of them. Try them one "
+             "at a time");
+    // Milestone 5: a cross-body gesture can reach this same per-body
+    // combination refusal on any one of the bodies it touches. `totalBodies`
+    // defaults to 1, which reproduces the sentence above byte for byte - the
+    // suite's own direct calls, and every single-body caller, read exactly
+    // that. Only a gesture spanning more than one body passes a larger count,
+    // and it names how many bodies were part of the gesture rather than which
+    // one refused - the kernel's own error string already carries that and is
+    // never shown, per the same rule bevelRefusalText() follows.
+    if (totalBodies <= 1) return base;
+    return tr("%1 — %2 bodies were part of this gesture").arg(base).arg(totalBodies);
+}
+
+QString MainWindow::bevelLinkGroupRefusalText(bool fillet)
+{
+    // Milestone 5's cross-body bevel, the refusal that is neither of the two
+    // above: two of the edited bodies are members of the SAME link group.
+    // Same taxonomy as applyBooleanToSelection()'s own same-group refusal one
+    // gizmo over - after bevelling both together there would no longer be
+    // one honest shape left to propagate FROM, so the combination is refused
+    // outright rather than answered with a propagation nobody could make
+    // sense of. Not "refused" in the copy itself - the banned-word sweep
+    // matches bare substrings case-insensitively and "refused" carries
+    // "fuse" inside it, the same finding transformRefusalText() and
+    // applyBooleanToSelection()'s own toast already made.
+    return fillet
+        ? tr("Fillet can't combine two copies of the same linked group in one "
+             "gesture — Unlink one first, then try again")
+        : tr("Chamfer can't combine two copies of the same linked group in one "
+             "gesture — Unlink one first, then try again");
 }
 
 QString MainWindow::transformOperationName(const gp_Trsf& delta)
@@ -4469,80 +4512,179 @@ bool MainWindow::transformIsRotation(const gp_Trsf& delta)
     return std::fabs(angle) > 1.0e-9;
 }
 
-bool MainWindow::bevelEdgesBy(const std::vector<TopoDS_Edge>& edges, double size, bool fillet)
+bool MainWindow::bevelPreview(const std::vector<TopoDS_Edge>& edges, double size, bool fillet,
+                              std::vector<std::pair<int, TopoDS_Shape>>& results,
+                              bool& combinationRefused, bool& sameLinkGroupRefused) const
 {
+    results.clear();
+    combinationRefused = false;
+    sameLinkGroupRefused = false;
     if (edges.empty() || size <= 0.0) return false;
     for (const TopoDS_Edge& edge : edges) {
         if (edge.IsNull()) return false;
     }
 
-    const int id = bodyIdForEdge(edges.front());
-    const TopoDS_Shape body = myDocument.shapeOf(id);
-    if (id <= 0 || body.IsNull()) return false;
-    // bevelTarget() already refuses a selection spanning two bodies, but this
-    // is the commit and it does not get to assume its caller checked: one
-    // build replaces ONE body, and an edge belonging to another would be
-    // rounded on a shape it is not part of.
+    // Group by the document body each edge belongs to, in first-seen order -
+    // a stable build order and a stable message order, and the SET of edges
+    // decides refusal either way, not the order they were picked in.
+    std::vector<int> bodyOrder;
+    std::map<int, std::vector<TopoDS_Edge>> edgesByBody;
     for (const TopoDS_Edge& edge : edges) {
-        if (bodyIdForEdge(edge) != id) return false;
+        const int id = bodyIdForEdge(edge);
+        if (id <= 0 || myDocument.shapeOf(id).IsNull()) return false;
+        if (edgesByBody.find(id) == edgesByBody.end()) bodyOrder.push_back(id);
+        edgesByBody[id].push_back(edge);
     }
 
-    const ModelingOps::BooleanResult result =
-        fillet ? ModelingOps::filletEdges(body, edges, size)
-               : ModelingOps::chamferEdges(body, edges, size);
-    if (!result.ok) {
+    // Linked copies (Milestone 5): two of the edited bodies naming the SAME
+    // link group refuse the whole gesture before the kernel is even asked -
+    // the identical reasoning applyBooleanToSelection()'s same-group boolean
+    // refusal uses. A single member plus unrelated bodies is fine; that
+    // member propagates to its own group below, as usual.
+    for (std::size_t i = 0; i < bodyOrder.size(); ++i) {
+        for (std::size_t j = i + 1; j < bodyOrder.size(); ++j) {
+            if (myDocument.isLinked(bodyOrder[i]) && myDocument.isLinked(bodyOrder[j]) &&
+                myDocument.linkAnchorOf(bodyOrder[i]) == myDocument.linkAnchorOf(bodyOrder[j])) {
+                sameLinkGroupRefused = true;
+                return false;
+            }
+        }
+    }
+
+    // ALL-OR-NOTHING ACROSS BODIES: every body's kernel result is built here,
+    // before anything is asked to mutate the document - the same
+    // resolve-before-mutate discipline pairWithMirror()/linkExisting() use.
+    // One body's own refusal (the radius, or its own edge combination)
+    // refuses the WHOLE gesture, exactly as a single body's refusal always
+    // has - a user dragging one radius over edges on two bodies must never
+    // see one body change while the other's refusal is reported.
+    for (int id : bodyOrder) {
+        const TopoDS_Shape body = myDocument.shapeOf(id);
+        const ModelingOps::BooleanResult result =
+            fillet ? ModelingOps::filletEdges(body, edgesByBody[id], size)
+                   : ModelingOps::chamferEdges(body, edgesByBody[id], size);
+        if (!result.ok) {
+            combinationRefused = result.combinationRefused;
+            results.clear();
+            return false;
+        }
+        results.emplace_back(id, result.shape);
+    }
+    return true;
+}
+
+bool MainWindow::bevelEdgesBy(const std::vector<TopoDS_Edge>& edges, double size, bool fillet)
+{
+    std::vector<std::pair<int, TopoDS_Shape>> results;
+    bool combinationRefused = false;
+    bool sameLinkGroupRefused = false;
+    if (!bevelPreview(edges, size, fillet, results, combinationRefused, sameLinkGroupRefused)) {
         // Never present a failed kernel operation as a success, and never show
         // its error text: it is written for this file, not for the user. A
         // fillet failing on hard geometry is normal, not exceptional - see
         // ModelingOps::filletEdge - so the sentence names the cause and the fix
         // rather than apologising.
-        qWarning("Bevel failed: %s", result.error.c_str());
-        // Two causes, two sentences. "Try a smaller size" is right for a
-        // radius the neighbouring face cannot give up, and FALSE for a
-        // combination of edges the kernel will not bevel together - no size
-        // works there, so a user following that advice shrinks the number
-        // until they give up. ModelingOps says which through
-        // combinationRefused; this never reads its error string.
-        myToasts->show(result.combinationRefused ? bevelCombinationRefusalText(fillet)
-                                                 : bevelRefusalText(fillet),
-                       Toast::Kind::Failure, false);
+        //
+        // Three causes, three sentences. "Try a smaller size" is right for a
+        // radius a neighbouring face cannot give up; FALSE for a combination
+        // of edges the kernel will not bevel together, and equally false for
+        // two edited bodies in the same link group - neither has a size that
+        // fixes it, so bevelPreview() says which through its own two flags
+        // rather than this ever reading a kernel error string.
+        if (sameLinkGroupRefused) {
+            qWarning("Bevel refused: two edited bodies share a link group");
+            myToasts->show(bevelLinkGroupRefusalText(fillet), Toast::Kind::Failure, false);
+        } else {
+            qWarning("Bevel failed");
+            // How many DISTINCT bodies this gesture named, for
+            // bevelCombinationRefusalText()'s own count - recomputed from the
+            // raw edges rather than read off `results` above, which
+            // bevelPreview() already cleared on this refusal path.
+            std::vector<int> distinctBodies;
+            for (const TopoDS_Edge& edge : edges) {
+                const int id = bodyIdForEdge(edge);
+                if (std::find(distinctBodies.begin(), distinctBodies.end(), id) ==
+                    distinctBodies.end())
+                    distinctBodies.push_back(id);
+            }
+            myToasts->show(combinationRefused
+                              ? bevelCombinationRefusalText(
+                                    fillet, static_cast<int>(distinctBodies.size()))
+                              : bevelRefusalText(fillet),
+                          Toast::Kind::Failure, false);
+        }
         statusBar()->showMessage(fillet ? tr("Fillet refused — nothing was changed")
                                         : tr("Chamfer refused — nothing was changed"));
         return false;
     }
 
-    // The preview, the arrow and the selection all describe the edge that is
-    // about to stop existing. All three go before the body is redisplayed, in
+    // Every body's result is in hand - now, and only now, mutate. The
+    // preview, the arrow and the selection all describe edges that are about
+    // to stop existing; all three go before the bodies are redisplayed, in
     // that order, so nothing is left pointing at topology from before the
     // rebuild - the face pull's rule, one gizmo over.
     myView->clearModelingPreview();
     myView->clearBevelArrow();
     myView->clearSelection();
 
-    bool twinFollowed = false;
-    int linkedOthersUpdated = 0;
-    commitReplaceBody(id, result.shape, twinFollowed, linkedOthersUpdated);
-    recordProgress("bevel.completed");
+    // ONE checkpoint for every body this gesture touches (Milestone 5) -
+    // checkpointDocument() once, then applyBodyReplacement() once per body,
+    // rather than commitReplaceBody()'s own per-call checkpoint, which would
+    // split one gesture across several undo entries. One Ctrl+Z therefore
+    // restores every body.
+    checkpointDocument();
 
+    bool anyTwinFollowed = false;
+    int totalLinkedOthersUpdated = 0;
+    bool anyLinkedPropagationRefused = false;
+    for (const auto& [id, shape] : results) {
+        bool twinFollowed = false;
+        int linkedOthersUpdated = 0;
+        applyBodyReplacement(id, shape, twinFollowed, linkedOthersUpdated);
+        anyTwinFollowed = anyTwinFollowed || twinFollowed;
+        if (linkedOthersUpdated < 0) anyLinkedPropagationRefused = true;
+        else totalLinkedOthersUpdated += linkedOthersUpdated;
+    }
+    const int linkedOthersUpdated =
+        anyLinkedPropagationRefused ? -1 : totalLinkedOthersUpdated;
+
+    recordProgress("bevel.completed");
     updateActions();
     emit documentChanged();
+
     // Led by the operation's own name. "Body 03 rounded" describes the result
     // in a word that appears nowhere else in the app - the chip, the tooltips,
     // the state label and the refusal all say Fillet or Chamfer.
     //
-    // The count only appears when there is one to report. A single-edge bevel
-    // reads exactly as it always did, and "1 edge" is a number nobody needs.
-    // Written out rather than through "(s)", per the vocabulary rules.
-    const QString name = QString::fromStdString(myDocument.nameOf(id));
-    const QString extent = QString::fromStdString(Measure::formatDimensions(result.shape));
-    QString message =
-        edges.size() > 1
+    // The edge count only appears when there is one to report - a single-edge
+    // bevel reads exactly as it always did. A gesture touching more than one
+    // body (Milestone 5) names the body count too, honestly, rather than
+    // picking one body's own dimensions to report for all of them - "3 edges"
+    // alone no longer says whether they came from one shape or several.
+    // Plurals written out rather than through "(s)", per the vocabulary
+    // rules.
+    QString message;
+    if (results.size() > 1) {
+        QStringList names;
+        for (const auto& [id, shape] : results)
+            names << QString::fromStdString(myDocument.nameOf(id));
+        message = (fillet ? tr("Fillet added to %1 — %2 edges across %3 bodies")
+                          : tr("Chamfer added to %1 — %2 edges across %3 bodies"))
+                      .arg(names.join(QStringLiteral(", ")))
+                      .arg(static_cast<int>(edges.size()))
+                      .arg(static_cast<int>(results.size()));
+    } else {
+        const QString name = QString::fromStdString(myDocument.nameOf(results.front().first));
+        const QString extent =
+            QString::fromStdString(Measure::formatDimensions(results.front().second));
+        message = edges.size() > 1
             ? (fillet ? tr("Fillet added to %1 — %2 edges — %3")
                       : tr("Chamfer added to %1 — %2 edges — %3"))
                   .arg(name, QString::number(static_cast<int>(edges.size())), extent)
             : (fillet ? tr("Fillet added to %1 — %2") : tr("Chamfer added to %1 — %2"))
                   .arg(name, extent);
-    if (twinFollowed) message += tr(" — twin followed");
+    }
+    if (anyTwinFollowed) message += tr(" — twin followed");
     message += linkedGroupSuffix(linkedOthersUpdated);
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());

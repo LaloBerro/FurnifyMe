@@ -19,10 +19,12 @@
 #include <QPainterPath>
 #include <QPoint>
 #include <QResizeEvent>
+#include <QSet>
 #include <QShowEvent>
 
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 namespace {
 
@@ -108,13 +110,16 @@ void BevelArrow::applyTheme()
     for (int line = 0; line < 2; ++line)
         content = std::max(content, badge.horizontalAdvance(hintText(line)));
     // The widest title row this chip can paint: the longer kind word, the
-    // count suffix a multi-edge gesture adds, and a comfortably large value
-    // beside it. Measured with the label font it is painted with - a title
-    // measured without the suffix and painted with one clips, which is
-    // exactly the failure CLAUDE.md's measure-with-the-font rule names.
+    // longest count suffix a multi-edge, cross-body gesture adds (Milestone
+    // 5's "edges across N bodies", strictly longer than the single-body
+    // "edges" suffix it replaces here), and a comfortably large value beside
+    // it. Measured with the label font it is painted with - a title measured
+    // without the suffix and painted with one clips, which is exactly the
+    // failure CLAUDE.md's measure-with-the-font rule names.
     content = std::max(content,
-                       label.horizontalAdvance(tr("%1 — %2 edges")
-                                                   .arg(tr("Chamfer"), QStringLiteral("12"))) +
+                       label.horizontalAdvance(tr("%1 — %2 edges across %3 bodies")
+                                                   .arg(tr("Chamfer"), QStringLiteral("12"),
+                                                        QStringLiteral("12"))) +
                            kKindGap +
                            label.horizontalAdvance(QStringLiteral("C 1,200 mm")));
 
@@ -329,23 +334,25 @@ void BevelArrow::updatePreview()
         return;
     }
 
-    // The SAME ModelingOps calls the commit uses - the LIST forms, over the
-    // same list, so a three-edge preview is built by the same single build
-    // that Enter will run. A preview built by a different path is a lie, and
-    // this is the one place a user judges a number by what it looks like;
-    // previewing one edge and committing three would be that lie at its
+    // The SAME MainWindow::bevelPreview() the commit calls - it groups myEdges
+    // by body and runs the LIST forms over each body's own edges, so a
+    // three-edge, two-body preview is built by the exact same per-body builds
+    // Enter will run. A preview built by a different path is a lie, and this
+    // is the one place a user judges a number by what it looks like;
+    // previewing one body's worth and committing two would be that lie at its
     // largest.
-    const TopoDS_Shape body = myWindow->document().shapeOf(myBodyId);
-    const ModelingOps::BooleanResult result =
-        myFillet ? ModelingOps::filletEdges(body, myEdges, size)
-                 : ModelingOps::chamferEdges(body, myEdges, size);
-    if (!result.ok) {
+    std::vector<std::pair<int, TopoDS_Shape>> results;
+    bool combinationRefused = false;
+    bool sameLinkGroupRefused = false;
+    if (!myWindow->bevelPreview(myEdges, size, myFillet, results, combinationRefused,
+                               sameLinkGroupRefused)) {
         // A refusal MID-DRAG is not an error to report - at furniture scale a
-        // radius that momentarily exceeds what the neighbouring face can give
-        // up is a when, not an if, and OCCT fillets legitimately fail there.
-        // The last good preview stays exactly as it was and only the field's
-        // border marks the problem; the failure is only ever SPOKEN when the
-        // user commits it (see commit()).
+        // radius that momentarily exceeds what a neighbouring face can give up
+        // is a when, not an if, and OCCT fillets legitimately fail there; the
+        // cross-body same-link-group refusal is exactly as silent here, for
+        // the same reason. The last good preview stays exactly as it was and
+        // only the field's border marks the problem; the failure is only ever
+        // SPOKEN when the user commits it (see commit()).
         markInvalid(true);
         return;
     }
@@ -354,11 +361,13 @@ void BevelArrow::updatePreview()
     mySize = size;
     // The DEDICATED channel, never setPreview(): that slot is already shared
     // by the sketch outline and the extrude preview, and CLAUDE.md records the
-    // bug that cost. myBodyId goes with it so the body the preview stands in
-    // for is drawn as a cage - a fillet preview is coincident with the body it
-    // rounds everywhere except at the one edge, so a shaded body underneath it
-    // would be a z-fight across the whole shape.
-    myView->setModelingPreview(result.shape, myBodyId);
+    // bug that cost. One (bodyId, shape) pair per body this gesture touches -
+    // Milestone 5's cross-body bevel - so every edited body's own preview
+    // stands in as a cage, not only the arrow's own: a fillet preview is
+    // coincident with the body it rounds everywhere except at the one edge,
+    // so a shaded body underneath it would be a z-fight across the whole
+    // shape, on EVERY body this gesture touches.
+    myView->setModelingPreviews(results);
     myHasPreview = true;
     update();
 }
@@ -414,6 +423,21 @@ QString BevelArrow::kindText() const
     // this chip is only ever asked for the count when it is two or more, so
     // "edges" is the only form it can need.
     if (myEdges.size() < 2) return kind;
+
+    // Milestone 5's cross-body bevel: how many DISTINCT bodies this gesture's
+    // edges came from. One body still reads exactly as it always did
+    // ("Fillet — 3 edges"); more than one adds the body count too, because
+    // "3 edges" alone no longer says whether they came from one shape or
+    // several.
+    QSet<int> bodies;
+    if (myWindow) {
+        for (const TopoDS_Edge& edge : myEdges) bodies.insert(myWindow->bodyIdForEdge(edge));
+    }
+    if (bodies.size() > 1) {
+        return tr("%1 — %2 edges across %3 bodies")
+            .arg(kind, QString::number(static_cast<int>(myEdges.size())),
+                 QString::number(static_cast<int>(bodies.size())));
+    }
     return tr("%1 — %2 edges")
         .arg(kind, QString::number(static_cast<int>(myEdges.size())));
 }

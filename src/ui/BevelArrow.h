@@ -139,14 +139,21 @@ private:
     MainWindow* myWindow = nullptr;
     OcctViewWidget* myView = nullptr;
 
-    // The edge being bevelled and the document body it belongs to. Both are
-    // re-derived from the live selection on every refresh() rather than
+    // The edge the arrow stands on and the document body IT belongs to. Both
+    // are re-derived from the live selection on every refresh() rather than
     // trusted across a rebuild - edge indices are no more stable than face
     // indices (CLAUDE.md's topological-naming warning).
     TopoDS_Edge myEdge;
-    // Every edge the gesture will bevel, the arrow's own included. One
-    // kernel build, one checkpoint, one toast - see MainWindow::bevelEdgesBy.
+    // Every edge the gesture will bevel, the arrow's own included - since
+    // Milestone 5, possibly spanning more than one document body. One kernel
+    // build PER BODY, one checkpoint, one toast - see
+    // MainWindow::bevelPreview/bevelEdgesBy.
     std::vector<TopoDS_Edge> myEdges;
+    // myEdge's OWN body - not necessarily every edge in myEdges' body, since
+    // a cross-body gesture's edges can name several. Used only to detect
+    // whether a refresh() is a repaint of the same gesture or a restart (see
+    // refresh()), never to build or preview anything - myWindow->bevelPreview()
+    // re-derives each edge's own body itself.
     int myBodyId = 0;
     gp_Pnt myCentre;
     gp_Dir myOutward{0.0, 0.0, 1.0};

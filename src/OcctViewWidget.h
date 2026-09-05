@@ -274,8 +274,21 @@ public:
     // SetDisplayMode is presentation state only: unlike Erase it does not
     // touch the selection, which the gizmo's own predicate depends on.
     void setModelingPreview(const TopoDS_Shape& shape, int replacesSolidId = -1);
+    // Milestone 5's cross-body bevel: ONE gesture can need a preview per body
+    // (one fillet/chamfer build per body it touches), and there is still one
+    // dedicated channel, not one per body - it just carries more than one
+    // entry at a time now. setModelingPreview() above is exactly the
+    // one-entry case of this, kept as the convenience every single-body
+    // gizmo (pull, transform, a same-body bevel) still calls; both go
+    // through the identical implementation, so a caller previewing two
+    // bodies cannot diverge from a caller previewing one.
+    void setModelingPreviews(const std::vector<std::pair<int, TopoDS_Shape>>& previews);
     void clearModelingPreview();
     bool hasModelingPreview() const;
+    // The one preview shape when exactly one body is being previewed (every
+    // gizmo but a cross-body bevel), or a null shape when none is up or more
+    // than one is - a multi-body caller built its own shapes and has no need
+    // to ask this accessor for a body it did not name.
     TopoDS_Shape modelingPreviewShape() const;
 
     // The face-pull arrow, drawn in the scene so it stays glued to its face
@@ -1836,11 +1849,17 @@ private:
     Graphic3d_ZLayerId mySketchLayer = Graphic3d_ZLayerId_UNKNOWN;
     Handle(AIS_Shape) myPreview;
     // The direct-modeling channel, kept strictly apart from myPreview above.
-    Handle(AIS_Shape) myModelingPreview;
-    // The body myModelingPreview stands in for while it is up, or -1. Its
+    // Milestone 5's cross-body bevel is the reason these are vectors rather
+    // than one shape and one id: a gesture spanning N bodies previews N
+    // shapes at once, and every single-body gizmo (pull, transform, a
+    // same-body bevel) is simply the N == 1 case of the same storage -
+    // there is no second, single-shape member to keep in step with this one.
+    // Parallel arrays, index for index: myModelingPreviewSolids[i] is the
+    // body myModelingPreviews[i] stands in for while it is up, or -1. Its
     // presentation is restored to the viewport's own display mode when the
-    // preview clears - see setModelingPreview().
-    int myModelingPreviewSolid = -1;
+    // preview clears - see setModelingPreviews().
+    std::vector<Handle(AIS_Shape)> myModelingPreviews;
+    std::vector<int> myModelingPreviewSolids;
 
     // The sketch point markers - see setSketchPointMarkers()'s comment for
     // why these are not the preview slot above. One object per placed

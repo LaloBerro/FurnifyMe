@@ -11105,20 +11105,48 @@ int main(int argc, char* argv[])
             }
         }
 
-        // --- an edge on each of TWO bodies raises no arrow ------------------
+        // --- Milestone 5: edges from DIFFERENT bodies bevel together --------
         //
-        // The predicate refuses it (one gesture is one kernel build on one
-        // shape, and there is no honest way to draw one arrow for two), and
-        // until now nothing checked that it does. Shift-click makes this
-        // selection in two clicks, so it is a state a user reaches by
-        // accident rather than a theoretical one.
+        // Shift-click across two bodies used to raise no arrow at all - one
+        // gesture was one kernel build on one shape, and there was no honest
+        // arrow for a selection spanning two. Milestone 5 widened the GESTURE
+        // instead: N kernel builds (one per body), inside ONE checkpoint and
+        // ONE toast - so this exact selection now raises the arrow, and
+        // committing it changes BOTH bodies together, restored by ONE Undo.
         {
             const int spanBodiesBefore = static_cast<int>(window.document().count());
-            check(buildBody(window, 0.24, 0.36, 0.44, 0.58, 30.0),
-                  "a second body, beside the first, for the two-body probe");
+            // TWO FRESH bodies, not `multiId` - `multiId` carries the whole
+            // history of every probe above it in this file (several r = 20
+            // fillets, some deliberately left uncommitted-undone by item 8's
+            // own spread check), and a NEW small radius picked next to one of
+            // those existing rounded strips measured as a genuine kernel
+            // refusal - not the cross-body mechanism, the SAME thing a
+            // second bevel next to a first one is documented to risk
+            // elsewhere in this file. A clean pair sidesteps that entirely,
+            // which is the point of this block: prove the CROSS-BODY
+            // mechanism, not fight unrelated accumulated geometry.
+            //
+            // Top view for both sketches: buildBody() draws in
+            // SCREEN-fraction space, and the camera here is still the item
+            // 8/9 probes' own angled framing (azimuth -45, elevation 32) -
+            // sketching a rectangle through an angled camera onto the ground
+            // plane produces a general, non-axis-aligned QUADRILATERAL, not a
+            // clean box. Top makes screen fractions land as a genuine
+            // axis-aligned rectangle again.
+            trigger(window, QStringLiteral("Top"));
+            settle(150);
+            check(buildBody(window, 0.10, 0.10, 0.25, 0.25, 40.0),
+                  "a first, CLEAN body for the cross-body probe");
+            const int firstId = window.document().solids().empty()
+                                    ? -1
+                                    : window.document().solids().back().id;
+            check(buildBody(window, 0.60, 0.60, 0.75, 0.75, 30.0),
+                  "a second, CLEAN body, well clear of the first");
             const int secondId = window.document().solids().empty()
                                      ? -1
                                      : window.document().solids().back().id;
+            trigger(window, QStringLiteral("Axonometric"));
+            settle(150);
             view->fitAll();
             settle(250);
 
@@ -11130,10 +11158,203 @@ int main(int argc, char* argv[])
                     if (it.Current().IsSame(edge)) return true;
                 return false;
             };
-            // One clickable edge on each body, found by clicking - the same
-            // rule the probe above uses, because an edge behind a body
-            // projects to a perfectly reachable pixel and picks something
-            // else entirely.
+            auto volumeOf = [&window](int id) {
+                return ModelingOps::volume(window.document().shapeOf(id));
+            };
+            // Straight-edge length, for the closed-form check below - the
+            // same (1 - pi/4) r^2 L the single-edge and multi-edge probes
+            // above assert, applied to each body independently this time.
+            auto edgeLength = [](const TopoDS_Edge& edge) {
+                TopoDS_Vertex v1, v2;
+                TopExp::Vertices(edge, v1, v2);
+                if (v1.IsNull() || v2.IsNull()) return 0.0;
+                return BRep_Tool::Pnt(v1).Distance(BRep_Tool::Pnt(v2));
+            };
+            // One clickable, TOP, straight edge on each body - found by
+            // clicking, the same rule the probe above uses, because an edge
+            // behind a body projects to a perfectly reachable pixel and picks
+            // something else entirely.
+            auto findEdgeOn = [&](int id, TopoDS_Edge& edgeOut, QPoint& at) {
+                const TopoDS_Shape shape = window.document().shapeOf(id);
+                for (TopExp_Explorer it(shape, TopAbs_EDGE); it.More(); it.Next()) {
+                    const TopoDS_Edge candidate = TopoDS::Edge(it.Current());
+                    gp_Pnt centre;
+                    gp_Dir outward;
+                    if (!ModelingOps::bevelAxis(shape, candidate, centre, outward)) continue;
+                    if (outward.Z() < 0.3) continue;
+                    QPoint pixel;
+                    if (!view->projectToScreen(centre, pixel)) continue;
+                    if (!view->rect().adjusted(40, 40, -40, -40).contains(pixel)) continue;
+                    view->clearSelection();
+                    settle(60);
+                    clickAt(view, QPointF(pixel));
+                    settle(120);
+                    if (view->selectedEdge().IsNull() ||
+                        !view->selectedEdge().IsSame(candidate))
+                        continue;
+                    edgeOut = candidate;
+                    at = pixel;
+                    return true;
+                }
+                return false;
+            };
+
+            TopoDS_Edge edgeOnFirst, edgeOnSecond;
+            QPoint onFirst, onSecond;
+            const bool bothFound = findEdgeOn(firstId, edgeOnFirst, onFirst) &&
+                                    findEdgeOn(secondId, edgeOnSecond, onSecond);
+            check(bothFound,
+                  "one clickable edge found on each of the two bodies, so what follows "
+                  "cannot vanish quietly");
+            if (bothFound) {
+                view->clearSelection();
+                settle(80);
+                clickAt(view, QPointF(onFirst));
+                settle(150);
+                check(view->hasBevelArrow(),
+                      "one edge on one body raises the arrow, as ever");
+                clickAt(view, QPointF(onSecond), Qt::ShiftModifier);
+                settle(200);
+                check(view->selectedEdges().size() == 2,
+                      QStringLiteral("Shift-clicking an edge on the OTHER body still "
+                                     "accumulates it (%1 selected)")
+                          .arg(int(view->selectedEdges().size())));
+                check(edgeBelongsTo(firstId, view->selectedEdges().front()) !=
+                          edgeBelongsTo(secondId, view->selectedEdges().front()),
+                      "and the two really are on different bodies, so this is the "
+                      "cross-body case and not two edges of one");
+                check(view->hasBevelArrow(),
+                      "and the arrow raises for exactly that selection now - Milestone "
+                      "5's whole point");
+
+                BevelArrow* crossBody = window.findChild<BevelArrow*>();
+                check(crossBody != nullptr && crossBody->isVisible(),
+                      "its value chip comes up with it");
+                if (crossBody) {
+                    check(crossBody->kindText() ==
+                              QStringLiteral("Fillet — 2 edges across 2 bodies"),
+                          QStringLiteral("the chip names both the edge count and the "
+                                         "body count (\"%1\")")
+                              .arg(crossBody->kindText()));
+                }
+
+                const double firstVolumeBefore = volumeOf(firstId);
+                const double secondVolumeBefore = volumeOf(secondId);
+                const double firstLength = edgeLength(edgeOnFirst);
+                const double secondLength = edgeLength(edgeOnSecond);
+                // A radius safe for both of these fresh, unmodified boxes -
+                // derived from the smaller of the two bodies' own smallest
+                // bounding-box extent rather than a guess, since buildBody()
+                // draws in SCREEN-fraction space and the real-world size a
+                // given fraction produces depends on the camera's own zoom.
+                auto smallestExtent = [&](int id) {
+                    Bnd_Box box;
+                    BRepBndLib::Add(window.document().shapeOf(id), box);
+                    double x0, y0, z0, x1, y1, z1;
+                    box.Get(x0, y0, z0, x1, y1, z1);
+                    return std::min({x1 - x0, y1 - y0, z1 - z0});
+                };
+                const double kCrossRadius = std::clamp(
+                    0.15 * std::min(smallestExtent(firstId), smallestExtent(secondId)), 1.0,
+                    8.0);
+
+                if (crossBody && crossBody->field()) {
+                    // Plain digits, no unit suffix - Measure::parseLength's own
+                    // grammar (an optional sign, digits, at most one point),
+                    // the same reason BevelArrow::textForSize() strips the
+                    // suffix formatLength() would otherwise add.
+                    crossBody->field()->setText(QString::number(kCrossRadius, 'f', 2));
+                    settle(150);
+                    check(view->hasModelingPreview() && crossBody->hasPreview(),
+                          QStringLiteral("typing a size (%1 mm) previews the cross-body "
+                                         "gesture - BOTH bodies' own preview, built by the "
+                                         "same bevelPreview() the commit uses")
+                              .arg(kCrossRadius));
+                    QKeyEvent commit(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+                    QCoreApplication::sendEvent(crossBody->field(), &commit);
+                    settle(250);
+                }
+
+                check(!view->hasBevelArrow(), "committing retires the arrow");
+                check(static_cast<int>(window.document().count()) == spanBodiesBefore + 2,
+                      "both bodies still exist - a cross-body bevel replaces each body "
+                      "in place, it does not merge them into one");
+
+                constexpr double kPi = 3.14159265358979323846;
+                const double expectedPerLength =
+                    (1.0 - kPi / 4.0) * kCrossRadius * kCrossRadius;
+                const double firstExpected = expectedPerLength * firstLength;
+                const double secondExpected = expectedPerLength * secondLength;
+                const double firstVolumeAfter = volumeOf(firstId);
+                const double secondVolumeAfter = volumeOf(secondId);
+                const double firstRemoved = firstVolumeBefore - firstVolumeAfter;
+                const double secondRemoved = secondVolumeBefore - secondVolumeAfter;
+                check(std::fabs(firstRemoved - firstExpected) <
+                          std::max(1.0, firstExpected * 0.02),
+                      QStringLiteral("the FIRST body lost exactly its own edge's fillet "
+                                     "volume (%1 vs %2)")
+                          .arg(firstRemoved).arg(firstExpected));
+                check(std::fabs(secondRemoved - secondExpected) <
+                          std::max(1.0, secondExpected * 0.02),
+                      QStringLiteral("the SECOND body lost exactly its own edge's fillet "
+                                     "volume too (%1 vs %2) - one gesture, two independent "
+                                     "kernel builds")
+                          .arg(secondRemoved).arg(secondExpected));
+
+                // ONE undo restores BOTH bodies - one checkpoint for the whole
+                // gesture, however many bodies it touched.
+                trigger(window, QStringLiteral("Undo"));
+                settle(200);
+                check(std::fabs(volumeOf(firstId) - firstVolumeBefore) < 1.0e-3 &&
+                          std::fabs(volumeOf(secondId) - secondVolumeBefore) < 1.0e-3,
+                      "one Undo restores BOTH bodies from the one cross-body gesture");
+                trigger(window, QStringLiteral("Redo"));
+                settle(200);
+                check(volumeOf(firstId) < firstVolumeBefore &&
+                          volumeOf(secondId) < secondVolumeBefore,
+                      "and Redo brings the cross-body bevel straight back on both");
+                trigger(window, QStringLiteral("Undo"));
+                settle(200);
+                check(std::fabs(volumeOf(firstId) - firstVolumeBefore) < 1.0e-3 &&
+                          std::fabs(volumeOf(secondId) - secondVolumeBefore) < 1.0e-3,
+                      "leaving both bodies unbevelled again for the probes that follow");
+            }
+
+            view->clearSelection();
+            settle(100);
+            trigger(window, QStringLiteral("Select Bodies"));
+            settle(150);
+            view->setSelectedSolids({firstId, secondId});
+            settle(150);
+            trigger(window, QStringLiteral("Delete Selected"));
+            settle(200);
+            check(static_cast<int>(window.document().count()) == spanBodiesBefore,
+                  "and the cross-body probe takes both its own fresh bodies away again");
+            trigger(window, QStringLiteral("Select Edges"));
+            settle(150);
+        }
+
+        // --- all-or-nothing ACROSS bodies: one body's own refusal refuses ---
+        // --- the whole gesture, and changes NEITHER body --------------------
+        //
+        // A radius the SECOND body's picked edge cannot give up (its
+        // neighbouring face is too short) must refuse the entire cross-body
+        // gesture, not just that body's own share of it - exactly the
+        // single-body all-or-nothing rule, extended across bodies.
+        {
+            const int aonBodiesBefore = static_cast<int>(window.document().count());
+            check(buildBody(window, 0.24, 0.36, 0.44, 0.58, 8.0),
+                  "a second, THIN body - its neighbouring face gives up only 8 mm, so a "
+                  "generous radius refuses it specifically");
+            const int thinId = window.document().solids().empty()
+                                   ? -1
+                                   : window.document().solids().back().id;
+            view->fitAll();
+            settle(250);
+
+            auto volumeOf = [&window](int id) {
+                return ModelingOps::volume(window.document().shapeOf(id));
+            };
             auto findEdgeOn = [&](int id, QPoint& at) {
                 const TopoDS_Shape shape = window.document().shapeOf(id);
                 for (TopExp_Explorer it(shape, TopAbs_EDGE); it.More(); it.Next()) {
@@ -11158,47 +11379,61 @@ int main(int argc, char* argv[])
                 return false;
             };
 
-            QPoint onFirst, onSecond;
+            QPoint onThick, onThin;
             const bool bothFound =
-                findEdgeOn(multiId, onFirst) && findEdgeOn(secondId, onSecond);
+                findEdgeOn(multiId, onThick) && findEdgeOn(thinId, onThin);
             check(bothFound,
-                  "one clickable edge found on each of the two bodies, so the two checks "
-                  "below cannot vanish quietly");
+                  "one clickable edge found on the thick body and the new thin one");
             if (bothFound) {
+                const double thickVolumeBefore = volumeOf(multiId);
+                const double thinVolumeBefore = volumeOf(thinId);
+
                 view->clearSelection();
                 settle(80);
-                clickAt(view, QPointF(onFirst));
+                clickAt(view, QPointF(onThick));
                 settle(150);
-                check(view->hasBevelArrow(),
-                      "one edge on one body raises the arrow, as ever");
-                clickAt(view, QPointF(onSecond), Qt::ShiftModifier);
+                clickAt(view, QPointF(onThin), Qt::ShiftModifier);
                 settle(200);
-                check(view->selectedEdges().size() == 2,
-                      QStringLiteral("Shift-clicking an edge on the OTHER body still "
-                                     "accumulates it (%1 selected)")
-                          .arg(int(view->selectedEdges().size())));
-                check(edgeBelongsTo(multiId, view->selectedEdges().front()) !=
-                          edgeBelongsTo(secondId, view->selectedEdges().front()),
-                      "and the two really are on different bodies, so this is the mixed "
-                      "case and not two edges of one");
-                check(!view->hasBevelArrow(),
-                      "but the arrow goes: one gesture is one build on one body, and there "
-                      "is no honest arrow for a selection spanning two");
-                BevelArrow* spanning = window.findChild<BevelArrow*>();
-                check(spanning == nullptr || !spanning->isVisible(),
-                      "and its value chip goes with it");
+                check(view->hasBevelArrow(),
+                      "both edges are straight, on their own bodies, so the arrow raises");
+
+                BevelArrow* aon = window.findChild<BevelArrow*>();
+                if (aon && aon->field()) {
+                    // A radius the thick body's own neighbour gladly gives up
+                    // but the thin body's cannot - 20 mm against an 8 mm
+                    // thickness.
+                    aon->field()->setText(QStringLiteral("20"));
+                    settle(150);
+                    check(!aon->hasPreview() && !view->hasModelingPreview(),
+                          "the preview goes invalid mid-drag rather than showing a "
+                          "partial result - the thin body alone cannot take this radius");
+                    QKeyEvent commit(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+                    QCoreApplication::sendEvent(aon->field(), &commit);
+                    settle(250);
+                }
+
+                check(std::fabs(volumeOf(multiId) - thickVolumeBefore) < 1.0e-6 &&
+                          std::fabs(volumeOf(thinId) - thinVolumeBefore) < 1.0e-6,
+                      "NEITHER body changed - one body's own refusal refuses the whole "
+                      "cross-body gesture, exactly as a single body's refusal always has");
+
+                ToastHost* aonToasts = window.findChild<ToastHost*>();
+                check(aonToasts != nullptr && aonToasts->isShowing() &&
+                          aonToasts->toast() != nullptr && !aonToasts->toast()->hasUndo(),
+                      "and it is reported as a Failure - nothing to undo, because "
+                      "nothing changed");
             }
 
             view->clearSelection();
             settle(100);
             trigger(window, QStringLiteral("Select Bodies"));
             settle(150);
-            view->setSelectedSolids({secondId});
+            view->setSelectedSolids({thinId});
             settle(150);
             trigger(window, QStringLiteral("Delete Selected"));
             settle(200);
-            check(static_cast<int>(window.document().count()) == spanBodiesBefore,
-                  "and the two-body probe takes its own body away again");
+            check(static_cast<int>(window.document().count()) == aonBodiesBefore,
+                  "the all-or-nothing probe takes its own thin body away again");
             trigger(window, QStringLiteral("Select Edges"));
             settle(150);
         }
@@ -12868,6 +13103,57 @@ int main(int argc, char* argv[])
             copyHost->show(MainWindow::bevelCombinationRefusalText(false),
                            Toast::Kind::Failure, false, kCopyStamp);
             settle(60);
+
+            // Milestone 5: the cross-body extension of the combination
+            // refusal, and the cross-body-only same-link-group refusal -
+            // neither reachable from a probe that only ever builds one body,
+            // so both are shown here or swept by nothing at all, the same
+            // reasoning the single-body combination refusal's own comment
+            // gives above.
+            check(MainWindow::bevelCombinationRefusalText(true, 1) ==
+                      MainWindow::bevelCombinationRefusalText(true),
+                  "a totalBodies of 1 (the default every existing caller reads) "
+                  "reproduces the single-body sentence byte for byte");
+            check(MainWindow::bevelCombinationRefusalText(true, 3) !=
+                          MainWindow::bevelCombinationRefusalText(true) &&
+                      MainWindow::bevelCombinationRefusalText(true, 3)
+                          .contains(QStringLiteral("3 bodies")),
+                  QStringLiteral("more than one body names the count too (\"%1\")")
+                      .arg(MainWindow::bevelCombinationRefusalText(true, 3)));
+            check(!MainWindow::bevelCombinationRefusalText(true, 3).endsWith(QLatin1Char('.')) &&
+                      !usesBannedWord(MainWindow::bevelCombinationRefusalText(true, 3),
+                                     QStringLiteral("Fuse")),
+                  "the cross-body extension stays sweep-clean too - no trailing period, "
+                  "no banned word");
+            copyHost->show(MainWindow::bevelCombinationRefusalText(true, 3),
+                           Toast::Kind::Failure, false, kCopyStamp);
+            settle(60);
+            copyHost->show(MainWindow::bevelCombinationRefusalText(false, 3),
+                           Toast::Kind::Failure, false, kCopyStamp);
+            settle(60);
+
+            check(!MainWindow::bevelLinkGroupRefusalText(true).endsWith(QLatin1Char('.')) &&
+                      !MainWindow::bevelLinkGroupRefusalText(false).endsWith(QLatin1Char('.')),
+                  "the same-link-group refusal ends without a period too");
+            check(MainWindow::bevelLinkGroupRefusalText(true).contains(QChar(0x2014)) &&
+                      MainWindow::bevelLinkGroupRefusalText(true).contains(
+                          QStringLiteral("Unlink")),
+                  QStringLiteral("and asks for the fix applyBooleanToSelection()'s own "
+                                 "same-group refusal already uses (\"%1\")")
+                      .arg(MainWindow::bevelLinkGroupRefusalText(true)));
+            check(!usesBannedWord(MainWindow::bevelLinkGroupRefusalText(true),
+                                  QStringLiteral("Fuse")) &&
+                      !usesBannedWord(MainWindow::bevelLinkGroupRefusalText(false),
+                                      QStringLiteral("Fuse")),
+                  "and neither half carries the banned substring \"refused\" would - "
+                  "transformRefusalText()'s own finding, one refusal over");
+            copyHost->show(MainWindow::bevelLinkGroupRefusalText(true), Toast::Kind::Failure,
+                           false, kCopyStamp);
+            settle(60);
+            copyHost->show(MainWindow::bevelLinkGroupRefusalText(false), Toast::Kind::Failure,
+                           false, kCopyStamp);
+            settle(60);
+
             copyHost->show(MainWindow::transformRefusalText(rotated), Toast::Kind::Failure,
                            false, kCopyStamp);
             settle(60);
@@ -20126,6 +20412,116 @@ int main(int argc, char* argv[])
             }
         }
 
+        // --- Milestone 5: a cross-body gesture where only ONE of the two --
+        // --- edited bodies is paired - its twin re-derives inside the SAME
+        // --- checkpoint the gesture takes, exactly as a single-body edit's
+        // --- twin-follow already does; the OTHER body, unrelated, picks up
+        // --- no twin of its own from this. ---------------------------------
+        {
+            // Symmetry is ON in this whole scope, so an ordinary new body
+            // pairs itself automatically the instant it is extruded, UNLESS
+            // it straddles the symmetry plane - and the plane has moved at
+            // least once by this point (bodyC's own placement above raised
+            // it tangent to bodyC's OWN box, on the X axis - the only axis
+            // any placement in this scope ever uses), so this reads the
+            // plane's CURRENT location along X rather than assuming x = 0
+            // still straddles anything. "Delete Selected" was tried here
+            // first and rejected: onDeleteSelected() deliberately deletes
+            // BOTH halves of a pair together ("a twin left standing with
+            // nothing to mirror is a symmetry the document no longer
+            // describes"), so removing a spurious auto-twin through it took
+            // this body down too - straddling by construction is the only
+            // way to a body this gesture can call genuinely unrelated.
+            const double planeX = probe.document().symmetryPlane().Location().X();
+            trigger(probe, QStringLiteral("Start Sketch"));
+            sketchQuadWorld(planeX - 25.0, 500.0, planeX + 25.0, 550.0);
+            trigger(probe, QStringLiteral("Finish Sketch"));
+            check(probe.extrudePendingFace(20.0),
+                  "an UNRELATED body for the cross-body twin-follow probe");
+            const int bodyDId = probe.document().solids().back().id;
+            check(probe.document().twinOf(bodyDId) == -1,
+                  "the new body is genuinely unpaired - it straddles the symmetry plane's "
+                  "OWN current location, wherever bodyC's own placement left it");
+
+            // A straight, TOP edge (bevelAxis()'s own outward test, the same
+            // filter every bevel probe in this file uses) on the given body -
+            // bodyCId may already carry one rounded edge from the single-edge
+            // probe just above, which BRepAdaptor_Curve's GeomAbs_Line check
+            // skips over automatically.
+            const auto firstStraightTopEdge = [&](int id) -> TopoDS_Edge {
+                const TopoDS_Shape shape = probe.document().shapeOf(id);
+                for (TopExp_Explorer it(shape, TopAbs_EDGE); it.More(); it.Next()) {
+                    const TopoDS_Edge candidate = TopoDS::Edge(it.Current());
+                    if (BRepAdaptor_Curve(candidate).GetType() != GeomAbs_Line) continue;
+                    gp_Pnt centre;
+                    gp_Dir outward;
+                    if (!ModelingOps::bevelAxis(shape, candidate, centre, outward)) continue;
+                    if (outward.Z() < 0.3) continue;
+                    return candidate;
+                }
+                return TopoDS_Edge();
+            };
+            const TopoDS_Edge edgeOnC = firstStraightTopEdge(bodyCId);
+            const TopoDS_Edge edgeOnD = firstStraightTopEdge(bodyDId);
+            check(!edgeOnC.IsNull() && !edgeOnD.IsNull(),
+                  "a straight top edge was found on the paired body and the unpaired one");
+            if (!edgeOnC.IsNull() && !edgeOnD.IsNull()) {
+                const double volCBefore = ModelingOps::volume(probe.document().shapeOf(bodyCId));
+                const double volTwinBefore =
+                    ModelingOps::volume(probe.document().shapeOf(twinOfB));
+                const double volDBefore = ModelingOps::volume(probe.document().shapeOf(bodyDId));
+                const std::size_t undoDepthBefore = probe.document().undoDepth();
+
+                constexpr double kCrossTwinRadius = 5.0;
+                check(probe.bevelEdgesBy({edgeOnC, edgeOnD}, kCrossTwinRadius, true),
+                      "the cross-body gesture - one paired body, one unrelated one - "
+                      "succeeds in a single call");
+                check(probe.document().undoDepth() == undoDepthBefore + 1,
+                      "...in exactly ONE checkpoint, however many bodies it touched");
+
+                const double volCAfter = ModelingOps::volume(probe.document().shapeOf(bodyCId));
+                const double volTwinAfter =
+                    ModelingOps::volume(probe.document().shapeOf(twinOfB));
+                const double volDAfter = ModelingOps::volume(probe.document().shapeOf(bodyDId));
+                check(volCAfter < volCBefore - 1.0e-6,
+                      "the paired body's own edit genuinely reduced its volume");
+                check(volDAfter < volDBefore - 1.0e-6,
+                      "the unrelated body's own edit reduced its volume too");
+                check(std::fabs(volTwinAfter - volTwinBefore) > 1.0e-3,
+                      "the paired body's TWIN re-derived - its volume changed too, in "
+                      "the SAME gesture, with no edge of the twin ever picked");
+                check(std::fabs(volTwinAfter - volCAfter) < 1.0,
+                      QStringLiteral("...and it re-derived to the MIRROR of the edited "
+                                     "body's new shape, which a mirror preserves the "
+                                     "volume of (twin=%1, body=%2)")
+                          .arg(volTwinAfter)
+                          .arg(volCAfter));
+                check(probe.document().twinOf(bodyDId) == -1,
+                      "the unrelated body picked up no twin of its own from this gesture");
+
+                ToastHost* symToastsAfterCross = probe.findChild<ToastHost*>();
+                check(symToastsAfterCross != nullptr &&
+                          symToastsAfterCross->currentText().contains(
+                              QStringLiteral("twin followed")),
+                      QStringLiteral("the toast reports the twin followed (\"%1\")")
+                          .arg(symToastsAfterCross ? symToastsAfterCross->currentText()
+                                                   : QString()));
+
+                // ONE undo restores all THREE bodies - the paired body, its
+                // twin, and the unrelated one.
+                trigger(probe, QStringLiteral("Undo"));
+                settle(150);
+                check(std::fabs(ModelingOps::volume(probe.document().shapeOf(bodyCId)) -
+                                volCBefore) < 1.0e-3 &&
+                          std::fabs(ModelingOps::volume(probe.document().shapeOf(twinOfB)) -
+                                    volTwinBefore) < 1.0e-3 &&
+                          std::fabs(ModelingOps::volume(probe.document().shapeOf(bodyDId)) -
+                                    volDBefore) < 1.0e-3,
+                      "one Undo restores the paired body, its twin, AND the unrelated body "
+                      "- all from the one cross-body checkpoint");
+            }
+        }
+
         // --- the editor/selector seam: a live gesture must not survive it,
         // and must not carry its captured body ids into a DIFFERENT
         // furniture. mirrorPlacementEnvironmentOk() was missing the
@@ -22163,6 +22559,68 @@ int main(int argc, char* argv[])
         check(std::fabs((volAAfterPull2 - volABeforePull2) -
                         (volA2AfterPull2 - volA2BeforePull2)) < 1.0e-3,
               "...by exactly the same amount again");
+
+        // --- Milestone 5: a cross-body bevel spanning members of the SAME ---
+        // --- link group refuses outright, before the kernel is even asked --
+        //
+        // idA and idA2 are still linked to each other here (Unlink runs just
+        // below) - after bevelling both together there would be no single
+        // honest shape left to propagate FROM, the identical reasoning
+        // applyBooleanToSelection()'s own same-group refusal already uses,
+        // one gizmo over.
+        {
+            const auto firstStraightEdge = [](const TopoDS_Shape& shape) -> TopoDS_Edge {
+                for (TopExp_Explorer it(shape, TopAbs_EDGE); it.More(); it.Next()) {
+                    const TopoDS_Edge candidate = TopoDS::Edge(it.Current());
+                    if (BRepAdaptor_Curve(candidate).GetType() == GeomAbs_Line) return candidate;
+                }
+                return TopoDS_Edge();
+            };
+            const TopoDS_Edge edgeOnA = firstStraightEdge(probe.document().shapeOf(idA));
+            const TopoDS_Edge edgeOnA2 = firstStraightEdge(probe.document().shapeOf(idA2));
+            check(!edgeOnA.IsNull() && !edgeOnA2.IsNull(),
+                  "a straight edge was found on both linked members");
+            if (!edgeOnA.IsNull() && !edgeOnA2.IsNull()) {
+                const double volABeforeRefusal =
+                    ModelingOps::volume(probe.document().shapeOf(idA));
+                const double volA2BeforeRefusal =
+                    ModelingOps::volume(probe.document().shapeOf(idA2));
+                const std::size_t undoDepthBeforeRefusal = probe.document().undoDepth();
+
+                std::vector<std::pair<int, TopoDS_Shape>> linkResults;
+                bool linkCombinationRefused = false;
+                bool linkSameGroupRefused = false;
+                const bool previewOk =
+                    probe.bevelPreview({edgeOnA, edgeOnA2}, 5.0, true, linkResults,
+                                       linkCombinationRefused, linkSameGroupRefused);
+                check(!previewOk && linkSameGroupRefused && !linkCombinationRefused,
+                      "bevelPreview() itself refuses two edges naming the SAME link "
+                      "group, and says so through its own dedicated flag rather than "
+                      "the edge-combination one");
+
+                check(!probe.bevelEdgesBy({edgeOnA, edgeOnA2}, 5.0, true),
+                      "bevelEdgesBy() refuses the whole gesture too");
+                check(std::fabs(ModelingOps::volume(probe.document().shapeOf(idA)) -
+                                volABeforeRefusal) < 1.0e-6 &&
+                          std::fabs(ModelingOps::volume(probe.document().shapeOf(idA2)) -
+                                    volA2BeforeRefusal) < 1.0e-6,
+                      "neither linked member changed");
+                check(probe.document().undoDepth() == undoDepthBeforeRefusal,
+                      "and no checkpoint was taken - nothing to undo for a refusal that "
+                      "changed nothing");
+                check(linkToasts != nullptr &&
+                          linkToasts->currentText() ==
+                              MainWindow::bevelLinkGroupRefusalText(true),
+                      QStringLiteral("the toast is the dedicated same-link-group refusal "
+                                     "(\"%1\")")
+                          .arg(linkToasts ? linkToasts->currentText() : QString()));
+                check(!usesBannedWord(MainWindow::bevelLinkGroupRefusalText(true),
+                                     QStringLiteral("Fuse")) &&
+                          !MainWindow::bevelLinkGroupRefusalText(true).endsWith(
+                              QLatin1Char('.')),
+                      "sweep-clean and no trailing period, like every other failure");
+            }
+        }
 
         // --- Unlink stops propagation ---------------------------------------
         linkView->setSelectedSolids({idA2});

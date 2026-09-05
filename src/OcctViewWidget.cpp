@@ -500,8 +500,8 @@ void OcctViewWidget::releaseGlResources()
     mySolids.clear();
     myOutlines.clear();
     myPreview.Nullify();
-    myModelingPreview.Nullify();
-    myModelingPreviewSolid = -1;
+    myModelingPreviews.clear();
+    myModelingPreviewSolids.clear();
     myPlacedMarkers.clear();
     myFirstPointMarker.Nullify();
     myCursorMarker.Nullify();
@@ -1267,40 +1267,61 @@ TopoDS_Shape OcctViewWidget::previewShape() const
 
 void OcctViewWidget::setModelingPreview(const TopoDS_Shape& shape, int replacesSolidId)
 {
+    if (shape.IsNull()) {
+        clearModelingPreview();
+        return;
+    }
+    setModelingPreviews({{replacesSolidId, shape}});
+}
+
+void OcctViewWidget::setModelingPreviews(const std::vector<std::pair<int, TopoDS_Shape>>& previews)
+{
     initializeViewer();
     if (myContext.IsNull()) return;
 
     clearModelingPreview();
-    if (shape.IsNull()) return;
+    if (previews.empty()) return;
 
-    ModelingOps::tessellate(shape, 0.1);
+    myModelingPreviews.reserve(previews.size());
+    myModelingPreviewSolids.reserve(previews.size());
+    for (const auto& [replacesSolidId, shape] : previews) {
+        if (shape.IsNull()) continue;
 
-    myModelingPreview = new AIS_Shape(shape);
-    // The same yellow setPreview() uses. One rule - a preview is yellow, a
-    // body is grey - rather than a second preview colour per feature. It also
-    // has to differ from the pull arrow standing on top of it: both were
-    // Theme::accent() at first, and the magnified capture showed an arrow
-    // that was technically drawn and practically invisible against the shape
-    // it was pulling.
-    myModelingPreview->SetColor(Quantity_Color(Quantity_NOC_YELLOW));
-    myModelingPreview->SetWidth(2.0);
-    // In the sketch-work layer with the rest of the feedback: a pull or a
-    // bevel preview carving a body sitting on the ground grid is exactly the
-    // shape the grid must not paint over. Depth testing is on in that layer,
-    // so it still hides behind whatever is genuinely in front of it.
-    markInSketchLayer(myModelingPreview);
-    // Selection mode -1: feedback only, never pickable - the same rule the
-    // sketch preview and every marker follows. A shape the user can select
-    // that exists in no document is the worst thing a preview can produce.
-    myContext->Display(myModelingPreview, AIS_Shaded, -1, Standard_False);
+        ModelingOps::tessellate(shape, 0.1);
 
-    // The body this preview stands in for becomes a cage for the duration -
-    // see the header for why, and why this is SetDisplayMode rather than
-    // Erase (Erase would drop the selection the gizmo's predicate reads).
-    const auto it = mySolids.find(replacesSolidId);
-    if (it != mySolids.end()) {
-        myContext->SetDisplayMode(it->second, AIS_WireFrame, Standard_False);
-        myModelingPreviewSolid = replacesSolidId;
+        Handle(AIS_Shape) preview = new AIS_Shape(shape);
+        // The same yellow setPreview() uses. One rule - a preview is yellow, a
+        // body is grey - rather than a second preview colour per feature. It
+        // also has to differ from the pull arrow standing on top of it: both
+        // were Theme::accent() at first, and the magnified capture showed an
+        // arrow that was technically drawn and practically invisible against
+        // the shape it was pulling.
+        preview->SetColor(Quantity_Color(Quantity_NOC_YELLOW));
+        preview->SetWidth(2.0);
+        // In the sketch-work layer with the rest of the feedback: a pull or a
+        // bevel preview carving a body sitting on the ground grid is exactly
+        // the shape the grid must not paint over. Depth testing is on in that
+        // layer, so it still hides behind whatever is genuinely in front of
+        // it.
+        markInSketchLayer(preview);
+        // Selection mode -1: feedback only, never pickable - the same rule
+        // the sketch preview and every marker follows. A shape the user can
+        // select that exists in no document is the worst thing a preview can
+        // produce.
+        myContext->Display(preview, AIS_Shaded, -1, Standard_False);
+        myModelingPreviews.push_back(preview);
+
+        // The body this preview stands in for becomes a cage for the
+        // duration - see the header for why, and why this is SetDisplayMode
+        // rather than Erase (Erase would drop the selection the gizmo's
+        // predicate reads).
+        const auto it = mySolids.find(replacesSolidId);
+        if (it != mySolids.end()) {
+            myContext->SetDisplayMode(it->second, AIS_WireFrame, Standard_False);
+            myModelingPreviewSolids.push_back(replacesSolidId);
+        } else {
+            myModelingPreviewSolids.push_back(-1);
+        }
     }
 
     scheduleRedraw();
@@ -1311,33 +1332,39 @@ void OcctViewWidget::clearModelingPreview()
     if (myContext.IsNull()) return;
 
     bool changed = false;
-    if (myModelingPreviewSolid >= 0) {
-        const auto it = mySolids.find(myModelingPreviewSolid);
+    for (int solidId : myModelingPreviewSolids) {
+        if (solidId < 0) continue;
+        const auto it = mySolids.find(solidId);
         if (it != mySolids.end()) {
             myContext->SetDisplayMode(it->second, myWireframe ? AIS_WireFrame : AIS_Shaded,
                                       Standard_False);
             changed = true;
         }
-        // Cleared even when the body has gone (a commit replaces it), so the
-        // id can never be restored onto a different body later.
-        myModelingPreviewSolid = -1;
     }
-    if (!myModelingPreview.IsNull()) {
-        myContext->Remove(myModelingPreview, Standard_False);
-        myModelingPreview.Nullify();
+    // Cleared even when a body has gone (a commit replaces it), so an id can
+    // never be restored onto a different body later.
+    myModelingPreviewSolids.clear();
+
+    for (const Handle(AIS_Shape)& preview : myModelingPreviews) {
+        if (preview.IsNull()) continue;
+        myContext->Remove(preview, Standard_False);
         changed = true;
     }
+    myModelingPreviews.clear();
+
     if (changed) scheduleRedraw();
 }
 
 bool OcctViewWidget::hasModelingPreview() const
 {
-    return !myModelingPreview.IsNull();
+    return !myModelingPreviews.empty();
 }
 
 TopoDS_Shape OcctViewWidget::modelingPreviewShape() const
 {
-    return myModelingPreview.IsNull() ? TopoDS_Shape() : myModelingPreview->Shape();
+    if (myModelingPreviews.size() != 1 || myModelingPreviews.front().IsNull())
+        return TopoDS_Shape();
+    return myModelingPreviews.front()->Shape();
 }
 
 void OcctViewWidget::showPullArrow(const gp_Pnt& centre, const gp_Dir& outward)

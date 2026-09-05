@@ -158,14 +158,18 @@ public:
 
     // THE predicate behind the bevel arrow, and everything the gizmo needs to
     // stand itself up: ONE OR MORE straight edges selected, in edge selection
-    // mode, ALL ON ONE document body, each with two adjacent faces that define
-    // an outward bisector - and no sketch in progress and no outline waiting.
+    // mode, each with two adjacent faces that define an outward bisector on
+    // its OWN body - and no sketch in progress and no outline waiting.
     //
-    // The widening from "exactly one" to "one or more on one body" is
-    // multi-edge bevels. A selection spanning two bodies raises no arrow: one
-    // gesture is one kernel build on one body, and there is no honest way to
-    // draw one arrow for two. `edges` comes back in selection order and
-    // `edge` is the one the arrow stands on - the last one picked.
+    // Milestone 5's cross-body bevel widened this a second time, from "one or
+    // more on one body" to "one or more, on any number of bodies" - a
+    // Shift-click across two shapes is exactly as easy to make as one across
+    // two bodies of the SAME shape, and there is no honest reason for one to
+    // raise an arrow and the other not to. `edges` comes back in selection
+    // order and `edge` is the one the arrow stands on - the last one picked -
+    // with `bodyId` naming THAT edge's own body (the arrow's position and
+    // axis are always read from the edge it stands on, never from whichever
+    // body happened to be picked first).
     //
     // One function, used to show the arrow, to hide it, and to write the
     // status label, so the three can never disagree. The mode check is what
@@ -180,21 +184,48 @@ public:
                      gp_Pnt& centre, gp_Dir& outward) const;
     bool canBevelSelectedEdge() const;
 
+    // Groups `edges` by the document body each belongs to and builds ONE
+    // ModelingOps::filletEdges/chamferEdges call per body, over exactly that
+    // body's own edges - a cross-body gesture never hands one body another
+    // body's edge, so the existing single-body containment/combination rules
+    // are untouched. `results` comes back holding one (bodyId, newShape) pair
+    // per body, in first-seen order, and is left EMPTY on ANY refusal - the
+    // resolve-before-mutate discipline pairWithMirror()/linkExisting() already
+    // use (build EVERY body's result before touching the document), extended
+    // across bodies: one body's own kernel refusal, or two edited bodies
+    // being members of the SAME link group (propagation would be
+    // ill-defined - the identical reasoning applyBooleanToSelection()'s own
+    // same-group refusal uses), refuses the WHOLE gesture.
+    //
+    // `combinationRefused`/`sameLinkGroupRefused` distinguish the reason for
+    // BevelArrow's commit-time toast; mid-drag neither is read (a refusal
+    // there is not an error to report - see BevelArrow::updatePreview()).
+    // BevelArrow's live preview and bevelEdgesBy()'s commit both call this,
+    // so a preview can never promise something the commit refuses
+    // differently.
+    bool bevelPreview(const std::vector<TopoDS_Edge>& edges, double size, bool fillet,
+                      std::vector<std::pair<int, TopoDS_Shape>>& results,
+                      bool& combinationRefused, bool& sameLinkGroupRefused) const;
+
     // Rounds `edges` with radius `size` (fillet == true) or flattens them with
-    // distance `size` (fillet == false), through ModelingOps, replacing the
+    // distance `size` (fillet == false), through ModelingOps, replacing every
     // body they belong to. The one commit path for the bevel gizmo: it takes
     // the undo checkpoint, resyncs the viewport, records progress and reports
     // the outcome, so BevelArrow never touches DocumentModel.
     //
-    // ONE checkpoint and ONE toast however many edges are named, because it is
-    // one gesture - and one kernel build, so the refusal is all-or-nothing
-    // (ModelingOps::filletEdges' contract). Every edge must belong to the same
-    // body; a list spanning two is refused before the kernel is asked.
+    // ONE checkpoint and ONE toast however many edges - and however many
+    // bodies (Milestone 5) - are named, because it is one gesture: N kernel
+    // builds (one per body, via bevelPreview() above) inside a single
+    // undo-tracked commit, so ONE Ctrl+Z restores every body this gesture
+    // touched. Each edited body's own mirror twin re-derives exactly as a
+    // single-body edit does, inside the same checkpoint; a gesture naming two
+    // members of the SAME link group is refused outright (see bevelPreview()).
     //
-    // False, with a Failure toast in cause-and-fix form and the body left
-    // exactly as it was, whenever the kernel refuses - which it legitimately
-    // does whenever the radius or the flat would eat a neighbouring face. The
-    // kernel's own error string is logged, never shown.
+    // False, with a Failure toast in cause-and-fix form and every body left
+    // exactly as it was, whenever any body's kernel build refuses - which it
+    // legitimately does whenever the radius or the flat would eat a
+    // neighbouring face. The kernel's own error string is logged, never
+    // shown.
     bool bevelEdgesBy(const std::vector<TopoDS_Edge>& edges, double size, bool fillet);
 
     // The refusal copy, one source each, so the production path and the
@@ -211,7 +242,22 @@ public:
     // The refusal that is NOT about the size - a set of edges the kernel will
     // only bevel some of. Separate copy because "try a smaller size" is false
     // advice there: no size works. See ModelingOps' combinationRefused.
-    static QString bevelCombinationRefusalText(bool fillet);
+    //
+    // `totalBodies` defaults to 1, which reproduces the original single-body
+    // sentence byte for byte - every existing caller (and the suite's own
+    // direct calls) keeps reading exactly that text. Only a cross-body
+    // gesture whose OWN body's combination refuses passes more than one, and
+    // the addition names how many bodies were part of the gesture rather than
+    // which one failed - the kernel's own error string already carries that
+    // and is never shown, per the rule above.
+    static QString bevelCombinationRefusalText(bool fillet, int totalBodies = 1);
+    // Milestone 5: the cross-body refusal that is neither of the above -
+    // two edited bodies naming the SAME link group, refused before the
+    // kernel is even asked. Same taxonomy as applyBooleanToSelection()'s own
+    // same-group refusal: propagation would be ill-defined once both were
+    // bevelled together, because there would no longer be one honest shape
+    // left to propagate FROM.
+    static QString bevelLinkGroupRefusalText(bool fillet);
 
     // Which of Move / Rotate / Scale a delta is, in the two forms the copy
     // needs - "Rotate" for a sentence that leads with the operation, "rotated"
@@ -936,6 +982,16 @@ private:
     // is not evidence that anything was written to it (M1).
     void commitReplaceBody(int id, const TopoDS_Shape& newShape, bool& twinFollowed,
                            int& linkedOthersUpdated);
+
+    // commitReplaceBody()'s own body, split out so a gesture that touches
+    // several bodies at once (Milestone 5's cross-body bevel) can take ONE
+    // checkpoint up front and then call this once per body, rather than each
+    // call taking its own - which would split one gesture across several undo
+    // entries. commitReplaceBody() is exactly
+    // `checkpointDocument(); applyBodyReplacement(...)` now; nothing about its
+    // own contract changed.
+    void applyBodyReplacement(int id, const TopoDS_Shape& newShape, bool& twinFollowed,
+                              int& linkedOthersUpdated);
 
     // Walks `editedId`'s link group (if it has one) and redisplays every
     // OTHER member from the document's own now-current shape -
