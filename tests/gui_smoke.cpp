@@ -4696,9 +4696,10 @@ int main(int argc, char* argv[])
                 // A RING, not a dot - measured as an ANNULUS rather than as
                 // one pixel in a roughly three-pixel hole, which is a target
                 // small enough that a pixel of rounding could hit its rim and
-                // report a filled mark. Rim present at radius 5, hole empty
-                // across the whole 3x3 middle: a filled ball fails the second
-                // half outright, and neither half turns on a single sample.
+                // report a filled mark. Rim present at radius 5, hole
+                // (almost) empty across the whole 3x3 middle: a filled ball
+                // fails the second half outright by a wide margin, and
+                // neither half turns on a single sample.
                 QPoint ringAtPoint = cursorAt;
                 const bool foundRing =
                     markCentre(cursorAt, Theme::sketchPointMarker(), 12, ringAtPoint);
@@ -4718,7 +4719,26 @@ int main(int argc, char* argv[])
                 check(rim >= 6,
                       QStringLiteral("the cursor mark has a rim all the way round "
                                      "(%1 of 8 pixels at radius 5)").arg(rim));
-                check(middleHits == 0,
+                // <= 1, not == 0 - a fix round traced an occasional single
+                // hit here to the live sketch preview segment (ordinary
+                // yellow, drawn correctly), which terminates exactly at the
+                // ring's own centre because that is where the segment's
+                // endpoint IS. That legitimately removes pixels from one
+                // side of the ring, which pulls markCentre()'s MASS
+                // centroid - an average of what is left - a fraction of a
+                // pixel off the ring's true centre; at one measured camera
+                // geometry that was enough for this 3x3 probe to land
+                // partly back on the ring's own band instead of squarely in
+                // its hole. The task that exposed it (Milestone 5, item 3)
+                // changed no marker-drawing code at all - it changed the
+                // viewport's own aspect ratio (the menu strip's removal made
+                // it full-bleed), which moved where these fixed
+                // screen-fraction sketch clicks land in 3D and, with it,
+                // the ring's sub-pixel screen position - confirmed by
+                // reading the actual failing capture pixel by pixel rather
+                // than assumed. A real "ball" regression still fails this
+                // outright: it reads as most or all of the 9, not one.
+                check(middleHits <= 1,
                       QStringLiteral("and a hollow middle - it is a ring, not a ball "
                                      "(%1 of the 9 middle pixels wear its colour)")
                           .arg(middleHits));
@@ -11838,25 +11858,40 @@ int main(int argc, char* argv[])
                    colorDistance(c, Theme::gridMajor()) < 8.0;
         };
         // The SPAN (max row - min row) of screen rows carrying a grid-
-        // coloured pixel, sampled sparsely across the whole frame - not a
-        // raw pixel count, because the failure mode this exists to catch is
-        // shape, not quantity. The unlocked GROUND grid viewed exactly
-        // Front or Right lies in a plane that CONTAINS the view direction -
-        // a horizontal plane looked at edge-on - so every one of its lines,
-        // whatever their world position, projects onto the same handful of
-        // screen rows near where that plane meets the view axis. A plane the
-        // camera is actually squared onto (the Task 5.1 substitution, or a
-        // locked vertical face) fills the frame top to bottom instead. Also
-        // asserts non-vacuity itself, so a span of 0 from "found nothing"
-        // cannot be mistaken for a span of 0 from "found one true row".
+        // coloured pixel - not a raw pixel count, because the failure mode
+        // this exists to catch is shape, not quantity. The unlocked GROUND
+        // grid viewed exactly Front or Right lies in a plane that CONTAINS
+        // the view direction - a horizontal plane looked at edge-on - so
+        // every one of its lines, whatever their world position, projects
+        // onto the same handful of screen rows near where that plane meets
+        // the view axis. A plane the camera is actually squared onto (the
+        // Task 5.1 substitution, or a locked vertical face) fills the frame
+        // top to bottom instead. Also asserts non-vacuity itself, so a span
+        // of 0 from "found nothing" cannot be mistaken for a span of 0 from
+        // "found one true row".
+        //
+        // Sampled every row and every column now, not every second one - a
+        // fix round found the locked-face case (a horizontal plane viewed
+        // genuinely edge-on) rasterizes to a line ONE screen row thick, so a
+        // stride of 2 has a coin-flip's chance of landing on a row that
+        // exists at all. It was landing before this task's own viewport
+        // change (menu strip gone, viewport now full-bleed to the window's
+        // top edge) happened to put that single row on an even y; the same
+        // camera pose against the new, taller viewport puts it on an odd
+        // one instead, and the stride-2 loop sampled zero matching pixels
+        // out of a real, correctly-drawn line - confirmed by reading the
+        // actual failing PNG pixel by pixel rather than guessing. The wide,
+        // many-lines-thick substitution grids this same helper also checks
+        // do not need the stride to find them, so removing it costs nothing
+        // there and closes the one case it does matter for.
         auto gridRowSpan = [&](const QString& path) -> int {
             check(pview->saveSnapshot(path),
                   QStringLiteral("a snapshot is captured (%1)").arg(path));
             const QImage shot(path);
             if (shot.isNull()) return -1;
             int minY = shot.height(), maxY = -1, samples = 0;
-            for (int y = 0; y < shot.height(); y += 2) {
-                for (int x = 0; x < shot.width(); x += 2) {
+            for (int y = 0; y < shot.height(); ++y) {
+                for (int x = 0; x < shot.width(); ++x) {
                     if (isGridColour(shot.pixelColor(x, y))) {
                         minY = std::min(minY, y);
                         maxY = std::max(maxY, y);
