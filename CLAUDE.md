@@ -154,6 +154,28 @@ cmake --build --preset windows
 .\build\RelWithDebInfo\gui_smoke.exe <output-dir-for-snapshots>
 ```
 
+**A second, optional argument filters which blocks run**, so a targeted fix
+can iterate in seconds instead of the ~5 minute full sweep:
+`gui_smoke.exe <output-dir> [filter]` runs only the blocks whose short name
+contains `filter` (case-insensitive substring); `gui_smoke.exe --list` prints
+every registered block name (with `[always]`/`[*shared-state]` tags) and
+exits before touching Qt at all. Block independence is **not** guaranteed —
+most blocks run against the one shared `window` built at the top of `main()`
+and assume everything earlier already happened, so filtering does not try to
+repair that coupling. Each block is tagged instead: `[always]` blocks
+establish the shared window and its first body and always run regardless of
+the filter, because dozens of later blocks assume that scene exists;
+untagged blocks build their own `MainWindow` and are genuinely independent —
+filtering to one of these (e.g. the hover block at the very end of the file)
+is the intended, fast use of this feature; `[*shared-state]` blocks touch the
+shared mid-sequence state honestly, and `blockEnabled()` prints a `[warn]`
+line when a filter selects one of these directly, since the result is not
+authoritative on its own. **A filtered run never enforces `kCheckFloor`** —
+it prints `FILTERED (N failures, M checks) - floor not enforced` in place of
+the floor check, so a filtered run can never be mistaken for an official
+one; only a plain, filter-less invocation is the real gate, and that
+invocation's accounting is unchanged by any of this.
+
 **The no-input law runs both ways.** `gui_smoke` installs an application-wide filter that
 drops every *spontaneous* mouse, wheel and key event, so the machine's own user cannot drive
 the app under test either. That is not belt-and-braces: Windows' "scroll inactive windows on

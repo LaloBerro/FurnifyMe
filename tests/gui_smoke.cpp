@@ -142,6 +142,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 
 namespace {
@@ -478,6 +479,208 @@ void check(bool condition, const QString& what)
     ++g_checks;
     std::printf("%-6s %s\n", condition ? "[ ok ]" : "[FAIL]", qPrintable(what));
     if (!condition) ++g_failures;
+}
+
+// --- gui_smoke block filter --------------------------------------------------
+//
+// A second CLI argument narrows a run to the blocks whose SHORT NAME contains
+// it (case-insensitive substring), so a targeted fix can iterate in seconds
+// instead of the ~5 minute full sweep: `gui_smoke.exe <snapshot-dir> [filter]`.
+// `gui_smoke.exe --list` prints every registered block name and exits before
+// touching Qt at all.
+//
+// Blocks are gated, not individual checks - a broken feature already fails
+// every check inside the block that exercises it, and gating checks one at a
+// time would multiply this file's size for no real benefit.
+//
+// Block INDEPENDENCE is not guaranteed. Almost every block after the first
+// runs against the ONE shared `window`/`view` built at the top of main(), and
+// assumes every earlier block already ran - a furniture is open, a body
+// exists, a selection sits in a particular state. Filtering does not attempt
+// to repair that coupling; see CLAUDE.md's gui_smoke section. Each table
+// entry carries two flags instead:
+//   - alwaysRun: this block (or the loose top-level code immediately around
+//     it) is part of establishing the shared window and its first body - the
+//     scene every later block assumes exists. It runs on every invocation,
+//     filtered or not, because skipping it would break dozens of blocks that
+//     never asked to be skipped. A handful of these blocks are left entirely
+//     UNWRAPPED in the code below rather than gated - the wrap would be a
+//     no-op (alwaysRun already forces true) and in a few cases (a variable
+//     the block declares is read again 10,000 lines later - see
+//     `windowSelector`, `volumeA`, `volumeB`) forcing a NEW C++ scope around
+//     them would take that variable out of scope at its later use. They are
+//     still registered here, so --list names every block that exists.
+//   - selfContained: this block builds its own MainWindow (almost always its
+//     own RequiredTempDir too), so it never touches the shared window at all
+//     and is genuinely independent - filtering to one of these is the fast,
+//     intended use of this feature (the hover block at the very end of this
+//     file is the canonical example: its own comment explains why it is
+//     placed last - nothing runs after it, so its footprint can shift
+//     nothing, which also means filtering to it alone is safe).
+// Everything else touches the shared, evolving mid-sequence state honestly:
+// --list tags it *shared-state, and blockEnabled() prints a warning the
+// moment a filter actually selects one, rather than pretending a filtered
+// run of it is authoritative.
+struct BlockInfo {
+    const char* name;
+    bool alwaysRun;
+    bool selfContained;
+};
+
+constexpr BlockInfo kBlocks[] = {
+    { "the-shell-is-laid-out-correctly-before-anybody", true, false },
+    { "the-init-screen-on-launch-and-how-this-suite-gets-a", true, false },
+    { "a-seeded-library-cards-opening-the-volume-they-carry", true, true },
+    { "delete-hover-reveals-it-two-clicks-confirm-it", true, true },
+    { "selectorwindow-the-type-scale-and-the-opaque-paint", true, false },
+    { "the-gallery-s-two-now-three-refusals-are-never", true, true },
+    { "a-hand-corrupted-shapes-bin-the-failure-toast-is", true, true },
+    { "save-the-dirty-star-autosave-and-close-furniture", true, true },
+    { "milestone-4-two-windows-boot-state-the-handoff-both", true, true },
+    { "milestone-4-fix-round-2-a-failed-close-time-save", true, true },
+    { "milestone-4-fix-round-2-with-autosave-on-an-earlier", true, true },
+    { "resyncview-reapplies-hidden-state-on-every-caller", true, true },
+    { "closeevent-itself-saves-flushes-a-pending-autosave", true, true },
+    { "the-window-carries-the-app-s-own-mark", true, false },
+    { "the-walkthrough-appears-for-a-newcomer", true, false },
+    { "the-hint-balloon-has-nothing-to-say-before-any-body", true, false },
+    { "camera-startup-state", true, false },
+    { "fit-all-knows-outlines-exist", true, false },
+    { "turntable-input", true, false },
+    { "axis-gizmo", true, false },
+    { "the-app-bar-is-a-floating-pill-and-the-viewport-is", true, false },
+    { "the-rail", true, false },
+    { "the-view-controls-cluster-four-chips-stacked-under", true, false },
+    { "the-viewport-enforces-a-minimum-height-the-rail", true, true },
+    { "above-horizon-clicks-are-rejected-not-mirrored", true, false },
+    { "bundled-font", true, false },
+    { "sketch-face-solid", true, false },
+    { "sketch-point-markers", true, false },
+    { "the-app-reports-dimensions-not-volume", false, false },
+    { "items-panel", false, false },
+    { "the-items-drawer", false, false },
+    { "the-qt-occt-pixel-boundary", false, false },
+    { "picking", false, false },
+    { "per-solid-visibility", false, false },
+    { "delete-undo-redo-through-the-real-actions", false, false },
+    { "sketch-work-draws-above-the-grid-and-under-the", false, false },
+    { "shift-the-8-direction-compass-dial-phase-6-task-6-1", false, false },
+    { "outcomes-are-reported-without-stopping-the-user", false, false },
+    { "a-second-taller-solid", false, false },
+    { "select-two-and-cut", false, false },
+    { "a-hint-appears-the-first-time-two-bodies-are", false, false },
+    { "teach-this-window-every-hint-and-re-select-for-the", false, false },
+    { "a-learned-hint-never-appears-again", false, true },
+    { "hint-balloon-visibility-real-hit-testing-all-three", false, true },
+    { "hint-balloon-the-two-dismissal-edges-that-do-not", false, true },
+    { "a-length-you-can-see-while-you-make-it", false, false },
+    { "an-edge-s-length-hovered-and-selected", false, false },
+    { "a-flat-face-can-become-the-sketch-plane", false, false },
+    { "extrude-asks-for-a-height-without-stopping-the-user", false, false },
+    { "the-preview-owns-enter-and-escape-whatever-holds", false, false },
+    { "starting-a-new-sketch-closes-an-open-extrude-preview", false, false },
+    { "escape-cancels-the-extrude-preview-without-touching", false, false },
+    { "a-closed-outline-is-a-document-item", false, false },
+    { "the-waiting-outline-has-an-exit-and-delete-is-it", false, false },
+    { "pull-a-face-the-headline-direct-modeling-gesture", false, false },
+    { "the-transform-gizmo-move-rotate-and-scale-a-whole", false, false },
+    { "one-edge-one-axis-two-operations", false, false },
+    { "multi-edge-bevels-and-the-spread-that-used-to-come", false, false },
+    { "the-whole-app-reads-in-one-unit", false, false },
+    { "a-dimension-already-on-screen-follows-the-unit-too", false, false },
+    { "switching-the-unit-while-the-extrude-preview-is", false, false },
+    { "icons", false, false },
+    { "chips-mirror-their-action", false, false },
+    { "overlay-anchoring", false, false },
+    { "view-controls", false, false },
+    { "standard-views-set-turntable-state", false, false },
+    { "task-6-2-exact-named-views-all-six-every-route", false, true },
+    { "task-5-1-face-on-ortho-grids", false, true },
+    { "phase-5-fix-round-start-sketch-follows-gridplane-s", false, true },
+    { "animated-transitions", false, false },
+    { "a-fade-cannot-be-double-clicked-into-a-second-undo", false, false },
+    { "grid-subdivision-policy", false, false },
+    { "task-5-2-theme-spec-griddensity-serialize-clamp", false, false },
+    { "vocabulary-is-enforced-not-merely-documented", false, false },
+    { "progress-is-recorded-from-real-actions", false, false },
+    { "the-help-menu", false, false },
+    { "the-view-hint-retires-on-its-event-from-either-route", false, true },
+    { "show-tips-again-restores-the-hints-not-only-the", false, true },
+    { "the-shortcut-sheet-lists-every-real-binding", false, false },
+    { "the-walkthrough-completes-and-stays-gone", false, true },
+    { "nothing-in-the-bottom-strip-lands-on-top-of", false, true },
+    { "the-drawer-is-an-obstacle-like-any-other", false, true },
+    { "one-type-scale-and-focus-you-can-see", false, false },
+    { "graphite-exact-tokens-chip-anatomy-and-the-shared", false, false },
+    { "the-appearance-panel-every-colour-and-the-type", false, true },
+    { "double-click-routes-item-13", false, false },
+    { "the-transform-gizmo-stays-a-size-a-hand-can-aim-at", false, false },
+    { "view-show-notifications-item-12", false, false },
+    { "and-the-preference-comes-back-item-12-persistence", false, true },
+    { "view-show-bottom-bar-milestone-3-task-5-item-7", false, false },
+    { "and-the-bottom-bar-preference-persists-item-7", false, true },
+    { "milestone-3-item-1-inline-rename-on-the-items", false, true },
+    { "the-picture-the-whole-item-is-for", false, false },
+    { "the-base-projection-is-a-preference-and-it-comes", false, true },
+    { "show-tips-again-restores-the-walkthrough-for-a", false, true },
+    { "furniturestore-the-furnify-library-injected-into-a", false, false },
+    { "atomic-saves-a-failed-write-must-never-corrupt-what", false, false },
+    { "saveversion-a-failed-manifest-write-leaves-no", false, false },
+    { "milestone-3-item-4-named-versions-and-the-side-by", false, true },
+    { "milestone-3-item-3-live-symmetry-via-mirror-twins", false, true },
+    { "milestone-4-phase-3-the-mirror-plane-placement", false, true },
+    { "render-mode-milestone-3-item-5", false, true },
+    { "task-7-2-the-render-settings-card-and-the-camera", false, true },
+    { "milestone-4-task-4-2-linked-copies-actions-and", false, true },
+    { "hover-keeps-glowing-while-an-edge-is-selected", false, true },
+};
+
+QString g_blockFilter;      // empty when no filter was given on the command line
+bool g_filterActive = false;
+
+const BlockInfo* findBlockInfo(const char* name)
+{
+    for (const auto& b : kBlocks) {
+        if (std::strcmp(b.name, name) == 0) return &b;
+    }
+    return nullptr;
+}
+
+void printBlockList()
+{
+    for (const auto& b : kBlocks) {
+        std::printf("%-58s%s%s\n", b.name, b.alwaysRun ? " [always]" : "",
+                     (!b.alwaysRun && !b.selfContained) ? " [*shared-state]" : "");
+    }
+}
+
+// Gates one top-level block in main(). Every call site wraps `{ ... }` with
+// `if (blockEnabled("name")) { ... }`, name matching a kBlocks entry exactly -
+// see the table's own comment for what alwaysRun/selfContained mean and why a
+// few registered blocks have no call site at all.
+bool blockEnabled(const char* name)
+{
+    const BlockInfo* info = findBlockInfo(name);
+    if (!info) {
+        // A call site with no table entry is a bug in the table above, not a
+        // reason to silently drop a whole block's checks from a full run -
+        // the same "fail loudly, never lower the bar" rule kCheckFloor itself
+        // exists for.
+        std::printf("[FAIL] blockEnabled(\"%s\"): no such block is registered in kBlocks\n",
+                     name);
+        ++g_checks;
+        ++g_failures;
+        return false;
+    }
+    if (!g_filterActive || info->alwaysRun) return true;
+    const bool enabled = QString::fromUtf8(name).contains(g_blockFilter, Qt::CaseInsensitive);
+    if (enabled && !info->selfContained) {
+        std::printf("[warn] '%s' runs against shared state set up by earlier blocks - "
+                    "a filtered run touching it is not authoritative (see CLAUDE.md's "
+                    "gui_smoke section)\n",
+                    name);
+    }
+    return enabled;
 }
 
 // Drops every mouse, wheel and key event that arrives from the WINDOW SYSTEM
@@ -1629,6 +1832,13 @@ int main(int argc, char* argv[])
     // fault. A crash whose location you cannot read costs far more than the
     // syscall per line this gives up.
     std::setvbuf(stdout, nullptr, _IONBF, 0);
+    // `--list` answers "what can I filter to" without touching Qt, a window
+    // or a GL context at all - every name printed here is exactly the string
+    // blockEnabled() matches a filter substring against.
+    if (argc > 1 && std::strcmp(argv[1], "--list") == 0) {
+        printBlockList();
+        return 0;
+    }
 #ifndef _WIN32
     if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM")) qputenv("QT_QPA_PLATFORM", "xcb");
 #endif
@@ -1662,6 +1872,15 @@ int main(int argc, char* argv[])
 
     const QString outDir = argc > 1 ? QString::fromLocal8Bit(argv[1]) : QDir::currentPath();
 
+    // Second argument, optional: a case-insensitive substring filter over the
+    // block names blockEnabled() gates - `gui_smoke.exe <snapshot-dir> [filter]`.
+    // Empty (no second argument) means every block runs, which is what keeps
+    // a plain invocation identical to the pre-filter suite.
+    if (argc > 2) {
+        g_blockFilter = QString::fromLocal8Bit(argv[2]);
+        g_filterActive = !g_blockFilter.isEmpty();
+    }
+
     // The furniture library's own temp directory - injected, never the real
     // QStandardPaths::DocumentsLocation, on the same terms as
     // persistProgress=false: a suite whose behaviour depended on what the
@@ -1694,7 +1913,7 @@ int main(int argc, char* argv[])
     // on isVisible() therefore saw no rail, and the drawer opened on top of
     // it with the rail's top six buttons underneath. Every check further down
     // this file was green while that was true.
-    {
+    if (blockEnabled("the-shell-is-laid-out-correctly-before-anybody")) {
         OcctViewWidget* v = window.view();
         ItemsPanel* drawer = window.itemsPanel();
         ToolCluster* startupRail = v ? v->findChild<ToolCluster*>() : nullptr;
@@ -1826,7 +2045,7 @@ int main(int argc, char* argv[])
     // exactly that risk everywhere else (the `returning`/`probe`/`learned`
     // windows further down) - this is the same idiom, used here for the same
     // reason.
-    {
+    if (blockEnabled("a-seeded-library-cards-opening-the-volume-they-carry")) {
         RequiredTempDir seedDir;
 
         QString seededId;
@@ -1991,7 +2210,7 @@ int main(int argc, char* argv[])
     // one. VersionsPanel's own two-click Delete (Task 1.2) is the shape it
     // follows: a first click arms it (a timer starts) and does nothing yet;
     // a second click while still armed is the one that actually removes it.
-    {
+    if (blockEnabled("delete-hover-reveals-it-two-clicks-confirm-it")) {
         RequiredTempDir deleteDir;
         FurnitureStore deleteSeedStore(deleteDir.path());
         const QString doomedId = deleteSeedStore.createFurniture(QStringLiteral("Doomed Stool"));
@@ -2073,7 +2292,7 @@ int main(int argc, char* argv[])
     // need: this window never touches OCCT (see SelectorWindow.h), so there
     // is no on-screen GL surface for DWM compositing to matter - Qt's own
     // backing store already is the authoritative render.
-    {
+    if (blockEnabled("selectorwindow-the-type-scale-and-the-opaque-paint")) {
         RequiredTempDir sweepDir;
         FurnitureStore sweepStore(sweepDir.path());
         const QString sweepId = sweepStore.createFurniture(QStringLiteral("Sweep Chair"));
@@ -2127,7 +2346,7 @@ int main(int argc, char* argv[])
     // its own header) - each is reported through the window's own inline
     // failure banner instead, forced here without needing real filesystem
     // permissions (unreliable to twiddle portably).
-    {
+    if (blockEnabled("the-gallery-s-two-now-three-refusals-are-never")) {
         // createFurniture(): a REGULAR FILE sits where the library root would
         // need to be a directory, so QDir::mkpath() cannot create it - the
         // same refusal a read-only or disconnected drive would produce, with
@@ -2254,7 +2473,7 @@ int main(int argc, char* argv[])
     // actually lands in the toast, so a banned word anywhere in
     // FurnifySerial's error strings fails here exactly as it would on any
     // other painted surface.
-    {
+    if (blockEnabled("a-hand-corrupted-shapes-bin-the-failure-toast-is")) {
         RequiredTempDir corruptDir;
         QString corruptId;
         {
@@ -2322,7 +2541,7 @@ int main(int argc, char* argv[])
     // extrude), and that machinery's side effects - recorded progress, the
     // walkthrough completing - must not leak into the shared `window` the
     // rest of this suite still has thousands of lines of assumptions about.
-    {
+    if (blockEnabled("save-the-dirty-star-autosave-and-close-furniture")) {
         RequiredTempDir saveDir;
 
         MainWindow saveProbe(nullptr, /*persistProgress=*/false, saveDir.path());
@@ -2570,7 +2789,7 @@ int main(int argc, char* argv[])
     // rather than relying on the shared `window`'s own early show() (done
     // for ITS OWN shell-layout checks, near the top of main(), which have
     // nothing to do with boot ORDER between the two windows).
-    {
+    if (blockEnabled("milestone-4-two-windows-boot-state-the-handoff-both")) {
         RequiredTempDir handoffDir;
         MainWindow handoffWindow(nullptr, /*persistProgress=*/false, handoffDir.path());
         // Never activate, even though this window's first show() happens
@@ -2746,7 +2965,7 @@ int main(int argc, char* argv[])
     // ".tmp" path FurnitureStore::writeShapesFileAtomic() needs makes the
     // temp file's own open() fail outright, with no permission-twiddling and
     // no window where a real file is ever half-written.
-    {
+    if (blockEnabled("milestone-4-fix-round-2-a-failed-close-time-save")) {
         RequiredTempDir saveFailDir;
         MainWindow saveFailProbe(nullptr, /*persistProgress=*/false, saveFailDir.path());
         saveFailProbe.setAttribute(Qt::WA_ShowWithoutActivating);
@@ -2834,7 +3053,7 @@ int main(int argc, char* argv[])
     // --- Milestone 4 fix round 2: with autosave ON, an EARLIER failed --------
     // autosave must not be double-reported at close time - one fresh, ------
     // authoritative save decides, not a stale cached failure -------------------
-    {
+    if (blockEnabled("milestone-4-fix-round-2-with-autosave-on-an-earlier")) {
         RequiredTempDir autosaveFailDir;
         MainWindow autosaveFailProbe(nullptr, /*persistProgress=*/false, autosaveFailDir.path());
         autosaveFailProbe.setAttribute(Qt::WA_ShowWithoutActivating);
@@ -2895,7 +3114,7 @@ int main(int argc, char* argv[])
     // until this fix round. Undo is the vehicle: it rebuilds the whole
     // presentation exactly as a fresh open does, and a body hidden before
     // an undo must still read (and look) hidden after one.
-    {
+    if (blockEnabled("resyncview-reapplies-hidden-state-on-every-caller")) {
         RequiredTempDir visDir;
         MainWindow visProbe(nullptr, /*persistProgress=*/false, visDir.path());
         visProbe.setAttribute(Qt::WA_ShowWithoutActivating);
@@ -3001,7 +3220,7 @@ int main(int argc, char* argv[])
     // timer had already fired on its own (unrelated to the close itself)
     // would prove nothing, so each probe closes the window before that could
     // happen by coincidence.
-    {
+    if (blockEnabled("closeevent-itself-saves-flushes-a-pending-autosave")) {
         // Autosave ON, closed the instant after the checkpoint - well
         // inside the 400ms debounce window, so any save that lands here can
         // only be closeEvent()'s own "flush what's pending" branch, not the
@@ -3083,7 +3302,7 @@ int main(int argc, char* argv[])
     // no check in this file could see. The pixel assertion is what stops an
     // empty-but-non-null QIcon from passing: a QIcon with no pixmaps is not
     // null, it simply draws nothing.
-    {
+    if (blockEnabled("the-window-carries-the-app-s-own-mark")) {
         check(!window.windowIcon().isNull(), "the window carries an application icon");
         const QPixmap mark = window.windowIcon().pixmap(64, 64);
         check(!mark.isNull() && mark.width() >= 32 && mark.height() >= 32,
@@ -3119,7 +3338,7 @@ int main(int argc, char* argv[])
     }
 
     // --- the walkthrough appears for a newcomer -------------------------------
-    {
+    if (blockEnabled("the-walkthrough-appears-for-a-newcomer")) {
         WalkthroughPanel* guide = window.findChild<WalkthroughPanel*>();
         check(guide != nullptr, "a new user gets the guided first build");
         check(guide != nullptr && guide->isVisible(), "the guide is visible on first run");
@@ -3131,7 +3350,7 @@ int main(int argc, char* argv[])
     // Visibility is asserted directly (isVisible()), not inferred from
     // currentHint() alone: a stub that sets myText without ever calling
     // show()/hide() would pass a text-only check just as well.
-    {
+    if (blockEnabled("the-hint-balloon-has-nothing-to-say-before-any-body")) {
         HintBalloon* hint = window.findChild<HintBalloon*>();
         check(hint != nullptr, "the window has a hint balloon");
         check(hint != nullptr && !hint->isVisible() && hint->currentHint().isEmpty(),
@@ -3187,7 +3406,7 @@ int main(int argc, char* argv[])
     // the frame and the outline's absence from it is invisible. Driven at the
     // viewport, whose map fitAll() actually reads, rather than through the
     // document - the id is the viewport's own and is removed again below.
-    {
+    if (blockEnabled("fit-all-knows-outlines-exist")) {
         const CameraState beforeFit = view->camera().state();
         BRepBuilderAPI_MakePolygon poly;
         poly.Add(gp_Pnt(2800.0, 2800.0, 0.0));
@@ -3228,7 +3447,7 @@ int main(int argc, char* argv[])
     }
 
     // --- turntable input ------------------------------------------------------
-    {
+    if (blockEnabled("turntable-input")) {
         const double az0 = view->camera().state().azimuthDeg;
         const gp_Dir up0 = view->camera().upVector();
         const gp_Pnt orbitTarget0 = view->camera().state().target;
@@ -3274,7 +3493,7 @@ int main(int argc, char* argv[])
     // the app bar, which shows the projection rather than the direction. The
     // direction name has one source, OcctViewWidget::viewDirectionName(),
     // which this block reads as its oracle for "square onto a world axis".
-    {
+    if (blockEnabled("axis-gizmo")) {
         AxisGizmo* gizmo = window.findChild<AxisGizmo*>();
         check(gizmo != nullptr, "the viewport has an axis gizmo");
         if (gizmo) {
@@ -3490,7 +3709,7 @@ int main(int argc, char* argv[])
     // same object, which the sheet's own block later asserts the row count
     // against, and this one asserts the group titles it can only produce by
     // reaching the menus at all.
-    {
+    if (blockEnabled("the-app-bar-is-a-floating-pill-and-the-viewport-is")) {
         check(window.menuWidget() == nullptr,
               "setMenuWidget is unwound structurally - the window's menu-widget "
               "slot is empty, not holding the pill");
@@ -3900,7 +4119,7 @@ int main(int argc, char* argv[])
     // states. It is the FIRST ToolCluster reparented onto the viewport
     // (buildOverlay() anchors it before the view-controls cluster exists),
     // so `.first()` finds it rather than the other one.
-    {
+    if (blockEnabled("the-rail")) {
         const QList<ToolCluster*> found = view->findChildren<ToolCluster*>();
         ToolCluster* rail = found.isEmpty() ? nullptr : found.first();
         check(rail != nullptr && rail->isVisible(), "the rail is up over the viewport");
@@ -4295,7 +4514,7 @@ int main(int argc, char* argv[])
     // the right chips, in the right order, the rail's own 34px square, real
     // hit targets, composed tooltips, and genuinely positioned under the
     // gizmo rather than merely present somewhere over the viewport.
-    {
+    if (blockEnabled("the-view-controls-cluster-four-chips-stacked-under")) {
         ToolCluster* viewControls = window.viewControls();
         check(viewControls != nullptr && viewControls->isVisible(),
               "the view-controls cluster is up over the viewport");
@@ -4403,7 +4622,7 @@ int main(int argc, char* argv[])
     // minimum - the shortest this probe can ever legally be - must still
     // leave the whole rail, Redo included, inside the viewport and reachable
     // by a real click.
-    {
+    if (blockEnabled("the-viewport-enforces-a-minimum-height-the-rail")) {
         RequiredTempDir minWinLib;
         MainWindow minWin(nullptr, /*persistProgress=*/false, minWinLib.path());
         minWin.setAttribute(Qt::WA_ShowWithoutActivating);
@@ -4504,7 +4723,7 @@ int main(int argc, char* argv[])
     }
 
     // --- above-horizon clicks are rejected, not mirrored behind the eye -------
-    {
+    if (blockEnabled("above-horizon-clicks-are-rejected-not-mirrored")) {
         trigger(window, QStringLiteral("Front"));
         settle(400);   // elevation 0: half the viewport is above the horizon
         trigger(window, QStringLiteral("Start Sketch"));
@@ -4537,7 +4756,7 @@ int main(int argc, char* argv[])
     // A dot at each placed point, a ring on the first (clicking it back is
     // what closes the outline), and a dot at the live cursor - see
     // OcctViewWidget::setSketchPointMarkers()/setSketchCursorMarker().
-    {
+    if (blockEnabled("sketch-point-markers")) {
         check(view->sketchPointMarkerCount() == 0, "no point markers before any click");
         check(!view->hasSketchStartMarker(), "no start marker before any click");
         check(!view->hasSketchCursorMarker(), "no cursor marker before any hover");
@@ -4820,7 +5039,7 @@ int main(int argc, char* argv[])
     check(window.document().count() == 1, "one solid in the document");
 
     // --- the app reports dimensions, not volume -------------------------------
-    {
+    if (blockEnabled("the-app-reports-dimensions-not-volume")) {
         const QString status = window.statusBar()->currentMessage();
         check(status.contains(QStringLiteral("Body 0")),
               QStringLiteral("the status line names the body (\"%1\")").arg(status));
@@ -4832,9 +5051,11 @@ int main(int argc, char* argv[])
     }
 
     // --- items panel ----------------------------------------------------------
-    check(window.itemsPanel() != nullptr, "the window has an items panel");
-    check(window.itemsPanel()->rowCount() == 1, "panel shows one row for one solid");
-    settle(300);
+    if (blockEnabled("items-panel")) {
+        check(window.itemsPanel() != nullptr, "the window has an items panel");
+        check(window.itemsPanel()->rowCount() == 1, "panel shows one row for one solid");
+        settle(300);
+    }
 
     // --- the items drawer -----------------------------------------------------
     // The panel stopped docking: it is a floating card over the viewport now,
@@ -4842,7 +5063,7 @@ int main(int argc, char* argv[])
     // always had. The first three checks assert the OLD arrangement is gone
     // rather than that the new one exists - a drawer added while the dock
     // stayed behind would satisfy every check after them.
-    {
+    if (blockEnabled("the-items-drawer")) {
         check(window.findChildren<QDockWidget*>().isEmpty(),
               QStringLiteral("no dock widget is left in the window (found %1)")
                   .arg(window.findChildren<QDockWidget*>().size()));
@@ -5143,7 +5364,7 @@ int main(int argc, char* argv[])
     // The camera's own target is by definition at the centre of the
     // viewport, which makes it the one point whose projection is known
     // without reference to any model.
-    {
+    if (blockEnabled("the-qt-occt-pixel-boundary")) {
         // The hosting layer itself, pinned first, because the two directions
         // below are only meaningful if the window OCCT measures against is the
         // one this widget actually occupies. Three separate facts, and each is
@@ -5271,11 +5492,13 @@ int main(int argc, char* argv[])
     }
 
     // --- picking -------------------------------------------------------------
-    clickAt(view, QPointF(view->width() * 0.5, view->height() * 0.5));
-    check(view->selectedSolidIds().size() == 1, "clicking the solid selects exactly one");
+    if (blockEnabled("picking")) {
+        clickAt(view, QPointF(view->width() * 0.5, view->height() * 0.5));
+        check(view->selectedSolidIds().size() == 1, "clicking the solid selects exactly one");
+    }
 
     // --- per-solid visibility -------------------------------------------------
-    {
+    if (blockEnabled("per-solid-visibility")) {
         const int id = window.document().solids().front().id;
         check(view->isSolidVisible(id), "a new solid starts visible");
 
@@ -5309,19 +5532,21 @@ int main(int argc, char* argv[])
     }
 
     // --- delete / undo / redo through the real actions -----------------------
-    trigger(window, QStringLiteral("Delete Selected"));
-    check(window.document().count() == 0, "Delete removes the solid");
-    check(window.itemsPanel()->rowCount() == 0, "panel empties when the solid is deleted");
+    if (blockEnabled("delete-undo-redo-through-the-real-actions")) {
+        trigger(window, QStringLiteral("Delete Selected"));
+        check(window.document().count() == 0, "Delete removes the solid");
+        check(window.itemsPanel()->rowCount() == 0, "panel empties when the solid is deleted");
 
-    trigger(window, QStringLiteral("Undo"));
-    check(window.document().count() == 1, "Undo brings it back");
+        trigger(window, QStringLiteral("Undo"));
+        check(window.document().count() == 1, "Undo brings it back");
 
-    trigger(window, QStringLiteral("Redo"));
-    check(window.document().count() == 0, "Redo removes it again");
+        trigger(window, QStringLiteral("Redo"));
+        check(window.document().count() == 0, "Redo removes it again");
 
-    trigger(window, QStringLiteral("Undo"));
-    check(window.document().count() == 1, "Undo again, back to one solid");
-    settle(200);
+        trigger(window, QStringLiteral("Undo"));
+        check(window.document().count() == 1, "Undo again, back to one solid");
+        settle(200);
+    }
 
     // --- sketch work draws above the grid, and under the bodies ---------------
     //
@@ -5330,7 +5555,7 @@ int main(int argc, char* argv[])
     // asserted first - ids, order and settings - because a pixel probe that
     // passed for the wrong reason would look identical to one that passed for
     // the right one. See GridRenderer::zLayer() for the argument.
-    {
+    if (blockEnabled("sketch-work-draws-above-the-grid-and-under-the")) {
         const Graphic3d_ZLayerId gridLayer = view->gridZLayer();
         const Graphic3d_ZLayerId sketchLayer = view->sketchZLayer();
         check(gridLayer != Graphic3d_ZLayerId_UNKNOWN &&
@@ -5627,7 +5852,7 @@ int main(int argc, char* argv[])
     // plane's own +u axis - measured toward wherever the cursor currently
     // is, rather than a direction fixed the moment the segment before it was
     // drawn.
-    {
+    if (blockEnabled("shift-the-8-direction-compass-dial-phase-6-task-6-1")) {
         trigger(window, QStringLiteral("Start Sketch"));
         check(window.isSketching(), "sketch mode for the compass-dial checks");
         check(!view->hasSketchStraightAnchor(),
@@ -5831,7 +6056,7 @@ int main(int argc, char* argv[])
     }
 
     // --- outcomes are reported without stopping the user ----------------------
-    {
+    if (blockEnabled("outcomes-are-reported-without-stopping-the-user")) {
         ToastHost* toasts = window.findChild<ToastHost*>();
         check(toasts != nullptr, "the window has a toast host");
 
@@ -6005,29 +6230,31 @@ int main(int argc, char* argv[])
     }
 
     // --- a second, taller solid ---------------------------------------------
-    trigger(window, QStringLiteral("Start Sketch"));
-    sketchQuad(window, 0.55, 0.30, 0.82, 0.50);
-    trigger(window, QStringLiteral("Finish Sketch"));
-    check(window.extrudePendingFace(40.0), "second extrude reports success");
-    check(window.document().count() == 2, "two solids in the document");
-    check(window.itemsPanel()->rowCount() == 2, "panel tracks the second solid");
+    if (blockEnabled("a-second-taller-solid")) {
+        trigger(window, QStringLiteral("Start Sketch"));
+        sketchQuad(window, 0.55, 0.30, 0.82, 0.50);
+        trigger(window, QStringLiteral("Finish Sketch"));
+        check(window.extrudePendingFace(40.0), "second extrude reports success");
+        check(window.document().count() == 2, "two solids in the document");
+        check(window.itemsPanel()->rowCount() == 2, "panel tracks the second solid");
 
-    {
-        const int firstId = window.document().solids().front().id;
-        view->setSelectedSolids({firstId});
-        settle(150);
-        check(view->selectedSolidIds().size() == 1,
-              "setSelectedSolids selects exactly the requested solid");
-        check(view->selectedSolidIds().front() == firstId,
-              "and it is the one that was asked for");
+        {
+            const int firstId = window.document().solids().front().id;
+            view->setSelectedSolids({firstId});
+            settle(150);
+            check(view->selectedSolidIds().size() == 1,
+                  "setSelectedSolids selects exactly the requested solid");
+            check(view->selectedSolidIds().front() == firstId,
+                  "and it is the one that was asked for");
 
-        // A hidden solid must never become selected behind the user's back.
-        view->clearSelection();
-        view->setSolidVisible(firstId, false);
-        view->setSelectedSolids({firstId});
-        settle(150);
-        check(view->selectedSolidIds().empty(), "a hidden solid cannot be selected");
-        view->setSolidVisible(firstId, true);
+            // A hidden solid must never become selected behind the user's back.
+            view->clearSelection();
+            view->setSolidVisible(firstId, false);
+            view->setSelectedSolids({firstId});
+            settle(150);
+            check(view->selectedSolidIds().empty(), "a hidden solid cannot be selected");
+            view->setSolidVisible(firstId, true);
+        }
     }
 
     settle(300);
@@ -6041,15 +6268,17 @@ int main(int argc, char* argv[])
     // solids land on screen, and the previous 0.35/0.50 point sat right on the
     // first solid's edge (it worked under orthographic framing, not under
     // perspective). 0.45/0.55 lands solidly inside the first solid's silhouette.
-    view->clearSelection();
-    clickAt(view, QPointF(view->width() * 0.45, view->height() * 0.55));
-    check(view->selectedSolidIds().size() == 1, "first solid picked");
+    if (blockEnabled("select-two-and-cut")) {
+        view->clearSelection();
+        clickAt(view, QPointF(view->width() * 0.45, view->height() * 0.55));
+        check(view->selectedSolidIds().size() == 1, "first solid picked");
 
-    clickAt(view, QPointF(view->width() * 0.68, view->height() * 0.40), Qt::ShiftModifier);
-    check(view->selectedSolidIds().size() == 2, "shift-click adds the second solid");
+        clickAt(view, QPointF(view->width() * 0.68, view->height() * 0.40), Qt::ShiftModifier);
+        check(view->selectedSolidIds().size() == 2, "shift-click adds the second solid");
+    }
 
     // --- a hint appears the first time two bodies are selected ----------------
-    {
+    if (blockEnabled("a-hint-appears-the-first-time-two-bodies-are")) {
         HintBalloon* hint = window.findChild<HintBalloon*>();
         check(hint != nullptr, "the window has a hint balloon");
         check(hint != nullptr && !hint->currentHint().isEmpty(),
@@ -6069,7 +6298,7 @@ int main(int argc, char* argv[])
     // of the suite actually needs from this block: the two bodies selected
     // again for the Cut, and a `window` that has learned everything so no
     // stray hint appears over later checks.
-    {
+    if (blockEnabled("teach-this-window-every-hint-and-re-select-for-the")) {
         for (int i = 0; i < UserProgress::kLearnedThreshold; ++i) {
             window.progress().record("boolean.completed");
             window.progress().record("faceMode.used");
@@ -6085,7 +6314,7 @@ int main(int argc, char* argv[])
     }
 
     // --- a learned hint never appears again ------------------------------------
-    {
+    if (blockEnabled("a-learned-hint-never-appears-again")) {
         // A window that has never shown a hint, so the session flag cannot be
         // what silences one: every governing event is pushed past the
         // threshold BEFORE anything raises a balloon, and then the exact
@@ -6142,7 +6371,7 @@ int main(int argc, char* argv[])
     // an accident of ordering, not the balloon's actual contract - so this
     // scenario is built from scratch, deterministically, to pin the contract
     // down instead.
-    {
+    if (blockEnabled("hint-balloon-visibility-real-hit-testing-all-three")) {
         RequiredTempDir probeLib;
         MainWindow probe(nullptr, /*persistProgress=*/false, probeLib.path());
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
@@ -6233,7 +6462,7 @@ int main(int argc, char* argv[])
     // the face-selection and the view hint can only show once per session,
     // and each hint's one showing in the probes above is already spent
     // proving a different trigger.
-    {
+    if (blockEnabled("hint-balloon-the-two-dismissal-edges-that-do-not")) {
         RequiredTempDir modeProbeLib;
         MainWindow modeProbe(nullptr, /*persistProgress=*/false, modeProbeLib.path());
         modeProbe.setAttribute(Qt::WA_ShowWithoutActivating);
@@ -6303,7 +6532,7 @@ int main(int argc, char* argv[])
     }
 
     // --- a length you can see while you make it -------------------------------
-    {
+    if (blockEnabled("a-length-you-can-see-while-you-make-it")) {
         trigger(window, QStringLiteral("Start Sketch"));
         settle(100);
         clickAt(view, QPointF(300, 300));
@@ -6353,7 +6582,7 @@ int main(int argc, char* argv[])
     // had SELECTED dropped its annotation. The last two checks are the other
     // half of the same rule - an annotation must not outlive the body it
     // measures.
-    {
+    if (blockEnabled("an-edge-s-length-hovered-and-selected")) {
         const CameraState cameraBefore = view->camera().state();
         view->fitAll();
         settle(200);
@@ -6485,7 +6714,7 @@ int main(int argc, char* argv[])
     // --- a flat face can become the sketch plane ------------------------------
     // The one part of this phase that changes what the app can build: an
     // outline on the side of a body, extruding out of it rather than up.
-    {
+    if (blockEnabled("a-flat-face-can-become-the-sketch-plane")) {
         // A body to pick a side face from, and a camera that definitely
         // frames it. Both are put back at the end of the block so the checks
         // after this one see the state they were written against.
@@ -7356,7 +7585,7 @@ int main(int argc, char* argv[])
     }
 
     // --- extrude asks for a height without stopping the user ------------------
-    {
+    if (blockEnabled("extrude-asks-for-a-height-without-stopping-the-user")) {
         // Draw an outline and close it, so a face is pending.
         trigger(window, QStringLiteral("Start Sketch"));
         clickAt(view, QPointF(300, 300)); clickAt(view, QPointF(420, 300));
@@ -7444,7 +7673,7 @@ int main(int argc, char* argv[])
     // either (Cancel Sketch's binding is disabled while a preview can be
     // open), and the panel has no buttons: the user was stranded with a
     // preview shape and no route to commit or cancel it.
-    {
+    if (blockEnabled("the-preview-owns-enter-and-escape-whatever-holds")) {
         trigger(window, QStringLiteral("Start Sketch"));
         clickAt(view, QPointF(300, 300)); clickAt(view, QPointF(420, 300));
         clickAt(view, QPointF(420, 380)); clickAt(view, QPointF(300, 380));
@@ -7533,7 +7762,7 @@ int main(int argc, char* argv[])
     // face went away would now stay open over a fresh outline. It closes on
     // "the outline I was opened for is not the one Extrude would consume any
     // more" instead - see ExtrudePreview::onAppStateChanged().
-    {
+    if (blockEnabled("starting-a-new-sketch-closes-an-open-extrude-preview")) {
         trigger(window, QStringLiteral("Start Sketch"));
         clickAt(view, QPointF(300, 300)); clickAt(view, QPointF(420, 300));
         clickAt(view, QPointF(420, 380)); clickAt(view, QPointF(300, 380));
@@ -7566,7 +7795,7 @@ int main(int argc, char* argv[])
     }
 
     // --- Escape cancels the extrude preview without touching the pending face -
-    {
+    if (blockEnabled("escape-cancels-the-extrude-preview-without-touching")) {
         trigger(window, QStringLiteral("Start Sketch"));
         clickAt(view, QPointF(300, 300)); clickAt(view, QPointF(420, 300));
         clickAt(view, QPointF(420, 380)); clickAt(view, QPointF(300, 380));
@@ -7641,7 +7870,7 @@ int main(int argc, char* argv[])
     //
     // This block restores the exact document it found: everything it builds it
     // takes back, so the blocks after it are unaffected.
-    {
+    if (blockEnabled("a-closed-outline-is-a-document-item")) {
         ItemsPanel* drawer = window.itemsPanel();
         ToastHost* toasts = window.findChild<ToastHost*>();
         check(drawer != nullptr && toasts != nullptr,
@@ -8026,7 +8255,7 @@ int main(int argc, char* argv[])
     //
     // The whole scenario is driven, in order, rather than asserted piecewise:
     // the defect was in the RELATIONSHIP between three things that each worked.
-    {
+    if (blockEnabled("the-waiting-outline-has-an-exit-and-delete-is-it")) {
         ToastHost* lockoutToasts = window.findChild<ToastHost*>();
         check(lockoutToasts != nullptr, "there is a toast host for the lock-out probe");
         const int bodiesBefore = static_cast<int>(window.document().count());
@@ -8224,7 +8453,7 @@ int main(int argc, char* argv[])
     // asserted as an exact volume delta (face area x distance) rather than
     // "something changed" - a pull that moved the wrong way, or by the wrong
     // amount, has to fail loudly.
-    {
+    if (blockEnabled("pull-a-face-the-headline-direct-modeling-gesture")) {
         const CameraState pullCameraBefore = view->camera().state();
         // Snap decides the drag step, so it is set here rather than inherited
         // from whatever an earlier block left it at.
@@ -8754,7 +8983,7 @@ int main(int argc, char* argv[])
     // silently stops hitting what it meant to; guessing at the arrow lengths
     // would be worse still, because AIS_Manipulator keeps them private and is
     // free to change them.
-    {
+    if (blockEnabled("the-transform-gizmo-move-rotate-and-scale-a-whole")) {
         trigger(window, QStringLiteral("Select Bodies"));
         settle(150);
         view->clearSelection();
@@ -9981,7 +10210,7 @@ int main(int argc, char* argv[])
     // chamfer of a straight edge have - (1 - pi/4)r^2 L and d^2 L / 2 - rather
     // than "something got smaller", which both operations would satisfy in
     // either direction.
-    {
+    if (blockEnabled("one-edge-one-axis-two-operations")) {
         const CameraState bevelCameraBefore = view->camera().state();
         QAction* snap = action(window, QStringLiteral("Snap to Grid"));
         check(snap != nullptr, "there is a Snap to Grid action for the bevel probes");
@@ -10665,7 +10894,7 @@ int main(int argc, char* argv[])
     // than by dragging. The drag is covered above; what these two are about is
     // which edges the KERNEL touches, and a probe whose aim can miss by a snap
     // step would report a spread that was really a mis-aimed drag.
-    {
+    if (blockEnabled("multi-edge-bevels-and-the-spread-that-used-to-come")) {
         const CameraState multiCameraBefore = view->camera().state();
         const int multiBodiesBefore = static_cast<int>(window.document().count());
         check(buildBody(window, 0.30, 0.32, 0.70, 0.64, 40.0),
@@ -11453,7 +11682,7 @@ int main(int argc, char* argv[])
     }
 
     // --- the whole app reads in one unit --------------------------------------
-    {
+    if (blockEnabled("the-whole-app-reads-in-one-unit")) {
         QAction* mm = action(window, QStringLiteral("Millimetres"));
         QAction* cm = action(window, QStringLiteral("Centimetres"));
         check(mm != nullptr && cm != nullptr, "both units are offered");
@@ -11548,7 +11777,7 @@ int main(int argc, char* argv[])
     // spec asked for the status bar, the items panel and a dimension label
     // checked together, which is what this does - and the label is checked
     // BEFORE any mouse move, because a move would rebuild it either way.
-    {
+    if (blockEnabled("a-dimension-already-on-screen-follows-the-unit-too")) {
         QAction* mm = action(window, QStringLiteral("Millimetres"));
         QAction* cm = action(window, QStringLiteral("Centimetres"));
         ItemsPanel* items = window.findChild<ItemsPanel*>();
@@ -11618,7 +11847,7 @@ int main(int argc, char* argv[])
     // could pick Centimetres with "10" still in the field and see the 10 mm
     // body they had before, then commit the 100 mm body the field silently
     // now meant.
-    {
+    if (blockEnabled("switching-the-unit-while-the-extrude-preview-is")) {
         QAction* mm = action(window, QStringLiteral("Millimetres"));
         QAction* cm = action(window, QStringLiteral("Centimetres"));
         check(mm != nullptr && cm != nullptr, "both units are still available for this check");
@@ -11668,7 +11897,7 @@ int main(int argc, char* argv[])
     }
 
     // --- icons ----------------------------------------------------------------
-    {
+    if (blockEnabled("icons")) {
         // DisplayMode, Screenshot and Fit are gone - Task 3 folded Wireframe
         // and Fit All into the app bar as text buttons and left Save
         // Screenshot menu-only, so the rail never needed those three icons
@@ -11700,7 +11929,7 @@ int main(int argc, char* argv[])
     }
 
     // --- chips mirror their action -------------------------------------------
-    {
+    if (blockEnabled("chips-mirror-their-action")) {
         QAction probe(QStringLiteral("Probe"));
         probe.setShortcut(QKeySequence(QStringLiteral("Ctrl+P")));
         ToolChip chip(&probe, IconSet::Glyph::Sketch);
@@ -11728,7 +11957,7 @@ int main(int argc, char* argv[])
     }
 
     // --- overlay anchoring ----------------------------------------------------
-    {
+    if (blockEnabled("overlay-anchoring")) {
         // Glyph::Fit no longer exists (Task 3 folded Fit All into the app bar
         // as a text button; Minor 8 removed the now-dead icon) - any glyph
         // does for this probe, which only cares that a chip is a chip.
@@ -11770,7 +11999,7 @@ int main(int argc, char* argv[])
     }
 
     // --- view controls --------------------------------------------------------
-    {
+    if (blockEnabled("view-controls")) {
         QAction* wireframe = action(window, QStringLiteral("Wireframe"));
         check(wireframe != nullptr, "a Wireframe display-mode action exists");
         if (wireframe) {
@@ -11810,7 +12039,7 @@ int main(int argc, char* argv[])
     }
 
     // --- standard views set turntable state -----------------------------------
-    {
+    if (blockEnabled("standard-views-set-turntable-state")) {
         trigger(window, QStringLiteral("Front"));
         settle(400);
         check(std::fabs(view->camera().state().azimuthDeg) < 1e-3 &&
@@ -11887,7 +12116,7 @@ int main(int argc, char* argv[])
     // shortcut dispatch, not this app's logic). This block covers the other
     // route, all six directions, in a fresh probe so a body of known,
     // queryable geometry backs the pixel check below.
-    {
+    if (blockEnabled("task-6-2-exact-named-views-all-six-every-route")) {
         RequiredTempDir axisProbeLib;
         MainWindow axisProbe(nullptr, /*persistProgress=*/false, axisProbeLib.path());
         axisProbe.setAttribute(Qt::WA_ShowWithoutActivating);
@@ -12138,7 +12367,7 @@ int main(int argc, char* argv[])
     // "trust the pixel" rule), and a fresh MainWindow keeps this probe's
     // camera/lock gymnastics from disturbing the shared `window` every other
     // block in this file depends on.
-    {
+    if (blockEnabled("task-5-1-face-on-ortho-grids")) {
         RequiredTempDir gridProbeLib;
         MainWindow gridProbe(nullptr, /*persistProgress=*/false, gridProbeLib.path());
         gridProbe.setAttribute(Qt::WA_ShowWithoutActivating);
@@ -12339,7 +12568,7 @@ int main(int argc, char* argv[])
     // also read by MainWindow::onStartSketch(), so what the grid shows and
     // what a click lands on cannot disagree. A dedicated probe window again,
     // for the same reasons Task 5.1's own block gives.
-    {
+    if (blockEnabled("phase-5-fix-round-start-sketch-follows-gridplane-s")) {
         RequiredTempDir sketchProbeLib;
         MainWindow sketchProbe(nullptr, /*persistProgress=*/false, sketchProbeLib.path());
         sketchProbe.setAttribute(Qt::WA_ShowWithoutActivating);
@@ -12561,7 +12790,7 @@ int main(int argc, char* argv[])
     }
 
     // --- animated transitions -------------------------------------------------
-    {
+    if (blockEnabled("animated-transitions")) {
         view->setAnimationsEnabled(true);
         CameraState goal = view->camera().state();
         goal.azimuthDeg += 90.0;
@@ -12589,7 +12818,7 @@ int main(int argc, char* argv[])
     // on (the shipping default), a fade used to leave the pill visible and
     // clickable for the whole 160 ms, so an ordinary impatient double-click
     // undid two operations - one of them silently.
-    {
+    if (blockEnabled("a-fade-cannot-be-double-clicked-into-a-second-undo")) {
         view->setAnimationsEnabled(true);
 
         check(!window.document().solids().empty(),
@@ -12680,7 +12909,7 @@ int main(int argc, char* argv[])
     }
 
     // --- grid subdivision policy ----------------------------------------------
-    {
+    if (blockEnabled("grid-subdivision-policy")) {
         check(GridRenderer::minorStepFor(700.0) == 10.0,
               "default working distance uses the 10mm grid");
         check(GridRenderer::minorStepFor(50.0) == 1.0,
@@ -12739,7 +12968,7 @@ int main(int argc, char* argv[])
     }
 
     // --- Task 5.2: Theme::Spec::gridDensity - serialize, clamp, refuse -------
-    {
+    if (blockEnabled("task-5-2-theme-spec-griddensity-serialize-clamp")) {
         Theme::Spec base = Theme::defaultSpec();
         check(std::fabs(base.gridDensity - 1.0) < 1e-9,
               "defaultSpec() carries today's grid at density 1.0");
@@ -12780,7 +13009,7 @@ int main(int argc, char* argv[])
     }
 
     // --- vocabulary is enforced, not merely documented ------------------------
-    {
+    if (blockEnabled("vocabulary-is-enforced-not-merely-documented")) {
         // A documented vocabulary drifts the moment someone is in a hurry. An
         // asserted one cannot.
         const QStringList banned = bannedWords();
@@ -13279,7 +13508,7 @@ int main(int argc, char* argv[])
     }
 
     // --- progress is recorded from real actions -------------------------------
-    {
+    if (blockEnabled("progress-is-recorded-from-real-actions")) {
         // The suite has by now completed sketches, extrudes and a boolean, so
         // those events must have been counted.
         check(window.progress().count("extrude.completed") >= 2,
@@ -13300,7 +13529,7 @@ int main(int argc, char* argv[])
     }
 
     // --- the Help menu ---------------------------------------------------------
-    {
+    if (blockEnabled("the-help-menu")) {
         check(action(window, QStringLiteral("Keyboard Shortcuts")) != nullptr,
               "a Keyboard Shortcuts action exists");
         QAction* reset = action(window, QStringLiteral("Show tips again"));
@@ -13350,7 +13579,7 @@ int main(int argc, char* argv[])
     // gizmo labels "Persp" - the balloon sat there after the user had done
     // exactly what it taught. One probe per route, since a hint only gets one
     // showing per session.
-    {
+    if (blockEnabled("the-view-hint-retires-on-its-event-from-either-route")) {
         RequiredTempDir axoProbeLib;
         MainWindow axoProbe(nullptr, /*persistProgress=*/false, axoProbeLib.path());
         axoProbe.setAttribute(Qt::WA_ShowWithoutActivating);
@@ -13439,7 +13668,7 @@ int main(int argc, char* argv[])
     // that clearing the store cannot reach on its own. A dedicated probe,
     // because this needs a hint genuinely dismissed earlier in the SAME
     // session, with nothing else having consumed the other hints' turns.
-    {
+    if (blockEnabled("show-tips-again-restores-the-hints-not-only-the")) {
         RequiredTempDir resetProbeLib;
         MainWindow resetProbe(nullptr, /*persistProgress=*/false, resetProbeLib.path());
         resetProbe.setAttribute(Qt::WA_ShowWithoutActivating);
@@ -13503,7 +13732,7 @@ int main(int argc, char* argv[])
     }
 
     // --- the shortcut sheet lists every real binding --------------------------
-    {
+    if (blockEnabled("the-shortcut-sheet-lists-every-real-binding")) {
         QAction* open = action(window, QStringLiteral("Keyboard Shortcuts"));
         check(open != nullptr, "the shortcut sheet has an action to open it");
         if (open) {
@@ -13631,7 +13860,7 @@ int main(int argc, char* argv[])
     }
 
     // --- the walkthrough completes and stays gone ------------------------------
-    {
+    if (blockEnabled("the-walkthrough-completes-and-stays-gone")) {
         WalkthroughPanel* guide = window.findChild<WalkthroughPanel*>();
         check(guide != nullptr && guide->isFinished(),
               "building a body completes the guide");
@@ -13773,7 +14002,7 @@ int main(int argc, char* argv[])
     // up it was pushed left to x~86 and put a third of its message under
     // Snap/Select - reachable on a first run the moment a self-crossing
     // outline raises a failure message.
-    {
+    if (blockEnabled("nothing-in-the-bottom-strip-lands-on-top-of")) {
         RequiredTempDir narrowLib;
         MainWindow narrow(nullptr, /*persistProgress=*/false, narrowLib.path());
         narrow.setAttribute(Qt::WA_ShowWithoutActivating);
@@ -14055,7 +14284,7 @@ int main(int argc, char* argv[])
     // the drawer's own horizontal band, and the balloon is measured with the
     // drawer open AND closed, so the assertion cannot pass because the drawer
     // happened to be nowhere near it.
-    {
+    if (blockEnabled("the-drawer-is-an-obstacle-like-any-other")) {
         RequiredTempDir probeLib2;
         MainWindow probe(nullptr, /*persistProgress=*/false, probeLib2.path());
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
@@ -14336,7 +14565,7 @@ int main(int argc, char* argv[])
     }
 
     // --- one type scale, and focus you can see --------------------------------
-    {
+    if (blockEnabled("one-type-scale-and-focus-you-can-see")) {
         QSet<double> scale;
         for (const QFont& f : {Theme::titleFont(), Theme::bodyFont(),
                                Theme::labelFont(), Theme::badgeFont()}) {
@@ -14422,7 +14651,7 @@ int main(int argc, char* argv[])
     }
 
     // --- Graphite: exact tokens, chip anatomy, and the shared surface ---------
-    {
+    if (blockEnabled("graphite-exact-tokens-chip-anatomy-and-the-shared")) {
         // A drive-by "cleanup" of the palette must fail loudly - these are
         // the exact Phase 5 values, not incidental ones a refactor could
         // silently drift.
@@ -14796,7 +15025,7 @@ int main(int argc, char* argv[])
     // state, so a block that left it edited would hand every later check a
     // differently coloured app - and the returning-user block below builds a
     // whole second window.
-    {
+    if (blockEnabled("the-appearance-panel-every-colour-and-the-type")) {
         QAction* appearance = action(window, QStringLiteral("Appearance..."));
         check(appearance != nullptr, "there is an Appearance action");
         check(appearance != nullptr && appearance->isCheckable(),
@@ -16200,7 +16429,7 @@ int main(int argc, char* argv[])
     // "give me the whole body", Ctrl means "let me draw on this face". The
     // plain one used to be the lock, and the checks below are what make the
     // move deliberate rather than a silent change of meaning.
-    {
+    if (blockEnabled("double-click-routes-item-13")) {
         // The lock is refused while an outline is waiting (canChangeSketchPlane),
         // and the Ctrl route consults no action's enabled state, so the
         // precondition is CLEARED and then pinned rather than assumed.
@@ -16438,7 +16667,7 @@ int main(int argc, char* argv[])
     // arms ran off every edge of the viewport. The cap is derived from the
     // camera, so the property to check is a SCREEN one, measured at two very
     // different zooms and in both projections.
-    {
+    if (blockEnabled("the-transform-gizmo-stays-a-size-a-hand-can-aim-at")) {
         check(!window.document().solids().empty(),
               "there are bodies for the gizmo-size probe");
         if (!window.document().solids().empty()) {
@@ -16610,7 +16839,7 @@ int main(int argc, char* argv[])
     // refused, and Undo never stops being reachable. All three are checked,
     // because the first two are the preference and the third is the thing the
     // preference must not quietly cost the user.
-    {
+    if (blockEnabled("view-show-notifications-item-12")) {
         QAction* notes = action(window, QStringLiteral("Show notifications"));
         check(notes != nullptr, "there is a Show notifications entry");
         ToastHost* noteHost = window.findChild<ToastHost*>();
@@ -16703,7 +16932,7 @@ int main(int argc, char* argv[])
     // same way: a window that must not write, one that must, and one that reads
     // it back. A preference that is stored and never read looks identical to
     // one that was never stored.
-    {
+    if (blockEnabled("and-the-preference-comes-back-item-12-persistence")) {
         ScopedTestSettings scopedSettings;
         {
             QSettings clean;
@@ -16779,7 +17008,7 @@ int main(int argc, char* argv[])
     // it is derived from the rail and the overlay margins (buildOverlay()'s
     // own comment), never from the status bar - a regression there would be
     // this toggle quietly moving a floor nothing about it should touch.
-    {
+    if (blockEnabled("view-show-bottom-bar-milestone-3-task-5-item-7")) {
         QAction* bottomBar = action(window, QStringLiteral("Show bottom bar"));
         check(bottomBar != nullptr, "there is a Show bottom bar entry");
         if (bottomBar) {
@@ -16827,7 +17056,7 @@ int main(int argc, char* argv[])
 
     // --- and the bottom-bar preference persists (item 7, persistence) --------
     // Same three-window shape as Show notifications' own persistence block.
-    {
+    if (blockEnabled("and-the-bottom-bar-preference-persists-item-7")) {
         ScopedTestSettings scopedSettings;
         {
             QSettings clean;
@@ -16901,7 +17130,7 @@ int main(int argc, char* argv[])
     // as the symmetry and versions blocks: renaming bumps the document's
     // revision and takes checkpoints that must not disturb `window`'s own
     // later state.
-    {
+    if (blockEnabled("milestone-3-item-1-inline-rename-on-the-items")) {
         RequiredTempDir renameLib;
         MainWindow renameProbe(nullptr, /*persistProgress=*/false, renameLib.path());
         renameProbe.setAttribute(Qt::WA_ShowWithoutActivating);
@@ -17390,7 +17619,7 @@ int main(int argc, char* argv[])
     // argue about when it is the vertical edges of a body that either stay
     // parallel or do not - the ground grid tells the same story, but a body
     // is what the user asked to see.
-    {
+    if (blockEnabled("the-picture-the-whole-item-is-for")) {
         QAction* orthoForShot = action(window, QStringLiteral("Orthographic"));
         check(!window.document().solids().empty(),
               "the document still holds bodies for the elevation capture");
@@ -17428,7 +17657,7 @@ int main(int argc, char* argv[])
     // preference that is stored and never read looks identical to one that was
     // never stored, and the guard is only worth having if the write it
     // suppresses actually happens without it.
-    {
+    if (blockEnabled("the-base-projection-is-a-preference-and-it-comes")) {
         ScopedTestSettings scopedSettings;
         {
             QSettings clean;
@@ -17504,7 +17733,7 @@ int main(int argc, char* argv[])
     }
 
     // --- Show tips again restores the walkthrough for a returning user too ---
-    {
+    if (blockEnabled("show-tips-again-restores-the-walkthrough-for-a")) {
         // Every walkthrough check above uses persistProgress=false, so
         // hasLearned() is always false at the moment buildOverlay() runs -
         // none of them can exercise the actual returning-user path, where
@@ -17633,7 +17862,7 @@ int main(int argc, char* argv[])
     // RequiredTempDir keeps this off the real Documents/FurnifyMe/ library
     // structurally (see its own comment), the same injection discipline
     // UserProgress's storage and ScopedTestSettings already established.
-    {
+    if (blockEnabled("furniturestore-the-furnify-library-injected-into-a")) {
         RequiredTempDir tempDir;
         FurnitureStore store(tempDir.path());
 
@@ -17913,7 +18142,7 @@ int main(int argc, char* argv[])
     // (FurnitureStore::writeShapesFileAtomic() for the shapes blob, QSaveFile
     // for the manifest) - this drives both failure modes for real and checks
     // that the OLD file survives, not just that the call returns false.
-    {
+    if (blockEnabled("atomic-saves-a-failed-write-must-never-corrupt-what")) {
         RequiredTempDir atomicDir;
         FurnitureStore atomicStore(atomicDir.path());
         const QString atomicId = atomicStore.createFurniture(QStringLiteral("Atomic"));
@@ -18016,7 +18245,7 @@ int main(int argc, char* argv[])
     // names it - so a manifest write failure used to leave that blob on disk
     // forever, referenced by nothing. saveVersion() now deletes it on that
     // exact path.
-    {
+    if (blockEnabled("saveversion-a-failed-manifest-write-leaves-no")) {
         RequiredTempDir orphanDir;
         FurnitureStore orphanStore(orphanDir.path());
         const QString orphanId = orphanStore.createFurniture(QStringLiteral("Orphan Probe"));
@@ -18073,7 +18302,7 @@ int main(int argc, char* argv[])
     // arrangement that the shared window's later ~40 checks (walkthrough,
     // hints, the "no splitter" regression guard a few thousand lines above)
     // must never see disturbed.
-    {
+    if (blockEnabled("milestone-3-item-4-named-versions-and-the-side-by")) {
         double versionVolumeA = 0.0;
         double versionVolumeB = 0.0;
         RequiredTempDir versionsLib;
@@ -19186,7 +19415,7 @@ int main(int argc, char* argv[])
     // (extrude/pull/delete/boolean all gain a twin-following branch) and a
     // new persisted manifest key, and none of it should be able to disturb
     // the shared `window`'s own later checks.
-    {
+    if (blockEnabled("milestone-3-item-3-live-symmetry-via-mirror-twins")) {
         RequiredTempDir symmetryLib;
         MainWindow probe(nullptr, /*persistProgress=*/false, symmetryLib.path());
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
@@ -19733,7 +19962,7 @@ int main(int argc, char* argv[])
     // block above (which now reaches this same gesture through S, but tests
     // creation-time propagation, not the gesture's own mechanics) or into
     // anything that runs after it.
-    {
+    if (blockEnabled("milestone-4-phase-3-the-mirror-plane-placement")) {
         RequiredTempDir placementLib;
         MainWindow probe(nullptr, /*persistProgress=*/false, placementLib.path());
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
@@ -20566,7 +20795,7 @@ int main(int argc, char* argv[])
     // above use one: this needs its own furniture, its own toast history to
     // sweep, and a scene left in render mode at the end of some sub-block
     // must never bleed into whatever runs after it.
-    {
+    if (blockEnabled("render-mode-milestone-3-item-5")) {
         RequiredTempDir renderLib;
         MainWindow probe(nullptr, /*persistProgress=*/false, renderLib.path());
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
@@ -21802,7 +22031,7 @@ int main(int argc, char* argv[])
     // for the persistence half, its own ScopedTestSettings identity, none of
     // which should be able to bleed into anything that runs before or after
     // it.
-    {
+    if (blockEnabled("task-7-2-the-render-settings-card-and-the-camera")) {
         RequiredTempDir renderSettingsLib;
         MainWindow probe(nullptr, /*persistProgress=*/false, renderSettingsLib.path());
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
@@ -22355,7 +22584,7 @@ int main(int argc, char* argv[])
     // one commit choke point (commitReplaceBody) and the boolean path, and a
     // new persisted manifest key, none of which should be able to disturb the
     // shared `window`'s own later checks.
-    {
+    if (blockEnabled("milestone-4-task-4-2-linked-copies-actions-and")) {
         RequiredTempDir linkLib;
         MainWindow probe(nullptr, /*persistProgress=*/false, linkLib.path());
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
@@ -23005,7 +23234,7 @@ int main(int argc, char* argv[])
     // while the parent passed 0 on the same machine and display state. At
     // the suite's very end nothing runs after it, so its footprint can shift
     // nothing, which is the property the first placement lacked.
-    {
+    if (blockEnabled("hover-keeps-glowing-while-an-edge-is-selected")) {
         RequiredTempDir hoverFixDir;
         MainWindow probe(nullptr, /*persistProgress=*/false, hoverFixDir.path());
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
@@ -23136,7 +23365,16 @@ int main(int argc, char* argv[])
     // no PrintWindow - is counted, named on stdout by skipByEnvironment(),
     // and does not turn a healthy run red with a message about guards.
     const int accounted = g_checks + g_skippedByEnvironment;
-    if (accounted < kCheckFloor) {
+    // A filtered run skipped whole blocks on purpose, so the floor - which
+    // exists to catch a GUARD silently skipping checks a full run expects -
+    // does not apply to it at all; enforcing it against a filtered total
+    // would just be the floor's own false positive. Printed as its own line,
+    // never folded into the PASS/FAIL line below, so a filtered run can never
+    // be mistaken for an official one even by someone reading only the tail.
+    if (g_filterActive) {
+        std::printf("FILTERED (%d failure%s, %d checks) - floor not enforced\n",
+                    g_failures, g_failures == 1 ? "" : "s", accounted);
+    } else if (accounted < kCheckFloor) {
         std::printf("[FAIL] the run executed %d checks (+%d skipped by the "
                     "environment = %d), below the floor of %d - a guard has "
                     "stopped letting its checks run; find the guard, do not lower "
