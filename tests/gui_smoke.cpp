@@ -472,7 +472,18 @@ void skipByEnvironment(int checks, const QString& why)
 // route, plus one more each on the axis-gizmo's Top and Bottom tips inside
 // the Task 6.2 named-views loop (the other four tips have nothing analogous
 // - their azimuth is already implied by construction). 2630 + 3 = 2633.
-constexpr int kCheckFloor = 2682;
+//
+// (The prose above stops at 2633 while the constant went on to 2682 across the
+// cross-body bevel and hover-fix rounds - noted rather than reconstructed, so
+// the next reader knows the gap is in the LEDGER and not in the arithmetic.)
+//
+// The modeling-lag investigation adds NINE, all in one new self-contained
+// block at the very end of this file: the probe's own body, the render-mode
+// action, that the modeling orbit painted at all, one frame per orbit step in
+// each of the two modes, the app-bar pricing's non-vacuity, the app bar's own
+// per-frame budget, the whole overlay tree's, and the structural pin that the
+// app mark is cached rather than re-decoded. 2682 + 9 = 2691.
+constexpr int kCheckFloor = 2691;
 
 void check(bool condition, const QString& what)
 {
@@ -633,6 +644,7 @@ constexpr BlockInfo kBlocks[] = {
     { "task-7-2-the-render-settings-card-and-the-camera", false, true },
     { "milestone-4-task-4-2-linked-copies-actions-and", false, true },
     { "hover-keeps-glowing-while-an-edge-is-selected", false, true },
+    { "an-orbit-step-costs-one-frame-in-both-modes", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -23351,6 +23363,218 @@ int main(int argc, char* argv[])
                   .arg(baseTint));
         check(!hview->selectedEdge().IsNull() && hview->selectedEdge().IsSame(picked),
               "and the selection itself survived the hover untouched");
+    }
+
+    // --- an orbit step costs one frame, in both modes -------------------------
+    // The instrument behind the modeling-lag investigation, kept as a check.
+    // See OcctViewWidget::PaintSample.
+    if (blockEnabled("an-orbit-step-costs-one-frame-in-both-modes")) {
+        RequiredTempDir lagDir;
+        MainWindow probe(nullptr, /*persistProgress=*/false, lagDir.path());
+        probe.setAttribute(Qt::WA_ShowWithoutActivating);
+        probe.resize(1000, 720);
+        probe.show();
+        settle(400);
+        OcctViewWidget* lview = probe.view();
+        lview->setAnimationsEnabled(false);
+        enterFreshFurniture(probe);
+        check(buildBody(probe, 0.35, 0.35, 0.60, 0.60, 80.0),
+              "a body for the orbit-pacing probe");
+        settle(300);
+
+        struct OrbitRun {
+            int moves = 0;
+            int paints = 0;
+            double wallMs = 0.0;     // whole loop
+            double sendMs = 0.0;     // synchronous per-move CPU (sendEvent)
+            double pumpMs = 0.0;     // paint + composite + present (processEvents)
+            double redrawMs = 0.0;   // V3d_View::Redraw() alone, summed
+            double intervalMs = 0.0; // mean present-to-present
+        };
+
+        // One synthetic RMB orbit drag of `moves` steps, with the event loop
+        // pumped BETWEEN steps so each move gets its own frame - which is what
+        // a real drag does and what a tight sendEvent loop (whose update()s all
+        // coalesce into one paint) does not.
+        const auto orbitRun = [&](OcctViewWidget* target, int moves) {
+            OrbitRun r;
+            r.moves = moves;
+            const QPointF from(520.0, 360.0);
+            QMouseEvent press(QEvent::MouseButtonPress, from, target->mapToGlobal(from),
+                              Qt::RightButton, Qt::RightButton, Qt::NoModifier);
+            QCoreApplication::sendEvent(target, &press);
+            settle(150);
+
+            target->clearPaintSamples();
+            const int paintsBefore = target->totalPaintCount();
+            QElapsedTimer wall;
+            wall.start();
+            qint64 sendNs = 0, pumpNs = 0;
+            for (int i = 0; i < moves; ++i) {
+                // A real wiggle: alternating azimuth so the orbit genuinely
+                // turns on every step (a zero delta is a no-op the camera
+                // never applies) without walking the camera off the body.
+                const QPointF at = from + QPointF((i % 2) ? -5.0 : 5.0, (i % 2) ? -2.0 : 2.0);
+                QMouseEvent move(QEvent::MouseMove, at, target->mapToGlobal(at),
+                                 Qt::RightButton, Qt::RightButton, Qt::NoModifier);
+                QElapsedTimer step;
+                step.start();
+                QCoreApplication::sendEvent(target, &move);
+                sendNs += step.nsecsElapsed();
+                step.restart();
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 200);
+                pumpNs += step.nsecsElapsed();
+            }
+            r.wallMs = wall.nsecsElapsed() / 1.0e6;
+            r.sendMs = sendNs / 1.0e6;
+            r.pumpMs = pumpNs / 1.0e6;
+            r.paints = target->totalPaintCount() - paintsBefore;
+
+            const std::vector<OcctViewWidget::PaintSample> samples = target->recentPaints();
+            long long redrawUs = 0;
+            for (const auto& s : samples) redrawUs += s.redrawUs;
+            r.redrawMs = redrawUs / 1000.0;
+            if (samples.size() >= 2) {
+                r.intervalMs = double(samples.back().beginUs - samples.front().beginUs) /
+                               1000.0 / double(samples.size() - 1);
+            }
+
+            const QPointF end = from + QPointF(5.0, 2.0);
+            QMouseEvent release(QEvent::MouseButtonRelease, end, target->mapToGlobal(end),
+                                Qt::RightButton, Qt::NoButton, Qt::NoModifier);
+            QCoreApplication::sendEvent(target, &release);
+            settle(150);
+            return r;
+        };
+
+        const int kOrbitMoves = 60;
+        const OrbitRun modeling = orbitRun(lview, kOrbitMoves);
+
+
+        QAction* renderAction = action(probe, QStringLiteral("Render mode"));
+        check(renderAction != nullptr, "the render-mode action exists for the pacing probe");
+        if (renderAction) renderAction->trigger();
+        // The tier probe runs once, on first activation, and can spend a
+        // second compiling a path-tracing shader - kept out of the measured
+        // window entirely.
+        settle(2500);
+        const bool inRenderMode = lview->renderModeActive();
+        const OrbitRun rendering = inRenderMode ? orbitRun(lview, kOrbitMoves) : OrbitRun();
+        if (renderAction) renderAction->trigger();
+        settle(300);
+
+        const auto report = [](const char* label, const OrbitRun& r) {
+            std::printf("[orbit-pacing] %-10s moves=%d paints=%d (%.2f/move)  "
+                        "wall=%.1fms (%.2f/move)  send=%.2f/move  pump=%.2f/move  "
+                        "redraw=%.2f/frame  interval=%.2fms (%.1f fps)\n",
+                        label, r.moves, r.paints,
+                        r.moves ? double(r.paints) / r.moves : 0.0,
+                        r.wallMs, r.moves ? r.wallMs / r.moves : 0.0,
+                        r.moves ? r.sendMs / r.moves : 0.0,
+                        r.moves ? r.pumpMs / r.moves : 0.0,
+                        r.paints ? r.redrawMs / r.paints : 0.0,
+                        r.intervalMs, r.intervalMs > 0.0 ? 1000.0 / r.intervalMs : 0.0);
+        };
+        report("modeling", modeling);
+        if (inRenderMode) report("render", rendering);
+
+        check(modeling.paints > 0, "the modeling orbit painted at all");
+        // The double-redraw family, as a bound. One user gesture is one frame;
+        // at or above 1.5 a second frame is being presented per orbit step,
+        // and every extra present halves the apparent rate. A frame COUNT, not
+        // wall clock, so it cannot flake on a busy machine.
+        check(modeling.moves > 0 &&
+                  double(modeling.paints) / modeling.moves < 1.5,
+              QStringLiteral("a modeling orbit step costs one frame, not two "
+                             "(%1 paints across %2 moves)")
+                  .arg(modeling.paints)
+                  .arg(modeling.moves));
+        check(!inRenderMode || (rendering.moves > 0 &&
+                                double(rendering.paints) / rendering.moves < 1.5),
+              QStringLiteral("and a render-mode orbit step still costs one frame "
+                             "(%1 paints across %2 moves)")
+                  .arg(rendering.paints)
+                  .arg(rendering.moves));
+
+        // --- and what one frame COSTS -------------------------------------
+        // The wall-clock half of the table above is deliberately NOT asserted.
+        // Both modes measured 4.1 ms/frame here, which is one refresh of this
+        // machine's 240 Hz display - the healthy floor is the REFRESH RATE, so
+        // the same healthy app reads 16.7 ms on a 60 Hz panel and any bound
+        // tight enough to catch the 21 ms defect would fail an ordinary
+        // monitor. The numbers live in the report; what is pinned here is the
+        // mechanism underneath them, which is refresh-independent.
+        //
+        // The mechanism: the viewport is a QOpenGLWidget, a TEXTURE widget,
+        // and Qt cannot partially update a window that holds one. The instant
+        // ANY raster overlay child is dirty, EVERY visible overlay widget in
+        // the window repaints - measured, 34 widget paints per orbit step
+        // against 1 with none of them dirty. The axis gizmo is dirty on every
+        // cameraChanged, so the whole overlay tree's paint cost is charged to
+        // every frame of an orbit drag, and the tree's total is therefore a
+        // per-frame budget rather than a one-off.
+        //
+        // It was 18.5 ms - one 60 Hz frame ENTIRELY - because
+        // AppBar::paintEvent() called IconSet::appMarkPixmap(), which decoded
+        // a 2000x2000 PNG and smooth-scaled it to 20x20 every time. That one
+        // widget measured 17.9 ms against a ToolChip's 0.02.
+        const auto priceCard = [](QWidget* card) {
+            if (!card || !card->isVisible() || card->size().isEmpty()) return -1.0;
+            QImage into(card->size() * card->devicePixelRatioF(),
+                        QImage::Format_ARGB32_Premultiplied);
+            if (into.isNull()) return -1.0;
+            into.setDevicePixelRatio(card->devicePixelRatioF());
+            QElapsedTimer paintClock;
+            paintClock.start();
+            constexpr int kPasses = 40;
+            for (int i = 0; i < kPasses; ++i) {
+                into.fill(Qt::transparent);
+                card->render(&into, QPoint(), QRegion(),
+                             QWidget::DrawWindowBackground | QWidget::DrawChildren);
+            }
+            return paintClock.nsecsElapsed() / 1.0e6 / kPasses;
+        };
+
+        double treeMs = 0.0;
+        QString priceLine;
+        for (QObject* child : lview->children()) {
+            QWidget* card = qobject_cast<QWidget*>(child);
+            const double ms = priceCard(card);
+            if (ms < 0.0) continue;
+            treeMs += ms;
+            priceLine += QStringLiteral("%1=%2 ")
+                             .arg(QString::fromLatin1(card->metaObject()->className()))
+                             .arg(ms, 0, 'f', 3);
+        }
+        // The app bar priced BY NAME as well as inside the sweep above: it is
+        // the widget that actually regressed, and a sweep whose membership
+        // depends on what happens to be visible must not be the only thing
+        // standing between this defect and a repeat.
+        AppBar* bar = probe.findChild<AppBar*>();
+        const double barMs = priceCard(bar);
+        std::printf("[orbit-pacing] overlay tree repaint = %.3f ms (%s) | app bar = %.3f ms\n",
+                    treeMs, qPrintable(priceLine), barMs);
+        check(barMs >= 0.0,
+              "the app bar is visible and was priced, so the budget below is not vacuous");
+        // 8 ms: half a 60 Hz frame, ~40x what the bar measures today (0.18 ms)
+        // and less than half the 17.9 ms the defect cost it. Generous in both
+        // directions on purpose - this is a wall-clock check and it is only
+        // honest if a loaded machine cannot tip it.
+        check(barMs >= 0.0 && barMs < 8.0,
+              QStringLiteral("one app-bar repaint fits inside half a 60 Hz frame "
+                             "(%1 ms) - it is charged to EVERY frame of an orbit, "
+                             "since one dirty card repaints the whole overlay tree")
+                  .arg(barMs, 0, 'f', 3));
+        check(treeMs > 0.0 && treeMs < 8.0,
+              QStringLiteral("and so does the whole overlay tree together (%1 ms)")
+                  .arg(treeMs, 0, 'f', 3));
+
+        // And the structural half, which needs no clock at all: the app mark
+        // is rasterized ONCE and handed out from a cache. A QPixmap built
+        // afresh gets a new cacheKey() every call; a cached one does not.
+        check(IconSet::appMarkPixmap(20).cacheKey() == IconSet::appMarkPixmap(20).cacheKey(),
+              "the app mark is rasterized once and cached, not re-decoded from "
+              "the 2000px artwork on every paint");
     }
 
     // The coverage floor, asserted OUTSIDE check() on purpose: an assertion

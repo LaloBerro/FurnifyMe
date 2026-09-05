@@ -1326,6 +1326,54 @@ surface, and because gui_smoke runs with animations off, so the opacity/colour s
 actually see a blended pixel. It was never part of the ground-fill/mask stratum and needed no
 change when that stratum was deleted.
 
+### One dirty card repaints all of them, so the tree's paint cost is a per-frame budget
+
+**The viewport is a QOpenGLWidget — a *texture* widget — and Qt cannot partially update a
+window that holds one.** The instant ANY raster overlay child is dirty, **every visible
+overlay widget in the window repaints**: measured at 34 widget paint events per orbit step
+(app bar, its menu bar, both clusters and all 17 chips, the drawer, the balloon, the gizmo,
+`MainWindow` itself) against **1** when nothing raster is dirty. `AxisGizmo` is dirty on
+every `cameraChanged` — correctly, it rotates with the scene — so **the whole overlay tree's
+paint cost is charged to every frame of an orbit, pan or zoom.** That is a budget, not a
+one-off, and it is the reason a widget nobody is looking at can make the camera feel slow.
+
+That budget was blown by one line. `AppBar::paintEvent()` called `IconSet::appMarkPixmap()`,
+which decoded `:/icons/app.png` — **the user's 2000×2000 artwork** — and ran a
+`SmoothTransformation` downscale of it to 20×20, **per paint**. One app-bar repaint measured
+**17.9 ms**, against 0.02 ms for a `ToolChip` and 0.08 ms for the entire axis gizmo. So an
+orbit step cost 21 ms where the frame itself cost 4, and modeling ran at **47 fps while
+path-traced render mode ran at 240** — the user's report, and the paradox in it, exactly: the
+heavier mode was the smoother one **because render mode hides every repainting overlay**, so
+its frames pay no raster cost at all. `appMarkPixmap()` is `QPixmapCache`-backed now (cleared
+by Qt at shutdown, so no `QPixmap` outlives its `QGuiApplication`), the bar paints in 0.18 ms,
+and both modes measure one frame per orbit step at 4.1 ms.
+
+Three things this cost, each ruled out **by measurement** before the cause was found, and
+each worth not re-deriving: it is **not** extra frames (paints-per-orbit-step was exactly
+1.00 the whole time, in both modes — the standing double-redraw suspicion is innocent here);
+it is **not** per-move CPU on the camera path (the whole synchronous `sendEvent` — orbit
+maths, the grid's rebuild guard, `updateManipulatorSize`, the symmetry and mirror indicators,
+every `cameraChanged` slot — measured 0.06 ms/move, 0.3% of the frame); and it is **not**
+pacing or swap-chain warmth (forcing `swapInterval` to 0 left the laggy orbit at 20.7 ms
+against 20.9 with vsync on, byte for byte, while the healthy path moved 4.1 → 0.6 ms; the
+lag was never in the present, which is why `surfaceFormat()` still asks for no swap interval).
+Marking the gizmo or the viewport `WA_OpaquePaintEvent`, making the gizmo native, and
+reparenting it out of the viewport all changed nothing either — the full-tree repaint is
+Qt's texture-widget rule, not something this app configured.
+
+**The standing rule, then: no overlay `paintEvent` may decode, load or rescale an asset.**
+Rasterize once and cache; a paint event that touches a resource is paying for it on every
+frame of the next camera gesture. `gui_smoke`'s `an-orbit-step-costs-one-frame-in-both-modes`
+block pins it three ways — paints-per-move (a frame count, so it cannot flake), the app bar's
+and the whole tree's own paint cost against half a 60 Hz frame (wall clock, but ~40× the
+measured value and less than half the defect's), and a clock-free structural check that
+`appMarkPixmap()` returns the same `cacheKey()` twice. The **wall-clock frame rate is
+deliberately not asserted**: the healthy floor is the display's refresh, so the same healthy
+app reads 4.1 ms here and 16.7 ms on a 60 Hz panel, and any bound tight enough to catch a
+21 ms defect would fail an ordinary monitor. `OcctViewWidget::PaintSample` /
+`recentPaints()` is the instrument the block prints its table from, kept so the finding stays
+re-measurable rather than being a story about a number nobody can take again.
+
 **A floating card's logical size must cover whole device pixels**, through
 `Theme::wholeDevicePixels()` at its `setFixedSize`. Widget geometry is logical and the
 backing store is device-sized, so a card 93 logical rows tall at 150% scaling occupies

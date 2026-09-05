@@ -366,7 +366,9 @@ QSurfaceFormat OcctViewWidget::surfaceFormat()
     // FINALIZED IN PHASE 3 OF THE QOPENGLWIDGET MIGRATION, against measured
     // tier outcomes rather than against what the request looks like it should
     // buy. Each of the three lines below is a decision with a measurement
-    // behind it; a fourth is a decision NOT to ask for something.
+    // behind it; the two after them are decisions NOT to ask for something,
+    // each with a measurement of its own (the second added by Milestone 5's
+    // modeling-lag investigation).
     QSurfaceFormat format;
     // OCCT's 3D view wants both, and neither is guaranteed by Qt's default. A
     // request is not a grant, so gui_smoke reads the two back off the LIVE
@@ -395,6 +397,15 @@ QSurfaceFormat OcctViewWidget::surfaceFormat()
     // nothing here performs. Antialiasing is OCCT's to do inside the scene
     // (Graphic3d_RenderingParams::IsAntialiasingEnabled, and the ray-traced
     // tiers' own sampling), where it costs the measurements nothing.
+    //
+    // AND NO setSwapInterval() - a SECOND decision not to ask for something,
+    // added by Milestone 5's modeling-lag investigation, which suspected the
+    // present. The default of 1 paces presentation at the display's refresh.
+    // Forcing 0 left the laggy orbit at 20.7 ms/frame against 20.9 with vsync
+    // on - byte for byte the same cost - while the healthy path moved from
+    // 4.1 ms (one 240 Hz refresh) to 0.6 ms. So the lag was never in the
+    // present at all; see IconSet::appMarkPixmap() for where it actually was.
+    // Tearing is not worth buying nothing.
     return format;
 }
 
@@ -908,7 +919,24 @@ void OcctViewWidget::paintGL()
         context->core11fwd->glDisable(GL_BLEND);
     }
 
+    // One clock for the whole process, started on first use - see PaintSample
+    // on the header. Static so two views (the live one and the compare pane's)
+    // report on the same timeline.
+    static QElapsedTimer ourPaintClock;
+    if (!ourPaintClock.isValid()) ourPaintClock.start();
+    const long long beginUs = ourPaintClock.nsecsElapsed() / 1000;
+
     myView->Redraw();
+
+    const long long redrawUs = ourPaintClock.nsecsElapsed() / 1000 - beginUs;
+    if (static_cast<int>(myPaintSamples.size()) < kPaintSampleRing) {
+        myPaintSamples.push_back({beginUs, redrawUs});
+        myPaintSampleNext = static_cast<int>(myPaintSamples.size()) % kPaintSampleRing;
+    } else {
+        myPaintSamples[myPaintSampleNext] = {beginUs, redrawUs};
+        myPaintSampleNext = (myPaintSampleNext + 1) % kPaintSampleRing;
+    }
+
     // One more frame on the current accumulation run. Counted here, at the one
     // place a frame is actually painted, rather than at whichever scheduler
     // asked for it - see accumulationDepth().
@@ -947,6 +975,27 @@ void OcctViewWidget::invalidateAccumulation()
     // each of the four call sites - see accumulationDepth() on the header for
     // what reads it and why it exists at all.
     myAccumulationDepth = 0;
+}
+
+std::vector<OcctViewWidget::PaintSample> OcctViewWidget::recentPaints() const
+{
+    // Unrolled oldest-first, so a caller reading successive beginUs values as
+    // present-to-present intervals never has to know where the ring wrapped.
+    std::vector<PaintSample> out;
+    out.reserve(myPaintSamples.size());
+    if (static_cast<int>(myPaintSamples.size()) < kPaintSampleRing) {
+        out = myPaintSamples;
+        return out;
+    }
+    for (int i = 0; i < kPaintSampleRing; ++i)
+        out.push_back(myPaintSamples[(myPaintSampleNext + i) % kPaintSampleRing]);
+    return out;
+}
+
+void OcctViewWidget::clearPaintSamples()
+{
+    myPaintSamples.clear();
+    myPaintSampleNext = 0;
 }
 
 void OcctViewWidget::scheduleRedraw()

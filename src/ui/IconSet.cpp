@@ -5,6 +5,7 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
+#include <QPixmapCache>
 
 namespace IconSet {
 namespace {
@@ -216,10 +217,36 @@ QIcon appIcon()
 
 QPixmap appMarkPixmap(int px)
 {
+    // CACHED, and the cache is the whole point of this function's shape.
+    //
+    // AppBar::paintEvent() calls this on every repaint, and the artwork behind
+    // ":/icons/app.png" is 2000x2000 - so the uncached form decoded two
+    // thousand rows of PNG and ran a SmoothTransformation downscale of them to
+    // 20x20, per frame. Measured at 17.9 ms for one AppBar paint against 0.02
+    // ms for a ToolChip and 0.08 ms for the whole axis gizmo.
+    //
+    // That is not a bar-only cost, which is why it was worth a measurement to
+    // find. The viewport is a QOpenGLWidget - a TEXTURE widget - and Qt cannot
+    // partially update a window that holds one: the moment ANY raster overlay
+    // child is dirty, every visible overlay widget in the window repaints, the
+    // app bar included. The axis gizmo repaints on every cameraChanged, so an
+    // orbit drag paid this once per frame and modeling ran at 21 ms/frame
+    // against render mode's 4 ms - the heavier mode being the smoother one,
+    // which is exactly the report that started this.
+    //
+    // QPixmapCache rather than a function-local static: it is cleared by Qt at
+    // shutdown, so no QPixmap outlives the QGuiApplication that must exist to
+    // hold one. A handful of sizes at most ever land in it.
+    const QString key = QStringLiteral("furnifyme:appmark:%1").arg(px);
+    QPixmap cached;
+    if (QPixmapCache::find(key, &cached)) return cached;
+
     const QPixmap art(QStringLiteral(":/icons/app.png"));
-    if (!art.isNull())
-        return art.scaled(px, px, Qt::KeepAspectRatio, Qt::SmoothTransformation);
-    return appIconPixmap(px);
+    const QPixmap mark =
+        art.isNull() ? appIconPixmap(px)
+                     : art.scaled(px, px, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    QPixmapCache::insert(key, mark);
+    return mark;
 }
 
 }  // namespace IconSet

@@ -197,6 +197,35 @@ public:
     // did Qt's paintGL() run, regardless of why.
     int totalPaintCount() const { return myTotalPaintCount; }
 
+    // --- Frame timing ----------------------------------------------------
+    // One sample per paintGL(), so "how many frames did that gesture cost and
+    // what did each one spend" is a MEASUREMENT rather than a story. Both
+    // numbers are microseconds on one monotonic clock shared by every widget
+    // in the process, so samples from the live view and the compare view can
+    // be read on the same timeline.
+    //
+    //   beginUs  - when paintGL() started. Successive values are the
+    //              present-to-present interval, which is what an apparent
+    //              frame rate actually is.
+    //   redrawUs - what V3d_View::Redraw() itself cost inside that paint.
+    //              Everything between two beginUs values that is NOT this is
+    //              Qt's compositing, the swap's vsync block, the overlay
+    //              children's own repaints, and whatever ran in the event
+    //              loop in between.
+    //
+    // Kept (rather than measured once and deleted) because the modeling-lag
+    // investigation's whole finding is a RATIO between those two numbers, and
+    // a ratio nothing can re-measure is a claim with a shelf life. The cost is
+    // two clock reads per frame.
+    struct PaintSample {
+        long long beginUs = 0;
+        long long redrawUs = 0;
+    };
+    static constexpr int kPaintSampleRing = 512;
+    // Oldest first, at most kPaintSampleRing entries.
+    std::vector<PaintSample> recentPaints() const;
+    void clearPaintSamples();
+
     // Ticks left in the live path-tracing convergence window, 0 when no window
     // is open. Exposed alongside accumulationDepth() and for the same reason:
     // "the real timer is armed" and "the accumulation actually progressed" are
@@ -2144,6 +2173,12 @@ private:
 
     // Total frames painted, ever - never reset. See totalPaintCount().
     int myTotalPaintCount = 0;
+
+    // The paint-timing ring - see PaintSample. A plain vector used as a ring so
+    // a long gesture cannot grow it without bound; myPaintSampleNext is the
+    // next slot to overwrite once it has filled.
+    std::vector<PaintSample> myPaintSamples;
+    int myPaintSampleNext = 0;
 
     // --- Render settings (Task 7.2) -------------------------------------
     // Plain session state - see the six accessors' own comments above for
