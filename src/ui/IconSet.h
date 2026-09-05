@@ -12,6 +12,16 @@ namespace IconSet {
 // unreferenced by anything the app actually builds. Removed rather than kept
 // dead, per the same rule that keeps `chrome()` truthful in Theme.h - an enum
 // value with no caller is exactly the kind of claim this file cannot back up.
+//
+// Milestone 5, item 3 moves Wireframe and Fit All back onto icon-only chips -
+// the app bar itself is a floating pill now and has no room left for text
+// buttons - so `Wireframe` and `FitAll` return under those names, drawn fresh
+// rather than resurrected byte-for-byte (the old `DisplayMode`/`Fit` cases are
+// gone with the commit that deleted them; these are new glyphs on the same
+// 24x24 grid). `Projection` is genuinely new: the Persp/Ortho toggle never had
+// an icon of its own before, because it painted its own word ("Persp"/"Ortho")
+// as a bar button's text - an icon-only chip has no room for that word, so it
+// needs a glyph that means "projection" rather than either of the two words.
 enum class Glyph {
     Sketch, Extrude, Fuse, Cut, Intersect, Delete,
     Undo, Redo, Items, Snap, SelectSolid, SelectFace, SelectEdge,
@@ -22,6 +32,14 @@ enum class Glyph {
     // shutter is a much bigger, round, standalone control, so the two would
     // never have shared a paintGlyph() case anyway.
     Camera,
+    // The four view controls (Milestone 5, item 3) that moved off the old
+    // text-button app bar onto icon-only chips under the axis gizmo. The
+    // unit chip is not here - it paints its own text ("mm"/"cm") as the
+    // glyph instead of a drawn icon, through ToolChip's text-glyph
+    // constructor, since a unit is a word, not a shape.
+    Wireframe,   // half-shaded circle - "edges only, see through the rest"
+    FitAll,      // frame corners - "frame everything"
+    Projection,  // a perspective frustum - "how depth is drawn"
 };
 
 // Returns an icon with Normal and Disabled modes already filled in.
@@ -41,5 +59,15 @@ QIcon icon(Glyph glyph);
 // would put a box on the taskbar with nothing to fall back to.
 QPixmap appIconPixmap(int px);
 QIcon appIcon();
+
+// The same artwork appIcon() prefers (assets/Icon.png, bundled as
+// :/icons/app.png), scaled fresh to `px` rather than picked from appIcon()'s
+// own fixed size set (16/24/32/48/64/128/256 - none of them small enough for
+// a mark sitting beside a wordmark at chip height). Falls back to the painted
+// tile the same way appIcon() does, so a broken resource build still shows
+// something rather than a blank square. One implementation of "the user's
+// mark, at an arbitrary size" rather than two - AppBar's pill is the first
+// caller that needs a size appIcon() never offers.
+QPixmap appMarkPixmap(int px);
 
 }  // namespace IconSet

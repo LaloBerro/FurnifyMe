@@ -1,34 +1,36 @@
 #include "AppBar.h"
 
+#include "IconSet.h"
 #include "Theme.h"
 
-#include <QAction>
 #include <QFontMetrics>
 #include <QHBoxLayout>
 #include <QLayoutItem>
 #include <QMenuBar>
 #include <QPainter>
-#include <QPainterPath>
 
 #include <algorithm>
 
 namespace {
 
-constexpr int kPadX = 12;      // inside a bar button, left and right of its label
-constexpr int kPadY = 6;
-constexpr int kRadius = 6;
-constexpr double kFocusRingWidth = 2.0;
+// The app mark's own fixed pixel size - small, beside the wordmark, the way
+// the mockup's sketch shows it. Independent of the type scale: the mark is
+// the user's own artwork (IconSet::appMarkPixmap(), Milestone 5 item 1),
+// not text, so it does not grow or shrink with Theme::basePt() the way the
+// wordmark beside it does.
+constexpr int kMarkSize = 20;
+// The one breathing-room gap used twice: between the mark and the wordmark,
+// and between the wordmark and the menu bar that follows it.
+constexpr int kGap = 8;
 
-// Room around the wordmark: the text sits kEdgeX from the bar's left edge and
-// the menu bar starts kWordmarkGap after it.
-constexpr int kEdgeX = 14;
-constexpr int kWordmarkGap = 20;
-constexpr int kButtonGap = 8;
+constexpr int kPadY = 6;        // the pill's own top/bottom padding
+constexpr int kMinRadius = 12;  // a floor under updatePillMargins()'s derived value,
+                                // so a still-empty layout (pre-first-paint) never
+                                // collapses the pill to a near-zero-radius sliver
 
-// The wordmark is the one place in the shell a title-weight string appears
-// outside a panel heading, and it reads as one unit: the glyph in accent(),
-// the name in text(), both at bodyFont() bold so the bar stays a strip rather
-// than a banner.
+// The wordmark reads as one unit at a title-ish weight, the one place in the
+// shell a bold string appears outside a panel heading - the same rule the
+// window-spanning bar followed before this task, carried over unchanged.
 QFont wordmarkFont()
 {
     QFont f = Theme::bodyFont();
@@ -38,209 +40,51 @@ QFont wordmarkFont()
 
 }  // namespace
 
-// --- BarButton ---------------------------------------------------------------
-
-BarButton::BarButton(QAction* action, QWidget* parent)
-    : QAbstractButton(parent)
-    , myAction(action)
-{
-    setAttribute(Qt::WA_Hover, true);
-    setCursor(Qt::PointingHandCursor);
-    // Keyboard-reachable like every chip, and for the same reason: a focus
-    // ring that can never receive focus would be dead code.
-    setFocusPolicy(Qt::StrongFocus);
-    applyTheme();
-    connect(Theme::notifier(), &Theme::Notifier::changed, this, &BarButton::applyTheme);
-
-    if (myAction) {
-        connect(this, &QAbstractButton::clicked, myAction, &QAction::trigger);
-        connect(myAction, &QAction::changed, this, &BarButton::syncFromAction);
-        syncFromAction();
-    }
-}
-
-void BarButton::applyTheme()
-{
-    // Baseline for this widget's own font() (what the type-scale sweep in
-    // gui_smoke reads): a bar button's text is a chip label. A per-widget
-    // stylesheet wins over the app-wide one regardless of selector
-    // specificity, so this sticks rather than fighting the cascade.
-    setStyleSheet(QStringLiteral("font-size: %1pt;").arg(Theme::labelFont().pointSizeF()));
-    // sizeHint() measures with labelFont(), so the button has to be re-laid
-    // out, not merely repainted.
-    updateGeometry();
-    update();
-}
-
-void BarButton::syncFromAction()
-{
-    setText(myAction->text().remove(QLatin1Char('&')));
-    setEnabled(myAction->isEnabled());
-    setCheckable(myAction->isCheckable());
-    setChecked(myAction->isChecked());
-    setToolTip(myAction->toolTip());
-    updateGeometry();
-    update();
-}
-
-void BarButton::reserveWidthFor(const QStringList& candidates)
-{
-    const QFontMetrics metrics(Theme::labelFont());
-    int widest = 0;
-    for (const QString& candidate : candidates)
-        widest = std::max(widest, metrics.horizontalAdvance(candidate));
-    myReservedTextWidth = widest;
-    updateGeometry();
-}
-
-QSize BarButton::sizeHint() const
-{
-    // Measured with the font paintEvent() actually draws with, not the
-    // widget's inherited one - bold is wider than regular and a title
-    // measured in the wrong weight clips.
-    const QFontMetrics metrics(Theme::labelFont());
-    const int textWidth = std::max(metrics.horizontalAdvance(text()), myReservedTextWidth);
-    // Grown by Theme::surfaceShadowMargin() per side. It is zero - the family
-    // paints no shadow and reserves no room for one (see Theme.h) - so this
-    // button's widget rect and its painted card are the same rectangle. Kept
-    // as arithmetic rather than folded away, the same way ToolChip,
-    // ToolCluster and ViewportOverlay keep it.
-    const int margin = Theme::surfaceShadowMargin();
-    return QSize(textWidth + kPadX * 2 + margin * 2,
-                 metrics.height() + kPadY * 2 + margin * 2);
-}
-
-void BarButton::paintEvent(QPaintEvent* /*event*/)
-{
-    QPainter painter(this);
-    painter.setRenderHint(QPainter::Antialiasing, true);
-
-    const int margin = Theme::surfaceShadowMargin();
-    const QRect body = rect().adjusted(margin, margin, -margin, -margin);
-
-    // No Theme::paintSurface() call here, for the reason spelled out at the
-    // same place in ToolChip::paintEvent(): it fills `body` with panel() and
-    // strokes border() around it, and the two statements below do exactly
-    // that again in this button's own state colour. Nothing it painted
-    // survived the call after it.
-
-    QColor background = Theme::chip();
-    if (!isEnabled())        background = Theme::chip().darker(115);
-    else if (isChecked())    background = Theme::chipActive();
-    else if (isDown())       background = Theme::chipActive();
-    else if (myHovered)      background = Theme::chipHover();
-
-    QPainterPath path;
-    path.addRoundedRect(body, kRadius, kRadius);
-    painter.fillPath(path, background);
-    // 1px border(), always - through Theme's one crisp-border idiom, the same
-    // call ToolChip and ToolCluster make.
-    Theme::drawCrispBorder(painter, QRectF(body), Theme::border(), kRadius);
-
-    if (isChecked()) {
-        // A second, inset ring - not a replacement for the border above.
-        // Checked reads as "bordered, plus marked".
-        Theme::drawCrispBorder(painter, QRectF(body).adjusted(2, 2, -2, -2),
-                               Theme::accent(), kRadius - 2);
-    }
-
-    painter.setFont(Theme::labelFont());
-    painter.setPen(isEnabled() ? Theme::text() : Theme::textDisabled());
-    painter.drawText(body, Qt::AlignCenter, text());
-
-    // window()->focusWidget() rather than hasFocus(), for the reason recorded
-    // at length in ToolChip::paintEvent(): hasFocus() stays false for every
-    // widget in a window that is not the OS-active one, and this suite never
-    // activates its windows.
-    if (window() && this == window()->focusWidget()) {
-        const bool active = window()->isActiveWindow();
-        Theme::drawCrispBorder(painter, QRectF(body).adjusted(3, 3, -3, -3),
-                               active ? Theme::focusRing() : Theme::focusRingMuted(),
-                               kRadius - 3,
-                               active ? kFocusRingWidth : kFocusRingWidth - 0.5);
-    }
-}
-
-void BarButton::enterEvent(QEnterEvent* /*event*/) { myHovered = true;  update(); }
-void BarButton::leaveEvent(QEvent* /*event*/)      { myHovered = false; update(); }
-
-// --- AppBar ------------------------------------------------------------------
-
-AppBar::AppBar(QMenuBar* menuBar, QAction* wireframe, QAction* fitAll, QWidget* parent)
+AppBar::AppBar(QMenuBar* menuBar, QWidget* parent)
     : QWidget(parent)
     , myMenus(menuBar)
 {
-    // The app stylesheet paints a QWidget's background only for widgets that
-    // ask for a styled background; this one paints its own chrome and its own
-    // bottom rule in paintEvent() instead, the same way every other
-    // custom-painted widget in the shell does.
+    // This pill is one of Theme's floating-surface family now (it used to
+    // paint its own flat chrome() strip across the whole window instead) -
+    // see paintEvent(). Both calls are the family's own constructor pair:
+    // WA_NoSystemBackground so this widget paints its own background, and
+    // makeSurfaceTransparent() so the app-wide QSS rule cannot stamp an
+    // opaque square over the corners paintSurface() leaves genuinely
+    // unpainted.
     setAttribute(Qt::WA_NoSystemBackground);
+    Theme::makeSurfaceTransparent(this);
 
     auto* row = new QHBoxLayout(this);
-    // What should measure 14px and 8px is the gap between PAINTED edges, not
-    // between widget rects, so the layout subtracts whatever each control
-    // reserves around its own card. That reservation is surfaceShadowMargin()
-    // and it is now zero - the family paints no shadow (see Theme.h) - so the
-    // two coincide again. The arithmetic stays rather than being folded away:
-    // it is the same compensation ToolCluster and ViewportOverlay express,
-    // and collapsing it here would leave three call sites disagreeing about
-    // whether the scheme exists.
-    const int margin = Theme::surfaceShadowMargin();
-    row->setContentsMargins(kEdgeX, 4 - margin > 0 ? 4 - margin : 0,
-                            kEdgeX - margin, 4 - margin > 0 ? 4 - margin : 0);
-    row->setSpacing(kButtonGap - margin * 2);
+    // Left/right start at 0 here and are set for real by updatePillMargins()
+    // below, once the menu bar is in the layout and a sizeHint exists to
+    // derive a radius from - see that function's own comment for why margins
+    // this wide cannot be a literal.
+    row->setContentsMargins(0, kPadY, 0, kPadY);
+    row->setSpacing(0);
 
-    // The wordmark is painted, not a child widget, so the layout only has to
-    // keep its space clear. Kept as a pointer rather than added and forgotten:
-    // applyTheme() re-measures it when the type scale moves.
+    // The mark and the wordmark are painted, not child widgets (see the
+    // header) - the layout only needs to keep their combined width clear, and
+    // applyTheme() is what sizes that space, because it moves when the
+    // wordmark's own font does.
     row->addSpacing(0);
-    myWordmarkSpace = row->itemAt(row->count() - 1)->spacerItem();
+    myMarkSpace = row->itemAt(row->count() - 1)->spacerItem();
 
     if (myMenus) {
-        // Reparented in. Its own bottom border and background come from the
-        // app stylesheet's QMenuBar rule and would draw a rule under the
-        // menus alone, so they are cleared here; the item padding, hover and
-        // popup rules in that same stylesheet still apply, because a
-        // per-widget sheet is merged with the application one rather than
+        // Reparented in. Its own background and border come from the app
+        // stylesheet's QMenuBar rule and would draw a rectangle behind the
+        // menu titles alone, so they are cleared here; the item padding,
+        // hover and popup rules in that same stylesheet still apply, because
+        // a per-widget sheet merges with the application one rather than
         // replacing it.
         myMenus->setStyleSheet(QStringLiteral(
             "QMenuBar { background: transparent; border: none; padding: 0; }"));
-        // Without this a QMenuBar expands and eats the stretch below.
-        // Maximum, not Fixed: it may still shrink in a narrow window.
+        // Without this a QMenuBar expands to fill whatever space it is
+        // given; Maximum keeps it sized to its own titles, and it may still
+        // shrink in a narrow window.
         myMenus->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Preferred);
+        row->addSpacing(kGap);
         row->addWidget(myMenus, 0, Qt::AlignVCenter);
     }
-
-    row->addStretch(1);
-
-    myProjection = new BarButton(nullptr, this);
-    // Both strings it will ever show, so it never resizes when the mode
-    // changes. It reads the mode the user CHOSE, not the one being drawn this
-    // instant: a gizmo arm or a face lock borrows an orthographic look for one
-    // orbit, and a label that flickered to "Ortho" and back for a loan the
-    // user never asked for would be reporting the wrong thing.
-    myProjection->setText(projectionLabel(false));
-    myProjection->reserveWidthFor({projectionLabel(false), projectionLabel(true)});
-    myProjection->setToolTip(tr("How the viewport draws depth — click to swap "
-                                "between perspective and orthographic (O)\n"
-                                "Orthographic keeps parallel edges parallel, which "
-                                "is how you judge a size by eye."));
-    connect(myProjection, &QAbstractButton::clicked, this, &AppBar::projectionClicked);
-    row->addWidget(myProjection);
-
-    myUnit = new BarButton(nullptr, this);
-    myUnit->setText(QStringLiteral("mm"));
-    myUnit->reserveWidthFor({QStringLiteral("mm"), QStringLiteral("cm")});
-    myUnit->setToolTip(tr("The unit every length is shown and typed in — click "
-                          "to swap between millimetres and centimetres"));
-    connect(myUnit, &QAbstractButton::clicked, this, &AppBar::unitClicked);
-    row->addWidget(myUnit);
-
-    myWireframe = new BarButton(wireframe, this);
-    row->addWidget(myWireframe);
-
-    myFit = new BarButton(fitAll, this);
-    row->addWidget(myFit);
 
     applyTheme();
     connect(Theme::notifier(), &Theme::Notifier::changed, this, &AppBar::applyTheme);
@@ -248,60 +92,42 @@ AppBar::AppBar(QMenuBar* menuBar, QAction* wireframe, QAction* fitAll, QWidget* 
 
 void AppBar::applyTheme()
 {
-    if (!myWordmarkSpace) return;
+    if (!myMarkSpace) return;
     // Measured with the font paintEvent() actually draws the wordmark in -
     // bold, and bold is wider than regular.
     const QFontMetrics metrics(wordmarkFont());
-    myWordmarkSpace->changeSize(metrics.horizontalAdvance(wordmark()) + kWordmarkGap, 0,
-                                QSizePolicy::Fixed, QSizePolicy::Minimum);
+    myMarkSpace->changeSize(kMarkSize + kGap + metrics.horizontalAdvance(wordmark()), 0,
+                            QSizePolicy::Fixed, QSizePolicy::Minimum);
     if (layout()) layout()->invalidate();
+    // The menu bar's own row height moves with the type scale, which moves
+    // this pill's height, which moves the radius its fully-rounded ends are
+    // drawn at - recomputed here rather than once at construction.
+    updatePillMargins();
     update();
+}
+
+void AppBar::updatePillMargins()
+{
+    auto* row = qobject_cast<QHBoxLayout*>(layout());
+    if (!row) return;
+    // The height a QHBoxLayout reports depends only on its top/bottom
+    // margins and its tallest child's own sizeHint - never on left/right,
+    // which is exactly what is being computed here. Asking for it BEFORE
+    // the new left/right margins are set is therefore not a stale read; it
+    // is the one order that avoids a circular layout pass altogether.
+    const int contentHeight = row->sizeHint().height();
+    const int radius = std::max(kMinRadius, contentHeight / 2);
+    row->setContentsMargins(radius, kPadY, radius, kPadY);
 }
 
 QString AppBar::wordmark() const
 {
-    return QStringLiteral("▰ FurnifyMe");
+    return QStringLiteral("FurnifyMe");
 }
-
-QString AppBar::projectionLabel(bool orthographic)
-{
-    // The two strings live here and only here - this bar is the only thing
-    // that paints them, and paintedTexts() is how the vocabulary sweep reaches
-    // them. A caller says which mode it means, never which word.
-    return orthographic ? QStringLiteral("Ortho") : QStringLiteral("Persp");
-}
-
-void AppBar::setOrthographic(bool orthographic)
-{
-    // Driven from appStateChanged, which fires at the end of every
-    // updateActions(), so this runs often and almost always with the string
-    // already showing. The guard is ours, deliberately:
-    // QAbstractButton::setText happens to early-out on an equal string today,
-    // but relying on that leaves a repaint-per-change one Qt release away,
-    // with nothing here saying it ever mattered.
-    const QString text = projectionLabel(orthographic);
-    if (!myProjection || myProjection->text() == text) return;
-    myProjection->setText(text);
-}
-
-void AppBar::setUnitLabel(const QString& text)
-{
-    // Same guard, same reason: this hangs off appStateChanged, which fires at
-    // the end of every updateActions().
-    if (!myUnit || myUnit->text() == text) return;
-    myUnit->setText(text);
-}
-
-QWidget* AppBar::projectionButton() const { return myProjection; }
-QWidget* AppBar::unitButton() const { return myUnit; }
 
 QStringList AppBar::paintedTexts() const
 {
-    QStringList texts{wordmark()};
-    for (const BarButton* button : {myProjection, myUnit, myWireframe, myFit}) {
-        if (button) texts << button->text();
-    }
-    return texts;
+    return {wordmark()};
 }
 
 void AppBar::paintEvent(QPaintEvent* /*event*/)
@@ -309,31 +135,26 @@ void AppBar::paintEvent(QPaintEvent* /*event*/)
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
 
-    painter.fillRect(rect(), Theme::chrome());
-    // The rule that used to belong to the QMenuBar, drawn across the whole
-    // bar rather than under the menus alone. Through Theme's shared rule
-    // helper, which owns the half-pixel snap that keeps it one crisp row of
-    // border() instead of the #2b2b2f smudge across two rows a magnified crop
-    // caught here first - the local `height() - 0.5` this used to carry has
-    // gone the same way as ToolCluster's translate.
-    Theme::drawCrispRule(painter, QPointF(0.0, height() - 1.0),
-                         QPointF(width(), height() - 1.0), Theme::border());
+    // Fully rounded ends - the mockup's own rule, radius = half the pill's
+    // CURRENT height, read fresh on every paint rather than cached, so the
+    // fill and the curve this widget draws can never disagree with
+    // whatever updatePillMargins() derived its horizontal padding from.
+    const int radius = height() / 2;
+    Theme::paintSurface(painter, rect(), radius);
 
-    // "<glyph> FurnifyMe" as one string, drawn in two runs so only the glyph
-    // takes accent(). Splitting on the first space keeps the two runs and
-    // wordmark() the same text; measuring with the font it is drawn with is
-    // what keeps the layout's reserved space honest.
+    // The mark and the wordmark, drawn starting at exactly `radius` from the
+    // left edge - the same value the layout's own left margin uses (see
+    // updatePillMargins()), and the widest point a true stadium shape's own
+    // curve reaches at any vertical position, so neither the mark nor the
+    // wordmark's first letter is ever clipped by it.
+    const QPixmap mark = IconSet::appMarkPixmap(kMarkSize);
+    const int markTop = (height() - mark.height()) / 2;
+    painter.drawPixmap(radius, markTop, mark);
+
     const QFont font = wordmarkFont();
     const QFontMetrics metrics(font);
-    const QString mark = wordmark();
-    const int split = mark.indexOf(QLatin1Char(' '));
-    const QString glyph = split < 0 ? mark : mark.left(split + 1);
-    const QString name = split < 0 ? QString() : mark.mid(split + 1);
-
     painter.setFont(font);
-    const int baseline = rect().center().y() + metrics.ascent() / 2 - 1;
-    painter.setPen(Theme::accent());
-    painter.drawText(kEdgeX, baseline, glyph);
     painter.setPen(Theme::text());
-    painter.drawText(kEdgeX + metrics.horizontalAdvance(glyph), baseline, name);
+    const int baseline = rect().center().y() + metrics.ascent() / 2 - 1;
+    painter.drawText(radius + mark.width() + kGap, baseline, wordmark());
 }

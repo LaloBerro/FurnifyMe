@@ -1,137 +1,86 @@
 #pragma once
-// The window's menu strip, replaced wholesale through
-// QMainWindow::setMenuWidget: a wordmark, the window's real QMenuBar, a
-// stretch, then the readouts and toggles that used to float over the
-// viewport.
+// Milestone 5, item 3: the app bar is a FLOATING ROUNDED PILL anchored
+// top-left over the viewport, one of the ViewportOverlay-anchored family
+// rather than the window's own menu strip. It used to be installed through
+// QMainWindow::setMenuWidget - a window-spanning strip above a viewport that
+// started below it - and that is gone: the viewport is full-bleed to the
+// window's top edge now, and this widget floats over it exactly as the rail
+// and the axis gizmo card do.
 //
-// It owns nothing it shows. The QMenuBar inside it is the one the menus were
-// built on - reparented in, never rebuilt - and every button either mirrors a
-// QAction MainWindow keeps or reports a click for MainWindow to act on. The
-// bar decides nothing: updateActions() stays the single place that says what
-// is available, and the unit button triggers the View -> Units action for the
-// unit it is NOT showing rather than growing a toggle of its own.
+// It carries only the app mark, the wordmark and the window's real QMenuBar
+// - the reparented-in one, never rebuilt, so the menus, their shortcuts, the
+// generated ShortcutSheet and the vocabulary sweep all keep working
+// untouched. The four view controls that used to live here as bar buttons
+// (Persp/Ortho, the unit chip, Wireframe, Fit All) moved to a dedicated
+// icon-only ToolCluster anchored top-right, under the axis gizmo - see
+// MainWindow::buildOverlay() - because a pill sized to its own content has
+// no room left for them and the mockup's own picture puts them elsewhere.
 //
-// TRAP, and the reason MainWindow builds its own QMenuBar rather than asking
-// the window for one: QMainWindow::menuBar() is
-// qobject_cast<QMenuBar*>(layout()->menuBar()), and that slot now holds an
-// AppBar. The cast fails, so menuBar() CREATES a new, empty menu bar - and
-// the setMenuBar() it then calls hides and deleteLater()s whatever sat in the
-// slot, which is this widget. Nothing may call menuBar() once the bar is
-// installed. The same mechanism is why the menu bar cannot be handed over
-// after the fact: QLayoutPrivate::menubar is a raw pointer that reparenting
-// does not clear, so a QMenuBar that has ever been in that slot is deleted by
-// the setMenuWidget() call that replaces it.
-#include <QAbstractButton>
-#include <QStringList>
+// It decides nothing of its own: updateActions() stays the single place that
+// says what is available, and the menu bar inside this pill is the real one
+// every shortcut and every menu action already answers to.
+//
+// TRAP, unchanged from before this task: QMainWindow::menuBar() is
+// qobject_cast<QMenuBar*>(layout()->menuBar()), and that slot is EMPTY now -
+// nothing calls setMenuWidget() any more - so menuBar() would create a fresh,
+// empty menu bar the moment anything called it. MainWindow never does;
+// this class is built on the QMenuBar MainWindow::buildMenus() hands it, and
+// AppBar::menus() is how a caller reaches the real object.
 #include <QWidget>
 
-class QAction;
 class QMenuBar;
-
-// A compact bordered button wearing the same anatomy ToolChip settled in
-// Task 1 - 1px border() always, chipHover() on hover, chipActive() plus an
-// inset accent() ring when checked, everything dimmed together when disabled.
-// Its painted card is its whole widget rect - the family reserves no margin
-// and paints no shadow (see Theme.h). It is that chip
-// without the glyph and the shortcut badge, which is what the bar's row of
-// controls wants; it is deliberately NOT a second button look, and the state
-// colours below are read in the same order ToolChip reads them.
-//
-// With an action it is a mirror: text, enabled, checkable, checked and
-// tooltip all come from the action and nothing is stored here. Without one it
-// is a plain readout button - the projection toggle and the unit chip - whose
-// text its owner sets and whose click its owner interprets.
-class BarButton : public QAbstractButton {
-    Q_OBJECT
-
-public:
-    explicit BarButton(QAction* action = nullptr, QWidget* parent = nullptr);
-
-    QAction* action() const { return myAction; }
-    // Widen the button to fit the widest string it will ever show, so a
-    // readout whose text changes ("Persp" to "Top", "mm" to "cm") does not
-    // shuffle everything to its right every time the camera moves.
-    void reserveWidthFor(const QStringList& candidates);
-
-    QSize sizeHint() const override;
-
-protected:
-    void paintEvent(QPaintEvent* event) override;
-    void enterEvent(QEnterEvent* event) override;
-    void leaveEvent(QEvent* event) override;
-    // Qt would otherwise flip the checked state locally, before the action has
-    // been triggered - the button must never be the source of truth for it.
-    void nextCheckState() override {}
-
-private:
-    void syncFromAction();
-    // The one appearance value a bar button cannot re-derive inside
-    // paintEvent(): the per-widget stylesheet that pins its font to
-    // labelFont(). See ToolChip::applyTheme(), which is the same rule one
-    // control over.
-    void applyTheme();
-
-    QAction* myAction = nullptr;
-    int myReservedTextWidth = 0;
-    bool myHovered = false;
-};
 
 class AppBar : public QWidget {
     Q_OBJECT
 
 public:
-    AppBar(QMenuBar* menuBar, QAction* wireframe, QAction* fitAll,
-           QWidget* parent = nullptr);
+    // `menuBar` is adopted (reparented) into this pill's own layout, never
+    // rebuilt. `parent` is left null by MainWindow::buildAppBar() - the
+    // widget is unparented until MainWindow::buildOverlay() hands it to
+    // ViewportOverlay::addWidget(), which is what actually reparents it onto
+    // the viewport and shows it.
+    explicit AppBar(QMenuBar* menuBar, QWidget* parent = nullptr);
 
-    // The projection toggle's readout. Takes the MODE, not the word: the two
-    // strings are this class's own and nothing outside it should hold a copy.
-    void setOrthographic(bool orthographic);
-    // "Persp" / "Ortho", so a caller that has to compare against what is
-    // painted uses this rather than a second copy of the literal.
-    static QString projectionLabel(bool orthographic);
-
-    void setUnitLabel(const QString& text);   // "mm" / "cm"
-
-    // The menu bar this bar was given. Not QMainWindow::menuBar() - see the
-    // trap at the top of this file - so a caller that needs the real object
-    // asks here.
+    // The menu bar this pill was given. Not QMainWindow::menuBar() - see the
+    // trap above - so a caller that needs the real object asks here.
     QMenuBar* menus() const { return myMenus; }
-
-    QWidget* projectionButton() const;
-    QWidget* unitButton() const;
 
     // The wordmark, exactly as painted, so a caller comparing against it uses
     // this string rather than a second copy of the same literal.
     QString wordmark() const;
 
-    // Wordmark plus every button's label. All of it is painted rather than
-    // carried on a QAction or a tooltip, so the vocabulary sweep cannot see
-    // any of it without this.
+    // Wordmark plus nothing else - the four controls that used to paint
+    // their own words here (Persp/Ortho, the unit readout, Wireframe, Fit
+    // All) moved out to icon-only chips, whose own tooltips the rail's
+    // existing sweep already reaches through ToolCluster/ToolChip. This pill
+    // paints exactly one string of its own.
     QStringList paintedTexts() const;
-
-signals:
-    // -> MainWindow triggers the Orthographic action. The button holds no
-    // projection state of its own, exactly as the unit chip holds no unit:
-    // both report a click and let the action that owns the state decide.
-    void projectionClicked();
-    void unitClicked();        // -> MainWindow triggers the other unit's action
 
 protected:
     void paintEvent(QPaintEvent* event) override;
 
 private:
-    // The wordmark is PAINTED, not a child widget, so the layout only holds
-    // an empty spacer wide enough to keep its space clear - and that width is
-    // measured with wordmarkFont(), which moves when the base type size does.
-    // A spacer is not a widget and gets no repaint, so it is re-measured
-    // here; without it a larger base size painted the wordmark straight
-    // through the menu bar.
+    // The wordmark and the app mark are both PAINTED, not child widgets, so
+    // the layout only holds an empty spacer wide enough to keep their space
+    // clear - re-measured here because it moves when the base type size (the
+    // wordmark) or nothing (the mark's own fixed pixel size never changes)
+    // does.
     void applyTheme();
+    // Recomputes the pill's own horizontal padding from its CURRENT height,
+    // so the fully-rounded ends (radius = height / 2, the mockup's own rule)
+    // never clip the mark, the wordmark or the menu bar. Height depends only
+    // on the layout's fixed top/bottom margins and the tallest child's own
+    // sizeHint - never on the left/right margins this sets - which is what
+    // makes computing the radius from a layout sizeHint taken BEFORE those
+    // margins are applied safe rather than circular. Derived on every theme
+    // change, never a literal: a base-size edit changes the menu bar's own
+    // row height, which changes the pill's height, which changes the radius
+    // a fixed padding could go stale against. (A card grown by
+    // Theme::wholeDevicePixels() during ViewportOverlay::relayout() can move
+    // the height by at most three pixels afterward - too small a radius
+    // change for a second recompute site to be worth the complexity.)
+    void updatePillMargins();
 
     QMenuBar* myMenus = nullptr;
-    class QSpacerItem* myWordmarkSpace = nullptr;
-    BarButton* myProjection = nullptr;
-    BarButton* myUnit = nullptr;
-    BarButton* myWireframe = nullptr;
-    BarButton* myFit = nullptr;
+    class QSpacerItem* myMarkSpace = nullptr;
 };

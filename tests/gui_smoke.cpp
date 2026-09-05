@@ -448,7 +448,18 @@ void skipByEnvironment(int checks, const QString& why)
 // on every machine. It adds a THIRD alongside them: an export's Dump() empties
 // the accumulation buffer it reads, so saveSnapshot() restarts the convergence
 // and the user is not left looking at a single sample. 2592 + 3 = 2595.
-constexpr int kCheckFloor = 2595;
+//
+// Milestone 5, item 3 (the floating pill) replaced the old single-bar-button
+// block with a larger one: the pill's own childAt/menu-bar-identity/corner
+// checks, a full-bleed-viewport check, the two-cluster count and the
+// view-controls cluster's own block (existence, exact chip count and order,
+// per-chip mode/size/tooltip/hit-test, stacking under the gizmo, corner
+// probe), and the pill-vs-rail minimum-size collision probe - while removing
+// the checks that only made sense against BarButton (bar-local childAt,
+// geometry read off a bar button's own rect). Matched against a real
+// measured run rather than a hand tally, per this task's own rule two
+// paragraphs up: 2595 -> 2628.
+constexpr int kCheckFloor = 2628;
 
 void check(bool condition, const QString& what)
 {
@@ -713,6 +724,26 @@ QAction* action(MainWindow& window, const QString& label)
     }
     return nullptr;
 }
+
+// The four view controls (Milestone 5, item 3) - Persp/Ortho, the unit chip,
+// Wireframe, Fit All, in that fixed construction order (see
+// MainWindow::buildOverlay()) - live in one icon-only ToolCluster, distinct
+// from the rail, exposed as MainWindow::viewControls(). Indexing by position
+// rather than hunting by text mirrors exactly how the rail's own block below
+// asserts ITS chips: comparing by pointer/position is what makes a reworded
+// tooltip or a reordered chip fail loudly instead of silently matching the
+// wrong control.
+ToolChip* viewControlChip(MainWindow& window, int index)
+{
+    ToolCluster* cluster = window.viewControls();
+    if (!cluster) return nullptr;
+    const QVector<ToolChip*>& chips = cluster->chips();
+    return index >= 0 && index < chips.size() ? chips[index] : nullptr;
+}
+ToolChip* projectionChip(MainWindow& window) { return viewControlChip(window, 0); }
+ToolChip* unitChip(MainWindow& window)       { return viewControlChip(window, 1); }
+ToolChip* wireframeChip(MainWindow& window)  { return viewControlChip(window, 2); }
+ToolChip* fitAllChip(MainWindow& window)     { return viewControlChip(window, 3); }
 
 // The persistent right-hand readout - a permanent widget on the status bar,
 // which MainWindow keeps no accessor for, so it is found the same way the
@@ -3256,14 +3287,16 @@ int main(int argc, char* argv[])
                       CameraController::Projection::Perspective,
                   "without changing the projection the user chose");
             {
-                AppBar* projBar = qobject_cast<AppBar*>(window.menuWidget());
-                QAbstractButton* projButton =
-                    projBar ? qobject_cast<QAbstractButton*>(projBar->projectionButton())
-                            : nullptr;
-                check(projButton != nullptr &&
-                          projButton->text() == AppBar::projectionLabel(false),
-                      QStringLiteral("so the bar's readout still says Persp (\"%1\")")
-                          .arg(projButton ? projButton->text() : QStringLiteral("<none>")));
+                // The bar's own painted readout is gone (Milestone 5, item
+                // 3) - the projection chip is icon-only now, and it mirrors
+                // the BASE mode through its checked state (checked = Ortho),
+                // not a borrowed one. That is the same distinction the
+                // readout's word used to carry.
+                ToolChip* projChip = projectionChip(window);
+                check(projChip != nullptr && !projChip->isChecked(),
+                      QStringLiteral("so the projection chip still reads Persp "
+                                     "(unchecked = %1)")
+                          .arg(projChip ? projChip->isChecked() : false));
             }
 
             // ...and the first orbit hands it back. A right-button drag is the
@@ -3426,38 +3459,72 @@ int main(int argc, char* argv[])
               "camera and projection restored to the startup state after the gizmo block");
     }
 
-    // --- the app bar owns the menu strip --------------------------------------
-    // QMainWindow::setMenuWidget puts an arbitrary widget where the menu strip
-    // was, with the window's real QMenuBar living inside it. Two traps make
-    // this worth asserting by pointer identity rather than by class name.
+    // --- the app bar is a floating pill, and the viewport is full-bleed -------
+    // Milestone 5, item 3 unwound QMainWindow::setMenuWidget entirely: the
+    // pill is a ViewportOverlay::Anchor::TopLeft card now, parented to the
+    // viewport rather than installed in the window's own menu-strip slot, and
+    // the viewport reaches the window's top edge because nothing reserves a
+    // row above it any more.
     //
-    // First, QMainWindow::menuBar() is qobject_cast<QMenuBar*>(the menu-widget
-    // slot) - which now holds an AppBar, so the cast fails and menuBar()
-    // CREATES a new, empty menu bar, whose setMenuBar() then deleteLater()s
-    // the app bar. Nothing in this block calls window.menuBar(); it asks
-    // window.menuWidget() instead, and counts the menu bars to prove no second
-    // one appeared.
-    //
-    // Second, ShortcutSheet enumerates every binding by walking
-    // parentWidget()->findChild<QMenuBar*>() from the window. Reparenting the
-    // bar into the app bar must leave that walk finding the same object; the
-    // sheet's own block later asserts the row count against the same
-    // enumeration, and this one asserts the group titles it can only produce
-    // by reaching the menus at all.
+    // Two traps this block still guards, carried over from before this task
+    // even though the mechanism moved. First, QMainWindow::menuBar() is
+    // qobject_cast<QMenuBar*>(the EMPTY menu-widget slot) now, so calling it
+    // would CREATE a new, empty menu bar and delete nothing behind it this
+    // time - but nothing in production ever calls it, and this block does
+    // not either; it asks window.appBar() and counts the menu bars to prove
+    // only one exists. Second, ShortcutSheet enumerates every binding by
+    // walking parentWidget()->findChild<QMenuBar*>() from the window - the
+    // pill's own reparenting of the real bar must leave that walk finding the
+    // same object, which the sheet's own block later asserts the row count
+    // against, and this one asserts the group titles it can only produce by
+    // reaching the menus at all.
     {
-        AppBar* bar = qobject_cast<AppBar*>(window.menuWidget());
-        check(bar != nullptr, "the window's menu strip is the app bar");
+        check(window.menuWidget() == nullptr,
+              "setMenuWidget is unwound structurally - the window's menu-widget "
+              "slot is empty, not holding the pill");
+
+        AppBar* bar = window.appBar();
+        check(bar != nullptr, "the window has a pill to ask for");
+
+        // The viewport is full-bleed: nothing above it reserves a window row
+        // any more, so its own top-left corner in WINDOW coordinates lands
+        // exactly on the window's own top edge.
+        const QPoint viewOrigin = view->mapTo(&window, QPoint(0, 0));
+        check(viewOrigin.y() == 0,
+              QStringLiteral("the viewport reaches the window's own top edge now "
+                             "that setMenuWidget is gone (y=%1)")
+                  .arg(viewOrigin.y()));
+
+        // The pill exists over the viewport, is reachable by a real click
+        // (childAt(), the mechanism a user's click actually goes through -
+        // not an event aimed straight at a widget we merely hope is
+        // reachable, which is what caught an unreachable control once
+        // already, see the walkthrough's skip control), and carries the
+        // family's genuinely transparent, antialiased rounded corners - the
+        // "no masks, no ground fills" architecture every other floating card
+        // already wears.
+        if (bar) {
+            // NOT the pill's geometric centre - the real QMenuBar occupies
+            // much of the pill's right side, so childAt() at the centre
+            // correctly finds a menu title instead (a real click there DOES
+            // open a menu). A point a few pixels in from the left edge - on
+            // the mark/wordmark's own painted chrome, well clear of where
+            // the menu bar starts - is what actually probes the PILL.
+            check(view->childAt(bar->mapTo(view, QPoint(4, bar->height() / 2))) == bar,
+                  "childAt() near the pill's left edge finds the pill itself");
+            checkCardCorners(bar, QStringLiteral("AppBar (the pill)"));
+        }
 
         const QList<QMenuBar*> bars = window.findChildren<QMenuBar*>();
         check(bars.size() == 1,
               QStringLiteral("the window holds exactly one menu bar, not a second "
-                             "created behind the app bar (found %1)")
+                             "created behind the pill (found %1)")
                   .arg(bars.size()));
         if (bar && bars.size() == 1) {
             check(bars.first() == bar->menus(),
-                  "and it is the app bar's own menu bar, by pointer identity");
+                  "and it is the pill's own menu bar, by pointer identity");
             check(bar->menus()->parentWidget() == bar,
-                  "the menu bar is reparented INTO the bar, not left beside it");
+                  "the menu bar is reparented INTO the pill, not left beside it");
             check(bar->menus()->isVisible(), "and it is visible there");
 
             QStringList titles;
@@ -3476,34 +3543,37 @@ int main(int argc, char* argv[])
             const QStringList painted = sheet->paintedTexts();
             check(painted.contains(QStringLiteral("Sketch")) &&
                       painted.contains(QStringLiteral("View")),
-                  "the shortcut sheet still finds the menu bar inside the app bar");
+                  "the shortcut sheet still finds the menu bar inside the pill");
             check(!painted.contains(QStringLiteral("Other")),
                   "and no binding fell out of its menu group in the move");
         }
 
         // The seat the view-direction readout used to hold is the Persp/Ortho
-        // toggle now. It no longer snaps to the axonometric pose (that lives
-        // on the gizmo, keys 0-3 and the View menu) and it deliberately does
-        // NOT record view.changed: a projection flip is not a look in a named
-        // direction, and the hint that teaches the gizmo retires on that
-        // event. Both halves of that are asserted here, because a control
-        // that quietly kept either behaviour would still show the right word.
-        QAbstractButton* projButton =
-            bar ? qobject_cast<QAbstractButton*>(bar->projectionButton()) : nullptr;
-        check(projButton != nullptr, "the bar carries a projection toggle");
-        if (bar && projButton) {
-            check(projButton->text() == AppBar::projectionLabel(false) &&
-                      !view->viewIsOrthographic(),
-                  QStringLiteral("it starts on the perspective the app ships with "
-                                 "(\"%1\")")
-                      .arg(projButton->text()));
+        // toggle now - an icon-only chip in the view-controls cluster (under
+        // the axis gizmo), mirroring the real Orthographic action rather
+        // than painting its own word. It no longer snaps to the axonometric
+        // pose (that lives on the gizmo, keys 0-3 and the View menu) and it
+        // deliberately does NOT record view.changed: a projection flip is
+        // not a look in a named direction, and the hint that teaches the
+        // gizmo retires on that event. Both halves of that are asserted
+        // here, because a control that quietly kept either behaviour would
+        // still show the same checked state.
+        ToolChip* projButton = projectionChip(window);
+        check(projButton != nullptr, "the view-controls cluster carries a projection toggle");
+        if (projButton) {
+            check(!projButton->isChecked() && !view->viewIsOrthographic(),
+                  "it starts unchecked, on the perspective the app ships with");
 
             // A real hit test, not an event aimed at the widget we hope is
             // reachable: childAt() is the mechanism a user's click goes
             // through, and it is what caught an unreachable control once
-            // already (see the walkthrough's skip control).
-            check(bar->childAt(projButton->geometry().center()) == projButton,
-                  "childAt() at the toggle's centre finds the button itself");
+            // already (see the walkthrough's skip control). The chip's
+            // ancestor is the viewport now, not the pill - it lives in the
+            // view-controls cluster under the gizmo, a sibling of the pill
+            // rather than a child of it.
+            check(view->childAt(projButton->mapTo(view, projButton->rect().center())) ==
+                      projButton,
+                  "childAt() at the toggle's centre finds the chip itself");
 
             const int before = window.progress().count("view.changed");
             const double azBefore = view->camera().state().azimuthDeg;
@@ -3536,9 +3606,8 @@ int main(int argc, char* argv[])
             check(view->camera().baseProjection() ==
                       CameraController::Projection::Orthographic,
                   "and it is the BASE mode that moved, not a borrowed look");
-            check(projButton->text() == AppBar::projectionLabel(true),
-                  QStringLiteral("the button reads Ortho (\"%1\")")
-                      .arg(projButton->text()));
+            check(projButton->isChecked(),
+                  "the chip reads checked (Ortho)");
             check(std::fabs(view->camera().state().azimuthDeg - azBefore) < 1e-9 &&
                       std::fabs(view->camera().state().elevationDeg - elBefore) < 1e-9,
                   "and the camera did not move - the toggle snaps to no pose");
@@ -3606,8 +3675,7 @@ int main(int argc, char* argv[])
                                         projButton->height() / 2.0));
             settle(300);
             view->saveSnapshot(outDir + "/j-projection-persp.png");
-            check(!view->viewIsOrthographic() &&
-                      projButton->text() == AppBar::projectionLabel(false),
+            check(!view->viewIsOrthographic() && !projButton->isChecked(),
                   "clicking again goes back to perspective");
             check(orthoAction != nullptr && !orthoAction->isChecked(),
                   "and the menu entry follows it back");
@@ -3680,31 +3748,34 @@ int main(int argc, char* argv[])
             }
         }
 
-        QAbstractButton* unitButton =
-            bar ? qobject_cast<QAbstractButton*>(bar->unitButton()) : nullptr;
-        check(unitButton != nullptr && unitButton->text() == QStringLiteral("mm"),
-              "the bar's unit button reads the display unit");
-        if (bar && unitButton) {
-            check(bar->childAt(unitButton->geometry().center()) == unitButton,
-                  "childAt() at the unit button's centre finds it too");
+        // The unit chip - the text-glyph ToolChip variant, action-less on
+        // the OLD bar button's own contract: a click triggers whichever
+        // unit action is NOT the current one, and the displayed word is
+        // pushed in on appStateChanged rather than mirrored from an owned
+        // action. textGlyph(), not text() - QAbstractButton::text() stays
+        // empty for this variant since syncFromAction() is what would set
+        // it, and this chip is built action-less (see ToolChip.h).
+        ToolChip* unitButton = unitChip(window);
+        check(unitButton != nullptr && unitButton->textGlyph() == QStringLiteral("mm"),
+              "the unit chip reads the display unit");
+        if (unitButton) {
+            check(view->childAt(unitButton->mapTo(view, unitButton->rect().center())) ==
+                      unitButton,
+                  "childAt() at the unit chip's centre finds it too");
         }
 
-        // Wireframe and Fit All left the viewport for the bar, and mirror
-        // their actions rather than storing anything of their own.
-        QAbstractButton* wireButton = nullptr;
-        QAbstractButton* fitButton = nullptr;
-        if (bar) {
-            for (QAbstractButton* candidate : bar->findChildren<QAbstractButton*>()) {
-                if (candidate->text() == QStringLiteral("Wireframe")) wireButton = candidate;
-                if (candidate->text() == QStringLiteral("Fit All")) fitButton = candidate;
-            }
-        }
+        // Wireframe and Fit All left the viewport-spanning bar for the
+        // view-controls cluster under the gizmo, and mirror their actions
+        // rather than storing anything of their own - unchanged in
+        // substance, just icon-only chips instead of text buttons now.
+        ToolChip* wireButton = wireframeChip(window);
+        ToolChip* fitButton = fitAllChip(window);
         check(wireButton != nullptr && fitButton != nullptr,
-              "Wireframe and Fit All are buttons in the bar");
+              "Wireframe and Fit All are chips in the view-controls cluster");
         QAction* wireAction = action(window, QStringLiteral("Wireframe"));
         if (wireButton && wireAction) {
             check(wireButton->isCheckable() && !wireButton->isChecked(),
-                  "the Wireframe button is a toggle and starts off");
+                  "the Wireframe chip is a toggle and starts off");
             wireAction->trigger();
             settle(120);
             check(wireButton->isChecked(),
@@ -3717,7 +3788,7 @@ int main(int argc, char* argv[])
                                         wireButton->height() / 2.0));
             settle(150);
             check(view->isWireframe() && wireButton->isChecked(),
-                  "clicking the button drives the action, not a private state");
+                  "clicking the chip drives the action, not a private state");
             clickAt(wireButton, QPointF(wireButton->width() / 2.0,
                                         wireButton->height() / 2.0));
             settle(150);
@@ -3726,8 +3797,8 @@ int main(int argc, char* argv[])
         }
         if (fitButton) {
             check(!fitButton->isCheckable(), "Fit All is not a toggle");
-            check(bar && bar->childAt(fitButton->geometry().center()) == fitButton,
-                  "childAt() at Fit All's centre finds the button");
+            check(view->childAt(fitButton->mapTo(view, fitButton->rect().center())) == fitButton,
+                  "childAt() at Fit All's centre finds the chip");
 
             // And it actually does something. Deliberately knock the camera
             // off-centre first, so "the camera moved" cannot be satisfied by
@@ -3755,31 +3826,26 @@ int main(int argc, char* argv[])
                       .arg(moved));
         }
 
-        // Save Screenshot is menu-only from here on: it kept no bar button,
-        // and the right-center chip cluster it shared went away with it.
+        // Save Screenshot is menu-only, unchanged by this task: it never had
+        // a bar button of its own to lose.
         check(action(window, QStringLiteral("Save Screenshot...")) != nullptr,
               "Save Screenshot is still reachable as an action");
 
-        // ...and the cluster really is GONE, not merely missing a chip. The
-        // action existing proves nothing about the cluster, and the bar-button
-        // search above runs inside the bar, so a stub that left the old
-        // cluster floating over the viewport would satisfy every check above
-        // this one.
-        //
-        // This asserted exactly three while Task 2's interim arrangement was
-        // in force (top-left, left-center, bottom-left, with the right-center
-        // one gone to the bar). Task 3 folded all three into ONE icon rail
-        // pinned to the left edge, so the count is now one - still the exact
-        // count rather than "no right-hand cluster", for the same reason:
-        // that is what makes this fail loudly the next time the shell's
-        // composition changes instead of silently passing against one cluster
-        // or five. What that single cluster actually contains is asserted in
-        // the rail block that follows.
+        // Two chip clusters float over the viewport now, not one - the rail
+        // (Anchor::LeftEdge) and, since Milestone 5 item 3, the view-controls
+        // cluster (Anchor::TopRight, under the gizmo) that took in the four
+        // controls the old bar used to paint as text buttons. Asserted as
+        // the exact count rather than "at least one" or "no right-hand
+        // cluster" (this block's own pre-Milestone-5 shape), for the same
+        // reason the count was pinned exactly before: it fails loudly the
+        // next time the shell's composition changes instead of silently
+        // passing against however many clusters happen to exist. What each
+        // one actually contains is asserted in the rail block and the
+        // view-controls block that follow.
         const QList<ToolCluster*> clusters = view->findChildren<ToolCluster*>();
-        check(clusters.size() == 1,
-              QStringLiteral("exactly one chip cluster floats over the viewport - "
-                             "the rail, with the other three folded into it "
-                             "(found %1)")
+        check(clusters.size() == 2,
+              QStringLiteral("exactly two chip clusters float over the viewport - "
+                             "the rail and the view-controls cluster (found %1)")
                   .arg(clusters.size()));
         QStringList onTheRight;
         for (ToolCluster* cluster : clusters) {
@@ -3788,34 +3854,40 @@ int main(int argc, char* argv[])
                                   .arg(cluster->geometry().center().x())
                                   .arg(cluster->geometry().center().y());
         }
-        check(onTheRight.isEmpty(),
-              QStringLiteral("and none of them sits on the viewport's right half "
-                             "(%1)")
+        check(onTheRight.size() == 1,
+              QStringLiteral("and exactly one of them - the view-controls cluster - sits "
+                             "on the viewport's right half, under the gizmo (%1)")
                   .arg(onTheRight.isEmpty() ? QStringLiteral("none")
                                             : onTheRight.join(QStringLiteral("; "))));
 
-        // A hit test where the cluster actually sat, for the same reason every
-        // other control here is probed with childAt: a geometry assertion can
-        // pass against a widget that is still there and still clickable.
-        // Swept across the right margin because the exact inset is the
-        // overlay's business, not this check's.
-        QWidget* lurking = nullptr;
-        for (int inset = 4; inset < 90 && !lurking; inset += 4) {
-            QWidget* hit = view->childAt(view->width() - inset, view->height() / 2);
+        // A hit test where that cluster actually sits, for the same reason
+        // every other control here is probed with childAt: a geometry
+        // assertion can pass against a widget that is still there and still
+        // clickable, or against one that quietly is not. Swept down from the
+        // gizmo's own row because the exact inset is the overlay's business,
+        // not this check's.
+        QWidget* rightSideHit = nullptr;
+        for (int down = 20; down < 260 && !rightSideHit; down += 12) {
+            QWidget* hit = view->childAt(view->width() - 20, down);
             for (QWidget* w = hit; w; w = w->parentWidget()) {
-                if (qobject_cast<ToolCluster*>(w)) { lurking = w; break; }
+                if (w == window.viewControls()) { rightSideHit = w; break; }
                 if (w == view) break;
             }
         }
-        check(lurking == nullptr,
-              "and nothing is clickable where the right-center cluster used to be");
+        check(rightSideHit == window.viewControls(),
+              "and the view-controls cluster is genuinely clickable where it sits, "
+              "not merely positioned there");
     }
 
     // --- the rail -------------------------------------------------------------
     // One icon-only cluster pinned to the viewport's left edge, carrying every
-    // command the four old floating clusters carried. The count check above
-    // proves there is exactly one cluster; this block proves it is the right
-    // one, in the right order, reachable, and rendering its actions' states.
+    // modeling command. The count check above proves there are exactly two
+    // clusters over the viewport now (this one and the view-controls
+    // cluster, checked separately below); this block proves THIS one is the
+    // right one, in the right order, reachable, and rendering its actions'
+    // states. It is the FIRST ToolCluster reparented onto the viewport
+    // (buildOverlay() anchors it before the view-controls cluster exists),
+    // so `.first()` finds it rather than the other one.
     {
         const QList<ToolCluster*> found = view->findChildren<ToolCluster*>();
         ToolCluster* rail = found.isEmpty() ? nullptr : found.first();
@@ -4184,6 +4256,113 @@ int main(int argc, char* argv[])
         }
     }
 
+    // --- the view-controls cluster: four chips, stacked under the gizmo -----
+    // Milestone 5, item 3's second half: Persp/Ortho, the unit chip,
+    // Wireframe and Fit All moved off the old bar's text buttons onto one
+    // icon-only ToolCluster, anchored Anchor::TopRight so it lands one gap
+    // under the axis gizmo card (see ViewportOverlay.h's own "clusters
+    // sharing an anchor stack downward in the order they were added"). Their
+    // action-mirroring, checked state and click behaviour are already
+    // exercised above, in the app-bar block, on the real actions this
+    // cluster's chips are built from - this block is the structural one:
+    // the right chips, in the right order, the rail's own 34px square, real
+    // hit targets, composed tooltips, and genuinely positioned under the
+    // gizmo rather than merely present somewhere over the viewport.
+    {
+        ToolCluster* viewControls = window.viewControls();
+        check(viewControls != nullptr && viewControls->isVisible(),
+              "the view-controls cluster is up over the viewport");
+        AxisGizmo* gizmoForStack = window.view()->findChild<AxisGizmo*>();
+
+        if (viewControls) {
+            const QVector<ToolChip*>& vcChips = viewControls->chips();
+            check(vcChips.size() == 4,
+                  QStringLiteral("the view-controls cluster carries exactly four chips "
+                                 "(found %1)")
+                      .arg(vcChips.size()));
+
+            // The exact order, the rail's own rule: Persp/Ortho, the unit
+            // chip, Wireframe, Fit All - matching the construction order in
+            // MainWindow::buildOverlay() and the order the old bar painted
+            // them in, left to right.
+            if (vcChips.size() == 4) {
+                QAction* orthoAction = action(window, QStringLiteral("Orthographic"));
+                QAction* wireAction2 = action(window, QStringLiteral("Wireframe"));
+                QAction* fitAction2 = action(window, QStringLiteral("Fit All"));
+                check(vcChips[0]->action() == orthoAction,
+                      "chip 0 mirrors the Orthographic action");
+                check(vcChips[1]->action() == nullptr &&
+                          !vcChips[1]->textGlyph().isEmpty(),
+                      "chip 1 is the action-less unit chip, painting its own text glyph");
+                check(vcChips[2]->action() == wireAction2,
+                      "chip 2 mirrors the Wireframe action");
+                check(vcChips[3]->action() == fitAction2,
+                      "chip 3 mirrors the Fit All action");
+            }
+
+            // Every chip is the SAME 34px icon-only square the rail's chips
+            // are - one control, two anchors, not a second button shape.
+            QStringList misSized;
+            const int side = 34 + Theme::surfaceShadowMargin() * 2;
+            for (ToolChip* chip : vcChips) {
+                check(chip->mode() == ToolChip::ChipMode::IconOnly,
+                      "every view-controls chip is icon-only");
+                if (chip->width() != side || chip->height() != side)
+                    misSized << QStringLiteral("%1x%2").arg(chip->width()).arg(chip->height());
+            }
+            check(misSized.isEmpty(),
+                  QStringLiteral("and each is a %1x%1 square of painted card (%2)")
+                      .arg(side)
+                      .arg(misSized.isEmpty() ? QStringLiteral("all are")
+                                              : misSized.join(QStringLiteral(", "))));
+
+            // Tooltips are COMPOSED from each action's own label and tooltip
+            // - ToolChip::syncFromAction()'s existing rule, not a bespoke
+            // string this cluster invented, so the vocabulary sweep already
+            // covers them without a dedicated entry. The unit chip is the
+            // one exception (it owns no action), and it still carries a
+            // real tooltip rather than none at all.
+            QStringList emptyTips;
+            for (ToolChip* chip : vcChips) {
+                if (chip->toolTip().trimmed().isEmpty())
+                    emptyTips << QStringLiteral("chip at index %1").arg(vcChips.indexOf(chip));
+            }
+            check(emptyTips.isEmpty(),
+                  QStringLiteral("every view-controls chip carries a composed tooltip (%1)")
+                      .arg(emptyTips.isEmpty() ? QStringLiteral("all do")
+                                               : emptyTips.join(QStringLiteral(", "))));
+
+            // Every chip is a real hit-test target - CLAUDE.md's rule, the
+            // rail's own discipline applied here too.
+            QStringList unreachable;
+            for (ToolChip* chip : vcChips) {
+                const QPoint centre =
+                    chip->mapTo(view, QPoint(chip->width() / 2, chip->height() / 2));
+                if (view->childAt(centre) != chip)
+                    unreachable << QStringLiteral("index %1").arg(vcChips.indexOf(chip));
+            }
+            check(unreachable.isEmpty(),
+                  QStringLiteral("a real click at each chip's centre finds that chip (%1)")
+                      .arg(unreachable.isEmpty() ? QStringLiteral("all four")
+                                                  : unreachable.join(QStringLiteral(", "))));
+
+            // Stacked one gap under the gizmo, not merely somewhere on the
+            // right - both anchored Anchor::TopRight, so relayout() places
+            // this cluster below whatever the gizmo's own bottom edge is.
+            check(gizmoForStack != nullptr && viewControls->y() > gizmoForStack->y(),
+                  "the view-controls cluster sits below the gizmo card, not above or "
+                  "overlapping its top");
+            check(gizmoForStack == nullptr ||
+                      viewControls->y() >= gizmoForStack->y() + gizmoForStack->height(),
+                  QStringLiteral("and does not overlap it vertically (gizmo bottom %1, "
+                                 "cluster top %2)")
+                      .arg(gizmoForStack ? gizmoForStack->y() + gizmoForStack->height() : -1)
+                      .arg(viewControls->y()));
+
+            checkCardCorners(viewControls, QStringLiteral("ToolCluster (view controls)"));
+        }
+    }
+
     // --- the viewport enforces a minimum height the rail actually fits in ----
     // Regression: ViewportOverlay::relayout()'s LeftEdge case deliberately
     // keeps the rail at its natural size on a too-short viewport and lets
@@ -4250,6 +4429,37 @@ int main(int argc, char* argv[])
                       "and a real click at its centre finds Redo itself, not a "
                       "clipped edge or whatever is behind it");
             }
+        }
+
+        // The pill (Milestone 5, item 3) now floats INSIDE this same
+        // viewport rather than in a window row that used to reserve its own
+        // height for free - MainWindow::buildOverlay()'s derived minimum
+        // takes std::max() of the rail's and the pill's own sizeHint(), so
+        // this is the one probe that can catch the two disagreeing at the
+        // window's own smallest legal size. They occupy different
+        // ViewportOverlay columns by construction (Anchor::LeftEdge vs.
+        // Anchor::TopLeft, which ViewportOverlay's own leftX rule keeps
+        // clear of the rail - see ViewportOverlay.h), so this checks that
+        // construction actually holds here rather than assuming it.
+        AppBar* minBar = minWin.appBar();
+        check(minBar != nullptr && minBar->isVisible(),
+              "the minimum-size probe still has a pill");
+        if (minBar && minRail) {
+            check(!minBar->geometry().intersects(minRail->geometry()),
+                  QStringLiteral("the pill and the rail do not collide at the window's "
+                                 "own minimum size (pill %1, rail %2)")
+                      .arg(QStringLiteral("%1,%2 %3x%4")
+                               .arg(minBar->x()).arg(minBar->y())
+                               .arg(minBar->width()).arg(minBar->height()),
+                           QStringLiteral("%1,%2 %3x%4")
+                               .arg(minRail->x()).arg(minRail->y())
+                               .arg(minRail->width()).arg(minRail->height())));
+            // Near the left edge, not the geometric centre - the real menu
+            // bar occupies the centre and much of the right side (see the
+            // app-bar block's own identical reasoning above).
+            const QPoint barLeft = minBar->mapTo(mv, QPoint(4, minBar->height() / 2));
+            check(mv->childAt(barLeft) == minBar,
+                  "and the pill is still reachable by a real click there");
         }
         minWin.close();
     }
@@ -4595,19 +4805,33 @@ int main(int argc, char* argv[])
                              "(drawer x=%1, rail right=%2)")
                   .arg(drawer ? drawer->x() : -1)
                   .arg(rail ? rail->geometry().right() : -1));
-        // Its top edge, derived rather than allowed a corridor. The overlay's
-        // own margin is private to ViewportOverlay.cpp, so this reads it off
-        // the widget anchored to the OPPOSITE top corner - the axis gizmo,
-        // whose TopRight placement uses the very same constant. Two cards on
-        // one top edge that disagree about where that edge is would be
-        // visible at a glance, and a "0 to 24" corridor would not have said
-        // so.
+        // Its top edge, derived rather than allowed a corridor. Before
+        // Milestone 5, item 3 the drawer was the first Anchor::TopLeft entry,
+        // so its top edge was simply the overlay's own margin - the same
+        // constant the axis gizmo's Anchor::TopRight placement uses, and this
+        // block used to compare the two directly. The pill is the first
+        // TopLeft entry now (see MainWindow::buildOverlay()), so the drawer
+        // stacks one gap BELOW it instead - the identical stacking rule the
+        // gizmo and the view-controls cluster already demonstrate on the
+        // opposite corner. The gap itself is still private to
+        // ViewportOverlay.cpp, so rather than hard-coding it this derives it
+        // from that already-known pair: two different corners stacking by a
+        // disagreeing amount would be visible at a glance, and a hard-coded
+        // guess would not have said so.
+        AppBar* topLeftBar = window.appBar();
         AxisGizmo* topRight = view->findChild<AxisGizmo*>();
-        check(drawer != nullptr && topRight != nullptr && drawer->y() == topRight->y(),
-              QStringLiteral("and its top edge is the overlay's own margin, the same one "
-                             "the gizmo hangs from across the top edge (drawer y=%1, "
-                             "gizmo y=%2)")
-                  .arg(drawer ? drawer->y() : -1).arg(topRight ? topRight->y() : -1));
+        ToolCluster* stackedViewControls = window.viewControls();
+        int stackGap = -1;
+        if (topRight && stackedViewControls)
+            stackGap = stackedViewControls->y() - (topRight->y() + topRight->height());
+        check(drawer != nullptr && topLeftBar != nullptr && stackGap >= 0 &&
+                  drawer->y() == topLeftBar->y() + topLeftBar->height() + stackGap,
+              QStringLiteral("and its top edge sits one stacking gap below the pill - the "
+                             "same gap the gizmo and the view-controls cluster stack by on "
+                             "the opposite corner (drawer y=%1, pill bottom=%2, gap=%3)")
+                  .arg(drawer ? drawer->y() : -1)
+                  .arg(topLeftBar ? topLeftBar->y() + topLeftBar->height() : -1)
+                  .arg(stackGap));
         check(drawer != nullptr && view->rect().contains(drawer->geometry()),
               "and lies entirely inside the viewport");
 
@@ -10947,34 +11171,32 @@ int main(int argc, char* argv[])
         check(beforeItems.contains(QStringLiteral("mm")),
               QStringLiteral("the panel reads in millimetres (\"%1\")").arg(beforeItems));
 
-        // The bar's unit button is not a second unit-writing path: it triggers
-        // the OTHER unit's existing QAction, so persistence, the items panel,
+        // The unit chip is not a second unit-writing path: it triggers the
+        // OTHER unit's existing QAction, so persistence, the items panel,
         // the status bar and the extrude field's label all follow the one
         // route Phase 4 built. Asserting the menu action's checked state after
-        // each click is what proves that - a private toggle inside the button
+        // each click is what proves that - a private toggle inside the chip
         // would move the label and leave the menu behind.
-        AppBar* unitBar = qobject_cast<AppBar*>(window.menuWidget());
-        QAbstractButton* unitButton =
-            unitBar ? qobject_cast<QAbstractButton*>(unitBar->unitButton()) : nullptr;
-        check(unitButton != nullptr && unitButton->text() == QStringLiteral("mm"),
-              "the bar's unit button starts on millimetres");
+        ToolChip* unitButton = unitChip(window);
+        check(unitButton != nullptr && unitButton->textGlyph() == QStringLiteral("mm"),
+              "the unit chip starts on millimetres");
         if (unitButton && mm && cm) {
             clickAt(unitButton, QPointF(unitButton->width() / 2.0,
                                         unitButton->height() / 2.0));
             settle(200);
-            check(unitButton->text() == QStringLiteral("cm"),
+            check(unitButton->textGlyph() == QStringLiteral("cm"),
                   QStringLiteral("clicking it switches to centimetres (\"%1\")")
-                      .arg(unitButton->text()));
+                      .arg(unitButton->textGlyph()));
             check(cm->isChecked() && !mm->isChecked(),
                   "and it went through the Units actions, not a private toggle");
             check(items && items->rowTextAt(0).contains(QStringLiteral("cm")),
-                  QStringLiteral("the items panel follows the button (\"%1\")")
+                  QStringLiteral("the items panel follows the chip (\"%1\")")
                       .arg(items ? items->rowTextAt(0) : QString()));
 
             clickAt(unitButton, QPointF(unitButton->width() / 2.0,
                                         unitButton->height() / 2.0));
             settle(200);
-            check(unitButton->text() == QStringLiteral("mm"),
+            check(unitButton->textGlyph() == QStringLiteral("mm"),
                   "clicking it again cycles back to millimetres");
             check(mm->isChecked() && !cm->isChecked(),
                   "the Units actions came back with it");
@@ -12325,17 +12547,22 @@ int main(int argc, char* argv[])
                   .arg(rowOffenders.isEmpty() ? QStringLiteral("none")
                                               : rowOffenders.join(QStringLiteral(", "))));
 
-        // The app bar's wordmark and its buttons' labels are painted, and the
-        // two readouts carry no QAction of their own, so neither sweep above
-        // can see them.
-        AppBar* sweptBar = qobject_cast<AppBar*>(window.menuWidget());
+        // The pill's wordmark is painted, and is the only orphaned copy left
+        // on this side of the shell since Milestone 5, item 3: the four view
+        // controls now mirror real QAction objects, whose own text and
+        // tooltip the action-tooltip sweep elsewhere in this file already
+        // walks directly - except the unit chip, which (like the old bar's
+        // unit button before it) carries a bespoke tooltip tied to no
+        // action at all, so this sweep reads that one string directly too,
+        // the way it used to read the whole bar.
+        AppBar* sweptBar = window.appBar();
         check(sweptBar != nullptr, "the app bar is there to sweep");
         if (sweptBar) {
-            const QStringList barTexts = sweptBar->paintedTexts();
-            check(barTexts.contains(sweptBar->wordmark()) && barTexts.size() >= 5,
-                  QStringLiteral("the bar exposes its painted copy - wordmark and "
-                                 "every button (%1)")
+            QStringList barTexts = sweptBar->paintedTexts();
+            check(barTexts.contains(sweptBar->wordmark()) && barTexts.size() >= 1,
+                  QStringLiteral("the pill exposes its painted copy - the wordmark (%1)")
                       .arg(barTexts.join(QStringLiteral(", "))));
+            if (ToolChip* unit = unitChip(window)) barTexts << unit->toolTip();
             QStringList barOffenders;
             for (const QString& text : barTexts) {
                 for (const QString& word : banned) {
@@ -15004,10 +15231,17 @@ int main(int argc, char* argv[])
         // rect, nothing paints it, and over the GL surface an unpainted row is
         // black. Same property Theme::wholeDevicePixels() promises for a
         // floating card; MainWindow::syncChromeHeights() is what now holds it
-        // for the two strips that span the window.
+        // for the ONE strip that still spans the window - the status bar. The
+        // TOP seam is no longer that function's problem at all (Milestone 5,
+        // item 3): the pill is a ViewportOverlay-anchored card now rather than
+        // a window-spanning strip, so the viewport is full-bleed to the
+        // window's own top edge and seams[0] is trivially 0 at every ratio -
+        // this sweep still probes it, rather than assuming it, because a
+        // future regression that reintroduced ANY top strip should fail here
+        // exactly as loudly as a bottom-edge one already does.
         //
         // Run HERE, on the edited spec, because the default type scale happens
-        // to give both strips a whole height - which is exactly how this
+        // to give the status bar a whole height - which is exactly how this
         // shipped.
         {
             const QPoint viewportTopLeft = view->mapTo(&window, QPoint(0, 0));

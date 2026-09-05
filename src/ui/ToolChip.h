@@ -33,6 +33,34 @@ public:
     ToolChip(QAction* action, IconSet::Glyph glyph,
              ChipMode mode = ChipMode::Labelled, QWidget* parent = nullptr);
 
+    // The text-glyph variant (Milestone 5, item 3): the unit chip ("mm"/"cm")
+    // is a WORD, not a shape, and IconSet has no glyph that could stand in for
+    // it - so this paints `textGlyph` centred in the icon-only square instead
+    // of a rasterised QIcon. Kept as a second constructor on the SAME class,
+    // per the mockup's own ruling, rather than a sibling button class: every
+    // other contract - mirrors an action when one is given, the border, the
+    // inset checked ring, the disabled dimming, the focus ring - is identical,
+    // and the unit chip (like the app bar's old unit button before it) is
+    // action-less by design, since a click triggers whichever unit action is
+    // NOT currently active rather than toggling one action of its own. Only
+    // IconOnly makes sense for a text glyph - there is no separate "label" to
+    // paint beside it - but the mode parameter is still taken, not hard-coded,
+    // so a future Labelled use is not a silent behaviour change away.
+    ToolChip(QAction* action, const QString& textGlyph,
+             ChipMode mode = ChipMode::IconOnly, QWidget* parent = nullptr);
+
+    // Updates the painted text glyph - the unit chip's own "mm" <-> "cm"
+    // swap, driven by whoever owns the reading (MainWindow, on
+    // appStateChanged) exactly as the old app bar's setUnitLabel() was. A
+    // no-op on a chip built with an IconSet::Glyph instead.
+    void setTextGlyph(const QString& text);
+    // The text glyph currently painted, or empty for a chip built with an
+    // IconSet::Glyph instead - QAbstractButton::text() stays empty for this
+    // variant (syncFromAction() is what sets it, and this variant is built
+    // action-less), so a caller checking what the unit chip actually reads
+    // asks here rather than at text().
+    QString textGlyph() const { return myUsesTextGlyph ? myTextGlyph : QString(); }
+
     QAction* action() const { return myAction; }
     ChipMode mode() const { return myMode; }
     QSize sizeHint() const override;
@@ -72,12 +100,18 @@ private:
     // one window, because a chip has no MainWindow and should not need one.
     void applyTheme();
 
+    // Shared construction body for both constructors.
+    void init();
+
     QAction* myAction = nullptr;
     ChipMode myMode = ChipMode::Labelled;
     // Kept so applyTheme() can rasterise the glyph again in the new text
     // colours. The QIcon this widget holds is the cache; this is the source
-    // it was built from.
-    IconSet::Glyph myGlyph;
+    // it was built from. Meaningless while myUsesTextGlyph is true.
+    IconSet::Glyph myGlyph = IconSet::Glyph::Items;
+    // The text-glyph variant's own state - see the constructor's comment.
+    bool myUsesTextGlyph = false;
+    QString myTextGlyph;
     QString myShortcut;
     bool myHovered = false;
 };

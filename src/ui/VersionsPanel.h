@@ -93,8 +93,8 @@ public:
     // The row's own card widget - the whole thumbnail+bar card, not just
     // one control inside it. Two uses: real hover events
     // (QEvent::Enter/Leave) can be delivered straight at it, the same
-    // pattern CLAUDE.md's hover precedent (ToolChip, AppBar's BarButton)
-    // uses, and a test can hit-test it with childAt() rather than merely
+    // pattern CLAUDE.md's hover precedent (ToolChip) uses, and a test can
+    // hit-test it with childAt() rather than merely
     // asserting it exists.
     QWidget* cardAt(int index) const;
     // The thumbnail's own rect, in cardAt(index)'s LOCAL coordinates - what

@@ -31,6 +31,21 @@ ToolChip::ToolChip(QAction* action, IconSet::Glyph glyph, ChipMode mode, QWidget
     , myMode(mode)
     , myGlyph(glyph)
 {
+    init();
+}
+
+ToolChip::ToolChip(QAction* action, const QString& textGlyph, ChipMode mode, QWidget* parent)
+    : QAbstractButton(parent)
+    , myAction(action)
+    , myMode(mode)
+    , myUsesTextGlyph(true)
+    , myTextGlyph(textGlyph)
+{
+    init();
+}
+
+void ToolChip::init()
+{
     if (myMode == ChipMode::IconOnly) {
         // The rail stretches to the viewport's full height and distributes
         // the slack through one stretch item; a chip that let a QVBoxLayout
@@ -58,12 +73,20 @@ ToolChip::ToolChip(QAction* action, IconSet::Glyph glyph, ChipMode mode, QWidget
     }
 }
 
+void ToolChip::setTextGlyph(const QString& text)
+{
+    if (!myUsesTextGlyph || myTextGlyph == text) return;
+    myTextGlyph = text;
+    update();
+}
+
 void ToolChip::applyTheme()
 {
     // Rasterised from Theme::text()/textDisabled() at this moment - a QIcon
     // is pixels, not a description, so it is stale the instant either colour
-    // moves.
-    setIcon(IconSet::icon(myGlyph));
+    // moves. Skipped for the text-glyph variant: there is no icon to
+    // rasterise, and setIcon(QIcon()) would only cost a paint nothing reads.
+    if (!myUsesTextGlyph) setIcon(IconSet::icon(myGlyph));
     // Baseline for this widget's own font() (what the sweep in gui_smoke
     // checks): the chip's own text is a chip label. A per-widget stylesheet
     // wins over the app-wide one regardless of selector specificity, so this
@@ -200,12 +223,24 @@ void ToolChip::paintEvent(QPaintEvent* /*event*/)
     // Normal/Disabled mode selection in both modes, so an icon-only chip's
     // disabled state dims exactly as a labelled one's does - there is no
     // second dimming rule to keep in step.
-    const QRect iconRect(myMode == ChipMode::IconOnly
-                             ? body.left() + (body.width() - kIcon) / 2
-                             : body.left() + kPadX,
-                         body.top() + (body.height() - kIcon) / 2, kIcon, kIcon);
-    icon().paint(&painter, iconRect, Qt::AlignCenter,
-                 isEnabled() ? QIcon::Normal : QIcon::Disabled);
+    //
+    // The text-glyph variant paints its own string instead - the unit chip's
+    // "mm"/"cm" is a word, not a shape IconSet can draw - in the same
+    // enabled/disabled colours a labelled chip's text uses, so it dims with
+    // everything else rather than staying lit while the icon-only glyphs
+    // around it go dark.
+    if (myUsesTextGlyph) {
+        painter.setFont(Theme::labelFont());
+        painter.setPen(isEnabled() ? Theme::text() : Theme::textDisabled());
+        painter.drawText(body, Qt::AlignCenter, myTextGlyph);
+    } else {
+        const QRect iconRect(myMode == ChipMode::IconOnly
+                                 ? body.left() + (body.width() - kIcon) / 2
+                                 : body.left() + kPadX,
+                             body.top() + (body.height() - kIcon) / 2, kIcon, kIcon);
+        icon().paint(&painter, iconRect, Qt::AlignCenter,
+                     isEnabled() ? QIcon::Normal : QIcon::Disabled);
+    }
 
     // An icon-only chip stops here: its label and shortcut are in the
     // tooltip syncFromAction() composed, not on the card.

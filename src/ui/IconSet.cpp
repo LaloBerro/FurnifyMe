@@ -99,6 +99,22 @@ void paintGlyph(QPainter& p, Glyph glyph)
             p.drawEllipse(QPoint(18, 10), 1, 1);
             break;
         }
+        case Glyph::Wireframe:                    // half-shaded circle
+            p.drawEllipse(QPoint(12, 12), 8, 8);
+            p.drawLine(12, 4, 12, 20);
+            break;
+        case Glyph::FitAll:                       // frame corners
+            p.drawLine(4, 8, 4, 4);  p.drawLine(4, 4, 8, 4);
+            p.drawLine(16, 4, 20, 4); p.drawLine(20, 4, 20, 8);
+            p.drawLine(20, 16, 20, 20); p.drawLine(20, 20, 16, 20);
+            p.drawLine(8, 20, 4, 20); p.drawLine(4, 20, 4, 16);
+            break;
+        case Glyph::Projection:                   // a perspective frustum
+            p.drawLine(8, 6, 16, 6);
+            p.drawLine(16, 6, 20, 19);
+            p.drawLine(20, 19, 4, 19);
+            p.drawLine(4, 19, 8, 6);
+            break;
     }
 }
 
@@ -196,6 +212,14 @@ QIcon appIcon()
     QIcon result;
     for (int size : {16, 24, 32, 48, 64, 128, 256}) result.addPixmap(appIconPixmap(size));
     return result;
+}
+
+QPixmap appMarkPixmap(int px)
+{
+    const QPixmap art(QStringLiteral(":/icons/app.png"));
+    if (!art.isNull())
+        return art.scaled(px, px, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    return appIconPixmap(px);
 }
 
 }  // namespace IconSet

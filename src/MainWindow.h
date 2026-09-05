@@ -407,6 +407,20 @@ public:
     AppearancePanel* appearancePanel() const { return myAppearancePanel; }
     RenderSettingsPanel* renderSettingsPanel() const { return myRenderSettingsPanel; }
     RenderShutterButton* renderShutter() const { return myRenderShutter; }
+    // The floating pill (Milestone 5, item 3) - the window's own menu strip
+    // before this task, a ViewportOverlay::Anchor::TopLeft card now. Exposed
+    // the same way every other overlay card is, rather than making a caller
+    // find it by class through findChild<>().
+    AppBar* appBar() const { return myAppBar; }
+    // The four view controls (Persp/Ortho, the unit chip, Wireframe, Fit
+    // All) that used to live as bar buttons - an icon-only ToolCluster
+    // anchored TopRight, stacked under the axis gizmo card. Distinct from
+    // the rail (also a ToolCluster, anchored LeftEdge instead) - a caller
+    // that wants "the rail" still gets it as the first match of
+    // findChild<ToolCluster*>() (added first, in buildOverlay()), and a
+    // caller that wants this one asks here instead of guessing which
+    // ToolCluster findChildren() returned.
+    ToolCluster* viewControls() const { return myViewControls; }
 
     UserProgress& progress() { return myProgress; }
     const UserProgress& progress() const { return myProgress; }
@@ -1238,6 +1252,14 @@ private:
     // drawers and the status bar the same way.
     ToolCluster* myRail = nullptr;
     AxisGizmo* myAxisGizmo = nullptr;
+    // The view-controls cluster (Milestone 5, item 3) and the unit chip
+    // inside it - kept on myRail/myAxisGizmo's own terms: both are built as
+    // locals inside buildOverlay() otherwise, and the unit chip specifically
+    // needs a stored pointer because, unlike the other three, it owns no
+    // QAction of its own to mirror - its text is pushed in on every
+    // appStateChanged, exactly as AppBar::setUnitLabel() used to be called.
+    ToolCluster* myViewControls = nullptr;
+    class ToolChip* myUnitChip = nullptr;
     QString myCompareVersionName;   // user text - see the badge's own rule
     // The badge and its Close-compare control, parented to myCompareView -
     // owned by Qt's parent-child cascade (destroyed with myCompareView),

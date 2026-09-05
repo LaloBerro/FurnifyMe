@@ -1552,49 +1552,36 @@ void MainWindow::goAxonometric()
 
 void MainWindow::buildAppBar(QMenuBar* menus)
 {
-    myAppBar = new AppBar(menus, myDisplayModeAction, myFitAction);
-    // The window takes ownership. Nothing may call menuBar() from here on.
-    setMenuWidget(myAppBar);
-
-    myAppBar->setOrthographic(myOrthographicAction->isChecked());
-    myAppBar->setUnitLabel(QString::fromStdString(Measure::unitSuffix()));
-
-    // The button triggers the action rather than flipping anything itself -
-    // the same contract the unit chip has, and the reason the menu entry, the
-    // O shortcut and this button can never disagree. It no longer snaps to
-    // the axonometric pose: that is the gizmo's job, and the View menu's, and
-    // this seat now belongs to the projection.
-    connect(myAppBar, &AppBar::projectionClicked, this,
-            [this] { myOrthographicAction->trigger(); });
-
-    // The button triggers the OTHER unit's existing action rather than
-    // writing the unit itself: persistence, the items panel, the status bar
-    // and the extrude field's own label then all follow the single path
-    // setDisplayUnit() already owns, and updateActions() stays the one place
-    // that decides anything.
-    connect(myAppBar, &AppBar::unitClicked, this, [this] {
-        if (Measure::displayUnit() == Measure::Unit::Millimetres)
-            myUnitsCentimetresAction->trigger();
-        else
-            myUnitsMillimetresAction->trigger();
-    });
-
-    // The readout follows the one signal every unit-following surface already
-    // refreshes on. It only reads and sets a string, so it cannot recurse
-    // back into updateActions().
-    connect(this, &MainWindow::appStateChanged, myAppBar, [this] {
-        myAppBar->setUnitLabel(QString::fromStdString(Measure::unitSuffix()));
-        // The BASE mode, off the action that owns it - not the camera's
-        // effective one. A gizmo arm or a face lock borrows orthographic for
-        // one orbit, and a readout that followed the loan would tell the user
-        // they had changed a setting they never touched.
-        myAppBar->setOrthographic(myOrthographicAction->isChecked());
-    });
+    // Milestone 5, item 3: this no longer installs a window-spanning menu
+    // strip through setMenuWidget() - the pill is a ViewportOverlay-anchored
+    // card now, and MainWindow::buildOverlay() is what anchors it (a
+    // ViewportOverlay does not exist yet at this point in the constructor,
+    // which is why this stays a separate function rather than folding
+    // straight into buildOverlay()). Left unparented here; addWidget()
+    // reparents it onto the viewport.
+    //
+    // The four view controls that used to live here as bar buttons - and the
+    // signals/slots that wired their clicks to the projection and unit
+    // actions - moved to buildOverlay()'s own view-controls cluster, built
+    // directly on the real QAction objects (Persp/Ortho, Wireframe, Fit All)
+    // the way every rail chip already is; only the unit chip still needs
+    // hand-wiring, since it owns no action of its own to mirror.
+    myAppBar = new AppBar(menus);
 }
 
 void MainWindow::buildOverlay()
 {
     myOverlay = new ViewportOverlay(myView);
+
+    // The pill (Milestone 5, item 3), anchored first so it stacks above
+    // everything else this function anchors TopLeft - the items drawer and
+    // the versions drawer both land beside the rail per Anchor::TopLeft's own
+    // rule (see ViewportOverlay.h), and adding this first means they stack
+    // BELOW it rather than the other way around. It carries the window's own
+    // menu bar, so it is not something render mode ever hides - see the
+    // appStateChanged-driven visibility lambda below, which only reaches the
+    // rail and the gizmo.
+    myOverlay->addWidget(myAppBar, ViewportOverlay::Anchor::TopLeft);
 
     // ONE rail, pinned to the viewport's left edge, in place of the four
     // chip clusters that used to float in three corners and one edge centre.
@@ -1654,7 +1641,21 @@ void MainWindow::buildOverlay()
     // viewport needs at least the rail's height plus twice that margin.
     // Read from ViewportOverlay itself rather than repeated here, so the two
     // cannot silently disagree about what the rail is pinned against.
-    myView->setMinimumHeight(rail->sizeHint().height() + 2 * ViewportOverlay::kEdgeMargin);
+    //
+    // The pill now floats INSIDE the viewport rather than in the window's own
+    // menu-strip row above it, so the same margin arithmetic is asked of its
+    // sizeHint() too - std::max, not a sum, because the two sit in different
+    // ViewportOverlay columns (Anchor::LeftEdge vs. Anchor::TopLeft, which
+    // never share an x-range - see ViewportOverlay.h) and never stack on top
+    // of each other; either one alone can be the taller demand on a given
+    // build, and the viewport must clear whichever one currently is. Derived
+    // from myAppBar's own sizeHint() rather than a literal, on the same
+    // reasoning the rail's own half of this already followed - a control that
+    // grows a pixel must raise this floor for free rather than reopening the
+    // clip CLAUDE.md already tells this story about once.
+    myView->setMinimumHeight(
+        std::max(rail->sizeHint().height(), myAppBar->sizeHint().height())
+        + 2 * ViewportOverlay::kEdgeMargin);
 
     myOverlay->addWidget(rail, ViewportOverlay::Anchor::LeftEdge);
 
@@ -1695,6 +1696,57 @@ void MainWindow::buildOverlay()
     // overlay a dependency on the whole application.
     connect(gizmo, &AxisGizmo::viewSnapped, this, &MainWindow::recordViewChanged);
     myOverlay->addWidget(gizmo, ViewportOverlay::Anchor::TopRight);
+
+    // The four view controls (Milestone 5, item 3) that used to live as bar
+    // buttons in the old window-spanning app bar - Persp/Ortho, the unit
+    // chip, Wireframe, Fit All - as one icon-only ToolCluster, anchored at
+    // the SAME TopRight slot the gizmo already stacks at, so relayout() puts
+    // it one gap under the gizmo card for free (see ViewportOverlay.h's
+    // "clusters sharing an anchor stack downward in the order they were
+    // added"). Unlike the Appearance/RenderSettings cards below, this one is
+    // NOT hidden by render mode - the four controls it carries stayed
+    // reachable through render mode when they lived in the bar, and nothing
+    // about moving them onto chips changes that; if the gizmo above it hides,
+    // this cluster simply reflows up to the gizmo's own slot; occupiedRects()
+    // and the anchor's own stacking already give that for free.
+    auto* viewControls = new ToolCluster(myView);
+    myViewControls = viewControls;
+    auto viewTool = [viewControls](QAction* toolAction, IconSet::Glyph glyph) {
+        viewControls->addChip(new ToolChip(toolAction, glyph, ToolChip::ChipMode::IconOnly));
+    };
+    // Persp/Ortho: the real checkable action, mirrored exactly as every rail
+    // chip already mirrors its own action - no bespoke tooltip text and no
+    // bespoke click handling survive the move, both of which the OLD bar
+    // button carried instead of the plain action-driven contract every other
+    // chip in the shell follows.
+    viewTool(myOrthographicAction, IconSet::Glyph::Projection);
+    // The unit chip: the text-glyph ToolChip variant (see ToolChip.h), built
+    // action-less on the exact contract the old bar's unit button already
+    // had - a click triggers whichever unit action is NOT the current one,
+    // rather than growing a toggle of its own - so this is the one control
+    // in the cluster that needs its own wiring instead of a bare viewTool()
+    // call.
+    myUnitChip = new ToolChip(nullptr, QString::fromStdString(Measure::unitSuffix()),
+                              ToolChip::ChipMode::IconOnly);
+    myUnitChip->setToolTip(tr("The unit every length is shown and typed in — click "
+                              "to swap between millimetres and centimetres"));
+    connect(myUnitChip, &QAbstractButton::clicked, this, [this] {
+        if (Measure::displayUnit() == Measure::Unit::Millimetres)
+            myUnitsCentimetresAction->trigger();
+        else
+            myUnitsMillimetresAction->trigger();
+    });
+    viewControls->addChip(myUnitChip);
+    viewTool(myDisplayModeAction, IconSet::Glyph::Wireframe);
+    viewTool(myFitAction,         IconSet::Glyph::FitAll);
+    // The unit readout follows the one signal every unit-following surface
+    // already refreshes on - AppBar::setUnitLabel()'s own reasoning, carried
+    // over unchanged now that a ToolChip paints the readout instead of a
+    // BarButton. Only reads state and sets a string, so it cannot recurse
+    // back into updateActions().
+    connect(this, &MainWindow::appStateChanged, myUnitChip,
+            [this] { myUnitChip->setTextGlyph(QString::fromStdString(Measure::unitSuffix())); });
+    myOverlay->addWidget(viewControls, ViewportOverlay::Anchor::TopRight);
 
     // The Appearance card, anchored at the same corner so relayout() stacks
     // it one gap under the gizmo - see AppearancePanel.h for why TopRight and
@@ -2420,8 +2472,8 @@ void MainWindow::persistAppearance()
 
 void MainWindow::syncChromeHeights()
 {
-    // The viewport's top and bottom edges ARE the app bar's bottom edge and
-    // the status bar's top edge, and both have to land on a whole device row.
+    // The viewport's bottom edge IS the status bar's top edge, and it has to
+    // land on a whole device row.
     //
     // Widget geometry is logical; the surface OCCT paints into is sized in
     // device pixels. A chrome strip whose logical height does not multiply up
@@ -2432,25 +2484,33 @@ void MainWindow::syncChromeHeights()
     // Measured at 175% with an edited type scale: a 2068-device-pixel black
     // line the full width of the window, exactly where the status bar meets
     // the viewport. It is the floating-card rule (Theme::wholeDevicePixels,
-    // see Theme.h) applied to the two cards that span the window, and neither
-    // paintSurface() nor anything else either widget paints can reach a row
-    // that is inside NEITHER widget's logical rect.
+    // see Theme.h) applied to a strip that spans the window, and neither
+    // paintSurface() nor anything else the strip paints can reach a row that
+    // is inside NEITHER widget's logical rect.
     //
     // It only appeared once the Appearance panel shipped because the default
-    // type scale happens to give both strips a whole height. The base size is
+    // type scale happens to give the strip a whole height. The base size is
     // a number the user edits now, so "happens to" stopped being a rule.
     //
-    // The constraints are lifted before the hint is read, so this is
-    // idempotent whatever a strip's sizeHint() does with its own fixed size:
-    // re-running it can never ratchet a strip taller.
-    auto whole = [](QWidget* strip) {
-        if (!strip) return;
+    // The app bar used to be this function's OTHER caller - it was a second
+    // window-spanning strip, installed through setMenuWidget(), whose bottom
+    // edge was the viewport's own top edge. Milestone 5, item 3 made it a
+    // floating pill anchored INSIDE the viewport instead: it is a card of the
+    // paintSurface() family now, and every anchored card already gets the
+    // identical whole-device-pixel treatment for free inside
+    // ViewportOverlay::relayout() (see Theme::wholeDevicePixels()'s own call
+    // site there) - a second, bespoke fix here would be the same rule kept in
+    // two places, which is exactly what this function's own history warns
+    // against.
+    //
+    // The constraint is lifted before the hint is read, so this is
+    // idempotent whatever the strip's sizeHint() does with its own fixed
+    // size: re-running it can never ratchet the strip taller.
+    if (QWidget* strip = statusBar()) {
         strip->setMinimumHeight(0);
         strip->setMaximumHeight(QWIDGETSIZE_MAX);
         strip->setFixedHeight(Theme::wholeDevicePixels(strip->sizeHint().height()));
-    };
-    whole(menuWidget());
-    whole(statusBar());
+    }
 }
 
 void MainWindow::writeAppearanceNow()

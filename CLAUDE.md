@@ -226,7 +226,7 @@ Source files under `src/`, plus `tests/`:
 | `ui/PullArrow.{h,cpp}` | face pull: 3D arrow + value chip, preview by the commit's own call |
 | `ui/BevelArrow.{h,cpp}` | edge drag: inward fillets, outward chamfers, same contract |
 | `ui/AppearancePanel.{h,cpp}` | every Theme token editable live; debounced persistence |
-| `ui/AppBar.{h,cpp}` | the menu strip: wordmark, real `QMenuBar`, view controls |
+| `ui/AppBar.{h,cpp}` | the floating pill: app mark, wordmark, real `QMenuBar` |
 | `FurnifySerial.{h,cpp}` | binary shape (de)serialization via `BinTools`, **zero Qt includes** |
 | `FurnitureStore.{h,cpp}` | owns the managed library — enumerate/create/save/load/rename/versions |
 | `ui/SelectorWindow.{h,cpp}` | the library, a top-level window of its own — cards, New, rename, delete |
@@ -1121,33 +1121,91 @@ state, label, shortcut. Never give a control its own state: menus, rail buttons 
 shortcuts would drift, and `gui_smoke` finds actions by text, so the controls are covered
 for free. `updateActions()` remains the single place that decides what is available.
 
-The shell's composition, settled in Phase 5 against HTML mockups the user chose from:
+The shell's composition, settled in Phase 5 against HTML mockups the user chose from, and
+reworked once more in Milestone 5, item 3 against a second round of mockups ("Option A -
+compact pill, top left"):
 
-- **The app bar** replaces the menu strip via `QMainWindow::setMenuWidget`. It holds the
-  wordmark, the window's **real `QMenuBar`** (reparented in - menus, shortcuts, the
-  generated sheet and the vocabulary sweep all keep working untouched), and the view
-  controls: the **Persp/Ortho toggle** (Phase 7 - it triggers the checkable
+- **The app bar is a floating rounded pill now, not a window-spanning strip.**
+  `QMainWindow::setMenuWidget` is gone; the viewport is full-bleed to the window's own top
+  edge, and `AppBar` is a `ViewportOverlay::Anchor::TopLeft` card exactly like every other
+  anchored widget - added FIRST in `MainWindow::buildOverlay()`, so the items drawer and
+  the versions drawer (both also `Anchor::TopLeft`, and both shifted right of the rail by
+  that anchor's own `leftX` rule - see `ViewportOverlay.h`) stack downward BELOW it rather
+  than the other way around. It carries the app mark (the user's own artwork,
+  `IconSet::appMarkPixmap()`), the wordmark, and the window's **real `QMenuBar`**
+  (reparented in - menus, shortcuts, the generated sheet and the vocabulary sweep all keep
+  working untouched: nothing about the menus themselves changed, only what holds them).
+  Fully rounded ends - **radius = half the pill's own height**, read fresh in `paintEvent()`
+  every time rather than cached, so the fill and the curve can never disagree - and it is
+  one of `Theme::paintSurface()`'s family now (`Theme::makeSurfaceTransparent()` +
+  `Qt::WA_NoSystemBackground` in the constructor, the pill's corners composite through to
+  the live GL scene exactly as the rail's and the gizmo's already do), where it used to
+  paint its own flat `chrome()` strip and bottom rule by hand. `AppBar::updatePillMargins()`
+  derives the pill's own horizontal padding from `radius`, recomputed on every theme change:
+  a stadium shape's semicircular ends are the widest point of the curve at every vertical
+  position spanning the full height (not merely near the corners, the way a small-radius
+  rounded rect's corners are), so anything painted inside has to clear a full radius's worth
+  of horizontal inset or the curve clips it. Since a `QHBoxLayout`'s height depends only on
+  its top/bottom margins and its tallest child's own `sizeHint()` - never on left/right -
+  asking for that height BEFORE the radius-derived horizontal margins are set is not a stale
+  read, it is the one order that avoids a circular layout pass.
+  `MainWindow::syncChromeHeights()` no longer has anything to do for the pill - it is a
+  `ViewportOverlay`-anchored card now, and `ViewportOverlay::relayout()` already rounds every
+  anchored card's size up through `Theme::wholeDevicePixels()` for free; only the status bar
+  is still a real window-spanning strip needing that function's own bespoke fix.
+- **The four view controls that used to live as bar buttons moved to a dedicated icon-only
+  `ToolCluster`, anchored `Anchor::TopRight` under the axis gizmo card** (stacking one gap
+  below it, the exact mechanism the Appearance and RenderSettings cards already share that
+  slot through - see `ViewportOverlay.h`'s "clusters sharing an anchor stack downward in the
+  order they were added"). The **Persp/Ortho toggle** (it triggers the checkable
   `Orthographic` action and holds no state, exactly as the unit chip does; it does **not**
   snap to Axonometric, which belongs to the gizmo, keys 0-3 and the View menu, and it
-  records no `view.changed`, because a projection flip is not a look in a named direction
-  and would otherwise retire the hint teaching the gizmo), the unit chip (triggers the
-  *other* unit's existing action - it holds no state), Wireframe and Fit All.
-  `Save Screenshot` is menu-only. `OcctViewWidget::viewDirectionName()` (once
-  `viewLabelText()`) still answers "which world axis is the camera square onto", and is
-  what the suite asserts snap flights against, but nothing paints it any more.
-- **The rail** is one `ToolCluster` in `ChipMode::IconOnly` at `Anchor::LeftEdge` -
-  every tool as an icon button, labels and shortcuts in tooltips that auto-update from
-  the actions. `MainWindow::buildOverlay()` sets the viewport's own minimum height from
-  the rail's `sizeHint()` plus both `ViewportOverlay` edge margins - derived, not a
-  literal, so it cannot go stale the day a button is added - which is what keeps the
-  viewport from ever shrinking short enough to clip the rail (Redo was the first
-  casualty, then Undo). A fourteenth tool raises that floor rather than reintroducing
-  the clip, but the user's actual screen height is a real ceiling the floor cannot push
-  past, so the rail still wants a rework - scrolling, grouping, something - well before
-  it gets there. **Symmetry stayed off the rail for exactly this reason** — it is a
-  Model-menu-only checkable action (`S`), not a fifteenth chip, so live symmetry did not
-  raise the floor further. Render mode and the bottom-bar toggle are View-menu-only for
-  the same load-bearing reason, not merely by omission.
+  records no `view.changed`, because a projection flip is not a look in a named direction and
+  would otherwise retire the hint teaching the gizmo), the **unit chip** (triggers the
+  *other* unit's existing action - it holds no state of its own, the identical contract the
+  old bar button had), **Wireframe** and **Fit All** are all reachable exactly as before, just
+  as 34px icon-only chips instead of text buttons - three of the four are plain
+  `ToolChip(action, IconSet::Glyph, ChipMode::IconOnly)` calls, mirroring their actions the
+  same way every rail chip already does (`IconSet::Glyph::Projection/Wireframe/FitAll`, all
+  new - the projection toggle never had an icon before, since it used to paint its own word).
+  The **unit chip is the one exception**: a unit is a word, not a shape, so it uses
+  `ToolChip`'s text-glyph constructor (`ToolChip(action, QString, ChipMode)`) - a second
+  constructor on the SAME class per this task's own ruling, not a sibling button class -
+  paints `"mm"`/`"cm"` centred in the icon-only square in place of a rasterised `QIcon`, and
+  (being action-less, on the identical contract the old bar's unit button already had) has
+  its text pushed in on every `appStateChanged` the same way `AppBar::setUnitLabel()` used
+  to be called, rather than mirroring a `QAction::changed()` the way the other three do.
+  This cluster is deliberately **not** hidden by render mode - the four controls stayed
+  reachable through render mode when they lived in the bar, and moving them onto chips does
+  not change that; if the gizmo above it hides, the cluster simply reflows up into the
+  gizmo's own slot, which `ViewportOverlay`'s existing "hidden entries occupy no slot" rule
+  already gives for free. `Save Screenshot` is still menu-only. Nothing paints
+  `OcctViewWidget::viewDirectionName()` any more (unchanged from Phase 7); the suite still
+  asserts snap flights against it.
+- **The rail** is a second, separate `ToolCluster` in `ChipMode::IconOnly` at
+  `Anchor::LeftEdge` - every tool as an icon button, labels and shortcuts in tooltips that
+  auto-update from the actions. `MainWindow::buildOverlay()` sets the viewport's own minimum
+  height from `std::max()` of the rail's `sizeHint()` and the pill's `sizeHint()`, plus both
+  `ViewportOverlay` edge margins on whichever is taller - derived, not a literal, so neither
+  can go stale the day either one grows (the pill floating INSIDE the viewport now, rather
+  than in a window row that used to reserve its own height for free, is exactly why its own
+  half of this had to be added rather than assumed). The two never share a column - the rail
+  is `Anchor::LeftEdge`, spanning the viewport's left edge top to bottom, while the pill is
+  `Anchor::TopLeft`, which that same anchor's `leftX` rule shifts clear of the rail's own
+  x-range - so `std::max` rather than a sum is the correct floor: whichever one currently
+  demands more height is the one the viewport must clear, and they are never both binding at
+  once the way two stacked entries in the same column would be. A fourteenth rail tool still
+  raises that floor rather than reintroducing the clip that cost Redo, then Undo, but the
+  user's actual screen height is a real ceiling the floor cannot push past, so the rail still
+  wants a rework - scrolling, grouping, something - well before it gets there. **Symmetry
+  stayed off the rail for exactly this reason** — it is a Model-menu-only checkable action
+  (`S`), not a fifteenth chip, so live symmetry did not raise the floor further. Render mode
+  and the bottom-bar toggle are View-menu-only for the same load-bearing reason, not merely
+  by omission. Two `ToolCluster`s now float over the viewport rather than one; a caller
+  wanting "the rail" specifically still gets it as the first match of
+  `findChild<ToolCluster*>()` (added first, in `buildOverlay()`), and `MainWindow::viewControls()`
+  is the accessor for the other one, rather than a caller having to guess which of
+  `findChildren<ToolCluster*>()`'s two results it wants.
 - **The items drawer** floats beside the rail, toggled by the existing Items action -
   visibility is derived from the action's checked state, both directions, and nothing
   else may show or hide it. The viewport is full-bleed; there is no dock.
