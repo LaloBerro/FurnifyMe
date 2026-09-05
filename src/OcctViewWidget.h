@@ -7,6 +7,7 @@
 #include <AIS_ManipulatorMode.hxx>
 #include <AIS_Shape.hxx>
 #include <Aspect_NeutralWindow.hxx>
+#include <SelectMgr_EntityOwner.hxx>
 #include <Graphic3d_CLight.hxx>
 #include <Graphic3d_RenderingParams.hxx>
 #include <Graphic3d_ToneMappingMethod.hxx>
@@ -185,6 +186,16 @@ public:
     // target before the first fresh frame - the counter has to mean what its
     // name says or every assertion standing on it is measuring nothing.
     int accumulationDepth() const { return myAccumulationDepth; }
+
+    // A total paintGL() count that NEVER resets - unlike accumulationDepth(),
+    // which scheduleRedraw() zeroes (via Invalidate()) in the SAME call that
+    // then leads to one new paint, so a repaint whose own trigger also
+    // invalidated nets back to whatever accumulationDepth() already read
+    // whenever that was nonzero - it cannot tell "a fresh paint just ran"
+    // from "no paint ran at all" in that case. This is the oracle for the
+    // question a scheduleRedraw()-triggered repaint actually needs answered:
+    // did Qt's paintGL() run, regardless of why.
+    int totalPaintCount() const { return myTotalPaintCount; }
 
     // Ticks left in the live path-tracing convergence window, 0 when no window
     // is open. Exposed alongside accumulationDepth() and for the same reason:
@@ -1959,6 +1970,30 @@ private:
     // setEdgeDimensionSuppressed().
     bool myEdgeDimensionSuppressed = false;
 
+    // The owner MoveTo() detected on the PREVIOUS hover move, so
+    // mouseMoveEvent() can tell whether the hover target actually changed -
+    // see the comment at that call site. AIS_InteractiveContext::MoveTo(...,
+    // Standard_True) asks OCCT for its own immediate redraw, which is a
+    // hardware-dependent shortcut (see the SetImmediateModeDrawToFront
+    // finding on this header): on hardware where the separate immediate-mode
+    // framebuffer fails to allocate, OCCT falls back to drawing straight into
+    // the bound default framebuffer and the highlight reaches the screen
+    // regardless of what this app does; where that allocation succeeds, a
+    // genuine Qt-driven repaint is the only thing that puts it there.
+    // updateEdgeDimension() used to be the sole source of one on this path,
+    // and it bails out before ever comparing the hover target at all the
+    // moment the dimension is suppressed (an edge selected, its bevel arrow
+    // up) or the mode is not Edge - so a hover that changed which owner is
+    // detected could go unscheduled entirely, in every selection mode, any
+    // time the annotation itself had nothing to say. Compared by handle
+    // identity, not by shape - it is the OWNER MoveTo() tracks, and comparing
+    // it directly means a genuine "the scene's dynamic highlight changed"
+    // signal in either direction (something now detected, something no
+    // longer detected, or a different something), never "on every idle
+    // mouse move over the same one" - the redraw storm the migration's fix
+    // round already removed once.
+    Handle(SelectMgr_EntityOwner) myLastHoverOwner;
+
     // The edge the last pick actually added to the selection. OCCT's
     // InitSelected order is the context's, not the user's, so "the edge you
     // picked last" cannot be read back out of the selection - it has to be
@@ -2106,6 +2141,9 @@ private:
 
     // Frames painted since the last Invalidate - see accumulationDepth().
     int myAccumulationDepth = 0;
+
+    // Total frames painted, ever - never reset. See totalPaintCount().
+    int myTotalPaintCount = 0;
 
     // --- Render settings (Task 7.2) -------------------------------------
     // Plain session state - see the six accessors' own comments above for

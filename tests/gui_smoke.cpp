@@ -6482,6 +6482,311 @@ int main(int argc, char* argv[])
         settle(150);
     }
 
+    // --- hovering a DIFFERENT edge while one is already selected ---------------
+    // The defect: in edge mode, with an edge SELECTED (bevel arrow up,
+    // dimension suppressed), hovering another edge showed no dynamic
+    // highlight at all. Hover works fine with nothing selected.
+    //
+    // saveSnapshot()/Dump cannot catch this - it calls myView->Redraw()
+    // itself before dumping (see saveSnapshot()'s own comment), which forces
+    // a fresh OCCT redraw reflecting whatever MoveTo() most recently detected
+    // regardless of whether Qt's compositor ever repainted the ON-SCREEN
+    // window. printWindowCapture() is the tool that actually answers "what
+    // does the user see" - the same distinction the render-mode grain finding
+    // already established (Dump beside a PrintWindow capture of the live
+    // window).
+    {
+        const std::size_t bodiesBefore = window.document().count();
+        const std::size_t outlinesBefore = window.document().outlineCount();
+        trigger(window, QStringLiteral("Select Bodies"));
+        view->clearSelection();
+
+        // ONE body, generously sized, so several of its own edges land far
+        // apart on screen. Deliberately the SAME AIS_Shape for both probe
+        // edges - two different bodies (tried first) measured the highlight
+        // reaching the screen in both conditions, which does not match what
+        // was reported; edges belonging to the SAME selected object is the
+        // narrower, more common case (hovering a neighbouring edge on the
+        // very body you are bevelling) and untested until now.
+        check(buildBody(window, 0.1, 0.1, 0.9, 0.9, 200.0),
+              "the probe body extrudes");
+        settle(150);
+        view->fitAll();
+        settle(200);
+
+        trigger(window, QStringLiteral("Select Edges"));
+        settle(120);
+        view->clearSelection();
+
+        // Every usable straight edge on the one body: a real midpoint,
+        // projecting safely inside the viewport, clear of the rail and the
+        // top overlays.
+        struct EdgeCandidate {
+            TopoDS_Edge edge;
+            QPoint screen;
+        };
+        std::vector<EdgeCandidate> perBody;
+        if (!window.document().solids().empty()) {
+            const DocumentModel::Solid& solid = window.document().solids().back();
+            for (TopExp_Explorer it(solid.shape, TopAbs_EDGE); it.More(); it.Next()) {
+                const TopoDS_Edge candidate = TopoDS::Edge(it.Current());
+                TopoDS_Vertex v1, v2;
+                TopExp::Vertices(candidate, v1, v2);
+                if (v1.IsNull() || v2.IsNull()) continue;
+                const gp_Pnt a = BRep_Tool::Pnt(v1);
+                const gp_Pnt b = BRep_Tool::Pnt(v2);
+                if (a.Distance(b) < 1.0) continue;
+                const gp_Pnt mid(0.5 * (a.X() + b.X()), 0.5 * (a.Y() + b.Y()),
+                                 0.5 * (a.Z() + b.Z()));
+                QPoint at;
+                if (!view->projectToScreen(mid, at)) continue;
+                if (!view->rect().adjusted(90, 90, -70, -70).contains(at)) continue;
+                perBody.push_back({candidate, at});
+            }
+        }
+        // The pair with the largest screen-space separation - the whole
+        // point is that A and B cannot be confused for one another, and
+        // picking the first two enumerated made no such guarantee.
+        int bestI = -1, bestJ = -1, bestDist = -1;
+        for (std::size_t i = 0; i < perBody.size(); ++i) {
+            for (std::size_t j = i + 1; j < perBody.size(); ++j) {
+                const int d = (perBody[i].screen - perBody[j].screen).manhattanLength();
+                if (d > bestDist) { bestDist = d; bestI = int(i); bestJ = int(j); }
+            }
+        }
+        check(bestI >= 0 && bestJ >= 0,
+              QStringLiteral("the one probe body offers at least two usable edges on its own "
+                             "(%1 candidates found)")
+                  .arg(perBody.size()));
+
+        if (bestI >= 0 && bestJ >= 0) {
+            const EdgeCandidate& edgeA = perBody[std::size_t(bestI)];
+            const EdgeCandidate& edgeB = perBody[std::size_t(bestJ)];
+            // Non-vacuity: the two probe points are far enough apart on
+            // screen that a hover-tint box around one cannot also catch the
+            // other's highlight or the bevel arrow standing on it.
+            const int screenGap = (edgeA.screen - edgeB.screen).manhattanLength();
+            check(screenGap > 150,
+                  QStringLiteral("the two probe edges land far enough apart on screen (%1 px) "
+                                 "that their hover regions cannot overlap")
+                      .arg(screenGap));
+
+            const QColor hoverTint = Theme::highlightHover();
+            // Counts pixels reading as the hover tint inside a box around a
+            // VIEW-local point, mapped into a whole-window printWindowCapture
+            // the same way the pull-arrow probe maps a viewport rect into
+            // one: translate view -> window, then scale by the capture's own
+            // size against the window's logical size.
+            auto tintCount = [&](const QImage& shot, const QPoint& viewPt, int margin) {
+                if (shot.isNull()) return -1;
+                QRect focus(viewPt.x() - margin, viewPt.y() - margin, margin * 2, margin * 2);
+                focus.translate(view->mapTo(&window, QPoint(0, 0)));
+                const double sx = double(shot.width()) / std::max(1, window.width());
+                const double sy = double(shot.height()) / std::max(1, window.height());
+                const QRect scaled(int(focus.left() * sx), int(focus.top() * sy),
+                                    int(focus.width() * sx), int(focus.height() * sy));
+                const QRect clipped = scaled.intersected(shot.rect());
+                if (clipped.isEmpty()) return -1;
+                int count = 0;
+                for (int y = clipped.top(); y <= clipped.bottom(); ++y)
+                    for (int x = clipped.left(); x <= clipped.right(); ++x)
+                        if (colorDistance(shot.pixelColor(x, y), hoverTint) < 60.0) ++count;
+                return count;
+            };
+
+            // BASELINE, nothing hovered at all: neither probe region reads
+            // the hover tint by chance.
+            moveTo(view, QPointF(8, 8));
+            settle(150);
+            const QImage restShot =
+                printWindowCapture(&window, outDir + QStringLiteral("/hover-edge-rest.png"));
+            const int restAtA = tintCount(restShot, edgeA.screen, 24);
+            const int restAtB = tintCount(restShot, edgeB.screen, 24);
+            check(restShot.width() > 200 && restAtA >= 0 && restAtB >= 0,
+                  "the at-rest capture came back with pixels, so the two comparisons "
+                  "below are not vacuous");
+            check(restAtA < 5 && restAtB < 5,
+                  QStringLiteral("neither probe edge reads the hover tint before anything is "
+                                 "hovered (%1, %2 tinted pixels)")
+                      .arg(restAtA).arg(restAtB));
+
+            // REGRESSION GUARD, direction 1: hover reaches the screen with
+            // nothing selected. This must stay true after the fix.
+            moveTo(view, QPointF(edgeB.screen));
+            settle(150);
+            const QImage hoverOnlyShot = printWindowCapture(
+                &window, outDir + QStringLiteral("/hover-edge-only.png"));
+            const int hoverOnlyAtB = tintCount(hoverOnlyShot, edgeB.screen, 24);
+            check(hoverOnlyShot.width() > 200 && hoverOnlyAtB >= 0,
+                  "the hover-only capture came back with pixels");
+            check(hoverOnlyAtB > restAtB + 5,
+                  QStringLiteral("hovering an edge with nothing selected reaches the screen "
+                                 "(%1 tinted pixels against a %2-pixel rest baseline)")
+                      .arg(hoverOnlyAtB).arg(restAtB));
+
+            moveTo(view, QPointF(8, 8));
+            settle(150);
+
+            // THE DEFECT, direction 2: select edge A (raises the bevel arrow,
+            // suppresses the dimension), then hover the UNRELATED edge B and
+            // confirm the dynamic highlight still reaches the screen.
+            clickAt(view, QPointF(edgeA.screen));
+            settle(150);
+            check(view->hasBevelArrow(),
+                  "selecting the first probe edge raises the bevel arrow");
+            check(view->edgeDimensionSuppressed(),
+                  "and suppresses the dimension annotation - the state the defect hides "
+                  "behind");
+
+            // THE REAL, ENVIRONMENT-INDEPENDENT REPRODUCTION.
+            //
+            // A pixel probe alone cannot pin this on every machine:
+            // AIS_InteractiveContext::MoveTo(...,Standard_True) asks OCCT for
+            // its OWN immediate redraw, and on hardware where the SEPARATE
+            // immediate-mode framebuffer fails to allocate (this machine
+            // logs "Immediate FBO ...initialization has failed" - the same
+            // GL_INVALID_OPERATION the header's SetImmediateModeDrawToFront
+            // finding already names) OCCT falls back to drawing hover
+            // highlights straight into the bound DEFAULT framebuffer - the
+            // one Qt composites and printWindowCapture() reads - so the
+            // highlight reaches the screen regardless of whether this app's
+            // OWN code ever asks Qt to repaint. On hardware where that
+            // separate FBO allocates successfully (untested here, but named
+            // as a live risk in the very same header comment), that
+            // fallback does not happen, and a Qt-driven repaint is the ONLY
+            // route left - which is exactly what this app fails to ask for.
+            //
+            // totalPaintCount(), NOT accumulationDepth(), is the oracle here -
+            // it answers the one question a pixel cannot on this machine: did
+            // THIS APP ever ask Qt to repaint because the hover target
+            // changed? mouseMoveEvent()'s hover branch calls
+            // updateEdgeDimension() unconditionally, and that function is
+            // the ONLY scheduleRedraw() caller on this path - but it bails
+            // out, via present(myDimension.clear()), before ever comparing
+            // the hover target at all, the moment myEdgeDimensionSuppressed
+            // is true (an edge selected, its bevel arrow up) or the mode
+            // is not Edge. So the frame is never asked for, on any machine -
+            // it just happens not to matter here. accumulationDepth() cannot
+            // serve as the oracle: scheduleRedraw() calls Invalidate() (which
+            // zeroes it) in the SAME breath that then produces one new paint
+            // (which brings it back to 1) - so a fix that correctly schedules
+            // a repaint and a no-op that schedules none can read IDENTICALLY
+            // whenever the depth was already 1 going in, which it is here
+            // (edge A's own selection already painted one frame).
+            // totalPaintCount() never resets, so it is the one counter that
+            // cannot be fooled by its own trigger's side effect.
+            const int paintsBeforeHover = view->totalPaintCount();
+            moveTo(view, QPointF(edgeB.screen));
+            settle(150);
+            const int paintsAfterHover = view->totalPaintCount();
+            check(paintsAfterHover > paintsBeforeHover,
+                  QStringLiteral("hovering a DIFFERENT edge while one is already selected "
+                                 "asks Qt for a real repaint (totalPaintCount %1 before, %2 "
+                                 "after) - the defect this task exists to fix, and the one "
+                                 "check on this machine that is not masked by OCCT's own "
+                                 "immediate-mode fallback")
+                      .arg(paintsBeforeHover).arg(paintsAfterHover));
+
+            // AND NO STORM: hovering the SAME edge again, nothing changed,
+            // must not ask for a second repaint - the exact regression the
+            // fix must not reintroduce.
+            const int paintsBeforeRepeat = view->totalPaintCount();
+            moveTo(view, QPointF(edgeB.screen) + QPointF(1, 0));
+            settle(150);
+            const int paintsAfterRepeat = view->totalPaintCount();
+            check(paintsAfterRepeat == paintsBeforeRepeat,
+                  QStringLiteral("and hovering the SAME edge again asks for no second repaint "
+                                 "(totalPaintCount %1 before, %2 after) - no redraw storm on "
+                                 "an idle cursor")
+                      .arg(paintsBeforeRepeat).arg(paintsAfterRepeat));
+
+            const QImage hoverWithSelectionShot = printWindowCapture(
+                &window, outDir + QStringLiteral("/hover-edge-with-selection.png"));
+            const int hoverWithSelectionAtB =
+                tintCount(hoverWithSelectionShot, edgeB.screen, 24);
+            check(hoverWithSelectionShot.width() > 200 && hoverWithSelectionAtB >= 0,
+                  "the hover-with-selection capture came back with pixels, so the "
+                  "reproduction below is not vacuous");
+            check(hoverWithSelectionAtB > restAtB + 5,
+                  QStringLiteral("hovering a DIFFERENT edge while one is already selected "
+                                 "still reaches the screen as a dynamic highlight (%1 tinted "
+                                 "pixels against a %2-pixel rest baseline) - the defect this "
+                                 "task exists to fix")
+                      .arg(hoverWithSelectionAtB).arg(restAtB));
+
+            // And edge A's own SELECTION must still be intact - this is about
+            // hover reaching the screen ALONGSIDE a selection, not replacing
+            // one.
+            check(view->selectedEdge().IsSame(edgeA.edge),
+                  "and the first edge is still the one actually selected");
+
+            // And once a genuine Qt-driven repaint DOES happen (view->update(),
+            // no Invalidate(), standing in for whatever unrelated cause might
+            // trigger one in the real app), the highlight must still be
+            // correct - proving AIS's detected-owner state is what a real
+            // paintGL() draws from, not merely something OCCT's own
+            // immediate-mode fallback happened to paint once.
+            const int paintsBeforeForced = view->totalPaintCount();
+            view->update();
+            settle(200);
+            const int paintsAfterForced = view->totalPaintCount();
+            check(paintsAfterForced > paintsBeforeForced,
+                  QStringLiteral("a genuine Qt-driven repaint really did run (totalPaintCount "
+                                 "%1 before, %2 after)")
+                      .arg(paintsBeforeForced).arg(paintsAfterForced));
+            const QImage afterForcedRepaintShot = printWindowCapture(
+                &window, outDir + QStringLiteral("/hover-edge-after-forced-repaint.png"));
+            const int afterForcedAtB = tintCount(afterForcedRepaintShot, edgeB.screen, 24);
+            check(afterForcedRepaintShot.width() > 200 && afterForcedAtB >= 0,
+                  "the post-forced-repaint capture came back with pixels");
+            check(afterForcedAtB > restAtB + 5,
+                  QStringLiteral("and the hover highlight survives a genuine Qt-driven "
+                                 "repaint, not only OCCT's own immediate-mode draw (%1 tinted "
+                                 "pixels against a %2-pixel rest baseline)")
+                      .arg(afterForcedAtB).arg(restAtB));
+        }
+
+        // Put the world back: drop the probe body (one checkpoint, extrude),
+        // restore the selection mode and clear anything left hovered or
+        // selected. Looped defensively (capped) rather than a single fixed
+        // Undo, since selecting/hovering an edge takes no checkpoint of its
+        // own but this is not the place to assume that never changes.
+        view->clearSelection();
+        moveTo(view, QPointF(8, 8));
+        settle(120);
+        int undoGuard = 0;
+        while (window.document().count() > bodiesBefore && undoGuard < 5) {
+            trigger(window, QStringLiteral("Undo"));
+            settle(150);
+            ++undoGuard;
+        }
+        check(window.document().count() == bodiesBefore,
+              QStringLiteral("the probe body is undone (%1 undo presses), leaving the document "
+                             "as this block found it (%2 bodies against %3 expected)")
+                  .arg(undoGuard).arg(window.document().count()).arg(bodiesBefore));
+
+        // Extrude-from-outline is ONE checkpoint (see CLAUDE.md), so undoing
+        // it restores the PENDING OUTLINE rather than deleting it outright -
+        // document().count() only sees bodies, so the check above passed
+        // while a leftover outline sat waiting, which disables "Lock to
+        // Face" for every block that runs after this one. Cleared the same
+        // way a user would: Delete Selected extends to the pending outline
+        // when nothing is selected.
+        if (window.document().outlineCount() > outlinesBefore) {
+            view->clearSelection();
+            trigger(window, QStringLiteral("Delete Selected"));
+            settle(150);
+        }
+        check(window.document().outlineCount() == outlinesBefore,
+              QStringLiteral("and no pending outline is left behind either (%1 outlines "
+                             "against %2 expected)")
+                  .arg(window.document().outlineCount()).arg(outlinesBefore));
+
+        trigger(window, QStringLiteral("Select Bodies"));
+        view->clearSelection();
+        settle(150);
+    }
+
     // --- a flat face can become the sketch plane ------------------------------
     // The one part of this phase that changes what the app can build: an
     // outline on the side of a body, extruding out of it rather than up.

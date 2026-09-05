@@ -517,6 +517,10 @@ void OcctViewWidget::releaseGlResources()
     myRenderSavedAmbients.clear();
     myRenderModeActive = false;
     mySketchLayer = Graphic3d_ZLayerId_UNKNOWN;
+    // Pointed into the context that has just gone, same reasoning as every
+    // other handle cleared above - a fresh viewer's first MoveTo() must
+    // compare against nothing, not a stale owner from the torn-down one.
+    myLastHoverOwner.Nullify();
     myInitialized = false;
     myAttachedContext.clear();
     // No view left to accumulate into, so no run to be deep in.
@@ -909,6 +913,9 @@ void OcctViewWidget::paintGL()
     // place a frame is actually painted, rather than at whichever scheduler
     // asked for it - see accumulationDepth().
     ++myAccumulationDepth;
+    // And one more frame, full stop - see totalPaintCount() for why this
+    // sibling never resets where the one above does.
+    ++myTotalPaintCount;
 
     if (context->core11fwd != nullptr) {
         context->core11fwd->glPixelStorei(GL_PACK_ALIGNMENT, 4);
@@ -5259,6 +5266,34 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
         // would otherwise have armed it, rather than guessed at later.
         if (!myManipulator.IsNull() && !detectedIsManipulator())
             myManipulator->DeactivateCurrentMode();
+
+        // MoveTo(...,Standard_True) asks OCCT for its own immediate redraw,
+        // but that is a hardware-dependent shortcut, not a guarantee: on
+        // hardware where OCCT's separate immediate-mode framebuffer fails to
+        // allocate, the highlight falls back to landing straight in the
+        // bound default framebuffer - the one Qt actually composites - so it
+        // reaches the screen regardless of anything below. Where that
+        // allocation succeeds, it does not, and a genuine Qt-driven repaint
+        // is the only thing that puts the new hover state on screen.
+        // updateEdgeDimension() used to be the sole source of one on this
+        // path, and it bails out before ever looking at hover at all the
+        // moment the dimension is suppressed (an edge selected, its bevel
+        // arrow up) or the mode is not Edge - so a hover that changed which
+        // owner is detected could go unscheduled entirely, in any selection
+        // mode. Compared here instead, by owner identity, independently of
+        // what the dimension does: a repaint is asked for exactly when the
+        // detected owner actually changes - something now detected, something
+        // no longer detected, or a different something - never on every idle
+        // mouse move over the same one, which is the redraw storm the
+        // migration's own fix round already removed once.
+        const Handle(SelectMgr_EntityOwner) detected =
+            myContext->HasDetected() ? myContext->DetectedOwner()
+                                      : Handle(SelectMgr_EntityOwner)();
+        if (detected != myLastHoverOwner) {
+            myLastHoverOwner = detected;
+            scheduleRedraw();
+        }
+
         updateEdgeDimension();
     }
 
