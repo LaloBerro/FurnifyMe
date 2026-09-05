@@ -3005,7 +3005,26 @@ bool OcctViewWidget::saveSnapshot(const QString& path)
     // image.
     if (myRenderTier == RenderTier::PathTracing) {
         awaitPathTracingConvergence();
-        return myView->Dump(path.toUtf8().constData()) == Standard_True;
+        const bool ok = myView->Dump(path.toUtf8().constData()) == Standard_True;
+        // READING THE BUFFER EMPTIES IT, and the user is still looking at it.
+        // awaitPathTracingConvergence()'s own comment already records that a
+        // Dump() restarts OCCT's accumulation - that is why the export drives a
+        // fixed pass count instead of sampling until it converges. The
+        // consequence nobody had followed through: the frame left ON SCREEN
+        // after an export is a single sample, so the picture visibly goes to
+        // grain the moment a screenshot is taken. Measured on the composited
+        // window straight after an export - median (147,145,144) against the
+        // (196,195,192) it had been, grain 6 against 1.
+        //
+        // Restarting the convergence is the whole repair: the burst window
+        // polishes it back within a couple of seconds and the idle refinement
+        // carries on from there. Without it the recovery would depend on
+        // whether any budget happened to be left, and an export taken from a
+        // long, settled rest - exactly when a user takes one - is the case
+        // where none is.
+        myAccumulationDepth = 0;
+        if (myRenderModeActive) startPathTracingConvergence();
+        return ok;
     }
 
     const QPoint deviceSize = toDevicePixels(QPoint(width(), height()));
@@ -4109,8 +4128,6 @@ void OcctViewWidget::startPathTracingConvergence()
     if (myView.IsNull()) return;
     if (myPathTracingRefineTimer == nullptr) {
         myPathTracingRefineTimer = new QTimer(this);
-        constexpr int kIntervalMs = 50;
-        myPathTracingRefineTimer->setInterval(kIntervalMs);
         connect(myPathTracingRefineTimer, &QTimer::timeout, this, [this]() {
             // Re-checked on every tick rather than trusted from whenever the
             // timer was started - render mode can exit or the tier can only
@@ -4119,11 +4136,24 @@ void OcctViewWidget::startPathTracingConvergence()
             // rather than because a real path to it missing stopCall was
             // found.
             if (!myRenderModeActive || myRenderTier != RenderTier::PathTracing ||
-                myView.IsNull() || myPathTracingRefineTicksLeft <= 0) {
+                myView.IsNull()) {
                 stopPathTracingConvergence();
                 return;
             }
-            --myPathTracingRefineTicksLeft;
+            if (myPathTracingRefineTicksLeft > 0) {
+                --myPathTracingRefineTicksLeft;
+                // Handing over to the idle rate: the burst is spent, and the
+                // interval widens for the rest of the polish. Done here rather
+                // than on a second timer so there is one tick, one budget and
+                // one place a revert can be caught.
+                if (myPathTracingRefineTicksLeft == 0)
+                    myPathTracingRefineTimer->setInterval(pathTracingIdleIntervalMs());
+            } else if (myPathTracingIdleTicksLeft > 0) {
+                --myPathTracingIdleTicksLeft;
+            } else {
+                stopPathTracingConvergence();
+                return;
+            }
             // NOT scheduleRedraw(): its Invalidate() restarts the very
             // accumulation this tick exists to advance. See
             // scheduleAccumulationFrame()'s own comment for the measurement
@@ -4131,18 +4161,36 @@ void OcctViewWidget::startPathTracingConvergence()
             scheduleAccumulationFrame();
         });
     }
-    // kPathTracingConvergeMs / kIntervalMs ticks - restarted, not merely
-    // topped up, so a camera move mid-convergence gets the full window
-    // again, matching the path tracer's own accumulation buffer starting
-    // over the instant the view actually changes.
-    myPathTracingRefineTicksLeft = kPathTracingConvergeMs / myPathTracingRefineTimer->interval();
+    // Both budgets restarted, not merely topped up, so a camera move mid-
+    // convergence gets the full window again, matching the path tracer's own
+    // accumulation buffer starting over the instant the view actually changes.
+    myPathTracingRefineTicksLeft = kPathTracingConvergeMs / kPathTracingBurstIntervalMs;
+    myPathTracingIdleTicksLeft = kPathTracingIdlePasses;
+    myPathTracingRefineTimer->setInterval(kPathTracingBurstIntervalMs);
     myPathTracingRefineTimer->start();
+}
+
+int OcctViewWidget::pathTracingIdleIntervalMs() const
+{
+    // Derived from what the tier probe actually MEASURED this frame costing,
+    // not from a literal - the same number the probe compares against its
+    // threshold. On this machine a path-traced pass costs 3 ms, so the idle
+    // rate stays at the burst's own 50 ms and the GPU idles at about 6% duty;
+    // on a machine that scraped into this tier at several hundred milliseconds
+    // a frame, a fixed 50 ms tick would queue paints faster than they render
+    // and an orbit would have to wait behind them. Twice the frame cost keeps
+    // any GPU at roughly a third duty and keeps the input queue reachable,
+    // which is the responsiveness half of this bargain.
+    const int frameMs = myTierProbeTimings.pathTracingMs;
+    if (frameMs <= 0) return kPathTracingBurstIntervalMs;
+    return std::max(kPathTracingBurstIntervalMs, 2 * frameMs);
 }
 
 void OcctViewWidget::stopPathTracingConvergence()
 {
     if (myPathTracingRefineTimer != nullptr) myPathTracingRefineTimer->stop();
     myPathTracingRefineTicksLeft = 0;
+    myPathTracingIdleTicksLeft = 0;
 }
 
 bool OcctViewWidget::probeShadowPixelsDiffer()

@@ -1004,6 +1004,34 @@ always starts in modeling) strips the viewport down to the furniture and nothing
   `Redraw()` directly inside a `GlScope`. `scheduleAccumulationFrame()` — `update()` with no
   `Invalidate()` — is the tick's own route now, and the pair reads **grain 1 against 1,
   medians 2.4/255 apart**. `gui_smoke` pins both halves.
+- **The polish does not stop while the user is still looking.** The user gate on Phase 3 was
+  "it converges and looks right, but visible fine grain remains at rest", and the cause was
+  `kPathTracingConvergeMs` running out: 4000 ms at a 50 ms tick is 80 passes, and the image
+  then froze on whatever noise was left. That window is now the **burst** — the responsive
+  first polish after a camera move — and `kPathTracingIdlePasses` (1200) carries on at a
+  wider interval afterwards, on one timer with two budgets, both restarted by every
+  `applyCameraState()`. Measured on the composited window, mean neighbour delta ×1000 over
+  open floor: **1794 frozen at depth 66**, against **1201** at 10 s, **445** at 30 s and
+  **237** at 60 s — four times cleaner at half a minute, seven at one. The idle interval is
+  `max(50 ms, 2 × the tier probe's measured frame cost)`, so a GPU that scraped into this
+  tier at several hundred milliseconds a frame polishes at its own pace instead of queueing
+  paints an orbit would have to wait behind.
+- **OCCT's sampling knobs do not help here, and that is a measurement, not an assumption.**
+  At equal wall clock and equal depth (~160 passes, 10 s), `RadianceClampingValue` at 3.0 and
+  at 1.5 measured 1431 and 1413 against the default 30.0's 1450 — inside the ~20%
+  run-to-run spread, which is what a studio scene lit by one soft key should do, there being
+  no fireflies anywhere near a clamp of 30. `AdaptiveScreenSampling` **off** measured 1861
+  and p95 7 against 4: meaningfully **worse**, so the existing choice is confirmed rather
+  than changed. Nothing was adopted; the win is depth, not parameters.
+- **An export empties the buffer the user is watching.** `V3d_View::Dump()` restarts OCCT's
+  accumulation — `awaitPathTracingConvergence()` already recorded that, which is why the
+  export drives a fixed pass count rather than sampling until it converges — and the
+  consequence nobody had followed through is that the frame left *on screen* after a
+  screenshot is a single sample: measured at median (147,145,144) and grain 6 against the
+  (196,195,192) and grain 1 it had been. `saveSnapshot()` therefore restarts the convergence
+  and zeroes `accumulationDepth()`, so the picture polishes back within the burst window and
+  the counter keeps meaning what its name says — a suite waiting on it to recover was
+  otherwise already past its target before the first fresh frame arrived.
 
 ### Milestone 4: two windows, Mirror, links and render tiers
 

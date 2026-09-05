@@ -437,7 +437,18 @@ void skipByEnvironment(int checks, const QString& why)
 //        action is unchecked afterwards.
 //
 // 2541 + 51 = 2592.
-constexpr int kCheckFloor = 2592;
+//
+// The user-gate round on Phase 3 adds TWO, both in that same real-tick block
+// and both about the half of it the gate rejected - the render freezing on its
+// residual grain when the burst window ran out. The idle refinement carries on
+// past that window (burst budget spent, idle budget live, depth past what the
+// burst alone can reach - one claim, one check), and an export taken from the
+// deeper rest carries the depth with it. Skipped-by-environment along with the
+// other two on any GPU whose tier is not PathTracing, so the total is the same
+// on every machine. It adds a THIRD alongside them: an export's Dump() empties
+// the accumulation buffer it reads, so saveSnapshot() restarts the convergence
+// and the user is not left looking at a single sample. 2592 + 3 = 2595.
+constexpr int kCheckFloor = 2595;
 
 void check(bool condition, const QString& what)
 {
@@ -20430,15 +20441,99 @@ int main(int argc, char* argv[])
                                      "against the %3 asked for (a tick wired back to "
                                      "scheduleRedraw() cannot exceed 1)")
                           .arg(reached).arg(drive.elapsed()).arg(kTargetDepth));
+
+                // AND IT CARRIES ON PAST THE BURST WINDOW. The user gate on
+                // this phase was "the render converges and looks right, but
+                // visible fine grain remains at rest", and the cause was this
+                // budget running out: 4000 ms at a 50 ms tick is 80 passes and
+                // then the image froze on whatever noise was left. Measured on
+                // the composited window, mean neighbour delta over open floor:
+                // 1794 (x1000) at the frozen depth of 66, against 445 at 30 s
+                // and 237 at 60 s once the idle refinement carries it - four
+                // and seven times cleaner for work the GPU only does while
+                // nothing is happening.
+                //
+                // Bounded, not a 30 s wait: depth 100 is one pass past the 80
+                // the burst alone can reach, which is all it takes to prove the
+                // second budget is real. The three assertions are one claim -
+                // the burst is SPENT, the idle budget is LIVE, and the depth is
+                // past what the burst alone could ever produce - so a revert to
+                // a single budget fails on every machine rather than on a race.
+                constexpr int kPastBurstDepth = 100;
+                constexpr int kIdleCapMs = 6000;
+                QElapsedTimer idle;
+                idle.start();
+                while (rview->accumulationDepth() < kPastBurstDepth &&
+                       idle.elapsed() < kIdleCapMs) {
+                    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                }
+                const int burstPasses = 4000 / 50;
+                check(rview->accumulationDepth() > burstPasses &&
+                          rview->pathTracingRefineTicksLeft() == 0 &&
+                          rview->pathTracingIdleTicksLeft() > 0 &&
+                          rview->pathTracingStillRefining(),
+                      QStringLiteral("and it keeps refining PAST the burst window - %1 frames "
+                                     "deep against the %2 the burst alone can reach, burst "
+                                     "budget spent, %3 idle passes still to come")
+                          .arg(rview->accumulationDepth()).arg(burstPasses)
+                          .arg(rview->pathTracingIdleTicksLeft()));
+
+                // An export taken from that deeper rest carries the depth with
+                // it - the coordinator's "it should for free, verify". It is
+                // free because saveSnapshot() drives awaitPathTracingConvergence()
+                // onto the SAME on-screen accumulation buffer the idle tick has
+                // been filling and then Dumps it, rather than starting a render
+                // of its own. Verified as grain, not as tone: the existing
+                // converged-export check above already pins the tone, and tone
+                // is exactly what an under-converged frame gets right last.
+                const QString deepPath = outDir + QStringLiteral("/render-export-deep.png");
+                const bool deepSaved = rview->saveSnapshot(deepPath);
+                const QImage deepShot(deepPath);
+                if (deepSaved && !deepShot.isNull()) {
+                    check(medianNeighbourDelta(deepShot, 0) <= 4,
+                          QStringLiteral("and an export taken from that deeper rest is at least "
+                                         "as clean as the screen it was taken from (median "
+                                         "neighbour delta %1, at most 4)")
+                              .arg(medianNeighbourDelta(deepShot, 0)));
+                } else {
+                    skipByEnvironment(1,
+                          QStringLiteral("the deep-rest export could not be measured "
+                                         "(saveSnapshot() failed, or the PNG did not reload)"));
+                }
+
+                // AND THE EXPORT GIVES THE SCREEN BACK WHAT IT TOOK. Dump()
+                // empties the accumulation buffer it reads, so the frame left
+                // on screen straight after a screenshot is a single sample -
+                // measured, before the repair, as median (147,145,144) against
+                // the (196,195,192) it had been and grain 6 against 1.
+                // saveSnapshot() restarts the convergence for exactly that
+                // reason, and this is the pin: the timer is armed again, and
+                // the polish actually runs, which is what the capture below
+                // then reads.
+                check(rview->pathTracingStillRefining(),
+                      QStringLiteral("and the export restarts the polish it consumed - Dump() "
+                                     "empties the buffer it reads, so the timer is armed again "
+                                     "(%1 burst, %2 idle) rather than leaving the user looking "
+                                     "at a single sample")
+                          .arg(rview->pathTracingRefineTicksLeft())
+                          .arg(rview->pathTracingIdleTicksLeft()));
+                QElapsedTimer recover;
+                recover.start();
+                while (rview->accumulationDepth() < kTargetDepth &&
+                       recover.elapsed() < kDriveCapMs) {
+                    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                }
             } else {
                 // Every other tier renders a full frame per Redraw and has no
                 // accumulation buffer to advance, so there is no timer at all -
                 // startPathTracingConvergence() is only called for PathTracing.
                 // Accounted rather than silently dropped, this file's rule.
-                skipByEnvironment(2,
+                skipByEnvironment(5,
                       QStringLiteral("PathTracing is not this session's tier, so there is no "
-                                     "convergence timer to drive and no accumulation to "
-                                     "advance - the two tick assertions do not apply"));
+                                     "convergence timer to drive, no accumulation to advance, "
+                                     "no idle refinement past the burst window, no "
+                                     "depth-carrying export and no buffer for an export to "
+                                     "empty - the five tick assertions do not apply"));
                 // The rasterized tiers still need a current frame under the
                 // capture below, and for them a plain repaint IS the whole
                 // render - nothing accumulates, so nothing is being modelled

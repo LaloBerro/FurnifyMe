@@ -176,6 +176,14 @@ public:
     // a tick wired to scheduleAccumulationFrame() climbs by one per tick. A
     // revert therefore fails a bounded, deterministic assertion instead of one
     // that depends on whether a timer window happened to still be open.
+    //
+    // An Invalidate() is not the only thing that throws the accumulation away:
+    // V3d_View::Dump() EMPTIES the buffer it reads (awaitPathTracingConvergence()
+    // records the measurement), so saveSnapshot() zeroes this too. Without that
+    // the counter kept climbing across an export while OCCT started again from
+    // one sample, and a suite waiting on it to "recover" was already past its
+    // target before the first fresh frame - the counter has to mean what its
+    // name says or every assertion standing on it is measuring nothing.
     int accumulationDepth() const { return myAccumulationDepth; }
 
     // Ticks left in the live path-tracing convergence window, 0 when no window
@@ -185,6 +193,17 @@ public:
     // against a hand-driven paint loop - which is precisely the coverage gap
     // the whole-branch review named.
     int pathTracingRefineTicksLeft() const { return myPathTracingRefineTicksLeft; }
+    // Passes left in the IDLE refinement that carries on after the burst
+    // window - the half the user gate on this phase asked for. Non-zero
+    // whenever the render is still quietly polishing itself; both counters at
+    // zero with the timer stopped is the only resting state where the picture
+    // is genuinely final.
+    int pathTracingIdleTicksLeft() const { return myPathTracingIdleTicksLeft; }
+    // Whether either budget is still live - "is this render still improving".
+    bool pathTracingStillRefining() const
+    {
+        return myPathTracingRefineTicksLeft > 0 || myPathTracingIdleTicksLeft > 0;
+    }
 
     void displaySolid(int id, const TopoDS_Shape& shape);
     void removeSolid(int id);
@@ -1088,7 +1107,33 @@ public:
     // passes is a little under half the noise of 30 for work the GPU only
     // does while the camera is at rest, in a mode the user entered
     // specifically to look at a picture.
+    // specifically to look at a picture.
+    //
+    // IT IS NO LONGER WHERE THE POLISHING STOPS - it is where the FAST rate
+    // stops. The user gate on this phase was "the render converges and looks
+    // right, but visible fine grain remains at rest", and the diagnosis was
+    // exactly this constant: the tick ran out after 80 passes and froze
+    // whatever noise was left. Every path-traced viewport worth the name keeps
+    // refining while nothing changes, so this window is now the BURST - the
+    // responsive first polish after a camera move - and kPathTracingIdlePasses
+    // below carries on afterwards at a wider interval.
     static constexpr int kPathTracingConvergeMs = 4000;
+    // The burst's tick interval, and the floor under the idle one. Was a local
+    // constant inside startPathTracingConvergence(); named here because the
+    // burst budget above is quoted in passes against it and two rates now read
+    // it.
+    static constexpr int kPathTracingBurstIntervalMs = 50;
+    // How many further accumulation passes the idle refinement drives once the
+    // burst window is spent, before it stops for good. Not "forever": an app
+    // sitting untouched in render mode should not hold the GPU indefinitely,
+    // and past a certain depth another sample changes no pixel a person can
+    // see. 1200 on top of the burst's 80 is a total of 1280, and path-tracing
+    // variance falls as 1/sqrt(samples) - so the resting image ends up
+    // sqrt(1280/80) = FOUR TIMES cleaner than the frozen frame the gate
+    // rejected. At the 50 ms this machine's idle rate resolves to that is a
+    // little over a minute of quiet polishing; see pathTracingIdleIntervalMs()
+    // for why a slower GPU spends it at its own pace instead.
+    static constexpr int kPathTracingIdlePasses = 1200;
 
     // The hard cap on how long an EXPORT will drive convergence before it
     // writes whatever it has - see awaitPathTracingConvergence(). The resting
@@ -1621,16 +1666,28 @@ private:
     // paintEvent once the gesture that triggered the first one (a click, an
     // orbit) lets go, so without this the studio shot would freeze on its
     // FIRST, noisiest frame instead of the "converges in ~1-2s at rest" look
-    // the brief calls for. Bounded by kPathTracingConvergeMs rather than run
-    // forever - OCCT 8.0.1 exposes no "is this frame already converged" query
-    // at this widget's disposal (checked; V3d_View offers Invalidate()/
-    // IsInvalidated(), nothing PT-specific), so this is a documented,
-    // time-boxed approximation rather than a query-driven stop condition -
-    // and restarted on every applyCameraState(), the one place every camera
-    // move already funnels through, on the same reasoning a moved camera
-    // resets the path tracer's own accumulation buffer.
+    // the brief calls for.
+    //
+    // TWO RATES, ONE TIMER. kPathTracingConvergeMs of fast ticks
+    // (kPathTracingBurstIntervalMs) is the responsive first polish after a
+    // camera move; kPathTracingIdlePasses of wider ones then carry the image
+    // the rest of the way, because a render that stops improving while the
+    // user is still looking at it is exactly the grain the user gate on this
+    // phase rejected. Both budgets are restarted, not topped up, on every
+    // applyCameraState() - the one place every camera move already funnels
+    // through - on the same reasoning a moved camera resets the path tracer's
+    // own accumulation buffer.
+    //
+    // Still time-boxed rather than query-driven, and still for the same
+    // reason: OCCT 8.0.1 exposes no "is this frame already converged" query at
+    // this widget's disposal (checked; V3d_View offers Invalidate()/
+    // IsInvalidated(), nothing PT-specific). The box is simply four times
+    // deeper in samples than it was, which is twice as clean.
     void startPathTracingConvergence();
     void stopPathTracingConvergence();
+    // The idle rate, derived from the tier probe's own measured frame cost -
+    // see the definition. Never faster than the burst rate.
+    int pathTracingIdleIntervalMs() const;
     // Every directional light this viewer owns, told to cast shadows or not.
     // One place, because both the tier-2 probe and applyRenderTier() need it.
     void setLightsCastShadows(bool cast);
@@ -2013,7 +2070,11 @@ private:
     // PathTracing-tier activation this session; a QTimer child of `this`,
     // cleaned up by Qt's own parent/child ownership.
     class QTimer* myPathTracingRefineTimer = nullptr;
+    // The burst budget (fast rate) and the idle one (wide rate) that follows
+    // it. One timer, two budgets, so there is one tick and one place a revert
+    // can be caught.
     int myPathTracingRefineTicksLeft = 0;
+    int myPathTracingIdleTicksLeft = 0;
 
     // Frames painted since the last Invalidate - see accumulationDepth().
     int myAccumulationDepth = 0;
