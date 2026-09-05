@@ -471,7 +471,7 @@ void skipByEnvironment(int checks, const QString& why)
 // route, plus one more each on the axis-gizmo's Top and Bottom tips inside
 // the Task 6.2 named-views loop (the other four tips have nothing analogous
 // - their azimuth is already implied by construction). 2630 + 3 = 2633.
-constexpr int kCheckFloor = 2633;
+constexpr int kCheckFloor = 2682;
 
 void check(bool condition, const QString& what)
 {
@@ -22991,6 +22991,137 @@ int main(int argc, char* argv[])
                   .arg(linkToastOffenders.isEmpty()
                            ? QStringLiteral("none")
                            : linkToastOffenders.join(QStringLiteral(", "))));
+    }
+
+    // --- hover keeps glowing while an edge is selected ------------------------
+    // Milestone 5's user-reported defect. The SOURCE fix (mouseMoveEvent()
+    // schedules a repaint whenever MoveTo()'s detected owner changes,
+    // independently of updateEdgeDimension()'s own suppression - see
+    // OcctViewWidget.cpp's myLastHoverOwner comment) is re-applied unchanged
+    // from the first attempt; what changed is THIS block's placement. The
+    // first attempt sat mid-file and its scene footprint (an extra body, a
+    // bumped document id, camera state) shifted geometry under nine later
+    // position-sensitive checks - all eleven failures A/B'd to that commit
+    // while the parent passed 0 on the same machine and display state. At
+    // the suite's very end nothing runs after it, so its footprint can shift
+    // nothing, which is the property the first placement lacked.
+    {
+        RequiredTempDir hoverFixDir;
+        MainWindow probe(nullptr, /*persistProgress=*/false, hoverFixDir.path());
+        probe.setAttribute(Qt::WA_ShowWithoutActivating);
+        probe.resize(900, 700);
+        probe.show();
+        settle(300);
+        OcctViewWidget* hview = probe.view();
+        hview->setAnimationsEnabled(false);
+        enterFreshFurniture(probe);
+
+        check(buildBody(probe, 0.35, 0.35, 0.55, 0.55, 80.0),
+              "a body for the hover-while-selected probe");
+        QAction* edgeAction = action(probe, QStringLiteral("Select Edges"));
+        check(edgeAction != nullptr, "the edge-mode action exists");
+        if (edgeAction) edgeAction->trigger();
+        settle(150);
+
+        // Select one straight edge by clicking its projected midpoint, read
+        // back through selectedEdge() so the assertion is about the edge the
+        // app actually picked (the pattern the edge-length block establishes).
+        TopoDS_Edge picked;
+        for (const DocumentModel::Solid& solid : probe.document().solids()) {
+            for (TopExp_Explorer it(solid.shape, TopAbs_EDGE); it.More(); it.Next()) {
+                const TopoDS_Edge candidate = TopoDS::Edge(it.Current());
+                TopoDS_Vertex v1, v2;
+                TopExp::Vertices(candidate, v1, v2);
+                if (v1.IsNull() || v2.IsNull()) continue;
+                const gp_Pnt a = BRep_Tool::Pnt(v1);
+                const gp_Pnt b = BRep_Tool::Pnt(v2);
+                if (a.Distance(b) < 1.0) continue;
+                const gp_Pnt mid(0.5 * (a.X() + b.X()), 0.5 * (a.Y() + b.Y()),
+                                 0.5 * (a.Z() + b.Z()));
+                QPoint at;
+                if (!hview->projectToScreen(mid, at)) continue;
+                if (!hview->rect().adjusted(40, 40, -40, -40).contains(at)) continue;
+                clickAt(hview, QPointF(at));
+                settle(100);
+                const TopoDS_Edge got = hview->selectedEdge();
+                if (got.IsNull() || !got.IsSame(candidate)) continue;
+                picked = got;
+                break;
+            }
+            if (!picked.IsNull()) break;
+        }
+        check(!picked.IsNull(), "an edge is selected for the hover to glow beside");
+
+        // A DIFFERENT straight edge to hover, found the same way - projected,
+        // on-screen, and not the picked one.
+        QPoint hoverAt;
+        bool hoverFound = false;
+        for (const DocumentModel::Solid& solid : probe.document().solids()) {
+            for (TopExp_Explorer it(solid.shape, TopAbs_EDGE); it.More(); it.Next()) {
+                const TopoDS_Edge candidate = TopoDS::Edge(it.Current());
+                if (!picked.IsNull() && candidate.IsSame(picked)) continue;
+                TopoDS_Vertex v1, v2;
+                TopExp::Vertices(candidate, v1, v2);
+                if (v1.IsNull() || v2.IsNull()) continue;
+                const gp_Pnt a = BRep_Tool::Pnt(v1);
+                const gp_Pnt b = BRep_Tool::Pnt(v2);
+                if (a.Distance(b) < 1.0) continue;
+                const gp_Pnt mid(0.5 * (a.X() + b.X()), 0.5 * (a.Y() + b.Y()),
+                                 0.5 * (a.Z() + b.Z()));
+                QPoint at;
+                if (!hview->projectToScreen(mid, at)) continue;
+                if (!hview->rect().adjusted(40, 40, -40, -40).contains(at)) continue;
+                hoverAt = at;
+                hoverFound = true;
+                break;
+            }
+            if (hoverFound) break;
+        }
+        check(hoverFound, "a second, different edge is on screen to hover");
+
+        // Baseline with the cursor clear of everything, then hover the second
+        // edge WITHOUT clicking. Two oracles, deliberately: the paint counter
+        // proves the fix's mechanism fired (a repaint was SCHEDULED for the
+        // owner change - the thing the old code failed to do exactly when the
+        // dimension was suppressed by the selected edge's bevel arrow), and
+        // the Dump proves the user-visible truth (hover tint on screen while
+        // a selection exists) on hardware regardless of which framebuffer
+        // OCCT's immediate mode landed in.
+        moveTo(hview, QPointF(6, 6));
+        settle(120);
+        const QString basePath = outDir + QStringLiteral("/hover-selected-base.png");
+        const QString glowPath = outDir + QStringLiteral("/hover-selected-glow.png");
+        const bool baseDumped = hview->saveSnapshot(basePath);
+        const int paintsBefore = hview->totalPaintCount();
+        if (hoverFound) moveTo(hview, QPointF(hoverAt));
+        settle(150);
+        const bool glowDumped = hview->saveSnapshot(glowPath);
+        check(hview->totalPaintCount() > paintsBefore,
+              "hovering a different edge scheduled a real repaint despite the "
+              "selected edge suppressing the dimension");
+
+        const QColor hoverTint = Theme::highlightHover();
+        const auto tintCount = [&hoverTint](const QString& path) {
+            const QImage shot(path);
+            if (shot.isNull()) return -1;
+            int count = 0;
+            for (int y = 0; y < shot.height(); ++y)
+                for (int x = 0; x < shot.width(); ++x)
+                    if (colorDistance(shot.pixelColor(x, y), hoverTint) < 60.0) ++count;
+            return count;
+        };
+        const int baseTint = baseDumped ? tintCount(basePath) : -1;
+        const int glowTint = glowDumped ? tintCount(glowPath) : -1;
+        check(baseDumped && glowDumped && baseTint >= 0 && glowTint >= 0,
+              "both hover-while-selected dumps were written, so the comparison "
+              "below is not vacuous");
+        check(glowTint > baseTint + 30,
+              QStringLiteral("the hover glow is really on screen while an edge is "
+                             "selected (%1 tinted pixels hovering against %2 not)")
+                  .arg(glowTint)
+                  .arg(baseTint));
+        check(!hview->selectedEdge().IsNull() && hview->selectedEdge().IsSame(picked),
+              "and the selection itself survived the hover untouched");
     }
 
     // The coverage floor, asserted OUTSIDE check() on purpose: an assertion
