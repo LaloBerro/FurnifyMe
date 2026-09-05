@@ -363,17 +363,38 @@ Aspect_Drawable currentGlNativeWindow()
 
 QSurfaceFormat OcctViewWidget::surfaceFormat()
 {
+    // FINALIZED IN PHASE 3 OF THE QOPENGLWIDGET MIGRATION, against measured
+    // tier outcomes rather than against what the request looks like it should
+    // buy. Each of the three lines below is a decision with a measurement
+    // behind it; a fourth is a decision NOT to ask for something.
     QSurfaceFormat format;
-    // OCCT's 3D view wants both, and neither is guaranteed by Qt's default.
+    // OCCT's 3D view wants both, and neither is guaranteed by Qt's default. A
+    // request is not a grant, so gui_smoke reads the two back off the LIVE
+    // context rather than off this object: a viewport with no depth buffer
+    // renders a plausible scene with the wrong faces in front, silently.
     format.setDepthBufferSize(24);
     format.setStencilBufferSize(8);
-    // Compatibility rather than core: OCCT's ray-tracing tiers have
-    // historically wanted the fixed-function-capable context, and Phase 1 is
-    // the hosting swap alone - Phase 3 is what re-measures the tiers and
-    // settles this for real. initializeViewer() feeds the same choice through
-    // to OpenGl_Caps::contextCompatible, so the driver and the surface cannot
-    // disagree about which profile is live.
+    // Compatibility rather than core. Phase 1 chose it on OCCT's historical
+    // preference and said so; Phase 3 kept it on a measurement - on this
+    // machine the tier probe reaches PathTracing through a compatibility
+    // context, timing one GPU-synchronized path-traced redraw at 3 ms against
+    // a 1500 ms threshold, and every calibrated pixel in the render block
+    // (floor blend, both shadow ratios, the converged export) reads exactly
+    // what it read through the pre-migration native window. There is nothing
+    // here for a core profile to win back. initializeViewer() feeds the same
+    // choice through to OpenGl_Caps::contextCompatible, so the driver and the
+    // surface cannot disagree about which profile is live.
     format.setProfile(QSurfaceFormat::CompatibilityProfile);
+    // AND DELIBERATELY NO setSamples(). Multisampling on the DEFAULT
+    // framebuffer is the one attribute that would actively break this
+    // hosting: Qt would hand the widget a multisampled FBO, OCCT would wrap
+    // it as its default framebuffer, and every pixel this project treats as
+    // ground truth is read back out of that buffer - V3d_View::Dump, the tier
+    // probe's own shadow test, the floor blend, the shadow ratios. A
+    // multisample colour attachment cannot be read without a resolve step
+    // nothing here performs. Antialiasing is OCCT's to do inside the scene
+    // (Graphic3d_RenderingParams::IsAntialiasingEnabled, and the ray-traced
+    // tiers' own sampling), where it costs the measurements nothing.
     return format;
 }
 
@@ -636,37 +657,51 @@ bool OcctViewWidget::attachGlWindow()
     myHostWindow->SetSize(std::max(1, device.width()), std::max(1, device.height()));
 
     myView->SetWindow(myHostWindow, bound->RenderingContext());
-    // SetImmediateModeDrawToFront(false) BELONGS HERE ON THE ARGUMENT, AND IS
-    // PARKED ON THE MEASUREMENT (fix round 1, 2026-09-04). Graphic3d_CView
-    // documents the flag default as TRUE, meaning immediate structures - the
-    // dynamic hover highlight, the manipulator mid-drag - are drawn "directly
-    // to the front buffer", and warns such content "will be missed in image
-    // dump since it is performed from back buffer". A QOpenGLWidget has no
-    // front buffer at all, so the reasoning that it should be turned off here
-    // is sound and was acted on.
+    // SetImmediateModeDrawToFront(false) IS NOT CALLED HERE, AND THAT IS A
+    // SETTLED DECISION, NOT AN OMISSION (Phase 3, 2026-09-04).
     //
-    // Then it was A/B-measured against the parent build, which is this
-    // project's law before any claim about a rendering change, and it moved a
-    // pixel it had no business moving: with the flag set, the path-traced
-    // BACKDROP renders (232,231,229) where the calibrated token is
-    // (193,191,186), and a user-chosen background lands 118 away from the
-    // colour they picked instead of 26. Everything else in the frame is
-    // byte-identical - the floor pixel does not move at all - so it is
-    // specifically the clear colour's trip through OCCT's main-scene
-    // framebuffer and its blit that the flag re-routes. Turning the one line
-    // off restored the calibration exactly (2484 checks, 0 failures) and
-    // turning it on broke it, deterministically, on the same build.
+    // The argument for calling it is real and was acted on first.
+    // Graphic3d_CView documents the flag's default as TRUE, meaning immediate
+    // structures - the dynamic hover highlight, the manipulator mid-drag - are
+    // drawn "directly to the front buffer", and warns that such content "will
+    // be missed in image dump since it is performed from back buffer". A
+    // QOpenGLWidget has no front buffer at all.
     //
-    // Two reasons it stays off in Phase 1 rather than shipping with a fudged
-    // constant. kPathTracingBackdropGain is a MEASURED calibration and
-    // re-deriving it against a changed compositing path is Phase 3's own
-    // remit, not a number to guess at here. And the harm the flag guards
-    // against is not real in this hosting layer: OCCT's "front buffer" writes
-    // land in the bound default framebuffer, which is exactly the one Qt
-    // composites and exactly the one V3d_View::Dump reads - so the immediate
-    // layer reaches both. That is not left as an assertion: gui_smoke Dumps a
-    // hovered body and finds the dynamic highlight in the pixels, which is the
-    // property this flag was going to buy.
+    // Phase 1 measured it and parked it; Phase 3 re-measured it in the
+    // finished compositing layer, on one binary with the flag behind a
+    // throw-away switch, and made the parking permanent. What the flag buys:
+    //
+    //   - It DOES silence a real OCCT error. With the flag at its default,
+    //     OCCT allocates a separate immediate-scene framebuffer and asks for
+    //     its colour attachment as GL_SRGB8_ALPHA8; this driver refuses with
+    //     GL_INVALID_OPERATION and OCCT logs "Immediate FBO WxH@0
+    //     initialization has failed" twice per run. With the flag set, no such
+    //     FBO is allocated and the log is clean. THE ERROR IS HARMLESS: OCCT
+    //     falls back on its own, the frame is correct, and it is logged
+    //     identically at 100% and at 150% scaling - a 100% run carrying both
+    //     messages passes every check in the suite.
+    //
+    // What it costs, all measured on the same build, same scene, same machine:
+    //
+    //   - THE USER STOPS SEEING WHAT THE PROBES MEASURE. Composited window
+    //     against V3d_View::Dump, as median colour: 2.4/255 apart without the
+    //     flag, 97.6 apart with it - and the picture says the same thing the
+    //     number does, the studio floor rendering a full step darker than the
+    //     backdrop it is calibrated to dissolve into, seam and all, while the
+    //     Dump every calibration in this file is read from stays correct.
+    //   - A user-chosen background lands 118/255 from the colour they picked
+    //     instead of 26. That is Phase 1's number, reproduced exactly in a
+    //     codebase whose whole overlay compositing changed in between.
+    //
+    // And the harm it guards against is measured NOT to exist in this hosting
+    // layer: OCCT's "front buffer" writes land in the bound default
+    // framebuffer, which is exactly the one Qt composites and exactly the one
+    // Dump reads. gui_smoke pins that rather than asserting it - it Dumps a
+    // hovered body and finds 13,941 highlight-tinted pixels against 0 on the
+    // unhovered frame, with and without the flag alike.
+    //
+    // So: a cosmetic log line against the render's correctness. The log line
+    // loses.
     myView->MustBeResized();
     myView->Invalidate();
     myAttachedContext = context();
@@ -854,6 +889,14 @@ void OcctViewWidget::scheduleRedraw()
     // when only the immediate layer changed, and every caller of this is
     // telling us the scene itself moved.
     myView->Invalidate();
+    update();
+}
+
+void OcctViewWidget::scheduleAccumulationFrame()
+{
+    if (myView.IsNull()) return;
+    // Deliberately NO Invalidate() - see the header. This is the one caller
+    // that is not reporting a change to the scene.
     update();
 }
 
@@ -4020,7 +4063,11 @@ void OcctViewWidget::startPathTracingConvergence()
                 return;
             }
             --myPathTracingRefineTicksLeft;
-            scheduleRedraw();
+            // NOT scheduleRedraw(): its Invalidate() restarts the very
+            // accumulation this tick exists to advance. See
+            // scheduleAccumulationFrame()'s own comment for the measurement
+            // that found it.
+            scheduleAccumulationFrame();
         });
     }
     // kPathTracingConvergeMs / kIntervalMs ticks - restarted, not merely
@@ -4362,7 +4409,39 @@ OcctViewWidget::RenderTier OcctViewWidget::probeRenderTier()
     // duration - Qt only guarantees a current context inside its own three GL
     // callbacks. See GlScope on the header.
     GlScope gl(this);
+    // Every field back to its "nothing measured" state before this run writes
+    // any of them, so a second probe can never leave one tier's numbers
+    // standing beside another tier's answer.
+    myTierProbeTimings = TierProbeTimings();
+    myTierProbeTimings.probed = true;
     if (myView.IsNull()) return RenderTier::Plain;
+
+    // A REDRAW THAT IS NOT WAITED FOR IS NOT A TIMING, and the QOpenGLWidget
+    // migration is what took the wait away. This probe's whole method is "time
+    // one redraw and compare it against a threshold", which only measures
+    // anything if the call returns after the GPU has done the work. It used to:
+    // OCCT owned the surface and ended Redraw() with a buffer swap, and a swap
+    // is a synchronization point. Qt owns the frame now, the driver is
+    // configured with buffersNoSwap, and GL commands are asynchronous - so the
+    // timer was measuring how long it takes to SUBMIT a path-traced frame, not
+    // to render one. Measured on this machine in the wrapped context: the
+    // first path-traced redraw timed 1 ms against a 1500 ms threshold, which
+    // is not a fast GPU, it is no measurement at all - every GPU would have
+    // been handed the top tier, including the ones this probe exists to
+    // protect from it.
+    //
+    // glFinish() rather than glFlush(): flush only guarantees the commands
+    // start, and "started" is exactly the answer that was already useless
+    // here. Taken once, before the timing begins as well as after each redraw,
+    // so no work queued by whatever ran before this probe is charged to the
+    // first tier it tries.
+    const Handle(OpenGl_Context) glContext = hostGlContext(myView);
+    myTierProbeTimings.gpuSyncAvailable =
+        !glContext.IsNull() && glContext->core11fwd != nullptr;
+    auto finishGpuWork = [this, &glContext]() {
+        if (myTierProbeTimings.gpuSyncAvailable) glContext->core11fwd->glFinish();
+    };
+    finishGpuWork();
 
     // Tier 0: path tracing - global illumination and adaptive screen
     // sampling on top of GPU ray tracing, timed against a single redraw on
@@ -4381,13 +4460,20 @@ OcctViewWidget::RenderTier OcctViewWidget::probeRenderTier()
     // suite's PT checks already skip-by-environment on a machine whose
     // probe lands elsewhere, so switching it costs nothing else.
     if (kPathTracingEnabled) {
+        myTierProbeTimings.pathTracingAttempted = true;
         try {
             applyRenderTier(RenderTier::PathTracing);
             QElapsedTimer timer;
             timer.start();
             myView->Redraw();
-            pathTracingFast = timer.elapsed() <= kPathTracingProbeThresholdMs;
+            finishGpuWork();
+            myTierProbeTimings.pathTracingMs = static_cast<int>(timer.elapsed());
+            // The RECORDED number, not a second, later reading of the same
+            // timer - the decision and the number the suite audits it against
+            // have to be one measurement.
+            pathTracingFast = myTierProbeTimings.pathTracingMs <= kPathTracingProbeThresholdMs;
         } catch (const Standard_Failure&) {
+            myTierProbeTimings.pathTracingRefused = true;
             pathTracingFast = false;
         }
     }
@@ -4401,13 +4487,17 @@ OcctViewWidget::RenderTier OcctViewWidget::probeRenderTier()
     // rather than take the app down, and OCCT reports that refusal as a
     // Standard_Failure here rather than a bool return.
     bool rayTracingFast = false;
+    myTierProbeTimings.rayTracingAttempted = true;
     try {
         applyRenderTier(RenderTier::RayTracing);
         QElapsedTimer timer;
         timer.start();
         myView->Redraw();
-        rayTracingFast = timer.elapsed() <= kRenderTierProbeThresholdMs;
+        finishGpuWork();
+        myTierProbeTimings.rayTracingMs = static_cast<int>(timer.elapsed());
+        rayTracingFast = myTierProbeTimings.rayTracingMs <= kRenderTierProbeThresholdMs;
     } catch (const Standard_Failure&) {
+        myTierProbeTimings.rayTracingRefused = true;
         rayTracingFast = false;
     }
     if (rayTracingFast) return RenderTier::RayTracing;
@@ -4416,7 +4506,9 @@ OcctViewWidget::RenderTier OcctViewWidget::probeRenderTier()
     // 2: a shadow-mapped directional light, accepted only once a real
     // Dump() shows a pixel actually moved.
     applyRenderTier(RenderTier::Shadows);
-    if (probeShadowPixelsDiffer()) return RenderTier::Shadows;
+    myTierProbeTimings.shadowsAttempted = true;
+    myTierProbeTimings.shadowsPixelsDiffered = probeShadowPixelsDiffer();
+    if (myTierProbeTimings.shadowsPixelsDiffered) return RenderTier::Shadows;
 
     // Nothing held up - stand plain, and undo the shadow flag
     // probeShadowPixelsDiffer() may have left set.

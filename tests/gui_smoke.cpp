@@ -142,6 +142,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <vector>
 
 namespace {
 
@@ -404,7 +405,15 @@ void skipByEnvironment(int checks, const QString& why)
 // same shape of small, unreconciled slack a prior fix round's own audit left
 // unresolved rather than hand-chased past its budget; the floor is set to
 // the measured true total, per that same precedent. 2486 + 49 = 2535.
-constexpr int kCheckFloor = 2535;
+//
+// The migration's Phase 3 (render tiers in the new context) adds SIX, all in
+// the render-mode block and all of them measurements this phase's own findings
+// were made with: the tier probe's recorded timings and the assertion that the
+// tier it chose follows from them (2); and the Dump-against-screen pair - each
+// image's grain, the Dump's median anchored to the studio backdrop, and the
+// two medians agreeing (4). No check was removed, weakened or skipped.
+// 2535 + 6 = 2541, which a real run reports exactly (2540 checks + 1 skip).
+constexpr int kCheckFloor = 2541;
 
 void check(bool condition, const QString& what)
 {
@@ -1023,6 +1032,45 @@ QImage printWindowCapture(QWidget* widget, const QString& path)
     if (bitmap) DeleteObject(bitmap);
     DeleteDC(memory);
     ReleaseDC(nullptr, screen);
+
+    // CROP TO WHAT IS ACTUALLY ON A SCREEN. A window taller than the display
+    // is captured at its full GetWindowRect size, but DWM has no composited
+    // content for the part hanging off the bottom - it comes back as a band of
+    // undrawn white with a black corner, and longestBlackRun() then reports a
+    // full-width black line in a window that has nothing wrong with it. That
+    // is not a hypothetical: at QT_SCALE_FACTOR=1.5 this suite's own windows
+    // are 1239 device rows tall on a 1080-row display, and the two Appearance-
+    // panel sweeps failed on a 1768 px run at y=1179 - inside a strip the user
+    // cannot see and Windows never drew. Phase 2 of the QOpenGLWidget
+    // migration reported those two as an OCCT framebuffer error's fallout; a
+    // 100% A/B disproved that (the same OCCT error is logged at 100%, where
+    // both sweeps pass) and this is what they actually were.
+    //
+    // A crop, not a wider inset: an inset big enough to clear this strip would
+    // also stop sweeping rows that are genuinely the app's. At 100%, where the
+    // window fits, the intersection is the whole window and nothing changes.
+    // The display the window is on, NOT the virtual-desktop bounding box: with
+    // a second monitor taller than the primary one, that box covers rectangles
+    // no display actually occupies, and the intersection comes back as the
+    // whole window - a no-op that measured exactly as broken as no crop at all
+    // (this machine's virtual desktop is 4480x1920 around a 1920x1080 primary,
+    // and the crop had to be tried against it before that was visible).
+    if (!shot.isNull()) {
+        HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO info{};
+        info.cbSize = sizeof(MONITORINFO);
+        if (monitor != nullptr && GetMonitorInfo(monitor, &info)) {
+            const QRect screenRect(info.rcMonitor.left, info.rcMonitor.top,
+                                   info.rcMonitor.right - info.rcMonitor.left,
+                                   info.rcMonitor.bottom - info.rcMonitor.top);
+            const QRect visible =
+                QRect(rect.left, rect.top, width, height).intersected(screenRect);
+            if (visible.isValid() && visible.size() != QSize(width, height)) {
+                shot = shot.copy(QRect(visible.left() - rect.left, visible.top() - rect.top,
+                                       visible.width(), visible.height()));
+            }
+        }
+    }
     if (!shot.isNull()) shot.save(path);
     return shot;
 #else
@@ -1061,6 +1109,77 @@ double averageLuminance(const QImage& image, const QRect& region)
         }
     }
     return count > 0 ? sum / count : 0.0;
+}
+
+// The per-channel median colour of an image, ignoring `inset` pixels of frame
+// on every side - the one statistic that lets a V3d_View::Dump of the 3D area
+// and a PrintWindow capture of the whole composited window be compared without
+// mapping one into the other. Phase 3 of the QOpenGLWidget migration needed
+// exactly that comparison and could not have it any other way: mapping a
+// widget's logical rect into a PrintWindow capture needs a scale AND an offset
+// (Windows 11 hands back the invisible resize frame too), and a region a few
+// pixels out reports agreement exactly as loudly as genuine agreement does -
+// checkNoBlackLine()'s own comment says so, and this is the same evasion.
+//
+// A median rather than a mean because it is a MODE-seeking statistic: in
+// render mode the viewport is the furniture alone against a studio backdrop,
+// the shadow-catcher floor is calibrated to sit within a few units of that
+// backdrop, and everything else on screen (the body, the app bar) is a
+// minority of the pixels. So the median lands in the backdrop/floor cluster
+// from either image - which is precisely the pixel that the parked
+// SetImmediateModeDrawToFront experiment moved, and therefore the pixel that
+// answers "does what Dump() measures still equal what the user sees".
+// A mean would fold the app bar's near-black into the answer and would move
+// with the body's size rather than with the backdrop.
+QColor medianColour(const QImage& image, int inset)
+{
+    if (image.isNull()) return QColor();
+    std::vector<int> channel[3];
+    for (int y = inset; y < image.height() - inset; ++y) {
+        for (int x = inset; x < image.width() - inset; ++x) {
+            const QRgb p = image.pixel(x, y);
+            channel[0].push_back(qRed(p));
+            channel[1].push_back(qGreen(p));
+            channel[2].push_back(qBlue(p));
+        }
+    }
+    if (channel[0].empty()) return QColor();
+    int mid[3] = {0, 0, 0};
+    for (int c = 0; c < 3; ++c) {
+        const std::size_t half = channel[c].size() / 2;
+        std::nth_element(channel[c].begin(), channel[c].begin() + half, channel[c].end());
+        mid[c] = channel[c][half];
+    }
+    return QColor(mid[0], mid[1], mid[2]);
+}
+
+// How GRAINY an image is: the median absolute luminance difference between
+// horizontally adjacent pixels, ignoring `inset` pixels of frame. A converged
+// render (or any flat interface surface) reads 0-1; a path-traced frame that
+// has taken only its first sample or two is salt-and-pepper and reads far
+// higher. The median rather than a mean is what makes it immune to the
+// legitimate hard edges in the picture - a body outline, a card border, a
+// glyph - which are a tiny minority of adjacent pairs.
+//
+// Mapping-free and scale-free by construction, which is the point: it can be
+// asked of a viewport-sized V3d_View::Dump and of a whole-window PrintWindow
+// capture and the two answers are comparable, the same evasion medianColour()
+// makes for level.
+int medianNeighbourDelta(const QImage& image, int inset)
+{
+    if (image.isNull()) return -1;
+    std::vector<int> deltas;
+    for (int y = inset; y < image.height() - inset; ++y) {
+        for (int x = inset + 1; x < image.width() - inset; ++x) {
+            const QRgb a = image.pixel(x - 1, y);
+            const QRgb b = image.pixel(x, y);
+            deltas.push_back(std::abs(qGray(a) - qGray(b)));
+        }
+    }
+    if (deltas.empty()) return -1;
+    const std::size_t half = deltas.size() / 2;
+    std::nth_element(deltas.begin(), deltas.begin() + half, deltas.end());
+    return deltas[half];
 }
 
 // Confirms a floating card genuinely goes through Theme::paintSurface():
@@ -19671,6 +19790,67 @@ int main(int argc, char* argv[])
               "not a mismatched pair");
         check(rview->renderModeTierProbed(), "the tier is now cached for the session");
 
+        // --- the probe's own working, not just its answer (Phase 3) ----------
+        // The tier a machine reaches is a TIMING decision, and until Phase 3
+        // of the QOpenGLWidget migration nothing anywhere recorded the times
+        // it turned on: a session could drop from PathTracing to Shadows
+        // because one redraw went 40 ms over a threshold and the only visible
+        // consequence was a differently worded toast. These two checks pin the
+        // decision against its own measurement rather than reporting the
+        // outcome twice - the numbers ride in the message, which is where a
+        // GPU that is drifting toward the threshold stays visible.
+        const OcctViewWidget::TierProbeTimings timings = rview->tierProbeTimings();
+        check(timings.probed && timings.gpuSyncAvailable && timings.pathTracingAttempted &&
+                  (timings.pathTracingRefused || timings.pathTracingMs >= 0),
+              QStringLiteral("the tier probe recorded what it measured - path tracing %1, "
+                             "ray tracing %2, shadows %3")
+                  .arg(timings.pathTracingRefused
+                           ? QStringLiteral("refused by the driver")
+                           : QStringLiteral("%1 ms (threshold 1500)").arg(timings.pathTracingMs))
+                  .arg(!timings.rayTracingAttempted
+                           ? QStringLiteral("not reached")
+                           : timings.rayTracingRefused
+                                 ? QStringLiteral("refused by the driver")
+                                 : QStringLiteral("%1 ms (threshold 100)").arg(timings.rayTracingMs))
+                  .arg(!timings.shadowsAttempted
+                           ? QStringLiteral("not reached")
+                           : timings.shadowsPixelsDiffered
+                                 ? QStringLiteral("pixels differed")
+                                 : QStringLiteral("no pixel moved")));
+        // And the tier follows from those numbers. Each branch asserts both
+        // halves - the tier that WAS taken cleared its own threshold, and
+        // every better tier did not - so a probe that returned the right
+        // answer for the wrong reason fails here.
+        bool tierFollowsFromTimings = false;
+        switch (tier) {
+            case OcctViewWidget::RenderTier::PathTracing:
+                tierFollowsFromTimings = !timings.pathTracingRefused &&
+                                         timings.pathTracingMs >= 0 &&
+                                         timings.pathTracingMs <= 1500 &&
+                                         !timings.rayTracingAttempted;
+                break;
+            case OcctViewWidget::RenderTier::RayTracing:
+                tierFollowsFromTimings = (timings.pathTracingRefused ||
+                                          timings.pathTracingMs > 1500) &&
+                                         timings.rayTracingAttempted &&
+                                         !timings.rayTracingRefused &&
+                                         timings.rayTracingMs >= 0 &&
+                                         timings.rayTracingMs <= 100 &&
+                                         !timings.shadowsAttempted;
+                break;
+            case OcctViewWidget::RenderTier::Shadows:
+                tierFollowsFromTimings = timings.shadowsAttempted &&
+                                         timings.shadowsPixelsDiffered;
+                break;
+            case OcctViewWidget::RenderTier::Plain:
+                tierFollowsFromTimings = timings.shadowsAttempted &&
+                                         !timings.shadowsPixelsDiffered;
+                break;
+        }
+        check(tierFollowsFromTimings,
+              "and the tier it chose follows from those numbers - the tier taken "
+              "cleared its own threshold and no better one did");
+
         // --- PathTracing's own measured-pixel proof --------------------------
         // "Trust the pixel over the setter's name," this task's own ruling
         // extended to a new tier: IsGlobalIlluminationEnabled and
@@ -19989,6 +20169,116 @@ int main(int argc, char* argv[])
                   QStringLiteral("PathTracing is not this session's chosen tier, so the "
                                  "converged-export gate does not apply - every other tier "
                                  "exports immediately, exactly as before"));
+        }
+
+        // --- the Dump measures what the user sees (Phase 3) ------------------
+        // The one question Phase 1 left open, closed here with a measurement
+        // rather than an argument. Every calibrated number in this file's
+        // render block - the floor blend, both shadow ratios, the converged
+        // export - is read out of a V3d_View::Dump, and OCCT no longer owns
+        // the surface: it renders into the framebuffer object Qt hands it and
+        // Qt composites that frame with the widget tree. So "the probes
+        // measure the render" and "the user sees the render" became two
+        // claims where they used to be one, and Phase 1's own parked
+        // SetImmediateModeDrawToFront finding is exactly a case where they
+        // could come apart (the flag moved the path-traced backdrop 39/255
+        // while leaving the rest of the frame byte-identical).
+        //
+        // Compared as median colours (see medianColour()) because that is the
+        // only honest way to put a viewport-sized Dump beside a whole-window
+        // PrintWindow capture without a scale-and-offset mapping that reports
+        // agreement exactly as loudly when it is a few pixels wrong. In render
+        // mode the viewport is the furniture alone and full-bleed, so both
+        // medians land in the backdrop/floor cluster - and that cluster IS the
+        // pixel the parked flag moved.
+        {
+            const QString dumpPath = outDir + QStringLiteral("/render-dump-vs-screen.png");
+            const bool dumped = rview->saveSnapshot(dumpPath);
+            const QImage dumpShot(dumpPath);
+            // Drive the screen to the same place the Dump is, the way the
+            // convergence timer itself drives it: a plain repaint per pass,
+            // no Invalidate. That is scheduleAccumulationFrame() exactly, so
+            // this models "the user entered render mode and sat still" rather
+            // than approximating it - and it is deterministic, where waiting
+            // on the real timer would depend on whether its window happened
+            // to still be open after the probes above.
+            //
+            // The pass count matches awaitPathTracingConvergence()'s own
+            // (kMeasurementSettlePasses x 2 = 48), because the comparison
+            // below is between two reads of one progressive render and an
+            // under-converged frame is systematically DARK - which is the
+            // whole reason the numbers must be taken at the same depth.
+            for (int pass = 0; pass < 48; ++pass) {
+                rview->update();
+                settle(12);
+            }
+            const QImage screenShot = printWindowCapture(
+                &probe, outDir + QStringLiteral("/render-screen-vs-dump.png"));
+            // Non-vacuity, both halves: two null or tiny images agree
+            // perfectly and prove nothing.
+            const bool haveBoth = dumped && !dumpShot.isNull() && !screenShot.isNull() &&
+                                  dumpShot.width() > 200 && screenShot.width() > 200;
+            if (haveBoth) {
+                // 24 px of Windows 11's invisible resize frame off the
+                // capture, checkNoBlackLine()'s own inset; the Dump has no
+                // frame, so it takes none.
+                const QColor dumpMedian = medianColour(dumpShot, 0);
+                const QColor screenMedian = medianColour(screenShot, 24);
+                // Grain, on both sides. The level check below says the two
+                // buffers agree on TONE; this says they agree on how far the
+                // progressive renderer has got, which is the half that was
+                // actually broken. Phase 1 rewrote the convergence timer's
+                // tick into scheduleRedraw(), whose Invalidate() restarts
+                // OCCT's accumulation - so on screen the path-traced render
+                // never got past its first sample while every Dump-based
+                // probe in this file, which drives Redraw() directly,
+                // measured a converged frame. Measured before the fix:
+                // dump grain 1, screen grain 24.
+                const int dumpGrain = medianNeighbourDelta(dumpShot, 0);
+                const int screenGrain = medianNeighbourDelta(screenShot, 24);
+                check(dumpGrain >= 0 && dumpGrain <= 4,
+                      QStringLiteral("the render-mode Dump is a CONVERGED path-traced frame "
+                                     "(median neighbour delta %1, at most 4)")
+                          .arg(dumpGrain));
+                check(screenGrain >= 0 && screenGrain <= 4,
+                      QStringLiteral("and so is the composited window the user is looking at "
+                                     "(median neighbour delta %1, at most 4) - the convergence "
+                                     "timer advances the accumulation instead of restarting it")
+                          .arg(screenGrain));
+                // And the third non-vacuity leg: the Dump's own median has to
+                // BE the studio backdrop, or the two medians could agree on
+                // some shared garbage. renderBackdropColour() is the app's own
+                // answer to "what colour is the studio backdrop", so this is a
+                // comparison against the token, not against a literal grey.
+                const QColor backdrop = rview->renderBackdropColour();
+                check(colorDistance(dumpMedian, backdrop) < 40.0,
+                      QStringLiteral("the render-mode Dump's median colour IS the studio "
+                                     "backdrop (%1 against %2), so the screen comparison "
+                                     "below is anchored to something")
+                          .arg(dumpMedian.name(), backdrop.name()));
+                // 12/255 straight-line, against a measured 2.4. The slack
+                // covers the two images sampling different populations (the
+                // capture carries the app bar and the window frame, the Dump
+                // does not) and a path-traced frame's residual variance. It is
+                // nowhere near loose enough to hide what it is for: with
+                // SetImmediateModeDrawToFront(false) these same two medians
+                // measured 97.6 apart, the on-screen studio floor a full step
+                // darker than the backdrop while the Dump stayed correct.
+                const double gap = colorDistance(dumpMedian, screenMedian);
+                check(gap < 12.0,
+                      QStringLiteral("and the composited window the USER sees reads the same "
+                                     "(screen median %1 against dump median %2, delta %3) - "
+                                     "what this file measures and what is on screen are one "
+                                     "buffer, which is what made SetImmediateModeDrawToFront "
+                                     "unnecessary rather than merely untested")
+                          .arg(screenMedian.name(), dumpMedian.name())
+                          .arg(gap, 0, 'f', 1));
+            } else {
+                skipByEnvironment(4,
+                      QStringLiteral("the Dump-against-screen comparison had no pair to make "
+                                     "(saveSnapshot() failed, or this machine has no "
+                                     "PrintWindow composited capture)"));
+            }
         }
 
         // Vocabulary sweep, scoped to this probe's own toast history - the

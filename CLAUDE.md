@@ -922,13 +922,25 @@ always starts in modeling) strips the viewport down to the furniture and nothing
   an ambient left scaled has *no symptom inside render mode*, only ordinary modeling coming
   back washed out, once, forever.
 - **The tier probe** tries `Graphic3d_RM_RAYTRACING` first, timed against one redraw at a
-  roughly **100 ms** threshold (try/catch around the OCCT call, since ray tracing can throw on
-  hardware that does not support it), falls back to shadow-mapped rasterization
+  roughly **100 ms** threshold (1500 ms for the path-traced tier, which pays a one-time
+  shader compile on its first frame; try/catch around the OCCT call, since ray tracing can
+  throw on hardware that does not support it), falls back to shadow-mapped rasterization
   (`Graphic3d_CLight::SetCastShadows`, Dump-pixel-probed to confirm shadows are actually
   drawn), and falls back again to plain rasterization. The chosen tier is **cached for the
   session** — probed once, at first activation — and reported in a **Note** toast, which means
   it goes quiet with `View → Show notifications` off: Notes can be silenced, Failures cannot,
   and a tier announcement is a Note by that same taxonomy, not a refusal.
+  **A redraw that is not waited for is not a timing**, and the QOpenGLWidget migration took
+  the wait away: the probe's whole method is "time one redraw", which measures nothing unless
+  the call returns after the GPU has done the work. It used to — OCCT owned the surface and
+  ended `Redraw()` with a buffer swap, and a swap synchronizes. Qt owns the frame now, the
+  driver runs with `buffersNoSwap`, and GL commands are asynchronous: the first path-traced
+  redraw timed **1 ms** against a 1500 ms threshold, which is not a fast GPU, it is no
+  measurement at all — every GPU would have been handed the top tier, including the ones the
+  probe exists to protect from it. A `glFinish()` now closes each timed redraw (3 ms measured
+  here, hot shader cache), and `TierProbeTimings` records what was measured beside the tier
+  that was chosen, including whether the sync was even available — `gui_smoke` asserts that
+  the tier **follows from** those numbers rather than only reporting the outcome.
 - **The studio dressing (2026-09-02, user-directed rework):** a flat light warm-grey backdrop
   (`renderBackdropColour()` — the user's reference shot, blended 4:1 toward the viewport
   token so Appearance edits still move it; the original gradient was rejected because only a
@@ -965,6 +977,31 @@ always starts in modeling) strips the viewport down to the furniture and nothing
   drives it and `saveSnapshot()` dumps. Half the linear resolution against twice the
   resolution of the wrong image. There is one `saveSnapshot()`, so the menu entry, the
   shutter and the furniture thumbnail all get this.
+- **The calibrated numbers survived the QOpenGLWidget migration unchanged — measured, not
+  assumed.** Phase 3 re-ran the identical suite against the pre-migration commit and against
+  the migrated branch on the same machine and scene, and **every render-mode number is
+  byte-identical**: PathTracing chosen both times; Shadows floor blend Δ 3/5/6; PathTracing
+  floor blend Δ 7/7/8; Shadows shadow ratio 139/186 = **0.747**; PathTracing shadow ratio
+  122/191 = **0.639**; converged export floor 194 against an at-rest 191. Nothing was
+  retuned, because nothing moved. Two documented numbers *above* are older than that A/B and
+  were already stale against this scene — the Shadows ratio is 0.747 here, not the 0.72 the
+  ambient-gain paragraph quotes, and the floor lands within 6/255 of the backdrop at this
+  sample point rather than 3 — so read those two as the calibration run's own numbers, not as
+  a claim about today.
+- **The Dump and the screen are one buffer, and the convergence tick is what nearly broke
+  that.** Every calibrated pixel above is read out of a `V3d_View::Dump`, and OCCT no longer
+  owns the surface — so "the probes measure the render" and "the user sees the render" became
+  two claims. Measured side by side (a `Dump` beside a `PrintWindow` capture of the live
+  window, compared as median colour and as median neighbour delta, both mapping-free), they
+  disagreed: the Dump converged and clean, the screen a **grain of 24** against the Dump's 1
+  and a full 85/255 darker. The cause was one line — the migration rewrote every "put this on
+  screen" `Redraw()` into `scheduleRedraw()`, and the path-tracing convergence timer's tick
+  was one of them, so each 50 ms tick told OCCT the scene had moved and restarted the
+  progressive accumulation. The render the user was looking at never got past its first
+  sample no matter how long they left it alone; the probes never noticed, because they drive
+  `Redraw()` directly inside a `GlScope`. `scheduleAccumulationFrame()` — `update()` with no
+  `Invalidate()` — is the tick's own route now, and the pair reads **grain 1 against 1,
+  medians 2.4/255 apart**. `gui_smoke` pins both halves.
 
 ### Milestone 4: two windows, Mirror, links and render tiers
 
@@ -1246,6 +1283,14 @@ documented on-screen-first ordering): those open a `GlScope`, which makes the co
 current, keeps the framebuffer wrapper in step, and asks for a composite on the way out. It
 is nesting-safe, so a probe calling a probe cannot have the context pulled from under it.
 
+**One caller must NOT use it, and finding that out cost a whole phase's sharpest bug.**
+`scheduleRedraw()` is `Invalidate()` + `update()`, and `Invalidate()` means "the scene
+moved" — which OCCT's progressive path tracer obeys by throwing away its accumulation. The
+path-tracing convergence timer's tick is the one caller that is not reporting a change; it
+is asking for one more sample of a scene that has not changed at all. It goes through
+`scheduleAccumulationFrame()` (`update()`, no `Invalidate()`). See the render-mode section
+for the measurement that found it.
+
 **Context lifetime is OWNED, and it is the one thing this migration could not leave to
 chance.** OCCT holds real GPU resources against Qt's context, and they can only be released
 while that context is alive and current. `releaseGlResources()` does it in OCCT's own
@@ -1278,20 +1323,50 @@ did the right thing.
 **context identity**, never the native window handle: a context rebuilt on the same
 top-level window leaves that handle unchanged.
 
-**`SetImmediateModeDrawToFront(false)` is PARKED, on a measurement, not omitted.**
+**`SetImmediateModeDrawToFront(false)` is PARKED PERMANENTLY, on measurements taken twice.**
 `Graphic3d_CView` defaults it to TRUE, which draws immediate structures — the hover
 highlight, the manipulator mid-drag — "directly to the front buffer", and warns they "will
 be missed in image dump since it is performed from back buffer"; a QOpenGLWidget has no
-front buffer, so turning it off looks obligatory. A/B measured against the same build, it
-moves a pixel it has no business moving: the path-traced **backdrop** renders (232,231,229)
-against a calibrated token of (193,191,186), and a user-chosen background lands 118 from the
-colour they picked instead of 26 — while the rest of the frame stays byte-identical, so it
-is specifically the clear colour's route through OCCT's main-scene framebuffer and its blit
-that the flag changes. Re-deriving `kPathTracingBackdropGain` against a changed compositing
-path is Phase 3's remit, and the harm the flag guards against **is not real in this hosting
-layer**: OCCT's front-buffer writes land in the bound default framebuffer, which is the one
-Qt composites and the one `Dump` reads. That is a pinned fact, not a claim — `gui_smoke`
-Dumps a hovered body and finds 13,941 hover-tinted pixels against 0 unhovered.
+front buffer, so turning it off looks obligatory. Phase 1 measured it and parked it
+provisionally; Phase 3 re-measured it in the finished compositing layer, on one binary with
+the flag behind a throw-away switch, and settled it. Setting the flag:
+
+- **does buy one real thing.** With the flag at its default OCCT allocates a separate
+  immediate-scene framebuffer and asks for `GL_SRGB8_ALPHA8` as its colour attachment; this
+  driver refuses with `GL_INVALID_OPERATION` and OCCT logs `Immediate FBO WxH@0
+  initialization has failed` twice a run. With the flag set, that FBO is never allocated and
+  the log is clean.
+- **costs the render's correctness.** The composited window against the `Dump`, as median
+  colour: **2.4/255 apart without the flag, 97.6 with it** — the on-screen studio floor a
+  full step darker than the backdrop it is calibrated to dissolve into, seam and all, while
+  the `Dump` every calibration is read from stays right. And a user-chosen background lands
+  **118/255** from the colour picked instead of 26 — Phase 1's own number, reproduced exactly
+  in a codebase whose overlay compositing changed completely in between.
+
+The harm it guards against is measured **not to exist in this hosting layer**: OCCT's
+front-buffer writes land in the bound default framebuffer, which is the one Qt composites
+and the one `Dump` reads. That is a pinned fact, not a claim — `gui_smoke` Dumps a hovered
+body and finds 13,941 hover-tinted pixels against 0 unhovered, with and without the flag.
+A cosmetic log line against the render's correctness; the log line loses.
+
+**That `Immediate FBO` error is harmless and is NOT a scaling bug — parked with its
+measurement.** Phase 2 reported it at `QT_SCALE_FACTOR=1.5` and read it as the cause of two
+black-line sweep failures there. A 100% A/B disproved that: the identical
+`GL_INVALID_OPERATION` on `fbo0_imm:color` is logged at 100% (1200x732) and at 150%
+(1800x1098) alike, and the 100% run carrying both messages passes every check in the suite.
+OCCT falls back on its own and the frame is correct. The only lever over it is the flag
+above, which costs more than it saves.
+
+**The two 150% black lines were the CAPTURE, not the app.** `printWindowCapture()` took
+`GetWindowRect` at face value, and at 1.5× this suite's windows are 1239 device rows tall on
+a 1080-row display: DWM has no composited content for the part hanging off the bottom, it
+comes back as undrawn white with a black corner, and `longestBlackRun()` duly reported a
+1768 px line at y=1179 in a window with nothing wrong with it. The capture is now cropped to
+the intersection with **the monitor the window is on** — not the virtual-desktop bounding
+box, which on a multi-monitor desktop (4480x1920 around a 1920x1080 primary here) covers
+rectangles no display occupies and made the crop a silent no-op. At 100%, where the window
+fits, nothing changes. A crop rather than a wider inset: an inset big enough to clear the
+strip would stop sweeping rows that are genuinely the app's.
 
 **`wrapDefaultFramebuffer()` binds `defaultFramebufferObject()` before `InitWrapper`.**
 `InitWrapper` wraps *whatever is bound*, and this function then treats that framebuffer's
@@ -1316,7 +1391,18 @@ whole job.
 `OcctViewWidget::surfaceFormat()`, read by `main.cpp` and `gui_smoke` before
 `QApplication` — the only moment the application default can be set — and by the widget's
 own constructor. The suite asserts what the context was **granted**, not what was requested.
-Phase 3 finalizes the profile against measured render tiers.
+
+**Phase 3 finalized it against the measured tiers, and the decision includes one thing it
+deliberately does not ask for.** Compatibility stays: this machine's probe reaches
+PathTracing through a compatibility context, timing one GPU-synchronized path-traced redraw
+at 3 ms against a 1500 ms threshold, and every calibrated pixel in the render block reads
+exactly what it read through the pre-migration native window — there is nothing for a core
+profile to win back. **No `setSamples()`, ever**: multisampling the DEFAULT framebuffer is
+the one attribute that would break this hosting outright, because Qt would hand the widget a
+multisampled FBO, OCCT would wrap it as its default framebuffer, and every pixel this
+project treats as ground truth is read back out of that buffer — a multisample colour
+attachment cannot be read without a resolve step nothing here performs. Antialiasing is
+OCCT's to do inside the scene, where it costs the measurements nothing.
 
 Event wiring: RMB drag→turntable orbit around the current view target (Unity-style, the user's explicit preference — no cursor-anchored pivoting), MMB drag→pan, wheel→zoomToward cursor; camera state lives in CameraController and is pushed via SetEye/SetCenter/SetUp. FOVy is fixed at 45° for the life of the view **except while render mode is on**, where the settings card's Camera FOV override is read through `OcctViewWidget::effectiveFovyDeg()` by both `applyCameraState()` and `worldPerPixel()` and pushed back through `applyCameraState()` on exit, so no override ever leaks outside render mode; **which projection is drawn with it moves** — see below.
 

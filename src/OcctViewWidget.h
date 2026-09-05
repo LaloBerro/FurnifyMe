@@ -805,6 +805,37 @@ public:
     RenderTier renderModeTier() const { return myRenderTier; }
     bool renderModeTierProbed() const { return myRenderTierProbed; }
 
+    // What the tier probe actually MEASURED, kept so the decision can be
+    // audited rather than only its outcome reported. Phase 3 of the
+    // QOpenGLWidget migration is what forced this into the open: "which tier
+    // does this machine reach in the wrapped context, and how close was the
+    // call" is a question the old surface could not answer at all - a session
+    // could fall from PathTracing to Shadows because a probe went 40 ms over
+    // a threshold, and nothing anywhere would say so. Every field is filled by
+    // probeRenderTier() on the one run it makes; `attempted` is false for a
+    // tier the probe never reached (it returned on an earlier one) and
+    // `refused` is true only for a tier that threw a Standard_Failure, which
+    // is a driver saying no rather than a driver being slow. Milliseconds are
+    // -1 where nothing was timed, never 0, so "not measured" and "measured
+    // instantly" cannot be confused.
+    struct TierProbeTimings {
+        bool probed = false;
+        // Whether the probe could put a glFinish() between the redraw and the
+        // clock. False makes every millisecond below a fiction - see
+        // probeRenderTier()'s own comment - so it is recorded rather than
+        // assumed, and gui_smoke asserts it.
+        bool gpuSyncAvailable = false;
+        bool pathTracingAttempted = false;
+        bool pathTracingRefused = false;
+        int pathTracingMs = -1;
+        bool rayTracingAttempted = false;
+        bool rayTracingRefused = false;
+        int rayTracingMs = -1;
+        bool shadowsAttempted = false;
+        bool shadowsPixelsDiffered = false;
+    };
+    TierProbeTimings tierProbeTimings() const { return myTierProbeTimings; }
+
     // A plain-value read of exactly the Graphic3d_RenderingParams fields
     // saveRenderParams()/restoreRenderParams() round-trip - cameraViewHeight-
     // AtTarget()'s own shape: an oracle for gui_smoke's params round-trip
@@ -1290,6 +1321,25 @@ private:
     // surface, so it does not get to decide when a frame is presented - Qt
     // does, through paintGL(). A no-op with no view.
     void scheduleRedraw();
+    // Asks Qt for a frame that ADDS to the path tracer's accumulation instead
+    // of restarting it - scheduleRedraw() without the Invalidate().
+    //
+    // Phase 3 of the QOpenGLWidget migration is what forced this apart, and it
+    // was measured rather than reasoned: a PrintWindow capture of the live
+    // window beside the V3d_View::Dump the suite's probes read showed the same
+    // scene converged in the Dump and heavily grained on screen. Phase 1
+    // rewrote every "put this on screen" Redraw() into scheduleRedraw(), and
+    // the path-tracing convergence timer's tick was one of them - so every
+    // 50 ms tick told OCCT the scene had moved, the progressive accumulation
+    // started over, and the render the user was looking at never got past its
+    // first sample no matter how long they left it alone. The probes did not
+    // notice because they call Redraw() directly inside a GlScope.
+    //
+    // The Invalidate() in scheduleRedraw() is right for every OTHER caller -
+    // they are all telling us the scene genuinely changed. This one is not: it
+    // is asking for one more sample of a scene that has not changed at all,
+    // which is the entire point of a progressive renderer.
+    void scheduleAccumulationFrame();
     // Makes this widget's GL context current for the life of the scope, with
     // OCCT's default framebuffer wrapper in step - what a SYNCHRONOUS
     // V3d_View::Redraw()/Dump() outside paintGL() needs, since Qt only
@@ -1826,6 +1876,8 @@ private:
     bool myRenderModeActive = false;
     bool myRenderTierProbed = false;
     RenderTier myRenderTier = RenderTier::Plain;
+    // The probe's own working, kept beside its answer - see TierProbeTimings.
+    TierProbeTimings myTierProbeTimings;
     // See showRenderFloor(). Null whenever render mode is off.
     Handle(AIS_Shape) myRenderFloor;
     // Every directional light's direction and intensity as they stood at
