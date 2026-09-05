@@ -915,7 +915,8 @@ always starts in modeling) strips the viewport down to the furniture and nothing
   for PathTracing and `kRasterAmbientGain` for the rest, **on top of** `myRenderLightStrength`
   rather than instead of it, so the Light strength control still opens the key by the factor
   it always did. The rasterized tiers' unlit faces read 0.55 of the lit floor before that
-  ambient fill and 0.72 (Shadows) / 0.65 (RayTracing) after, **and the floor does not move
+  ambient fill and 0.72 (Shadows — *calibration-run number, 0.747 today; see the Phase-3 A/B
+  below*) / 0.65 (RayTracing) after, **and the floor does not move
   with it** — the Milestone-3 floor material's ambient reflectance is zero by construction,
   which a measurement confirmed rather than assumed. Ambient lights and the key's cone angle
   are saved at entry and restored at exit like the direction and intensity already were:
@@ -962,7 +963,8 @@ always starts in modeling) strips the viewport down to the furniture and nothing
   (trust the pixel): the default rig is too weak for any lit diffuse to reach the backdrop
   tone, so EMISSIVE carries 87.5% of it — shadow-immune, which is what makes the seam
   invisible — and the white diffuse layer on top is exactly what the shadow map subtracts,
-  landing the lit floor within 3/255 of the backdrop and the shadow ~25% under it. The
+  landing the lit floor within 3/255 of the backdrop (*calibration-run number, 6/255 at
+  today's sample point; see the Phase-3 A/B below*) and the shadow ~25% under it. The
   floor goes up **before** the tier probe, deliberately: the tier-2 pixel probe must measure
   the scene the user will see — with no floor, a straight-down shadow could touch no pixel
   and the probe would fall to Plain on hardware that shadow-maps fine.
@@ -1160,7 +1162,20 @@ whatever is really there. `paintSurface()` therefore paints **only** the rounded
 crisp border now - nothing fills the four small triangles outside the rounded shape any more,
 and nothing needs to. `installCardMask()` is deleted outright, not replaced by anything that
 also cuts a shape: cutting is no longer necessary once nothing is painted there in the first
-place. What replaced the mask's OTHER job - keeping the app-wide
+place *for painting*.
+
+**And that sentence is only about painting, which is why the mask's second job needs naming
+rather than quietly dropping.** A `QRegion` mask excluded those corner pixels from
+**hit-testing** as well - Qt honours `QWidget::mask()` in `childAt()` - so during the mask era
+a click in a card's corner triangle fell straight through to the viewport behind it. Nothing
+replaces that half, and nothing is meant to: **a corner click now lands on the card**, which
+swallows it. That is the accepted trade of maskless corners, ruled rather than overlooked. It
+costs a few pixels per corner on a card that is already a click target everywhere else, and
+the alternative - reintroducing a per-widget `QRegion`, rebuilt on every resize, purely to
+route input - buys back a pass-through nobody has ever asked for at exactly the cost this
+phase existed to delete. Recorded so the next reader knows the corners look see-through and
+are not click-through, and does not read it as a bug when they find it. What replaced the
+mask's OTHER job - keeping the app-wide
 `QMainWindow, QWidget { background-color: @chrome }` stylesheet rule from stamping an opaque
 square over that same unpainted area before `paintEvent()` ever runs - is
 `Theme::makeSurfaceTransparent()`: a plain `background: transparent` per-widget stylesheet,
@@ -1307,8 +1322,15 @@ handles. Two callers, and they are the only two moments a context can die under 
   derived destructor body, so a live connection would call back into a half-destroyed object.
 - **`QOpenGLContext::aboutToBeDestroyed`**, Qt's only hook for releasing while the dying
   context still exists — a driver reset, a reparent the attribute below does not cover.
-  Direct connection; the widget then renders empty until the document is re-displayed, which
-  is the honest price of a context loss and is not the crash it replaces.
+  Direct connection. The widget would then render empty — every presentation map it held is
+  cleared and the next `initializeGL()` rebuilds an *empty* viewer — so the same handler
+  emits **`glResourcesReleased()`**, and `MainWindow` answers it with `resyncView()` plus
+  `setRenderModeEnabled(false)`: the machinery undo, redo, open and restore already use, not
+  a second one. The render-mode half is not tidiness — `myRenderModeActive` is cleared inside
+  the widget by the release, so leaving `View → Render mode` checked would break the
+  single-source-of-truth rule across the one event nobody drives. The signal is emitted from
+  the *context-loss* caller only, never from the destructor's own release, where there is no
+  owner left to tell.
 
 **`Qt::AA_ShareOpenGLContexts` is set before `QApplication`, in `main.cpp` and in
 `gui_smoke`, and it is load-bearing.** Without it Qt destroys a `QOpenGLWidget`'s context on
@@ -1348,6 +1370,26 @@ front-buffer writes land in the bound default framebuffer, which is the one Qt c
 and the one `Dump` reads. That is a pinned fact, not a claim — `gui_smoke` Dumps a hovered
 body and finds 13,941 hover-tinted pixels against 0 unhovered, with and without the flag.
 A cosmetic log line against the render's correctness; the log line loses.
+
+**Say what that last measurement covers, though.** The reason immediate content lands where
+`Dump` can read it *here* is precisely that the separate immediate FBO was **refused**: with
+no immediate framebuffer to draw into, the fallback is the bound default one. `GL_SRGB8_ALPHA8`
+is colour-renderable in core GL 4.x, so on hardware where that allocation **succeeds** the
+immediate layer goes somewhere else and the 13,941-pixel pin is untested rather than
+known-good. The decision does not rest on that leg — the flag's cost is `Dump`-side and so
+driver-independent — and the pin is a live check, so a machine where the allocation succeeds
+and the highlight stops reaching `Dump` **reports** it rather than hiding it.
+
+**Provenance of the A/B, since it decides how much of one column to believe.** The no-flag
+**2.4** is unambiguously *post*-accumulation-fix — it is the same number the Dump-against-screen
+finding below reports. The with-flag **97.6** is Phase 3's too, "in the finished compositing
+layer", but the report never states whether that switch was thrown before or after the fix in
+the same session — and it matters, because the *pre*-fix screen-vs-`Dump` distance was 85.5
+(`#93918f` against `#c4c3c0`), so grain alone could account for most of a 97.6. Which is why
+the decision does not stand on that column. It stands on the **user-chosen background: 118.2
+against 26, measured in Phase 1**, before `scheduleAccumulationFrame()` existed at all, on a
+`V3d_View::Dump` no amount of accumulation restarting can move, with the rest of the frame
+byte-identical.
 
 **That `Immediate FBO` error is harmless and is NOT a scaling bug — parked with its
 measurement.** Phase 2 reported it at `QT_SCALE_FACTOR=1.5` and read it as the cause of two

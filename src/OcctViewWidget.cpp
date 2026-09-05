@@ -519,6 +519,8 @@ void OcctViewWidget::releaseGlResources()
     mySketchLayer = Graphic3d_ZLayerId_UNKNOWN;
     myInitialized = false;
     myAttachedContext.clear();
+    // No view left to accumulate into, so no run to be deep in.
+    myAccumulationDepth = 0;
 
     if (took) doneCurrent();
 }
@@ -676,10 +678,25 @@ bool OcctViewWidget::attachGlWindow()
     //     its colour attachment as GL_SRGB8_ALPHA8; this driver refuses with
     //     GL_INVALID_OPERATION and OCCT logs "Immediate FBO WxH@0
     //     initialization has failed" twice per run. With the flag set, no such
-    //     FBO is allocated and the log is clean. THE ERROR IS HARMLESS: OCCT
-    //     falls back on its own, the frame is correct, and it is logged
+    //     FBO is allocated and the log is clean. THE ERROR IS HARMLESS HERE:
+    //     OCCT falls back on its own, the frame is correct, and it is logged
     //     identically at 100% and at 150% scaling - a 100% run carrying both
     //     messages passes every check in the suite.
+    //
+    // WHAT THE EVIDENCE COVERS, AND WHAT IT DOES NOT (added by the branch
+    // review, because the paragraph above read as a general fact and it is a
+    // one-GPU measurement). The reason immediate content lands where Dump can
+    // read it on THIS machine is precisely that the separate immediate FBO was
+    // refused: with no immediate framebuffer to draw into, OCCT's "front
+    // buffer" writes fall back to the bound default framebuffer, which is the
+    // one Qt composites and the one Dump reads. GL_SRGB8_ALPHA8 is
+    // colour-renderable in core GL 4.x, so on hardware where that allocation
+    // SUCCEEDS the immediate layer goes somewhere else entirely and the
+    // 13,941-pixel hover pin is untested rather than known-good. The decision
+    // does not rest on that leg: the flag's cost is Dump-side and therefore
+    // driver-independent (see the two measurements below), and the hover pin
+    // is a live check, so a machine where the allocation succeeds and the
+    // highlight stops reaching Dump reports it rather than hiding it.
     //
     // What it costs, all measured on the same build, same scene, same machine:
     //
@@ -693,6 +710,23 @@ bool OcctViewWidget::attachGlWindow()
     //     instead of 26. That is Phase 1's number, reproduced exactly in a
     //     codebase whose whole overlay compositing changed in between.
     //
+    // PROVENANCE OF THE A/B, since the ordering against the accumulation fix
+    // decides how much of one column to believe. The no-flag 2.4 is
+    // unambiguously POST-fix: it is the same number Phase 3's own
+    // Dump-against-screen finding reports after scheduleAccumulationFrame()
+    // landed. The with-flag 97.6 is Phase 3's too, taken "in the finished
+    // compositing layer" - but the report does not state in so many words
+    // whether that switch was thrown before or after the fix in the same
+    // session, and it matters more than it looks: the PRE-fix screen-vs-Dump
+    // distance was 85.5 (#93918f against #c4c3c0), so accumulation grain alone
+    // could account for most of a 97.6 if that column happened to be taken
+    // first. Which is exactly why this decision does not stand on that column.
+    // It stands on the user-chosen background: 118.2 against 26, measured in
+    // PHASE 1 - before scheduleAccumulationFrame() existed at all - on a
+    // V3d_View::Dump, which no amount of accumulation restarting can move,
+    // with the rest of the frame byte-identical. That number is the evidence;
+    // the Dump-vs-screen column is corroboration.
+    //
     // And the harm it guards against is measured NOT to exist in this hosting
     // layer: OCCT's "front buffer" writes land in the bound default
     // framebuffer, which is exactly the one Qt composites and exactly the one
@@ -703,7 +737,7 @@ bool OcctViewWidget::attachGlWindow()
     // So: a cosmetic log line against the render's correctness. The log line
     // loses.
     myView->MustBeResized();
-    myView->Invalidate();
+    invalidateAccumulation();
     myAttachedContext = context();
     return true;
 }
@@ -756,7 +790,7 @@ bool OcctViewWidget::wrapDefaultFramebuffer()
     if (fboSize != windowSize) {
         myHostWindow->SetSize(fboSize.x(), fboSize.y());
         myView->MustBeResized();
-        myView->Invalidate();
+        invalidateAccumulation();
     }
     context->SetDefaultFrameBuffer(fbo);
     return true;
@@ -782,7 +816,18 @@ void OcctViewWidget::initializeGL()
     // different QObject.
     if (context() != nullptr) {
         connect(context(), &QOpenGLContext::aboutToBeDestroyed, this,
-                [this]() { releaseGlResources(); }, Qt::DirectConnection);
+                [this]() {
+                    releaseGlResources();
+                    // AND TELL THE OWNER. releaseGlResources() has just emptied
+                    // every presentation map this widget holds; nothing else
+                    // puts the document back, and until something does the
+                    // viewport is blank and MainWindow's Render mode action is
+                    // checked over a widget whose render mode was cleared under
+                    // it. Emitted HERE rather than inside releaseGlResources()
+                    // so the destructor's own call to that function stays
+                    // silent - see the signal's own comment on the header.
+                    emit glResourcesReleased();
+                }, Qt::DirectConnection);
         // A pure observer, receiver-scoped to the CONTEXT rather than to this
         // widget, so it lives exactly as long as the thing it watches and can
         // still record the death after the widget has released and
@@ -860,6 +905,10 @@ void OcctViewWidget::paintGL()
     }
 
     myView->Redraw();
+    // One more frame on the current accumulation run. Counted here, at the one
+    // place a frame is actually painted, rather than at whichever scheduler
+    // asked for it - see accumulationDepth().
+    ++myAccumulationDepth;
 
     if (context->core11fwd != nullptr) {
         context->core11fwd->glPixelStorei(GL_PACK_ALIGNMENT, 4);
@@ -879,7 +928,18 @@ void OcctViewWidget::resizeGL(int w, int h)
     const QPoint device = toDevicePixels(QPoint(std::max(1, w), std::max(1, h)));
     myHostWindow->SetSize(std::max(1, device.x()), std::max(1, device.y()));
     myView->MustBeResized();
+    invalidateAccumulation();
+}
+
+void OcctViewWidget::invalidateAccumulation()
+{
+    if (myView.IsNull()) return;
     myView->Invalidate();
+    // The accumulation run ends exactly where the Invalidate lands, so the
+    // counter that names its depth is zeroed in the same breath rather than at
+    // each of the four call sites - see accumulationDepth() on the header for
+    // what reads it and why it exists at all.
+    myAccumulationDepth = 0;
 }
 
 void OcctViewWidget::scheduleRedraw()
@@ -888,7 +948,7 @@ void OcctViewWidget::scheduleRedraw()
     // Invalidate first: OCCT is entitled to reuse the last main-buffer content
     // when only the immediate layer changed, and every caller of this is
     // telling us the scene itself moved.
-    myView->Invalidate();
+    invalidateAccumulation();
     update();
 }
 
@@ -896,7 +956,8 @@ void OcctViewWidget::scheduleAccumulationFrame()
 {
     if (myView.IsNull()) return;
     // Deliberately NO Invalidate() - see the header. This is the one caller
-    // that is not reporting a change to the scene.
+    // that is not reporting a change to the scene, and the one that therefore
+    // leaves accumulationDepth() standing to climb another frame.
     update();
 }
 
@@ -4435,6 +4496,21 @@ OcctViewWidget::RenderTier OcctViewWidget::probeRenderTier()
     // here. Taken once, before the timing begins as well as after each redraw,
     // so no work queued by whatever ran before this probe is charged to the
     // first tier it tries.
+    //
+    // THE COST, STATED: THIS BLOCKS THE UI THREAD FOR A WHOLE PATH-TRACED
+    // FRAME, once per session, at the first render-mode activation. glFinish()
+    // does not return until the GPU is done, and the threshold is only
+    // consulted AFTER that - kPathTracingProbeThresholdMs (1500 ms) protects
+    // the TIER CHOICE, not the wait, so a GPU that takes 1400 ms to draw the
+    // first path-traced frame freezes the window for 1400 ms and then gets the
+    // top tier anyway. Measured here at 3 ms, but that is a warm shader cache;
+    // a cold first-ever compile on weak hardware is the untested case and the
+    // one that could reach the threshold. Not a regression - before the
+    // QOpenGLWidget migration OCCT ended Redraw() with a buffer swap, which
+    // synchronised just as hard - and not restructured, because a probe that
+    // does not wait measures nothing at all (see the paragraph above, where a
+    // path-traced frame "timed" 1 ms). Recorded so that a user reporting a
+    // one-off freeze on entering render mode has somewhere to land.
     const Handle(OpenGl_Context) glContext = hostGlContext(myView);
     myTierProbeTimings.gpuSyncAvailable =
         !glContext.IsNull() && glContext->core11fwd != nullptr;

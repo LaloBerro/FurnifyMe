@@ -413,7 +413,31 @@ void skipByEnvironment(int checks, const QString& why)
 // image's grain, the Dump's median anchored to the studio backdrop, and the
 // two medians agreeing (4). No check was removed, weakened or skipped.
 // 2535 + 6 = 2541, which a real run reports exactly (2540 checks + 1 skip).
-constexpr int kCheckFloor = 2541;
+//
+// The migration's FINAL FIX WAVE adds 51 and removes none.
+//
+//   +44  checkFamilyPerimeter(), the whole-perimeter opacity sweep restored on
+//        its own axis after Phase 2 replaced it with a three-point triad (the
+//        branch review's IMPORTANT 1). Four checks per call - outside-visited,
+//        outside-transparent, inside-visited, inside-opaque, the two non-vacuity
+//        guards being half of it because a sweep that visits nothing reports
+//        clean exactly as loudly as a clean card - across the SAME 11
+//        checkFamilySurface() calls the old sweep covered. 11 x 4 = 44. The
+//        triad stays: it asks a different question (is there a genuine
+//        antialiased blend pixel) and nothing it pins is duplicated here.
+//   + 2  the convergence tick, driven by the REAL QTimer rather than by a
+//        hand-rolled paint loop (IMPORTANT 2): the timer is armed after a
+//        camera apply, and accumulationDepth() reaches 40 frames in one
+//        unbroken run. Skipped-by-environment as a pair on any GPU whose tier
+//        is not PathTracing, since there is no convergence timer at all there,
+//        so the total is the same on every machine.
+//   + 5  the context-loss resync pin (MINOR 6): the viewport and document agree
+//        going in, render mode is genuinely on, the simulated loss genuinely
+//        emptied the maps, the handler put every body back, and the Render mode
+//        action is unchecked afterwards.
+//
+// 2541 + 51 = 2592.
+constexpr int kCheckFloor = 2592;
 
 void check(bool condition, const QString& what)
 {
@@ -998,6 +1022,19 @@ void checkNoBlackLine(const QImage& shot, const QString& label)
 //
 // Returns the captured image (null on failure) as well as writing it, so a
 // caller can crop or magnify the same pixels it just saved.
+//
+// ORIGIN: the returned image's (0,0) is the top-left of the window's VISIBLE
+// part, not GetWindowRect's top-left - see the crop at the end of this
+// function. On this machine at 100% they are the same pixel and the crop is a
+// no-op; at 1.5×, where the window hangs off the bottom of the display, they
+// still are (the crop only ever loses rows below, never above) - but a window
+// pushed off the TOP or LEFT edge of its monitor would shift the origin by the
+// crop offset. No current caller maps widget coordinates into the result (all
+// 17 either discard the image, hand it to checkNoBlackLine()'s inset-based
+// sweep, or take a mapping-free median), which is why nothing is wrong today;
+// the next caller that DOES map has to add `visible.topLeft() - rect.topLeft()`
+// or be silently off by it, and a region a few pixels out reports agreement
+// exactly as loudly as genuine agreement does.
 QImage printWindowCapture(QWidget* widget, const QString& path)
 {
 #ifdef _WIN32
@@ -1010,15 +1047,17 @@ QImage printWindowCapture(QWidget* widget, const QString& path)
 
     HDC screen = GetDC(nullptr);
     HDC memory = CreateCompatibleDC(screen);
-    BITMAPINFO info{};
-    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    info.bmiHeader.biWidth = width;
-    info.bmiHeader.biHeight = -height;   // top-down, to match QImage's row order
-    info.bmiHeader.biPlanes = 1;
-    info.bmiHeader.biBitCount = 32;
-    info.bmiHeader.biCompression = BI_RGB;
+    // Named apart from the MONITORINFO in the crop below, which used to be a
+    // second `info` in the same function - it compiled, and it read wrong.
+    BITMAPINFO bitmapInfo{};
+    bitmapInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bitmapInfo.bmiHeader.biWidth = width;
+    bitmapInfo.bmiHeader.biHeight = -height;   // top-down, to match QImage's row order
+    bitmapInfo.bmiHeader.biPlanes = 1;
+    bitmapInfo.bmiHeader.biBitCount = 32;
+    bitmapInfo.bmiHeader.biCompression = BI_RGB;
     void* bits = nullptr;
-    HBITMAP bitmap = CreateDIBSection(memory, &info, DIB_RGB_COLORS, &bits, nullptr, 0);
+    HBITMAP bitmap = CreateDIBSection(memory, &bitmapInfo, DIB_RGB_COLORS, &bits, nullptr, 0);
     QImage shot;
     if (bitmap && bits) {
         HGDIOBJ previous = SelectObject(memory, bitmap);
@@ -1057,12 +1096,12 @@ QImage printWindowCapture(QWidget* widget, const QString& path)
     // and the crop had to be tried against it before that was visible).
     if (!shot.isNull()) {
         HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-        MONITORINFO info{};
-        info.cbSize = sizeof(MONITORINFO);
-        if (monitor != nullptr && GetMonitorInfo(monitor, &info)) {
-            const QRect screenRect(info.rcMonitor.left, info.rcMonitor.top,
-                                   info.rcMonitor.right - info.rcMonitor.left,
-                                   info.rcMonitor.bottom - info.rcMonitor.top);
+        MONITORINFO monitorInfo{};
+        monitorInfo.cbSize = sizeof(MONITORINFO);
+        if (monitor != nullptr && GetMonitorInfo(monitor, &monitorInfo)) {
+            const QRect screenRect(monitorInfo.rcMonitor.left, monitorInfo.rcMonitor.top,
+                                   monitorInfo.rcMonitor.right - monitorInfo.rcMonitor.left,
+                                   monitorInfo.rcMonitor.bottom - monitorInfo.rcMonitor.top);
             const QRect visible =
                 QRect(rect.left, rect.top, width, height).intersected(screenRect);
             if (visible.isValid() && visible.size() != QSize(width, height)) {
@@ -1238,8 +1277,150 @@ bool findAntialiasedPixel(const QImage& img, QPoint& at)
     return false;
 }
 
+// Signed clearance of a pixel CENTRE against the rounded-rect path
+// Theme::paintSurface() fills, in pixels: POSITIVE outside the shape, NEGATIVE
+// inside it. Only the four corner squares can be outside at all, so anything in
+// a straight band returns a large negative rather than a computed distance -
+// which is the whole point, since "the straight band is deeply inside" is what
+// makes the perimeter sweep below able to demand alpha 255 there without
+// knowing anything about the card except its radius.
+double roundedRectClearance(const QRect& r, int radius, int x, int y)
+{
+    const double px = x + 0.5;
+    const double py = y + 0.5;
+    const double left = r.left();
+    const double top = r.top();
+    const double right = r.right() + 1.0;
+    const double bottom = r.bottom() + 1.0;
+    double cx = 0.0;
+    double cy = 0.0;
+    if (px < left + radius)             cx = left + radius;
+    else if (px > right - radius)       cx = right - radius;
+    else return -1e9;
+    if (py < top + radius)              cy = top + radius;
+    else if (py > bottom - radius)      cy = bottom - radius;
+    else return -1e9;
+    return std::hypot(px - cx, py - cy) - radius;
+}
+
+// THE WHOLE-PERIMETER SWEEP, RESTORED - and restored on its own axis rather
+// than as the pre-migration check it replaces.
+//
+// The QOpenGLWidget migration's Phase 2 deleted a sweep that walked all four
+// edges asserting alpha 255 everywhere except where a QRegion mask had excluded
+// the pixel, and put a three-point triad in its place (one caller-supplied edge
+// point, (0,0), one blend pixel in a 16x16 box). The branch review's IMPORTANT 1
+// is that the triad is not equivalent on the one axis this project has actually
+// shipped a defect on: an UNPAINTED ROW OR COLUMN ALONG A CARD'S OWN EDGE. The
+// old sweep read alpha 0 somewhere along that row and failed; the triad samples
+// one point per card and would sail past a card whose paint stops one row short
+// of its own rect on the other three edges.
+//
+// So this asks two questions of every perimeter pixel, and the corner radius -
+// not a mask - is what separates them:
+//
+//   (a) OUTSIDE the rounded shape, alpha must be 0. Nothing paints out there
+//       any more, on purpose, and Theme::makeSurfaceTransparent() keeps the
+//       app-wide stylesheet from stamping it either. This is the mask-exclusion
+//       clause the old sweep had, rewritten as geometry.
+//   (b) INSIDE it - every straight-band pixel of all four edges - alpha must be
+//       255. This is the leftover-row clause, and it is the half nothing has
+//       checked since the deletion: paintSurface() strokes its 1px border along
+//       the shape's OUTER edge precisely so the outermost row and column belong
+//       to the card, and a card that stopped one row short (a returning shadow
+//       margin, an inset handed to paintSurface(), a size the layout grew past
+//       its own paint) fails here on every one of that edge's pixels.
+//
+// SCOPE, stated because renderExact() is 1:1 and 1:1 hides one variant: what
+// this catches is an unpainted row INSIDE the widget's logical rect. The
+// fractional-device-pixel leftover row - a card 93 logical rows tall needing
+// 139.5 device rows - lives OUTSIDE the logical rect, where renderExact()
+// structurally cannot see it (see its own comment); checkNoBlackLine() over a
+// composited PrintWindow capture is what covers that one, and since the
+// migration it shows the scene rather than black there anyway.
+//
+// Both legs carry a non-vacuity count. A sweep that visits nothing reports
+// clean exactly as loudly as a clean card does, and that is how five shadow
+// checks once went quiet instead of red.
+void checkFamilyPerimeter(const QImage& img, int radius, const QString& label)
+{
+    // A pixel within 1 px of the arc is antialiased by construction - a 1px
+    // pen and an AA fill both spill about half a pixel - so it is counted as
+    // neither, rather than being asked for an alpha it cannot have. The blend
+    // pixel those become is not lost: findAntialiasedPixel() below demands one
+    // exist.
+    constexpr double kArcSlack = 1.0;
+    const QRect card = img.rect();
+
+    int outsideVisited = 0;
+    int outsidePainted = 0;
+    int insideVisited = 0;
+    int insideSeeThrough = 0;
+    QPoint firstPainted;
+    QPoint firstSeeThrough;
+    int firstSeeThroughAlpha = -1;
+
+    auto sweep = [&](int x, int y) {
+        if (!card.contains(x, y)) return;
+        const double clearance = roundedRectClearance(card, radius, x, y);
+        const int alpha = qAlpha(img.pixel(x, y));
+        if (clearance > kArcSlack) {
+            ++outsideVisited;
+            if (alpha != 0) {
+                if (outsidePainted == 0) firstPainted = QPoint(x, y);
+                ++outsidePainted;
+            }
+        } else if (clearance < -kArcSlack) {
+            ++insideVisited;
+            if (alpha != 255) {
+                if (insideSeeThrough == 0) {
+                    firstSeeThrough = QPoint(x, y);
+                    firstSeeThroughAlpha = alpha;
+                }
+                ++insideSeeThrough;
+            }
+        }
+    };
+
+    for (int x = 0; x < img.width(); ++x)  { sweep(x, 0); sweep(x, img.height() - 1); }
+    for (int y = 0; y < img.height(); ++y) { sweep(0, y); sweep(img.width() - 1, y); }
+
+    check(outsideVisited > 0,
+          QStringLiteral("%1's perimeter sweep visited real pixels OUTSIDE its rounded "
+                         "shape (%2), so the transparency assertion below is not vacuous")
+              .arg(label).arg(outsideVisited));
+    check(outsidePainted == 0,
+          QStringLiteral("%1 paints NOTHING anywhere outside its rounded shape - every one "
+                         "of the %2 perimeter pixels past the corner arc is alpha 0 (%3)")
+              .arg(label).arg(outsideVisited)
+              .arg(outsidePainted == 0
+                       ? QStringLiteral("all clear")
+                       : QStringLiteral("%1 painted, first at %2,%3")
+                             .arg(outsidePainted).arg(firstPainted.x()).arg(firstPainted.y())));
+    check(insideVisited > 0,
+          QStringLiteral("%1's perimeter sweep visited real pixels INSIDE its rounded shape "
+                         "(%2), so the opacity assertion below is not vacuous")
+              .arg(label).arg(insideVisited));
+    check(insideSeeThrough == 0,
+          QStringLiteral("and %1's own paint reaches its card rect on all four edges - every "
+                         "one of the %2 straight-band perimeter pixels is fully opaque, so no "
+                         "unpainted row or column is left inside the widget (%3)")
+              .arg(label).arg(insideVisited)
+              .arg(insideSeeThrough == 0
+                       ? QStringLiteral("all opaque")
+                       : QStringLiteral("%1 see-through, first alpha %2 at %3,%4")
+                             .arg(insideSeeThrough).arg(firstSeeThroughAlpha)
+                             .arg(firstSeeThrough.x()).arg(firstSeeThrough.y())));
+}
+
+// `radius` is the card's OWN corner radius - the third argument its
+// paintEvent() hands Theme::paintSurface() - supplied by the caller for the
+// same reason `edgePoint` and `interiorSearch` are: it is a per-card fact, and
+// guessing one radius for a family that uses both 8 and 10 would either demand
+// alpha 0 at a pixel the card legitimately paints or stop sweeping pixels it
+// should.
 void checkFamilySurface(QWidget* widget, const QPoint& edgePoint, const QRect& interiorSearch,
-                        const QColor& edgeColour, const QString& label)
+                        const QColor& edgeColour, const QString& label, int radius)
 {
     const QImage img = renderExact(widget);
     // Asserted unconditionally rather than as an `if (bad) check(false)`
@@ -1317,6 +1498,11 @@ void checkFamilySurface(QWidget* widget, const QPoint& edgePoint, const QRect& i
               .arg(hasBlend ? QStringLiteral("alpha %1 at %2,%3")
                                    .arg(qAlpha(img.pixel(blendAt))).arg(blendAt.x()).arg(blendAt.y())
                             : QStringLiteral("none found")));
+
+    // And the whole perimeter, not the one point above - the coverage the
+    // migration's own triad dropped. See checkFamilyPerimeter()'s header for
+    // which defect class each of its four checks stands on.
+    checkFamilyPerimeter(img, radius, label);
 }
 
 // Replaces Theme::installCardMask()'s own structural pin, deleted along with
@@ -3170,7 +3356,7 @@ int main(int argc, char* argv[])
             // other card in the family carries.
             checkFamilySurface(gizmo, QPoint(0, gizmo->height() / 2),
                                gizmo->rect().adjusted(2, 2, -2, -2), Theme::border(),
-                               QStringLiteral("AxisGizmo"));
+                               QStringLiteral("AxisGizmo"), /*radius=*/8);
 
             // ...and specifically its CORNERS. This used to assert the
             // ground-fill era's answer - each corner reading as OPAQUE
@@ -3807,7 +3993,7 @@ int main(int argc, char* argv[])
                                   std::max(4, undo->y() - 4 -
                                                   (selectEdges->y() + selectEdges->height() + 4)));
                 checkFamilySurface(rail, QPoint(0, slackY), slack, Theme::border(),
-                                   QStringLiteral("ToolCluster (the rail)"));
+                                   QStringLiteral("ToolCluster (the rail)"), /*radius=*/10);
                 checkCardCorners(rail, QStringLiteral("ToolCluster (the rail)"));
             }
 
@@ -4576,7 +4762,7 @@ int main(int argc, char* argv[])
         if (drawer && drawer->isVisible()) {
             checkFamilySurface(drawer, QPoint(0, drawer->height() / 2),
                                drawer->rect().adjusted(6, 6, -6, -6), Theme::border(),
-                               QStringLiteral("ItemsPanel (the drawer)"));
+                               QStringLiteral("ItemsPanel (the drawer)"), /*radius=*/10);
 
             // ...and specifically its CORNERS - the card the nubs were worst
             // on: it floats widest of the family. This used to assert the
@@ -13764,7 +13950,7 @@ int main(int argc, char* argv[])
             const QRect body = guide->rect().adjusted(m, m, -m, -m);
             checkFamilySurface(guide, QPoint(body.left(), body.center().y()),
                                body.adjusted(4, 4, -4, -4), Theme::accent(),
-                               QStringLiteral("WalkthroughPanel"));
+                               QStringLiteral("WalkthroughPanel"), /*radius=*/10);
             checkCardCorners(guide, QStringLiteral("WalkthroughPanel"));
         }
 
@@ -13784,7 +13970,7 @@ int main(int argc, char* argv[])
                 const QRect body = hint->rect().adjusted(m, m, -m, -m);
                 checkFamilySurface(hint, QPoint(body.left(), body.center().y()),
                                    body.adjusted(4, 4, -4, -4), Theme::border(),
-                                   QStringLiteral("HintBalloon"));
+                                   QStringLiteral("HintBalloon"), /*radius=*/8);
                 checkCardCorners(hint, QStringLiteral("HintBalloon"));
             }
         }
@@ -13807,7 +13993,7 @@ int main(int argc, char* argv[])
                 const QRect body = sheet->rect().adjusted(m, m, -m, -m);
                 checkFamilySurface(sheet, QPoint(body.left(), body.center().y()),
                                    body.adjusted(4, 4, -4, -4), Theme::border(),
-                                   QStringLiteral("ShortcutSheet"));
+                                   QStringLiteral("ShortcutSheet"), /*radius=*/10);
                 checkCardCorners(sheet, QStringLiteral("ShortcutSheet"));
             }
             sheet->hide();
@@ -13832,7 +14018,7 @@ int main(int argc, char* argv[])
                 const QRect body = toastWidget->rect().adjusted(m, m, -m, -m);
                 checkFamilySurface(toastWidget, QPoint(body.center().x(), body.top()),
                                    body.adjusted(4, 4, -4, -4),
-                                   Theme::border(), QStringLiteral("Toast"));
+                                   Theme::border(), QStringLiteral("Toast"), /*radius=*/8);
                 checkCardCorners(toastWidget, QStringLiteral("Toast"));
 
                 // Also saved to disk - the coordinator asked for a magnified
@@ -13907,7 +14093,7 @@ int main(int argc, char* argv[])
             const QRect body = extrudePreview->rect().adjusted(m, m, -m, -m);
             checkFamilySurface(extrudePreview, QPoint(body.left(), body.center().y()),
                                body.adjusted(4, 4, -4, -4),
-                               Theme::border(), QStringLiteral("ExtrudePreview (valid)"));
+                               Theme::border(), QStringLiteral("ExtrudePreview (valid)"), /*radius=*/8);
             checkCardCorners(extrudePreview, QStringLiteral("ExtrudePreview"));
 
             // The height field is a SIBLING parented straight to the
@@ -14154,7 +14340,7 @@ int main(int argc, char* argv[])
                                                       -Theme::surfaceShadowMargin());
             checkFamilySurface(panel, QPoint(body.left(), body.center().y()),
                                body.adjusted(4, 4, -4, -4), Theme::border(),
-                               QStringLiteral("AppearancePanel"));
+                               QStringLiteral("AppearancePanel"), /*radius=*/10);
             checkCardCorners(panel, QStringLiteral("AppearancePanel"));
         }
 
@@ -17703,11 +17889,11 @@ int main(int argc, char* argv[])
         // edge reading closer to itself than the panel() interior does.
         checkFamilySurface(panel, QPoint(0, panel->height() / 2),
                            panel->rect().adjusted(6, 6, -6, -6), Theme::border(),
-                           QStringLiteral("VersionsPanel (the drawer)"));
+                           QStringLiteral("VersionsPanel (the drawer)"), /*radius=*/10);
         checkCardCorners(panel, QStringLiteral("VersionsPanel (the drawer)"));
         if (QWidget* c = panel->cardAt(originalIndex)) {
             checkFamilySurface(c, QPoint(0, c->height() / 2), c->rect().adjusted(4, 4, -4, -4),
-                               Theme::border(), QStringLiteral("VersionsPanel row card"));
+                               Theme::border(), QStringLiteral("VersionsPanel row card"), /*radius=*/8);
             // VersionCardWidget is a child of VersionsPanel itself, not of
             // the viewport (see VersionsPanel.cpp), so it never sits
             // directly on the GL surface this family's corner fix targets -
@@ -20195,22 +20381,72 @@ int main(int argc, char* argv[])
             const QString dumpPath = outDir + QStringLiteral("/render-dump-vs-screen.png");
             const bool dumped = rview->saveSnapshot(dumpPath);
             const QImage dumpShot(dumpPath);
-            // Drive the screen to the same place the Dump is, the way the
-            // convergence timer itself drives it: a plain repaint per pass,
-            // no Invalidate. That is scheduleAccumulationFrame() exactly, so
-            // this models "the user entered render mode and sat still" rather
-            // than approximating it - and it is deterministic, where waiting
-            // on the real timer would depend on whether its window happened
-            // to still be open after the probes above.
+            // DRIVEN BY THE REAL TICK, NOT A HAND-ROLLED COPY OF IT.
             //
-            // The pass count matches awaitPathTracingConvergence()'s own
-            // (kMeasurementSettlePasses x 2 = 48), because the comparison
-            // below is between two reads of one progressive render and an
-            // under-converged frame is systematically DARK - which is the
-            // whole reason the numbers must be taken at the same depth.
-            for (int pass = 0; pass < 48; ++pass) {
-                rview->update();
-                settle(12);
+            // This loop used to be `rview->update(); settle(12);` 48 times,
+            // with a comment saying that IS scheduleAccumulationFrame() and is
+            // deterministic where the real timer would race. Both halves were
+            // true and together they were the branch review's IMPORTANT 2: a
+            // hand-rolled copy of the fix cannot detect the fix being reverted.
+            // Wire the convergence tick back to scheduleRedraw() and this file
+            // stayed entirely green unless the 4 s window happened to still be
+            // open across those 576 ms - a regression detector whose
+            // sensitivity is a race, which is the "probe that can quietly skip"
+            // this project bans.
+            //
+            // So: restart the window through a route the APP takes (a camera
+            // apply - what every orbit, pan, zoom and Fit All does - with the
+            // identical state in and out, so no pixel moves), assert the real
+            // QTimer is armed, then pump events and let IT drive every frame.
+            // Nothing below calls update().
+            //
+            // The oracle is OcctViewWidget::accumulationDepth(): frames painted
+            // since the last Invalidate. scheduleRedraw() zeroes it,
+            // scheduleAccumulationFrame() does not, paintGL() increments it -
+            // so a tick reverted to scheduleRedraw() can never carry it past 1
+            // however long this waits, and the check below fails on every
+            // machine, every run, with no dependence on timing. The wait is
+            // bounded: 40 frames at the timer's own 50 ms interval is ~2 s
+            // inside a 4 s window, under an 8 s cap.
+            if (tier == OcctViewWidget::RenderTier::PathTracing) {
+                rview->setCameraStateNow(rview->camera().state());
+                check(rview->pathTracingRefineTicksLeft() > 0,
+                      QStringLiteral("the REAL path-tracing convergence timer is armed after a "
+                                     "camera apply (%1 ticks left), so the frames below are the "
+                                     "app's own tick and not this file driving the screen")
+                          .arg(rview->pathTracingRefineTicksLeft()));
+                constexpr int kTargetDepth = 40;
+                constexpr int kDriveCapMs = 8000;
+                QElapsedTimer drive;
+                drive.start();
+                while (rview->accumulationDepth() < kTargetDepth &&
+                       drive.elapsed() < kDriveCapMs) {
+                    QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+                }
+                const int reached = rview->accumulationDepth();
+                check(reached >= kTargetDepth,
+                      QStringLiteral("and it ADVANCES the accumulation rather than restarting "
+                                     "it - %1 frames deep in one unbroken run after %2 ms, "
+                                     "against the %3 asked for (a tick wired back to "
+                                     "scheduleRedraw() cannot exceed 1)")
+                          .arg(reached).arg(drive.elapsed()).arg(kTargetDepth));
+            } else {
+                // Every other tier renders a full frame per Redraw and has no
+                // accumulation buffer to advance, so there is no timer at all -
+                // startPathTracingConvergence() is only called for PathTracing.
+                // Accounted rather than silently dropped, this file's rule.
+                skipByEnvironment(2,
+                      QStringLiteral("PathTracing is not this session's tier, so there is no "
+                                     "convergence timer to drive and no accumulation to "
+                                     "advance - the two tick assertions do not apply"));
+                // The rasterized tiers still need a current frame under the
+                // capture below, and for them a plain repaint IS the whole
+                // render - nothing accumulates, so nothing is being modelled
+                // wrongly by asking for one directly.
+                for (int pass = 0; pass < 8; ++pass) {
+                    rview->update();
+                    settle(12);
+                }
             }
             const QImage screenShot = printWindowCapture(
                 &probe, outDir + QStringLiteral("/render-screen-vs-dump.png"));
@@ -20674,6 +20910,57 @@ int main(int argc, char* argv[])
                                  "found it (%1 step(s), unchanged) - resumed, "
                                  "not restarted")
                       .arg(guide ? guide->completedSteps() : -1));
+        }
+
+        // --- a context loss does not strand a blank viewport ------------------
+        // The branch review's MINOR 6. releaseGlResources() empties every
+        // presentation map this widget holds - that is deliberate, the handles
+        // pointed into a context that is going away - and before this wave
+        // NOTHING put the document back: the viewport rendered empty until the
+        // user happened to undo, open something or toggle symmetry, each of
+        // which resyncs by accident. Worse, myRenderModeActive was cleared
+        // inside the widget while View -> Render mode stayed CHECKED, so the
+        // single-source-of-truth rule broke across the one event nobody drives.
+        //
+        // WHAT THIS CAN AND CANNOT REACH. Destroying this suite's own GL context
+        // for real would take the viewport every later check needs with it, and
+        // AA_ShareOpenGLContexts exists precisely so no ordinary gesture
+        // destroys one (the compare-pane teardown above is the reachable
+        // teardown, and it destroys the COMPARE widget, not this one). So this
+        // simulates the state the loss leaves - the maps emptied - and then
+        // emits the signal the real loss path emits, which is the half a
+        // handler can actually be wrong about. The emptying is asserted first,
+        // so a simulation that quietly did nothing fails rather than sails.
+        {
+            const int documentBodies = probe.document().count();
+            check(documentBodies > 0 &&
+                      rview->displayedSolidCount() == documentBodies,
+                  QStringLiteral("the viewport and the document agree before the simulated "
+                                 "context loss (%1 bodies displayed, %2 in the document)")
+                      .arg(rview->displayedSolidCount()).arg(documentBodies));
+
+            renderAction->trigger();
+            settle(200);
+            check(renderAction->isChecked() && rview->renderModeActive(),
+                  "render mode is on going into the simulated context loss, so the "
+                  "action-desync half below is not vacuous");
+
+            rview->clearSolids();
+            rview->clearOutlines();
+            check(rview->displayedSolidCount() == 0 && rview->outlineCount() == 0,
+                  "the simulated loss genuinely emptied the viewport - exactly what "
+                  "releaseGlResources() does to the presentation maps");
+
+            emit rview->glResourcesReleased();
+            settle(100);
+            check(rview->displayedSolidCount() == documentBodies,
+                  QStringLiteral("and MainWindow's handler put the whole document back on "
+                                 "screen through the resync every undo, open and restore "
+                                 "already uses (%1 bodies again)")
+                      .arg(rview->displayedSolidCount()));
+            check(!renderAction->isChecked() && !rview->renderModeActive(),
+                  "...and Render mode is unchecked rather than left claiming a mode the "
+                  "widget no longer has");
         }
     }
 

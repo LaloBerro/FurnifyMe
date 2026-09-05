@@ -160,9 +160,41 @@ public:
     static long long lastGlContextDeathTick();
     static int glReleaseCount();
 
+    // How many frames this widget has painted since the last time it
+    // INVALIDATED the view - the depth of the path tracer's current
+    // accumulation run, counted on our side of the wall because OCCT keeps its
+    // own accumulation counter private (OpenGl_View::myAccumFrames has no
+    // accessor at any level).
+    //
+    // It exists for one reason and it is worth stating plainly: it is the only
+    // way the suite can prove the convergence timer ADVANCES the accumulation
+    // rather than restarting it, WITHOUT racing the 4 s convergence window.
+    // Every Invalidate() this class performs zeroes it - an Invalidate is
+    // exactly "throw the accumulation away" - scheduleAccumulationFrame()
+    // deliberately does not, and paintGL() increments it. So a tick wired to
+    // scheduleRedraw() can never carry this past 1 however long it runs, while
+    // a tick wired to scheduleAccumulationFrame() climbs by one per tick. A
+    // revert therefore fails a bounded, deterministic assertion instead of one
+    // that depends on whether a timer window happened to still be open.
+    int accumulationDepth() const { return myAccumulationDepth; }
+
+    // Ticks left in the live path-tracing convergence window, 0 when no window
+    // is open. Exposed alongside accumulationDepth() and for the same reason:
+    // "the real timer is armed" and "the accumulation actually progressed" are
+    // two claims, and a suite that could only make the second one would pass
+    // against a hand-driven paint loop - which is precisely the coverage gap
+    // the whole-branch review named.
+    int pathTracingRefineTicksLeft() const { return myPathTracingRefineTicksLeft; }
+
     void displaySolid(int id, const TopoDS_Shape& shape);
     void removeSolid(int id);
     void clearSolids();
+    // How many bodies are currently DISPLAYED, which is not the same question
+    // as how many the document holds - the gap between the two is what a
+    // context loss opens (releaseGlResources() empties this map) and what
+    // MainWindow's glResourcesReleased() handler closes. outlineCount()'s
+    // sibling, added for the same kind of pin.
+    int displayedSolidCount() const { return static_cast<int>(mySolids.size()); }
 
     // Presentation state, not document state: it is deliberately not captured by
     // undo, because hiding something is not an edit.
@@ -1184,6 +1216,25 @@ public:
     static constexpr double kMaxRenderFovDeg = 120.0;
 
 signals:
+    // The OpenGL context this widget was rendering through has gone, and
+    // everything OCCT held on it has been released with it - mySolids,
+    // myOutlines, the markers, the manipulator and the render-mode state are
+    // all empty, and the next initializeGL() will rebuild an EMPTY viewer.
+    //
+    // Emitted so the owner can put the document back on screen. Without it the
+    // viewport stays permanently blank until the user stumbles into an
+    // undo/open/symmetry toggle, and MainWindow's own Render mode action stays
+    // checked over a widget whose myRenderModeActive was just cleared - a
+    // single-source-of-truth break across the one event nobody drives.
+    // Unreachable in ordinary use (AA_ShareOpenGLContexts covers the compare
+    // pane's reparent, the only context-rebuilding event this app performs),
+    // reachable on a driver reset.
+    //
+    // NOT emitted from the destructor's own releaseGlResources() call: this
+    // object is being destroyed there, its owner is not going to redisplay
+    // anything into it, and Qt has not yet disconnected its connections.
+    void glResourcesReleased();
+
     void sketchPointPicked(const gp_Pnt& point);
     // Fired on every camera change so overlays (the axis gizmo) can repaint.
     void cameraChanged();
@@ -1307,9 +1358,13 @@ private:
     // initializeViewer(): no viewer, no view, no context, no presentations,
     // myInitialized false - so a later initializeGL() rebuilds from scratch
     // rather than reviving handles into a dead context. On the destructor path
-    // that is the end of it; on the context-loss path the viewport is empty
-    // until the document is re-displayed, which is the honest price of a
-    // context loss and still enormously better than the crash it replaces.
+    // that is the end of it; on the context-loss path the viewport would be
+    // empty until the document is re-displayed - so the caller on that path
+    // (initializeGL()'s aboutToBeDestroyed lambda) emits glResourcesReleased()
+    // straight afterwards and MainWindow re-displays through the resync it
+    // already runs on every undo, open and restore. This function itself does
+    // NOT emit: it is also the destructor's teardown, where there is no owner
+    // left to tell.
     void releaseGlResources();
     // Wraps the framebuffer object Qt is currently rendering into as OCCT's
     // default FBO, and syncs the neutral window to its size. Run before every
@@ -1321,6 +1376,14 @@ private:
     // surface, so it does not get to decide when a frame is presented - Qt
     // does, through paintGL(). A no-op with no view.
     void scheduleRedraw();
+    // The ONE place this class throws OCCT's accumulated frame away:
+    // V3d_View::Invalidate() plus the accumulationDepth() counter that mirrors
+    // it. Four callers - scheduleRedraw(), resizeGL(), attachGlWindow() and
+    // wrapDefaultFramebuffer()'s size change - and they are four because
+    // "the scene moved" and "the surface moved" both end an accumulation run.
+    // A bare Invalidate() anywhere else would leave the counter claiming a
+    // depth the renderer no longer has.
+    void invalidateAccumulation();
     // Asks Qt for a frame that ADDS to the path tracer's accumulation instead
     // of restarting it - scheduleRedraw() without the Invalidate().
     //
@@ -1951,6 +2014,9 @@ private:
     // cleaned up by Qt's own parent/child ownership.
     class QTimer* myPathTracingRefineTimer = nullptr;
     int myPathTracingRefineTicksLeft = 0;
+
+    // Frames painted since the last Invalidate - see accumulationDepth().
+    int myAccumulationDepth = 0;
 
     // --- Render settings (Task 7.2) -------------------------------------
     // Plain session state - see the six accessors' own comments above for

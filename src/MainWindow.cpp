@@ -784,6 +784,25 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // authority every other exit routes through.
     connect(myView, &OcctViewWidget::renderModeExitRequested, this,
             [this] { setRenderModeEnabled(false); });
+    // A LOST OPENGL CONTEXT IS NOT A LOST DOCUMENT. The widget released every
+    // presentation it held while the dying context was still current (that is
+    // the whole point of releaseGlResources()), so what it renders afterwards
+    // is an empty viewer over a document that is entirely intact. Nothing else
+    // in this window would put it back: the user would have to stumble into an
+    // undo, an open or a symmetry toggle, each of which resyncs by accident.
+    //
+    // No new machinery for it - this is exactly what resyncView() is, "the only
+    // way to be sure the two agree", already run on undo/redo/open/restore.
+    // Render mode is re-derived through its own single authority for the same
+    // reason: myRenderModeActive was cleared inside the widget, so leaving the
+    // menu entry checked would break the one-source-of-truth rule across the
+    // one event nobody drives. setRenderModeEnabled() is a no-op when the mode
+    // was already off, so the ordinary loss costs one resync and nothing else.
+    connect(myView, &OcctViewWidget::glResourcesReleased, this, [this] {
+        resyncView();
+        setRenderModeEnabled(false);
+        updateActions();
+    });
 
     buildActions();
     buildAppBar(buildMenus());
