@@ -1573,15 +1573,22 @@ void MainWindow::buildOverlay()
 {
     myOverlay = new ViewportOverlay(myView);
 
-    // The pill (Milestone 5, item 3), anchored first so it stacks above
-    // everything else this function anchors TopLeft - the items drawer and
-    // the versions drawer both land beside the rail per Anchor::TopLeft's own
-    // rule (see ViewportOverlay.h), and adding this first means they stack
-    // BELOW it rather than the other way around. It carries the window's own
-    // menu bar, so it is not something render mode ever hides - see the
-    // appStateChanged-driven visibility lambda below, which only reaches the
-    // rail and the gizmo.
-    myOverlay->addWidget(myAppBar, ViewportOverlay::Anchor::TopLeft);
+    // The pill (Milestone 5, item 3; user feedback round: it now LEADS the
+    // rail's own column instead of floating beside it), anchored first and
+    // FIRST of two entries sharing Anchor::LeftEdge - the rail, added below,
+    // is the second and therefore the spine that stretches to the viewport's
+    // bottom edge; this one is the header that does not (see
+    // ViewportOverlay.h's Anchor comment for how that split is derived, not
+    // flagged). Same x as the rail (kEdgeMargin), one stacking gap above it,
+    // so the two read as one column the way the mockup asked for. Adding it
+    // first also means the items drawer and the versions drawer, both
+    // anchored TopLeft below, stack BELOW its own bottom edge rather than
+    // beside it - see relayout()'s leftEdgeHeaderBottom, the symmetric
+    // counterpart to the leftX shift the rail's own width already causes.
+    // It carries the window's own menu bar, so it is not something render
+    // mode ever hides - see the appStateChanged-driven visibility lambda
+    // below, which only reaches the rail and the gizmo.
+    myOverlay->addWidget(myAppBar, ViewportOverlay::Anchor::LeftEdge);
 
     // ONE rail, pinned to the viewport's left edge, in place of the four
     // chip clusters that used to float in three corners and one edge centre.
@@ -1631,31 +1638,26 @@ void MainWindow::buildOverlay()
     tool(myUndoAction,        IconSet::Glyph::Undo);
     tool(myRedoAction,        IconSet::Glyph::Redo);
 
-    // The viewport must never be able to shrink shorter than the rail needs.
-    // rail->sizeHint() is the rail's own natural stack height - every chip,
-    // separator and gap, plus the card's own top/bottom padding - with the
-    // stretch between Select Edges and Undo contributing nothing, the same
-    // number ViewportOverlay::relayout() calls `ch` for a LeftEdge entry.
-    // ViewportOverlay pins that entry kEdgeMargin px off BOTH the top and the
-    // bottom of the viewport (see relayout()'s LeftEdge case), so the
-    // viewport needs at least the rail's height plus twice that margin.
-    // Read from ViewportOverlay itself rather than repeated here, so the two
-    // cannot silently disagree about what the rail is pinned against.
-    //
-    // The pill now floats INSIDE the viewport rather than in the window's own
-    // menu-strip row above it, so the same margin arithmetic is asked of its
-    // sizeHint() too - std::max, not a sum, because the two sit in different
-    // ViewportOverlay columns (Anchor::LeftEdge vs. Anchor::TopLeft, which
-    // never share an x-range - see ViewportOverlay.h) and never stack on top
-    // of each other; either one alone can be the taller demand on a given
-    // build, and the viewport must clear whichever one currently is. Derived
-    // from myAppBar's own sizeHint() rather than a literal, on the same
-    // reasoning the rail's own half of this already followed - a control that
-    // grows a pixel must raise this floor for free rather than reopening the
-    // clip CLAUDE.md already tells this story about once.
+    // The viewport must never be able to shrink shorter than the pill-plus-
+    // rail column needs. rail->sizeHint() is the rail's own natural stack
+    // height - every chip, separator and gap, plus the card's own top/bottom
+    // padding - with the stretch between Select Edges and Undo contributing
+    // nothing, the same number ViewportOverlay::relayout() calls `ch` for
+    // the spine LeftEdge entry. myAppBar->sizeHint() is the pill's own
+    // natural height the same way. Since the user feedback round put the
+    // pill and the rail in ONE column (the pill leading, the rail starting
+    // one stacking gap below its bottom edge - see relayout()'s LeftEdge
+    // case), the floor is now a STACKED SUM rather than a max of two
+    // independent demands: kEdgeMargin (top) + the pill's height + one
+    // ViewportOverlay::kStackGap + the rail's height + kEdgeMargin (bottom).
+    // Both sizeHint()s and both ViewportOverlay constants are read fresh
+    // here rather than repeated as literals, so this cannot silently
+    // disagree with what relayout() actually places against, and a control
+    // that grows a pixel raises this floor for free rather than reopening
+    // the clip CLAUDE.md already tells this story about once.
     myView->setMinimumHeight(
-        std::max(rail->sizeHint().height(), myAppBar->sizeHint().height())
-        + 2 * ViewportOverlay::kEdgeMargin);
+        myAppBar->sizeHint().height() + ViewportOverlay::kStackGap +
+        rail->sizeHint().height() + 2 * ViewportOverlay::kEdgeMargin);
 
     myOverlay->addWidget(rail, ViewportOverlay::Anchor::LeftEdge);
 

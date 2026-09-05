@@ -1121,17 +1121,25 @@ state, label, shortcut. Never give a control its own state: menus, rail buttons 
 shortcuts would drift, and `gui_smoke` finds actions by text, so the controls are covered
 for free. `updateActions()` remains the single place that decides what is available.
 
-The shell's composition, settled in Phase 5 against HTML mockups the user chose from, and
+The shell's composition, settled in Phase 5 against HTML mockups the user chose from,
 reworked once more in Milestone 5, item 3 against a second round of mockups ("Option A -
-compact pill, top left"):
+compact pill, top left"), and adjusted again by a user feedback round on that same item: the
+pill now **leads the rail's own column** (same left margin, one stacking gap above it)
+rather than floating beside it:
 
 - **The app bar is a floating rounded pill now, not a window-spanning strip.**
   `QMainWindow::setMenuWidget` is gone; the viewport is full-bleed to the window's own top
-  edge, and `AppBar` is a `ViewportOverlay::Anchor::TopLeft` card exactly like every other
-  anchored widget - added FIRST in `MainWindow::buildOverlay()`, so the items drawer and
-  the versions drawer (both also `Anchor::TopLeft`, and both shifted right of the rail by
-  that anchor's own `leftX` rule - see `ViewportOverlay.h`) stack downward BELOW it rather
-  than the other way around. It carries the app mark (the user's own artwork,
+  edge, and `AppBar` is a `ViewportOverlay::Anchor::LeftEdge` card now - the FIRST of two
+  entries sharing that anchor, added before the rail, so it is the **header** rather than the
+  **spine** (see `ViewportOverlay.h`'s Anchor comment for how that split is derived from
+  insertion order alone, never flagged, and never confused by which one render mode happens
+  to be hiding). Same x as the rail (`kEdgeMargin`), so the two read as one column the way
+  the feedback round asked for - not the `Anchor::TopLeft` card it was at first ship, floated
+  beside the rail by `leftX`. Adding it first still means the items drawer and the versions
+  drawer (both `Anchor::TopLeft`) stack downward BELOW its bottom edge - now via
+  `relayout()`'s `leftEdgeHeaderBottom`, the symmetric counterpart to the `leftX` shift the
+  rail's own width already causes, rather than via the ordinary TopLeft cursor a plain corner
+  anchor would have given it for free. It carries the app mark (the user's own artwork,
   `IconSet::appMarkPixmap()`), the wordmark, and the window's **real `QMenuBar`**
   (reparented in - menus, shortcuts, the generated sheet and the vocabulary sweep all keep
   working untouched: nothing about the menus themselves changed, only what holds them).
@@ -1182,33 +1190,40 @@ compact pill, top left"):
   already gives for free. `Save Screenshot` is still menu-only. Nothing paints
   `OcctViewWidget::viewDirectionName()` any more (unchanged from Phase 7); the suite still
   asserts snap flights against it.
-- **The rail** is a second, separate `ToolCluster` in `ChipMode::IconOnly` at
+- **The rail** is a second, separate `ToolCluster` in `ChipMode::IconOnly`, also anchored
   `Anchor::LeftEdge` - every tool as an icon button, labels and shortcuts in tooltips that
-  auto-update from the actions. `MainWindow::buildOverlay()` sets the viewport's own minimum
-  height from `std::max()` of the rail's `sizeHint()` and the pill's `sizeHint()`, plus both
-  `ViewportOverlay` edge margins on whichever is taller - derived, not a literal, so neither
-  can go stale the day either one grows (the pill floating INSIDE the viewport now, rather
-  than in a window row that used to reserve its own height for free, is exactly why its own
-  half of this had to be added rather than assumed). The two never share a column - the rail
-  is `Anchor::LeftEdge`, spanning the viewport's left edge top to bottom, while the pill is
-  `Anchor::TopLeft`, which that same anchor's `leftX` rule shifts clear of the rail's own
-  x-range - so `std::max` rather than a sum is the correct floor: whichever one currently
-  demands more height is the one the viewport must clear, and they are never both binding at
-  once the way two stacked entries in the same column would be. A fourteenth rail tool still
-  raises that floor rather than reintroducing the clip that cost Redo, then Undo, but the
-  user's actual screen height is a real ceiling the floor cannot push past, so the rail still
-  wants a rework - scrolling, grouping, something - well before it gets there. **Symmetry
-  stayed off the rail for exactly this reason** — it is a Model-menu-only checkable action
-  (`S`), not a fifteenth chip, so live symmetry did not raise the floor further. Render mode
-  and the bottom-bar toggle are View-menu-only for the same load-bearing reason, not merely
-  by omission. Two `ToolCluster`s now float over the viewport rather than one; a caller
-  wanting "the rail" specifically still gets it as the first match of
-  `findChild<ToolCluster*>()` (added first, in `buildOverlay()`), and `MainWindow::viewControls()`
-  is the accessor for the other one, rather than a caller having to guess which of
-  `findChildren<ToolCluster*>()`'s two results it wants.
-- **The items drawer** floats beside the rail, toggled by the existing Items action -
-  visibility is derived from the action's checked state, both directions, and nothing
-  else may show or hide it. The viewport is full-bleed; there is no dock.
+  auto-update from the actions. Being the SECOND `Anchor::LeftEdge` entry (the pill, above,
+  is the first) makes it the **spine**: the one that stretches to reach the viewport's
+  bottom edge, starting one `ViewportOverlay::kStackGap` below wherever the pill's own
+  bottom edge actually is - read live off the pill's placed geometry every `relayout()`,
+  never a constant, so a pill that grows a row when the type scale does moves the rail's
+  start down with it for free. `MainWindow::buildOverlay()` sets the viewport's own minimum
+  height from a **stacked SUM** now, not a `std::max()` of two independent demands: the
+  pill's `sizeHint()`, one `kStackGap`, the rail's `sizeHint()`, and both `ViewportOverlay`
+  edge margins - derived from both real `sizeHint()`s and both `ViewportOverlay` constants
+  rather than any literal, so it cannot go stale the day either grows, and matches exactly
+  what `relayout()` places against because it reads the same two named constants relayout()
+  does. Before this feedback round the two never shared a column and a `std::max()` was the
+  correct floor; now that they read as one column, the floor has to be the sum of both,
+  because the viewport must clear the header AND the spine stacked, not whichever alone
+  happens to be taller. A fourteenth rail tool still raises that floor rather than
+  reintroducing the clip that cost Redo, then Undo, but the user's actual screen height is a
+  real ceiling the floor cannot push past, so the rail still wants a rework - scrolling,
+  grouping, something - well before it gets there. **Symmetry stayed off the rail for
+  exactly this reason** — it is a Model-menu-only checkable action (`S`), not a fifteenth
+  chip, so live symmetry did not raise the floor further. Render mode and the bottom-bar
+  toggle are View-menu-only for the same load-bearing reason, not merely by omission. Two
+  `ToolCluster`s float over the viewport (the rail and the view-controls cluster under the
+  gizmo, not the pill - that one is an `AppBar`, not a `ToolCluster`); a caller wanting "the
+  rail" specifically still gets it as the first match of `findChild<ToolCluster*>()` (added
+  first, in `buildOverlay()`), and `MainWindow::viewControls()` is the accessor for the
+  other one, rather than a caller having to guess which of `findChildren<ToolCluster*>()`'s
+  two results it wants.
+- **The items drawer** floats beside the rail - and, since it stacks in the same
+  `Anchor::TopLeft` column the pill used to occupy alone, below the pill's own bottom edge
+  too - toggled by the existing Items action: visibility is derived from the action's
+  checked state, both directions, and nothing else may show or hide it. The viewport is
+  full-bleed; there is no dock.
 
 Overlay widgets are **direct children of `OcctViewWidget`**. A probe confirmed Qt
 composites plain children over OCCT's OpenGL surface correctly on Windows - but see the

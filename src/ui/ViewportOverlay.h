@@ -28,6 +28,22 @@ public:
     // That is a property of the layout rather than of any one caller: it does
     // not depend on the order entries were added, and it holds for whatever
     // is anchored left next.
+    //
+    // MULTIPLE widgets may share Anchor::LeftEdge (Milestone 5, item 3's fix
+    // round: the pill leads the rail's own column, same left margin, one
+    // gap between them). They stack downward from the viewport's top edge,
+    // same x, in the order they were added - exactly like TopLeft's own
+    // stack - but only the LAST one added stretches to reach the viewport's
+    // bottom edge (the spine; the rail). Every earlier one (a header; the
+    // pill) keeps its own natural size instead. Which is which is derived
+    // from INSERTION ORDER alone, structurally, never from which entry
+    // happens to be visible right now: the rail is still the last entry
+    // added even while render mode hides it, so hiding it cannot promote the
+    // pill into stretching to fill the viewport - a hidden spine is simply
+    // skipped, the same as any other hidden entry. A header's height is
+    // also what pushes TopLeft's own stack down clear of it (symmetric to
+    // how the spine's width already pushes TopLeft/LeftCenter/BottomLeft
+    // right of it) - see relayout()'s own comment for the arithmetic.
     enum class Anchor { TopLeft, LeftCenter, BottomLeft, TopRight, RightCenter, BottomRight,
                         LeftEdge };
 
@@ -40,6 +56,14 @@ public:
     // sizeHint() plus two of these - reads the real margin relayout() places
     // against, rather than a second copy that could drift from it.
     static constexpr int kEdgeMargin = 14;
+
+    // The gap between two widgets stacked in the same column - the rail
+    // below the pill, a TopLeft card below the one above it. Public for the
+    // same reason kEdgeMargin is: MainWindow derives the viewport's minimum
+    // height as a stacked SUM of the pill's and the rail's own sizeHint()s
+    // plus this gap, and it has to read the real value relayout() places
+    // against rather than a second copy that could drift from it.
+    static constexpr int kStackGap = 8;
 
     explicit ViewportOverlay(QWidget* viewport);
 

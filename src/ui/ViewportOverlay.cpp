@@ -19,7 +19,10 @@ namespace {
 // in, so a caller cannot bake in a stale value if that number ever moves
 // again.
 const int kMargin = 16 - Theme::surfaceShadowMargin();
-constexpr int kGap = 8;       // gap between clusters sharing an edge
+// The same value as the public ViewportOverlay::kStackGap, read through that
+// name rather than redeclared, so MainWindow's own stacked-height arithmetic
+// can never quietly drift from what relayout() actually places against.
+constexpr int kGap = ViewportOverlay::kStackGap;
 }  // namespace
 
 ViewportOverlay::ViewportOverlay(QWidget* viewport)
@@ -68,6 +71,18 @@ void ViewportOverlay::relayout()
     const int w = myViewport->width();
     const int h = myViewport->height();
 
+    // The SPINE among however many entries share Anchor::LeftEdge - the
+    // last one added, structurally, regardless of which ones are visible
+    // right now (see the Anchor comment in the header for why that has to
+    // be true rather than "the last one currently shown"). Found once, up
+    // front, rather than re-derived per entry below: every LeftEdge entry
+    // that is NOT this one is a header, stacked above it in the same
+    // column, at its own natural size.
+    QWidget* spineWidget = nullptr;
+    for (const Entry& entry : myEntries) {
+        if (entry.widget && entry.anchor == Anchor::LeftEdge) spineWidget = entry.widget;
+    }
+
     // Clusters sharing an anchor stack downward in the order they were added.
     int topLeftY = kMargin;
     int topRightY = kMargin;
@@ -85,6 +100,15 @@ void ViewportOverlay::relayout()
     // next left-hand card is placed beside the rail for free, and means the
     // answer does not depend on which entry happens to have been added first.
     int leftX = kMargin;
+
+    // The bottom of whatever LeftEdge HEADERS precede the spine in the same
+    // column (Milestone 5, item 3's fix round: the pill leads the rail) -
+    // the symmetric counterpart to leftX above. A header does not span the
+    // viewport's full height the way the spine does, so it only needs
+    // pushing TopLeft's own stack DOWN clear of it, never pushing anything
+    // right - once past a header's own bottom edge, only the spine (which
+    // DOES span the remaining height) is still there to dodge horizontally.
+    int leftEdgeHeaderBottom = kEdgeMargin;
 
     for (const Entry& entry : myEntries) {
         if (!entry.widget) continue;
@@ -118,11 +142,21 @@ void ViewportOverlay::relayout()
         // isHidden() asks the question that is actually meant - "is this
         // widget meant to be on screen" - and its answer does not depend on
         // whether an ancestor has been shown yet.
-        if (entry.anchor == Anchor::LeftEdge)
-            leftX = std::max(leftX, kEdgeMargin + entry.widget->width() + kGap);
+        if (entry.anchor == Anchor::LeftEdge) {
+            if (entry.widget == spineWidget)
+                leftX = std::max(leftX, kEdgeMargin + entry.widget->width() + kGap);
+            else
+                leftEdgeHeaderBottom += entry.widget->height() + kGap;
+        }
     }
     int leftCursor = (h - (leftCenterY - kGap)) / 2;
     int rightCursor = (h - (rightCenterY - kGap)) / 2;
+    // TopLeft's own stack starts below whatever headers lead the LeftEdge
+    // column, when that is lower than the corner's own ordinary margin -
+    // std::max, not a plain assignment, so a build with no header at all
+    // (leftEdgeHeaderBottom left at its untouched kEdgeMargin) leaves
+    // topLeftY exactly as it always was.
+    topLeftY = std::max(topLeftY, leftEdgeHeaderBottom);
 
     // The POSITION half of Theme's whole-device-pixel rule, for everything
     // anchored here - see Theme.h.
@@ -141,6 +175,14 @@ void ViewportOverlay::relayout()
         return QPoint(Theme::snapToDevicePixels(x, origin.x(), dpr),
                       Theme::snapToDevicePixels(y, origin.y(), dpr));
     };
+
+    // The LeftEdge column's own stacking cursor - the pill's header sits at
+    // kEdgeMargin, and the rail (the spine, whichever entry equals
+    // spineWidget) starts wherever the header's own bottom edge plus kGap
+    // leaves it, read off the header's REAL placed height a few lines below
+    // rather than any fixed offset - the whole reason a header can grow a
+    // row when the type scale does and the rail simply follows.
+    int leftEdgeY = kEdgeMargin;
 
     for (const Entry& entry : myEntries) {
         if (!entry.widget) continue;   // the widget was destroyed; nothing to place
@@ -209,31 +251,46 @@ void ViewportOverlay::relayout()
                 bottomRightY -= kGap;
                 break;
             case Anchor::LeftEdge:
-                placed->move(snapped(kEdgeMargin, kEdgeMargin));
-                // std::max, not the available height alone: on a viewport
-                // too short for every tool the rail carries, shrinking it
-                // would ask its layout to squeeze fourteen fixed-size chips
-                // into a space they do not fit, which Qt resolves by
-                // overlapping them. Keeping the rail at its natural height
-                // instead means a short viewport clips the last button
-                // cleanly off the bottom edge - still wrong, but legibly so,
-                // and every button above it stays the size it should be.
-                //
-                // This class has no way to know it, but the branch is dead
-                // in the shipped app: MainWindow::buildOverlay() sets the
-                // viewport's own minimum height from the rail's sizeHint()
-                // plus kEdgeMargin twice, specifically so `h` here can never
-                // be smaller than `ch` needs. Kept as a real std::max rather
-                // than an assert, because this class is not the one that
-                // enforces that invariant and must not assume a caller
-                // always will.
-                // Through wholeDevicePixels() as well: this one is the ONLY
-                // anchored size not taken from a layout, and the viewport's
-                // height is as arbitrary a number as they come - which is
-                // exactly why the rail was the card the black-run sweep
-                // caught.
-                placed->resize(cw, Theme::wholeDevicePixels(
-                                       std::max(ch, h - kEdgeMargin * 2)));
+                // Every LeftEdge entry shares x = kEdgeMargin and stacks at
+                // the column's own running cursor - a header (the pill)
+                // simply advances it by its own natural height plus kGap; only
+                // the spine (whichever entry equals spineWidget, the rail)
+                // additionally stretches to reach the viewport's bottom edge.
+                placed->move(snapped(kEdgeMargin, leftEdgeY));
+                if (placed == spineWidget) {
+                    // std::max, not the available height alone: on a viewport
+                    // too short for every tool the rail carries, shrinking it
+                    // would ask its layout to squeeze fourteen fixed-size chips
+                    // into a space they do not fit, which Qt resolves by
+                    // overlapping them. Keeping the rail at its natural height
+                    // instead means a short viewport clips the last button
+                    // cleanly off the bottom edge - still wrong, but legibly so,
+                    // and every button above it stays the size it should be.
+                    //
+                    // This class has no way to know it, but the branch is dead
+                    // in the shipped app: MainWindow::buildOverlay() sets the
+                    // viewport's own minimum height from the pill's and the
+                    // rail's own sizeHint()s STACKED, plus kEdgeMargin twice
+                    // and one kStackGap between them, specifically so `h`
+                    // here can never be smaller than `leftEdgeY + ch` needs.
+                    // Kept as a real std::max rather than an assert, because
+                    // this class is not the one that enforces that invariant
+                    // and must not assume a caller always will.
+                    // Through wholeDevicePixels() as well: this one is the
+                    // ONLY anchored size not taken from a layout, and the
+                    // viewport's height is as arbitrary a number as they come
+                    // - which is exactly why the rail was the card the
+                    // black-run sweep caught.
+                    placed->resize(cw, Theme::wholeDevicePixels(
+                                           std::max(ch, h - leftEdgeY - kEdgeMargin)));
+                }
+                // Advances the column's cursor by this entry's REAL, final
+                // height - already the stretched one for the spine, since
+                // the resize above already ran. A header (the pill) reads
+                // its own natural height here, so the rail that follows it
+                // always starts from the pill's actual size, never a
+                // constant - the whole point of this fix round.
+                leftEdgeY += placed->height() + kGap;
                 break;
         }
         placed->raise();

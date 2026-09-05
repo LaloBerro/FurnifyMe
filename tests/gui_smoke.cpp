@@ -459,7 +459,13 @@ void skipByEnvironment(int checks, const QString& why)
 // geometry read off a bar button's own rect). Matched against a real
 // measured run rather than a hand tally, per this task's own rule two
 // paragraphs up: 2595 -> 2628.
-constexpr int kCheckFloor = 2628;
+//
+// The user feedback round that put the pill at the top of the rail's own
+// column (same left margin, one stacking gap above it, instead of floating
+// beside it) added TWO: the min-size probe's own pill/rail same-x and
+// stacking-gap assertions, now that the two are meant to read as one column
+// even at the window's smallest legal size. 2628 + 2 = 2630.
+constexpr int kCheckFloor = 2630;
 
 void check(bool condition, const QString& what)
 {
@@ -3894,19 +3900,34 @@ int main(int argc, char* argv[])
         check(rail != nullptr && rail->isVisible(), "the rail is up over the viewport");
 
         if (rail) {
-            // Pinned to the LEFT edge and spanning the viewport top to
-            // bottom - the two halves of what Anchor::LeftEdge means. The
-            // height is the part a plain corner anchor could not produce:
-            // it is what puts Undo and Redo at the bottom of the viewport
-            // rather than directly under Select Edges.
+            // Pinned to the LEFT edge and spanning down to the viewport's
+            // bottom edge - the two halves of what Anchor::LeftEdge's SPINE
+            // means. The height is the part a plain corner anchor could not
+            // produce: it is what puts Undo and Redo at the bottom of the
+            // viewport rather than directly under Select Edges.
             check(rail->x() >= 0 && rail->x() <= 20,
                   QStringLiteral("the rail hugs the viewport's left edge (x=%1)")
                       .arg(rail->x()));
+            // User feedback round (Milestone 5, item 3): the rail no longer
+            // starts at the viewport's own top edge - it is the SECOND
+            // Anchor::LeftEdge entry now, stacked one ViewportOverlay::
+            // kStackGap below the pill (the header, added first - see
+            // MainWindow::buildOverlay()). The expected top is therefore
+            // DERIVED from the pill's own live geometry, never a constant,
+            // so a pill that grows a row when the type scale does moves
+            // this expectation with it rather than going stale.
+            AppBar* pillForRail = window.appBar();
+            const int expectedRailTop = pillForRail
+                ? pillForRail->y() + pillForRail->height() + ViewportOverlay::kStackGap
+                : -1;
             const int bottomGap = view->height() - (rail->y() + rail->height());
-            check(rail->y() >= 0 && rail->y() <= 20 && bottomGap >= -1 && bottomGap <= 20,
-                  QStringLiteral("and spans it top to bottom (y=%1, %2px of viewport "
-                                 "left below it, viewport %3px tall, rail %4px)")
-                      .arg(rail->y()).arg(bottomGap)
+            check(pillForRail != nullptr && std::abs(rail->y() - expectedRailTop) <= 1 &&
+                      bottomGap >= -1 && bottomGap <= 20,
+                  QStringLiteral("and starts one stacking gap below the pill, spanning "
+                                 "down to the viewport's bottom edge (rail y=%1, expected "
+                                 "%2, %3px of viewport left below it, viewport %4px tall, "
+                                 "rail %5px)")
+                      .arg(rail->y()).arg(expectedRailTop).arg(bottomGap)
                       .arg(view->height()).arg(rail->height()));
 
             // The exact order, by QAction POINTER. Comparing visible text
@@ -4433,14 +4454,14 @@ int main(int argc, char* argv[])
 
         // The pill (Milestone 5, item 3) now floats INSIDE this same
         // viewport rather than in a window row that used to reserve its own
-        // height for free - MainWindow::buildOverlay()'s derived minimum
-        // takes std::max() of the rail's and the pill's own sizeHint(), so
-        // this is the one probe that can catch the two disagreeing at the
-        // window's own smallest legal size. They occupy different
-        // ViewportOverlay columns by construction (Anchor::LeftEdge vs.
-        // Anchor::TopLeft, which ViewportOverlay's own leftX rule keeps
-        // clear of the rail - see ViewportOverlay.h), so this checks that
-        // construction actually holds here rather than assuming it.
+        // height for free - and, since the user feedback round, LEADS the
+        // rail's own column (same x, one stacking gap above it) rather than
+        // floating beside it. MainWindow::buildOverlay()'s derived minimum
+        // is a STACKED SUM of the rail's and the pill's own sizeHint()s now,
+        // not a std::max() of two independent demands, so this is the one
+        // probe that can catch the arithmetic disagreeing with what
+        // relayout() actually places at the window's own smallest legal
+        // size.
         AppBar* minBar = minWin.appBar();
         check(minBar != nullptr && minBar->isVisible(),
               "the minimum-size probe still has a pill");
@@ -4454,6 +4475,18 @@ int main(int argc, char* argv[])
                            QStringLiteral("%1,%2 %3x%4")
                                .arg(minRail->x()).arg(minRail->y())
                                .arg(minRail->width()).arg(minRail->height())));
+            // They read as one column now - same x, and the rail's top is
+            // the pill's own bottom plus one ViewportOverlay::kStackGap,
+            // derived from live geometry rather than assumed, even at the
+            // window's own smallest legal size.
+            check(minBar->x() == minRail->x(),
+                  QStringLiteral("and they share the same left margin (pill x=%1, rail "
+                                 "x=%2)")
+                      .arg(minBar->x()).arg(minRail->x()));
+            check(minRail->y() == minBar->y() + minBar->height() + ViewportOverlay::kStackGap,
+                  QStringLiteral("and the rail starts exactly one stacking gap below the "
+                                 "pill even here (pill bottom=%1, rail y=%2)")
+                      .arg(minBar->y() + minBar->height()).arg(minRail->y()));
             // Near the left edge, not the geometric centre - the real menu
             // bar occupies the centre and much of the right side (see the
             // app-bar block's own identical reasoning above).
