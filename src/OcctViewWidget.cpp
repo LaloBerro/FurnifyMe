@@ -2453,6 +2453,12 @@ gp_Dir OcctViewWidget::liveCameraDirection() const
     return myView->Camera()->Direction();
 }
 
+gp_Dir OcctViewWidget::liveCameraUp() const
+{
+    if (myView.IsNull()) return gp_Dir(0.0, 1.0, 0.0);
+    return myView->Camera()->Up();
+}
+
 bool OcctViewWidget::projectToScreen(const gp_Pnt& world, QPoint& out) const
 {
     if (myView.IsNull()) return false;
@@ -3348,10 +3354,16 @@ void OcctViewWidget::setViewTop()
 {
     CameraState s = myCamera.state();
     // A true 90, not one short of it (Task 6.2's fix) - CameraController::
-    // upVector() no longer degenerates there. Azimuth going along for the
-    // ride unused is fine: eyePosition() is insensitive to it exactly
-    // overhead, but upVector() still reads it, so the view rotates about
-    // its own axis exactly as an orbit approaching the pole would.
+    // upVector() no longer degenerates there. eyePosition() is insensitive
+    // to azimuth exactly overhead, but upVector() still reads it, so
+    // leaving azimuth at whatever it happened to be (as this used to)
+    // rotated the view about its own axis - the same tilt an orbit
+    // approaching the pole would produce, except landed on arbitrarily
+    // depending on where the camera was before "Top" was pressed. Milestone
+    // 5 item 4's fix: force the squared azimuth so Top always shows world
+    // +X right, +Y up, the same every time - see
+    // CameraController::kTopBottomSquaredAzimuthDeg's own comment.
+    s.azimuthDeg = CameraController::kTopBottomSquaredAzimuthDeg;
     s.elevationDeg = 90.0;
     animateTo(s);
 }

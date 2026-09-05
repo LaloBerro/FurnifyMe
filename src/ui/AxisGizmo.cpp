@@ -162,6 +162,12 @@ void AxisGizmo::snapToAxis(int axis, bool positive)
             goal.elevationDeg = 0.0;
             break;
         case 2:   // straight above or below - the true pole (Task 6.2's fix)
+            // Milestone 5 item 4: force the squared azimuth here too, or a
+            // click on the Top/Bottom tip from an arbitrary orbit position
+            // rotated world X/Y arbitrarily on screen - the same bug
+            // setViewTop() had, reached through the gizmo instead of the
+            // menu/key. See CameraController::kTopBottomSquaredAzimuthDeg.
+            goal.azimuthDeg = CameraController::kTopBottomSquaredAzimuthDeg;
             goal.elevationDeg = s * 90.0;
             break;
     }

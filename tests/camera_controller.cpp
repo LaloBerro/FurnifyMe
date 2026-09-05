@@ -137,6 +137,71 @@ int main()
                   "the floor pole is just as well-defined as the ceiling");
     }
 
+    // --- Milestone 5 item 4: the squared Top/Bottom azimuth --------------------
+    // The bug: a user pressing "Top" got a different-looking view depending on
+    // which azimuth the camera happened to hold beforehand, because
+    // upVector() (correctly, per the block just above) keeps varying with
+    // azimuth exactly at the pole - nothing forced that azimuth to a fixed
+    // value before this task. kTopBottomSquaredAzimuthDeg is the one azimuth
+    // (180 degrees - Back's own) that squares BOTH poles onto world X/Y: at
+    // Top, up is exactly world +Y (the ordinary engineering top view, +X
+    // screen-right); at Bottom, up is exactly world -Y (+X still screen-right,
+    // +Y now screen-down - the standard convention for a view from
+    // underneath). Pinned from several different starting azimuths, since the
+    // whole point is that the result no longer depends on where the camera
+    // started.
+    {
+        CameraController cam;
+        CameraState s;
+        s.distance = 500.0;
+
+        for (double startAz : {-45.0, 0.0, 33.0, 90.0, 271.5}) {
+            s.azimuthDeg = startAz;
+            s.elevationDeg = 90.0;
+            cam.setState(s);
+            s.azimuthDeg = CameraController::kTopBottomSquaredAzimuthDeg;
+            cam.setState(s);
+            const gp_Dir up = cam.upVector();
+            checkNear(up.X(), 0.0, 1e-9, "Top squared: up has no X component");
+            checkNear(up.Y(), 1.0, 1e-9, "Top squared: up is exactly world +Y");
+            checkNear(up.Z(), 0.0, 1e-9, "Top squared: up has no Z component (it is the pole)");
+
+            const gp_Dir right = cam.rightVector();
+            checkNear(right.X(), 1.0, 1e-9,
+                      "Top squared: right is exactly world +X, the ordinary "
+                      "engineering top view");
+
+            s.elevationDeg = -90.0;
+            cam.setState(s);
+            const gp_Dir upBottom = cam.upVector();
+            checkNear(upBottom.X(), 0.0, 1e-9, "Bottom squared: up has no X component");
+            checkNear(upBottom.Y(), -1.0, 1e-9,
+                      "Bottom squared: up is exactly world -Y - +Y reads screen-down, "
+                      "the standard convention viewed from underneath");
+            const gp_Dir rightBottom = cam.rightVector();
+            checkNear(rightBottom.X(), 1.0, 1e-9,
+                      "Bottom squared: right is exactly world +X too, same as Top");
+        }
+
+        // And it really is Back's own azimuth - tilting continuously up or
+        // down from Back must not roll the screen at all: right stays world
+        // +X the entire way, only up sweeps from +Z to +Y (or to -Y).
+        s.azimuthDeg = CameraController::kTopBottomSquaredAzimuthDeg;
+        s.elevationDeg = 0.0;
+        cam.setState(s);
+        const gp_Dir backUp = cam.upVector();
+        const gp_Dir backRight = cam.rightVector();
+        checkNear(backUp.Z(), 1.0, 1e-9, "Back itself: up is world +Z");
+        checkNear(backRight.X(), 1.0, 1e-9, "Back itself: right is world +X");
+        for (double el : {30.0, 60.0, 89.0, -30.0, -60.0, -89.0}) {
+            s.elevationDeg = el;
+            cam.setState(s);
+            checkNear(cam.rightVector().X(), 1.0, 1e-9,
+                      "right stays world +X all the way from Back to the poles - "
+                      "no roll anywhere along the meridian");
+        }
+    }
+
     // --- setState clamps ------------------------------------------------------
     {
         CameraController cam;

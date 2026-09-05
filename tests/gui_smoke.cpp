@@ -11590,6 +11590,17 @@ int main(int argc, char* argv[])
         check(std::fabs(view->liveCameraDirection().Dot(gp_Dir(0.0, 0.0, -1.0)) - 1.0) < 1.0e-9,
               "and the live OCCT camera looks exactly straight down - dot == 1 "
               "within 1e-9, not merely close");
+        // Milestone 5 item 4: straight down is not enough on its own - the
+        // user's report was that Top kept whatever azimuth the camera held
+        // before the key was pressed, so world X/Y appeared rotated by an
+        // arbitrary angle. setViewTop() now forces the squared azimuth
+        // (CameraController::kTopBottomSquaredAzimuthDeg), so the live OCCT
+        // up vector must be exactly world +Y - +X right, +Y up, the ordinary
+        // engineering top view - regardless of where the camera was a moment
+        // ago (this block orbits through Front/Right/Axonometric first).
+        check(std::fabs(view->liveCameraUp().Dot(gp_Dir(0.0, 1.0, 0.0)) - 1.0) < 1.0e-9,
+              "and Top is genuinely squared - the live up vector is exactly "
+              "world +Y, not just whatever azimuth was left over");
 
         trigger(window, QStringLiteral("Right"));
         settle(400);
@@ -11718,6 +11729,28 @@ int main(int argc, char* argv[])
                 check(std::fabs(dot - 1.0) < 1.0e-9,
                       QStringLiteral("%1: the live OCCT camera direction is exactly "
                                      "on axis (dot %2)").arg(name).arg(dot, 0, 'f', 12));
+
+                // Milestone 5 item 4: Top and Bottom must be SQUARED onto
+                // world X/Y, not merely straight up/down - the neutral pose
+                // above starts every click from azimuth -45, so this is a
+                // real stress of the fix (the old code left that -45
+                // untouched, which rotates the up vector off either world
+                // axis). The four side views already imply their own
+                // azimuth by construction (each picks a specific value with
+                // elevation 0 - verified by the direction dot above), so
+                // there is nothing analogous to check for them.
+                if (v.axis == 2) {
+                    const gp_Dir expectedUp = v.positive ? gp_Dir(0.0, 1.0, 0.0)
+                                                          : gp_Dir(0.0, -1.0, 0.0);
+                    const double upDot = pview->liveCameraUp().Dot(expectedUp);
+                    check(std::fabs(upDot - 1.0) < 1.0e-9,
+                          QStringLiteral("%1: the live OCCT camera up vector is exactly "
+                                         "world %2 (dot %3) - squared, not just whatever "
+                                         "azimuth the camera held before the click")
+                              .arg(name)
+                              .arg(v.positive ? QStringLiteral("+Y") : QStringLiteral("-Y"))
+                              .arg(upDot, 0, 'f', 12));
+                }
             }
         }
 

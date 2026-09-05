@@ -683,6 +683,15 @@ public:
     // an arbitrary but harmless default, since no check runs without a view.
     gp_Dir liveCameraDirection() const;
 
+    // The LIVE OCCT camera's up vector - Graphic3d_Camera::Up() - same oracle
+    // discipline as liveCameraDirection() just above. Milestone 5 item 4
+    // reads this to pin that Top/Bottom are genuinely SQUARED (world +Y up,
+    // not merely straight down): comparing myCamera.upVector() to itself
+    // would prove only that CameraController agrees with itself, never that
+    // OCCT was actually told the squared pose. gp_Dir(0, 1, 0) before the
+    // view exists - harmless, since no check runs without a view.
+    gp_Dir liveCameraUp() const;
+
     // Document ids of the selected solids, deduplicated (face-mode selection can
     // hit several faces of one solid).
     std::vector<int> selectedSolidIds() const;

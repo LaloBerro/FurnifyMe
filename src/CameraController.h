@@ -36,6 +36,27 @@ public:
     static constexpr double kMinDistance = 1.0;
     static constexpr double kMaxDistance = 100000.0;
 
+    // Milestone 5 item 4's fix: Top and Bottom used to snap elevation to the
+    // true pole (Task 6.2) but left azimuth wherever the camera already was,
+    // so upVector() - which stays genuinely azimuth-driven exactly at the
+    // pole, that being the whole point of its closed form - painted world
+    // X/Y at an arbitrary screen rotation. A user pressing "Top" twice from
+    // two different orbit positions got two different-looking top views of
+    // the same model.
+    //
+    // 180 degrees is the one azimuth that squares BOTH poles onto world
+    // X/Y at once, and it is not an arbitrary pick: it is Back's own azimuth
+    // (setViewFront()/snapToAxis() put Back at 180, elevation 0), so tilting
+    // continuously from Back up to Top or down to Bottom along this meridian
+    // never rotates the screen - rightVector() stays world +X the whole way,
+    // only upVector() sweeps from +Z (Back) to +Y (Top) or to -Y (Bottom).
+    // Checked directly against CameraController::upVector()'s closed form:
+    // at (az=180, el=90) up = world (0, 1, 0) - +X right, +Y up, the
+    // ordinary engineering top view. At (az=180, el=-90) up = world
+    // (0, -1, 0) - +X right, +Y DOWN, the standard convention for a view
+    // from underneath (viewed from below, the near/far sense of Y flips).
+    static constexpr double kTopBottomSquaredAzimuthDeg = 180.0;
+
     // How the scene is projected. Two pieces of state, not one, and the split
     // is the whole feature:
     //
