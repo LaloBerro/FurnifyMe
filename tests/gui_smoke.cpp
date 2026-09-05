@@ -465,7 +465,13 @@ void skipByEnvironment(int checks, const QString& why)
 // beside it) added TWO: the min-size probe's own pill/rail same-x and
 // stacking-gap assertions, now that the two are meant to read as one column
 // even at the window's smallest legal size. 2628 + 2 = 2630.
-constexpr int kCheckFloor = 2630;
+//
+// Milestone 5, item 4 (Top/Bottom squared onto world X/Y) added THREE: the
+// "standard views" block's own live-up-vector check on the menu/key Top
+// route, plus one more each on the axis-gizmo's Top and Bottom tips inside
+// the Task 6.2 named-views loop (the other four tips have nothing analogous
+// - their azimuth is already implied by construction). 2630 + 3 = 2633.
+constexpr int kCheckFloor = 2633;
 
 void check(bool condition, const QString& what)
 {
