@@ -1208,11 +1208,15 @@ void OcctViewWidget::displayOutline(int id, const TopoDS_Face& face)
     ModelingOps::tessellate(face, 0.1);
 
     Handle(AIS_Shape) presentation = new AIS_Shape(face);
-    // The same yellow every piece of sketch work wears - setPreview() and
-    // setModelingPreview() both use it. An outline is a document item, but it
-    // is a FLAT one that is not a body yet, and giving it the bodies' grey
-    // would say it was one.
-    presentation->SetColor(Quantity_Color(Quantity_NOC_YELLOW));
+    // Milestone 5, item 7: the same editable colour the live in-progress
+    // outline wears via setPreview() below - one token for the one word
+    // (outline) at two moments of its life, no longer the hardcoded OCCT
+    // yellow every piece of sketch work used to share with
+    // setModelingPreview() (that channel is a different, unrelated feature
+    // and stays on the stock colour - see this token's own header comment).
+    // An outline is a document item, but it is a FLAT one that is not a
+    // body yet, and giving it the bodies' grey would say it was one.
+    presentation->SetColor(toOcctColor(Theme::outlineLineColour()));
     // Milestone 5, item 6: the same editable width the live in-progress
     // outline wears via setPreview() below - one token for the one word
     // (outline) at two moments of its life.
@@ -1314,9 +1318,9 @@ void OcctViewWidget::setPreview(const TopoDS_Shape& shape, bool shaded)
     if (shaded) ModelingOps::tessellate(shape, 0.1);
 
     myPreview = new AIS_Shape(shape);
-    myPreview->SetColor(Quantity_Color(Quantity_NOC_YELLOW));
-    // Milestone 5, item 6: the same editable width displayOutline() wears -
-    // see that function's own comment.
+    // Milestone 5, items 6 and 7: the same editable width and colour
+    // displayOutline() wears - see that function's own comment.
+    myPreview->SetColor(toOcctColor(Theme::outlineLineColour()));
     myPreview->SetWidth(Theme::sketchLineWidthPx());
     // The in-progress outline and the closed face are drawn above the
     // work-plane grid they sit exactly on top of - see sketchZLayer().
@@ -3549,15 +3553,18 @@ void OcctViewWidget::applyTheme()
         }
     }
 
-    // The outline's own line width, live too - both display sites
-    // (displayOutline(), setPreview()) share Theme::sketchLineWidthPx(), so
-    // a committed outline item still on screen follows an edit the same way
-    // a body's boundary does above.
+    // The outline's own line width AND colour, live too - both display
+    // sites (displayOutline(), setPreview()) share Theme::sketchLineWidthPx()
+    // and Theme::outlineLineColour(), so a committed outline item still on
+    // screen follows an edit to either the same way a body's boundary does
+    // above.
     {
         const double sketchWidth = Theme::sketchLineWidthPx();
+        const Quantity_Color outlineColour = toOcctColor(Theme::outlineLineColour());
         for (auto& entry : myOutlines) {
             if (entry.second.IsNull()) continue;
             entry.second->SetWidth(sketchWidth);
+            entry.second->SetColor(outlineColour);
             myContext->Redisplay(entry.second, Standard_False);
         }
     }

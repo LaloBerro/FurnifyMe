@@ -145,6 +145,7 @@ QString AppearancePanel::nameForToken(const QString& id)
         {QStringLiteral("highlightHover"), QObject::tr("Hover highlight")},
         {QStringLiteral("highlightSelected"), QObject::tr("Selection highlight")},
         {QStringLiteral("sketchPointMarker"), QObject::tr("Outline points")},
+        {QStringLiteral("outlineLineColour"), QObject::tr("Outline lines — colour")},
         {QStringLiteral("chrome"), QObject::tr("Top bar and status bar")},
         {QStringLiteral("panel"), QObject::tr("Panels")},
         {QStringLiteral("border"), QObject::tr("Borders")},

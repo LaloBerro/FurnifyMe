@@ -71,6 +71,11 @@ Spec graphite()
     s.gizmoAxisZ        = QColor("#4a80e0");   // vivid blue
     s.sketchPointMarker = QColor("#ff4fc3");   // magenta - unclaimed by any
                                                // other viewport hue
+    // Quantity_NOC_YELLOW, which is what displayOutline()/setPreview() drew
+    // before this task rather than a token - written as hex for the same
+    // reason the two highlight colours below are: pixel-identical to the
+    // OCCT constant it replaces, so nothing on screen moves until edited.
+    s.outlineLineColour = QColor("#ffff00");
     s.danger            = QColor("#e0564a");   // invalid input, failures
     s.focusRing         = QColor("#ffca4a");   // amber - distinct from
                                                // accent(), which already marks
@@ -233,6 +238,7 @@ const QVector<ColourToken>& colourTokens()
         {QStringLiteral("highlightHover"), &Spec::highlightHover},
         {QStringLiteral("highlightSelected"), &Spec::highlightSelected},
         {QStringLiteral("sketchPointMarker"), &Spec::sketchPointMarker},
+        {QStringLiteral("outlineLineColour"), &Spec::outlineLineColour},
         {QStringLiteral("chrome"), &Spec::chrome},
         {QStringLiteral("panel"), &Spec::panel},
         {QStringLiteral("border"), &Spec::border},
@@ -424,6 +430,7 @@ QColor gizmoAxisX()   { return spec().gizmoAxisX; }
 QColor gizmoAxisY()   { return spec().gizmoAxisY; }
 QColor gizmoAxisZ()   { return spec().gizmoAxisZ; }
 QColor sketchPointMarker() { return spec().sketchPointMarker; }
+QColor outlineLineColour() { return spec().outlineLineColour; }
 QColor danger()       { return spec().danger; }
 QColor focusRing()    { return spec().focusRing; }
 QColor focusRingMuted() { return spec().focusRingMuted; }

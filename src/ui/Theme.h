@@ -45,6 +45,16 @@ struct Spec {
     QColor axisX;
     QColor axisY;
     QColor sketchPointMarker;
+    // Milestone 5, item 7: the in-progress outline's own polyline and a
+    // closed outline's line aspect - the same two display sites
+    // sketchLineWidthPx already reaches. It was OCCT's own
+    // Quantity_NOC_YELLOW until this task rather than a Theme token, and
+    // deliberately NOT accent() - the two are unrelated surfaces that would
+    // otherwise move together the instant either one was edited. The default
+    // is that constant's exact sRGB value, so nothing on screen moves until
+    // the user edits it (the same rule highlightHover/highlightSelected
+    // already follow for their own former OCCT constants).
+    QColor outlineLineColour;
     QColor danger;
     QColor focusRing;
     QColor focusRingMuted;
@@ -234,6 +244,9 @@ QColor sketchPointMarker(); // in-progress sketch: the dot at each placed
                         // preview outline, the cyan hover or the orange
                         // selection tint), chosen to read against both the
                         // viewport background and a shaded grey body
+QColor outlineLineColour(); // the outline's own line - the in-progress
+                        // polyline and a closed outline item's line aspect,
+                        // both - see Spec::outlineLineColour
 QColor danger();        // invalid input, failure accents - NOT the same
                         // concept as axisX(), which is a grid-axis tint that
                         // happens to be red; this is the semantic "something

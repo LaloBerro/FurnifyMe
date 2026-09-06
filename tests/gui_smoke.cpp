@@ -483,7 +483,7 @@ void skipByEnvironment(int checks, const QString& why)
 // each of the two modes, the app-bar pricing's non-vacuity, the app bar's own
 // per-frame budget, the whole overlay tree's, and the structural pin that the
 // app mark is cached rather than re-decoded. 2682 + 9 = 2691.
-constexpr int kCheckFloor = 3121;
+constexpr int kCheckFloor = 3144;
 
 void check(bool condition, const QString& what)
 {
@@ -15147,6 +15147,10 @@ int main(int argc, char* argv[])
                 {QStringLiteral("gizmoAxisY"), QStringLiteral("#7fc84e")},
                 {QStringLiteral("gizmoAxisZ"), QStringLiteral("#4a80e0")},
                 {QStringLiteral("sketchPointMarker"), QStringLiteral("#ff4fc3")},
+                // Milestone 5, item 7: OCCT's own Quantity_NOC_YELLOW, which
+                // is what displayOutline()/setPreview() drew before this
+                // task rather than a token.
+                {QStringLiteral("outlineLineColour"), QStringLiteral("#ffff00")},
                 {QStringLiteral("danger"), QStringLiteral("#e0564a")},
                 {QStringLiteral("focusRing"), QStringLiteral("#ffca4a")},
                 {QStringLiteral("focusRingMuted"), QStringLiteral("#9f7e2e")},
@@ -15179,7 +15183,7 @@ int main(int argc, char* argv[])
                       .arg(Theme::colourTokens().size()).arg(pinned).arg(shipped.size()));
             check(drifted.isEmpty(),
                   QStringLiteral("and defaultSpec() is Graphite byte for byte (%1)")
-                      .arg(drifted.isEmpty() ? QStringLiteral("all 24 exact")
+                      .arg(drifted.isEmpty() ? QStringLiteral("all 25 exact")
                                              : drifted.join(QStringLiteral(", "))));
             check(std::fabs(shippedSpec.basePt - 10.0) < 1e-9,
                   QStringLiteral("and the shipped base size is still 10pt (%1)")
@@ -23700,6 +23704,22 @@ int main(int argc, char* argv[])
                            view->childAt(sketchCentre))),
                   "and a real click on the Outline lines control would land on it too");
 
+            // Milestone 5, item 7: the new COLOUR token rides the data-driven
+            // colourTokens() table, so its row, swatch and persistence are
+            // automatic - the count checks elsewhere in this suite
+            // (panel->colourRowCount() == Theme::colourTokens().size(), the
+            // shipped-defaults pin) already prove the table grew by one and
+            // every entry in it - including this one - got a row. What this
+            // block still owns is that the swatch genuinely EXISTS by id,
+            // the same API every other colour token is edited through
+            // (setTokenColour()) rather than a click - a scroll-position-
+            // dependent childAt proof is not something this suite attempts
+            // for any of the other 24 swatches inside the same scrolling
+            // list either.
+            QWidget* outlineSwatch = panel->swatchFor(QStringLiteral("outlineLineColour"));
+            check(outlineSwatch != nullptr && outlineSwatch->isVisible(),
+                  "the panel has a swatch for the outline colour token");
+
             // The rows' own names - and swept for the banned vocabulary like
             // every other painted string in the shell.
             const QStringList texts = panel->paintedTexts();
@@ -23707,6 +23727,8 @@ int main(int argc, char* argv[])
                   "the row is named \"Edge lines\"");
             check(texts.contains(QStringLiteral("Outline lines")),
                   "the row is named \"Outline lines\"");
+            check(texts.contains(QStringLiteral("Outline lines — colour")),
+                  "the colour row is named \"Outline lines — colour\"");
             for (const QString& text : texts) {
                 for (const QString& word : bannedWords()) {
                     check(!usesBannedWord(text, word),
@@ -23918,9 +23940,137 @@ int main(int argc, char* argv[])
                       .arg(sketchWidthAt1)
                       .arg(sketchWidthAt6));
 
-            trigger(probe, QStringLiteral("Cancel Sketch"));
+            // --- Milestone 5, item 7: Outline lines — colour, on both
+            // display sites this same live in-progress line already frames
+            // for the width probe above -----------------------------------
+            //
+            // The brightest pixel along a perpendicular scan is this line
+            // (a flat, unlit colour against the dark viewport/grid), so its
+            // hue answers "what colour is this line actually drawn in" with
+            // no dependence on the width just tested.
+            auto sampleBrightest = [&](const QImage& shot, const QPointF& mid,
+                                       const QPointF& perp, int half) -> QColor {
+                QColor brightest;
+                int bestLum = -1;
+                for (int t = -half; t <= half; ++t) {
+                    const QPoint p = (mid + perp * t).toPoint();
+                    if (!shot.rect().contains(p)) continue;
+                    const QColor c = shot.pixelColor(p);
+                    const int lum = qGray(c.rgb());
+                    if (lum > bestLum) {
+                        bestLum = lum;
+                        brightest = c;
+                    }
+                }
+                return brightest;
+            };
+            auto sampleSegmentColour = [&](const QString& path) -> QColor {
+                moveTo(view, p1);
+                check(view->saveSnapshot(path),
+                      QStringLiteral("a snapshot is captured (%1)").arg(path));
+                const QImage shot(path);
+                if (shot.isNull()) return QColor();
+                const QPointF mid = (p0 + p1) / 2.0;
+                QPointF dir = p1 - p0;
+                const double len = std::hypot(dir.x(), dir.y());
+                if (len < 1.0) return QColor();
+                dir /= len;
+                const QPointF perp(-dir.y(), dir.x());
+                return sampleBrightest(shot, mid, perp, 15);
+            };
+
             panel->setSketchLineWidth(2.0);
             settle(100);
+            const QColor liveColourBefore =
+                sampleSegmentColour(outDir + QStringLiteral("/sketch-line-colour-before.png"));
+            check(colorDistance(liveColourBefore, Theme::outlineLineColour()) < 40.0,
+                  QStringLiteral("the live in-progress outline renders in its own "
+                                 "colour token (%1), not a bare hardcoded yellow")
+                      .arg(liveColourBefore.name()));
+
+            const QColor customOutlineColour(QStringLiteral("#00aaff"));
+            panel->setTokenColour(QStringLiteral("outlineLineColour"), customOutlineColour);
+            settle(100);
+            const QColor liveColourAfter =
+                sampleSegmentColour(outDir + QStringLiteral("/sketch-line-colour-after.png"));
+            check(colorDistance(liveColourAfter, customOutlineColour) < 40.0 &&
+                      colorDistance(liveColourAfter, liveColourBefore) > 60.0,
+                  QStringLiteral("changing Outline lines — colour moves the LIVE "
+                                 "in-progress outline's own rendered pixels (%1 "
+                                 "before, %2 after)")
+                      .arg(liveColourBefore.name(), liveColourAfter.name()));
+
+            trigger(probe, QStringLiteral("Cancel Sketch"));
+
+            // --- and the same token reaches a CLOSED, committed outline
+            // item too - not merely a freshly built one, but one already on
+            // screen when the edit happens, which is what actually exercises
+            // applyTheme()'s live re-apply over myOutlines rather than just
+            // displayOutline()'s own creation-time read. -------------------
+            panel->setTokenColour(QStringLiteral("outlineLineColour"), QColor(QStringLiteral("#ffff00")));
+            settle(100);
+            trigger(probe, QStringLiteral("Start Sketch"));
+            // Clear of both the body and the in-progress segment above.
+            sketchQuad(probe, 0.06, 0.75, 0.20, 0.85);
+            trigger(probe, QStringLiteral("Finish Sketch"));
+            settle(150);
+            check(view->outlineCount() > 0, "Finish Sketch left a pending outline item");
+
+            const QPointF outlineTop(0.13 * w, 0.75 * h);
+            auto sampleOutlineColour = [&](const QString& path) -> QColor {
+                check(view->saveSnapshot(path),
+                      QStringLiteral("a snapshot is captured (%1)").arg(path));
+                const QImage shot(path);
+                if (shot.isNull()) return QColor();
+                return sampleBrightest(shot, outlineTop, QPointF(0.0, 1.0), 10);
+            };
+
+            // Sampled from the SHADED interior, not the flat unlit border
+            // line the in-progress probe above reads - displayOutline() puts
+            // the token on an AIS_Shaded face, so the pixel actually carries
+            // Phong lighting on top of the base colour (a measured ~94-unit
+            // shift here) and cannot be compared to a bare hex literal. What
+            // survives the lighting is which of the two candidate colours it
+            // reads CLOSER to - the same "measure the pixel, never trust the
+            // setter" discipline, applied with a relative rather than an
+            // absolute yardstick.
+            const QColor defaultOutlineColour(QStringLiteral("#ffff00"));
+            const QColor outlineColourBefore =
+                sampleOutlineColour(outDir + QStringLiteral("/outline-item-colour-before.png"));
+            check(colorDistance(outlineColourBefore, defaultOutlineColour) <
+                      colorDistance(outlineColourBefore, customOutlineColour),
+                  QStringLiteral("the closed outline item reads far closer to the "
+                                 "shipped default colour than to the custom one "
+                                 "not yet applied (%1)")
+                      .arg(outlineColourBefore.name()));
+
+            panel->setTokenColour(QStringLiteral("outlineLineColour"), customOutlineColour);
+            settle(150);
+            const QColor outlineColourAfter =
+                sampleOutlineColour(outDir + QStringLiteral("/outline-item-colour-after.png"));
+            check(colorDistance(outlineColourAfter, customOutlineColour) <
+                      colorDistance(outlineColourAfter, defaultOutlineColour),
+                  QStringLiteral("...and a theme edit made AFTER the outline item "
+                                 "already exists still reaches it live, through "
+                                 "applyTheme()'s own re-apply - now closer to the "
+                                 "custom colour than the shipped default (%1 "
+                                 "before, %2 after)")
+                      .arg(outlineColourBefore.name(), outlineColourAfter.name()));
+
+            panel->setTokenColour(QStringLiteral("outlineLineColour"), QColor(QStringLiteral("#ffff00")));
+            panel->setSketchLineWidth(2.0);
+            settle(100);
+
+            // Clean-up: a pending outline blocks Render mode (the same
+            // "no pending outline" gate ExtrudePreview and the direct-
+            // modeling gizmos already share), and the round trip below needs
+            // Render mode to actually enter. "Delete Selected" is the
+            // pending outline's own second exit (Phase 7's E-or-Delete rule)
+            // when no body is selected, which is the state here.
+            trigger(probe, QStringLiteral("Delete Selected"));
+            settle(150);
+            check(view->outlineCount() == 0,
+                  "the pending outline is gone before the render-mode round trip");
 
             // --- persists through the same debounce chipStroke's and
             // gridDensity's own probes already use ----------------------------
@@ -23995,6 +24145,7 @@ int main(int argc, char* argv[])
         Theme::Spec resetSpec = Theme::spec();
         resetSpec.edgeWidthPx = 1.0;
         resetSpec.sketchLineWidthPx = 2.0;
+        resetSpec.outlineLineColour = QColor(QStringLiteral("#ffff00"));
         Theme::setSpec(resetSpec);
         settle(MainWindow::kAppearanceWriteMs * 2);
 
