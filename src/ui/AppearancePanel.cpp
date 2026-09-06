@@ -287,6 +287,54 @@ AppearancePanel::AppearancePanel(QWidget* parent)
     gridDensityLine->addWidget(myGridDensity);
     outer->addWidget(gridDensityRow);
 
+    // Milestone 5, item 6: two more numeric tokens, on the exact same
+    // QDoubleSpinBox template Grid detail set - a field + kMin/kMax
+    // constants + defaultSpec + operator== + serialize/deserialize +
+    // accessor + this row + applyTheme sync + paintedTexts.
+    auto* edgeWidthRow = new QWidget(this);
+    makeTransparent(edgeWidthRow, QStringLiteral("appearanceEdgeWidthRow"));
+    auto* edgeWidthLine = new QHBoxLayout(edgeWidthRow);
+    edgeWidthLine->setContentsMargins(0, 0, 0, 0);
+    edgeWidthLine->setSpacing(8);
+    myEdgeWidthLabel = new QLabel(tr("Edge lines"), edgeWidthRow);
+    makeTransparent(myEdgeWidthLabel, QStringLiteral("appearanceEdgeWidthLabel"));
+    edgeWidthLine->addWidget(myEdgeWidthLabel, 1);
+    myEdgeWidth = new QDoubleSpinBox(edgeWidthRow);
+    myEdgeWidth->setRange(Theme::kMinEdgeWidthPx, Theme::kMaxEdgeWidthPx);
+    myEdgeWidth->setSingleStep(0.5);
+    myEdgeWidth->setDecimals(1);
+    myEdgeWidth->setSuffix(tr(" px"));
+    myEdgeWidth->setToolTip(tr("How thick the lines along a body's own edges are — "
+                               "0 leaves the shading with none at all"));
+    connect(myEdgeWidth, &QDoubleSpinBox::valueChanged, this, [this](double px) {
+        if (mySyncing) return;
+        setEdgeWidth(px);
+    });
+    edgeWidthLine->addWidget(myEdgeWidth);
+    outer->addWidget(edgeWidthRow);
+
+    auto* sketchLineWidthRow = new QWidget(this);
+    makeTransparent(sketchLineWidthRow, QStringLiteral("appearanceSketchLineWidthRow"));
+    auto* sketchLineWidthLine = new QHBoxLayout(sketchLineWidthRow);
+    sketchLineWidthLine->setContentsMargins(0, 0, 0, 0);
+    sketchLineWidthLine->setSpacing(8);
+    mySketchLineWidthLabel = new QLabel(tr("Outline lines"), sketchLineWidthRow);
+    makeTransparent(mySketchLineWidthLabel, QStringLiteral("appearanceSketchLineWidthLabel"));
+    sketchLineWidthLine->addWidget(mySketchLineWidthLabel, 1);
+    mySketchLineWidth = new QDoubleSpinBox(sketchLineWidthRow);
+    mySketchLineWidth->setRange(Theme::kMinSketchLineWidthPx, Theme::kMaxSketchLineWidthPx);
+    mySketchLineWidth->setSingleStep(0.5);
+    mySketchLineWidth->setDecimals(1);
+    mySketchLineWidth->setSuffix(tr(" px"));
+    mySketchLineWidth->setToolTip(tr("How thick the line an outline draws is — while it "
+                                     "is being drawn and once it is closed"));
+    connect(mySketchLineWidth, &QDoubleSpinBox::valueChanged, this, [this](double px) {
+        if (mySyncing) return;
+        setSketchLineWidth(px);
+    });
+    sketchLineWidthLine->addWidget(mySketchLineWidth);
+    outer->addWidget(sketchLineWidthRow);
+
     auto* strokeRow = new QWidget(this);
     makeTransparent(strokeRow, QStringLiteral("appearanceStrokeRow"));
     auto* strokeLine = new QHBoxLayout(strokeRow);
@@ -402,6 +450,8 @@ void AppearancePanel::applyTheme()
     }
     if (mySize) mySize->setValue(static_cast<int>(live.basePt));
     if (myGridDensity) myGridDensity->setValue(live.gridDensity);
+    if (myEdgeWidth) myEdgeWidth->setValue(live.edgeWidthPx);
+    if (mySketchLineWidth) mySketchLineWidth->setValue(live.sketchLineWidthPx);
     if (myStroke) myStroke->setValue(static_cast<int>(live.chipStrokePx));
     if (myFamily) {
         const int index = myFamily->findText(live.fontFamily);
@@ -454,6 +504,21 @@ void AppearancePanel::setGridDensity(double density)
 {
     Theme::Spec next = Theme::spec();
     next.gridDensity = std::clamp(density, Theme::kMinGridDensity, Theme::kMaxGridDensity);
+    Theme::setSpec(next);
+}
+
+void AppearancePanel::setEdgeWidth(double px)
+{
+    Theme::Spec next = Theme::spec();
+    next.edgeWidthPx = std::clamp(px, Theme::kMinEdgeWidthPx, Theme::kMaxEdgeWidthPx);
+    Theme::setSpec(next);
+}
+
+void AppearancePanel::setSketchLineWidth(double px)
+{
+    Theme::Spec next = Theme::spec();
+    next.sketchLineWidthPx =
+        std::clamp(px, Theme::kMinSketchLineWidthPx, Theme::kMaxSketchLineWidthPx);
     Theme::setSpec(next);
 }
 
@@ -643,6 +708,8 @@ QStringList AppearancePanel::paintedTexts() const
     for (const Row& row : myRows) texts << row.name;
     if (mySizeLabel) texts << mySizeLabel->text();
     if (myGridDensityLabel) texts << myGridDensityLabel->text();
+    if (myEdgeWidthLabel) texts << myEdgeWidthLabel->text();
+    if (mySketchLineWidthLabel) texts << mySketchLineWidthLabel->text();
     if (myStrokeLabel) texts << myStrokeLabel->text();
     if (myFamilyLabel) texts << myFamilyLabel->text();
     if (mySave) texts << mySave->text();

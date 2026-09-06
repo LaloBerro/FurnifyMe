@@ -91,6 +91,18 @@ struct Spec {
     // given zoom and a value below 1.0 coarsens sooner. 1.0 is today's grid,
     // byte-identical - the same rule chipStrokePx's 1.0 default follows.
     double gridDensity = 1.0;
+    // The width of the face-boundary edges displaySolid() draws on shaded
+    // bodies - the GRAY30 crease lines that make a box's own edges readable
+    // once it is shaded. 0 means no boundary lines at all
+    // (SetFaceBoundaryDraw false), the same "0 removes the ring outright"
+    // rule chipStrokePx's 0 already follows. 1.0 is today's hardcoded width,
+    // byte-identical.
+    double edgeWidthPx = 1.0;
+    // The width of the live in-progress outline and a closed outline's own
+    // line aspect (AIS_Shape::SetWidth) - both display sites share this one
+    // value, because the two are the same outline at two moments of its
+    // life. 2.0 is today's hardcoded width, byte-identical.
+    double sketchLineWidthPx = 2.0;
 };
 
 bool operator==(const Spec& a, const Spec& b);
@@ -112,6 +124,19 @@ constexpr double kMaxChipStrokePx = 4.0;
 // into a solid wash (past a handful of times finer).
 constexpr double kMinGridDensity = 0.5;
 constexpr double kMaxGridDensity = 2.0;
+
+// The band the body edge-line width may be set to - see Spec::edgeWidthPx.
+// 0 removes the boundary lines outright; past 4 the crease lines start to
+// eat the shading they are meant to merely outline.
+constexpr double kMinEdgeWidthPx = 0.0;
+constexpr double kMaxEdgeWidthPx = 4.0;
+
+// The band the outline line width may be set to - see
+// Spec::sketchLineWidthPx. 1 is the thinnest a line can be and still read
+// against the viewport background; past 6 it starts to obscure the corner
+// it is meant to mark.
+constexpr double kMinSketchLineWidthPx = 1.0;
+constexpr double kMaxSketchLineWidthPx = 6.0;
 
 const Spec& spec();
 Spec defaultSpec();
@@ -224,6 +249,8 @@ QColor highlightSelected(); // and its selection tint
 
 double chipStrokePx();      // ToolChip border width - see Spec::chipStrokePx
 double gridDensity();       // grid line density multiplier - see Spec::gridDensity
+double edgeWidthPx();       // body boundary-line width - see Spec::edgeWidthPx
+double sketchLineWidthPx(); // outline line width - see Spec::sketchLineWidthPx
 
 // The whole app's type scale: four sizes, and every widget that paints text
 // reads one of them - a fifth size anywhere is a smell, not a design choice.

@@ -67,6 +67,12 @@ public:
     // below 1.0 thins it out. See GridRenderer::minorStepFor() for the exact
     // mapping this drives.
     void setGridDensity(double density);
+    // A body's face-boundary line width - Spec::edgeWidthPx, clamped to
+    // Theme's own range. 0 draws no boundary lines at all.
+    void setEdgeWidth(double px);
+    // The in-progress and closed outline's own line width -
+    // Spec::sketchLineWidthPx, clamped to Theme's own range.
+    void setSketchLineWidth(double px);
     void setFontFamily(const QString& family);
     // Back to Theme::defaultSpec() - Graphite, and the bundled family at 10pt.
     void reset();
@@ -135,6 +141,8 @@ public:
     QSpinBox* sizeControl() const { return mySize; }
     QSpinBox* strokeControl() const { return myStroke; }
     QDoubleSpinBox* gridDensityControl() const { return myGridDensity; }
+    QDoubleSpinBox* edgeWidthControl() const { return myEdgeWidth; }
+    QDoubleSpinBox* sketchLineWidthControl() const { return mySketchLineWidth; }
     QComboBox* familyControl() const { return myFamily; }
     // The live modeless picker, or null when none is open. Exposed so the
     // suite can assert it is modeless and close it - a dialog left open would
@@ -189,10 +197,14 @@ private:
     QLabel* myTitle = nullptr;
     QLabel* mySizeLabel = nullptr;
     QLabel* myGridDensityLabel = nullptr;
+    QLabel* myEdgeWidthLabel = nullptr;
+    QLabel* mySketchLineWidthLabel = nullptr;
     QLabel* myStrokeLabel = nullptr;
     QLabel* myFamilyLabel = nullptr;
     QSpinBox* mySize = nullptr;
     QDoubleSpinBox* myGridDensity = nullptr;
+    QDoubleSpinBox* myEdgeWidth = nullptr;
+    QDoubleSpinBox* mySketchLineWidth = nullptr;
     QSpinBox* myStroke = nullptr;
     QComboBox* myFamily = nullptr;
     class QPushButton* myReset = nullptr;

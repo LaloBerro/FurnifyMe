@@ -483,7 +483,7 @@ void skipByEnvironment(int checks, const QString& why)
 // each of the two modes, the app-bar pricing's non-vacuity, the app bar's own
 // per-frame budget, the whole overlay tree's, and the structural pin that the
 // app mark is cached rather than re-decoded. 2682 + 9 = 2691.
-constexpr int kCheckFloor = 2691;
+constexpr int kCheckFloor = 3121;
 
 void check(bool condition, const QString& what)
 {
@@ -612,6 +612,7 @@ constexpr BlockInfo kBlocks[] = {
     { "a-fade-cannot-be-double-clicked-into-a-second-undo", false, false },
     { "grid-subdivision-policy", false, false },
     { "task-5-2-theme-spec-griddensity-serialize-clamp", false, false },
+    { "milestone-5-item-6-theme-edgewidth-sketchlinewidth-serialize", false, false },
     { "vocabulary-is-enforced-not-merely-documented", false, false },
     { "progress-is-recorded-from-real-actions", false, false },
     { "the-help-menu", false, false },
@@ -645,6 +646,7 @@ constexpr BlockInfo kBlocks[] = {
     { "milestone-4-task-4-2-linked-copies-actions-and", false, true },
     { "hover-keeps-glowing-while-an-edge-is-selected", false, true },
     { "an-orbit-step-costs-one-frame-in-both-modes", false, true },
+    { "milestone-5-item-6-edge-and-outline-line-width-rows", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -13020,6 +13022,68 @@ int main(int argc, char* argv[])
               "a spec string with no gridDensity= fragment defaults to 1.0");
     }
 
+    // --- Milestone 5, item 6: Theme::Spec::edgeWidthPx / sketchLineWidthPx -
+    // serialize, clamp, refuse - the exact template task 5.2's gridDensity
+    // block above already established, run twice over for the two new
+    // tokens at once.
+    if (blockEnabled("milestone-5-item-6-theme-edgewidth-sketchlinewidth-serialize")) {
+        Theme::Spec base = Theme::defaultSpec();
+        check(std::fabs(base.edgeWidthPx - 1.0) < 1e-9,
+              "defaultSpec() carries today's body boundary lines at 1px");
+        check(std::fabs(base.sketchLineWidthPx - 2.0) < 1e-9,
+              "defaultSpec() carries today's outline line at 2px");
+
+        Theme::Spec withWidths = base;
+        withWidths.edgeWidthPx = 2.5;
+        withWidths.sketchLineWidthPx = 4.5;
+        const QString serialized = Theme::serializeSpec(withWidths);
+        check(serialized.contains(QStringLiteral("edgeWidth=2.5")),
+              QStringLiteral("serializeSpec() writes the edgeWidth= fragment (\"%1\")")
+                  .arg(serialized));
+        check(serialized.contains(QStringLiteral("sketchLineWidth=4.5")),
+              QStringLiteral("and the sketchLineWidth= fragment (\"%1\")").arg(serialized));
+
+        Theme::Spec readBack;
+        check(Theme::deserializeSpec(serialized, readBack) &&
+                  std::fabs(readBack.edgeWidthPx - 2.5) < 1e-9 &&
+                  std::fabs(readBack.sketchLineWidthPx - 4.5) < 1e-9,
+              "and deserializeSpec() reads both straight back");
+
+        // Refuse-out-of-range, on the low and high side of each token,
+        // following gridDensity's own rule - and leaving `out` untouched on
+        // refusal.
+        Theme::Spec sentinel = base;
+        sentinel.accent = QColor(QStringLiteral("#123456"));
+
+        Theme::Spec edgeTooLow = sentinel;
+        check(!Theme::deserializeSpec(QStringLiteral("edgeWidth=-1"), edgeTooLow) &&
+                  edgeTooLow.accent == sentinel.accent,
+              "an edgeWidth below kMinEdgeWidthPx is refused outright, `out` untouched");
+        Theme::Spec edgeTooHigh = sentinel;
+        check(!Theme::deserializeSpec(QStringLiteral("edgeWidth=5"), edgeTooHigh) &&
+                  edgeTooHigh.accent == sentinel.accent,
+              "an edgeWidth above kMaxEdgeWidthPx is refused outright, `out` untouched");
+
+        Theme::Spec sketchTooLow = sentinel;
+        check(!Theme::deserializeSpec(QStringLiteral("sketchLineWidth=0.5"), sketchTooLow) &&
+                  sketchTooLow.accent == sentinel.accent,
+              "a sketchLineWidth below kMinSketchLineWidthPx is refused outright, "
+              "`out` untouched");
+        Theme::Spec sketchTooHigh = sentinel;
+        check(!Theme::deserializeSpec(QStringLiteral("sketchLineWidth=7"), sketchTooHigh) &&
+                  sketchTooHigh.accent == sentinel.accent,
+              "a sketchLineWidth above kMaxSketchLineWidthPx is refused outright, "
+              "`out` untouched");
+
+        // An older spec with neither fragment loads at both defaults - the
+        // same forward-compatible reading gridDensity's own block pins.
+        Theme::Spec noWidths;
+        check(Theme::deserializeSpec(QStringLiteral("base=11"), noWidths) &&
+                  std::fabs(noWidths.edgeWidthPx - 1.0) < 1e-9 &&
+                  std::fabs(noWidths.sketchLineWidthPx - 2.0) < 1e-9,
+              "a spec string with neither fragment defaults to 1px edges / 2px outlines");
+    }
+
     // --- vocabulary is enforced, not merely documented ------------------------
     if (blockEnabled("vocabulary-is-enforced-not-merely-documented")) {
         // A documented vocabulary drifts the moment someone is in a hurry. An
@@ -23575,6 +23639,366 @@ int main(int argc, char* argv[])
         check(IconSet::appMarkPixmap(20).cacheKey() == IconSet::appMarkPixmap(20).cacheKey(),
               "the app mark is rasterized once and cached, not re-decoded from "
               "the 2000px artwork on every paint");
+    }
+
+    // --- Milestone 5, item 6: Edge lines / Outline lines rows ---------------
+    // Self-contained, on the same terms the hover block and the orbit-pacing
+    // block above it are: its own window, its own furniture, its own body -
+    // the fast, intended use of the FILTER for a numeric-token row exactly
+    // like chipStrokePx's and gridDensity's own probes before it. Placed
+    // last so nothing after it can inherit whatever it leaves the shared
+    // Theme::spec() holding, and so a filtered run of it alone is safe (see
+    // kBlocks' own comment on selfContained).
+    if (blockEnabled("milestone-5-item-6-edge-and-outline-line-width-rows")) {
+        // Out of the real registry entirely for the persistence half below -
+        // the same guard the returning-user path and the grid-density probe
+        // both use, constructed before the persisting window so its very
+        // first read/write already lands in the isolated ini.
+        ScopedTestSettings scopedSettings;
+        RequiredTempDir lineWidthLib;
+        MainWindow probe(nullptr, /*persistProgress=*/true, lineWidthLib.path());
+        probe.setAttribute(Qt::WA_ShowWithoutActivating);
+        probe.resize(1000, 760);
+        probe.move(60, 60);
+        probe.show();
+        settle(300);
+        OcctViewWidget* view = probe.view();
+        view->setAnimationsEnabled(false);
+
+        enterFreshFurniture(probe);
+
+        QAction* appearanceAction = action(probe, QStringLiteral("Appearance..."));
+        check(appearanceAction != nullptr, "there is an Appearance action");
+        if (appearanceAction && !appearanceAction->isChecked()) appearanceAction->trigger();
+        settle(200);
+
+        AppearancePanel* panel = probe.appearancePanel();
+        check(panel != nullptr && panel->isVisible(), "the Appearance panel is open");
+        check(panel != nullptr && panel->edgeWidthControl() != nullptr &&
+                  panel->sketchLineWidthControl() != nullptr,
+              "the panel has an edge-line row and an outline-line row");
+
+        if (panel && panel->edgeWidthControl() && panel->sketchLineWidthControl()) {
+            check(panel->edgeWidthControl()->isVisible() &&
+                      panel->sketchLineWidthControl()->isVisible(),
+                  "and both are actually reachable, not merely constructed");
+
+            // childAt-reachable: a real click on either control lands on it,
+            // not merely on a widget that happens to report isVisible() -
+            // the same proof the render-mode block's rail check uses.
+            const QPoint edgeCentre = panel->edgeWidthControl()->mapTo(
+                view, panel->edgeWidthControl()->rect().center());
+            check(view->childAt(edgeCentre) != nullptr &&
+                      (view->childAt(edgeCentre) == panel->edgeWidthControl() ||
+                       panel->edgeWidthControl()->isAncestorOf(view->childAt(edgeCentre))),
+                  "a real click on the Edge lines control would land on it");
+            const QPoint sketchCentre = panel->sketchLineWidthControl()->mapTo(
+                view, panel->sketchLineWidthControl()->rect().center());
+            check(view->childAt(sketchCentre) != nullptr &&
+                      (view->childAt(sketchCentre) == panel->sketchLineWidthControl() ||
+                       panel->sketchLineWidthControl()->isAncestorOf(
+                           view->childAt(sketchCentre))),
+                  "and a real click on the Outline lines control would land on it too");
+
+            // The rows' own names - and swept for the banned vocabulary like
+            // every other painted string in the shell.
+            const QStringList texts = panel->paintedTexts();
+            check(texts.contains(QStringLiteral("Edge lines")),
+                  "the row is named \"Edge lines\"");
+            check(texts.contains(QStringLiteral("Outline lines")),
+                  "the row is named \"Outline lines\"");
+            for (const QString& text : texts) {
+                for (const QString& word : bannedWords()) {
+                    check(!usesBannedWord(text, word),
+                          QStringLiteral("\"%1\" carries no banned word (checked "
+                                         "against \"%2\")")
+                              .arg(text, word));
+                }
+            }
+
+            // --- applyTheme sync: the panel's edit path lands on Theme
+            // immediately, and the control reads back what was set -
+            // chipStroke's and gridDensity's own contract.
+            panel->setEdgeWidth(2.5);
+            check(std::fabs(Theme::edgeWidthPx() - 2.5) < 1e-9,
+                  "setEdgeWidth() lands on Theme immediately");
+            check(std::fabs(panel->edgeWidthControl()->value() - 2.5) < 1e-9,
+                  "and the control reads back what was set");
+            panel->setSketchLineWidth(4.5);
+            check(std::fabs(Theme::sketchLineWidthPx() - 4.5) < 1e-9,
+                  "setSketchLineWidth() lands on Theme immediately");
+            check(std::fabs(panel->sketchLineWidthControl()->value() - 4.5) < 1e-9,
+                  "and the control reads back what was set");
+
+            // --- a live edit visibly changes rendered output: a body's own
+            // boundary lines --------------------------------------------------
+            //
+            // Square-down FIRST, the same premise the exact-named-views block
+            // establishes: buildBody() clicks a SCREEN rectangle, and
+            // unprojecting a screen rectangle onto the ground plane only
+            // yields a WORLD-axis-aligned rectangle when the camera looks
+            // exactly along an axis with an axis-aligned up vector - the
+            // default oblique startup pose skews it into a parallelogram
+            // instead, which is not the clean box this probe's Bnd_Box corner
+            // math needs.
+            CameraState squareDown = view->camera().state();
+            squareDown.azimuthDeg = 0.0;
+            squareDown.elevationDeg = 90.0;
+            view->animateTo(squareDown);
+            settle(100);
+            check(buildBody(probe, 0.38, 0.38, 0.62, 0.62, 150.0),
+                  "a body for the edge-width pixel probe");
+            const int bodyId = probe.document().solids().empty()
+                                   ? -1
+                                   : probe.document().solids().back().id;
+            check(bodyId > 0, "the body reached the document");
+
+            Bnd_Box box;
+            if (!probe.document().solids().empty())
+                BRepBndLib::Add(probe.document().solids().back().shape, box);
+            Standard_Real bx0 = 0, by0 = 0, bz0 = 0, bx1 = 0, by1 = 0, bz1 = 0;
+            box.Get(bx0, by0, bz0, bx1, by1, bz1);
+
+            // A 3/4 view onto the body's own +X+Y corner - the default
+            // startup azimuth (-45) and CameraController::eyePosition()'s own
+            // formula put the eye at +X,+Y relative to the target, so that
+            // corner's vertical edge is a genuine INTERIOR crease between two
+            // visible, differently-lit faces rather than the silhouette -
+            // which is what makes "darker than both neighbours" a clean
+            // signal for the boundary line itself, with no background or
+            // grid pixels anywhere near it.
+            CameraState creaseView;
+            creaseView.target =
+                gp_Pnt(0.5 * (bx0 + bx1), 0.5 * (by0 + by1), 0.5 * (bz0 + bz1));
+            creaseView.azimuthDeg = -45.0;
+            creaseView.elevationDeg = 25.0;
+            creaseView.distance =
+                std::max(300.0, 1.8 * std::sqrt((bx1 - bx0) * (bx1 - bx0) +
+                                                (by1 - by0) * (by1 - by0) +
+                                                (bz1 - bz0) * (bz1 - bz0)));
+            view->animateTo(creaseView);
+            settle(150);
+
+            QPoint edgeTop, edgeBottom;
+            const bool haveEdge = view->projectToScreen(gp_Pnt(bx1, by1, bz1), edgeTop) &&
+                                  view->projectToScreen(gp_Pnt(bx1, by1, bz0), edgeBottom);
+            check(haveEdge, "the body's near vertical edge projects onto the viewport");
+
+            // A luminance profile perpendicular to that edge, sampled around
+            // its midpoint - a local MINIMUM below both neighbouring plateaus
+            // is the boundary line itself (an unlit, flat-coloured line drawn
+            // between two differently-lit faces), regardless of its exact
+            // colour value - the same "measure the pixel, not the setter"
+            // discipline CLAUDE.md's zoom-persistence finding established.
+            auto sampleProfile = [&](const QString& path) -> std::vector<int> {
+                std::vector<int> profile;
+                if (!haveEdge) return profile;
+                check(view->saveSnapshot(path),
+                      QStringLiteral("a snapshot is captured (%1)").arg(path));
+                const QImage shot(path);
+                if (shot.isNull()) return profile;
+                const QPointF mid = (QPointF(edgeTop) + QPointF(edgeBottom)) / 2.0;
+                QPointF dir = QPointF(edgeBottom) - QPointF(edgeTop);
+                const double len = std::hypot(dir.x(), dir.y());
+                if (len < 1.0) return profile;
+                dir /= len;
+                const QPointF perp(-dir.y(), dir.x());
+                for (int t = -22; t <= 22; ++t) {
+                    const QPoint p = (mid + perp * t).toPoint();
+                    profile.push_back(shot.rect().contains(p) ? qGray(shot.pixel(p)) : -1);
+                }
+                return profile;
+            };
+            auto valleyWidth = [](const std::vector<int>& profile) -> int {
+                if (profile.size() < 12) return 0;
+                long leftSum = 0, rightSum = 0;
+                for (int i = 0; i < 5; ++i) leftSum += profile[i];
+                for (int i = 0; i < 5; ++i) rightSum += profile[profile.size() - 1 - i];
+                const double reference = std::min(leftSum / 5.0, rightSum / 5.0);
+                const double threshold = reference - 10.0;
+                int count = 0;
+                for (int v : profile) {
+                    if (v >= 0 && v < threshold) ++count;
+                }
+                return count;
+            };
+
+            panel->setEdgeWidth(1.0);
+            settle(150);
+            const int widthAt1 =
+                valleyWidth(sampleProfile(outDir + QStringLiteral("/edge-width-1.png")));
+
+            panel->setEdgeWidth(Theme::kMaxEdgeWidthPx);
+            settle(150);
+            const int widthAt4 =
+                valleyWidth(sampleProfile(outDir + QStringLiteral("/edge-width-4.png")));
+
+            check(widthAt1 >= 0 && widthAt4 > widthAt1,
+                  QStringLiteral("raising Edge lines thickens the LIVE boundary line "
+                                 "at a fixed camera pose (%1 px before, %2 px after)")
+                      .arg(widthAt1)
+                      .arg(widthAt4));
+
+            panel->setEdgeWidth(0.0);
+            settle(150);
+            check(view->solidFaceBoundaryWidth(bodyId) < 0.0,
+                  "edgeWidthPx=0 disables the boundary aspect outright");
+            const int widthAt0 =
+                valleyWidth(sampleProfile(outDir + QStringLiteral("/edge-width-0.png")));
+            check(widthAt0 < widthAt1,
+                  QStringLiteral("...and the rendered boundary line is genuinely "
+                                 "gone, not merely a thin one (%1 px against %2 px "
+                                 "at 1px)")
+                      .arg(widthAt0)
+                      .arg(widthAt1));
+
+            panel->setEdgeWidth(1.0);
+            settle(100);
+
+            // --- and the same idea for the live in-progress outline's own
+            // line ------------------------------------------------------------
+            //
+            // Back to the square-down view used to build the body: a
+            // straight-down ray-plane intersection maps a screen fraction to
+            // the ground plane with no perspective/horizon complication at
+            // all, which is what makes the two screen points below land
+            // exactly where they are clicked rather than wherever an oblique
+            // ray under the crease-probe's close-up camera happens to hit.
+            view->animateTo(squareDown);
+            settle(100);
+            trigger(probe, QStringLiteral("Start Sketch"));
+            const double w = view->width();
+            const double h = view->height();
+            // Clear of the body's own footprint (built at 0.38..0.62 in both
+            // axes) - straight down, the sketch line at Z=0 would otherwise
+            // sit directly under the body and be occluded by it.
+            const QPointF p0(0.06 * w, 0.06 * h);
+            const QPointF p1(0.20 * w, 0.16 * h);
+            clickAt(view, p0);
+
+            auto sampleSegmentWidth = [&](const QString& path) -> int {
+                moveTo(view, p1);
+                check(view->saveSnapshot(path),
+                      QStringLiteral("a snapshot is captured (%1)").arg(path));
+                const QImage shot(path);
+                if (shot.isNull()) return -1;
+                const QPointF mid = (p0 + p1) / 2.0;
+                QPointF dir = p1 - p0;
+                const double len = std::hypot(dir.x(), dir.y());
+                if (len < 1.0) return -1;
+                dir /= len;
+                const QPointF perp(-dir.y(), dir.x());
+                int count = 0;
+                for (int t = -15; t <= 15; ++t) {
+                    const QPoint p = (mid + perp * t).toPoint();
+                    if (!shot.rect().contains(p)) continue;
+                    const QColor c = shot.pixelColor(p);
+                    // Pure, unlit AIS_WireFrame yellow against a dark
+                    // viewport background - a strong, unambiguous signal
+                    // that needs no plateau/valley machinery.
+                    if (c.red() > 150 && c.green() > 150 && c.blue() < 120) ++count;
+                }
+                return count;
+            };
+
+            panel->setSketchLineWidth(1.0);
+            settle(100);
+            const int sketchWidthAt1 =
+                sampleSegmentWidth(outDir + QStringLiteral("/sketch-line-width-1.png"));
+
+            panel->setSketchLineWidth(Theme::kMaxSketchLineWidthPx);
+            settle(100);
+            const int sketchWidthAt6 =
+                sampleSegmentWidth(outDir + QStringLiteral("/sketch-line-width-6.png"));
+
+            check(sketchWidthAt1 >= 0 && sketchWidthAt6 > sketchWidthAt1,
+                  QStringLiteral("raising Outline lines thickens the LIVE "
+                                 "in-progress outline at a fixed camera pose "
+                                 "(%1 px before, %2 px after)")
+                      .arg(sketchWidthAt1)
+                      .arg(sketchWidthAt6));
+
+            trigger(probe, QStringLiteral("Cancel Sketch"));
+            panel->setSketchLineWidth(2.0);
+            settle(100);
+
+            // --- persists through the same debounce chipStroke's and
+            // gridDensity's own probes already use ----------------------------
+            panel->setEdgeWidth(3.0);
+            panel->setSketchLineWidth(3.5);
+            settle(MainWindow::kAppearanceWriteMs * 2);
+            {
+                QSettings written;
+                Theme::Spec readBack;
+                check(Theme::deserializeSpec(
+                          written.value(QStringLiteral("appearance")).toString(), readBack) &&
+                          std::fabs(readBack.edgeWidthPx - 3.0) < 1e-9 &&
+                          std::fabs(readBack.sketchLineWidthPx - 3.5) < 1e-9,
+                      "and the debounced write stores both widths that survived");
+            }
+
+            // --- render mode's own round trip: suppressed while active,
+            // restored AT the token width on exit ------------------------------
+            check(std::fabs(view->solidFaceBoundaryWidth(bodyId) - 3.0) < 1e-6,
+                  "the body's boundary aspect reads back the live token width");
+
+            QAction* renderAction = action(probe, QStringLiteral("Render mode"));
+            check(renderAction != nullptr, "there is a Render mode action");
+            if (renderAction) renderAction->trigger();
+            settle(400);
+            check(renderAction == nullptr || probe.renderModeEnabled(),
+                  "render mode is on for the round-trip check");
+            check(view->solidFaceBoundaryWidth(bodyId) < 0.0,
+                  "boundary lines are suppressed while render mode is active, "
+                  "regardless of the token width");
+
+            if (renderAction) renderAction->trigger();
+            settle(300);
+            check(renderAction == nullptr || !probe.renderModeEnabled(),
+                  "render mode is off again");
+            check(std::fabs(view->solidFaceBoundaryWidth(bodyId) - 3.0) < 1e-6,
+                  "and restored AT the token width on exit, not just "
+                  "unconditionally on");
+
+            // A theme edit made WHILE render mode is up must not undo the
+            // suppression - applyTheme()'s own guard, exercised live.
+            if (renderAction) renderAction->trigger();
+            settle(300);
+            panel->setEdgeWidth(3.5);
+            settle(100);
+            check(view->solidFaceBoundaryWidth(bodyId) < 0.0,
+                  "a theme edit made mid-render-mode does not re-enable the "
+                  "boundary");
+            if (renderAction) renderAction->trigger();
+            settle(300);
+            check(std::fabs(view->solidFaceBoundaryWidth(bodyId) - 3.5) < 1e-6,
+                  "exiting afterwards restores at whatever width was live at "
+                  "that moment");
+
+            // And the 0-width case survives a round trip too: no boundary
+            // before, none after.
+            panel->setEdgeWidth(0.0);
+            settle(100);
+            if (renderAction) renderAction->trigger();
+            settle(300);
+            check(view->solidFaceBoundaryWidth(bodyId) < 0.0,
+                  "0px stays suppressed while render mode is active");
+            if (renderAction) renderAction->trigger();
+            settle(300);
+            check(view->solidFaceBoundaryWidth(bodyId) < 0.0,
+                  "and stays off on exit too - 0 means no boundary at all");
+        }
+
+        // Theme is process-global state - left at the shipped defaults for
+        // whatever runs next, the same discipline gridDensity's own probe
+        // follows.
+        Theme::Spec resetSpec = Theme::spec();
+        resetSpec.edgeWidthPx = 1.0;
+        resetSpec.sketchLineWidthPx = 2.0;
+        Theme::setSpec(resetSpec);
+        settle(MainWindow::kAppearanceWriteMs * 2);
+
+        probe.close();
     }
 
     // The coverage floor, asserted OUTSIDE check() on purpose: an assertion

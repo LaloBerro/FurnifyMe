@@ -1081,9 +1081,17 @@ void OcctViewWidget::displaySolid(int id, const TopoDS_Shape& shape)
     // Neutral grey so the cyan hover and orange selection stand out, and face
     // boundaries drawn so the shape's edges are readable when shaded.
     presentation->SetColor(Quantity_Color(Quantity_NOC_GRAY70));
-    presentation->Attributes()->SetFaceBoundaryDraw(Standard_True);
-    presentation->Attributes()->SetFaceBoundaryAspect(
-        new Prs3d_LineAspect(Quantity_NOC_GRAY30, Aspect_TOL_SOLID, 1.0));
+    // Milestone 5, item 6: the boundary width is an editable token now - 0
+    // means no boundary lines at all, the same rule chipStrokePx's 0 already
+    // follows for a chip's own ring.
+    {
+        const double edgeWidth = Theme::edgeWidthPx();
+        presentation->Attributes()->SetFaceBoundaryDraw(edgeWidth > 0.0);
+        if (edgeWidth > 0.0) {
+            presentation->Attributes()->SetFaceBoundaryAspect(
+                new Prs3d_LineAspect(Quantity_NOC_GRAY30, Aspect_TOL_SOLID, edgeWidth));
+        }
+    }
     myContext->Display(presentation, myWireframe ? AIS_WireFrame : AIS_Shaded,
                        kSelectionModeWholeShape, Standard_False);
     mySolids[id] = presentation;
@@ -1179,6 +1187,17 @@ bool OcctViewWidget::isSolidVisible(int id) const
     return myContext->IsDisplayed(it->second);
 }
 
+double OcctViewWidget::solidFaceBoundaryWidth(int id) const
+{
+    const auto it = mySolids.find(id);
+    if (it == mySolids.end() || it->second.IsNull()) return -1.0;
+    const Handle(Prs3d_Drawer)& attrs = it->second->Attributes();
+    if (attrs.IsNull() || !attrs->FaceBoundaryDraw()) return -1.0;
+    const Handle(Prs3d_LineAspect)& aspect = attrs->FaceBoundaryAspect();
+    if (aspect.IsNull() || aspect->Aspect().IsNull()) return -1.0;
+    return aspect->Aspect()->Width();
+}
+
 void OcctViewWidget::displayOutline(int id, const TopoDS_Face& face)
 {
     initializeViewer();
@@ -1194,7 +1213,10 @@ void OcctViewWidget::displayOutline(int id, const TopoDS_Face& face)
     // is a FLAT one that is not a body yet, and giving it the bodies' grey
     // would say it was one.
     presentation->SetColor(Quantity_Color(Quantity_NOC_YELLOW));
-    presentation->SetWidth(2.0);
+    // Milestone 5, item 6: the same editable width the live in-progress
+    // outline wears via setPreview() below - one token for the one word
+    // (outline) at two moments of its life.
+    presentation->SetWidth(Theme::sketchLineWidthPx());
     // Above the work-plane grid it lies exactly on top of - see sketchZLayer().
     markInSketchLayer(presentation);
     // Selection mode -1: never pickable. Outlines are handled from the drawer
@@ -1293,7 +1315,9 @@ void OcctViewWidget::setPreview(const TopoDS_Shape& shape, bool shaded)
 
     myPreview = new AIS_Shape(shape);
     myPreview->SetColor(Quantity_Color(Quantity_NOC_YELLOW));
-    myPreview->SetWidth(2.0);
+    // Milestone 5, item 6: the same editable width displayOutline() wears -
+    // see that function's own comment.
+    myPreview->SetWidth(Theme::sketchLineWidthPx());
     // The in-progress outline and the closed face are drawn above the
     // work-plane grid they sit exactly on top of - see sketchZLayer().
     markInSketchLayer(myPreview);
@@ -3506,6 +3530,38 @@ void OcctViewWidget::applyTheme()
     myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane(),
                           Theme::gridDensity());
 
+    // Milestone 5, item 6: the body boundary lines' width is a live token
+    // too - re-applied and Redisplay'd here exactly like the highlight
+    // styles above. Skipped while render mode is active: entry already
+    // forced every body's boundary off (setRenderModeEnabled()) and a theme
+    // edit made mid-render must not undo that - the exit path there is what
+    // restores this state, at whatever width is live at that moment.
+    if (!myRenderModeActive) {
+        const double edgeWidth = Theme::edgeWidthPx();
+        for (auto& entry : mySolids) {
+            if (entry.second.IsNull()) continue;
+            entry.second->Attributes()->SetFaceBoundaryDraw(edgeWidth > 0.0);
+            if (edgeWidth > 0.0) {
+                entry.second->Attributes()->SetFaceBoundaryAspect(
+                    new Prs3d_LineAspect(Quantity_NOC_GRAY30, Aspect_TOL_SOLID, edgeWidth));
+            }
+            myContext->Redisplay(entry.second, Standard_False);
+        }
+    }
+
+    // The outline's own line width, live too - both display sites
+    // (displayOutline(), setPreview()) share Theme::sketchLineWidthPx(), so
+    // a committed outline item still on screen follows an edit the same way
+    // a body's boundary does above.
+    {
+        const double sketchWidth = Theme::sketchLineWidthPx();
+        for (auto& entry : myOutlines) {
+            if (entry.second.IsNull()) continue;
+            entry.second->SetWidth(sketchWidth);
+            myContext->Redisplay(entry.second, Standard_False);
+        }
+    }
+
     // The same problem one presentation over: both drag arrows bake
     // Theme::accent() into the AIS object at build time and their show()
     // early-outs on an unchanged pose, so a live arrow kept the old accent.
@@ -4915,8 +4971,18 @@ void OcctViewWidget::setRenderMode(bool on)
         myRenderSavedAmbients.clear();
         if (!myViewer.IsNull()) myViewer->UpdateLights();
         const Standard_Integer mode = myWireframe ? AIS_WireFrame : AIS_Shaded;
+        // Restored AT THE TOKEN WIDTH, not unconditionally True - a theme
+        // edit made WHILE render mode was up (applyTheme() above skips the
+        // boundary while myRenderModeActive) lands here instead, on exit.
+        // 0 means the user asked for no boundary lines at all, which this
+        // exit must honour exactly like displaySolid()'s own creation path.
+        const double edgeWidth = Theme::edgeWidthPx();
         for (auto& entry : mySolids) {
-            entry.second->Attributes()->SetFaceBoundaryDraw(Standard_True);
+            entry.second->Attributes()->SetFaceBoundaryDraw(edgeWidth > 0.0);
+            if (edgeWidth > 0.0) {
+                entry.second->Attributes()->SetFaceBoundaryAspect(
+                    new Prs3d_LineAspect(Quantity_NOC_GRAY30, Aspect_TOL_SOLID, edgeWidth));
+            }
             // The render-mode PBR material off, back to whatever stood
             // before applyRenderBodyMaterials() ran - see that function's
             // own comment on why UnsetMaterial() is a complete restore here.

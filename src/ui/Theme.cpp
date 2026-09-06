@@ -86,6 +86,8 @@ Spec graphite()
     s.basePt = 10.0;
     s.chipStrokePx = 1.0;
     s.gridDensity = 1.0;
+    s.edgeWidthPx = 1.0;
+    s.sketchLineWidthPx = 2.0;
     return s;
 }
 
@@ -209,7 +211,9 @@ bool operator==(const Spec& a, const Spec& b)
     return a.fontFamily == b.fontFamily &&
            std::fabs(a.basePt - b.basePt) < 1.0e-9 &&
            std::fabs(a.chipStrokePx - b.chipStrokePx) < 1.0e-9 &&
-           std::fabs(a.gridDensity - b.gridDensity) < 1.0e-9;
+           std::fabs(a.gridDensity - b.gridDensity) < 1.0e-9 &&
+           std::fabs(a.edgeWidthPx - b.edgeWidthPx) < 1.0e-9 &&
+           std::fabs(a.sketchLineWidthPx - b.sketchLineWidthPx) < 1.0e-9;
 }
 
 const QVector<ColourToken>& colourTokens()
@@ -304,6 +308,8 @@ QString serializeSpec(const Spec& s)
     parts << QStringLiteral("base=") + QString::number(s.basePt);
     parts << QStringLiteral("chipStroke=") + QString::number(s.chipStrokePx);
     parts << QStringLiteral("gridDensity=") + QString::number(s.gridDensity);
+    parts << QStringLiteral("edgeWidth=") + QString::number(s.edgeWidthPx);
+    parts << QStringLiteral("sketchLineWidth=") + QString::number(s.sketchLineWidthPx);
     return parts.join(QLatin1Char(';'));
 }
 
@@ -363,6 +369,22 @@ bool deserializeSpec(const QString& text, Spec& out)
             sawSomething = true;
             continue;
         }
+        if (key == QLatin1String("edgeWidth")) {
+            bool ok = false;
+            const double px = value.toDouble(&ok);
+            if (!ok || px < kMinEdgeWidthPx || px > kMaxEdgeWidthPx) return false;
+            parsed.edgeWidthPx = px;
+            sawSomething = true;
+            continue;
+        }
+        if (key == QLatin1String("sketchLineWidth")) {
+            bool ok = false;
+            const double px = value.toDouble(&ok);
+            if (!ok || px < kMinSketchLineWidthPx || px > kMaxSketchLineWidthPx) return false;
+            parsed.sketchLineWidthPx = px;
+            sawSomething = true;
+            continue;
+        }
 
         QColor Spec::*member = nullptr;
         for (const ColourToken& token : colourTokens()) {
@@ -410,6 +432,8 @@ QColor highlightSelected() { return spec().highlightSelected; }
 
 double chipStrokePx() { return spec().chipStrokePx; }
 double gridDensity()  { return spec().gridDensity; }
+double edgeWidthPx()  { return spec().edgeWidthPx; }
+double sketchLineWidthPx() { return spec().sketchLineWidthPx; }
 
 QString fontFamily() { return spec().fontFamily; }
 

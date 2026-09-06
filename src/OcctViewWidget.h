@@ -259,6 +259,14 @@ public:
     // undo, because hiding something is not an edit.
     void setSolidVisible(int id, bool visible);
     bool isSolidVisible(int id) const;
+    // The width of the crease/boundary lines displaySolid() draws on this
+    // body's shaded faces, or -1 when it has none (Theme::edgeWidthPx() at
+    // 0, or render mode suppressing it). Test-support, on the same terms as
+    // hasPreview()/previewShape() below: a test can tell which of Theme's
+    // token, render mode's suppression or the OCCT default is actually on
+    // screen, rather than trusting a value nothing reads back from the AIS
+    // object itself.
+    double solidFaceBoundaryWidth(int id) const;
 
     // A closed outline that is a DOCUMENT ITEM (DocumentModel::Outline), not a
     // preview - Phase 7, item 4. It gets a channel of its own for the reason
