@@ -1116,13 +1116,24 @@ void MainWindow::buildActions()
                                             "becomes the mirror."));
     connect(mySetSymmetryPlaneAction, &QAction::triggered, this, &MainWindow::onSetSymmetryPlane);
 
+    // Milestone 5, item 8: plain Duplicate. An independent copy of the
+    // selected body - no link, no mirror pairing inherited from the source -
+    // offset by one grid step and left selected, the same visible gesture
+    // Duplicate linked below already established. Claims the bare Ctrl+D;
+    // Duplicate linked moves to Ctrl+Shift+D to make room for it.
+    myDuplicateAction = new QAction(tr("&Duplicate"), this);
+    myDuplicateAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_D));
+    connect(myDuplicateAction, &QAction::triggered, this,
+            [this] { duplicateSelectedBody(); });
+
     // Linked copies (Milestone 4, Task 4.2) - see the header's own "linked
-    // copies" section for what each one does and refuses on. Ctrl+D was
-    // free (checked against every other binding in this function); the
+    // copies" section for what each one does and refuses on. Ctrl+D moved to
+    // the plain Duplicate action above (Milestone 5, item 8); Ctrl+Shift+D
+    // was checked free against every other binding in this function. The
     // other two carry no shortcut of their own, the same as Union/Subtract/
     // Intersect just below.
     myDuplicateLinkedAction = new QAction(tr("Duplicate &linked"), this);
-    myDuplicateLinkedAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_D));
+    myDuplicateLinkedAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_D));
     connect(myDuplicateLinkedAction, &QAction::triggered, this,
             [this] { duplicateLinkedCopy(); });
 
@@ -1358,6 +1369,7 @@ void MainWindow::buildActions()
     // tooltips; updateActions() swaps each for a reason-specific one while
     // disabled, the same "why not" contract Lock to Face and Set Symmetry
     // Plane keep - see duplicateLinkedTooltipText() and its two neighbours.
+    myDuplicateAction->setToolTip(duplicateTooltipText());
     myDuplicateLinkedAction->setToolTip(duplicateLinkedTooltipText());
     myLinkSelectedAction->setToolTip(linkSelectedTooltipText());
     myUnlinkAction->setToolTip(unlinkBodyTooltipText());
@@ -1442,6 +1454,9 @@ QMenuBar* MainWindow::buildMenus()
     modelMenu->addAction(mySetSymmetryPlaneAction);
     modelMenu->addAction(mySymmetryOffAction);
     modelMenu->addSeparator();
+    // Milestone 5, item 8 - menu-only, no new rail chip (the rail-floor
+    // rule); beside Duplicate linked, which it sits above.
+    modelMenu->addAction(myDuplicateAction);
     // Linked copies (Milestone 4, Task 4.2) - menu-only, same reason.
     modelMenu->addAction(myDuplicateLinkedAction);
     modelMenu->addAction(myLinkSelectedAction);
@@ -2108,6 +2123,23 @@ void MainWindow::updateActions()
         const bool linkWrongMode =
             !mySketching && !atInit && !hasPendingFace() &&
             myView->selectionMode() != OcctViewWidget::SelectionMode::Solid;
+
+        // Milestone 5, item 8: plain Duplicate. The identical reason cascade
+        // as Duplicate linked just below, minus its final "already mirrored"
+        // rung - a plain duplicate has no mirror/link exclusion of its own,
+        // so once the environment and the one-body count are satisfied there
+        // is nothing left to refuse.
+        if (myDuplicateAction) {
+            const bool enabled = canDuplicate();
+            myDuplicateAction->setEnabled(enabled);
+            myDuplicateAction->setToolTip(
+                enabled                    ? duplicateTooltipText()
+                : mySketching               ? sketchReason
+                : hasPendingFace()          ? pendingReason
+                : linkWrongMode             ? tr("Switch to body selection, then select "
+                                                  "the body to duplicate")
+                                            : tr("Select exactly one body to duplicate"));
+        }
 
         if (myDuplicateLinkedAction) {
             const bool enabled = canDuplicateLinked();
@@ -3342,9 +3374,15 @@ QString MainWindow::unlockTooltipText() const
     return tr("Go back to drawing on the ground (Shift+L)");
 }
 
+QString MainWindow::duplicateTooltipText() const
+{
+    return tr("Copy this body, independent of the original (Ctrl+D)\n"
+              "Editing either one afterward leaves the other exactly as it was.");
+}
+
 QString MainWindow::duplicateLinkedTooltipText() const
 {
-    return tr("Copy this body and keep both in step (Ctrl+D)\n"
+    return tr("Copy this body and keep both in step (Ctrl+Shift+D)\n"
               "Editing either one carries the change to every copy.");
 }
 
@@ -5562,6 +5600,114 @@ void MainWindow::cancelMirrorPlacement()
     myView->cancelMirrorPlacement();
     updateActions();
     statusBar()->showMessage(tr("Mirror placement cancelled"));
+}
+
+// --- plain duplicate (Milestone 5, item 8) ----------------------------------
+
+int MainWindow::duplicateSourceId() const
+{
+    // Reuses linkGestureEnvironmentOk() - the environment a plain duplicate
+    // needs (no sketch, no pending outline, a real furniture open, body
+    // selection mode) is exactly what the linked-copy gestures below need
+    // too - but carries NEITHER of duplicateLinkedSourceId()'s two extra
+    // exclusions. A mirrored source and a linked source are both fine: the
+    // copy this makes is plain and independent regardless of what the
+    // source itself is doing.
+    if (!linkGestureEnvironmentOk()) return 0;
+    const std::vector<int> ids = myView->selectedSolidIds();
+    if (ids.size() != 1) return 0;
+    return ids.front();
+}
+
+bool MainWindow::duplicateSelectedBody()
+{
+    const int sourceId = duplicateSourceId();
+    if (sourceId <= 0) {
+        // canDuplicate() already gates the action, and every term this
+        // predicate checks has its own disabled-tooltip reason - unlike
+        // duplicateLinkedCopy(), there is no further exclusion worth naming
+        // in a Failure toast for a caller that reaches this directly.
+        return false;
+    }
+
+    const TopoDS_Shape sourceShape = myDocument.shapeOf(sourceId);
+    if (sourceShape.IsNull()) return false;   // unreachable in practice -
+                                               // sourceId came from the live
+                                               // selection.
+
+    // A visible offset - one grid step along X and Y - the same one
+    // duplicateLinkedCopy() uses, so the copy never lands exactly on its
+    // source regardless of unit or of whether Snap to Grid is on.
+    const double step = myView->snapStep();
+    gp_Trsf offset;
+    offset.SetTranslation(gp_Vec(step, step, 0.0));
+
+    const ModelingOps::BooleanResult transformed =
+        ModelingOps::transformShape(sourceShape, offset);
+    if (!transformed.ok) {
+        qWarning("Duplicate failed: %s", transformed.error.c_str());
+        myToasts->show(tr("Couldn't duplicate that body — the geometry engine turned "
+                          "the copy down. Try a different body"),
+                      Toast::Kind::Failure, false);
+        statusBar()->showMessage(tr("Duplicate refused — nothing was changed"));
+        return false;
+    }
+
+    // ONE checkpoint around the copy AND its own creation-time twin (if
+    // any) below - the same "one gesture, one checkpoint" rule
+    // extrudePendingFace() and duplicateLinkedCopy() each follow.
+    checkpointDocument();
+    const int id = myDocument.addSolid(transformed.shape);
+    myView->displaySolid(id, transformed.shape);
+
+    // Creation-time pairing - reused VERBATIM from onExtrude()'s own block
+    // rather than special-cased here (CLAUDE.md's "do not special-case" for
+    // this exact task): a genuinely new body gets its own fresh twin when
+    // mirroring is on and it does not straddle the plane. This is
+    // independent of the SOURCE's own pairing - a mirrored source's copy
+    // does NOT inherit the source's twin (duplicateSourceId()'s whole
+    // point is that the copy is plain), but it is still a new body, so
+    // under live mirroring it is paired with its OWN fresh twin exactly as
+    // any other freshly created body would be.
+    int twinId = 0;
+    if (id > 0 && myDocument.symmetryOn() &&
+        !ModelingOps::boundingBoxStraddlesPlane(transformed.shape, myDocument.symmetryPlane())) {
+        const ModelingOps::BooleanResult mirrored =
+            ModelingOps::mirrorShape(transformed.shape, myDocument.symmetryPlane());
+        if (mirrored.ok) {
+            twinId = myDocument.addSolid(mirrored.shape);
+            if (twinId > 0) {
+                myDocument.pairBodies(id, twinId);
+                myView->displaySolid(twinId, mirrored.shape);
+            }
+        } else {
+            qWarning("Symmetry: creation-pair mirror failed on duplicate: %s",
+                     mirrored.error.c_str());
+        }
+    }
+
+    // Body mode is already active (linkGestureEnvironmentOk() required it) -
+    // selecting the copy here is what makes refreshTransformGizmo() (an
+    // appStateChanged slot) attach the transform gizmo to it, the same
+    // machinery an ordinary click already drives.
+    myView->setSelectedSolids({id});
+    recordProgress("duplicate.completed");
+
+    updateActions();
+    emit documentChanged();
+
+    // Paired: names both, the same shape onExtrude()'s own paired message
+    // takes. Unpaired: the ordinary single-body duplicate message.
+    const QString message =
+        twinId > 0
+            ? tr("%1 and %2 created")
+                  .arg(QString::fromStdString(myDocument.nameOf(id)),
+                       QString::fromStdString(myDocument.nameOf(twinId)))
+            : tr("%1 duplicated")
+                  .arg(QString::fromStdString(myDocument.nameOf(id)));
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    return true;
 }
 
 // --- linked copies (Milestone 4, Task 4.2) ----------------------------------

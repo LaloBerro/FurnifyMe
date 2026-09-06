@@ -647,6 +647,7 @@ constexpr BlockInfo kBlocks[] = {
     { "hover-keeps-glowing-while-an-edge-is-selected", false, true },
     { "an-orbit-step-costs-one-frame-in-both-modes", false, true },
     { "milestone-5-item-6-edge-and-outline-line-width-rows", false, true },
+    { "milestone-5-item-8-plain-duplicate-ctrl-d", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -22682,9 +22683,14 @@ int main(int argc, char* argv[])
         QAction* unlinkAction = action(probe, QStringLiteral("Unlink"));
         check(dupAction != nullptr && linkAction != nullptr && unlinkAction != nullptr,
               "all three linked-copy actions exist");
-        check(dupAction != nullptr && dupAction->shortcut() == QKeySequence(Qt::CTRL | Qt::Key_D),
-              "Duplicate linked carries Ctrl+D - checked free against every other "
-              "binding in buildActions()");
+        // Milestone 5, item 8 moved plain Duplicate onto the bare Ctrl+D and
+        // pushed Duplicate linked to Ctrl+Shift+D - see that task's own
+        // dedicated block for the new action's own coverage.
+        check(dupAction != nullptr &&
+                  dupAction->shortcut() == QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_D),
+              "Duplicate linked carries Ctrl+Shift+D, freed up for plain Duplicate "
+              "(Milestone 5, item 8) - checked free against every other binding in "
+              "buildActions()");
         check(linkAction != nullptr && linkAction->shortcut().isEmpty() &&
                   unlinkAction != nullptr && unlinkAction->shortcut().isEmpty(),
               "Link selected and Unlink carry no shortcut of their own, matching "
@@ -24148,6 +24154,367 @@ int main(int argc, char* argv[])
         resetSpec.outlineLineColour = QColor(QStringLiteral("#ffff00"));
         Theme::setSpec(resetSpec);
         settle(MainWindow::kAppearanceWriteMs * 2);
+
+        probe.close();
+    }
+
+    // --- Milestone 5, item 8: plain Duplicate (Ctrl+D) ------------------------
+    // An isolated, self-contained probe - the same shape the Milestone 4
+    // linked-copies block above uses - since this exercises a new action, a
+    // new MainWindow method and a shortcut re-binding (Duplicate linked moved
+    // off Ctrl+D) that has no business touching the shared `window`'s own
+    // later state.
+    if (blockEnabled("milestone-5-item-8-plain-duplicate-ctrl-d")) {
+        RequiredTempDir dupLib;
+        MainWindow probe(nullptr, /*persistProgress=*/false, dupLib.path());
+        probe.setAttribute(Qt::WA_ShowWithoutActivating);
+        probe.resize(1000, 700);
+        probe.show();
+        settle(200);
+        probe.view()->setAnimationsEnabled(false);
+        enterFreshFurniture(probe);
+
+        OcctViewWidget* dupView = probe.view();
+        dupView->setSelectionMode(OcctViewWidget::SelectionMode::Solid);
+
+        QAction* plainDupAction = action(probe, QStringLiteral("Duplicate"));
+        QAction* linkedDupAction = action(probe, QStringLiteral("Duplicate linked"));
+        check(plainDupAction != nullptr, "the plain Duplicate action exists");
+        check(linkedDupAction != nullptr, "Duplicate linked still exists beside it");
+
+        // The two bindings, checked apart rather than merely non-empty - the
+        // whole point of this task was moving one key without colliding with
+        // the other. A real OS keystroke is deliberately not simulated here:
+        // CLAUDE.md's no-input-hijacking law rules out driving this through
+        // the platform input queue, and sendKeyTo()'s own comment records
+        // that every window in this suite carries WA_ShowWithoutActivating,
+        // so QApplication::focusWidget() - what QShortcutMap's WindowShortcut
+        // context actually keys off - is null throughout the suite; a
+        // synthetic key event could never reach a QAction's shortcut through
+        // Qt's own dispatch here regardless of how it were sent. Comparing
+        // the actual bound QKeySequence is this suite's own established way
+        // of pinning "the real shortcut" (the Milestone 4 block above does
+        // the identical thing for Duplicate linked).
+        check(plainDupAction != nullptr &&
+                  plainDupAction->shortcut() == QKeySequence(Qt::CTRL | Qt::Key_D),
+              "Duplicate carries Ctrl+D");
+        check(linkedDupAction != nullptr &&
+                  linkedDupAction->shortcut() ==
+                      QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_D),
+              "...Duplicate linked carries Ctrl+Shift+D - the two keys do not collide");
+
+        // No new rail chip (the rail-floor rule, CLAUDE.md) - the action is
+        // menu-only.
+        {
+            bool onARailChip = false;
+            for (ToolChip* chip : probe.findChildren<ToolChip*>()) {
+                if (chip->action() == plainDupAction) onARailChip = true;
+            }
+            check(!onARailChip, "Duplicate is not wired to any chip - menu-only");
+        }
+
+        // --- the enablement matrix, through updateActions() alone -----------
+        check(!plainDupAction->isEnabled(), "nothing selected - Duplicate is disabled");
+        check(plainDupAction->toolTip() ==
+                  QStringLiteral("Select exactly one body to duplicate"),
+              QStringLiteral("...and says why (\"%1\")").arg(plainDupAction->toolTip()));
+
+        trigger(probe, QStringLiteral("Start Sketch"));
+        sketchQuad(probe, 0.06, 0.06, 0.16, 0.16);
+        trigger(probe, QStringLiteral("Finish Sketch"));
+        check(probe.extrudePendingFace(30.0), "body A extrudes - the matrix's own probe body");
+        const int idA = probe.document().solids().back().id;
+
+        dupView->setSelectedSolids({idA});
+        settle(80);
+        check(plainDupAction->isEnabled(), "one body selected - Duplicate is live");
+        check(probe.canDuplicate() && probe.duplicateSourceId() == idA,
+              "the predicate and the action agree on which body");
+
+        // Wrong mode - the same closed door every linked-copy gesture shares.
+        dupView->setSelectionMode(OcctViewWidget::SelectionMode::Face);
+        settle(80);
+        check(!plainDupAction->isEnabled(), "face selection mode - Duplicate is disabled");
+        check(plainDupAction->toolTip().contains(QStringLiteral("body selection")),
+              QStringLiteral("...and the reason names the fix (\"%1\")")
+                  .arg(plainDupAction->toolTip()));
+        dupView->setSelectionMode(OcctViewWidget::SelectionMode::Solid);
+        dupView->setSelectedSolids({idA});
+        settle(80);
+
+        // Mid-sketch closes the same door Lock to Face and the linked-copy
+        // gestures already answer to.
+        trigger(probe, QStringLiteral("Start Sketch"));
+        settle(80);
+        check(!plainDupAction->isEnabled(), "mid-sketch - Duplicate is disabled");
+        trigger(probe, QStringLiteral("Cancel Sketch"));
+        settle(80);
+        dupView->setSelectedSolids({idA});
+        settle(80);
+
+        // --- the headline gesture: an independent copy, offset, selected ----
+        const std::size_t bodiesBeforeDup = probe.document().count();
+        const std::size_t undoDepthBeforeDup = probe.document().undoDepth();
+        const double volABeforeDup = ModelingOps::volume(probe.document().shapeOf(idA));
+        GProp_GProps propsABeforeDup;
+        BRepGProp::VolumeProperties(probe.document().shapeOf(idA), propsABeforeDup);
+        const gp_Pnt comABeforeDup = propsABeforeDup.CentreOfMass();
+
+        check(trigger(probe, QStringLiteral("Duplicate")),
+              "Duplicate's own action triggers - proves the menu wiring, not just "
+              "the method");
+        check(probe.document().count() == bodiesBeforeDup + 1, "exactly one new body exists");
+        check(probe.document().undoDepth() == undoDepthBeforeDup + 1,
+              "...in exactly one checkpoint");
+        const int idACopy = probe.document().solids().back().id;
+
+        check(!probe.document().isLinked(idACopy), "the copy is not part of any link group");
+        check(!probe.document().symmetryOn() || probe.document().twinOf(idACopy) == -1,
+              "...nor mirror-paired - a plain duplicate made with mirroring off stays "
+              "unpaired, matching the ordinary new-body rule");
+
+        const double volACopy = ModelingOps::volume(probe.document().shapeOf(idACopy));
+        check(std::fabs(volACopy - volABeforeDup) < 1.0e-3,
+              QStringLiteral("the copy carries the SAME volume as its source (%1 vs %2)")
+                  .arg(volABeforeDup).arg(volACopy));
+
+        GProp_GProps propsACopy;
+        BRepGProp::VolumeProperties(probe.document().shapeOf(idACopy), propsACopy);
+        const gp_Pnt comACopy = propsACopy.CentreOfMass();
+        const double step = dupView->snapStep();
+        check(std::fabs(comACopy.X() - (comABeforeDup.X() + step)) < 1.0e-6 &&
+                  std::fabs(comACopy.Y() - (comABeforeDup.Y() + step)) < 1.0e-6 &&
+                  std::fabs(comACopy.Z() - comABeforeDup.Z()) < 1.0e-6,
+              QStringLiteral("the copy sits exactly one grid step (%1) away in X and Y, "
+                             "unmoved in Z")
+                  .arg(step));
+
+        check(dupView->selectedSolidIds().size() == 1 &&
+                  dupView->selectedSolidIds().front() == idACopy,
+              "the copy - not the source - is left selected");
+        check(probe.canTransformSelectedBody() && probe.transformableBodyId() == idACopy,
+              "...which is exactly what attaches the transform gizmo to it - the "
+              "ordinary selection-driven machinery, nothing gesture-specific");
+
+        ToastHost* dupToasts = probe.findChild<ToastHost*>();
+        check(dupToasts != nullptr &&
+                  dupToasts->currentText() ==
+                      QStringLiteral("%1 duplicated")
+                          .arg(QString::fromStdString(probe.document().nameOf(idACopy))),
+              QStringLiteral("the toast names the copy alone, no pairing suffix (\"%1\")")
+                  .arg(dupToasts ? dupToasts->currentText() : QString()));
+        {
+            QStringList dupOffenders;
+            for (const QString& word : bannedWords()) {
+                if (dupToasts != nullptr && usesBannedWord(dupToasts->currentText(), word))
+                    dupOffenders << word;
+            }
+            check(dupOffenders.isEmpty(),
+                  QStringLiteral("the toast uses no banned word (%1)")
+                      .arg(dupOffenders.isEmpty() ? QStringLiteral("none")
+                                                  : dupOffenders.join(QStringLiteral(", "))));
+        }
+
+        // A duplicated source is no different from any other body as far as
+        // Duplicate itself is concerned - it can be duplicated again.
+        dupView->setSelectedSolids({idA});
+        settle(80);
+        check(probe.canDuplicate(), "A can still be duplicated again");
+
+        // --- one undo removes exactly the copy, nothing else ----------------
+        check(trigger(probe, QStringLiteral("Undo")), "Undo's own action triggers");
+        check(probe.document().count() == bodiesBeforeDup, "the copy is gone");
+        check(!probe.document().contains(idACopy), "...by id, not merely by count");
+        check(probe.document().contains(idA), "the source itself is untouched");
+        check(std::fabs(ModelingOps::volume(probe.document().shapeOf(idA)) - volABeforeDup) <
+                  1.0e-6,
+              "...and its volume is exactly what it was before");
+
+        dupView->setViewTop();
+        settle(150);
+        const auto worldToScreen = [&](double x, double y) -> QPointF {
+            QPoint out;
+            dupView->projectToScreen(gp_Pnt(x, y, 0.0), out);
+            return QPointF(out);
+        };
+        const auto sketchQuadWorld = [&](double x0, double y0, double x1, double y1) {
+            dupView->fitAll();
+            dupView->setViewTop();
+            settle(120);
+            clickAt(dupView, worldToScreen(x0, y0));
+            clickAt(dupView, worldToScreen(x1, y0));
+            clickAt(dupView, worldToScreen(x1, y1));
+            clickAt(dupView, worldToScreen(x0, y1));
+        };
+
+        // --- a linked member duplicates OUT of its group ---------------------
+        // Done BEFORE mirroring turns on below: onExtrude()'s own
+        // creation-time pairing runs on every extrude while symmetryOn() is
+        // true, and M1/M2 would otherwise pick up mirror twins of their own
+        // (an unrelated wrinkle this task's own review found the hard way),
+        // which would make the ids captured below name a twin rather than
+        // the body this section actually means to test.
+        trigger(probe, QStringLiteral("Start Sketch"));
+        sketchQuadWorld(40.0, -10.0, 60.0, 10.0);
+        trigger(probe, QStringLiteral("Finish Sketch"));
+        check(probe.extrudePendingFace(12.0), "link seed M1 extrudes");
+        const int idM1 = probe.document().solids().back().id;
+        trigger(probe, QStringLiteral("Start Sketch"));
+        sketchQuadWorld(70.0, -10.0, 92.0, 12.0);
+        trigger(probe, QStringLiteral("Finish Sketch"));
+        check(probe.extrudePendingFace(22.0), "link seed M2 extrudes, a different size than M1");
+        const int idM2 = probe.document().solids().back().id;
+
+        dupView->setSelectedSolids({idM1, idM2});
+        settle(80);
+        check(trigger(probe, QStringLiteral("Link selected")), "Link selected succeeds");
+        check(probe.document().isLinked(idM1) && probe.document().isLinked(idM2),
+              "M1 and M2 read back linked");
+
+        dupView->setSelectedSolids({idM1});
+        settle(80);
+        check(probe.canDuplicate(), "a linked member can still be plain-duplicated");
+        const double volM1BeforeMemberDup = ModelingOps::volume(probe.document().shapeOf(idM1));
+        const double volM2BeforeMemberDup = ModelingOps::volume(probe.document().shapeOf(idM2));
+        check(probe.duplicateSelectedBody(), "duplicating the linked member succeeds");
+        const int idM1Copy = probe.document().solids().back().id;
+        check(!probe.document().isLinked(idM1Copy),
+              "the copy is born OUTSIDE the group - not a third member");
+        check(probe.document().isLinked(idM1) && probe.document().isLinked(idM2),
+              "...and the original group is completely undisturbed");
+        check(probe.document().linkAnchorOf(idM1) == probe.document().linkAnchorOf(idM2),
+              "...still the SAME group, M1 and M2 together");
+
+        // Editing the copy must not reach the group at all - the whole point
+        // of "independent" is that propagateLinkedEdit() never hears about it.
+        const TopoDS_Face copyFace = [&]() -> TopoDS_Face {
+            for (TopExp_Explorer it(probe.document().shapeOf(idM1Copy), TopAbs_FACE); it.More();
+                 it.Next()) {
+                return TopoDS::Face(it.Current());
+            }
+            return TopoDS_Face();
+        }();
+        check(!copyFace.IsNull(), "a face of the copy was found for the edit");
+        check(probe.pullFaceBy(copyFace, 7.0), "pulling a face of the independent copy succeeds");
+        check(std::fabs(ModelingOps::volume(probe.document().shapeOf(idM1)) -
+                        volM1BeforeMemberDup) < 1.0e-6,
+              "M1's own volume is untouched by an edit to its former source's copy");
+        check(std::fabs(ModelingOps::volume(probe.document().shapeOf(idM2)) -
+                        volM2BeforeMemberDup) < 1.0e-6,
+              "...and M2's too - the group genuinely did not change");
+
+        // --- live mirroring: the copy follows the ORDINARY new-body rule, ---
+        // --- not a special case (CLAUDE.md's own ruling for this task) ------
+        //
+        // P is the mirror SOURCE, placed so the gesture's own default plane -
+        // tangent to P's bounding box, per beginMirrorPlacement() - sits
+        // exactly at P's own far edge. R is a second, unrelated body placed
+        // well clear of that plane, on the same side, with enough margin that
+        // shifting it by one grid step never brings it near the plane. Both
+        // bodies live entirely on one side of the plane, at different
+        // distances from it - which is what lets duplicating each one land on
+        // a DIFFERENT branch of the same rule.
+        trigger(probe, QStringLiteral("Start Sketch"));
+        sketchQuadWorld(-30.0, -10.0, -10.0, 10.0);
+        trigger(probe, QStringLiteral("Finish Sketch"));
+        check(probe.extrudePendingFace(6.0), "mirror source P extrudes, symmetry still off");
+        const int idP = probe.document().solids().back().id;
+
+        trigger(probe, QStringLiteral("Start Sketch"));
+        sketchQuadWorld(-80.0, -10.0, -60.0, 10.0);
+        trigger(probe, QStringLiteral("Finish Sketch"));
+        check(probe.extrudePendingFace(6.0),
+              "R extrudes well clear of where the mirror plane will land");
+        const int idR = probe.document().solids().back().id;
+
+        dupView->setSelectedSolids({idP});
+        settle(80);
+        trigger(probe, QStringLiteral("Mirror"));
+        check(dupView->mirrorPlacementActive(), "S with P selected begins placement");
+        sendKeyTo(&probe, Qt::Key_Return);
+        settle(200);
+        check(probe.document().symmetryOn() && probe.document().twinOf(idP) > 0,
+              "P is mirror-paired now, tangent to its own default plane");
+        check(probe.document().twinOf(idR) == -1, "R was never part of that gesture");
+
+        // R: an ordinary body, never mirrored, comfortably clear of the
+        // plane even after the duplicate's own offset - expect the ordinary
+        // new-body rule to fire and give the copy its OWN fresh twin.
+        dupView->setSelectedSolids({idR});
+        settle(80);
+        const std::size_t bodiesBeforeR = probe.document().count();
+        check(probe.canDuplicate(), "R, unmirrored and unlinked, can be duplicated");
+        check(probe.duplicateSelectedBody(), "duplicating R succeeds");
+        check(probe.document().count() == bodiesBeforeR + 2,
+              "the copy AND its own fresh twin both arrived - creation-time pairing "
+              "fired, exactly as it would for a freshly extruded body");
+        // addSolid() adds the copy FIRST and its twin second (see
+        // duplicateSelectedBody()), but the copy - not the twin - is what
+        // gets selected, so selectedSolidIds() is the reliable way to name
+        // it rather than assuming list order.
+        check(dupView->selectedSolidIds().size() == 1,
+              "exactly one body - the copy - is left selected");
+        const int idRCopy =
+            dupView->selectedSolidIds().empty() ? 0 : dupView->selectedSolidIds().front();
+        const int idRTwin = probe.document().solids().back().id;
+        check(idRTwin != idRCopy, "the twin really is a distinct body from the copy");
+        check(probe.document().twinOf(idRCopy) == idRTwin &&
+                  probe.document().twinOf(idRCopy) != probe.document().twinOf(idP),
+              "the copy's twin is its OWN, distinct from P's twin");
+        check(probe.document().twinOf(idR) == -1,
+              "R itself is still exactly as unpaired as it was - only its COPY got a twin");
+
+        // P: the mirror SOURCE itself. Its own copy does not inherit P's
+        // twin (duplicateSourceId() carries none of duplicateLinkedCopy()'s
+        // exclusions), and - because the gesture's own tangent plane sits
+        // exactly at P's far edge - shifting the copy by one grid step
+        // genuinely straddles that plane, so the ordinary new-body rule does
+        // not fire either. Both routes to a twin are closed for this one, by
+        // real geometry rather than a special case: the copy is born
+        // unpaired, which is the outcome CLAUDE.md's own ruling names.
+        dupView->setSelectedSolids({idP});
+        settle(80);
+        const std::size_t bodiesBeforeP = probe.document().count();
+        check(probe.canDuplicate(), "P, mirror-paired, can still be plain-duplicated");
+        check(probe.duplicateSelectedBody(), "duplicating P succeeds");
+        check(probe.document().count() == bodiesBeforeP + 1,
+              "exactly one new body - no twin this time");
+        const int idPCopy = probe.document().solids().back().id;
+        check(probe.document().twinOf(idPCopy) == -1,
+              "P's own copy is born unpaired - straddling the tangent plane after the "
+              "grid-step offset closes the ordinary new-body route too");
+        check(probe.document().twinOf(idP) > 0, "P itself is still paired with its ORIGINAL twin");
+        check(dupToasts != nullptr &&
+                  dupToasts->currentText() ==
+                      QStringLiteral("%1 duplicated")
+                          .arg(QString::fromStdString(probe.document().nameOf(idPCopy))),
+              QStringLiteral("the toast is the plain single-body message, not the paired "
+                             "one (\"%1\")")
+                  .arg(dupToasts ? dupToasts->currentText() : QString()));
+
+        // --- the shortcut sheet picks the new binding up automatically ------
+        QAction* openSheet = action(probe, QStringLiteral("Keyboard Shortcuts"));
+        check(openSheet != nullptr, "the shortcut sheet has an action to open it on this probe");
+        if (openSheet) {
+            openSheet->trigger();
+            settle(150);
+            ShortcutSheet* sheet = probe.findChild<ShortcutSheet*>();
+            check(sheet != nullptr && sheet->isVisible(), "triggering it shows the sheet");
+            int expected = 0;
+            for (QAction* candidate : probe.findChildren<QAction*>()) {
+                if (!candidate->shortcut().isEmpty()) ++expected;
+            }
+            check(sheet != nullptr && sheet->rowCount() == expected,
+                  QStringLiteral("the sheet lists all %1 bound actions on this probe, "
+                                 "Duplicate included (got %2)")
+                      .arg(expected)
+                      .arg(sheet ? sheet->rowCount() : -1));
+            if (sheet) {
+                QKeyEvent escape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+                QCoreApplication::sendEvent(sheet, &escape);
+                settle(120);
+            }
+        }
 
         probe.close();
     }

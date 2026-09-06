@@ -338,6 +338,37 @@ public:
     // call when no gesture is active.
     void cancelMirrorPlacement();
 
+    // --- plain duplicate (Milestone 5, item 8) ------------------------------
+    //
+    // Model -> Duplicate (Ctrl+D). An independent copy of the selected body -
+    // no link, no mirror pairing inherited from the source. Same environment
+    // as the linked-copy gestures below (duplicateSourceId() reuses
+    // linkGestureEnvironmentOk()), but with NEITHER of duplicateLinkedCopy()'s
+    // two extra exclusions: a mirrored source may be duplicated (the copy is
+    // born unpaired - it does not inherit the source's own twin), and a
+    // linked source may be duplicated (the copy is born outside the group).
+    // Offsets the copy by the same one visible grid step Duplicate linked
+    // uses, selects the copy and leaves body-selection mode as it is -
+    // refreshTransformGizmo() attaches the transform gizmo to it exactly as
+    // it does for the linked gesture, the same machinery an ordinary click
+    // already drives.
+    //
+    // Under live mirroring the copy still follows the ORDINARY new-body
+    // creation rule (the same one onExtrude() applies to a freshly extruded
+    // body): if symmetryOn() and the copy's own bounding box does not
+    // straddle the plane, it gets its OWN fresh twin, paired independently
+    // of whatever the source's pairing was. That is not a special case for
+    // Duplicate - it is what happens to any new body, applied here rather
+    // than skipped.
+    //
+    // One checkpoint (checkpointDocument() + addSolid(), covering the copy
+    // and its own creation-time twin if any), one Note toast with Undo
+    // naming what was created.
+    bool duplicateSelectedBody();
+    // The body that would be copied, or 0 when the gesture is unavailable.
+    int duplicateSourceId() const;
+    bool canDuplicate() const { return duplicateSourceId() > 0; }
+
     // --- linked copies (Milestone 4, Task 4.2) ------------------------------
     //
     // Where symmetry keeps two bodies in step across a plane, a link group
@@ -348,8 +379,9 @@ public:
     // each is one click that either commits immediately or refuses with a
     // reason, the same shape Union/Subtract/Delete already have.
     //
-    // Model -> Duplicate linked (Ctrl+D). Exactly one body selected, in body
-    // selection mode, no sketch in progress, no outline waiting, and not
+    // Model -> Duplicate linked (Ctrl+Shift+D - Ctrl+D moved to the plain
+    // Duplicate above in Milestone 5, item 8). Exactly one body selected, in
+    // body selection mode, no sketch in progress, no outline waiting, and not
     // already paired with a mirror twin - see duplicateLinkedSourceId(). An
     // already-linked source is fine: the copy simply becomes another member
     // of its existing group (DocumentModel::createLinkedCopy()'s own rule).
@@ -835,6 +867,9 @@ private:
     // 4.2), on the identical contract: buildActions() sets these once and
     // updateActions() swaps in a reason-specific message while disabled,
     // restoring these exact strings the moment the action is enabled again.
+    // duplicateTooltipText() (Milestone 5, item 8) follows the same
+    // contract for the plain Duplicate action just below.
+    QString duplicateTooltipText() const;
     QString duplicateLinkedTooltipText() const;
     QString linkSelectedTooltipText() const;
     QString unlinkBodyTooltipText() const;
@@ -1214,6 +1249,7 @@ private:
     QAction* mySetSymmetryPlaneAction = nullptr;
     // Linked copies (Milestone 4, Task 4.2) - menu-only for the same reason:
     // the rail stays at thirteen tools.
+    QAction* myDuplicateAction = nullptr;
     QAction* myDuplicateLinkedAction = nullptr;
     QAction* myLinkSelectedAction = nullptr;
     QAction* myUnlinkAction = nullptr;
