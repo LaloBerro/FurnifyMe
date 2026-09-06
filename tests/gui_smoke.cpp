@@ -483,7 +483,7 @@ void skipByEnvironment(int checks, const QString& why)
 // each of the two modes, the app-bar pricing's non-vacuity, the app bar's own
 // per-frame budget, the whole overlay tree's, and the structural pin that the
 // app mark is cached rather than re-decoded. 2682 + 9 = 2691.
-constexpr int kCheckFloor = 3144;
+constexpr int kCheckFloor = 3209;
 
 void check(bool condition, const QString& what)
 {
