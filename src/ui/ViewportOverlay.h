@@ -19,7 +19,7 @@ public:
     // against the viewport's left edge, so the tool rail is a spine the
     // viewport is laid out beside rather than a tall card that happens to
     // start near the top. The rail's own layout decides where the slack goes
-    // (a stretch between Select Edges and Undo puts history at the bottom);
+    // (a stretch between the last tool and Undo puts history at the bottom);
     // this anchor only decides how much slack there is.
     //
     // A visible LeftEdge entry also moves the three left-hand anchors -

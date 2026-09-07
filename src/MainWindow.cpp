@@ -793,12 +793,18 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // lockToFace() - including its refusal - rather than one of them growing
     // its own copy of the rule.
     connect(myView, &OcctViewWidget::faceDoubleClicked, this, &MainWindow::lockToFace);
-    // The other double-click route: a plain one on a body while faces or edges
-    // are what is being picked means "select the whole body". The viewport
-    // reports the gesture; this window performs it, because the selection mode
-    // is a QAction's checked state and updateActions() is the single place that
-    // decides what is available.
-    connect(myView, &OcctViewWidget::bodyDoubleClicked, this, &MainWindow::onBodyDoubleClicked);
+    // The other double-click route - a plain one, meaning "the whole body" -
+    // has no wire here any more. It used to be announced so this window could
+    // trigger the body-mode action; with the modes gone there is no action to
+    // trigger, so the viewport performs the pick itself and reports it through
+    // the ordinary selectionChanged() every other pick already uses.
+    //
+    // A Shift-clicked kind the selection is not holding, on the other hand,
+    // does nothing at all and so has nothing ordinary to report. That is the
+    // spec's own "quiet no-op with the status label saying why", and this is
+    // where the why arrives.
+    connect(myView, &OcctViewWidget::autoPickRefused, this,
+            &MainWindow::onPickRefused);
     // The transform gizmo reports the end of a drag; this window decides what
     // it means, exactly as it does for the face-pull arrow above.
     connect(myView, &OcctViewWidget::gizmoReleased, this, &MainWindow::onGizmoReleased);
@@ -1238,16 +1244,13 @@ void MainWindow::buildActions()
                                        "beside the live one with Compare."));
     connect(mySaveVersionAction, &QAction::triggered, this, &MainWindow::onSaveVersion);
 
-    mySolidSelectAction = new QAction(tr("Select &Bodies"), this);
-    mySolidSelectAction->setCheckable(true);
-    mySolidSelectAction->setChecked(true);
-    myFaceSelectAction = new QAction(tr("Select F&aces"), this);
-    myFaceSelectAction->setCheckable(true);
-    myEdgeSelectAction = new QAction(tr("Select &Edges"), this);
-    myEdgeSelectAction->setCheckable(true);
-    myEdgeSelectAction->setToolTip(tr("Pick one edge at a time\n"
-                                      "Hovering shows its length."));
-
+    // The three Select Bodies/Faces/Edges actions are GONE (Phase 2 of the
+    // auto-selection spec). There is one selection behaviour now and the
+    // cursor decides it, so there is nothing for a control to switch: an
+    // action whose only job was to choose between three modes cannot survive
+    // the modes. Their rail chips, their menu entries and their glyphs went
+    // with them; nothing inherited their shortcuts, because they never
+    // carried any.
     myDeleteAction = new QAction(tr("&Delete Selected"), this);
     myDeleteAction->setShortcut(QKeySequence::Delete);
     myDeleteAction->setToolTip(tr("Delete the selected bodies (Del)"));
@@ -1430,15 +1433,6 @@ void MainWindow::buildActions()
     myLinkSelectedAction->setToolTip(linkSelectedTooltipText());
     myUnlinkAction->setToolTip(unlinkBodyTooltipText());
 
-    auto* selectionGroup = new QActionGroup(this);
-    selectionGroup->addAction(mySolidSelectAction);
-    selectionGroup->addAction(myFaceSelectAction);
-    selectionGroup->addAction(myEdgeSelectAction);
-    selectionGroup->setExclusive(true);
-    connect(mySolidSelectAction, &QAction::triggered, this, &MainWindow::onSelectionModeChanged);
-    connect(myFaceSelectAction, &QAction::triggered, this, &MainWindow::onSelectionModeChanged);
-    connect(myEdgeSelectAction, &QAction::triggered, this, &MainWindow::onSelectionModeChanged);
-
     myUnitsMillimetresAction = new QAction(tr("Millimetres"), this);
     myUnitsMillimetresAction->setCheckable(true);
     myUnitsCentimetresAction = new QAction(tr("Centimetres"), this);
@@ -1551,9 +1545,6 @@ QMenuBar* MainWindow::buildMenus()
     viewMenu->addSeparator();
     viewMenu->addAction(mySnapAction);
     viewMenu->addSeparator();
-    viewMenu->addAction(mySolidSelectAction);
-    viewMenu->addAction(myFaceSelectAction);
-    viewMenu->addAction(myEdgeSelectAction);
     viewMenu->addAction(myItemsPanelAction);
     viewMenu->addAction(myVersionsPanelAction);
     viewMenu->addAction(myNotificationsAction);
@@ -1702,10 +1693,12 @@ void MainWindow::buildOverlay()
     tool(myIntersectAction,   IconSet::Glyph::Intersect);
     tool(myDeleteAction,      IconSet::Glyph::Delete);
     rail->addSeparator();
+    // Ten chips, not thirteen: the three selection-mode buttons that used to
+    // close this group are gone with the modes themselves (Phase 2 of the
+    // auto-selection spec). The rail's derived minimum height below follows
+    // for free - it reads rail->sizeHint(), never a count - so the viewport's
+    // floor simply dropped by three buttons and a separator's worth.
     tool(mySnapAction,        IconSet::Glyph::Snap);
-    tool(mySolidSelectAction, IconSet::Glyph::SelectSolid);
-    tool(myFaceSelectAction,  IconSet::Glyph::SelectFace);
-    tool(myEdgeSelectAction,  IconSet::Glyph::SelectEdge);
     rail->addStretch();
     tool(myUndoAction,        IconSet::Glyph::Undo);
     tool(myRedoAction,        IconSet::Glyph::Redo);
@@ -1713,7 +1706,7 @@ void MainWindow::buildOverlay()
     // The viewport must never be able to shrink shorter than the pill-plus-
     // rail column needs. rail->sizeHint() is the rail's own natural stack
     // height - every chip, separator and gap, plus the card's own top/bottom
-    // padding - with the stretch between Select Edges and Undo contributing
+    // padding - with the stretch between the last tool and Undo contributing
     // nothing, the same number ViewportOverlay::relayout() calls `ch` for
     // the spine LeftEdge entry. myAppBar->sizeHint() is the pill's own
     // natural height the same way. Since the user feedback round put the
@@ -2180,9 +2173,16 @@ void MainWindow::updateActions()
     // reason mirrorPlacementRefusalText() does.
     {
         const std::vector<int> linkIds = myView->selectedSolidIds();
-        const bool linkWrongMode =
+        // "Something is selected, and it is not whole bodies" - the
+        // selection-content term that replaced "not in body selection mode".
+        // PickKind::None is deliberately excluded: nothing selected is not a
+        // WRONG kind, and letting it fall through keeps the count rung below
+        // saying what it always said for an empty selection.
+        const OcctViewWidget::PickKind linkKind = myView->selectionKind();
+        const bool linkWrongKind =
             !mySketching && !atInit && !hasPendingFace() &&
-            myView->selectionMode() != OcctViewWidget::SelectionMode::Solid;
+            linkKind != OcctViewWidget::PickKind::None &&
+            linkKind != OcctViewWidget::PickKind::Body;
 
         // Milestone 5, item 8: plain Duplicate. The identical reason cascade
         // as Duplicate linked just below, minus its final "already mirrored"
@@ -2196,8 +2196,8 @@ void MainWindow::updateActions()
                 enabled                    ? duplicateTooltipText()
                 : mySketching               ? sketchReason
                 : hasPendingFace()          ? pendingReason
-                : linkWrongMode             ? tr("Switch to body selection, then select "
-                                                  "the body to duplicate")
+                : linkWrongKind             ? tr("Double-click a body to select the whole "
+                                                  "thing, then duplicate it")
                                             : tr("Select exactly one body to duplicate"));
         }
 
@@ -2208,8 +2208,8 @@ void MainWindow::updateActions()
                 enabled                    ? duplicateLinkedTooltipText()
                 : mySketching               ? sketchReason
                 : hasPendingFace()          ? pendingReason
-                : linkWrongMode             ? tr("Switch to body selection, then select "
-                                                  "the body to duplicate")
+                : linkWrongKind             ? tr("Double-click a body to select the whole "
+                                                  "thing, then duplicate it")
                 : linkIds.size() != 1       ? tr("Select exactly one body to duplicate")
                                             : tr("This body is already mirrored — duplicate "
                                                  "its twin instead, or turn mirroring off "
@@ -2223,8 +2223,8 @@ void MainWindow::updateActions()
                 enabled                    ? linkSelectedTooltipText()
                 : mySketching               ? sketchReason
                 : hasPendingFace()          ? pendingReason
-                : linkWrongMode             ? tr("Switch to body selection, then select two "
-                                                  "or more bodies")
+                : linkWrongKind             ? tr("Double-click a body, then Shift+double-click "
+                                                  "the others")
                 : linkIds.size() < 2        ? tr("Select two or more bodies to link")
                                             : tr("One of the selected bodies is already "
                                                  "linked or already mirrored — unlink it or "
@@ -2238,8 +2238,8 @@ void MainWindow::updateActions()
                 enabled                    ? unlinkBodyTooltipText()
                 : mySketching               ? sketchReason
                 : hasPendingFace()          ? pendingReason
-                : linkWrongMode             ? tr("Switch to body selection, then select a "
-                                                  "linked body")
+                : linkWrongKind             ? tr("Double-click the linked body to select the "
+                                                  "whole thing")
                 : linkIds.size() != 1       ? tr("Select exactly one linked body")
                                             : tr("This body isn't linked to anything"));
         }
@@ -2366,13 +2366,11 @@ void MainWindow::updateActions()
     // first built in buildActions().
     mySnapAction->setToolTip(snapTooltipText());
 
-    // Selection mode and snap are meaningless with nothing to select or
-    // snap - part of the same "every modeling action" gate atInit closes,
-    // even though an empty document already leaves them harmless.
+    // Snap is meaningless with nothing to snap - part of the same "every
+    // modeling action" gate atInit closes, even though an empty document
+    // already leaves it harmless. The three selection-mode actions that used
+    // to be gated alongside it no longer exist.
     mySnapAction->setEnabled(!atInit);
-    mySolidSelectAction->setEnabled(!atInit);
-    myFaceSelectAction->setEnabled(!atInit);
-    myEdgeSelectAction->setEnabled(!atInit);
 
     // File -> Save / Autosave / Close furniture: available only with a
     // furniture actually open. Disabling the submenu's OWN action greys out
@@ -3638,16 +3636,24 @@ void MainWindow::updateStateLabel()
             // same predicate the gizmo itself does, so the label cannot
             // describe a gizmo that is not there - or stay quiet about one
             // that is.
+            // Shift+DOUBLE-click, not Shift-click: a plain click takes what
+            // the cursor is on, which on a body is one of its faces or edges,
+            // and the kind lock refuses to mix those with a whole body. The
+            // gesture that TAKES a body is the gesture that adds one, and
+            // this label is where most users will read that for the first
+            // time - so it has to name the real gesture rather than the one
+            // the old body-selection mode used to have.
             state = canTransformSelectedBody()
                         ? tr("1 body selected — drag a handle to Move, Rotate or Scale — "
-                             "Shift-click another to combine them")
-                        : tr("1 body selected — Shift-click another to combine them");
+                             "Shift+double-click another to combine them")
+                        : tr("1 body selected — Shift+double-click another to combine them");
         } else if (bodies == 0) {
             state = tr("Nothing yet — press Ctrl+K to draw an outline");
         } else if (bodies == 1) {
-            state = tr("1 body — click it to select");
+            state = tr("1 body — hover picks a face or an edge, double-click takes the body");
         } else {
-            state = tr("%1 bodies — click one to select").arg(bodies);
+            state = tr("%1 bodies — hover picks a face or an edge, double-click takes "
+                       "the body").arg(bodies);
         }
     }
     // A lock is a mode, and a mode with no persistent cue is a trap: the
@@ -3707,6 +3713,16 @@ QString MainWindow::faceOnDirectionLabel(const gp_Dir& normal) const
 
 void MainWindow::resyncView()
 {
+    // EVERY DOCUMENT SWAP GOES THROUGH HERE - opening a furniture, closing
+    // back to the library, undo, redo, restoring a version, closing the
+    // compare pane, and the GL-context-loss recovery - which is exactly why
+    // the pick gesture's own remembered state is dropped here rather than at
+    // seven call sites that would each have to remember to. Phase 1's review
+    // flagged those flags as having no reset on any of these paths; this is
+    // the one line that closes it. The kind lock needs nothing: it is derived
+    // from the live selection, and clearSolids() below empties that.
+    myView->resetPickGesture();
+
     myView->clearSolids();
     for (const DocumentModel::Solid& solid : myDocument.solids()) {
         myView->displaySolid(solid.id, solid.shape);
@@ -4369,10 +4385,26 @@ bool MainWindow::canPullSelectedFace() const
     // viewport's own suppression does.
     if (mySketching || hasPendingFace() || myRenderModeOn) return false;
 
-    // selectedFace() is deliberately "the ONE selected face", never the first
-    // of several, so this cannot be a coin toss between two highlighted
-    // faces. It is null outside face-selection mode, which is what makes the
-    // mode check implicit rather than a second condition to keep in step.
+    // THE SELECTION-CONTENT TERM, and it is new: it used to be implicit,
+    // because selectedFace() answered null outside face-selection mode and
+    // face-selection mode was a thing the user chose. With auto selection
+    // there are no modes, so "what is selected" is the only question left -
+    // and it has to be asked, not inferred. Phase 1 flagged this exact
+    // omission: without the term a face picked alongside anything else would
+    // raise the pull arrow, and the arrow's own screen-space hit test would
+    // then start swallowing presses aimed at whatever else was there.
+    //
+    // selectionKind() is DERIVED from the live selection and returns exactly
+    // one of None/Body/Face/Edge, which is what makes this predicate, the
+    // bevel arrow's and the transform gizmo's mutually exclusive BY
+    // CONSTRUCTION - see the header for the whole argument.
+    if (myView->selectionKind() != OcctViewWidget::PickKind::Face) return false;
+
+    // And exactly ONE face: selectedFace() is deliberately "the one selected
+    // face", never the first of several, so this cannot be a coin toss
+    // between two highlighted faces. Kind-locked accumulation can put a
+    // second face in the selection (Shift adds more of the same kind), so
+    // this is a live constraint rather than a leftover.
     const TopoDS_Face face = myView->selectedFace();
     if (face.IsNull()) return false;
     return BRepAdaptor_Surface(face).GetType() == GeomAbs_Plane;
@@ -4551,9 +4583,13 @@ bool MainWindow::bevelTarget(std::vector<TopoDS_Edge>& edges, TopoDS_Edge& edge,
     // reasons - see its comment and the header.
     if (mySketching || hasPendingFace() || myRenderModeOn) return false;
 
-    // Edge mode explicitly, so this cannot be true at the same time as the
-    // face pull's predicate or the transform gizmo's.
-    if (myView->selectionMode() != OcctViewWidget::SelectionMode::Edge) return false;
+    // EDGES SELECTED, explicitly - the selection-content term that replaced
+    // "edge selection mode" when the modes went away. selectionKind() derives
+    // one value from the live selection, so this cannot be true at the same
+    // time as canPullSelectedFace()'s Face or transformableBodyId()'s Body:
+    // the disjointness is one enum's worth, checked in three places against
+    // three different values of it.
+    if (myView->selectionKind() != OcctViewWidget::PickKind::Edge) return false;
 
     const std::vector<TopoDS_Edge> selected = myView->selectedEdges();
     if (selected.empty()) return false;
@@ -4920,10 +4956,13 @@ int MainWindow::transformableBodyId() const
     // body.
     if (myView->mirrorPlacementActive()) return 0;
 
-    // Body mode explicitly. selectedSolidIds() reports the owning body of a
-    // selected FACE too, so without this the gizmo would appear over a face
-    // selection and fight the pull arrow for the same drag.
-    if (myView->selectionMode() != OcctViewWidget::SelectionMode::Solid) return 0;
+    // A WHOLE BODY selected, explicitly - the selection-content term that
+    // replaced "body selection mode". selectedSolidIds() reports the OWNING
+    // body of a selected face or edge too, so without this the gizmo would
+    // appear over a face selection and fight the pull arrow for the same
+    // drag. That was true when the term was a mode and it is true now; only
+    // what answers it changed.
+    if (myView->selectionKind() != OcctViewWidget::PickKind::Body) return 0;
 
     const std::vector<int> ids = myView->selectedSolidIds();
     if (ids.size() != 1) return 0;
@@ -5237,54 +5276,22 @@ void MainWindow::onExportStep()
                                        .arg(myDocument.count()).arg(path));
 }
 
-void MainWindow::onSelectionModeChanged()
+void MainWindow::onPickRefused(const QString& reason)
 {
-    const OcctViewWidget::SelectionMode mode =
-        myFaceSelectAction->isChecked() ? OcctViewWidget::SelectionMode::Face
-        : myEdgeSelectAction->isChecked() ? OcctViewWidget::SelectionMode::Edge
-                                          : OcctViewWidget::SelectionMode::Solid;
-    myView->setSelectionMode(mode);
-    if (myFaceSelectAction->isChecked()) recordProgress("faceMode.used");
-    statusBar()->showMessage(
-        myFaceSelectAction->isChecked()
-            ? tr("Face selection — hovering highlights one face at a time")
-        : myEdgeSelectAction->isChecked()
-            ? tr("Edge selection — hovering shows one edge's length at a time")
-            : tr("Body selection — click whole bodies to combine them"));
-    // Neither mySolidSelectAction nor myFaceSelectAction is touched by
-    // updateActions() itself (their checked state is handled entirely by the
-    // QActionGroup they belong to), so this cannot recurse back in here -
-    // but without this call, HintBalloon::reconsider() only ever finds out
-    // face selection was used the next time something unrelated happens to
-    // fire appStateChanged, which left its hint lingering.
-    updateActions();
-}
-
-void MainWindow::onBodyDoubleClicked(int solidId)
-{
-    if (solidId <= 0) return;
-
-    // The MODE first, and through the action - setChecked() alone would leave
-    // the QActionGroup right and the viewport wrong, and setSelectionMode() on
-    // the viewport alone would leave the chip, the menu tick and the status
-    // label all describing the mode the user just left. onSelectionModeChanged()
-    // is the one function that reads the group and pushes the answer out, and
-    // it ends in updateActions().
-    if (mySolidSelectAction && !mySolidSelectAction->isChecked()) {
-        mySolidSelectAction->setChecked(true);
-        onSelectionModeChanged();
-    }
-
-    // Then the body. Changing the mode clears the old sub-shape selection
-    // (setSelectionMode re-activates every displayed shape), so this has to
-    // follow it rather than lead - selecting first and switching after would
-    // throw the selection away again and leave the user in body mode with
-    // nothing picked, which is the gesture doing half of what it says.
+    // A Shift-click asking for a kind the selection is not holding changes
+    // nothing at all - no selection, no checkpoint, no toast. Quiet is not
+    // silent, though, so the sentence the viewport wrote goes straight into
+    // the status bar. ONE author: OcctViewWidget::autoKindRefusalText() names
+    // both halves of the mismatch and this window never rewords it.
     //
-    // It announces itself: setSelectedSolids() emits selectionChanged(), which
-    // this window answers with onSelectionChanged() -> updateActions(). No
-    // second refresh path from here.
-    myView->setSelectedSolids({solidId});
+    // Not a Failure toast, deliberately, and that is the one place this
+    // departs from the never-silent-failure taxonomy on purpose: the spec
+    // rules this gesture a QUIET no-op, and a toast on every mistaken
+    // Shift-click would shout at a click that did nothing. Not the state
+    // label either - the state label describes the selection, and a refused
+    // click is exactly the click that left the selection alone.
+    if (reason.isEmpty()) return;
+    statusBar()->showMessage(reason);
 }
 
 bool MainWindow::canChangeSketchPlane()
@@ -5578,11 +5585,12 @@ bool MainWindow::mirrorPlacementEnvironmentOk() const
     // the gesture on the handoff itself, with no second mechanism to keep in
     // step.
     if (myShowingInitScreen || isCompareOpen()) return false;
-    // Body mode explicitly - selectedSolidIds() reports the owning body of a
-    // selected FACE too, so without this the gesture could stand next to a
-    // face selection and collide with the pull arrow's own drag. The same
-    // mode check transformableBodyId() carries, for the same reason.
-    return myView->selectionMode() == OcctViewWidget::SelectionMode::Solid;
+    // WHOLE BODIES selected, explicitly - selectedSolidIds() reports the
+    // owning body of a selected face or edge too, so without this the gesture
+    // could stand next to a face selection and collide with the pull arrow's
+    // own drag. The same selection-content term transformableBodyId()
+    // carries, for the same reason.
+    return myView->selectionKind() == OcctViewWidget::PickKind::Body;
 }
 
 bool MainWindow::canBeginMirrorPlacement() const
@@ -5634,8 +5642,9 @@ QString MainWindow::mirrorPlacementRefusalText() const
     if (myShowingInitScreen) return tr("Open a furniture first");
     if (isCompareOpen())
         return tr("Unavailable while comparing versions — close the compare pane first");
-    if (myView->selectionMode() != OcctViewWidget::SelectionMode::Solid)
-        return tr("Switch to body selection, then select one or more bodies to mirror");
+    if (myView->selectionKind() != OcctViewWidget::PickKind::None &&
+        myView->selectionKind() != OcctViewWidget::PickKind::Body)
+        return tr("Double-click a body to select the whole thing, then press S");
     return tr("Select one or more bodies to mirror");
 }
 
@@ -5892,12 +5901,13 @@ bool MainWindow::linkGestureEnvironmentOk() const
     // progress nor a waiting outline should let a body underneath either one
     // be duplicated, linked or unlinked out from under it.
     if (mySketching || hasPendingFace() || myShowingInitScreen) return false;
-    // Body mode explicitly - selectedSolidIds() reports the owning body of a
-    // selected face or edge too, so without this a face/edge selection could
-    // satisfy a count check that means something different in body mode. The
-    // same mode check transformableBodyId() and mirrorPlacementEnvironmentOk()
-    // each carry, for the same reason.
-    return myView->selectionMode() == OcctViewWidget::SelectionMode::Solid;
+    // WHOLE BODIES selected, explicitly - selectedSolidIds() reports the
+    // owning body of a selected face or edge too, so without this a face or
+    // edge selection could satisfy a count check that means something
+    // different for bodies. The same selection-content term
+    // transformableBodyId() and mirrorPlacementEnvironmentOk() each carry,
+    // for the same reason.
+    return myView->selectionKind() == OcctViewWidget::PickKind::Body;
 }
 
 int MainWindow::duplicateLinkedSourceId() const
@@ -6116,6 +6126,20 @@ bool MainWindow::unlinkSelectedBody()
 
 void MainWindow::onSelectionChanged()
 {
+    // The learning event behind the auto-pick hint, recorded BEFORE
+    // updateActions() because updateActions() is what emits appStateChanged,
+    // and HintBalloon::reconsider() answers that signal - recording after it
+    // would leave the hint teaching something the user had already done until
+    // the next unrelated state change happened along. (That is the exact bug
+    // the old faceMode.used recording had to add an extra updateActions()
+    // call to work around; ordering it correctly costs nothing.)
+    //
+    // The event is "a face or an edge was picked", which is what the hint
+    // actually teaches - not "a mode was entered", which no longer exists.
+    const OcctViewWidget::PickKind kind = myView->selectionKind();
+    if (kind == OcctViewWidget::PickKind::Face || kind == OcctViewWidget::PickKind::Edge)
+        recordProgress("subPick.used");
+
     updateActions();
 
     const std::size_t count = myView->selectedSolidIds().size();

@@ -133,7 +133,7 @@ void ItemsPanel::applyTheme()
         // Rasterised out of text()/textDisabled() when it was built, so it is
         // pixels rather than a description - the same cached-appearance value
         // ToolChip::applyTheme() has to rebuild.
-        if (row.eye) row.eye->setIcon(IconSet::icon(IconSet::Glyph::SelectSolid));
+        if (row.eye) row.eye->setIcon(IconSet::icon(IconSet::Glyph::Body));
     }
 
     // The empty state's message is a plain child of myRows with no entry in
@@ -308,7 +308,7 @@ void ItemsPanel::refresh()
         eye->setCheckable(true);
         eye->setChecked(visible);
         eye->setFixedSize(24, 24);
-        eye->setIcon(IconSet::icon(IconSet::Glyph::SelectSolid));
+        eye->setIcon(IconSet::icon(IconSet::Glyph::Body));
         eye->setToolTip(isOutline ? tr("Show or hide this outline")
                                   : tr("Show or hide this body"));
         connect(eye, &QPushButton::toggled, this, [this, id, isOutline](bool show) {

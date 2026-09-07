@@ -15,11 +15,13 @@
 //
 // reconsider() only runs when MainWindow::appStateChanged fires, so a live
 // predicate driven by nothing already wired to that signal would linger no
-// matter how correct it is: switching selection mode explicitly calls
-// updateActions() (see MainWindow::onSelectionModeChanged), and every route
-// that changes the camera to a named direction - the View menu and a click
-// on the axis gizmo alike - goes through MainWindow::recordViewChanged(),
-// which records the event and calls updateActions() too.
+// matter how correct it is: picking a face or an edge goes through
+// MainWindow::onSelectionChanged(), which records the event and then calls
+// updateActions(), in that order (see there for why the order is the whole
+// fix); and every route that changes the camera to a named direction - the
+// View menu and a click on the axis gizmo alike - goes through
+// MainWindow::recordViewChanged(), which records and calls updateActions()
+// too.
 //
 // That last one is why no predicate here reads the camera. The view hint
 // used to retire on the view-name label != "Persp" - a string that lived on

@@ -80,23 +80,24 @@ class OcctViewWidget : public QOpenGLWidget {
     Q_OBJECT
 
 public:
-    // Solid/Face/Edge are the three modes the rail still shows: one AIS
-    // selection mode activated on every body, chosen by the user, with the
-    // hover highlight and the click both confined to it.
-    //
-    // Auto is the ONE behaviour that replaces all three (see
+    // Auto is the ONE behaviour this app has (see
     // docs/superpowers/specs/2026-09-06-auto-selection-design.md). It
     // activates edge AND face selection on every body at once and lets the
     // cursor decide: within kAutoEdgeTolerancePx of an edge the edge glows,
     // otherwise the face does, and a click takes exactly what glows. Bodies
-    // stay behind the double-click they already had.
+    // stay behind the double-click they already had. It is the DEFAULT this
+    // member is constructed with, and Phase 2 removed the three actions, the
+    // three rail chips and the three menu entries that used to reach the
+    // others - nothing in the shipped app calls setSelectionMode() at all.
     //
-    // Phase 1 builds it INVISIBLY - no action, no chip and no menu entry
-    // reaches this value, and setSelectionMode() is the only door. It is a
-    // test seam this phase and the DEFAULT the next one, which is what
-    // deletes the other three. Nothing in the three classic modes changes
-    // shape to make room for it: every branch that names Auto is an
-    // additional one.
+    // Solid/Face/Edge survive as a DOCUMENTED TEST SEAM and nothing else:
+    // one AIS selection mode activated on every body, with the hover
+    // highlight and the click both confined to it. gui_smoke uses them where
+    // a check merely needs a selection OF A GIVEN KIND as setup and driving
+    // the real hover path would add nothing to what that check is about;
+    // every such use carries a one-line justification in place. A check whose
+    // SUBJECT is selection or a gizmo drives the real auto path instead.
+    // There is no UI, shortcut or menu route to any of the three.
     enum class SelectionMode { Solid, Face, Edge, Auto };
 
     // What a pick is OF - the kind Auto's hover arbitrates between and its
@@ -375,6 +376,26 @@ public:
     // the pull. While it is true this widget picks nothing on release - see
     // mouseReleaseEvent().
     bool pullDragActive() const { return myPullDrag.active; }
+    // Whether the pull arrow's own 14px screen-space hit test claims this
+    // LOGICAL pixel - the exact question mousePressEvent() and
+    // mouseDoubleClickEvent() ask before deciding whether a press belongs to
+    // the arrow. Exposed so gui_smoke can prove the arrow really is in the
+    // way at a pixel before asserting that a double-click gets past it: an
+    // "it works" check aimed somewhere the arrow never was would be vacuous,
+    // and this is the one thing that can tell those two apart. False with no
+    // arrow up.
+    bool pullArrowClaimsPoint(const QPoint& logical) const {
+        return arrowHit(myPullArrow, logical);
+    }
+    // The same question for the bevel arrow. Both exist so gui_smoke can say
+    // WHERE an arrow is standing rather than inferring it, which matters more
+    // now than it did: with one selection behaviour, the plain click is the
+    // universal pick gesture AND the arrows' own press, so an arrow lying
+    // over a face the user might want is a real, pinnable interaction rather
+    // than a curiosity of one mode.
+    bool bevelArrowClaimsPoint(const QPoint& logical) const {
+        return arrowHit(myBevelArrow, logical);
+    }
 
     // The bevel arrow: the same double-headed arrow, perpendicular to a
     // selected edge along the bisector of its two faces' outward normals. See
@@ -457,8 +478,26 @@ public:
     // False for an unknown id.
     bool solidPresentationTransform(int id, gp_Trsf& out) const;
 
+    // THE TEST SEAM. No shipped UI path reaches this - see the enum.
     void setSelectionMode(SelectionMode mode);
     SelectionMode selectionMode() const { return mySelectionMode; }
+
+    // Drops everything a half-finished pick gesture left behind: the
+    // pre-click kind memory, the swallow-the-trailing-release claim, the
+    // standing refusal sentence and the last-picked edge. The KIND LOCK
+    // itself needs nothing here - selectionKind() derives it from the live
+    // selection, so whatever empties the selection empties the lock with it -
+    // and that is exactly why this function is small: the only state worth
+    // resetting is the state that is genuinely remembered.
+    //
+    // Called by MainWindow::resyncView(), which is the one choke point every
+    // document swap goes through: opening a furniture, closing back to the
+    // library, undo, redo, restoring a version, closing the compare pane, and
+    // the GL-context-loss recovery. Phase 1's review flagged these flags as
+    // having no reset on any of those paths - harmless while Auto was
+    // unreachable, worth closing the moment it became the default. Nothing
+    // here can fire a signal or touch OCCT, so it is safe from any of them.
+    void resetPickGesture();
 
     // --- Auto selection (spec 2026-09-06, Phase 1) -------------------------
     //
@@ -500,8 +539,9 @@ public:
     // 0.75x the custom tolerance (8 -> 6 logical px), so asking for 8 would
     // have capped the promise below its own value. The cost of asking for
     // more is that faces are detected a little further outside the body's
-    // silhouette in Auto than in the classic modes - forgiving rather than
-    // wrong, and invisible this phase, since nothing reaches Auto.
+    // silhouette than the classic seam modes would detect them - forgiving
+    // rather than wrong, and the forgiving side is the right side to err on
+    // for the one behaviour every pick in the app now goes through.
     static constexpr int kAutoCandidateTolerancePx = 12;
 
     // "No custom tolerance" - OCCT's own sentinel, which is what the selector
@@ -536,10 +576,10 @@ public:
     // Why the last Shift-click in Auto did nothing, or an empty string. A
     // Shift-click whose kind differs from selectionKind() is a QUIET no-op -
     // it changes no selection and takes no checkpoint - so something has to
-    // say why, or the app looks broken. Phase 2 paints this in the status
-    // label; this phase records it and emits autoPickRefused() beside it, so
-    // the copy exists, is swept for banned words, and has exactly one author.
-    // Cleared by the next pick that actually lands.
+    // say why, or the app looks broken. MainWindow puts it in the status bar,
+    // off the autoPickRefused() signal emitted beside it, so the copy has
+    // exactly one author and is swept for banned words like any other.
+    // Cleared by the next pick that actually lands, and by resetPickGesture().
     QString autoPickRefusalText() const { return myAutoRefusal; }
 
     // The CUSTOM selector tolerance OCCT is holding, in DEVICE pixels - what
@@ -1475,16 +1515,11 @@ signals:
     // rubber band and the coordinate readout.
     void sketchCursorMoved(const gp_Pnt& point);
     void selectionChanged();
-    // A face CTRL+double-clicked in face-selection mode. MainWindow decides
-    // what that means (it locks it); this widget knows nothing about locking.
-    // The modifier is what leaves the plain double-click free for the body
-    // route below - see mouseDoubleClickEvent().
+    // A face CTRL+double-clicked. MainWindow decides what that means (it locks
+    // it); this widget knows nothing about locking. The modifier is what
+    // leaves the plain double-click free for the whole-body pick - see
+    // mouseDoubleClickEvent().
     void faceDoubleClicked(const TopoDS_Face& face);
-    // A body plainly double-clicked while its faces or edges were what was
-    // being picked. MainWindow answers by switching to body selection - through
-    // the same QAction the rail chip triggers, because the mode is that
-    // action's checked state and nothing else may write it.
-    void bodyDoubleClicked(int solidId);
 
     // A live face pull. `distance` is signed along the pulled face's outward
     // normal and measured from the press - positive grows, negative carves -
@@ -1543,9 +1578,10 @@ signals:
     // holding, and so did nothing at all. `reason` is the sentence
     // autoPickRefusalText() also stores - one author, two ways to read it -
     // and it is emitted rather than shown here because this widget owns no
-    // status label. Nothing is connected to it in Phase 1: Auto is not
-    // reachable from any control yet, and wiring a slot that can only fire in
-    // a mode nothing can enter would be dead code pretending to be a feature.
+    // status label. MainWindow answers it by putting the sentence in the
+    // status bar - the spec's "quiet no-op with the status label saying why",
+    // and deliberately NOT a Failure toast: a toast on every mistaken
+    // Shift-click would shout at a gesture that changed nothing.
     void autoPickRefused(const QString& reason);
 
 protected:
@@ -2090,7 +2126,9 @@ private:
 
     bool myWireframe = false;
 
-    SelectionMode mySelectionMode = SelectionMode::Solid;
+    // Auto from construction - Phase 2's switch. Nothing in the shipped app
+    // moves it; only the test seam does. See the enum.
+    SelectionMode mySelectionMode = SelectionMode::Auto;
     // The one piece of Auto state that is genuinely remembered rather than
     // derived, and it is a MESSAGE, not a mode: why the last Shift-click did
     // nothing. Everything else about Auto's kind lock comes out of

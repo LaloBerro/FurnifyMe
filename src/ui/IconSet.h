@@ -24,7 +24,17 @@ namespace IconSet {
 // needs a glyph that means "projection" rather than either of the two words.
 enum class Glyph {
     Sketch, Extrude, Fuse, Cut, Intersect, Delete,
-    Undo, Redo, Items, Snap, SelectSolid, SelectFace, SelectEdge,
+    Undo, Redo, Items, Snap,
+    // A filled cube. It was SelectSolid, the rail's body-selection chip,
+    // until the auto-selection spec's Phase 2 deleted the three selection
+    // modes and their three chips - but the glyph itself never belonged to
+    // that chip alone: ItemsPanel's per-row visibility button has always
+    // drawn it too, and still does. Renamed rather than deleted, because a
+    // glyph named after a control that no longer exists is worse than either
+    // keeping it or dropping it. SelectFace and SelectEdge WERE dead the
+    // moment their chips went and are gone outright, the same way
+    // DisplayMode, Screenshot and Fit went above.
+    Body,
     // The render-mode shutter (Task 7.2) - a camera body with a lens ring,
     // reintroduced on the same 24x24 grid the removed Screenshot glyph
     // above's comment describes, drawn fresh rather than resurrected: that

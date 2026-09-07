@@ -576,8 +576,11 @@ cannot express per-axis, and `GTransform` would convert faces to NURBS).
 Three selection-driven gizmos, no new rail buttons. Their visibility predicates are one
 derived function each, driven from `appStateChanged`, and **provably disjoint**:
 `ExtrudePreview` requires a pending face; the pull arrow, transform manipulator and bevel
-arrow all require none, plus three different selection modes. At most one app-wide
-Enter/Escape claim can therefore exist at a time. Gizmo previews go through the
+arrow all require none, plus three different values of `selectionKind()` — Face, Body and
+Edge respectively. (That last clause read "three different selection modes" until the
+auto-selection spec's Phase 2 deleted the modes; see "Selection" for the re-keyed argument
+and why kind-locked accumulation is what keeps the new foundation solid.) At most one
+app-wide Enter/Escape claim can therefore exist at a time. Gizmo previews go through the
 **dedicated `setModelingPreview` channel** (selection mode −1), never the sketch/extrude
 `setPreview` slot — two features sharing that slot already cost one bug.
 
@@ -1228,11 +1231,15 @@ rather than floating beside it:
   does. Before this feedback round the two never shared a column and a `std::max()` was the
   correct floor; now that they read as one column, the floor has to be the sum of both,
   because the viewport must clear the header AND the spine stacked, not whichever alone
-  happens to be taller. A fourteenth rail tool still raises that floor rather than
+  happens to be taller. The rail carries TEN chips since the auto-selection switch deleted
+  Select Bodies/Faces/Edges (Items · Start Sketch, Extrude · Union, Subtract, Intersect,
+  Delete · Snap to Grid · Undo, Redo), and the floor followed for free because it is
+  derived from `rail->sizeHint()` rather than from a count. An eleventh rail tool still
+  raises that floor rather than
   reintroducing the clip that cost Redo, then Undo, but the user's actual screen height is a
   real ceiling the floor cannot push past, so the rail still wants a rework - scrolling,
   grouping, something - well before it gets there. **Symmetry stayed off the rail for
-  exactly this reason** — it is a Model-menu-only checkable action (`S`), not a fifteenth
+  exactly this reason** — it is a Model-menu-only checkable action (`S`), not an eleventh
   chip, so live symmetry did not raise the floor further. Render mode and the bottom-bar
   toggle are View-menu-only for the same load-bearing reason, not merely by omission. Two
   `ToolCluster`s float over the viewport (the rail and the view-controls cluster under the
@@ -1669,13 +1676,18 @@ plane, and the perspective rule would refuse perfectly visible clicks. `Convert`
 Iterate with `InitSelected()`/`MoreSelected()`/`NextSelected()`, pull topology via
 `SelectedShape()`.
 
-**Auto selection (spec `docs/superpowers/specs/2026-09-06-auto-selection-design.md`, Phase 1
-merged) activates modes 2 AND 4 on every body at once**, so the cursor decides what a click
-takes: within 8 logical pixels of an edge the edge glows, otherwise the face does. It is a
-fourth `SelectionMode` value reachable only through `setSelectionMode()` — no action, chip or
-menu entry touches it this phase, and the three classic modes are byte-for-byte unchanged
-(the raised selector tolerance is applied on entry and handed back on exit, so a classic mode
-can never inherit it). Phase 2 removes the mode UI and makes this the default.
+**Auto selection (spec `docs/superpowers/specs/2026-09-06-auto-selection-design.md`, both
+phases merged) is the app's ONE selection behaviour**: modes 2 AND 4 activated on every body
+at once, so the cursor decides what a click takes — within 8 logical pixels of an edge the
+edge glows, otherwise the face does, and a click takes exactly what glows. `OcctViewWidget`
+is constructed in it. **The three Select Bodies/Faces/Edges actions, their rail chips, their
+menu entries and their glyphs are DELETED**, and `Solid`/`Face`/`Edge` survive as a
+**documented test seam** only: nothing outside `gui_smoke` calls `setSelectionMode()`.
+`gui_smoke` uses the seam where a check merely needs a selection OF A GIVEN KIND as setup and
+driving the real hover path would add nothing (each use justified in place); a check whose
+SUBJECT is selection or a gizmo drives the real path — `pickFaceOf()`, `pickEdgeOf()` and
+`pickBodyOf()` are the three helpers that do it, and they clear the selection first, because
+a live arrow or manipulator takes a press outright before the picker ever runs.
 
 **Two OCCT facts the arbitration cost a measurement each.** Raising the tolerance is not
 enough on its own: `AIS_InteractiveContext::SetPixelTolerance` sets a CUSTOM tolerance that
@@ -1695,24 +1707,90 @@ projected back — and hands the choice to OCCT through `HilightNextDetected()`,
 highlight, `DetectedShape()` and `SelectDetected()` all still read one field and a click
 cannot disagree with what is glowing.
 
+**Phase 2 corrected that arbitration twice, both times by measurement, and both corrections
+are about the same thing: a rule stated in PIXELS has to be resolved in pixels.** Phase 1
+took the first candidate in RANK order (= depth order) inside the tolerance, and returned
+early whenever OCCT had already detected *some* edge. Both were wrong once auto became the
+only pick: on a body a few tens of pixels across, all four edges of a face are candidates at
+once, so depth chose between them and routinely chose one five or six pixels away over the
+one the cursor was sitting exactly on — and the early return meant this function never even
+looked. Measured on two small bodies: every click aimed at an edge's own projected midpoint
+took a neighbour instead, four candidates running. It now walks the whole candidate list and
+keeps the **nearest on screen**, with a strict comparison so ties still fall to rank order —
+which is the case that matters for one edge hidden directly behind another, where both
+project to the same pixel and the nearer one is still taken.
+
+**The custom tolerance stands down while the transform gizmo is attached, and that is a
+measurement too.** OCCT's custom tolerance belongs to the SELECTOR, not to a presentation,
+and is added to *every* registered entity's sensitivity — `AIS_Manipulator`'s parts included.
+Its arms, translation-plane quadrants, rotation rings and scale cubes sit within a few tens
+of pixels of one another by construction, so inflating all of them by 12 device pixels merges
+them: hovering out along the Z arm armed the rotation ring about Y at every step, and walking
+out along X found the translation plane and then the ring, never the arrow and never the
+cube. `applySelectionTolerance()` therefore uses the classic default whenever `myManipulator`
+is non-null — which is exactly when a whole BODY is selected, and so exactly when the next
+gesture is the gizmo rather than a sub-shape — and `attachManipulator()`/`detachManipulator()`
+call it. The cost is named rather than hidden: while a body is selected an edge has to be
+hovered nearer to win, because it must reach OCCT's candidate list on the default sensitivity
+alone. The 8 px promise is a ceiling, not a floor, and "the highlight is the contract" holds
+either way, because hover and click still arbitrate identically.
+
 **Shift is kind-locked, and the lock is DERIVED.** `selectionKind()` reads the live selection
 rather than remembering the first pick, so undo, delete, a mode switch and
 `setSelectedSolids()` all move the lock with them and there is nothing to keep in step. A
-Shift-click of another kind is a quiet no-op carrying a sentence (`autoPickRefusalText()`,
-swept for banned words by `gui_smoke` since no widget paints it until Phase 2). Bodies
-accumulate by Shift+**double**-click, because a plain click in auto lands on a face or an
-edge. Qt delivers a double-click as press/release/DblClick/**release**, and both halves of
-that bit: the gesture's own first click moves the lock (hence `myAutoKindBeforeClick`, read
-one event later) and the trailing release re-picks (hence `myAutoBodyPickTaken`, which
-swallows it — the same "the gesture that started owns the release that ends it" rule every
-drag in that file already keeps).
+Shift-click of another kind is a quiet no-op carrying a sentence
+(`OcctViewWidget::autoKindRefusalText()`, one author), emitted as `autoPickRefused()` and put
+in the **status bar** by `MainWindow::onPickRefused()`. Deliberately not a Failure toast — the
+spec rules this gesture a quiet no-op, and a toast on every mistaken Shift-click would shout
+at a click that changed nothing — and deliberately not the state label, which describes the
+selection a refused click did not change. Bodies accumulate by Shift+**double**-click, because
+a plain click in auto lands on a face or an edge. Qt delivers a double-click as
+press/release/DblClick/**release**, and both halves of that bit: the gesture's own first click
+moves the lock (hence `myAutoKindBeforeClick`, read one event later) and the trailing release
+re-picks (hence `myAutoBodyPickTaken`, which swallows it — the same "the gesture that started
+owns the release that ends it" rule every drag in that file already keeps).
+`resetPickGesture()` drops both flags, the refusal and the last-picked edge, and
+`MainWindow::resyncView()` — the one choke point every document swap goes through — calls it.
 
-**One predicate already reaches into auto and will need Phase 2's attention:**
-`canPullSelectedFace()` carries no mode term — its comment says the mode check is *implicit*
-because `selectedFace()` is null outside face mode — which is true of the three classic modes
-and false of auto. So a face picked in auto raises the pull arrow, and `arrowHit()` then
-swallows a double-click aimed at that face's centre. Harmless this phase (nothing reaches
-auto) and pinned in the suite's own comment where it bites.
+**The gizmo predicates key on selection CONTENT now, and the disjointness argument moved with
+them.** It used to be "face pull needs face mode, bevels need edge mode, the transform gizmo
+needs body mode, so no two can be true at once". It is now one enum's worth, asked in three
+places against three different values: `selectionKind()` derives exactly one of
+`None`/`Body`/`Face`/`Edge` from the live selection, `canPullSelectedFace()` requires `Face`,
+`bevelTarget()` requires `Edge` and `transformableBodyId()` requires `Body` — so at most one
+can hold, by construction rather than by three predicates kept in step. Kind-locked
+accumulation is what makes the foundation solid: a selection can never hold two kinds at once,
+so the derived value is never a coin toss. `ExtrudePreview` is still held apart by
+`hasPendingFace()`, which all three refuse on, and `mirrorPlacementEnvironmentOk()` and
+`linkGestureEnvironmentOk()` take the same `Body` term for the same reason
+`transformableBodyId()` does — `selectedSolidIds()` reports the OWNING body of a selected face
+or edge, so a count alone cannot answer it. **The face pull's term is genuinely new**: it used
+to be implicit (`selectedFace()` was null outside face mode), and with no modes left that
+inference is gone.
+
+**Two press-swallowing hazards this re-key opened, both closed:**
+- **A double-click on a face must still take the body.** In auto a plain click on the middle
+  of a face raises the pull arrow AT THAT FACE'S CENTRE, which is exactly where the second
+  click of a double-click aimed at the body lands — so `arrowHit()` swallowed it and every
+  such gesture was a no-op. The guard stands down in auto: an arrow has no CLICK meaning at
+  all (it is press-drag-release), and the gesture's own first press/release pair has already
+  offered it that gesture and been answered.
+- **A Shift+double-click over a gizmo arm must still add the body underneath.**
+  `AIS_ManipulatorOwner` outranks a shape's owner, so the double-click returned on
+  `detectedIsManipulator()` and added nothing. `mouseDoubleClickEvent()` now `Deactivate()`s
+  the manipulator around its own `MoveTo`, restoring it on every exit through a local scope
+  guard — the same shield `mouseReleaseEvent()` already carried for the Shift-CLICK, one
+  gesture over.
+
+**What is NOT closed, and is ruled rather than overlooked: a live arrow owns a band of pixels
+around what it stands on.** `arrowHit()` is a 14 px screen-space test that takes a press
+outright, so with an edge selected a click 8–14 px from it — over a face the user may well
+want — selects nothing at all. That is unchanged behaviour (an arrow has always claimed
+presses on itself) and the spec puts "what the gizmos do once raised" out of scope, but it is
+newly reachable now that the plain click is the universal pick gesture. `gui_smoke` pins it in
+both directions rather than leaving it to be rediscovered as a mystery dead click: it searches
+for a pixel the arrow claims that also hovers as a face (finding it is its own check), then
+asserts the click there changes nothing.
 
 ### The modeling loop
 
@@ -1765,11 +1843,14 @@ octave nudge stays — the layer settles draw order, the nudge settles the depth
 Insert the grid layer **after** Default: inserted before, the locked-face grid vanishes
 under the face it decorates (measured: 0 of 5616 grid pixels).
 
-**Gestures, face and edge modes**: plain double-click selects the whole body and switches
-to body mode; **Ctrl+double-click on a face** locks the sketch plane (the old plain
-double-click route); `L`/`Shift+L`/menu unchanged. The Ctrl exemption from the
-pull-arrow's double-click guard applies **only** in the face-lock branch — widened, it
-lets Ctrl+double-click in edge mode yank the mode out from under a live bevel arrow.
+**Gestures**: plain double-click selects the whole body — performed by the viewport itself
+since the auto-selection switch, there being no mode action left to announce it to;
+**Ctrl+double-click on a face** locks the sketch plane (the old plain double-click route);
+`L`/`Shift+L`/menu unchanged. The Ctrl exemption from the pull-arrow's double-click guard
+names the face-lock BRANCH rather than the modifier, which is what stopped a
+Ctrl+double-click on an edge inheriting it; under auto the guard stands down for the
+whole-body route as well — see "Selection" for the two press-swallowing hazards the re-key
+opened and how each is closed.
 
 **Notes can be silenced, Failures cannot.** `View → Show notifications` drops
 `Toast::Kind::Note` only; a refusal that reports nowhere would violate the

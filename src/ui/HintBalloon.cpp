@@ -21,7 +21,11 @@ constexpr int kWidth = 250;
 constexpr int kClearance = 8;   // gap left when stepping around an obstacle
 
 const QString kBooleanEvent = QStringLiteral("boolean.completed");
-const QString kFaceModeEvent = QStringLiteral("faceMode.used");
+// "A face or an edge was picked" - recorded by MainWindow::onSelectionChanged
+// (see there). It replaced faceMode.used when the three selection modes went
+// away: the hint teaches what the cursor does, and the thing it watches for is
+// the user doing it, not a mode being entered.
+const QString kAutoPickEvent = QStringLiteral("subPick.used");
 const QString kViewChangedEvent = QStringLiteral("view.changed");
 }  // namespace
 
@@ -74,12 +78,18 @@ bool HintBalloon::conditionHolds(const QString& event) const
         // either one makes this false and the hint go away.
         return myWindow->view()->selectedSolidIds().size() == 2;
     }
-    if (event == kFaceModeEvent) {
-        // True while a body exists and the user has not yet tried face
-        // selection. The moment they do, this goes false - the hint has done
-        // its job.
+    if (event == kAutoPickEvent) {
+        // True while a body exists and the user has not yet picked a face or
+        // an edge. The moment they do, the recorded count is non-zero and
+        // this goes false - the hint has done its job.
+        //
+        // It reads the RECORDED EVENT, not the live selection, for the reason
+        // the view hint's own comment below spells out: a selection can be
+        // cleared a moment later, and a hint that came back the instant the
+        // user clicked empty space would be teaching something they had
+        // already learned.
         return myWindow->document().count() > 0 &&
-               myWindow->view()->selectionMode() != OcctViewWidget::SelectionMode::Face;
+               myWindow->progress().count(event.toStdString()) == 0;
     }
     if (event == kViewChangedEvent) {
         // True while a body exists and the user has not yet looked from a
@@ -104,14 +114,15 @@ QString HintBalloon::textForEvent(const QString& event) const
         return tr("Two bodies selected — Union combines them, Subtract cuts the second "
                   "out of the first, Intersect keeps only the overlap.");
     }
-    if (event == kFaceModeEvent) {
-        // Amended for the rail: the chip this used to name painted its own
-        // label ("Select Faces") right on the viewport. The rail is
-        // icon-only - the label moved into the chip's tooltip - so the old
-        // wording pointed at text that appears nowhere on screen. The fix is
-        // to locate the control instead of merely naming it.
-        return tr("Switch to Select Faces — on the rail at the left edge — to "
-                  "pick one face at a time instead of a whole body.");
+    if (event == kAutoPickEvent) {
+        // Rewritten for auto selection: this hint used to point at a rail
+        // chip, and there is no chip and no mode to point at any more. What
+        // it teaches now is the behaviour itself, which is a rule about the
+        // cursor - so the sentence describes what hovering does and what the
+        // second gesture is for.
+        return tr("Hover a body: near an edge the edge lights up, otherwise the face "
+                  "does — and a click takes whatever is lit. Double-click for the "
+                  "whole body.");
     }
     if (event == kViewChangedEvent) {
         return tr("Click an arm of the gizmo, top right, to look from that direction. "
@@ -200,8 +211,8 @@ void HintBalloon::reconsider()
         return;
     }
 
-    if (isDue(kFaceModeEvent)) {
-        showHint(kFaceModeEvent);
+    if (isDue(kAutoPickEvent)) {
+        showHint(kAutoPickEvent);
         return;
     }
 
@@ -424,7 +435,7 @@ QStringList HintBalloon::paintedTexts() const
     // sweep checks.
     return {
         textForEvent(kBooleanEvent),
-        textForEvent(kFaceModeEvent),
+        textForEvent(kAutoPickEvent),
         textForEvent(kViewChangedEvent),
         tr("got it"),
     };

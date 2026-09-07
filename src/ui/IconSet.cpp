@@ -74,23 +74,10 @@ void paintGlyph(QPainter& p, Glyph glyph)
             }
             p.drawEllipse(QPoint(12, 12), 2, 2);
             break;
-        case Glyph::SelectSolid:                  // filled cube
+        case Glyph::Body:                         // filled cube
             p.drawRect(6, 6, 12, 12);
             p.fillRect(QRect(9, 9, 6, 6), QBrush(p.pen().color()));
             break;
-        case Glyph::SelectFace:                   // cube with one face marked
-            p.drawRect(6, 6, 12, 12);
-            p.drawLine(6, 12, 18, 12);
-            p.fillRect(QRect(7, 7, 10, 4), QBrush(p.pen().color()));
-            break;
-        case Glyph::SelectEdge: {                 // cube with one edge thickened
-            p.drawRect(6, 6, 12, 12);
-            QPen thick = p.pen();
-            thick.setWidthF(3.4);
-            p.setPen(thick);
-            p.drawLine(6, 6, 18, 6);
-            break;
-        }
         case Glyph::Camera: {                     // a camera body, lens and shutter button
             p.drawRoundedRect(QRectF(3.5, 8.0, 17.0, 12.0), 2.0, 2.0);
             p.drawLine(8, 8, 10, 5);

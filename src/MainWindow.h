@@ -815,8 +815,12 @@ private slots:
     void onItemRenameCommitted(int id, bool isOutline, QString newName);
 
     void onExportStep();
-    void onSelectionModeChanged();
     void onSelectionChanged();
+    // A Shift-click that asked for a kind the selection is not holding, and so
+    // did nothing at all - OcctViewWidget::autoPickRefused(). The sentence
+    // goes into the status bar and nowhere else; see the definition for why it
+    // is neither a toast nor the state label.
+    void onPickRefused(const QString& reason);
     void onLockToFace();
     // "Set symmetry plane": reads the current face selection and calls
     // setSymmetryPlaneFromFace() - the Lock to Face idiom, one gizmo over.
@@ -830,12 +834,6 @@ private slots:
     // the plane-placement gesture and reverts the action's own optimistic
     // checked-flash via updateActions() when that refuses.
     void onSymmetryActionTriggered();
-    // A plain double-click on a body in face or edge selection mode: switch to
-    // body selection and select that body, in one gesture. Routed through
-    // mySolidSelectAction rather than straight at the viewport, so the rail
-    // chip, the menu entry and the status label all follow - the mode is that
-    // action's checked state, and nothing else may write it.
-    void onBodyDoubleClicked(int solidId);
     // The end of a transform-gizmo drag. An identity delta is a cancel - the
     // user released where they started, or the snap rounded the whole gesture
     // away - and a cancel takes no checkpoint and says nothing. The viewport
@@ -1292,9 +1290,9 @@ private:
     QAction* mySubtractAction = nullptr;
     QAction* myIntersectAction = nullptr;
     QAction* myExportStepAction = nullptr;
-    QAction* mySolidSelectAction = nullptr;
-    QAction* myFaceSelectAction = nullptr;
-    QAction* myEdgeSelectAction = nullptr;
+    // No mySolidSelectAction/myFaceSelectAction/myEdgeSelectAction any more:
+    // one selection behaviour, decided by the cursor, leaves nothing for a
+    // control to switch (auto-selection spec, Phase 2).
     QAction* mySnapAction = nullptr;
     QAction* myDeleteAction = nullptr;
     // F2, and (like Delete) two meanings decided in ONE place - updateActions().
