@@ -492,7 +492,19 @@ void skipByEnvironment(int checks, const QString& why)
 // + old-boolean-migration probe - plus the six adapted call sites across the
 // four pre-existing autosave blocks (the action lookups changed shape, not
 // the check count).
-constexpr int kCheckFloor = 3289;
+//
+// Auto selection, Phase 1 (the auto-pick core, built behind the three mode
+// buttons) raises it from 3289 to 3329, matched against a real full run rather
+// than a hand tally, per the rule the entry above already follows. Two new
+// self-contained blocks at the very end of this file: the hover-arbitration
+// probe (the tolerance sweep and its two boundary pins, the three Dump-pixel
+// glow counts, the click-takes-what-glows identities, and the tolerance's
+// round trip in and out of auto) and the kind-lock probe (edge-with-edge
+// accumulation including across bodies, both directions of the quiet no-op
+// with their own sentences, the double-click body pick and its Shift
+// accumulation, the refusal sweep, and the lock clearing with the selection).
+// No existing block changed by a single check - that is the phase's own bar.
+constexpr int kCheckFloor = 3329;
 
 void check(bool condition, const QString& what)
 {
@@ -659,6 +671,8 @@ constexpr BlockInfo kBlocks[] = {
     { "milestone-5-item-8-plain-duplicate-ctrl-d", false, true },
     { "milestone-5-item-10-autosave-modes-and-timed-saves", false, true },
     { "milestone-5-item-10-autosave-persistence-and-migration", false, true },
+    { "auto-selection-phase-1-the-cursor-decides", false, true },
+    { "auto-selection-phase-1-the-kind-lock", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -24961,6 +24975,491 @@ int main(int argc, char* argv[])
                       .arg(modePair.second));
             readWindow.close();
             settle(100);
+        }
+    }
+
+    // --- auto selection, phase 1: the cursor decides -------------------------
+    //
+    // The auto-pick core, built behind the three mode buttons that are still
+    // the interface (spec 2026-09-06). Nothing in the app reaches
+    // SelectionMode::Auto yet, so these two blocks are the only thing that
+    // drives it - and they drive the REAL path: hover moves, clicks and
+    // double-clicks delivered to the viewport, never a shortcut into the
+    // selection.
+    //
+    // Placed at the very end of the file, and both self-contained, for the
+    // reason the hover block one screen up gives: nothing runs after them, so
+    // their footprint can shift nothing that came before, which is what makes
+    // "every existing check still passes untouched" a claim about this phase
+    // rather than about where its checks happened to land.
+    if (blockEnabled("auto-selection-phase-1-the-cursor-decides")) {
+        RequiredTempDir autoDir;
+        MainWindow probe(nullptr, /*persistProgress=*/false, autoDir.path());
+        probe.setAttribute(Qt::WA_ShowWithoutActivating);
+        probe.resize(900, 700);
+        probe.show();
+        settle(300);
+        OcctViewWidget* av = probe.view();
+        av->setAnimationsEnabled(false);
+        enterFreshFurniture(probe);
+        check(buildBody(probe, 0.32, 0.32, 0.58, 0.58, 80.0),
+              "a body for the auto-selection probe");
+
+        // The classic default, and the number every classic mode has to keep
+        // picking with - read off OCCT, not off our own idea of the mode.
+        const int classicTolerance = av->selectionPixelTolerance();
+        check(classicTolerance == OcctViewWidget::kNoCustomTolerance,
+              QStringLiteral("the three classic modes ask OCCT for no custom selector "
+                             "tolerance at all (%1)")
+                  .arg(classicTolerance));
+
+        av->setSelectionMode(OcctViewWidget::SelectionMode::Auto);
+        settle(150);
+        check(av->selectionMode() == OcctViewWidget::SelectionMode::Auto,
+              "the viewport is in auto selection");
+        const int wantTolerance =
+            std::max(1, int(std::lround(OcctViewWidget::kAutoCandidateTolerancePx *
+                                        av->devicePixelRatioF())));
+        check(av->selectionPixelTolerance() == wantTolerance,
+              QStringLiteral("auto asks for a candidate tolerance of %1 device pixels "
+                             "for %2 logical (ratio %3)")
+                  .arg(av->selectionPixelTolerance())
+                  .arg(OcctViewWidget::kAutoCandidateTolerancePx)
+                  .arg(av->devicePixelRatioF()));
+
+        // The body's own projected centre, so "step INTO the body" is a
+        // direction derived from the scene rather than a guess about which way
+        // the camera happens to be looking.
+        QPoint bodyCentre;
+        bool haveCentre = false;
+        for (const DocumentModel::Solid& solid : probe.document().solids()) {
+            GProp_GProps props;
+            BRepGProp::VolumeProperties(solid.shape, props);
+            haveCentre = av->projectToScreen(props.CentreOfMass(), bodyCentre);
+            break;
+        }
+        check(haveCentre, "the body's centre projects onto the viewport");
+
+        // The longest straight edge whose midpoint really hovers AS AN EDGE,
+        // and whose perpendicular really leaves it - found by asking the app,
+        // not by trusting a projection. A probe that assumed either would
+        // report a tolerance for a pixel that was never on an edge at all.
+        TopoDS_Edge probeEdge;
+        QPoint edgeMid;
+        QPointF intoBody;
+        bool haveEdge = false;
+        double bestLen = 0.0;
+        for (const DocumentModel::Solid& solid : probe.document().solids()) {
+            for (TopExp_Explorer it(solid.shape, TopAbs_EDGE); it.More(); it.Next()) {
+                const TopoDS_Edge candidate = TopoDS::Edge(it.Current());
+                TopoDS_Vertex v1, v2;
+                TopExp::Vertices(candidate, v1, v2);
+                if (v1.IsNull() || v2.IsNull()) continue;
+                const gp_Pnt a = BRep_Tool::Pnt(v1);
+                const gp_Pnt b = BRep_Tool::Pnt(v2);
+                if (a.Distance(b) < 20.0) continue;
+                const gp_Pnt mid(0.5 * (a.X() + b.X()), 0.5 * (a.Y() + b.Y()),
+                                 0.5 * (a.Z() + b.Z()));
+                QPoint pa, pb, pm;
+                if (!av->projectToScreen(a, pa) || !av->projectToScreen(b, pb) ||
+                    !av->projectToScreen(mid, pm))
+                    continue;
+                if (!av->rect().adjusted(60, 60, -60, -60).contains(pm)) continue;
+                const QPointF along(pb.x() - pa.x(), pb.y() - pa.y());
+                const double lenPx = std::hypot(along.x(), along.y());
+                if (lenPx < 60.0 || lenPx <= bestLen) continue;
+                QPointF perp(-along.y() / lenPx, along.x() / lenPx);
+                const QPointF toCentre(bodyCentre.x() - pm.x(), bodyCentre.y() - pm.y());
+                if (perp.x() * toCentre.x() + perp.y() * toCentre.y() < 0.0)
+                    perp = QPointF(-perp.x(), -perp.y());
+
+                moveTo(av, QPointF(pm));
+                if (av->hoveredKind() != OcctViewWidget::PickKind::Edge) continue;
+                // NOT named `far` - that is a Windows SDK macro defined to
+                // nothing, and the declaration compiles into a syntax error.
+                const QPointF beyond(
+                    pm.x() + perp.x() * (OcctViewWidget::kAutoEdgeTolerancePx + 8),
+                    pm.y() + perp.y() * (OcctViewWidget::kAutoEdgeTolerancePx + 8));
+                moveTo(av, beyond);
+                if (av->hoveredKind() != OcctViewWidget::PickKind::Face) continue;
+                probeEdge = candidate;
+                edgeMid = pm;
+                intoBody = perp;
+                bestLen = lenPx;
+                haveEdge = true;
+            }
+        }
+        check(haveEdge,
+              "a long straight edge is on screen with a face behind it, so the "
+              "tolerance sweep below is not vacuous");
+
+        // THE MEASUREMENT. One logical pixel at a time, straight out from the
+        // edge into the face it bounds, asking the app what a click would
+        // take. The table is printed because the tolerance is a measured
+        // number, not a chosen one - a value nothing can re-measure is a
+        // claim with a shelf life.
+        int lastEdgePx = -1;
+        int firstFacePx = -1;
+        if (haveEdge) {
+            std::printf("      auto edge tolerance sweep (logical px from the edge):\n      ");
+            for (int px = 0; px <= OcctViewWidget::kAutoEdgeTolerancePx + 8; ++px) {
+                moveTo(av, QPointF(edgeMid.x() + intoBody.x() * px,
+                                    edgeMid.y() + intoBody.y() * px));
+                const OcctViewWidget::PickKind kind = av->hoveredKind();
+                std::printf("%d:%s ", px,
+                            kind == OcctViewWidget::PickKind::Edge   ? "E"
+                            : kind == OcctViewWidget::PickKind::Face ? "F"
+                            : kind == OcctViewWidget::PickKind::Body ? "B"
+                                                                      : "-");
+                if (kind == OcctViewWidget::PickKind::Edge) lastEdgePx = px;
+                if (kind == OcctViewWidget::PickKind::Face && firstFacePx < 0)
+                    firstFacePx = px;
+            }
+            std::printf("\n");
+        }
+        const int tol = OcctViewWidget::kAutoEdgeTolerancePx;
+        check(haveEdge && lastEdgePx >= 0 && firstFacePx > lastEdgePx,
+              QStringLiteral("the hover flips from edge to face exactly once, and the "
+                             "edge holds it up to %1 px (face from %2)")
+                  .arg(lastEdgePx)
+                  .arg(firstFacePx));
+        // Both sides of the boundary, +/-2 px around the declared tolerance -
+        // the pin the spec asks for. A tolerance that quietly drifted to 3 px
+        // or to 20 fails here rather than passing because SOMETHING still
+        // flipped somewhere.
+        if (haveEdge) {
+            moveTo(av, QPointF(edgeMid.x() + intoBody.x() * (tol - 2),
+                                edgeMid.y() + intoBody.y() * (tol - 2)));
+            check(av->hoveredKind() == OcctViewWidget::PickKind::Edge,
+                  QStringLiteral("two pixels inside the tolerance (%1 px) the edge still "
+                                 "wins").arg(tol - 2));
+            moveTo(av, QPointF(edgeMid.x() + intoBody.x() * (tol + 2),
+                                edgeMid.y() + intoBody.y() * (tol + 2)));
+            check(av->hoveredKind() == OcctViewWidget::PickKind::Face,
+                  QStringLiteral("two pixels outside it (%1 px) the face takes over")
+                      .arg(tol + 2));
+        }
+
+        // The middle of a face, found the same way - the face's own centre of
+        // mass, projected. "Otherwise the face wins" is the other half of the
+        // rule and it gets its own point rather than being read off the tail
+        // of the sweep.
+        QPoint faceMiddle;
+        bool haveFaceMiddle = false;
+        for (const DocumentModel::Solid& solid : probe.document().solids()) {
+            for (TopExp_Explorer it(solid.shape, TopAbs_FACE); it.More(); it.Next()) {
+                GProp_GProps props;
+                BRepGProp::SurfaceProperties(it.Current(), props);
+                QPoint at;
+                if (!av->projectToScreen(props.CentreOfMass(), at)) continue;
+                if (!av->rect().adjusted(60, 60, -60, -60).contains(at)) continue;
+                moveTo(av, QPointF(at));
+                if (av->hoveredKind() != OcctViewWidget::PickKind::Face) continue;
+                faceMiddle = at;
+                haveFaceMiddle = true;
+                break;
+            }
+            if (haveFaceMiddle) break;
+        }
+        check(haveFaceMiddle, "the middle of a face is on screen and hovers as a face");
+
+        // What is on SCREEN, not only what the app says is detected. An edge
+        // glow is a thin line and a face glow is an area, so the two are
+        // separable by counting hover-tinted pixels against a baseline with
+        // the cursor clear of everything.
+        const QColor hoverTint = Theme::highlightHover();
+        const auto tintCount = [&hoverTint](const QString& path) {
+            const QImage shot(path);
+            if (shot.isNull()) return -1;
+            int count = 0;
+            for (int y = 0; y < shot.height(); ++y)
+                for (int x = 0; x < shot.width(); ++x)
+                    if (colorDistance(shot.pixelColor(x, y), hoverTint) < 60.0) ++count;
+            return count;
+        };
+        moveTo(av, QPointF(6, 6));
+        const QString autoBase = outDir + QStringLiteral("/auto-hover-base.png");
+        const QString autoEdgeShot = outDir + QStringLiteral("/auto-hover-edge.png");
+        const QString autoFaceShot = outDir + QStringLiteral("/auto-hover-face.png");
+        const bool baseOk = av->saveSnapshot(autoBase);
+        if (haveEdge) moveTo(av, QPointF(edgeMid));
+        const bool edgeOk = av->saveSnapshot(autoEdgeShot);
+        if (haveFaceMiddle) moveTo(av, QPointF(faceMiddle));
+        const bool faceOk = av->saveSnapshot(autoFaceShot);
+        const int baseTint = baseOk ? tintCount(autoBase) : -1;
+        const int edgeTint = edgeOk ? tintCount(autoEdgeShot) : -1;
+        const int faceTint = faceOk ? tintCount(autoFaceShot) : -1;
+        check(baseOk && edgeOk && faceOk && baseTint >= 0 && edgeTint >= 0 && faceTint >= 0,
+              "all three auto-hover dumps were written, so the pixel comparisons "
+              "below are not vacuous");
+        check(edgeTint > baseTint + 20,
+              QStringLiteral("hovering near an edge really glows it (%1 tinted pixels "
+                             "against %2 with the cursor clear)")
+                  .arg(edgeTint)
+                  .arg(baseTint));
+        check(faceTint > edgeTint * 3,
+              QStringLiteral("and the middle of a face glows the whole face, not a line "
+                             "(%1 tinted pixels against the edge's %2)")
+                  .arg(faceTint)
+                  .arg(edgeTint));
+
+        // THE CONTRACT: a click takes exactly what glows. Read the hovered
+        // shape first, then click the same pixel and compare - the assertion
+        // is an identity between two topological shapes, not two counts.
+        if (haveEdge) {
+            moveTo(av, QPointF(edgeMid));
+            const TopoDS_Shape glowing = av->hoveredShape();
+            clickAt(av, QPointF(edgeMid));
+            const TopoDS_Edge took = av->selectedEdge();
+            check(!glowing.IsNull() && glowing.ShapeType() == TopAbs_EDGE &&
+                      !took.IsNull() && took.IsSame(glowing),
+                  "a click on a glowing edge takes THAT edge");
+            check(av->selectionKind() == OcctViewWidget::PickKind::Edge,
+                  "and the selection now holds edges");
+        }
+        if (haveFaceMiddle) {
+            moveTo(av, QPointF(faceMiddle));
+            const TopoDS_Shape glowingFace = av->hoveredShape();
+            clickAt(av, QPointF(faceMiddle));
+            const TopoDS_Face tookFace = av->selectedFace();
+            check(!glowingFace.IsNull() && glowingFace.ShapeType() == TopAbs_FACE &&
+                      !tookFace.IsNull() && tookFace.IsSame(glowingFace),
+                  "a click in the middle of a glowing face takes THAT face");
+            check(av->selectionKind() == OcctViewWidget::PickKind::Face,
+                  "and the selection now holds faces");
+        }
+
+        // Leaving auto hands the tolerance back. This is the invisibility bar
+        // in one check: a raised tolerance left behind auto would make every
+        // classic mode pick differently from how it always has.
+        av->setSelectionMode(OcctViewWidget::SelectionMode::Solid);
+        settle(100);
+        check(av->selectionPixelTolerance() == classicTolerance,
+              QStringLiteral("leaving auto puts the selector tolerance back to %1")
+                  .arg(classicTolerance));
+        check(av->selectionKind() == OcctViewWidget::PickKind::None,
+              "and the selection a mode switch clears really is empty");
+    }
+
+    // --- auto selection, phase 1: the kind lock -----------------------------
+    //
+    // The first pick decides what the selection is OF; Shift only ever adds
+    // more of that, and a Shift-click asking for anything else does nothing
+    // at all and says why. Driven entirely through real clicks - the lock is
+    // derived from the live selection, so a probe that set the selection
+    // programmatically would be testing a state the gesture never produces.
+    if (blockEnabled("auto-selection-phase-1-the-kind-lock")) {
+        RequiredTempDir lockDir;
+        MainWindow probe(nullptr, /*persistProgress=*/false, lockDir.path());
+        probe.setAttribute(Qt::WA_ShowWithoutActivating);
+        probe.resize(900, 700);
+        probe.show();
+        settle(300);
+        OcctViewWidget* av = probe.view();
+        av->setAnimationsEnabled(false);
+        enterFreshFurniture(probe);
+        check(buildBody(probe, 0.24, 0.34, 0.44, 0.58, 70.0), "the first body");
+        check(buildBody(probe, 0.58, 0.34, 0.76, 0.58, 50.0), "a second body beside it");
+        check(probe.document().solids().size() == 2,
+              "two bodies, so cross-body edge accumulation has somewhere to cross to");
+        av->setSelectionMode(OcctViewWidget::SelectionMode::Auto);
+        settle(150);
+
+        // Every straight edge on screen, with the body it belongs to, found
+        // by hovering rather than by projecting and hoping: a point that does
+        // not actually hover as an edge cannot be used to pick one.
+        struct EdgeSpot {
+            int solidId = -1;
+            QPoint at;
+        };
+        std::vector<EdgeSpot> edgeSpots;
+        std::vector<QPoint> faceSpots;
+        // Each spot has to RESOLVE to the sub-shape it was derived from, not
+        // merely to something of the right kind: two bodies standing side by
+        // side put one body's projected edge midpoint within the tolerance of
+        // the OTHER body's edge, and a spot filed under the wrong body makes
+        // "cross-body accumulation" a check that was never crossing anything.
+        // Found by measurement - a spot at x=525 was filed under the first
+        // body and picked the second one's edge.
+        for (const DocumentModel::Solid& solid : probe.document().solids()) {
+            for (TopExp_Explorer it(solid.shape, TopAbs_EDGE); it.More(); it.Next()) {
+                const TopoDS_Edge candidate = TopoDS::Edge(it.Current());
+                TopoDS_Vertex v1, v2;
+                TopExp::Vertices(candidate, v1, v2);
+                if (v1.IsNull() || v2.IsNull()) continue;
+                const gp_Pnt a = BRep_Tool::Pnt(v1);
+                const gp_Pnt b = BRep_Tool::Pnt(v2);
+                if (a.Distance(b) < 20.0) continue;
+                const gp_Pnt mid(0.5 * (a.X() + b.X()), 0.5 * (a.Y() + b.Y()),
+                                 0.5 * (a.Z() + b.Z()));
+                QPoint at;
+                if (!av->projectToScreen(mid, at)) continue;
+                if (!av->rect().adjusted(40, 40, -40, -40).contains(at)) continue;
+                moveTo(av, QPointF(at));
+                if (av->hoveredKind() != OcctViewWidget::PickKind::Edge) continue;
+                const TopoDS_Shape got = av->hoveredShape();
+                if (got.IsNull() || !got.IsSame(candidate)) continue;
+                edgeSpots.push_back({solid.id, at});
+            }
+            for (TopExp_Explorer it(solid.shape, TopAbs_FACE); it.More(); it.Next()) {
+                const TopoDS_Shape candidate = it.Current();
+                GProp_GProps props;
+                BRepGProp::SurfaceProperties(candidate, props);
+                QPoint at;
+                if (!av->projectToScreen(props.CentreOfMass(), at)) continue;
+                if (!av->rect().adjusted(40, 40, -40, -40).contains(at)) continue;
+                moveTo(av, QPointF(at));
+                if (av->hoveredKind() != OcctViewWidget::PickKind::Face) continue;
+                const TopoDS_Shape got = av->hoveredShape();
+                if (got.IsNull() || !got.IsSame(candidate)) continue;
+                faceSpots.push_back(at);
+            }
+        }
+        const auto spotsOnBody = [&edgeSpots](int id) {
+            int n = 0;
+            for (const EdgeSpot& s : edgeSpots)
+                if (s.solidId == id) ++n;
+            return n;
+        };
+        const int firstId = probe.document().solids().front().id;
+        const int secondId = probe.document().solids().back().id;
+        const bool haveSpots = spotsOnBody(firstId) >= 2 && spotsOnBody(secondId) >= 1 &&
+                               !faceSpots.empty();
+        check(haveSpots,
+              QStringLiteral("two edges on the first body, one on the second and a face "
+                             "are all reachable (%1 edges, %2 faces found)")
+                  .arg(int(edgeSpots.size()))
+                  .arg(int(faceSpots.size())));
+
+        if (haveSpots) {
+            QPoint edgeA, edgeB, edgeOther;
+            for (const EdgeSpot& s : edgeSpots) {
+                if (s.solidId != firstId) continue;
+                if (edgeA.isNull()) edgeA = s.at;
+                else if (edgeB.isNull() && s.at != edgeA) edgeB = s.at;
+            }
+            for (const EdgeSpot& s : edgeSpots) {
+                if (s.solidId == secondId) { edgeOther = s.at; break; }
+            }
+
+            clickAt(av, QPointF(edgeA));
+            check(av->selectionKind() == OcctViewWidget::PickKind::Edge &&
+                      av->selectedEdges().size() == 1,
+                  "the first pick is an edge, and it locks the kind to edges");
+
+            // Same kind: accumulates.
+            clickAt(av, QPointF(edgeB), Qt::ShiftModifier);
+            check(av->selectedEdges().size() == 2,
+                  "Shift-clicking a second edge accumulates it");
+
+            // Same kind, other body - Milestone 5 item 5's own rule, which
+            // needed nothing new here: XOR accumulation never cared which
+            // body an edge came from.
+            clickAt(av, QPointF(edgeOther), Qt::ShiftModifier);
+            const std::vector<int> spanning = av->selectedSolidIds();
+            check(av->selectedEdges().size() == 3 && spanning.size() == 2,
+                  QStringLiteral("and a third edge on the OTHER body joins them "
+                                 "(%1 edges across %2 bodies)")
+                      .arg(int(av->selectedEdges().size()))
+                      .arg(int(spanning.size())));
+
+            // Different kind: a QUIET no-op. The selection is untouched -
+            // which is the whole point, since the alternative is a gesture
+            // aimed at adding one thing silently discarding three.
+            clickAt(av, QPointF(faceSpots.front()), Qt::ShiftModifier);
+            check(av->selectedEdges().size() == 3 &&
+                      av->selectionKind() == OcctViewWidget::PickKind::Edge,
+                  "a Shift-click on a face changes nothing while edges are held");
+            const QString edgeRefusal = av->autoPickRefusalText();
+            check(!edgeRefusal.isEmpty() && edgeRefusal.contains(QStringLiteral("edges")) &&
+                      edgeRefusal.contains(QStringLiteral("faces")),
+                  QStringLiteral("...and says why, naming both kinds: \"%1\"")
+                      .arg(edgeRefusal));
+
+            // A plain click always lands, whatever is held - the lock governs
+            // Shift alone.
+            clickAt(av, QPointF(faceSpots.front()));
+            check(av->selectionKind() == OcctViewWidget::PickKind::Face &&
+                      av->selectedEdges().empty(),
+                  "a click WITHOUT Shift re-locks the kind to faces");
+            check(av->autoPickRefusalText().isEmpty(),
+                  "and a pick that lands clears the refusal it answers");
+
+            // The mirror case, so the copy is exercised in both directions.
+            clickAt(av, QPointF(edgeA), Qt::ShiftModifier);
+            const QString faceRefusal = av->autoPickRefusalText();
+            check(av->selectionKind() == OcctViewWidget::PickKind::Face &&
+                      av->selectedEdges().empty(),
+                  "a Shift-click on an edge changes nothing while faces are held");
+            check(!faceRefusal.isEmpty() && faceRefusal != edgeRefusal,
+                  QStringLiteral("...with its own sentence: \"%1\"").arg(faceRefusal));
+
+            // The body kind, and the gesture that takes it. A double-click in
+            // auto must NOT hand the app back to body mode the way the classic
+            // route does - there is no mode to hand back to.
+            //
+            // Aimed at an EDGE, not at a face, and the reason is a real
+            // interaction rather than test convenience: a double-click's own
+            // FIRST click selects what is under it, and with a face selected
+            // MainWindow raises the pull arrow (canPullSelectedFace() reads
+            // selectedFace() and carries no mode term of its own, so it fires
+            // in auto exactly as it does in face mode). The arrow's tail
+            // stands at that face's centre, and arrowHit() swallows the
+            // second click before the viewport ever sees it - CLAUDE.md's
+            // screen-space-arrow rule, unchanged and doing its job. Nothing
+            // raises a gizmo on an edge in auto (bevelTarget() still requires
+            // edge mode), so the body gesture has a clear pixel to land on.
+            // Phase 2 re-keys those predicates and will have to answer this
+            // collision on the face too.
+            doubleClickAt(av, QPointF(edgeA));
+            check(av->selectionMode() == OcctViewWidget::SelectionMode::Auto,
+                  "a double-click in auto leaves the viewport in auto");
+            check(av->selectionKind() == OcctViewWidget::PickKind::Body &&
+                      av->selectedSolidIds().size() == 1,
+                  "and takes the whole body");
+
+            // Bodies with bodies. The gesture that takes a body is the
+            // gesture that adds one.
+            doubleClickAt(av, QPointF(edgeOther), Qt::ShiftModifier);
+            check(av->selectionKind() == OcctViewWidget::PickKind::Body &&
+                      av->selectedSolidIds().size() == 2,
+                  "Shift+double-click adds the second body");
+
+            // ...and a Shift-CLICK while bodies are held is the no-op again,
+            // with the sentence that names the double-click.
+            clickAt(av, QPointF(edgeA), Qt::ShiftModifier);
+            const QString bodyRefusal = av->autoPickRefusalText();
+            check(av->selectionKind() == OcctViewWidget::PickKind::Body &&
+                      av->selectedSolidIds().size() == 2,
+                  "a Shift-click on an edge changes nothing while bodies are held");
+            check(bodyRefusal.contains(QStringLiteral("double-click")),
+                  QStringLiteral("...and points at the gesture that would work: \"%1\"")
+                      .arg(bodyRefusal));
+
+            // The vocabulary law reaches this copy like any other this app
+            // writes. Swept here rather than by the action/tooltip sweep,
+            // which cannot see a string no widget paints yet - Phase 2 is what
+            // gives it a status label to live in.
+            QStringList refusalOffenders;
+            for (const QString& sentence : {edgeRefusal, faceRefusal, bodyRefusal}) {
+                for (const QString& word : bannedWords()) {
+                    if (usesBannedWord(sentence, word)) refusalOffenders << word;
+                }
+            }
+            check(refusalOffenders.isEmpty(),
+                  QStringLiteral("every auto refusal sentence is sweep-clean (%1)")
+                      .arg(refusalOffenders.isEmpty() ? QStringLiteral("none")
+                                                      : refusalOffenders.join(", ")));
+
+            // A pick on nothing clears, as it always has, and the lock goes
+            // with it - which is what makes the NEXT pick free to be of any
+            // kind. Derived, not reset: nothing anywhere writes the lock.
+            clickAt(av, QPointF(6, 6));
+            check(av->selectionKind() == OcctViewWidget::PickKind::None,
+                  "a click on empty space clears the selection and the kind with it");
+            clickAt(av, QPointF(edgeA));
+            check(av->selectionKind() == OcctViewWidget::PickKind::Edge,
+                  "so the next pick is free to be an edge again");
         }
     }
 

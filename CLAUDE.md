@@ -1669,6 +1669,51 @@ plane, and the perspective rule would refuse perfectly visible clicks. `Convert`
 Iterate with `InitSelected()`/`MoreSelected()`/`NextSelected()`, pull topology via
 `SelectedShape()`.
 
+**Auto selection (spec `docs/superpowers/specs/2026-09-06-auto-selection-design.md`, Phase 1
+merged) activates modes 2 AND 4 on every body at once**, so the cursor decides what a click
+takes: within 8 logical pixels of an edge the edge glows, otherwise the face does. It is a
+fourth `SelectionMode` value reachable only through `setSelectionMode()` — no action, chip or
+menu entry touches it this phase, and the three classic modes are byte-for-byte unchanged
+(the raised selector tolerance is applied on entry and handed back on exit, so a classic mode
+can never inherit it). Phase 2 removes the mode UI and makes this the default.
+
+**Two OCCT facts the arbitration cost a measurement each.** Raising the tolerance is not
+enough on its own: `AIS_InteractiveContext::SetPixelTolerance` sets a CUSTOM tolerance that
+OCCT adds to each entity's own sensitivity (`PixelTolerance()` reports the sum, so it is not
+the number you set — `MainSelector()->CustomPixelTolerance()` is), and the resulting candidate
+radius measured about **0.75×** the custom value (8 → 6 logical px), which is why the
+candidate tolerance (12) and the promise (8) are two separate constants. And which candidate
+OCCT *highlights* is `SelectMgr_SortCriterion::IsCloserDepth()`, which leads with **depth** —
+so on a box's top face the edge sat at depth 1431.5 while the face ran 1429.6 one pixel in to
+1410.4 at six, and the face won the hover **from one pixel out**. Neither obvious lever
+helps: `SetPickClosest(false)` swaps the whole selector to priority-first (edge 7 beats face
+5 — but at *any* depth, anywhere, which is x-ray picking), and the owners' own
+`SetPriority()` is only consulted after the depth comparisons have already answered.
+`OcctViewWidget::preferDetectedEdge()` therefore arbitrates in SCREEN space — the spec's own
+sentence, measured in the space the sentence is about, using `SelectMgr_SortCriterion::Point`
+projected back — and hands the choice to OCCT through `HilightNextDetected()`, so the
+highlight, `DetectedShape()` and `SelectDetected()` all still read one field and a click
+cannot disagree with what is glowing.
+
+**Shift is kind-locked, and the lock is DERIVED.** `selectionKind()` reads the live selection
+rather than remembering the first pick, so undo, delete, a mode switch and
+`setSelectedSolids()` all move the lock with them and there is nothing to keep in step. A
+Shift-click of another kind is a quiet no-op carrying a sentence (`autoPickRefusalText()`,
+swept for banned words by `gui_smoke` since no widget paints it until Phase 2). Bodies
+accumulate by Shift+**double**-click, because a plain click in auto lands on a face or an
+edge. Qt delivers a double-click as press/release/DblClick/**release**, and both halves of
+that bit: the gesture's own first click moves the lock (hence `myAutoKindBeforeClick`, read
+one event later) and the trailing release re-picks (hence `myAutoBodyPickTaken`, which
+swallows it — the same "the gesture that started owns the release that ends it" rule every
+drag in that file already keeps).
+
+**One predicate already reaches into auto and will need Phase 2's attention:**
+`canPullSelectedFace()` carries no mode term — its comment says the mode check is *implicit*
+because `selectedFace()` is null outside face mode — which is true of the three classic modes
+and false of auto. So a face picked in auto raises the pull arrow, and `arrowHit()` then
+swallows a double-click aimed at that face's centre. Harmless this phase (nothing reaches
+auto) and pinned in the suite's own comment where it bites.
+
 ### The modeling loop
 
 - **Sketch:** unproject the click with `view->ConvertWithProj(...)` into a `gp_Lin`, then

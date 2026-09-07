@@ -80,7 +80,30 @@ class OcctViewWidget : public QOpenGLWidget {
     Q_OBJECT
 
 public:
-    enum class SelectionMode { Solid, Face, Edge };
+    // Solid/Face/Edge are the three modes the rail still shows: one AIS
+    // selection mode activated on every body, chosen by the user, with the
+    // hover highlight and the click both confined to it.
+    //
+    // Auto is the ONE behaviour that replaces all three (see
+    // docs/superpowers/specs/2026-09-06-auto-selection-design.md). It
+    // activates edge AND face selection on every body at once and lets the
+    // cursor decide: within kAutoEdgeTolerancePx of an edge the edge glows,
+    // otherwise the face does, and a click takes exactly what glows. Bodies
+    // stay behind the double-click they already had.
+    //
+    // Phase 1 builds it INVISIBLY - no action, no chip and no menu entry
+    // reaches this value, and setSelectionMode() is the only door. It is a
+    // test seam this phase and the DEFAULT the next one, which is what
+    // deletes the other three. Nothing in the three classic modes changes
+    // shape to make room for it: every branch that names Auto is an
+    // additional one.
+    enum class SelectionMode { Solid, Face, Edge, Auto };
+
+    // What a pick is OF - the kind Auto's hover arbitrates between and its
+    // Shift accumulation locks onto. Body is what a double-click takes; None
+    // is "the cursor is over nothing of ours", which is a real answer and not
+    // an error.
+    enum class PickKind { None, Body, Face, Edge };
 
     // `viewerOnly` is Milestone 3's compare pane: a second, read-only view
     // of a loaded version alongside the live one. It still gets a real
@@ -436,6 +459,101 @@ public:
 
     void setSelectionMode(SelectionMode mode);
     SelectionMode selectionMode() const { return mySelectionMode; }
+
+    // --- Auto selection (spec 2026-09-06, Phase 1) -------------------------
+    //
+    // How near an edge, in LOGICAL pixels, the cursor has to be for the edge
+    // to win the hover over the face behind it. It is not a rule this file
+    // enforces itself - it is pushed onto OCCT's own selector as its pixel
+    // tolerance (in device pixels, converted at the one conversion point this
+    // class has), which inflates every edge's sensitive by exactly this much
+    // and leaves the arbitration to SelectMgr_SortCriterion. That matters
+    // because arbitration is what makes "the highlight is the contract"
+    // true by construction rather than by two code paths agreeing: hover and
+    // click both go through the same MoveTo, so they cannot disagree about
+    // what is under the cursor.
+    //
+    // OCCT decides the tie the way this behaviour needs, unprompted, and it
+    // is worth recording WHY so nobody re-derives it: an edge lies on the
+    // face it bounds, so the two candidates come back at the same depth,
+    // SelectMgr_SortCriterion::IsCloserDepth() falls through its depth
+    // comparison to selection priority, and StdSelect_BRepSelectionTool gives
+    // an edge 4 against a face's 2. No explicit SetPriority() call is needed
+    // or made; raising the tolerance is the whole mechanism.
+    //
+    // MEASURED, not chosen: see the auto-selection block in gui_smoke, which
+    // walks the cursor away from a real edge one pixel at a time and reports
+    // where the hover actually flips. The value below is what that probe
+    // measured, and the probe pins both sides of it.
+    static constexpr int kAutoEdgeTolerancePx = 8;
+
+    // The CUSTOM selector tolerance Auto asks OCCT for, in logical pixels -
+    // deliberately larger than the promise above, and the two are separate
+    // numbers because they answer different questions. This one decides
+    // whether the edge is a CANDIDATE at all; kAutoEdgeTolerancePx decides
+    // whether it WINS, and preferDetectedEdge() enforces that half in screen
+    // space so the promise is an exact pixel count rather than whatever
+    // radius the selector's frustum scaling happens to produce.
+    //
+    // It has to be bigger because those two are not the same radius:
+    // measured, the selector kept an edge in the candidate list to about
+    // 0.75x the custom tolerance (8 -> 6 logical px), so asking for 8 would
+    // have capped the promise below its own value. The cost of asking for
+    // more is that faces are detected a little further outside the body's
+    // silhouette in Auto than in the classic modes - forgiving rather than
+    // wrong, and invisible this phase, since nothing reaches Auto.
+    static constexpr int kAutoCandidateTolerancePx = 12;
+
+    // "No custom tolerance" - OCCT's own sentinel, which is what the selector
+    // holds until something sets one, and what Auto has to hand back on the
+    // way out. Named rather than spelled -1 at the call site, because the
+    // value is a promise to the three classic modes: they must pick exactly
+    // as they always did, and a tolerance left raised behind them would be a
+    // user-visible change made by a phase that is not allowed to make one.
+    // The value actually restored is CAPTURED from OCCT at construction, not
+    // taken from here - see applySelectionTolerance().
+    static constexpr int kNoCustomTolerance = -1;
+
+    // What a click RIGHT NOW would take, read off the live detection the last
+    // hover left behind - which is precisely what the highlight is standing
+    // on. The contract the spec states ("a click picks exactly what glows")
+    // is therefore checkable rather than asserted: hover, read this, click,
+    // and compare against selectionKind().
+    PickKind hoveredKind() const;
+    // The exact sub-shape under that highlight, or a null shape. The same
+    // question one level finer, so a check can prove the click took THAT edge
+    // rather than merely an edge.
+    TopoDS_Shape hoveredShape() const;
+
+    // The kind the current selection holds - DERIVED from the selection
+    // itself, never stored. That is the whole of Auto's kind lock: there is
+    // no cursor to keep in step with undo, a mode switch, a delete or a
+    // context loss, because the answer is recomputed from what is actually
+    // selected every time it is asked. PickKind::None when nothing is
+    // selected, which is what makes the next pick free to be of any kind.
+    PickKind selectionKind() const;
+
+    // Why the last Shift-click in Auto did nothing, or an empty string. A
+    // Shift-click whose kind differs from selectionKind() is a QUIET no-op -
+    // it changes no selection and takes no checkpoint - so something has to
+    // say why, or the app looks broken. Phase 2 paints this in the status
+    // label; this phase records it and emits autoPickRefused() beside it, so
+    // the copy exists, is swept for banned words, and has exactly one author.
+    // Cleared by the next pick that actually lands.
+    QString autoPickRefusalText() const { return myAutoRefusal; }
+
+    // The CUSTOM selector tolerance OCCT is holding, in DEVICE pixels - what
+    // this class asked for, read back off the selector rather than off a copy
+    // of it. The oracle for the paragraph above: a check that only asked this
+    // class what mode it thinks it is in would be its own oracle, while this
+    // reads what OCCT was told - so a tolerance left raised behind Auto,
+    // exactly the way this phase could silently change the three classic
+    // modes, shows up as the mismatch it is.
+    //
+    // Not the same number as OCCT's own PixelTolerance(), which adds the
+    // largest registered entity sensitivity on top and therefore moves when a
+    // body is displayed. -1 before the context exists.
+    int selectionPixelTolerance() const;
 
     // While sketching, a left click reports a point on `plane` instead of selecting.
     void setSketchMode(bool enabled, const gp_Pln& plane);
@@ -1421,6 +1539,15 @@ signals:
     // whatever pick or gesture it would ordinarily have started.
     void renderModeExitRequested();
 
+    // A Shift-click in Auto that asked for a kind the selection is not
+    // holding, and so did nothing at all. `reason` is the sentence
+    // autoPickRefusalText() also stores - one author, two ways to read it -
+    // and it is emitted rather than shown here because this widget owns no
+    // status label. Nothing is connected to it in Phase 1: Auto is not
+    // reachable from any control yet, and wiring a slot that can only fire in
+    // a mode nothing can enter would be dead code pretending to be a feature.
+    void autoPickRefused(const QString& reason);
+
 protected:
     // Qt's three GL callbacks, and the only places a current OpenGL context is
     // guaranteed without asking for one. initializeGL() is where the lazy
@@ -1658,6 +1785,35 @@ private:
     // this gesture must not be able to produce.
     void endGizmoDrag();
     void applySelectionMode(const Handle(AIS_Shape)& shape);
+    // Pushes the selector tolerance the CURRENT mode wants onto the context -
+    // kAutoEdgeTolerancePx (converted to device pixels through this class's
+    // one conversion point) in Auto, OCCT's own default everywhere else.
+    // Called from setSelectionMode() and again from resizeGL(), because the
+    // logical->device ratio is not a constant: a window dragged to a display
+    // at a different scale would otherwise keep a tolerance measured for the
+    // old one, and an edge that used to be 8 px forgiving would silently
+    // become 5.
+    void applySelectionTolerance();
+    // The kind of one detected/selected sub-shape. TopAbs_EDGE and
+    // TopAbs_FACE map to themselves; everything else (a solid, a compound -
+    // what a whole-body owner carries) is a Body. One mapping, so hover and
+    // selection can never classify the same shape differently.
+    static PickKind kindOfShape(const TopoDS_Shape& shape);
+    // Auto's hover arbitration: with edges and faces both detectable, moves
+    // OCCT's highlight onto an edge whenever one is in the candidate list AT
+    // THE SAME DEPTH as what OCCT chose. A no-op in every other mode, and a
+    // no-op when the edge already won. See the .cpp for the measurement that
+    // made this necessary and for the two levers it rejects.
+    void preferDetectedEdge(const QPoint& cursor);
+    // The sentence a kind-locked refusal reports - see autoPickRefusalText().
+    // One author for it, here, rather than one string per refusing branch.
+    static QString autoKindRefusalText(PickKind held, PickKind asked);
+    // The whole-body pick behind a double-click in Auto: `additive` toggles
+    // the body in the selection, otherwise it replaces it. Returns false when
+    // nothing of ours is under the detection. Auto has no whole-shape
+    // selection mode activated, so this goes through the object's own global
+    // owner - the identical route setSelectedSolids() already takes.
+    bool selectDetectedBody(bool additive);
     void applyCameraState();
     void stopCameraAnimation();
     // Shows or clears the edge dimension: the edge the last MoveTo detected
@@ -1935,6 +2091,22 @@ private:
     bool myWireframe = false;
 
     SelectionMode mySelectionMode = SelectionMode::Solid;
+    // The one piece of Auto state that is genuinely remembered rather than
+    // derived, and it is a MESSAGE, not a mode: why the last Shift-click did
+    // nothing. Everything else about Auto's kind lock comes out of
+    // selectionKind(), which reads the live selection.
+    QString myAutoRefusal;
+    // The kind the selection held before the CURRENT click changed it -
+    // gesture-local memory for the one event that needs it, the double-click.
+    // See its record site in mouseReleaseEvent(); selectionKind() is still
+    // the only authority on what is held now.
+    PickKind myAutoKindBeforeClick = PickKind::None;
+    // Set by an Auto double-click that took a body, cleared by the release
+    // that trails it - the one release that must not re-pick. See both sites.
+    bool myAutoBodyPickTaken = false;
+    // OCCT's own starting selector tolerance, captured at context creation -
+    // see applySelectionTolerance().
+    int myDefaultPixelTolerance = kNoCustomTolerance;
     bool myInitialized = false;
     bool mySketchMode = false;
     gp_Pln mySketchPlane;

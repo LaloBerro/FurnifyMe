@@ -75,6 +75,8 @@
 #include <Quantity_Color.hxx>
 #include <Quantity_NameOfColor.hxx>
 #include <SelectMgr_Selection.hxx>
+#include <SelectMgr_SortCriterion.hxx>
+#include <StdSelect_BRepOwner.hxx>
 #include <Standard_Failure.hxx>
 #include <StdSelect_ViewerSelector3d.hxx>
 #include <TopAbs_ShapeEnum.hxx>
@@ -568,6 +570,13 @@ void OcctViewWidget::initializeViewer()
 
     myView = myViewer->CreateView();
     myContext = new AIS_InteractiveContext(myViewer);
+    // What OCCT itself starts the selector at, captured rather than assumed:
+    // Auto raises this tolerance and every other mode has to be handed back
+    // the exact number it was picking with before, not a constant this file
+    // believes OCCT uses. kDefaultPixelTolerancePx documents the value the
+    // installed version does in fact start at; this is what actually gets
+    // restored.
+    myDefaultPixelTolerance = myContext->MainSelector()->CustomPixelTolerance();
     // Nothing below this line touches a window or a GL context, and that is
     // the point: this function is reached from every entry point that displays
     // something, including ones that run long before the widget is first shown
@@ -963,6 +972,11 @@ void OcctViewWidget::resizeGL(int w, int h)
     const QPoint device = toDevicePixels(QPoint(std::max(1, w), std::max(1, h)));
     myHostWindow->SetSize(std::max(1, device.x()), std::max(1, device.y()));
     myView->MustBeResized();
+    // The logical->device ratio can change under a widget that never resized
+    // in logical terms (a window dragged to a display at another scale sends
+    // exactly this callback), and Auto's edge tolerance is a promise in
+    // LOGICAL pixels. Re-derived here, so the promise survives the move.
+    applySelectionTolerance();
     invalidateAccumulation();
 }
 
@@ -2482,11 +2496,39 @@ void OcctViewWidget::applySelectionMode(const Handle(AIS_Shape)& shape)
 {
     if (myContext.IsNull() || shape.IsNull()) return;
 
+    myContext->Deactivate(shape);
+
+    // Auto is the only mode that activates TWO, and that is the whole
+    // mechanism behind "the cursor decides": with edges and faces both in the
+    // pick candidates, OCCT arbitrates between them on every MoveTo, and both
+    // the hover and the click ask through that same MoveTo. See
+    // kAutoEdgeTolerancePx on the header for why the edge wins the tie and
+    // why no priority is set here.
+    if (mySelectionMode == SelectionMode::Auto) {
+        myContext->Activate(shape, kSelectionModeEdge);
+        myContext->Activate(shape, kSelectionModeFace);
+        return;
+    }
+
     const int mode = mySelectionMode == SelectionMode::Face  ? kSelectionModeFace
                     : mySelectionMode == SelectionMode::Edge ? kSelectionModeEdge
                                                               : kSelectionModeWholeShape;
-    myContext->Deactivate(shape);
     myContext->Activate(shape, mode);
+}
+
+void OcctViewWidget::applySelectionTolerance()
+{
+    if (myContext.IsNull()) return;
+
+    // Device pixels: the selector measures in the window's own pixel space,
+    // which is what toDevicePixels() converts into, and at 150% an 8-logical-
+    // pixel promise is 12 device pixels or it is not that promise.
+    const int wanted =
+        mySelectionMode == SelectionMode::Auto
+            ? std::max(1, toDevicePixels(QPoint(kAutoCandidateTolerancePx, 0)).x())
+            : myDefaultPixelTolerance;
+    if (selectionPixelTolerance() == wanted) return;
+    myContext->SetPixelTolerance(wanted);
 }
 
 void OcctViewWidget::setSelectionMode(SelectionMode mode)
@@ -2495,12 +2537,214 @@ void OcctViewWidget::setSelectionMode(SelectionMode mode)
 
     mySelectionMode = mode;
     myDimension.clear();   // a hover annotation from the old mode means nothing in the new one
+    myAutoRefusal.clear();
     if (myContext.IsNull()) return;
 
+    // The tolerance belongs to the mode, so it moves with it - raised on the
+    // way into Auto and put back on the way out. A tolerance left raised
+    // behind Auto would make the three classic modes pick differently from
+    // how they always have, which is the one thing this phase may not do.
+    applySelectionTolerance();
     myContext->ClearSelected(Standard_False);
     for (auto& entry : mySolids) applySelectionMode(entry.second);
     scheduleRedraw();
     emit selectionChanged();
+}
+
+int OcctViewWidget::selectionPixelTolerance() const
+{
+    if (myContext.IsNull() || myContext->MainSelector().IsNull()) return -1;
+    // CustomPixelTolerance(), not PixelTolerance(). The latter is the
+    // EFFECTIVE number OCCT picks with - the custom tolerance plus the
+    // largest sensitivity any registered entity carries - so it moves when a
+    // body is displayed and cannot answer "what did this class ask for". The
+    // custom tolerance is the one thing this class writes, so it is the one
+    // thing worth reading back.
+    return myContext->MainSelector()->CustomPixelTolerance();
+}
+
+OcctViewWidget::PickKind OcctViewWidget::kindOfShape(const TopoDS_Shape& shape)
+{
+    if (shape.IsNull()) return PickKind::None;
+    switch (shape.ShapeType()) {
+        case TopAbs_EDGE: return PickKind::Edge;
+        case TopAbs_FACE: return PickKind::Face;
+        default:          return PickKind::Body;
+    }
+}
+
+OcctViewWidget::PickKind OcctViewWidget::hoveredKind() const
+{
+    if (myContext.IsNull()) return PickKind::None;
+    // HasDetected() first, always - see detectedIsManipulator()'s own comment
+    // for what an unguarded read of the detection costs.
+    if (!myContext->HasDetected()) return PickKind::None;
+    if (!myContext->HasDetectedShape()) return PickKind::Body;
+    return kindOfShape(myContext->DetectedShape());
+}
+
+TopoDS_Shape OcctViewWidget::hoveredShape() const
+{
+    if (myContext.IsNull() || !myContext->HasDetected()) return TopoDS_Shape();
+    if (!myContext->HasDetectedShape()) return TopoDS_Shape();
+    return myContext->DetectedShape();
+}
+
+OcctViewWidget::PickKind OcctViewWidget::selectionKind() const
+{
+    if (myContext.IsNull()) return PickKind::None;
+
+    // DERIVED, never stored. A remembered kind would be a second source of
+    // truth over the selection, and it would have to be put back by hand on
+    // every undo, delete, mode switch, context loss and programmatic
+    // setSelectedSolids() - the drift CLAUDE.md's "derive state; never store
+    // a cursor" rule is about. Asking the selection costs a short walk and
+    // cannot be wrong.
+    for (myContext->InitSelected(); myContext->MoreSelected(); myContext->NextSelected()) {
+        if (!myContext->HasSelectedShape()) return PickKind::Body;
+        const PickKind kind = kindOfShape(myContext->SelectedShape());
+        if (kind != PickKind::None) return kind;
+    }
+    return PickKind::None;
+}
+
+QString OcctViewWidget::autoKindRefusalText(PickKind held, PickKind asked)
+{
+    // Names BOTH halves - what this selection is holding and what the click
+    // asked for - because "that did nothing" is not a reason. Swept for the
+    // banned vocabulary like any other copy this app writes: a face is a
+    // face, an edge is an edge, and a whole one is a BODY, never a solid.
+    const auto plural = [](PickKind kind) {
+        switch (kind) {
+            case PickKind::Edge: return tr("edges");
+            case PickKind::Face: return tr("faces");
+            case PickKind::Body: return tr("bodies");
+            default:             return tr("nothing");
+        }
+    };
+    if (held == PickKind::Body) {
+        // The one asymmetric case, and it is asymmetric in the gesture rather
+        // than in the rule: a body is taken by a double-click, so that is
+        // what adds one too.
+        return tr("Shift adds bodies to this selection — double-click a body to add it, "
+                  "or click without Shift to pick %1 instead")
+            .arg(plural(asked));
+    }
+    return tr("Shift adds %1 to this selection — click without Shift to pick %2 instead")
+        .arg(plural(held), plural(asked));
+}
+
+void OcctViewWidget::preferDetectedEdge(const QPoint& cursor)
+{
+    if (mySelectionMode != SelectionMode::Auto || myContext.IsNull() || myView.IsNull())
+        return;
+    if (!myContext->HasDetected()) return;
+    // Already what we want, which is the common case: OCCT picks the edge on
+    // its own whenever the geometry makes the edge the nearer candidate.
+    if (hoveredKind() == PickKind::Edge) return;
+
+    // THE ARBITRATION, and it is ours rather than OCCT's for a MEASURED
+    // reason. Raising the selector tolerance does put the edge into the
+    // candidate list - that half works - but which candidate OCCT then
+    // HIGHLIGHTS is decided by SelectMgr_SortCriterion::IsCloserDepth(),
+    // which leads with depth, and a face sampled just inside its own boundary
+    // is genuinely nearer than the edge bounding it whenever the face is
+    // tilted away from the camera. Measured on a box's top face at a custom
+    // tolerance of 8 device pixels: the edge sat at depth 1431.5 all the way
+    // across, while the face ran 1429.6 at one pixel in to 1410.4 at six -
+    // about 3.8 depth units per pixel on that obliquity - so OCCT handed the
+    // hover to the face from ONE pixel out. The edge itself stayed a
+    // candidate to six pixels and vanished at seven, so the selector's own
+    // effective radius is about 0.75x the custom tolerance rather than equal
+    // to it.
+    //
+    // Neither of the two obvious levers is the answer, and both were checked
+    // against the same run rather than guessed at. SetPickClosest(false)
+    // swaps the WHOLE selector to priority-first ordering (the picked list
+    // above shows the priorities OCCT assigns: edge 7, face 5), which would
+    // make an edge beat a face at any depth, on any body, across the whole
+    // scene - x-ray picking. And the owners' own SetPriority() changes
+    // nothing under the default ordering, because priority is only consulted
+    // after the depth comparisons have already answered.
+    //
+    // A depth-based guard was written first and measured wrong for a reason
+    // worth keeping: "the same depth within OCCT's own tolerances" put the
+    // flip at 3 px on this face and would put it somewhere else on every
+    // other obliquity, so the tolerance would not be a number at all. The
+    // gate below is the spec's own sentence instead - "within a small PIXEL
+    // tolerance of an edge" - measured in the space the sentence is about.
+    // SelectMgr_SortCriterion::Point is the point on the entity the pick
+    // resolved to, so projecting it gives the edge's own nearest pixel, and
+    // the distance from the cursor to it is the tolerance exactly.
+    //
+    // The choice is handed back to OCCT through its own detected-cycling API,
+    // which is what keeps "the highlight is the contract" true:
+    // HilightNextDetected() moves myLastPicked, and the highlight,
+    // HasDetectedShape(), DetectedShape() and SelectDetected() all read that
+    // one field. There is no second path for a click to disagree with what is
+    // glowing.
+    const Handle(StdSelect_ViewerSelector3d)& selector = myContext->MainSelector();
+    if (selector.IsNull()) return;
+    const int picked = selector->NbPicked();
+    if (picked < 2) return;
+
+    // The body the cursor is actually on. An edge is only preferred over a
+    // face of the SAME object, which is what keeps this from reaching through
+    // one body to grab an edge of another standing behind it - the one piece
+    // of the x-ray hazard that is worth spending a comparison on, since a
+    // nearer body's edge is already the frontmost candidate and needs no
+    // preference at all. An edge of the same body hidden BEHIND it can still
+    // be preferred, and deliberately so: that is exactly what edge mode has
+    // always done, and this phase is not the place to change it.
+    const Handle(SelectMgr_EntityOwner) current = myContext->DetectedOwner();
+    if (current.IsNull()) return;
+    const Handle(SelectMgr_SelectableObject) onBody = current->Selectable();
+
+    Handle(SelectMgr_EntityOwner) target;
+    for (int rank = 1; rank <= picked; ++rank) {
+        const Handle(SelectMgr_EntityOwner)& owner = selector->Picked(rank);
+        if (owner.IsNull() || owner->Selectable() != onBody) continue;
+        const Handle(StdSelect_BRepOwner) brep = Handle(StdSelect_BRepOwner)::DownCast(owner);
+        if (brep.IsNull() || !brep->HasShape()) continue;
+        if (brep->Shape().ShapeType() != TopAbs_EDGE) continue;
+        QPoint onScreen;
+        if (!projectToScreen(selector->PickedData(rank).Point, onScreen)) continue;
+        const double dx = onScreen.x() - cursor.x();
+        const double dy = onScreen.y() - cursor.y();
+        if (std::hypot(dx, dy) > double(kAutoEdgeTolerancePx)) continue;
+        target = owner;   // rank order is depth order, so this is the nearest one
+        break;
+    }
+    if (target.IsNull()) return;
+
+    // Bounded: HilightNextDetected() loops, and a target that is somehow not
+    // in the detected sequence at all must leave OCCT's own choice standing
+    // rather than spin. Standard_False - the frame is this class's to ask
+    // for, and the caller asks for it once the owner has settled.
+    for (int guard = 0; guard <= picked; ++guard) {
+        if (myContext->DetectedOwner() == target) return;
+        myContext->HilightNextDetected(myView, Standard_False);
+    }
+}
+
+bool OcctViewWidget::selectDetectedBody(bool additive)
+{
+    if (myContext.IsNull() || !myContext->HasDetected()) return false;
+
+    const Handle(AIS_InteractiveObject) hit = myContext->DetectedInteractive();
+    if (hit.IsNull()) return false;
+    for (const auto& entry : mySolids) {
+        if (entry.second.get() != hit.get()) continue;
+        // Auto activates edges and faces, never mode 0, so there is no
+        // whole-shape owner among the pick candidates to SelectDetected. The
+        // object's own global owner is the route that does not need one, and
+        // it is the same call setSelectedSolids() has always made from inside
+        // face and edge mode.
+        if (!additive) myContext->ClearSelected(Standard_False);
+        myContext->AddOrRemoveSelected(entry.second, Standard_False);
+        return true;
+    }
+    return false;
 }
 
 void OcctViewWidget::setSnap(bool enabled, double step)
@@ -2984,7 +3228,15 @@ void OcctViewWidget::updateEdgeDimension()
     // one edge is noise, and the chip is the more specific of the two. See
     // setEdgeDimensionSuppressed(), which MainWindow drives off the same
     // predicate that raises the arrow.
-    if (myEdgeDimensionSuppressed || mySelectionMode != SelectionMode::Edge ||
+    // Auto joins Edge here rather than getting an annotation rule of its own:
+    // in Auto the hover already resolves to an edge or to a face, so the two
+    // reads below (the detected edge, then the single selected one) answer
+    // "is an edge what this is about right now" exactly as they do in edge
+    // mode, and a hovered face simply produces no edge to measure. The three
+    // classic modes are untouched - Solid and Face still clear.
+    const bool edgesAreMeasurable = mySelectionMode == SelectionMode::Edge ||
+                                    mySelectionMode == SelectionMode::Auto;
+    if (myEdgeDimensionSuppressed || !edgesAreMeasurable ||
         myContext.IsNull() || myView.IsNull()) {
         present(myDimension.clear());
         return;
@@ -5099,7 +5351,8 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
     // face mode rather than the modifier alone, so the bevel arrow one branch
     // down - where Ctrl means nothing - keeps its guard whole.
     const bool lockGesture = (event->modifiers() & Qt::ControlModifier) &&
-                             mySelectionMode == SelectionMode::Face;
+                             (mySelectionMode == SelectionMode::Face ||
+                              mySelectionMode == SelectionMode::Auto);
     if (event->button() == Qt::LeftButton && !mySketchMode && !lockGesture &&
         arrowHit(myPullArrow, myLastPos)) {
         // The press CLAIMS the gesture whether or not the drag maths can
@@ -5232,6 +5485,14 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
 
     if (event->button() != Qt::LeftButton || myContext.IsNull()) return;
 
+    // The release that trails an Auto double-click belongs to that gesture -
+    // see mouseDoubleClickEvent()'s Auto branch. Consumed here, once, so a
+    // later click can never inherit it.
+    if (myAutoBodyPickTaken) {
+        myAutoBodyPickTaken = false;
+        return;
+    }
+
     const QPoint pos = event->position().toPoint();
 
     if (mySketchMode) {
@@ -5274,6 +5535,11 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
     // and the gizmo would erase itself. It cannot be detected at all on the
     // additive path above, which is the point of that branch.
     const bool onGizmo = detectedIsManipulator();
+    // The same preference the hover applies, at the same point in the same
+    // sequence - after the manipulator has had its say, before anything reads
+    // the detected shape. A click must take what the last hover was glowing,
+    // and the only way to guarantee that is for both to arbitrate identically.
+    if (!onGizmo) preferDetectedEdge(pos);
     // Read BEFORE SelectDetected, because a Replace clears the detection's
     // relationship to the selection and an XOR may have just removed it.
     TopoDS_Edge justPicked;
@@ -5281,9 +5547,56 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
         myContext->DetectedShape().ShapeType() == TopAbs_EDGE) {
         justPicked = TopoDS::Edge(myContext->DetectedShape());
     }
+
+    // Auto's kind lock. The FIRST pick decides what this selection is OF, and
+    // Shift only ever adds more of that - edges with edges (across bodies
+    // included, which is Milestone 5 item 5's own rule and needs nothing
+    // extra here: XOR accumulation never cared which body an edge came from),
+    // faces with faces. A Shift-click asking for anything else does NOTHING
+    // AT ALL - it does not replace the selection, does not clear it, and
+    // takes no checkpoint - because the alternative is a gesture aimed at
+    // adding an edge silently throwing away the four the user already had.
+    //
+    // Quiet is not silent: a no-op with no explanation reads as a broken
+    // control, so the reason is recorded and announced. The lock itself is
+    // read from selectionKind(), which derives it from the live selection -
+    // so an undo, a delete or a programmatic selection change moves the lock
+    // with them and there is nothing to keep in step.
+    if (!onGizmo && mySelectionMode == SelectionMode::Auto) {
+        // What this selection was OF before this click touched it. Qt delivers
+        // a double-click as press/release/DblClick/release, so by the time
+        // mouseDoubleClickEvent() runs, the gesture's OWN first click has
+        // already picked a face or an edge and moved the lock - and reading
+        // the lock there would refuse a Shift+double-click on the strength of
+        // a sub-shape the same gesture had just added half a beat earlier.
+        // Recorded here, where the pre-click answer still exists, and read
+        // exactly one event later. It is gesture-local memory, the same kind
+        // myLastPickedEdge is, and never a second source of truth for the
+        // lock itself: selectionKind() remains the only thing that answers
+        // "what is held".
+        myAutoKindBeforeClick = selectionKind();
+    }
+    if (!onGizmo && mySelectionMode == SelectionMode::Auto && additive) {
+        const PickKind held = myAutoKindBeforeClick;
+        const PickKind asked = hoveredKind();
+        if (held != PickKind::None && asked != PickKind::None && asked != held) {
+            // Restore the picker before any return - the same unconditional
+            // rule the ordinary path keeps a few lines down, for the same
+            // reason: a restore some path can skip is a gizmo that silently
+            // stops being grabbable.
+            if (hideGizmoFromPick) activateManipulatorModes();
+            myAutoRefusal = autoKindRefusalText(held, asked);
+            emit autoPickRefused(myAutoRefusal);
+            return;
+        }
+    }
+
     if (!onGizmo) {
         myContext->SelectDetected(additive ? AIS_SelectionScheme_XOR
                                            : AIS_SelectionScheme_Replace);
+        // A pick that landed answers whatever the last refusal was asking
+        // about, so the sentence goes with it.
+        myAutoRefusal.clear();
         // "The edge you picked last" - remembered here because it cannot be
         // read back out of the selection afterwards (see lastSelectedEdge()).
         // A click on nothing clears it, so the arrow cannot linger on an edge
@@ -5389,6 +5702,12 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
         if (!myManipulator.IsNull() && !detectedIsManipulator())
             myManipulator->DeactivateCurrentMode();
 
+        // Auto's edge-over-face preference, applied BEFORE the owner
+        // comparison below so the repaint is asked for against the owner that
+        // will actually be glowing - and applied on this path and the click's
+        // in exactly the same place, which is what makes the two agree.
+        preferDetectedEdge(pos);
+
         // MoveTo(...,Standard_True) asks OCCT for its own immediate redraw,
         // but that is a hardware-dependent shortcut, not a guarantee: on
         // hardware where OCCT's separate immediate-mode framebuffer fails to
@@ -5470,7 +5789,14 @@ void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
     // by holding a key the edge-mode gesture does not even use. The exemption
     // names the branch it exists for, so nothing else can inherit it.
     const bool ctrlHeld = (event->modifiers() & Qt::ControlModifier) != 0;
-    const bool lockGesture = ctrlHeld && mySelectionMode == SelectionMode::Face;
+    // Auto joins face mode here for the reason the exemption exists at all:
+    // in Auto a face is one of the two things the cursor can be on, so
+    // Ctrl+double-click means exactly what it means in face mode, and the
+    // gesture has to survive an arrow's tail sitting at the face's centre.
+    // The exemption still names the BRANCH rather than the modifier, so
+    // nothing else inherits it.
+    const bool lockGesture = ctrlHeld && (mySelectionMode == SelectionMode::Face ||
+                                          mySelectionMode == SelectionMode::Auto);
     if (onArrow && !lockGesture) return;
     const QPoint device = toDevicePixels(pos);
     myContext->MoveTo(device.x(), device.y(), myView, Standard_False);
@@ -5506,6 +5832,53 @@ void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
     // the modifier should buy it the whole-body route the guard would refuse
     // to an unmodified click on the same pixel.
     if (onArrow) return;
+
+    // In Auto there is no mode to come back out to, so the whole-body pick is
+    // performed HERE rather than announced. That is the one place the two
+    // routes genuinely have to differ: the classic branch below emits
+    // bodyDoubleClicked() so MainWindow can trigger the body-mode action, and
+    // doing that in Auto would switch the app straight out of Auto on the
+    // gesture that is supposed to work inside it.
+    //
+    // Shift accumulates bodies, which is the "bodies with bodies" half of the
+    // kind lock. It is a double-click rather than a Shift-click because a
+    // click in Auto lands on a face or an edge - the kind lock refuses it and
+    // says so - and the gesture that takes a body is the gesture that adds
+    // one.
+    if (mySelectionMode == SelectionMode::Auto) {
+        const bool additive = (event->modifiers() & Qt::ShiftModifier) != 0;
+        // The lock as it stood BEFORE this gesture's own first click - see
+        // myAutoKindBeforeClick's record site in mouseReleaseEvent().
+        const PickKind held = additive ? myAutoKindBeforeClick : PickKind::None;
+        if (additive && held != PickKind::None && held != PickKind::Body) {
+            myAutoRefusal = autoKindRefusalText(held, PickKind::Body);
+            emit autoPickRefused(myAutoRefusal);
+            return;
+        }
+        // Accumulate only onto a body selection that already existed. A
+        // Shift+double-click that STARTS a selection replaces instead, which
+        // is what sweeps up the face or edge this same gesture's first click
+        // put there - accumulating onto it would leave a mixed selection the
+        // lock is supposed to make impossible.
+        if (!selectDetectedBody(held == PickKind::Body))
+            return;   // nothing of ours under the cursor
+        // Qt delivers a double-click as press/release/DblClick/RELEASE, and
+        // that trailing release runs an ordinary pick - which in Auto lands
+        // on the face or the edge under the cursor and throws the body
+        // selection away half a beat after this branch made it. The classic
+        // route never noticed, because it only ANNOUNCES the gesture and the
+        // mode switch that answers clears the selection anyway; a route that
+        // performs the pick itself has to claim the release too. Same rule
+        // every drag in this file already keeps: the gesture that started
+        // owns the release that ends it.
+        myAutoBodyPickTaken = true;
+        myAutoRefusal.clear();
+        myLastPickedEdge.Nullify();   // a body pick is not an edge pick
+        updateEdgeDimension();
+        scheduleRedraw();
+        emit selectionChanged();
+        return;
+    }
 
     const Handle(AIS_InteractiveObject) hit = myContext->DetectedInteractive();
 
