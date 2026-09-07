@@ -21,6 +21,15 @@
 
 class DimensionRenderer {
 public:
+    // The app's own DM Sans, resolved and registered with OCCT's font manager
+    // once, or a sans fallback if the resource is unavailable - NEVER OCCT's
+    // own serif default. Public because a second in-scene label needs the
+    // IDENTICAL face: the Move gizmo's axis letters are a proportional copy of
+    // the axis card's, and "the same font, roughly" is not a copy. Registering
+    // twice would be two spills of the same resource and two chances to
+    // resolve different family names.
+    static const std::string& fontFamily();
+
     void attach(const Handle(AIS_InteractiveContext)& context);
     // Drops the context and everything built against it, WITHOUT touching the
     // viewer - GridRenderer::detach()'s own contract, for the same one caller

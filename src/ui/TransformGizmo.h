@@ -64,14 +64,22 @@ public:
 
     // Draws the gizmo at `pivot`. `viewDirection` lets a subclass turn its
     // geometry to face the eye; `worldPerPixel` sizes the whole thing in
-    // screen pixels. Replaces whatever was drawn before.
+    // LOGICAL screen pixels, and `pixelRatio` is how many device pixels one of
+    // those is worth. Both are needed and they are not interchangeable:
+    // worldPerPixel() divides by the widget's own logical height, while the
+    // two things OCCT sizes for us rather than from our geometry - a line's
+    // width and a label's height - are counted in DEVICE pixels. Without the
+    // ratio a 150% display draws the whole drawing half again as big and its
+    // strokes and letters exactly as before, which is a different drawing.
+    // Replaces whatever was drawn before.
     //
     // Returns TRUE only when what is on screen actually changed - the caller
     // owns the frame and asks for one only on a true return, which is the
     // measured saving PullArrowRenderer's own header records (a rebuild
     // riding along with applyCameraState()'s redraw rather than forcing a
     // second vsync).
-    bool show(const gp_Pnt& pivot, const gp_Dir& viewDirection, double worldPerPixel);
+    bool show(const gp_Pnt& pivot, const gp_Dir& viewDirection, double worldPerPixel,
+              double pixelRatio);
     // TRUE when something was actually removed - show()'s own contract.
     bool clear();
     bool isShowing() const { return !myObjects.empty(); }
@@ -86,12 +94,14 @@ public:
 
     const gp_Pnt& pivot() const { return myPivot; }
 
-protected:
+    // One drawn line. Public only so the file-local geometry helpers that
+    // build rings and discs can name it; nothing outside constructs one.
     struct Stroke {
         gp_Pnt a;
         gp_Pnt b;
     };
 
+protected:
     // THE subclass hook. Called with myPivot/myViewDirection/myWorldPerPixel
     // already set; adds whatever the tool draws through addStrokes().
     virtual void buildStrokes() = 0;
@@ -110,7 +120,20 @@ protected:
     // Theme::gizmoAxisX/Y/Z rather than in something approximately like them.
     void addStrokes(const std::vector<Stroke>& strokes, const QColor& colour, double widthPx);
 
+    // One AIS_TextLabel, same discipline as addStrokes(): mode -1, Topmost,
+    // never pickable. `heightPx` is the font's EM box in DEVICE pixels, which
+    // is the unit OCCT sizes a non-zoomable label in - see AxisCard::
+    // letterEmPx() for why that is not the same number Qt was given.
+    //
+    // The face is DimensionRenderer::fontFamily(), deliberately shared rather
+    // than resolved again here: that function spills the app's DM Sans out of
+    // the Qt resource and registers it with Font_FontMgr exactly once, and two
+    // registrations of one resource are two chances to end up with two family
+    // names and a gizmo whose letters are not the app's font at all.
+    void addLabel(const QString& text, const gp_Pnt& at, const QColor& colour, double heightPx);
+
     double worldPerPixel() const { return myWorldPerPixel; }
+    double pixelRatio() const { return myPixelRatio; }
     const gp_Dir& viewDirection() const { return myViewDirection; }
 
 private:
@@ -121,15 +144,34 @@ private:
     // call that changes nothing from one that does.
     gp_Dir myViewDirection{0.0, 0.0, -1.0};
     double myWorldPerPixel = 0.0;
+    double myPixelRatio = 1.0;
     // Defeats show()'s pose cache for one call - the appearance changed, not
     // the geometry, and the cache key knows nothing about appearance.
     bool myForceRebuild = false;
 };
 
-// The MOVE tool's presentation: three arms from the pivot in
-// Theme::gizmoAxisX/Y/Z with cone tips, and a small neutral hub - the axis
-// card's own visual language (src/ui/AxisGizmo.cpp), scaled from that card's
-// 36-pixel arms to the viewport's own.
+// The MOVE tool's presentation: THE AXIS CARD'S OWN DRAWING, in the scene.
+//
+// Not "the card's language" or "the card's family" - the card's drawing. Every
+// element of AxisGizmo::paintEvent() has its counterpart here at the card's own
+// proportions, and both read one set of numbers (AxisCard, in AxisGizmo.h):
+// three thin arms in Theme::gizmoAxisX/Y/Z at the card's stroke-to-arm ratio,
+// filled cone tips at the card's cone-to-arm ratio, HOLLOW BALLS on the three
+// negative directions at the card's ball-to-arm ratio, the neutral filled hub,
+// and the small lowercase x/y/z past each cone in the card's own badge face.
+// One number is chosen here rather than derived - how long an arm is - and
+// everything else is that scale times a card number.
+//
+// gui_smoke pins it by MEASUREMENT, not by shared constants: it renders the
+// card, dumps the scene, and compares five element-to-arm ratios read off the
+// two RENDERINGS. Shared constants only stop the two drawings disagreeing about
+// what the numbers are; the pin is what stops them disagreeing about how they
+// are used.
+//
+// The three negative balls are grab targets too, exactly as the three cones
+// are. A drag on one is measured against the SAME infinite world line the
+// positive arm uses (armAxis()), so it needs no maths of its own - it simply
+// resolves to a negative distance.
 class MoveGizmoRenderer : public GizmoRenderer {
 public:
     // World +X / +Y / +Z. The one place the axis-index -> gp_Dir mapping
@@ -141,15 +183,24 @@ public:
     // the pivot. FIXED for the life of a gesture, exactly as
     // PullArrowRenderer::axis() is - a line measured from a point that itself
     // moved as the drag proceeded would make the drag measure its own effect.
+    // Direction-agnostic on purpose: the negative ball's drag is the positive
+    // arm's drag with the other sign, and one line is what makes that true.
     gp_Lin armAxis(int axis) const;
-    // The arm's outer tip, where the value chip is placed.
-    gp_Pnt armTip(int axis) const;
-    // Where an arm's GRABBABLE span starts, as a fraction of its length. The
-    // inner third is excluded from the hit test on purpose: all three arms
-    // meet at the hub, so near it the nearest-arm-wins rule would be decided
-    // by sub-pixel noise and the user would get an axis at random.
+
+    // A handle's outer point - the cone's nominal tip on the positive side,
+    // the ball's centre on the negative one. Where the value chip goes, and
+    // where the hit test's span ends.
+    gp_Pnt handleTip(int axis, bool positive) const;
+    // Where a handle's GRABBABLE span starts, as a fraction of the arm. The
+    // inner third is excluded on purpose: all six handles meet at the hub, so
+    // near it the nearest-handle-wins rule would be decided by sub-pixel noise
+    // and the user would get an axis at random.
     static constexpr double kGrabStartFraction = 0.3;
-    gp_Pnt armGrabStart(int axis) const;
+    gp_Pnt handleGrabStart(int axis, bool positive) const;
+
+    // The positive spellings, kept because most callers only ever mean +axis.
+    gp_Pnt armTip(int axis) const { return handleTip(axis, true); }
+    gp_Pnt armGrabStart(int axis) const { return handleGrabStart(axis, true); }
 
 protected:
     void buildStrokes() override;

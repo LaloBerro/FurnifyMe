@@ -41,7 +41,7 @@ Quantity_Color toOcct(const QColor& c)
 // face if the resource or the registration is ever unavailable - never
 // silently back to whatever OCCT's own default happens to be, which is a
 // serif face.
-const std::string& dimensionFontFamily()
+const std::string& resolveFontFamily()
 {
     static const std::string family = [] {
         QFile resource(QStringLiteral(":/fonts/DMSans.ttf"));
@@ -101,6 +101,11 @@ public:
 };
 
 }  // namespace
+
+const std::string& DimensionRenderer::fontFamily()
+{
+    return resolveFontFamily();
+}
 
 void DimensionRenderer::attach(const Handle(AIS_InteractiveContext)& context)
 {
@@ -268,10 +273,10 @@ bool DimensionRenderer::show(const gp_Pnt& from, const gp_Pnt& to, const gp_Dir&
     label->SetHeight(13.0);
     label->SetColor(toOcct(Theme::text()));
     // The app's own DM Sans if OCCT could resolve it, otherwise a sans
-    // fallback - see dimensionFontFamily(). Never left at OCCT's serif
+    // fallback - see fontFamily(). Never left at OCCT's serif
     // default, which is the one string in the app that would otherwise
     // ignore Phase 3's type scale entirely.
-    label->SetFont(dimensionFontFamily().c_str());
+    label->SetFont(fontFamily().c_str());
     // TODT_SUBTITLE paints a filled rectangle behind the text - the "boxed
     // label" the brief calls for, at no extra geometry.
     label->SetDisplayType(Aspect_TODT_SUBTITLE);

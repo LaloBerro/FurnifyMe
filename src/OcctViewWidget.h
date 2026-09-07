@@ -445,18 +445,26 @@ public:
     // aiming a test at the gizmo's OWN geometry rather than at a pixel guess.
     // False when no gizmo is up or `axis` is not 0/1/2.
     bool moveGizmoArmTip(int axis, gp_Pnt& out) const;
+    // The same, for either end of an arm: the cone's nominal tip on the
+    // positive side, the hollow ball's centre on the negative one.
+    bool moveGizmoHandleTip(int axis, bool positive, gp_Pnt& out) const;
     // Which arm (0/1/2) the 14 px screen-space hit test gives this LOGICAL
-    // pixel, or -1. This is the exact question mousePressEvent() asks before
-    // deciding whether a press belongs to the gizmo - exposed for the same
-    // reason pullArrowClaimsPoint() is: a check that a drag moved the body
-    // proves nothing unless something can say the press really was on an arm.
-    int moveGizmoAxisAt(const QPoint& logical) const;
+    // pixel, or -1, and through `positive` which END of it - the cone or the
+    // ball. This is the exact question mousePressEvent() asks before deciding
+    // whether a press belongs to the gizmo - exposed for the same reason
+    // pullArrowClaimsPoint() is: a check that a drag moved the body proves
+    // nothing unless something can say the press really was on a handle.
+    int moveGizmoAxisAt(const QPoint& logical, bool* positive = nullptr) const;
     // True between the press that grabbed an arm and the release that ends the
     // move. While it is true this widget picks nothing on release - the same
     // rule pullDragActive() carries, for the same reason.
     bool moveDragActive() const { return myMoveDrag.active; }
     // The arm being dragged (0/1/2), or -1.
     int moveDragAxis() const { return myMoveDrag.active ? myMoveDragAxis : -1; }
+    // Which END of it was grabbed - the cone or the negative ball. The drag
+    // maths does not care (one line, a signed distance); the value chip does,
+    // because it stands beside the handle the user is holding.
+    bool moveDragPositive() const { return myMoveDragPositive; }
     // Abandons a live drag WITHOUT committing anything - Escape's route. The
     // trailing release is swallowed rather than falling through to an ordinary
     // pick, because the button is still down when this is called and that
@@ -2327,6 +2335,10 @@ private:
     MoveGizmoRenderer myMoveGizmo;
     AxisDrag myMoveDrag;
     int myMoveDragAxis = -1;
+    // Which end of that arm the press landed on. Not part of the drag maths -
+    // both ends measure against one line - but the chip has to stand beside
+    // the handle actually being held rather than always at the cone.
+    bool myMoveDragPositive = true;
     // Escape's leftover: the drag is over but the button is still down, so the
     // release that is coming still belongs to the gesture that was cancelled
     // and must not fall through to an ordinary pick. Consumed exactly once -

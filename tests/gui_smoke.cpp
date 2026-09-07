@@ -586,7 +586,25 @@ void skipByEnvironment(int checks, const QString& why)
 //       on, and the type-scale sweep covers the Move chip
 //   +1  the focus check reports what it measured rather than only that it
 //       differed
-constexpr int kCheckFloor = 3451;
+//
+// The CUSTOM GIZMO, Phase 1 fix wave (the Move gizmo becomes the axis card's
+// OWN drawing rather than its language - hollow balls on the negative
+// directions, the card's stroke-to-arm ratio, the card's cone proportions, a
+// filled neutral hub and the card's own lowercase letters) raises it
+// 3451 -> 3480, matched against a real full run. +29, all of it one new
+// self-contained block at the end of this file:
+//
+//  +23  the ratio pin itself - the probe's own body, the Orthographic action,
+//       the gizmo and the card being up together, the squared orthographic
+//       look and the body being small enough to measure against, both arm
+//       directions being real, both drawings measuring every element, the
+//       card's letter against its own font metrics, the dump loading back,
+//       the six element-to-arm ratios, and the non-vacuity floor on both arms
+//   +6  the hollow balls as grab targets: the -X ball projecting, the hit test
+//       claiming it for the X arm, the hit test naming the NEGATIVE end, the
+//       drag target projecting, the body moving the way the ball points,
+//       along X alone
+constexpr int kCheckFloor = 3480;
 
 void check(bool condition, const QString& what)
 {
@@ -756,6 +774,7 @@ constexpr BlockInfo kBlocks[] = {
     { "milestone-5-item-10-autosave-persistence-and-migration", false, true },
     { "auto-selection-phase-1-the-cursor-decides", false, true },
     { "auto-selection-phase-1-the-kind-lock", false, true },
+    { "the-move-gizmo-is-the-axis-card-s-own-drawing", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -26651,6 +26670,518 @@ int main(int argc, char* argv[])
         check(probe.moveToolBodyId() == 0, "and the predicate lets go of the body");
 
         probe.close();
+        settle(150);
+    }
+
+    // ======================================================================
+    // THE MOVE GIZMO IS THE AXIS CARD'S OWN DRAWING, MEASURED
+    // ======================================================================
+    //
+    // The user's ask was "exactly like the card", and the two drawings do read
+    // one set of numbers (AxisCard, in src/ui/AxisGizmo.h) - but shared
+    // constants only stop them disagreeing about what the numbers ARE. They
+    // say nothing about how each drawing uses them, and every real divergence
+    // this phase had to close lived there: a stroke weight left absolute while
+    // the arm scaled, a cone the card FILLS and the scene can only stroke, a
+    // label sized in points on one side and in em pixels on the other.
+    //
+    // So this pins the two RENDERINGS against each other. The card is rendered
+    // (renderExact, 1:1), the scene is dumped (V3d_View::Dump), and five
+    // element-to-arm ratios are read off the pixels of each - stroke, cone,
+    // ball, hub and letter height, every one of them against an arm measured
+    // in the same image. Nothing here reads a constant out of the source and
+    // compares it to itself: the only numbers in this block are tolerances.
+    //
+    // The camera is squared onto a look with the Z axis IN the screen plane
+    // and elevation 0, and that is load-bearing rather than tidy. The card
+    // draws its cone, ball, hub and letter at fixed SCREEN sizes and its arm
+    // foreshortened; the scene builds all five as geometry, so only the arm
+    // foreshortens there too. The two agree on every element only where the
+    // measured arm is not foreshortened at all, which is what an axis lying in
+    // the screen plane means. Orthographic for the same reason, one order
+    // smaller: a perspective arm is very slightly not its own length.
+    //
+    // The arm reference is the span from the negative BALL's centre to the
+    // positive CONE's base - two features both drawings really have, and a
+    // span rather than a distance from the hub on purpose: projectToScreen()
+    // answers in whole logical pixels, so where the hub centre is is known
+    // only to half a pixel, and an error there shifts the two features in
+    // opposite directions and cancels out of their separation exactly.
+    if (blockEnabled("the-move-gizmo-is-the-axis-card-s-own-drawing")) {
+        RequiredTempDir ratioDir;
+        MainWindow ratio(nullptr, /*persistProgress=*/false, ratioDir.path());
+        ratio.setAttribute(Qt::WA_ShowWithoutActivating);
+        ratio.resize(1100, 800);
+        ratio.show();
+        settle(300);
+        OcctViewWidget* rv = ratio.view();
+        rv->setAnimationsEnabled(false);
+        enterFreshFurniture(ratio);
+
+        check(buildBody(ratio, 0.46, 0.46, 0.54, 0.54, 40.0),
+              "a body for the card-against-scene pin to stand a gizmo on");
+        const int ratioId =
+            ratio.document().solids().empty() ? -1 : ratio.document().solids().back().id;
+        rv->fitAll();
+        settle(250);
+
+        QAction* ratioOrtho = action(ratio, QStringLiteral("Orthographic"));
+        check(ratioOrtho != nullptr, "there is an Orthographic action for the ratio pin");
+        if (ratioOrtho && !ratioOrtho->isChecked()) { ratioOrtho->trigger(); settle(150); }
+
+        rv->setSelectedSolids({ratioId});
+        settle(250);
+        check(rv->hasMoveGizmo(), "the Move gizmo is up for the ratio pin");
+
+        AxisGizmo* card = ratio.findChild<AxisGizmo*>();
+        check(card != nullptr, "and the axis card it is a copy of is on the same window");
+
+        // --- square the camera, and stand well back --------------------------
+        //
+        // Far enough back that the BODY is a few pixels across. Not cosmetic:
+        // the ink measure below reads how far each pixel sits along the line
+        // between the drawing's colour and the background behind it, and a
+        // selected body's own orange is neither. Shrinking it to well inside
+        // the hub keeps every measured span over the empty viewport.
+        if (rv->hasMoveGizmo() && ratioId > 0) {
+            Bnd_Box ratioBox;
+            BRepBndLib::Add(ratio.document().shapeOf(ratioId), ratioBox);
+            double bx0, by0, bz0, bx1, by1, bz1;
+            ratioBox.Get(bx0, by0, bz0, bx1, by1, bz1);
+            const double bodyDiagonal = gp_Pnt(bx0, by0, bz0).Distance(gp_Pnt(bx1, by1, bz1));
+
+            CameraState squared = rv->camera().state();
+            squared.target = rv->moveGizmoPivot();
+            squared.azimuthDeg = 30.0;   // X and Y clear of the Z arm on screen
+            squared.elevationDeg = 0.0;  // ...and Z exactly upright, unforeshortened
+            // worldPerPixel() is 2 * distance * tan(fovy/2) / viewport height,
+            // in both projections by construction, so the distance that puts a
+            // given world span on a given number of pixels is that inverted.
+            constexpr double kRatioPi = 3.14159265358979323846;
+            const double wantedBodyPixels = 11.0;
+            squared.distance = bodyDiagonal * std::max(1, rv->height()) /
+                               (wantedBodyPixels * 2.0 * std::tan(0.5 * 45.0 * kRatioPi / 180.0));
+            rv->animateTo(squared);
+            settle(300);
+
+            check(rv->viewIsOrthographic(),
+                  "the ratio pin measures an orthographic view - a perspective arm is "
+                  "very slightly not its own length");
+
+            QPoint bodyLow, bodyHigh;
+            const bool bodyProjects = rv->projectToScreen(gp_Pnt(bx0, by0, bz0), bodyLow) &&
+                                      rv->projectToScreen(gp_Pnt(bx1, by1, bz1), bodyHigh);
+            const double bodyPixels =
+                bodyProjects ? std::hypot(double(bodyHigh.x() - bodyLow.x()),
+                                          double(bodyHigh.y() - bodyLow.y()))
+                             : 1.0e9;
+            check(bodyPixels < 30.0,
+                  QStringLiteral("the body is small enough that the arms measure against the "
+                                 "viewport rather than against its own shading (%1 px across)")
+                      .arg(bodyPixels, 0, 'f', 1));
+        }
+
+        // --- the one measurement, run twice ----------------------------------
+        //
+        // How much of a pixel is the drawing's colour rather than the ground
+        // behind it. An antialiased pixel is a linear blend of the two, so
+        // projecting it back onto the line between them recovers the coverage
+        // and the 0.5 crossing is where the ink's edge really is - which is
+        // what lets a 2-pixel card stroke and a 5-pixel scene one be compared
+        // at all. A pixel that is not ON that line (the body's orange, the
+        // ground grid, a lit face) is rejected outright rather than projected
+        // onto it, which is the whole reason the residual test is here.
+        auto inkAlpha = [](const QColor& p, const QColor& f, const QColor& b) -> double {
+            const double dr = f.red() - b.red();
+            const double dg = f.green() - b.green();
+            const double db = f.blue() - b.blue();
+            const double len2 = dr * dr + dg * dg + db * db;
+            if (len2 < 1.0) return 0.0;
+            const double pr = p.red() - b.red();
+            const double pg = p.green() - b.green();
+            const double pb = p.blue() - b.blue();
+            const double t = (pr * dr + pg * dg + pb * db) / len2;
+            const double ex = pr - t * dr, ey = pg - t * dg, ez = pb - t * db;
+            // A fifth of the distance between the two colours, off the line:
+            // an antialiased edge lands ON it, and every other colour in
+            // either image is further away than that. Measured, not guessed -
+            // at half this strictness the axis card's own vivid GREEN read as
+            // 0.64 of the way from the viewport to the neutral hub grey and
+            // was counted as hub ink, which reported a hub two and a half
+            // times its own size on both drawings at once.
+            if (ex * ex + ey * ey + ez * ez > 0.04 * len2) return 0.0;
+            return std::clamp(t, 0.0, 1.0);
+        };
+
+        // How far the drawing's ink reaches along one straight run of pixels:
+        // first 0.5 crossing to last, each interpolated between the two
+        // samples that straddle it, so the answer is sub-pixel on both an
+        // antialiased QPainter line and an aliased OpenGL one. `step` is a
+        // unit vector, so the answer is in image pixels.
+        auto inkSpan = [&](const QImage& img, const QPointF& origin, const QPointF& step,
+                           int reach, const QList<QColor>& fg, const QColor& bg) -> double {
+            const int n = reach;
+            std::vector<double> a(std::size_t(2 * n + 1), 0.0);
+            for (int i = -n; i <= n; ++i) {
+                const QPointF at = origin + step * double(i);
+                const int x = int(std::lround(at.x()));
+                const int y = int(std::lround(at.y()));
+                double best = 0.0;
+                if (x >= 0 && y >= 0 && x < img.width() && y < img.height()) {
+                    const QColor p = img.pixelColor(x, y);
+                    for (const QColor& f : fg) best = std::max(best, inkAlpha(p, f, bg));
+                }
+                a[std::size_t(i + n)] = best;
+            }
+            int lo = -1, hi = -1;
+            for (int i = 0; i <= 2 * n; ++i) {
+                if (a[std::size_t(i)] >= 0.5) { lo = i; break; }
+            }
+            for (int i = 2 * n; i >= 0; --i) {
+                if (a[std::size_t(i)] >= 0.5) { hi = i; break; }
+            }
+            if (lo < 0 || hi < 0) return 0.0;
+            double low = double(lo - n);
+            if (lo > 0) {
+                const double below = a[std::size_t(lo - 1)];
+                low -= (a[std::size_t(lo)] - 0.5) / std::max(a[std::size_t(lo)] - below, 1.0e-9);
+            }
+            double high = double(hi - n);
+            if (hi < 2 * n) {
+                const double above = a[std::size_t(hi + 1)];
+                high += (a[std::size_t(hi)] - 0.5) / std::max(a[std::size_t(hi)] - above, 1.0e-9);
+            }
+            return std::max(0.0, high - low);
+        };
+
+        // Everything one of the two drawings can be asked about itself, in its
+        // own image's pixels. `arm` is the reference every other number is
+        // reported against.
+        struct Drawn {
+            double arm = 0.0;
+            double stroke = 0.0;
+            double cone = 0.0;
+            double ball = 0.0;
+            double hub = 0.0;
+            double letter = 0.0;       // the glyph's ink HEIGHT, along the arm
+            double letterWide = 0.0;   // and its ink width, across it
+            bool ok = false;
+        };
+
+        auto measureDrawing = [&](const QImage& img, const QPointF& centre, const QPointF& dir,
+                                  const QList<QColor>& axisInk, const QColor& hubInk,
+                                  const QColor& bg, double reach, int perp) -> Drawn {
+            Drawn d;
+            if (img.isNull()) return d;
+
+            const QPointF normal(-dir.y(), dir.x());
+            const double step = 0.25;
+            // The ink ACROSS the arm at `t` pixels along it.
+            auto widthAt = [&](double t) {
+                return inkSpan(img, centre + dir * t, normal, perp, axisInk, bg);
+            };
+
+            // The cone's base and the ball's centre are simply the widest the
+            // drawing gets on each side of the hub. Both are true of the card
+            // and of the scene, and neither needs a constant to find.
+            //
+            // The MIDDLE of the widest run, not the first row of it: the card
+            // fills a triangle and peaks on one row, while the scene strokes a
+            // ring whose widest rows span a whole line width, so taking the
+            // first maximum pulled both features inward - by 0.75 px on the
+            // card and 3.75 px in the scene, which is a 2% error in the arm
+            // every ratio below is reported against.
+            auto widest = [&](double from, double to, double& at) {
+                double best = 0.0;
+                for (double t = from; (from < to ? t <= to : t >= to); t += (from < to ? step : -step))
+                    best = std::max(best, widthAt(t));
+                double sum = 0.0;
+                int taken = 0;
+                for (double t = from; (from < to ? t <= to : t >= to); t += (from < to ? step : -step)) {
+                    if (widthAt(t) >= 0.99 * best) { sum += t; ++taken; }
+                }
+                at = taken > 0 ? sum / double(taken) : 0.0;
+                return best;
+            };
+            double tCone = 0.0, tBall = 0.0;
+            const double wCone = widest(3.0, reach, tCone);
+            const double wBall = widest(-3.0, -reach, tBall);
+            if (wCone <= 0.0 || wBall <= 0.0 || tCone <= 0.0) return d;
+
+            d.arm = tCone - tBall;
+            d.cone = wCone;
+            d.ball = wBall;
+
+            // The shaft, sampled well clear of both the hub and the cone.
+            double sum = 0.0;
+            int taken = 0;
+            for (double t = 0.35 * tCone; t <= 0.75 * tCone; t += step) {
+                const double w = widthAt(t);
+                if (w > 0.0) { sum += w; ++taken; }
+            }
+            d.stroke = taken > 0 ? sum / double(taken) : 0.0;
+
+            // The axis letter: walk out past the cone to where its ink stops,
+            // across the clear band beyond it, and take the whole of the next
+            // run of ink. The band is found by ink and nothing else - an
+            // earlier spelling gated it at a third of the cone's width, which
+            // is fine for finding the letter and wrong for bounding it: the
+            // middle of a 'z' is one diagonal stroke wide, so the gate cut the
+            // glyph down to its top bar and reported a letter half its height.
+            double t = tCone;
+            while (t <= reach && widthAt(t) > 0.0) t += step;
+            while (t <= reach && widthAt(t) <= 0.0) t += step;
+            const double letterFrom = t;
+            double letterTo = t;
+            while (letterTo <= reach && widthAt(letterTo) > 0.0) {
+                d.letterWide = std::max(d.letterWide, widthAt(letterTo));
+                letterTo += step;
+            }
+            // ...and its HEIGHT, which the profile above cannot answer: that
+            // profile reads ACROSS the arm, so its letter figure is the
+            // glyph's width. Turn the same sub-pixel run ninety degrees and
+            // read the tallest column instead, bounded to the letter's own
+            // band so the cone below it can never join in.
+            if (letterTo > letterFrom) {
+                const double mid = 0.5 * (letterFrom + letterTo);
+                const int reachUp = std::max(2, int(0.5 * (letterTo - letterFrom)) + 2);
+                const int across = std::max(1, int(0.5 * d.letterWide) + 1);
+                for (int c = -across; c <= across; ++c)
+                    d.letter = std::max(d.letter, inkSpan(img, centre + dir * mid + normal * double(c),
+                                                          dir, reachUp, axisInk, bg));
+            }
+
+            // The hub, across the arm at whatever row shows most of it. In the
+            // scene the three arms cross the disc where the card simply paints
+            // its own hub over them, so the widest CLEAR row is a whisker
+            // inside the true diameter - a systematic couple of per cent, and
+            // the only place in this block the two drawings are not measured
+            // under identical conditions.
+            double hub = 0.0;
+            for (double h = -0.35 * tCone; h <= 0.35 * tCone; h += step)
+                hub = std::max(hub, inkSpan(img, centre + dir * h, normal, perp, {hubInk}, bg));
+            d.hub = hub;
+
+            d.ok = d.arm > 1.0 && d.stroke > 0.0 && d.cone > 0.0 && d.ball > 0.0 &&
+                   d.hub > 0.0 && d.letter > 0.0 && d.letterWide > 0.0;
+            return d;
+        };
+
+        Drawn cardDrawn;
+        Drawn sceneDrawn;
+        double cardLetterInk = 0.0;
+
+        // --- the card, rendered at 1:1 ---------------------------------------
+        if (card) {
+            const QImage cardImg = renderExact(card);
+            check(!cardImg.isNull() && cardImg.width() > 40,
+                  QStringLiteral("the axis card renders at its own size (%1x%2)")
+                      .arg(cardImg.width()).arg(cardImg.height()));
+            const QPointF cardCentre(cardImg.width() / 2.0, cardImg.height() / 2.0);
+            QPointF cardDir = card->tipCenter(2, true) - cardCentre;
+            const double cardDirLength = std::hypot(cardDir.x(), cardDir.y());
+            check(cardDirLength > 20.0,
+                  QStringLiteral("the card's own +Z tip is a real distance from its hub "
+                                 "(%1 px) - a degenerate axis would measure nothing")
+                      .arg(cardDirLength, 0, 'f', 1));
+            if (cardDirLength > 20.0) {
+                cardDir /= cardDirLength;
+                cardDrawn = measureDrawing(cardImg, cardCentre, cardDir,
+                                           {Theme::gizmoAxisZ(),
+                                            Theme::gizmoAxisZ().lighter(AxisCard::kLetterLighten)},
+                                           AxisCard::hubColour(), Theme::panel(),
+                                           cardImg.height() / 2.0 - 4.0, 24);
+                cardLetterInk = cardDrawn.letter;
+            }
+            check(cardDrawn.ok,
+                  QStringLiteral("every element of the card is found in its own rendering "
+                                 "(arm %1, stroke %2, cone %3, ball %4, hub %5, letter %6)")
+                      .arg(cardDrawn.arm, 0, 'f', 2).arg(cardDrawn.stroke, 0, 'f', 2)
+                      .arg(cardDrawn.cone, 0, 'f', 2).arg(cardDrawn.ball, 0, 'f', 2)
+                      .arg(cardDrawn.hub, 0, 'f', 2).arg(cardDrawn.letter, 0, 'f', 2));
+            std::printf("       card letter ink %.2f x %.2f px\n", cardDrawn.letterWide,
+                        cardDrawn.letter);
+        }
+
+        // The one absolute anchor in an otherwise entirely relative pin. Two
+        // drawings can agree with each other while both disagreeing with the
+        // font they claim to use, so the card's rendered 'z' is checked
+        // against the tight ink box its own metrics report for that glyph.
+        {
+            const double metricHeight = AxisCard::letterHeightPx(QLatin1Char('z'));
+            {
+                QFont plain = AxisCard::letterFont();
+                plain.setBold(false);
+                const QRectF plainInk =
+                    QFontMetricsF(plain).tightBoundingRect(QStringLiteral("z"));
+                std::printf("       card font: em %.2f  bold ink %.2f  plain ink %.2f x %.2f\n",
+                            AxisCard::letterEmPx(), metricHeight, plainInk.width(),
+                            plainInk.height());
+            }
+            check(cardLetterInk > 0.0 &&
+                      std::fabs(cardLetterInk - metricHeight) <=
+                          std::max(1.0, 0.15 * metricHeight),
+                  QStringLiteral("the card's letter really is drawn at its own font's ink "
+                                 "height (%1 px measured, %2 px from the metrics, em %3 px)")
+                      .arg(cardLetterInk, 0, 'f', 2).arg(metricHeight, 0, 'f', 2)
+                      .arg(AxisCard::letterEmPx(), 0, 'f', 2));
+        }
+
+        // --- the scene, dumped ------------------------------------------------
+        if (rv->hasMoveGizmo()) {
+            const QString scenePath = outDir + QStringLiteral("/move-gizmo-card-ratio.png");
+            check(rv->saveSnapshot(scenePath), "the scene gizmo can be dumped for the pin");
+            const QImage sceneImg(scenePath);
+            check(!sceneImg.isNull(), "and the dump loads back");
+
+            gp_Pnt sceneTip;
+            QPoint pivotAt, tipAt;
+            const bool haveScene =
+                !sceneImg.isNull() && rv->moveGizmoHandleTip(2, true, sceneTip) &&
+                rv->projectToScreen(rv->moveGizmoPivot(), pivotAt) &&
+                rv->projectToScreen(sceneTip, tipAt);
+            check(haveScene, "the scene gizmo's hub and +Z tip both project into the viewport");
+
+            if (haveScene) {
+                // The dump is DEVICE pixels and projectToScreen() answers in
+                // logical ones (CLAUDE.md's own pitfall), so the two are
+                // brought together by the ratio the dump itself reports rather
+                // than by asking the platform what the scale is.
+                const double toDump =
+                    double(sceneImg.width()) / double(std::max(1, rv->width()));
+                const QPointF sceneCentre(pivotAt.x() * toDump, pivotAt.y() * toDump);
+                QPointF sceneDir(double(tipAt.x() - pivotAt.x()), double(tipAt.y() - pivotAt.y()));
+                const double sceneDirLength = std::hypot(sceneDir.x(), sceneDir.y());
+                check(sceneDirLength > 40.0,
+                      QStringLiteral("the scene's +Z arm has a real screen direction (%1 px)")
+                          .arg(sceneDirLength, 0, 'f', 1));
+                if (sceneDirLength > 40.0) {
+                    sceneDir /= sceneDirLength;
+                    // The background is read out of the dump's own empty
+                    // corner rather than assumed to be Theme::viewport(): the
+                    // clear colour goes through OCCT's sRGB handling on the
+                    // way to a pixel, and a background that is 2/255 out
+                    // biases every edge this block interpolates.
+                    const QColor sceneBg = sceneImg.pixelColor(4, 4);
+                    sceneDrawn = measureDrawing(
+                        sceneImg, sceneCentre, sceneDir,
+                        {Theme::gizmoAxisZ(),
+                         Theme::gizmoAxisZ().lighter(AxisCard::kLetterLighten)},
+                        AxisCard::hubColour(), sceneBg, 165.0 * toDump, int(60 * toDump));
+                }
+                check(sceneDrawn.ok,
+                      QStringLiteral("every element of the card is found again in the SCENE "
+                                     "(arm %1, stroke %2, cone %3, ball %4, hub %5, letter %6)")
+                          .arg(sceneDrawn.arm, 0, 'f', 2).arg(sceneDrawn.stroke, 0, 'f', 2)
+                          .arg(sceneDrawn.cone, 0, 'f', 2).arg(sceneDrawn.ball, 0, 'f', 2)
+                          .arg(sceneDrawn.hub, 0, 'f', 2).arg(sceneDrawn.letter, 0, 'f', 2));
+                std::printf("       scene letter ink %.2f x %.2f px\n", sceneDrawn.letterWide,
+                            sceneDrawn.letter);
+            }
+        }
+
+        // --- the pin ----------------------------------------------------------
+        //
+        // Five element-to-arm ratios, both sides read from live rendering, at
+        // 5% - and it is not slack at that: the two drawings are rasterized by
+        // two different engines, QPainter antialiasing its lines while the GL
+        // side does not, so a scene stroke lands on a whole pixel either way.
+        //
+        // A SIXTH row, the letter's width, is the one element that is not
+        // reproducible in the scene and it is pinned separately rather than
+        // quietly folded into the others. AxisCard::letterFont() is bold and
+        // Qt synthesizes that weight for a family that ships only a regular
+        // face; OCCT does not - Font_FTFontParams carries ToSynthesizeItalic
+        // and has no bold counterpart, so Font_FontAspect_Bold on the same
+        // family renders the regular face. The letters are therefore the
+        // card's letters at the card's size and a hair lighter, which
+        // measures as a narrower glyph at an identical height. Pinned at 12%
+        // so the gap is bounded and cannot grow unnoticed.
+        {
+            const bool bothMeasured = cardDrawn.ok && sceneDrawn.ok;
+            check(bothMeasured,
+                  "both drawings measured, so the ratios below compare two renderings");
+            std::printf("       card-vs-scene element ratios (element / arm):\n");
+            struct Pair { const char* name; double card; double scene; double tolerance; };
+            const Pair pairs[] = {
+                {"stroke",  cardDrawn.stroke,     sceneDrawn.stroke,     0.05},
+                {"cone",    cardDrawn.cone,       sceneDrawn.cone,       0.05},
+                {"ball",    cardDrawn.ball,       sceneDrawn.ball,       0.05},
+                {"hub",     cardDrawn.hub,        sceneDrawn.hub,        0.05},
+                {"letter",  cardDrawn.letter,     sceneDrawn.letter,     0.05},
+                {"letterW", cardDrawn.letterWide, sceneDrawn.letterWide, 0.12},
+            };
+            for (const Pair& p : pairs) {
+                const double cardRatio = cardDrawn.arm > 0.0 ? p.card / cardDrawn.arm : 0.0;
+                const double sceneRatio = sceneDrawn.arm > 0.0 ? p.scene / sceneDrawn.arm : 0.0;
+                const double drift = cardRatio > 0.0
+                                         ? std::fabs(sceneRatio - cardRatio) / cardRatio
+                                         : 1.0;
+                std::printf("         %-7s card %6.4f   scene %6.4f   %+.1f%%  (tol %.0f%%)\n",
+                            p.name, cardRatio, sceneRatio,
+                            100.0 * (sceneRatio - cardRatio) / std::max(cardRatio, 1.0e-9),
+                            100.0 * p.tolerance);
+                check(bothMeasured && drift <= p.tolerance,
+                      QStringLiteral("the scene draws its %1 at the card's own %1-to-arm ratio "
+                                     "(card %2, scene %3, %4% apart, %5% allowed)")
+                          .arg(QString::fromLatin1(p.name))
+                          .arg(cardRatio, 0, 'f', 4).arg(sceneRatio, 0, 'f', 4)
+                          .arg(100.0 * drift, 0, 'f', 1)
+                          .arg(100.0 * p.tolerance, 0, 'f', 0));
+            }
+            // Non-vacuity: a pin whose reference arms were a handful of pixels
+            // would pass every ratio above by rounding.
+            check(cardDrawn.arm > 40.0 && sceneDrawn.arm > 100.0,
+                  QStringLiteral("and both arms are long enough for those ratios to mean "
+                                 "anything (card %1 px, scene %2 px)")
+                      .arg(cardDrawn.arm, 0, 'f', 1).arg(sceneDrawn.arm, 0, 'f', 1));
+        }
+
+        // --- the hollow balls are grab targets, like the cones ----------------
+        //
+        // A control the user can see and cannot grab is a control that lies
+        // about itself. Both ends of an arm resolve to the same axis and the
+        // same world line, so a ball drag needs no maths of its own - it comes
+        // out with the other sign.
+        if (rv->hasMoveGizmo()) {
+            gp_Pnt ballWorld;
+            QPoint ballAt;
+            const bool haveBall =
+                rv->moveGizmoHandleTip(0, false, ballWorld) &&
+                rv->projectToScreen(ballWorld, ballAt) &&
+                rv->rect().adjusted(8, 8, -8, -8).contains(ballAt);
+            check(haveBall, "the -X hollow ball projects into the viewport");
+
+            bool ballPositive = true;
+            check(haveBall && rv->moveGizmoAxisAt(ballAt, &ballPositive) == 0,
+                  "and the app's own hit test claims it for the X arm");
+            check(haveBall && !ballPositive,
+                  "naming the NEGATIVE end of it, which is where the chip belongs");
+
+            QPoint ballTarget;
+            const bool haveBallDrag =
+                haveBall &&
+                rv->projectToScreen(ballWorld.Translated(gp_Vec(-30.0, 0.0, 0.0)), ballTarget) &&
+                rv->rect().contains(ballTarget);
+            check(haveBallDrag, "a point 30 mm further along -X projects into the viewport");
+
+            if (haveBallDrag) {
+                const gp_Pnt before = ModelingOps::centreOfMass(ratio.document().shapeOf(ratioId));
+                dragButton(rv, QPointF(ballAt), QPointF(ballTarget), Qt::LeftButton);
+                settle(300);
+                const gp_Pnt after = ModelingOps::centreOfMass(ratio.document().shapeOf(ratioId));
+                const double dx = after.X() - before.X();
+                check(dx < -1.0,
+                      QStringLiteral("dragging the ball moves the body the way the ball points "
+                                     "(%1 mm along X)").arg(dx, 0, 'f', 2));
+                check(std::hypot(after.Y() - before.Y(), after.Z() - before.Z()) < 1.0e-6,
+                      "along X alone, exactly as the cone at the other end does");
+                trigger(ratio, QStringLiteral("Undo"));
+                settle(250);
+            }
+        }
+
+        ratio.close();
         settle(150);
     }
 

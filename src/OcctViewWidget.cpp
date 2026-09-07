@@ -1541,8 +1541,8 @@ void OcctViewWidget::showMoveGizmo(const gp_Pnt& pivot)
     // actually moved, which is its own equal-guard's answer. Skipped under
     // myApplyingCamera because applyCameraState()'s own redraw is already
     // coming: showPullArrow()'s rule, for the measured reason recorded there.
-    const bool changed =
-        myMoveGizmo.show(pivot, myView->Camera()->Direction(), worldPerPixel());
+    const bool changed = myMoveGizmo.show(pivot, myView->Camera()->Direction(), worldPerPixel(),
+                                          devicePixelRatioF());
     if (changed && !myApplyingCamera) scheduleRedraw();
 }
 
@@ -1556,8 +1556,13 @@ void OcctViewWidget::clearMoveGizmo()
 
 bool OcctViewWidget::moveGizmoArmTip(int axis, gp_Pnt& out) const
 {
+    return moveGizmoHandleTip(axis, true, out);
+}
+
+bool OcctViewWidget::moveGizmoHandleTip(int axis, bool positive, gp_Pnt& out) const
+{
     if (!myMoveGizmo.isShowing() || axis < 0 || axis > 2) return false;
-    out = myMoveGizmo.armTip(axis);
+    out = myMoveGizmo.handleTip(axis, positive);
     return true;
 }
 
@@ -1616,28 +1621,43 @@ bool OcctViewWidget::arrowHit(const PullArrowRenderer& arrow, const QPoint& poin
     return distance >= 0.0 && distance <= kHandleGrabPx;
 }
 
-int OcctViewWidget::moveGizmoAxisAt(const QPoint& point) const
+int OcctViewWidget::moveGizmoAxisAt(const QPoint& point, bool* positive) const
 {
+    if (positive) *positive = true;
     if (!myMoveGizmo.isShowing()) return -1;
 
-    // NEAREST arm wins, not the first one within tolerance: all three meet at
-    // the hub, so on any camera two of them cross near the middle of the
+    // SIX handles, not three: the drawing puts a cone on each positive tip and
+    // a hollow ball on each negative one, and a ball a user can see and cannot
+    // grab is a control that lies about itself. Both ends of an arm resolve to
+    // the same axis and the same world line - only the sign of the resulting
+    // distance differs - so this stays one span per direction rather than a
+    // second gesture.
+    //
+    // NEAREST handle wins, not the first one within tolerance: all six meet at
+    // the hub, so on any camera several of them cross near the middle of the
     // screen and a first-match rule would hand the user whichever happens to
     // be checked first.
     //
-    // The tested span starts a third of the way out (armGrabStart()) for the
-    // other half of the same problem: close to the hub every arm is within
+    // The tested span starts a third of the way out (handleGrabStart()) for the
+    // other half of the same problem: close to the hub every handle is within
     // tolerance of every pixel, and "nearest" there is decided by sub-pixel
     // noise. The inner third is dead, which is what makes the answer stable.
     int best = -1;
+    bool bestPositive = true;
     double bestDistance = kHandleGrabPx;
     for (int axis = 0; axis < 3; ++axis) {
-        const double distance =
-            segmentPixelDistance(myMoveGizmo.armGrabStart(axis), myMoveGizmo.armTip(axis), point);
-        if (distance < 0.0 || distance > bestDistance) continue;
-        best = axis;
-        bestDistance = distance;
+        for (int side = 0; side < 2; ++side) {
+            const bool plus = side == 0;
+            const double distance =
+                segmentPixelDistance(myMoveGizmo.handleGrabStart(axis, plus),
+                                     myMoveGizmo.handleTip(axis, plus), point);
+            if (distance < 0.0 || distance > bestDistance) continue;
+            best = axis;
+            bestPositive = plus;
+            bestDistance = distance;
+        }
     }
+    if (positive) *positive = bestPositive;
     return best;
 }
 
@@ -5666,10 +5686,16 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
     // exactly where a user aims to lock one.
     if (event->button() == Qt::LeftButton && !mySketchMode && !additivePress && !lockGesture &&
         myMoveGizmo.isShowing()) {
-        const int axis = moveGizmoAxisAt(myLastPos);
+        bool positive = true;
+        const int axis = moveGizmoAxisAt(myLastPos, &positive);
         if (axis >= 0) {
             myMoveDragAxis = axis;
+            myMoveDragPositive = positive;
             myMoveDragCancelled = false;
+            // ONE line for both ends of an arm. A drag begun on the negative
+            // ball is the positive arm's drag with the other sign, so it needs
+            // no maths of its own - which is also why armAxis() is deliberately
+            // direction-agnostic.
             beginAxisDrag(myMoveDrag, myMoveGizmo.armAxis(axis), myLastPos);
             return;
         }

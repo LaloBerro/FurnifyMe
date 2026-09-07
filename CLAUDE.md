@@ -682,10 +682,51 @@ visible at a time. Phase 1 shipped Move; Phase 2 takes the other two and deletes
 - **`src/ui/TransformGizmo.{h,cpp}` is PullArrow's split, one gizmo over.** `GizmoRenderer`
   is a shared base owning the context, the object list, the pose cache, the display
   discipline (mode −1, never pickable, `Topmost`) and `reapplyTheme()`; a subclass supplies
-  geometry alone through `buildStrokes()`. `MoveGizmoRenderer` draws three arms in
-  `Theme::gizmoAxisX/Y/Z` with cone tips and a neutral hub, sized in SCREEN PIXELS through
-  `worldPerPixel()` and rebuilt on `cameraChanged` — never OCCT's zoom-persistence flags.
+  geometry alone through `buildStrokes()`. `MoveGizmoRenderer` draws **the axis card's own
+  drawing, in the scene** — see the next bullet — sized in SCREEN PIXELS through
+  `worldPerPixel()` and rebuilt on `cameraChanged`, never OCCT's zoom-persistence flags.
   `MoveTool` is the Qt half: the value chip, the ghost preview and the Escape claim.
+- **The gizmo IS the card's drawing, and that is pinned by measurement rather than by shared
+  constants.** The card's numbers live in `namespace AxisCard` (`src/ui/AxisGizmo.h`) and
+  both drawings read them, so neither can disagree about what they *are*; `kCardScale`
+  (`kArmPixels / AxisCard::kArmPx`) is the one choice the scene makes and every other size
+  is a card number times it. Element for element: three thin arms at the card's
+  stroke-to-arm ratio, filled cone tips at its cone proportions, **hollow balls on the three
+  negative directions**, the neutral filled hub, and the small lowercase `x`/`y`/`z` past
+  each cone in `AxisCard::letterFont()`'s face — through `DimensionRenderer::fontFamily()`,
+  which is public precisely so one registration of the app's DM Sans serves both in-scene
+  labels. But shared constants say nothing about how each drawing *uses* them, and every
+  real divergence lived exactly there, so `gui_smoke`'s ratio pin renders the card
+  (`renderExact`), dumps the scene, and compares five element-to-arm ratios read off the two
+  RENDERINGS at 5%. Four things that pin taught, each of which had been wrong:
+  - **The stroke scales with the arm.** A 2.0 px line was carried over verbatim at first;
+    at 2.5× the arm that is a different drawing, not the same one further away.
+  - **`show()` needs the DEVICE PIXEL RATIO as well as `worldPerPixel()`.** The latter
+    divides by the widget's LOGICAL height, while a line's width and a label's height are
+    counted by OCCT in DEVICE pixels — so without the ratio a 150% display draws the
+    geometry half again as big and the strokes and letters exactly as before.
+  - **Ink is not path.** The card FILLS its cone and its hub with no pen, and nothing in
+    this build fills anything, so both are stroked line-art whose ink runs half a line width
+    past its path. Both are inset by that half width; the ball is NOT, because the card
+    strokes its ball too.
+  - **"Hub on top of everything" is a draw-ORDER statement the scene cannot make.** Half of
+    every arm is genuinely nearer the eye than a disc at the pivot, so each arm's shaft
+    instead starts where the card's own shaft becomes visible: `hubRadius / foreshortening`
+    along the axis, foreshortening being the magnitude of the same `axis × view` the rings
+    are built on. Before that the arms cut the disc and it measured 6% under the card's.
+  The one element that is **not** reproducible: `AxisCard::letterFont()` is bold, Qt
+  synthesizes that weight for a family shipping only a regular face, and OCCT does not —
+  `Font_FTFontParams` carries `ToSynthesizeItalic` and has no bold counterpart, so
+  `Font_FontAspect_Bold` renders the regular face. The letters are the card's letters at the
+  card's size and a hair lighter: measured, that is an identical ink HEIGHT (−2.3%) and a
+  9.5% narrower glyph. Pinned separately at 12% so the gap is bounded rather than folded
+  into the others and forgotten.
+- **The negative balls are grab targets, like the cones.** `moveGizmoAxisAt()` tests six
+  handles and reports which END through an out parameter; a ball drag is measured against
+  the SAME infinite world line (`armAxis()` is direction-agnostic on purpose) and simply
+  comes out with the other sign, so it adds no drag maths at all. The value chip stands at
+  the handle actually being held (`moveGizmoHandleTip`, `moveDragPositive`), not always at
+  the cone. A control the user can see and cannot grab is a control that lies about itself.
 - **Cones are drawn as their own silhouette** (a base ring plus generatrices), because
   `Graphic3d_ArrayOfTriangles` draws nothing at all in this build — the finding
   `DimensionRenderer` and `SketchPointMarker` already paid for twice. Lines also keep the
@@ -696,7 +737,7 @@ visible at a time. Phase 1 shipped Move; Phase 2 takes the other two and deletes
   `Deactivate`-around-picks, no owner-priority hazard. `OcctViewWidget::moveGizmoAxisAt()`
   is a 14 px screen-space test (`kHandleGrabPx`, shared with `arrowHit()` through
   `segmentPixelDistance()`) that takes a press outright, before the picker runs. The
-  NEAREST arm wins, and the inner third of every arm is a dead zone — all three meet at the
+  NEAREST handle wins, and the inner third of every arm is a dead zone — all six meet at the
   hub, where "nearest" would otherwise be decided by sub-pixel noise. The drag is
   `AxisDrag` + `CameraController::axisParameterForRay`, the pull arrow's own maths; the
   release is swallowed; Shift and Ctrl are excluded from the grab for the bevel arrow's and

@@ -1,20 +1,28 @@
 #include "TransformGizmo.h"
 
+#include "AxisGizmo.h"
+#include "DimensionRenderer.h"
 #include "MainWindow.h"
 #include "Measure.h"
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
 #include "Theme.h"
 
+#include <AIS_TextLabel.hxx>
+#include <Aspect_TypeOfDisplayText.hxx>
 #include <Aspect_TypeOfLine.hxx>
+#include <Font_FontAspect.hxx>
 #include <Graphic3d_ArrayOfSegments.hxx>
 #include <Graphic3d_AspectLine3d.hxx>
 #include <Graphic3d_Group.hxx>
+#include <Graphic3d_HorizontalTextAlignment.hxx>
+#include <Graphic3d_VerticalTextAlignment.hxx>
 #include <Graphic3d_ZLayerId.hxx>
 #include <Prs3d_Presentation.hxx>
 #include <PrsMgr_PresentationManager.hxx>
 #include <Quantity_Color.hxx>
 #include <SelectMgr_Selection.hxx>
+#include <TCollection_ExtendedString.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
 
@@ -45,27 +53,39 @@ constexpr int kEdgeInset = 8;
 
 // --- the gizmo's own size, in SCREEN pixels --------------------------------
 //
-// The axis card (src/ui/AxisGizmo.cpp) draws 36-pixel arms with a 9-pixel cone
-// on a 2.0-pixel stroke. This is that language at viewport scale: roughly
-// two and a half times the arm, the same cone-to-arm proportion, and the
-// IDENTICAL stroke weight, because a thicker line would be a different visual
-// family rather than the same one further away.
+// ONE number is chosen here: how long an arm is. Everything else - the stroke,
+// the cone, the hollow ball, the hub, the letter and where each of them sits -
+// is AxisCard's own number multiplied by kCardScale, so this drawing IS the
+// card's drawing at another size rather than a second drawing that resembles
+// it. See AxisGizmo.h.
 //
-// The arm length is the one number here chosen by eye rather than derived, and
-// the spec parks it: Phase 3 is the user's feel-test on sizes, grab tolerances
-// and chip placement. It is deliberately under the manipulator's own screen cap
+// The arm length is deliberately under the manipulator's own screen cap
 // (kGizmoMaxViewportFraction, 15% of the viewport's smaller side - about 116 px
 // in the suite's 1100x800 window), so swapping tools with Space never makes the
-// handle jump outward.
+// handle jump outward. The spec parks this number for Phase 3's feel-test.
 constexpr double kArmPixels = 92.0;
-constexpr double kConePixels = 20.0;
-constexpr double kConeRadiusPixels = 6.0;
-constexpr double kHubRadiusPixels = 4.5;
-constexpr double kArmStrokePx = 2.0;
-// How many segments a cone's base ring and a hub ring are drawn with. Twelve
-// at eighteen screen pixels leaves no visible facet, and the whole gizmo is
-// still under two hundred line segments.
-constexpr int kRingSegments = 12;
+constexpr double kCardScale = kArmPixels / AxisCard::kArmPx;
+
+// How many segments a cone's base ring, a ball and the hub disc are drawn
+// with. Thirty-two leaves no visible facet at these sizes, and the whole gizmo
+// is still under four hundred line segments.
+//
+// It is also what makes the measurement honest rather than approximately
+// honest: a ring's frame below is built so that a VERTEX lands on each screen
+// silhouette extreme, and a 32-gon's inscribed width is 0.5% under its
+// circumscribed one - so what a pixel probe measures across a ring is the
+// radius the code asked for, not the radius minus however far the nearest
+// vertex happened to fall from the edge.
+constexpr int kRingSegments = 32;
+// How many spokes fill the hub disc. The card FILLS its hub; nothing in this
+// build fills anything (see addStrokes()), so the disc is a rim plus spokes,
+// and the spoke count only has to be high enough that the arc between two of
+// them at the rim is shorter than a stroke is wide. At the hub's own
+// proportions that threshold is thirteen; this is comfortably past it.
+constexpr int kHubSpokes = 32;
+
+// The x/y/z the card paints past each cone, in its own lowercase.
+constexpr char kAxisLetter[3] = {'x', 'y', 'z'};
 
 // Spelled out rather than M_PI, which MSVC does not define without
 // _USE_MATH_DEFINES - the same literal every other file in this tree carries.
@@ -128,6 +148,46 @@ void perpendicularFrame(const gp_Dir& along, gp_Vec& u, gp_Vec& v)
     v.Normalize();
 }
 
+// The same frame, but AIMED AT THE SCREEN: `u` is the one direction that is
+// perpendicular to `along` and lies in the camera plane, which is exactly the
+// direction a ring around `along` is widest in when it is drawn. Building the
+// ring on it puts a real vertex on each silhouette edge instead of somewhere
+// between two, which is what lets a pixel probe read the radius back.
+//
+// False when the arm points at the eye and there is no such direction; the
+// caller falls back to perpendicularFrame(), whose ring is then a dot anyway.
+bool screenFrame(const gp_Dir& along, const gp_Dir& view, gp_Vec& u, gp_Vec& v)
+{
+    gp_Vec across = gp_Vec(along).Crossed(gp_Vec(view));
+    if (across.Magnitude() < 1.0e-6) return false;
+    u = across.Normalized();
+    v = gp_Vec(along).Crossed(u);
+    if (v.Magnitude() < 1.0e-9) return false;
+    v.Normalize();
+    return true;
+}
+
+// One closed ring of `segments` chords, centred on `at`, radius `radius`, in
+// the (u, v) plane. Appended rather than returned so a caller can put a ring
+// and whatever else it needs into one AIS object.
+void addRing(std::vector<GizmoRenderer::Stroke>& out, const gp_Pnt& at, const gp_Vec& u,
+            const gp_Vec& v, double radius, int segments)
+{
+    gp_Pnt previous;
+    gp_Pnt first;
+    for (int i = 0; i <= segments; ++i) {
+        const double angle = 2.0 * kPi * double(i) / double(segments);
+        const gp_Pnt onRing =
+            at.Translated(u * (radius * std::cos(angle)) + v * (radius * std::sin(angle)));
+        if (i == 0)
+            first = onRing;
+        else
+            out.push_back({previous, onRing});
+        previous = onRing;
+    }
+    out.push_back({previous, first});
+}
+
 }  // namespace
 
 // --- the shared presentation base -------------------------------------------
@@ -162,10 +222,11 @@ void GizmoRenderer::reapplyTheme()
 {
     if (!isShowing()) return;
     myForceRebuild = true;
-    show(myPivot, myViewDirection, myWorldPerPixel);   // caller owns the frame
+    show(myPivot, myViewDirection, myWorldPerPixel, myPixelRatio);   // caller owns the frame
 }
 
-bool GizmoRenderer::show(const gp_Pnt& pivot, const gp_Dir& viewDirection, double worldPerPixel)
+bool GizmoRenderer::show(const gp_Pnt& pivot, const gp_Dir& viewDirection, double worldPerPixel,
+                         double pixelRatio)
 {
     if (myContext.IsNull()) return false;
 
@@ -179,7 +240,8 @@ bool GizmoRenderer::show(const gp_Pnt& pivot, const gp_Dir& viewDirection, doubl
     if (!myForceRebuild && isShowing() && pivot.IsEqual(myPivot, 1.0e-9) &&
         viewDirection.IsEqual(myViewDirection, kHalfDegree) &&
         std::fabs(worldPerPixel - myWorldPerPixel) <=
-            std::max(myWorldPerPixel, 1.0e-9) * 0.01) {
+            std::max(myWorldPerPixel, 1.0e-9) * 0.01 &&
+        std::fabs(pixelRatio - myPixelRatio) < 1.0e-6) {
         return false;
     }
     myForceRebuild = false;
@@ -189,6 +251,7 @@ bool GizmoRenderer::show(const gp_Pnt& pivot, const gp_Dir& viewDirection, doubl
     myPivot = pivot;
     myViewDirection = viewDirection;
     myWorldPerPixel = std::max(worldPerPixel, 1.0e-9);
+    myPixelRatio = std::max(pixelRatio, 1.0e-9);
 
     buildStrokes();
     return true;
@@ -223,6 +286,35 @@ void GizmoRenderer::addStrokes(const std::vector<Stroke>& strokes, const QColor&
     myObjects.push_back(object);
 }
 
+void GizmoRenderer::addLabel(const QString& text, const gp_Pnt& at, const QColor& colour,
+                             double heightPx)
+{
+    if (myContext.IsNull() || text.isEmpty() || heightPx <= 0.0) return;
+
+    Handle(AIS_TextLabel) label = new AIS_TextLabel();
+    label->SetText(TCollection_ExtendedString(text.toUtf8().constData(), Standard_True));
+    label->SetPosition(at);
+    // Centred on the anchor in BOTH directions, because the card centres its
+    // own letter in a box around letterPos - a bottom-justified label would
+    // sit a whole cap height off, which is most of the distance being pinned.
+    label->SetHJustification(Graphic3d_HTA_CENTER);
+    label->SetVJustification(Graphic3d_VTA_CENTER);
+    label->SetHeight(heightPx);
+    label->SetColor(toOcct(colour));
+    label->SetFont(DimensionRenderer::fontFamily().c_str());
+    // Bold, as AxisCard::letterFont() is. It changes the ink's WIDTH rather
+    // than its height, so it is not what the ratio pin is measuring - it is
+    // here because the two drawings are meant to be one drawing.
+    label->SetFontAspect(Font_FontAspect_Bold);
+    // TODT_NORMAL, unlike the dimension label: a subtitle box behind three
+    // letters would put a panel-coloured rectangle over the scene at each arm
+    // tip, and the card paints no such box.
+    label->SetDisplayType(Aspect_TODT_NORMAL);
+    myContext->Display(label, 0, -1, Standard_False);   // mode -1: feedback only
+    myContext->SetZLayer(label, Graphic3d_ZLayerId_Topmost);
+    myObjects.push_back(label);
+}
+
 // --- the Move tool's presentation -------------------------------------------
 
 gp_Dir MoveGizmoRenderer::armDirection(int axis)
@@ -239,89 +331,171 @@ gp_Lin MoveGizmoRenderer::armAxis(int axis) const
     return gp_Lin(pivot(), armDirection(axis));
 }
 
-gp_Pnt MoveGizmoRenderer::armTip(int axis) const
+gp_Pnt MoveGizmoRenderer::handleTip(int axis, bool positive) const
 {
-    return pivot().Translated(gp_Vec(armDirection(axis)) * myArmLength);
+    const double sign = positive ? 1.0 : -1.0;
+    return pivot().Translated(gp_Vec(armDirection(axis)) * (sign * myArmLength));
 }
 
-gp_Pnt MoveGizmoRenderer::armGrabStart(int axis) const
+gp_Pnt MoveGizmoRenderer::handleGrabStart(int axis, bool positive) const
 {
-    return pivot().Translated(gp_Vec(armDirection(axis)) * (myArmLength * kGrabStartFraction));
+    const double sign = positive ? 1.0 : -1.0;
+    return pivot().Translated(gp_Vec(armDirection(axis)) *
+                              (sign * myArmLength * kGrabStartFraction));
 }
 
 void MoveGizmoRenderer::buildStrokes()
 {
-    // Every size here is a target in SCREEN PIXELS converted at the point of
-    // use - DimensionRenderer's rule, and the reason this gizmo needs none of
-    // OCCT's zoom-persistence machinery: furniture-sized handles swamp a
-    // close-up and vanish on a distant one, and worldPerPixel() is the one
-    // formula this app relates world units to pixels with, verified in both
-    // projections.
-    const double wpp = worldPerPixel();
-    myArmLength = kArmPixels * wpp;
-    const double coneLength = kConePixels * wpp;
-    const double coneRadius = kConeRadiusPixels * wpp;
-    const double hubRadius = kHubRadiusPixels * wpp;
+    // THE CARD'S DRAWING, at this viewport's scale. There are exactly two
+    // conversions below and every single size goes through one of them:
+    //
+    //   `w`  turns a card pixel into WORLD units, for anything this file
+    //        builds as geometry - arms, cones, balls, the hub, the letters'
+    //        anchors. Screen pixels converted at the point of use is
+    //        DimensionRenderer's rule, and it is why this gizmo needs none of
+    //        OCCT's zoom-persistence machinery.
+    //   `p`  turns a card pixel into DEVICE pixels, for the two things OCCT
+    //        sizes for us rather than from our geometry: a line's width and a
+    //        label's height. worldPerPixel() answers per LOGICAL pixel, so
+    //        this is the one place the display scale enters.
+    //
+    // Nothing here is a number of its own. The only choice this file makes is
+    // kArmPixels, and kCardScale is that choice divided by the card's.
+    const double w = kCardScale * worldPerPixel();
+    const double p = kCardScale * pixelRatio();
+
+    myArmLength = AxisCard::kArmPx * w;
+
+    const double coneLength = AxisCard::kConePx * w;
+    const double coneApex = AxisCard::kConePx * AxisCard::kConeApexFactor * w;
+    const double coneRadius = AxisCard::kConePx * AxisCard::kConeHalfWidthFactor * w;
+    const double ballRadius = AxisCard::kBallPx * w;
+    const double hubRadius = AxisCard::kHubPx * w;
+    const double letterOffset = AxisCard::kLetterOffsetPx * w;
+    const double armStroke = AxisCard::kArmStrokePx * p;
+    const double negativeStroke = AxisCard::kNegativeStrokePx * p;
+    const double letterHeight = AxisCard::letterEmPx() * p;
+
+    // INK, not path - and this is the one correction the copy needs.
+    //
+    // The card FILLS its cone and its hub with QPainter and no pen at all, so
+    // their edges land exactly on the radius. Nothing in this build fills
+    // anything (see addStrokes()), so both are drawn as stroked line-art
+    // instead, and a stroke's ink runs half a line width PAST the path it is
+    // centred on. Inset the path by that half width and the ink lands where
+    // the card's fill edge does. Note the display scale cancels out of it: the
+    // stroke is scaled by `p` and converted back by dividing by the same
+    // ratio, so this is a card number times `w` like everything else.
+    //
+    // The BALL is not inset, because the card strokes its ball too - both
+    // drawings put their ink half a stroke outside the same radius, which is
+    // agreement rather than a matched error.
+    const double halfArmInk = 0.5 * AxisCard::kArmStrokePx * w;
+
+    const gp_Dir view = viewDirection();
 
     for (int axis = 0; axis < 3; ++axis) {
         const gp_Dir dir = armDirection(axis);
         const gp_Vec along(dir);
-        const gp_Pnt tip = armTip(axis);
-        const gp_Pnt coneBase = tip.Translated(along * -coneLength);
-
-        gp_Vec u, v;
-        perpendicularFrame(dir, u, v);
-
-        std::vector<Stroke> strokes;
-        strokes.reserve(1 + kRingSegments * 2);
-        // The shaft, from the hub to where the cone begins.
-        strokes.push_back({pivot(), coneBase});
-
-        // The cone as its own silhouette: a base ring plus one generatrix per
-        // ring point. See addStrokes()' comment for why it is not a filled
-        // triangle fan.
-        gp_Pnt previous;
-        gp_Pnt first;
-        for (int i = 0; i <= kRingSegments; ++i) {
-            const double angle = 2.0 * kPi * double(i) / double(kRingSegments);
-            const gp_Pnt onRing =
-                coneBase.Translated(u * (coneRadius * std::cos(angle)) +
-                                    v * (coneRadius * std::sin(angle)));
-            if (i == 0) {
-                first = onRing;
-            } else {
-                strokes.push_back({previous, onRing});
-                strokes.push_back({onRing, tip});
-            }
-            previous = onRing;
-        }
-        strokes.push_back({previous, first});
-
         const QColor colour = axis == 0   ? Theme::gizmoAxisX()
                               : axis == 1 ? Theme::gizmoAxisY()
                                           : Theme::gizmoAxisZ();
-        addStrokes(strokes, colour, kArmStrokePx);
+
+        gp_Vec u, v;
+        if (!screenFrame(dir, view, u, v)) perpendicularFrame(dir, u, v);
+
+        // Where this arm leaves the hub ON SCREEN. The card draws its shaft
+        // from the dead centre and then paints the hub over it last - "hub on
+        // top of everything", its own words - and the visible result is a
+        // shaft that starts at the hub's edge. Here the hub cannot simply be
+        // painted last: draw ORDER is not draw priority in a depth-tested
+        // scene, and half of every arm is genuinely nearer the eye than a
+        // disc standing at the pivot. So the shaft starts where the card's
+        // shaft becomes visible instead, which is the same drawing by the
+        // only route the scene offers.
+        //
+        // `foreshortening` is how much of the arm's length survives the
+        // projection - the magnitude of the same cross product screenFrame()
+        // is built on - so hubRadius / it is the world distance whose SCREEN
+        // length is the hub's own radius. Clamped, because an arm pointing at
+        // the eye has no such distance and is a dot behind the hub anyway.
+        const double foreshortening =
+            std::max(1.0e-3, gp_Vec(dir).Crossed(gp_Vec(view)).Magnitude());
+        const double clearOfHub = std::min(hubRadius / foreshortening, 0.5 * myArmLength);
+
+        // --- the positive arm: shaft, filled cone, letter ------------------
+        const gp_Pnt tip = handleTip(axis, true);
+        const gp_Pnt coneBase = tip.Translated(along * -coneLength);
+        const gp_Pnt apex = tip.Translated(along * coneApex);
+
+        std::vector<Stroke> arm;
+        arm.reserve(1 + kRingSegments * 2 + 1);
+        // The shaft, hub edge to cone base - the card's own line, less the
+        // part its hub covers.
+        arm.push_back({pivot().Translated(along * clearOfHub), coneBase});
+        // The cone as its own silhouette: a base ring plus one generatrix per
+        // ring point, which at this size closes into a solid triangle. See
+        // addStrokes() for why it is not a filled fan.
+        addRing(arm, coneBase, u, v, coneRadius - halfArmInk, kRingSegments);
+        for (int i = 0; i < kRingSegments; ++i) {
+            const double angle = 2.0 * kPi * double(i) / double(kRingSegments);
+            arm.push_back({coneBase.Translated(u * ((coneRadius - halfArmInk) * std::cos(angle)) +
+                                               v * ((coneRadius - halfArmInk) * std::sin(angle))),
+                           apex});
+        }
+        addStrokes(arm, colour, armStroke);
+
+        // The axis letter just past the cone, in the card's own lighter shade
+        // of the same hue.
+        addLabel(QString(QLatin1Char(kAxisLetter[axis])), tip.Translated(along * letterOffset),
+                 colour.lighter(AxisCard::kLetterLighten), letterHeight);
+
+        // --- the negative direction: a thinner stub and a hollow ball ------
+        //
+        // Hollow means hollow. The card fills its ball with its own panel
+        // colour because a card is opaque and there is nothing behind it; here
+        // there IS something behind it, and a ring is what the card's fill was
+        // standing in for.
+        const gp_Pnt ballAt = handleTip(axis, false);
+        std::vector<Stroke> negative;
+        negative.reserve(1 + kRingSegments);
+        negative.push_back(
+            {pivot().Translated(along * -std::max(myArmLength * AxisCard::kNegativeStubStart,
+                                                  clearOfHub)),
+             ballAt});
+        // Camera-facing, so it reads as a circle from anywhere - which is what
+        // the card's own ellipse is. `u` is already the screen-perpendicular
+        // of this arm, so it stays; the other leg turns to face the eye.
+        gp_Vec ballU = u;
+        gp_Vec ballV = gp_Vec(view).Crossed(ballU);
+        if (ballV.Magnitude() < 1.0e-9)
+            perpendicularFrame(view, ballU, ballV);
+        else
+            ballV.Normalize();
+        addRing(negative, ballAt, ballU, ballV, ballRadius, kRingSegments);
+        addStrokes(negative, colour, negativeStroke);
     }
 
-    // The hub: three small rings in the principal planes, so it reads as a
-    // ball from any camera. Neutral, like the axis card's own hub - it belongs
-    // to no axis, and colouring it would make it look like a fourth handle.
+    // --- the hub: one filled neutral disc, facing the eye -------------------
+    //
+    // The card draws a filled circle last, on top of everything. A disc made
+    // of a rim and spokes is what that is without a fill: the spokes close it
+    // because the arc between two of them at the rim is shorter than a stroke
+    // is wide, and the rim is what gives it a clean edge. Neutral on purpose -
+    // it belongs to no axis, and colouring it would read as a fourth handle.
     {
+        gp_Vec hubU, hubV;
+        perpendicularFrame(view, hubU, hubV);
+        const double rim = std::max(hubRadius - halfArmInk, 1.0e-9);
         std::vector<Stroke> hub;
-        hub.reserve(3 * kRingSegments);
-        for (int plane = 0; plane < 3; ++plane) {
-            gp_Vec u, v;
-            perpendicularFrame(armDirection(plane), u, v);
-            gp_Pnt previous;
-            for (int i = 0; i <= kRingSegments; ++i) {
-                const double angle = 2.0 * kPi * double(i) / double(kRingSegments);
-                const gp_Pnt onRing = pivot().Translated(u * (hubRadius * std::cos(angle)) +
-                                                         v * (hubRadius * std::sin(angle)));
-                if (i > 0) hub.push_back({previous, onRing});
-                previous = onRing;
-            }
+        hub.reserve(kRingSegments + kHubSpokes);
+        addRing(hub, pivot(), hubU, hubV, rim, kRingSegments);
+        for (int i = 0; i < kHubSpokes; ++i) {
+            const double angle = 2.0 * kPi * double(i) / double(kHubSpokes);
+            hub.push_back({pivot(), pivot().Translated(hubU * (rim * std::cos(angle)) +
+                                                       hubV * (rim * std::sin(angle)))});
         }
-        addStrokes(hub, Theme::text(), kArmStrokePx);
+        addStrokes(hub, AxisCard::hubColour(), armStroke);
     }
 }
 
@@ -539,9 +713,15 @@ void MoveTool::reposition()
 
     gp_Pnt tip;
     QPoint at;
-    if (!myView->moveGizmoArmTip(myAxis, tip) || !myView->projectToScreen(tip, at)) return;
+    // The END that was grabbed, not always the cone: a drag begun on the
+    // negative ball is measured along the same line, but a chip that jumped to
+    // the far side of the body would be labelling the handle the user is not
+    // holding.
+    if (!myView->moveGizmoHandleTip(myAxis, myView->moveDragPositive(), tip) ||
+        !myView->projectToScreen(tip, at))
+        return;
 
-    // Beside the dragged arm's tip, flipped to the other side rather than
+    // Beside the dragged handle's tip, flipped to the other side rather than
     // clamped when that would run off the right edge - PullArrow's own layout,
     // for the same reason: a value chip that walks away from the handle it
     // labels stops labelling it.

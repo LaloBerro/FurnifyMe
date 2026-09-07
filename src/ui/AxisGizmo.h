@@ -31,10 +31,76 @@
 // (CameraController::setTemporaryOrtho) - an axis view IS a face-on view, and
 // perspective convergence is what stops one reading as square. The user's
 // first orbit hands it back.
+#include <QColor>
+#include <QFont>
 #include <QPointF>
 #include <QWidget>
 
 class OcctViewWidget;
+
+// THE CARD'S OWN DRAWING, as numbers - and the reason they live in a header
+// rather than in AxisGizmo.cpp's anonymous namespace where they started.
+//
+// The in-scene Move gizmo (src/ui/TransformGizmo.h) is a PROPORTIONAL COPY of
+// this card: same stroke-to-arm, cone-to-arm, ball-to-arm, hub-to-arm and
+// letter-to-arm ratios, at whatever arm length the viewport wants. The user's
+// ask was "exactly like the card", and a copy that reads its own transcription
+// of these numbers is a copy until somebody edits one of them. So there is ONE
+// set, both drawings read it, and gui_smoke measures the two RENDERINGS against
+// each other so a divergence in how they are used fails as loudly as a
+// divergence in what they are.
+//
+// Every length is in the card's own logical pixels, against kArmPx. The scene
+// gizmo multiplies all of them by (its arm length / kArmPx).
+namespace AxisCard {
+
+constexpr double kArmPx = 36.0;              // a positive arm, hub to tip
+constexpr double kConePx = 9.0;              // the cone's own length back from the tip
+constexpr double kBallPx = 5.5;              // the hollow ball on a negative tip
+constexpr double kHubPx = 5.0;               // the filled neutral hub
+constexpr double kArmStrokePx = 2.0;         // the positive arm's pen
+constexpr double kNegativeStrokePx = 1.4;    // the negative stub's thinner pen
+constexpr double kNegativeStubStart = 0.35;  // where a negative stub begins, along its arm
+constexpr double kConeHalfWidthFactor = 0.55;   // of kConePx, either side of the axis
+constexpr double kConeApexFactor = 0.40;        // of kConePx, PAST the tip
+constexpr double kLetterOffsetPx = 9.0;         // the letter's anchor, past the tip
+// How much lighter the axis letter is drawn than its own arm. A percentage in
+// QColor::lighter()'s own units, so both drawings brighten by the same amount.
+constexpr int kLetterLighten = 115;
+
+// The hub's colour. Neutral on purpose: the hub belongs to no axis, and
+// colouring it would make it look like a fourth handle. A function rather than
+// a constant because QColor has no constexpr constructor.
+QColor hubColour();
+
+// The font the axis letters are painted with - Theme::badgeFont(), bold. One
+// accessor, so the card paints and the scene gizmo sizes from the same
+// metrics rather than from two readings of the same intention.
+QFont letterFont();
+
+// One axis letter's own drawn INK height in the card's pixels, measured off
+// letterFont()'s metrics rather than guessed from a point size. gui_smoke
+// checks the card's rendered letter against this, which is what stops the
+// ratio pin below being purely relative - two drawings can agree with each
+// other while both disagreeing with the font they claim to use.
+//
+// The glyph is an argument because the three letters do not share an ink
+// height: x and z stop at the x-height, y hangs a descender below the
+// baseline. A tight bounding box of the actual glyph, never capHeight(),
+// which none of the three lowercase letters this card paints ever reaches.
+double letterHeightPx(QChar letter);
+
+// The letter font's EM size in the card's pixels - what an in-scene
+// AIS_TextLabel's SetHeight() is measured in. The two text engines are asked
+// for the same thing in different units and that difference is the whole
+// reason this accessor exists: Qt sizes a QFont by POINTS and OCCT sizes a
+// label by its em box in PIXELS, so handing OCCT the point size would draw
+// the letters at three quarters of the card's, silently and only on a
+// machine at this DPI. Cap height and em share one ratio for one face, so
+// scaling THIS number is what makes the two INKS the same height.
+double letterEmPx();
+
+}  // namespace AxisCard
 
 class AxisGizmo : public QWidget {
     Q_OBJECT

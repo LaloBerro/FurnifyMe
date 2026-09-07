@@ -4,6 +4,8 @@
 #include "Theme.h"
 
 #include <QFont>
+#include <QFontInfo>
+#include <QFontMetricsF>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -31,10 +33,16 @@ QColor axisColor(int axis)
 }
 constexpr char kAxisLetter[3] = {'x', 'y', 'z'};
 
-constexpr double kRadius = 36.0;      // arm length in pixels
-constexpr double kConeSize = 9.0;     // positive-tip cone
-constexpr double kBallSize = 5.5;     // negative-tip hollow ball
-constexpr double kHitRadius = 11.0;   // click tolerance around a tip
+// The drawing's own numbers now live in AxisCard (see AxisGizmo.h) so the
+// in-scene Move gizmo can be a proportional copy of this card rather than an
+// interpretation of it. These four names are kept as local aliases because
+// paintEvent() below reads them a dozen times and `kRadius` says what it is.
+constexpr double kRadius = AxisCard::kArmPx;
+constexpr double kConeSize = AxisCard::kConePx;
+constexpr double kBallSize = AxisCard::kBallPx;
+constexpr double kHitRadius = 11.0;   // click tolerance around a tip - this
+                                      // card's own input, not part of the
+                                      // drawing, so it stays here
 
 // The card's OWN corner radius - paintEvent() below calls
 // Theme::paintSurface(painter, rect()) with no third argument, so this is
@@ -53,6 +61,46 @@ QPointF hubCenter(const QWidget& w)
 }
 
 }  // namespace
+
+// --- the card's own numbers, shared with the in-scene copy -------------------
+
+QColor AxisCard::hubColour()
+{
+    // The one hex literal this drawing carries. It is deliberately NOT a Theme
+    // token: a hub is neutral by definition and a user who tinted it would be
+    // adding a fourth axis colour to a control whose whole language is three.
+    return QColor("#c8c8cc");
+}
+
+QFont AxisCard::letterFont()
+{
+    QFont font = Theme::badgeFont();
+    font.setBold(true);
+    return font;
+}
+
+double AxisCard::letterHeightPx(QChar letter)
+{
+    // MEASURED off the font, never derived from its point size: a guess at
+    // "8pt is about 11 pixels" is exactly the kind of number that is right on
+    // one machine. And the TIGHT box, not capHeight() or height(): what a
+    // pixel probe can see of a lowercase x, y or z is its own ink, and none of
+    // the three reaches a capital's height - the first spelling of this
+    // function said cap height was "the honest ceiling" for them and measured
+    // 7.7 px against a rendering of 4.8.
+    return QFontMetricsF(letterFont()).tightBoundingRect(QString(letter)).height();
+}
+
+double AxisCard::letterEmPx()
+{
+    // QFontInfo, not the QFont's own pointSizeF(): the request and what the
+    // font engine actually resolved are two different numbers, and it is the
+    // resolved one the card rasterizes with. Falls back through the metrics'
+    // line height only if a platform ever hands back 0, which would otherwise
+    // scale the scene's letters to nothing at all.
+    const double px = QFontInfo(letterFont()).pixelSize();
+    return px > 0.0 ? px : QFontMetricsF(letterFont()).height();
+}
 
 AxisGizmo::AxisGizmo(OcctViewWidget* view, QWidget* parent)
     : QWidget(parent)
@@ -286,7 +334,7 @@ void AxisGizmo::paintEvent(QPaintEvent* /*event*/)
 
         if (tip->positive) {
             // Arm plus a cone at the end, pointing outward.
-            painter.setPen(QPen(colour, 2.0));
+            painter.setPen(QPen(colour, AxisCard::kArmStrokePx));
             const QPointF dir = tip->screen - centre;
             const double length = std::hypot(dir.x(), dir.y());
             if (length > 1.0) {
@@ -295,9 +343,9 @@ void AxisGizmo::paintEvent(QPaintEvent* /*event*/)
                 const QPointF base = tip->screen - unit * kConeSize;
                 painter.drawLine(centre, base);
                 QPainterPath cone;
-                cone.moveTo(tip->screen + unit * (kConeSize * 0.4));
-                cone.lineTo(base + normal * (kConeSize * 0.55));
-                cone.lineTo(base - normal * (kConeSize * 0.55));
+                cone.moveTo(tip->screen + unit * (kConeSize * AxisCard::kConeApexFactor));
+                cone.lineTo(base + normal * (kConeSize * AxisCard::kConeHalfWidthFactor));
+                cone.lineTo(base - normal * (kConeSize * AxisCard::kConeHalfWidthFactor));
                 cone.closeSubpath();
                 painter.setPen(Qt::NoPen);
                 painter.setBrush(colour);
@@ -305,19 +353,17 @@ void AxisGizmo::paintEvent(QPaintEvent* /*event*/)
 
                 // Axis letter just past the cone - a small badge, like the
                 // shortcut badges Theme::badgeFont() is sized for.
-                painter.setPen(colour.lighter(115));
-                QFont letterFont = Theme::badgeFont();
-                letterFont.setBold(true);
-                painter.setFont(letterFont);
-                const QPointF letterPos = tip->screen + unit * 9.0;
+                painter.setPen(colour.lighter(AxisCard::kLetterLighten));
+                painter.setFont(AxisCard::letterFont());
+                const QPointF letterPos = tip->screen + unit * AxisCard::kLetterOffsetPx;
                 painter.drawText(QRectF(letterPos.x() - 6, letterPos.y() - 7, 12, 14),
                                  Qt::AlignCenter, QString(QLatin1Char(kAxisLetter[tip->axis])));
             }
         } else {
             // Negative axis: a short arm and a hollow ball, like Unity.
-            painter.setPen(QPen(colour, 1.4));
+            painter.setPen(QPen(colour, AxisCard::kNegativeStrokePx));
             const QPointF dir = tip->screen - centre;
-            painter.drawLine(centre + dir * 0.35, tip->screen);
+            painter.drawLine(centre + dir * AxisCard::kNegativeStubStart, tip->screen);
             // The card's own fill, not Theme::viewport() - a "hollow" ball is
             // hollow onto whatever this widget is painted on, and that is the
             // card now.
@@ -328,6 +374,6 @@ void AxisGizmo::paintEvent(QPaintEvent* /*event*/)
 
     // Hub on top of everything.
     painter.setPen(Qt::NoPen);
-    painter.setBrush(QColor("#c8c8cc"));
-    painter.drawEllipse(centre, 5.0, 5.0);
+    painter.setBrush(AxisCard::hubColour());
+    painter.drawEllipse(centre, AxisCard::kHubPx, AxisCard::kHubPx);
 }
