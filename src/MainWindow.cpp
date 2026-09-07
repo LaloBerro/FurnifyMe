@@ -805,6 +805,11 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // where the why arrives.
     connect(myView, &OcctViewWidget::autoPickRefused, this,
             &MainWindow::onPickRefused);
+    // ...and the pick that answers it takes it back down, because a status
+    // message with no timeout is permanent and the state label beside it is
+    // not. See onPickRefusalWithdrawn().
+    connect(myView, &OcctViewWidget::autoPickRefusalWithdrawn, this,
+            &MainWindow::onPickRefusalWithdrawn);
     // The transform gizmo reports the end of a drag; this window decides what
     // it means, exactly as it does for the face-pull arrow above.
     connect(myView, &OcctViewWidget::gizmoReleased, this, &MainWindow::onGizmoReleased);
@@ -3722,6 +3727,10 @@ void MainWindow::resyncView()
     // the one line that closes it. The kind lock needs nothing: it is derived
     // from the live selection, and clearSolids() below empties that.
     myView->resetPickGesture();
+    // ...and the sentence it dropped comes off the bar with it. Called
+    // directly rather than through the signal, because resetPickGesture()
+    // promises on its own header to emit nothing.
+    onPickRefusalWithdrawn();
 
     myView->clearSolids();
     for (const DocumentModel::Solid& solid : myDocument.solids()) {
@@ -5291,7 +5300,30 @@ void MainWindow::onPickRefused(const QString& reason)
     // label either - the state label describes the selection, and a refused
     // click is exactly the click that left the selection alone.
     if (reason.isEmpty()) return;
+    // Remembered, because taking it back down again has to be surgical: the
+    // status bar is a shared line and this window must only ever clear its
+    // OWN sentence off it. See onPickRefusalWithdrawn().
+    myPaintedPickRefusal = reason;
     statusBar()->showMessage(reason);
+}
+
+void MainWindow::onPickRefusalWithdrawn()
+{
+    // The pick that answered the refusal has landed, so the sentence comes
+    // down. It is not enough for the viewport to forget it: showMessage()
+    // with no timeout is PERMANENT, and myStateLabel is a permanent widget
+    // sitting beside it - so a stale refusal and a fresh state label are
+    // legible at the same time, which is how "2 bodies selected" ended up
+    // beside "Shift adds bodies to this selection - double-click a body to
+    // add it". The bar was instructing the user to do the thing they had
+    // just successfully done.
+    //
+    // Compared against what is actually showing rather than cleared blind:
+    // anything else may have written the bar since, and this window has no
+    // business erasing a message it did not put there.
+    if (myPaintedPickRefusal.isEmpty()) return;
+    if (statusBar()->currentMessage() == myPaintedPickRefusal) statusBar()->clearMessage();
+    myPaintedPickRefusal.clear();
 }
 
 bool MainWindow::canChangeSketchPlane()
@@ -5585,12 +5617,30 @@ bool MainWindow::mirrorPlacementEnvironmentOk() const
     // the gesture on the handoff itself, with no second mechanism to keep in
     // step.
     if (myShowingInitScreen || isCompareOpen()) return false;
-    // WHOLE BODIES selected, explicitly - selectedSolidIds() reports the
-    // owning body of a selected face or edge too, so without this the gesture
-    // could stand next to a face selection and collide with the pull arrow's
-    // own drag. The same selection-content term transformableBodyId()
-    // carries, for the same reason.
-    return myView->selectionKind() == OcctViewWidget::PickKind::Body;
+    // AND NO SELECTION TERM, deliberately - this predicate guards BEGINNING a
+    // placement and SURVIVING one, and the selection only decides the first.
+    //
+    // It carried "body selection mode" before the auto-selection switch and
+    // was re-keyed to selectionKind() == Body with it, which quietly turned a
+    // deliberate act into an accident: under the old modes a press that missed
+    // the plane handle fell through to an ordinary pick that changed the
+    // selection but never the MODE, so a live placement survived it. Under
+    // auto that same missed press picks a face, an edge or empty space, all
+    // three of which fail a Body term - so refreshMirrorPlacement()'s
+    // self-cancel destroyed the gesture on one stray click, silently, with no
+    // toast, on the one gesture with a recorded history of the user not being
+    // able to make it work.
+    //
+    // Moving the term to canBeginMirrorPlacement() is the honest fix rather
+    // than a workaround, because a changed selection genuinely does not
+    // invalidate a running placement: beginMirrorPlacement() captured the ids
+    // it will pair and never re-reads them. What DOES invalidate one is above -
+    // a sketch starting, an outline waiting, render mode, the handoff to the
+    // library, a compare session - and those all still cancel it. Belt and
+    // braces beside this: OcctViewWidget suspends ordinary picking outright
+    // while a placement is live, so in the shipped app the selection cannot
+    // change under one in the first place.
+    return true;
 }
 
 bool MainWindow::canBeginMirrorPlacement() const
@@ -5599,6 +5649,14 @@ bool MainWindow::canBeginMirrorPlacement() const
     // A gesture already running cannot be begun a second time on top of
     // itself.
     if (myView->mirrorPlacementActive()) return false;
+    // WHOLE BODIES selected, explicitly - selectedSolidIds() reports the
+    // owning body of a selected face or edge too, so without this the gesture
+    // could be begun beside a face selection and collide with the pull arrow's
+    // own drag. The same selection-content term transformableBodyId() carries,
+    // for the same reason. It lives HERE rather than in the environment
+    // predicate because it is a condition on starting, not on continuing - see
+    // there.
+    if (myView->selectionKind() != OcctViewWidget::PickKind::Body) return false;
     return !myView->selectedSolidIds().empty();
 }
 
@@ -6136,8 +6194,30 @@ void MainWindow::onSelectionChanged()
     //
     // The event is "a face or an edge was picked", which is what the hint
     // actually teaches - not "a mode was entered", which no longer exists.
+    //
+    // GATED ON hasLearned(), and that gate is not an optimisation, it is what
+    // makes this recording legal on this path at all. recordProgress() is
+    // WRITE-THROUGH - it constructs a QSettings and serializes the whole
+    // progress blob every single time (see its own definition, and the
+    // contrast persistAppearance() draws against it) - and its predecessor
+    // faceMode.used fired a handful of times a session, once per press of a
+    // mode button. This fires on every sub-shape pick, which is the gesture
+    // this branch made universal: without the gate it is one registry write
+    // per click, forever, on the app's hottest interaction. That is the same
+    // class of mistake as an overlay paintEvent decoding an asset - cheap-
+    // looking work moved onto a per-gesture path - and CLAUDE.md already has
+    // that rule for a reason.
+    //
+    // UserProgress's own semantics do the job with nothing new: three
+    // completions is learned (kLearnedThreshold), and a learned event's count
+    // never has to move again - HintBalloon's predicate for this hint is
+    // count == 0 and its retirement is hasLearned(), so every write past the
+    // third changes no answer anybody asks. At most three writes per fresh
+    // install, then none.
     const OcctViewWidget::PickKind kind = myView->selectionKind();
-    if (kind == OcctViewWidget::PickKind::Face || kind == OcctViewWidget::PickKind::Edge)
+    if ((kind == OcctViewWidget::PickKind::Face ||
+         kind == OcctViewWidget::PickKind::Edge) &&
+        !myProgress.hasLearned("subPick.used"))
         recordProgress("subPick.used");
 
     updateActions();

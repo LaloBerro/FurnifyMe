@@ -350,7 +350,13 @@ UI; never continue past `ok == false`.
 
 `UserProgress` (`src/UserProgress.h`, Qt-free) counts what the user has actually done.
 Three completions of an action means it is learned, and that action's hint never appears
-again. **Storage is injected, not built in:** `MainWindow` persists `serialize()` through
+again. **`recordProgress()` is WRITE-THROUGH** — it builds a `QSettings` and serializes the
+whole blob every call — so an event recorded on a per-gesture path must be gated on
+`hasLearned()` first. `subPick.used` (a face or an edge picked, the auto-pick hint's own
+event) is: without the gate it was one registry write per click, forever, on the app's
+hottest interaction, and every write past the third changes no answer anybody asks. Same
+class of mistake as an overlay `paintEvent` decoding an asset — cheap-looking work moved onto
+a per-gesture path. **Storage is injected, not built in:** `MainWindow` persists `serialize()` through
 `QSettings`, while `gui_smoke` constructs `MainWindow(nullptr, false)` and never touches
 the real store. A suite whose result depended on how often the developer had run the app
 would not be a suite. The one place the suite does exercise persistence — the
@@ -1070,6 +1076,22 @@ first** and hides the source second, so at least one window is always visible; a
 mere `hide()` and a posted `QEvent::Quit` cannot be taken back later in the same call
 stack. Closing the selector is the one honest quit gesture in this model.
 
+**A live Mirror placement owns every left gesture in the viewport.** Auto's switch re-keyed
+`mirrorPlacementEnvironmentOk()` from "body selection mode" to `selectionKind() == Body`, and
+that quietly turned a deliberate act into an accident: under the old modes a press that missed
+the plane handle changed the selection but never the MODE, so `refreshMirrorPlacement()`'s
+self-cancel left a live placement alone; under auto the same press picks a face, an edge or
+empty space, all three of which fail a Body term, and one stray click destroyed the gesture
+silently. Two things fix it, and both are rulings rather than workarounds. The selection term
+moved to `canBeginMirrorPlacement()`, because a changed selection genuinely does not
+invalidate a running placement — `beginMirrorPlacement()` captured the ids it will pair and
+never re-reads them — while what DOES invalidate one (a sketch starting, an outline waiting,
+render mode, the handoff to the library, a compare pane) all still cancels it. And
+`OcctViewWidget` suspends ordinary picking outright while a placement is live: the plane
+handle owns its clicks, every other left press/release/double-click is swallowed, and RMB
+orbit and MMB pan pass through untouched so framing the plane still works. It is the mouse
+half of a claim the gesture already made on Enter, Escape and X/Y/Z.
+
 **Mirror is a placed plane, not a toggle.** `S` begins a gesture: a plane with a draggable
 handle, `X`/`Y`/`Z` to aim, Enter to commit, Escape to back out — one application-wide key
 claim, disjoint from the other three by construction. The plane spawns **tangent** to the
@@ -1728,12 +1750,36 @@ of pixels of one another by construction, so inflating all of them by 12 device 
 them: hovering out along the Z arm armed the rotation ring about Y at every step, and walking
 out along X found the translation plane and then the ring, never the arrow and never the
 cube. `applySelectionTolerance()` therefore uses the classic default whenever `myManipulator`
-is non-null — which is exactly when a whole BODY is selected, and so exactly when the next
-gesture is the gizmo rather than a sub-shape — and `attachManipulator()`/`detachManipulator()`
-call it. The cost is named rather than hidden: while a body is selected an edge has to be
-hovered nearer to win, because it must reach OCCT's candidate list on the default sensitivity
-alone. The 8 px promise is a ceiling, not a floor, and "the highlight is the contract" holds
-either way, because hover and click still arbitrate identically.
+is non-null — which is *narrower* than "a whole body is selected": `attachManipulator()` also
+requires exactly one body, no sketch, no pending outline, no render mode and no live mirror
+placement, so two selected bodies keep the full tolerance. It is applied from
+`initializeViewer()` and from `attachManipulator()`/`detachManipulator()`, and re-derived by
+`resizeGL()`. **The cost is a measured number, not a shrug:** `gui_smoke` sweeps
+the cursor out from a real edge one logical pixel at a time in **both** states and prints both
+tables — cleared, the edge holds the hover to **7 px** and the face takes it at 8; with the
+gizmo up it holds to **2 px** and the face takes it at 3, which is what Phase 1's own 0.75×
+candidate radius predicts once the custom tolerance is gone. So while the transform gizmo is
+up an edge has to be hovered very nearly dead-on, and that is the state the headline gesture
+(double-click a body) leaves the user in most of the time. The stand-down sweep carries the
+gizmo on a SECOND body deliberately: selecting the edge's own body puts the manipulator over
+the sweep line and every pixel answers `Body`, which says a great deal about the gizmo's reach
+and nothing about the tolerance. The 8 px promise is a ceiling, not
+a floor, and "the highlight is the contract" holds either way, because hover and click still
+arbitrate identically.
+
+**A refusal a double-click makes moot is WITHDRAWN, not left standing.** Qt delivers a
+double-click as press/release/DblClick/release, so a Shift+double-click's own FIRST release
+runs an ordinary additive pick with bodies already held — which in auto always lands on a face
+or an edge, because mode 0 is not activated. The kind lock correctly refuses it and correctly
+says why, half a beat before the DblClick adds the body the sentence was explaining how to
+add. `showMessage()` with no timeout is permanent and `myStateLabel` beside it is a permanent
+widget, so the two were legible at once: *"2 bodies selected"* next to *"Shift adds bodies to
+this selection — double-click a body to add it"*, the bar instructing the user to do the thing
+they had just done. A release cannot know a double-click is coming, so
+`autoPickRefusalWithdrawn()` takes it back — emitted wherever a landed pick clears a standing
+refusal, and emitted BEFORE `selectionChanged()` so the ordinary message is the last word.
+`MainWindow` only ever clears the sentence IT painted, compared against what the bar is
+actually showing.
 
 **Shift is kind-locked, and the lock is DERIVED.** `selectionKind()` reads the live selection
 rather than remembering the first pick, so undo, delete, a mode switch and
@@ -1769,12 +1815,17 @@ to be implicit (`selectedFace()` was null outside face mode), and with no modes 
 inference is gone.
 
 **Two press-swallowing hazards this re-key opened, both closed:**
-- **A double-click on a face must still take the body.** In auto a plain click on the middle
-  of a face raises the pull arrow AT THAT FACE'S CENTRE, which is exactly where the second
-  click of a double-click aimed at the body lands — so `arrowHit()` swallowed it and every
-  such gesture was a no-op. The guard stands down in auto: an arrow has no CLICK meaning at
-  all (it is press-drag-release), and the gesture's own first press/release pair has already
-  offered it that gesture and been answered.
+- **A PLAIN double-click on a face must still take the body.** In auto a plain click on the
+  middle of a face raises the pull arrow AT THAT FACE'S CENTRE, which is exactly where the
+  second click of a double-click aimed at the body lands — so `arrowHit()` swallowed it and
+  every such gesture was a no-op. The guard stands down in auto: an arrow has no CLICK meaning
+  at all (it is press-drag-release), and the gesture's own first press/release pair has
+  already offered it that gesture and been answered. **The stand-down is for the PLAIN
+  gesture only** — the fix wave found that a blanket exemption let a *Ctrl*+double-click on a
+  live bevel arrow fall past the lock branch (which needs a detected FACE and finds an edge)
+  and take the whole body out from under the arrow, which is the precise harm the exemption's
+  own comment names. Ctrl means "lock this face" and nothing else; if the detection is not a
+  face it means nothing at all, so it keeps the pre-phase guard in auto as in the seam modes.
 - **A Shift+double-click over a gizmo arm must still add the body underneath.**
   `AIS_ManipulatorOwner` outranks a shape's owner, so the double-click returned on
   `detectedIsManipulator()` and added nothing. `mouseDoubleClickEvent()` now `Deactivate()`s

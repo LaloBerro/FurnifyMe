@@ -577,6 +577,14 @@ void OcctViewWidget::initializeViewer()
     // installed version does in fact start at; this is what actually gets
     // restored.
     myDefaultPixelTolerance = myContext->MainSelector()->CustomPixelTolerance();
+    // ...and the tolerance auto wants is applied HERE, on the context that
+    // has just been built, rather than being left to arrive as a side effect
+    // of the first resizeGL(). Benign either way in practice - Qt always
+    // resizes before the first paint - but auto is the constructed default
+    // now, so the raise belongs where the viewer comes up in it rather than
+    // in the one other place that happens to re-derive it. Safe here: it only
+    // reads mySelectionMode and myManipulator (null) and writes the selector.
+    applySelectionTolerance();
     // Nothing below this line touches a window or a GL context, and that is
     // the point: this function is reached from every entry point that displays
     // something, including ones that run long before the widget is first shown
@@ -2537,14 +2545,29 @@ void OcctViewWidget::applySelectionTolerance()
     // along the Z arm armed the rotation ring about Y at every step of the
     // way, and walking out along X found the translation PLANE and then the
     // ring, never the arrow and never the cube. A gizmo whose arms cannot be
-    // aimed at is worse than an edge tolerance one pixel short.
+    // aimed at is worse than a shorter edge reach.
     //
     // So the raise is suspended for exactly as long as a manipulator is
-    // attached - which is exactly when a WHOLE BODY is selected, and so
-    // exactly when the user's next gesture is the gizmo rather than a
-    // sub-shape. What it costs is real and worth naming: while a body is
-    // selected, an edge has to be hovered nearer to win, because it has to
-    // reach OCCT's candidate list on the default sensitivity alone.
+    // ATTACHED. That is not the same as "a body is selected" and the
+    // difference is worth stating rather than glossing: attachManipulator()
+    // additionally requires exactly ONE body, no sketch in progress, no
+    // pending outline, no render mode and no live mirror placement - so two
+    // selected bodies, or one selected while an outline waits, keep the full
+    // tolerance. The stand-down is narrower than "a body is selected", which
+    // is the safe direction.
+    //
+    // WHAT IT COSTS, AS A MEASURED NUMBER RATHER THAN A SHRUG. gui_smoke
+    // sweeps the cursor out from a real edge one logical pixel at a time in
+    // BOTH states and prints both tables. Cleared, the edge holds the hover to
+    // 7 px and the face takes it at 8. With the gizmo up it holds to 2 px and
+    // the face takes it at 3 - which is what Phase 1's own 0.75x candidate
+    // radius predicts once the custom tolerance is gone. So while the
+    // transform gizmo is up an edge has to be hovered very nearly dead-on to
+    // win, not merely nearer, and that is the state the headline gesture
+    // (double-click a body) leaves the user in most of the time. Both numbers
+    // are pinned, so a stand-down that quietly stopped standing down - or one
+    // that took the edge away entirely - fails rather than drifts.
+    //
     // preferDetectedEdge()'s own kAutoEdgeTolerancePx promise is unchanged -
     // it is a ceiling, not a floor - and "the highlight is the contract"
     // holds either way, because hover and click still arbitrate identically.
@@ -5426,13 +5449,23 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
     // The pull arrow owns LEFT drags that start on it, and nothing else -
     // RMB orbit and MMB pan pass straight through above, so grabbing the
     // arrow never costs the user the camera.
-    // Ctrl in FACE mode is the lock gesture and is not a grab, scoped exactly as
+    // Ctrl is the lock gesture and is not a grab, scoped exactly as
     // mouseDoubleClickEvent() scopes the same exemption. Without it the lock's
     // first press armed a pull drag on the way past: the release ended a drag
     // that had moved nothing, which fell through to an ordinary pick and
-    // deselected the very face the gesture was aimed at. The exemption names
-    // face mode rather than the modifier alone, so the bevel arrow one branch
-    // down - where Ctrl means nothing - keeps its guard whole.
+    // deselected the very face the gesture was aimed at.
+    //
+    // THE EXEMPTION IS THE PULL ARROW'S ALONE, and it is scoped by WHERE it is
+    // written rather than by what it names. It used to be scoped by naming
+    // face mode, so that the bevel arrow one branch down - where Ctrl means
+    // nothing - kept its guard whole; with the modes gone that reason no
+    // longer parses, and `lockGesture` is now true for Ctrl in auto whatever
+    // is under the cursor. What keeps the bevel branch whole is that it does
+    // not consult `lockGesture` at all: it is guarded on Shift only, so a
+    // Ctrl press on a bevel arrow still claims the bevel drag exactly as it
+    // always did. mouseDoubleClickEvent() carries the matching guard for the
+    // double-click half - see its own comment on why Ctrl keeps the arrow
+    // guard there while a plain double-click gives it up.
     const bool lockGesture = (event->modifiers() & Qt::ControlModifier) &&
                              (mySelectionMode == SelectionMode::Face ||
                               mySelectionMode == SelectionMode::Auto);
@@ -5453,11 +5486,11 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
 
     // The mirror-placement handle, on the same terms as the two arrows below
     // it - including claiming the gesture at an angle the maths refuses.
-    // Checked ahead of them rather than after: a mirror gesture requires body
-    // selection mode, which the pull and bevel arrows are never shown in
-    // (face mode, edge mode respectively), so the ordering is not
-    // load-bearing either, but this keeps the three "grab a screen-space
-    // handle" branches together.
+    // Checked ahead of them rather than after: a mirror gesture needs whole
+    // BODIES selected to begin, and neither arrow is ever up over a body
+    // selection (the pull arrow needs one face, the bevel arrow needs edges),
+    // so the ordering is not load-bearing either - but this keeps the three
+    // "grab a screen-space handle" branches together.
     if (event->button() == Qt::LeftButton && !mySketchMode && myMirrorPlacement.active &&
         mirrorHandleHit(myLastPos)) {
         beginAxisDrag(myMirrorDrag, mirrorPlacementAxisLine(), myLastPos);
@@ -5465,10 +5498,32 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
         return;
     }
 
+    // A LIVE PLACEMENT OWNS EVERY LEFT PRESS IN THE VIEWPORT, and the handle
+    // above is the only thing that does anything with one. The gesture is
+    // already modal in its keys - it holds Enter, Escape and X/Y/Z
+    // application-wide - and this is the mouse half of the same claim.
+    //
+    // It exists because the auto-selection switch turned a harmless miss into
+    // a destroyed gesture. Under the old modes a press that missed the handle
+    // fell through to an ordinary pick, which changed the selection but never
+    // the MODE, so mirrorPlacementEnvironmentOk() still held and the placement
+    // survived. Under auto that same press picks a face, an edge or empty
+    // space, and a Body term in that predicate turned every one of them into a
+    // silent self-cancel. The term moved to canBeginMirrorPlacement() where it
+    // belongs (see MainWindow), and this makes the point moot in the shipped
+    // app as well: while a placement is live nothing can change the selection,
+    // so nothing can change what the gesture is about to pair.
+    //
+    // RMB orbit and MMB pan returned above, so framing the plane still works -
+    // exactly the freedom render mode's own press guard leaves intact.
+    if (event->button() == Qt::LeftButton && !mySketchMode && myMirrorPlacement.active)
+        return;
+
     // The bevel arrow, on exactly the same terms - including claiming the
     // gesture at an angle the maths refuses. The two arrows are never up at
-    // once (face mode against edge mode), so the order of these two blocks is
-    // not load-bearing.
+    // once - selectionKind() answers Face for one and Edge for the other, and
+    // a selection holds one kind at a time - so the order of these two blocks
+    // is not load-bearing.
     //
     // Shift is excluded, and that exclusion is the arrow's half of multi-edge
     // selection. arrowHit() is a 14 px SCREEN-SPACE test, so the arrow does
@@ -5567,6 +5622,15 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
     }
 
     if (event->button() != Qt::LeftButton || myContext.IsNull()) return;
+
+    // The other half of the press guard above: a live placement suspends
+    // ordinary picking outright, so a left release changes neither the
+    // selection nor the gesture. Both halves are needed - the press claim
+    // stops a manipulator mode arming and the release claim stops the pick -
+    // and it is the same "the gesture that started owns the release that ends
+    // it" rule every drag in this file already keeps, widened from one drag to
+    // one modal gesture.
+    if (myMirrorPlacement.active) return;
 
     // The release that trails an Auto double-click belongs to that gesture -
     // see mouseDoubleClickEvent()'s Auto branch. Consumed here, once, so a
@@ -5678,8 +5742,12 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
         myContext->SelectDetected(additive ? AIS_SelectionScheme_XOR
                                            : AIS_SelectionScheme_Replace);
         // A pick that landed answers whatever the last refusal was asking
-        // about, so the sentence goes with it.
-        myAutoRefusal.clear();
+        // about, so the sentence goes with it - off the member AND off
+        // whatever is painting it. See autoPickRefusalWithdrawn().
+        if (!myAutoRefusal.isEmpty()) {
+            myAutoRefusal.clear();
+            emit autoPickRefusalWithdrawn();
+        }
         // "The edge you picked last" - remembered here because it cannot be
         // read back out of the selection afterwards (see lastSelectedEdge()).
         // A click on nothing clears it, so the arrow cannot linger on an edge
@@ -5847,6 +5915,12 @@ void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
 {
     if (event->button() != Qt::LeftButton || mySketchMode || myContext.IsNull() || myViewerOnly)
         return;
+    // A live mirror placement owns every left gesture in the viewport - see
+    // the press handler for why, and why the handle is the only exception.
+    // Taking a whole body here would change what the placement is about to
+    // pair, which is the one thing a running gesture must not let a stray
+    // click do.
+    if (myMirrorPlacement.active) return;
 
     const QPoint pos = event->position().toPoint();
     const bool onArrow = arrowHit(myPullArrow, pos) || arrowHit(myBevelArrow, pos);
@@ -5952,14 +6026,23 @@ void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
         return;
     }
 
-    // Past the one exempt branch, an arrow hit is an arrow hit again - in the
-    // classic seam modes. A Ctrl+double-click that got this far is one whose
-    // detection was not a face after all - a body, an edge, the ground - and
-    // there is no reason the modifier should buy it the whole-body route the
-    // guard would refuse to an unmodified click on the same pixel. Auto is
-    // exempt for the reason spelled out at the guard above: the arrow has no
-    // click meaning there, and the body pick is what a double-click is.
-    if (onArrow && mySelectionMode != SelectionMode::Auto) return;
+    // Past the one exempt branch, an arrow hit is an arrow hit again. A
+    // Ctrl+double-click that got this far is one whose detection was not a
+    // face after all - a body, an edge, the ground - and there is no reason
+    // the modifier should buy it the whole-body route the guard would refuse
+    // to an unmodified click on the same pixel.
+    //
+    // AUTO IS EXEMPT ONLY WITHOUT CTRL, and the difference is the whole point
+    // of the two clauses. A PLAIN double-click means "the whole body" and has
+    // to reach it through an arrow the first click of that same gesture put
+    // under the cursor - that is the guard stand-down the comment above
+    // argues for. A CTRL double-click means "lock this face", nothing else,
+    // and if the detection was not a face it means nothing at all; letting it
+    // fall through here is exactly the harm the exemption's own comment names,
+    // because it takes the whole body out from under a live bevel arrow the
+    // user is standing on. Ctrl keeps the pre-phase guard, in auto as in the
+    // seam modes.
+    if (onArrow && (lockGesture || mySelectionMode != SelectionMode::Auto)) return;
 
     // In Auto the whole-body pick is performed HERE. There is no selection
     // mode to come back out to and nothing to announce: this is the gesture,
@@ -5998,7 +6081,17 @@ void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
         // every drag in this file already keeps: the gesture that started
         // owns the release that ends it.
         myAutoBodyPickTaken = true;
-        myAutoRefusal.clear();
+        // THE WITHDRAWAL, and this is the site it exists for. This gesture's
+        // OWN first release ran an ordinary additive pick with bodies held,
+        // landed on a face or an edge (mode 0 is not activated in auto), and
+        // the kind lock correctly refused it and said why - a sentence this
+        // branch has just made false by adding the body the sentence was
+        // telling the user how to add. Emitted BEFORE selectionChanged(), so
+        // the ordinary "2 bodies selected" message is the last word.
+        if (!myAutoRefusal.isEmpty()) {
+            myAutoRefusal.clear();
+            emit autoPickRefusalWithdrawn();
+        }
         myLastPickedEdge.Nullify();   // a body pick is not an edge pick
         updateEdgeDimension();
         scheduleRedraw();

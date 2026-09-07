@@ -535,7 +535,29 @@ void skipByEnvironment(int checks, const QString& why)
 //   +1  the same for plain Duplicate
 //   +2  a face picked mid-gesture self-cancels a mirror placement
 //   -1  the hover block no longer looks up an edge-mode action
-constexpr int kCheckFloor = 3354;
+//
+// The whole-branch review's FIX WAVE raises it again, 3354 -> 3372, matched
+// against a real full run. +18:
+//
+//   +6  the Mirror stray-click probe replaces the mid-life self-cancel one it
+//       had (7 checks -> 13): a second body and two target pixels all CONFIRMED
+//       before the gesture starts (a live placement suspends picking, which is
+//       the thing under test, so a pixel verified while one is up would be
+//       verified by the mechanism being tested), then empty space, another
+//       body and a double-click each leaving the gesture and the selection
+//       untouched, Escape still ending it, and the probe's own body taken back
+//   +2  Ctrl+double-click on a live bevel arrow: the arrow is proved to claim
+//       that pixel, and the body is proved NOT to be taken - the half the old
+//       comment claimed was asserted and was not
+//   +2  a successful Shift+double-click leaves no refusal standing, on the
+//       viewport AND in the status bar - the painted half a cleared member
+//       cannot answer for
+//   +8  the tolerance stand-down measured rather than described: a gizmo
+//       carrier body, the manipulator up, the selector confirmed back at its
+//       own default, the start pixel confirmed still hovering as the edge, the
+//       sweep's own reach pinned on both sides against the cleared one, the
+//       carrier taken back, and the full tolerance confirmed restored
+constexpr int kCheckFloor = 3372;
 
 void check(bool condition, const QString& what)
 {
@@ -16949,9 +16971,50 @@ int main(int argc, char* argv[])
                     check(secondOwner > 0,
                           "Shift+double-click adds a second whole body to a body "
                           "selection, which is how bodies accumulate now");
+                    // "NOT A MIXTURE" MEANS WHAT IT SAYS, and selectionKind()
+                    // alone cannot prove it: that function is first-entry-wins
+                    // (see its own header), so it would answer Body for a
+                    // selection whose first entry happens to be a body and
+                    // whose second is a face. Asking the two sub-shape
+                    // accessors directly is what makes the sentence true - a
+                    // selection holding no face and no edge is holding bodies
+                    // and nothing else.
                     check(secondOwner == 0 ||
-                              view->selectionKind() == OcctViewWidget::PickKind::Body,
-                          "and the selection is still holding bodies, not a mixture");
+                              (view->selectionKind() == OcctViewWidget::PickKind::Body &&
+                               view->selectedFace().IsNull() &&
+                               view->selectedEdges().empty()),
+                          "and the selection is still holding bodies and nothing else - "
+                          "no face and no edge rode along with them");
+
+                    // --- SUCCESS SAYS NOTHING SCOLDING -------------------
+                    //
+                    // Qt delivers a double-click as press/release/DblClick/
+                    // release, so this gesture's OWN first release ran an
+                    // ordinary additive pick with bodies already held - which
+                    // in auto always lands on a face or an edge, because mode
+                    // 0 is not activated. The kind lock correctly refused it
+                    // and correctly said why, half a beat before the DblClick
+                    // added the body the sentence was explaining how to add.
+                    // showMessage() with no timeout is permanent and the state
+                    // label beside it is a permanent widget, so the two were
+                    // legible at once: "2 bodies selected" next to "Shift adds
+                    // bodies to this selection - double-click a body to add
+                    // it". The bar was instructing the user to do the thing
+                    // they had just done. Withdrawn now - see
+                    // OcctViewWidget::autoPickRefusalWithdrawn().
+                    check(secondOwner == 0 ||
+                              view->autoPickRefusalText().isEmpty(),
+                          "a successful Shift+double-click leaves no refusal standing on "
+                          "the viewport");
+                    check(secondOwner == 0 || window.statusBar() == nullptr ||
+                              !window.statusBar()->currentMessage().contains(
+                                  QStringLiteral("Shift adds")),
+                          QStringLiteral("...and none in the status bar either, which is "
+                                         "the half a cleared member cannot answer for "
+                                         "(\"%1\")")
+                              .arg(window.statusBar()
+                                       ? window.statusBar()->currentMessage()
+                                       : QString()));
 
                     // --- the kind lock refuses the mixture -----------------
                     //
@@ -16999,13 +17062,20 @@ int main(int argc, char* argv[])
                         settle(150);
                     }
 
-                    // --- Ctrl on an EDGE locks nothing ---------------------
+                    // --- Ctrl on an EDGE takes nothing and locks nothing ---
                     //
                     // The exemption is the LOCK's, not Ctrl's. It used to be
-                    // provable by watching the selection MODE fail to change;
-                    // with no modes left, what it must not do is take the
-                    // whole body out from under a live bevel arrow OR lock
-                    // anything, and both are asserted directly.
+                    // provable by watching the selection MODE fail to change,
+                    // and when that assertion was dropped in the switch the
+                    // half it stood for stopped holding: Ctrl set lockGesture,
+                    // the lock branch found an edge rather than a face and
+                    // skipped, and the auto exemption then let the gesture
+                    // through to the whole-body route - taking the body out
+                    // from under a live bevel arrow, which is the precise harm
+                    // the exemption's own comment names. The guard is back for
+                    // Ctrl (a PLAIN double-click still gives it up, which is
+                    // the sibling probe above), and BOTH halves are asserted
+                    // here rather than one of them merely claimed.
                     view->setSelectedSolids({});
                     settle(150);
                     QPoint edgeAt;
@@ -17017,11 +17087,22 @@ int main(int argc, char* argv[])
                         check(view->hasBevelArrow(),
                               "and selecting it raises the bevel arrow the guard "
                               "protects");
+                        // Non-vacuity, the step its sibling probe above was
+                        // strengthened with: if the arrow does not claim this
+                        // pixel there is no guard being tested at all.
+                        check(view->bevelArrowClaimsPoint(edgeAt),
+                              "and the arrow's own screen-space hit test claims that "
+                              "pixel, so the guard is genuinely in the way");
+                        const std::vector<TopoDS_Edge> heldEdges = view->selectedEdges();
                         doubleClickAt(view, QPointF(edgeAt), Qt::ControlModifier);
                         settle(200);
+                        check(view->selectionKind() == OcctViewWidget::PickKind::Edge &&
+                                  view->selectedEdges().size() == heldEdges.size() &&
+                                  view->hasBevelArrow(),
+                              "Ctrl+double-clicking on a live bevel arrow takes NO body - "
+                              "the edge is still selected and the arrow is still up");
                         check(!window.isFaceLocked(),
-                              "Ctrl+double-clicking on a live bevel arrow locks nothing, "
-                              "there being no face in it");
+                              "and it locks nothing either, there being no face in it");
                     }
                     view->setSelectedSolids({});
                     settle(120);
@@ -20560,39 +20641,200 @@ int main(int argc, char* argv[])
         check(activeClaimCount() == 0, "no application-wide key claim after Escape");
 
         // --- Fix round 1, Finding 1: disjointness has to hold for the
-        // gesture's WHOLE LIFETIME, not just the press that began it. A
-        // selection change mid-gesture used to leave nothing standing between
-        // the mirror chip and PullArrow/BevelArrow rising alongside it -
-        // refreshMirrorPlacement() (MainWindow.cpp), the ExtrudePreview
-        // self-cancel discipline applied one gizmo over, is what closes it.
-        // It used to be provoked by switching selection mode; with auto
-        // selection what provokes it is picking a FACE, which is one click.
+        // gesture's WHOLE LIFETIME, not just the press that began it - the
+        // ExtrudePreview self-cancel discipline applied one gizmo over.
+        // refreshMirrorPlacement() (MainWindow.cpp) still ends a live gesture
+        // the instant its ENVIRONMENT stops holding; what it no longer does is
+        // end one because the SELECTION moved, and the checks below are both
+        // halves of that distinction.
+        //
+        // The auto-selection switch re-keyed mirrorPlacementEnvironmentOk()
+        // from "body selection mode" to selectionKind() == Body, and that
+        // quietly turned a deliberate act into an accident: under the old
+        // modes a press that missed the plane handle changed the selection but
+        // never the mode, so a live placement survived it; under auto the same
+        // press picks a face, an edge or empty space, all three of which fail
+        // a Body term. One stray click silently destroyed the gesture, with no
+        // toast, on the one gesture with a recorded history of the user not
+        // being able to make it work. The term moved to
+        // canBeginMirrorPlacement(), where it guards BEGINNING; and the
+        // viewport suspends ordinary picking outright while a placement is
+        // live, so the selection cannot move under one in the first place.
+        //
+        // BOTH TARGET PIXELS ARE FOUND BEFORE THE GESTURE STARTS, and they
+        // have to be: a live placement suspends ordinary picking, which is the
+        // very thing under test, so a pixel verified while one is up could
+        // only ever be verified by the mechanism being tested. Found here,
+        // with picking working, and re-used unchanged once it is not.
+        probe.view()->setSelectedSolids({});
+        settle(80);
+
+        // A SECOND BODY, because at this point in the block the document holds
+        // exactly one (measured - every twin and probe body earlier in this
+        // block has been taken back) and "a click on another body" cannot be
+        // aimed at a body that does not exist. Built here, deleted at the end,
+        // so the block still leaves the document as it found it.
+        const std::size_t bodiesBeforeStray = probe.document().solids().size();
+        const bool builtStrayHelper = buildBody(probe, 0.68, 0.10, 0.86, 0.28, 30.0);
+        check(builtStrayHelper &&
+                  probe.document().solids().size() == bodiesBeforeStray + 1,
+              "a second body is built for the stray-click probe, so \"click another "
+              "body\" has one to aim at");
+        const int strayHelperId = probe.document().solids().empty()
+                                      ? 0
+                                      : probe.document().solids().back().id;
+        probe.view()->setSelectedSolids({});
+
+        // FRAMED, and restored at the end. This block's earlier drag probes
+        // leave the camera wherever the last gesture put it, so "a pixel over
+        // that second body" is not something to hope for - Fit All makes it
+        // something to guarantee. The camera goes back once the stray-click
+        // probe is done, so nothing after this inherits the framing.
+        const CameraState strayCameraBefore = pView->camera().state();
+        pView->fitAll();
+        settle(250);
+
+        // A pixel with nothing behind it, derived from every body's projected
+        // bounding box rather than guessed, and CONFIRMED by clicking it.
+        QRect occupied;
+        for (const DocumentModel::Solid& solid : probe.document().solids()) {
+            Bnd_Box box;
+            BRepBndLib::Add(solid.shape, box);
+            Standard_Real bx0, by0, bz0, bx1, by1, bz1;
+            box.Get(bx0, by0, bz0, bx1, by1, bz1);
+            const gp_Pnt corners[8] = {
+                {bx0, by0, bz0}, {bx1, by0, bz0}, {bx0, by1, bz0}, {bx1, by1, bz0},
+                {bx0, by0, bz1}, {bx1, by0, bz1}, {bx0, by1, bz1}, {bx1, by1, bz1}};
+            for (const gp_Pnt& corner : corners) {
+                QPoint at;
+                if (pView->projectToScreen(corner, at))
+                    occupied = occupied.isNull() ? QRect(at, QSize(1, 1))
+                                                 : occupied.united(QRect(at, QSize(1, 1)));
+            }
+        }
+        occupied.adjust(-50, -50, 50, 50);
+        QPoint emptyAt;
+        bool haveEmptyAt = false;
+        for (int y = 30; y < pView->height() - 30 && !haveEmptyAt; y += 13) {
+            for (int x = 30; x < pView->width() - 30 && !haveEmptyAt; x += 13) {
+                if (occupied.contains(QPoint(x, y))) continue;
+                clickAt(pView, QPointF(x, y));
+                settle(80);
+                if (!pView->selectedSolidIds().empty()) continue;
+                emptyAt = QPoint(x, y);
+                haveEmptyAt = true;
+            }
+        }
+        check(haveEmptyAt,
+              "a pixel with nothing behind it is found and confirmed for the stray-click "
+              "probe");
+
+        // ...and a pixel over a body that is NOT the one the placement will be
+        // begun on, confirmed the same way: by clicking it and reading back
+        // which body the app selected.
+        QPoint otherAt;
+        bool haveOtherAt = false;
+        for (const DocumentModel::Solid& solid : probe.document().solids()) {
+            if (solid.id == bodyAId || haveOtherAt) continue;
+            // Every aim the body offers - its own centre, then each face's,
+            // then each edge's midpoint - because occlusion decides which of
+            // them the app actually picks and only the app can answer that.
+            std::vector<gp_Pnt> aims;
+            GProp_GProps volumeProps;
+            BRepGProp::VolumeProperties(solid.shape, volumeProps);
+            aims.push_back(volumeProps.CentreOfMass());
+            for (TopExp_Explorer it(solid.shape, TopAbs_FACE); it.More(); it.Next()) {
+                GProp_GProps faceProps;
+                BRepGProp::SurfaceProperties(it.Current(), faceProps);
+                aims.push_back(faceProps.CentreOfMass());
+            }
+            for (TopExp_Explorer it(solid.shape, TopAbs_EDGE); it.More(); it.Next()) {
+                GProp_GProps edgeProps;
+                BRepGProp::LinearProperties(it.Current(), edgeProps);
+                aims.push_back(edgeProps.CentreOfMass());
+            }
+            for (const gp_Pnt& aim : aims) {
+                QPoint at;
+                if (!pView->projectToScreen(aim, at)) continue;
+                if (!pView->rect().adjusted(12, 12, -12, -12).contains(at)) continue;
+                clickAt(pView, QPointF(at));
+                settle(80);
+                const std::vector<int> got = pView->selectedSolidIds();
+                if (std::find(got.begin(), got.end(), solid.id) == got.end()) continue;
+                otherAt = at;
+                haveOtherAt = true;
+                break;
+            }
+        }
+        check(haveOtherAt,
+              "and a pixel over a DIFFERENT body, confirmed by the app selecting that "
+              "body when it is clicked");
+
         probe.view()->setSelectedSolids({bodyAId});
         settle(80);
         trigger(probe, QStringLiteral("Mirror"));
-        check(pView->mirrorPlacementActive(), "re-begun on body A for the mode-switch probe");
+        check(pView->mirrorPlacementActive(), "re-begun on body A for the stray-click probe");
         check(activeClaimCount() == 1, "exactly one claim while the gesture is active");
 
         {
-            QPoint mirrorFaceAt;
-            TopoDS_Face mirrorFace;
-            check(pickFaceOf(probe, bodyAId, mirrorFaceAt, mirrorFace),
-                  "a face of body A can be picked mid-gesture");
-            settle(120);
-            check(pView->selectionKind() == OcctViewWidget::PickKind::Face,
-                  "so the selection is holding a face rather than a body");
+            const std::vector<int> idsBefore = pView->selectedSolidIds();
+            if (haveEmptyAt) {
+                clickAt(pView, QPointF(emptyAt));
+                settle(150);
+                check(pView->mirrorPlacementActive(),
+                      "a click on empty space mid-placement leaves the gesture standing - "
+                      "a miss is a miss, not a cancel");
+                check(pView->selectedSolidIds() == idsBefore,
+                      "...and changes the selection not at all, because a live placement "
+                      "suspends ordinary picking outright");
+            }
+            if (haveOtherAt) {
+                clickAt(pView, QPointF(otherAt));
+                settle(150);
+                check(pView->mirrorPlacementActive(),
+                      "a click on another body mid-placement leaves the gesture standing "
+                      "too - the pick that used to destroy it");
+                check(pView->selectedSolidIds() == idsBefore,
+                      "...with the selection the placement was begun on untouched");
+                check(activeClaimCount() == 1,
+                      "and still exactly one application-wide claim - no second gizmo "
+                      "joined it, because nothing about the selection moved");
+            }
+            // A double-click is swallowed on the same terms: taking a whole
+            // body would change what the placement is about to pair.
+            if (haveOtherAt) {
+                doubleClickAt(pView, QPointF(otherAt));
+                settle(150);
+                check(pView->mirrorPlacementActive() &&
+                          pView->selectedSolidIds() == idsBefore,
+                      "and a DOUBLE-click on another body mid-placement is swallowed too, "
+                      "gesture and selection both untouched");
+            }
+
+            // End it deliberately, so the probes after this one begin from no
+            // gesture at all - they used to inherit a placement the face pick
+            // had cancelled for them, and a gesture that now survives has to
+            // be put down by hand.
+            sendKeyTo(&probe, Qt::Key_Escape);
+            settle(150);
             check(!pView->mirrorPlacementActive(),
-                  "picking a face mid-gesture self-cancels it");
-            check(activeClaimCount() <= 1,
-                  "...so no second claim (PullArrow, on a face pick) can ever join it");
-            check(!probe.canBeginMirrorPlacement(),
-                  "canBeginMirrorPlacement() itself now reads false - the selection is "
-                  "not bodies, not merely \"already active\"");
+                  "...and Escape still ends it, on a gesture no stray click could");
         }
 
-        // Back to a whole-body selection, for everything that follows.
+        // The probe's own second body goes, the camera goes back where this
+        // probe found it, and body A is selected again - so everything after
+        // this starts from the state it was written against.
+        if (strayHelperId > 0) {
+            probe.view()->setSelectedSolids({strayHelperId});
+            settle(150);
+            trigger(probe, QStringLiteral("Delete Selected"));
+            settle(200);
+        }
+        check(probe.document().solids().size() == bodiesBeforeStray,
+              "and the stray-click probe takes its own second body away again");
+        pView->animateTo(strayCameraBefore);   // animations are off: immediate
         probe.view()->setSelectedSolids({bodyAId});
-        settle(80);
+        settle(200);
 
         // --- Fix round 1, Finding 3: S pressed again mid-gesture cancels
         // it, rather than reaching a "Select one or more bodies" refusal
@@ -25425,6 +25667,106 @@ int main(int argc, char* argv[])
                       .arg(tol + 2));
         }
 
+        // --- THE SAME SWEEP WITH THE TRANSFORM GIZMO UP -------------------
+        //
+        // The stand-down has a cost and until now it was a word ("nearer")
+        // rather than a number. OCCT's custom tolerance is a property of the
+        // SELECTOR and is added to every entity's sensitivity, AIS_Manipulator's
+        // parts included, so auto suspends the raise for as long as a
+        // manipulator is attached - otherwise the gizmo's arms, planes, rings
+        // and cubes merge into one another and none of them can be aimed at
+        // (measured: hovering out along the Z arm armed the rotation ring about
+        // Y at every step). What that costs the EDGE side is what this measures.
+        //
+        // The sweep above runs from a cleared selection, so it could never see
+        // this half at all: a regression on the stand-down side would have been
+        // invisible. Both tables are printed, and the check is a comparison
+        // between two measured numbers rather than a bound somebody chose.
+        //
+        // THE GIZMO STANDS ON A BODY OF ITS OWN, well away from the edge under
+        // test, and that is not convenience - it is the only way this measures
+        // what it claims to. Selecting the edge's OWN body puts the manipulator
+        // at that body's centre, and its arms and rings then answer every pixel
+        // of the sweep line with PickKind::Body: measured, the whole table read
+        // `0:E 1:B 2:B …`, which says a great deal about the gizmo's reach and
+        // nothing whatever about the tolerance. A second body carries the
+        // gizmo instead, so the stand-down is real and the sweep line is clear.
+        if (haveEdge) {
+            const std::size_t bodiesBeforeSweep = probe.document().solids().size();
+            const bool builtSweepBody =
+                buildBody(probe, 0.74, 0.10, 0.92, 0.26, 40.0);
+            check(builtSweepBody &&
+                      probe.document().solids().size() == bodiesBeforeSweep + 1,
+                  "a second body, off in a corner, is built to carry the gizmo for the "
+                  "stand-down sweep");
+            const int gizmoCarrier = probe.document().solids().empty()
+                                         ? 0
+                                         : probe.document().solids().back().id;
+            av->setSelectedSolids({gizmoCarrier});
+            settle(200);
+            check(av->hasManipulator(),
+                  "selecting it raises the transform gizmo, so the sweep below is "
+                  "measuring the state it is about");
+            check(av->selectionPixelTolerance() == OcctViewWidget::kNoCustomTolerance,
+                  QStringLiteral("and the selector really has handed the custom tolerance "
+                                 "back while it is up (%1)")
+                      .arg(av->selectionPixelTolerance()));
+
+            // Non-vacuity, and the exact thing the earlier attempt got wrong:
+            // the pixel the sweep starts from must still hover as the EDGE, not
+            // as a manipulator owner sitting on top of it.
+            moveTo(av, QPointF(edgeMid));
+            check(av->hoveredKind() == OcctViewWidget::PickKind::Edge,
+                  "the sweep's own start pixel still hovers as that edge, clear of the "
+                  "gizmo - so what follows measures the tolerance rather than the gizmo");
+
+            int heldLastEdgePx = -1;
+            int heldFirstFacePx = -1;
+            std::printf("      ...and with a body selected (gizmo up, tolerance stood "
+                        "down):\n      ");
+            for (int px = 0; px <= OcctViewWidget::kAutoEdgeTolerancePx + 8; ++px) {
+                moveTo(av, QPointF(edgeMid.x() + intoBody.x() * px,
+                                    edgeMid.y() + intoBody.y() * px));
+                const OcctViewWidget::PickKind kind = av->hoveredKind();
+                std::printf("%d:%s ", px,
+                            kind == OcctViewWidget::PickKind::Edge   ? "E"
+                            : kind == OcctViewWidget::PickKind::Face ? "F"
+                            : kind == OcctViewWidget::PickKind::Body ? "B"
+                                                                      : "-");
+                if (kind == OcctViewWidget::PickKind::Edge) heldLastEdgePx = px;
+                if (kind == OcctViewWidget::PickKind::Face && heldFirstFacePx < 0)
+                    heldFirstFacePx = px;
+            }
+            std::printf("\n");
+
+            // Phase 1 measured the candidate radius at about 0.75x the custom
+            // tolerance, so with no custom tolerance at all the edge should
+            // leave the candidate list within a pixel or two rather than at
+            // eight. Pinned as a real band on both sides: a stand-down that
+            // quietly stopped standing down would read 7 here and fail, and one
+            // that took the edge away entirely would read -1 and fail too.
+            check(heldLastEdgePx >= 0 && heldLastEdgePx <= 4,
+                  QStringLiteral("with the gizmo up the edge holds the hover only to %1 px "
+                                 "against %2 with the selection clear - the stand-down's "
+                                 "real cost, measured rather than described")
+                      .arg(heldLastEdgePx).arg(lastEdgePx));
+            check(heldLastEdgePx < lastEdgePx && heldFirstFacePx > heldLastEdgePx,
+                  QStringLiteral("...and it is strictly the shorter reach, with the face "
+                                 "taking over from %1 rather than %2")
+                      .arg(heldFirstFacePx).arg(firstFacePx));
+
+            // Leave the block's document exactly as this sweep found it.
+            trigger(probe, QStringLiteral("Delete Selected"));
+            settle(200);
+            check(probe.document().solids().size() == bodiesBeforeSweep,
+                  "and the sweep takes its own gizmo carrier away again");
+            av->clearSelection();
+            settle(150);
+            check(av->selectionPixelTolerance() != OcctViewWidget::kNoCustomTolerance,
+                  "and letting the body go puts the full candidate tolerance straight "
+                  "back - the stand-down lasts exactly as long as the gizmo does");
+        }
+
         // The middle of a face, found the same way - the face's own centre of
         // mass, projected. "Otherwise the face wins" is the other half of the
         // rule and it gets its own point rather than being read off the tail
@@ -25743,22 +26085,21 @@ int main(int argc, char* argv[])
                   QStringLiteral("...with its own sentence: \"%1\"").arg(faceRefusal));
 
             // The body kind, and the gesture that takes it. A double-click in
-            // auto must NOT hand the app back to body mode the way the classic
-            // route does - there is no mode to hand back to.
+            // auto performs the whole-body pick itself - there is no mode to
+            // hand the app back to, and nothing to announce.
             //
-            // Aimed at an EDGE, not at a face, and the reason is a real
-            // interaction rather than test convenience: a double-click's own
-            // FIRST click selects what is under it, and with a face selected
-            // MainWindow raises the pull arrow (canPullSelectedFace() reads
-            // selectedFace() and carries no mode term of its own, so it fires
-            // in auto exactly as it does in face mode). The arrow's tail
-            // stands at that face's centre, and arrowHit() swallows the
-            // second click before the viewport ever sees it - CLAUDE.md's
-            // screen-space-arrow rule, unchanged and doing its job. Nothing
-            // raises a gizmo on an edge in auto (bevelTarget() still requires
-            // edge mode), so the body gesture has a clear pixel to land on.
-            // Phase 2 re-keys those predicates and will have to answer this
-            // collision on the face too.
+            // Aimed at an EDGE rather than a face, and that is now a matter of
+            // this block's own subject rather than of dodging anything. A
+            // double-click's own first click selects what is under it, so on a
+            // face it raises the pull arrow and on an edge it raises the bevel
+            // arrow - both of them at the very pixel the second click is
+            // about to land on. Whether the double-click gets through an arrow
+            // standing in its way is the DOUBLE-CLICK block's question, and it
+            // is answered there, deliberately at the arrow's own tail; what
+            // this block is about is the kind lock, so it aims where the
+            // gesture is simplest to read. Both predicates key on selection
+            // CONTENT now - canPullSelectedFace() needs Face, bevelTarget()
+            // needs Edge - which is the re-key Phase 2 made, not a gap it left.
             doubleClickAt(av, QPointF(edgeA));
             check(av->selectionMode() == OcctViewWidget::SelectionMode::Auto,
                   "a double-click in auto leaves the viewport in auto");

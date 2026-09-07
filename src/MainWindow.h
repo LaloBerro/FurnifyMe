@@ -87,11 +87,18 @@ public:
     // logged, never shown: it is written for this file, not for the user.
     bool pullFaceBy(const TopoDS_Face& face, double distance);
 
-    // Exactly one flat face selected, no sketch in progress, no outline
+    // Exactly one flat face selected - selectionKind() == Face AND
+    // selectedFace() non-null - with no sketch in progress and no outline
     // waiting. THE predicate behind the pull arrow, and the same one
     // updateActions() uses for Lock to Face and updateStateLabel() uses for
     // its teaching text - one function, so the gizmo, the enabled state and
     // the label can never disagree about whether a pull is possible.
+    //
+    // THE SELECTION-CONTENT TERM IS EXPLICIT, and it did not used to be: the
+    // mode check was implicit, because selectedFace() answered null outside
+    // face-selection mode. The auto-selection spec's Phase 2 deleted the
+    // modes, so there is nothing left to infer from and the question has to
+    // be asked - see THE DISJOINTNESS ARGUMENT on transformableBodyId().
     //
     // It refuses while a face is pending, which is exactly when
     // ExtrudePreview can be open: the two panels' application-wide
@@ -100,15 +107,34 @@ public:
     bool canPullSelectedFace() const;
 
     // THE predicate behind the transform gizmo: the document id of the one
-    // body it should be standing on, or 0. Exactly one body selected, in body
-    // selection mode, with no sketch in progress and no outline waiting.
+    // body it should be standing on, or 0. Exactly one WHOLE BODY selected,
+    // with no sketch in progress and no outline waiting.
     //
-    // The mode check is what keeps the three gizmos mutually exclusive BY
-    // CONSTRUCTION rather than by three predicates that have to be kept in
-    // step: face pull needs face mode, bevels need edge mode, and this needs
-    // body mode, so no two of them can ever be true at once. The sketch and
-    // pending-face halves are canPullSelectedFace()'s, for the same reasons
-    // spelled out there.
+    // THE DISJOINTNESS ARGUMENT, and this is where the other two predicates
+    // send their readers. It used to be a MODE argument: face pull needed
+    // face mode, bevels needed edge mode, this needed body mode, and the user
+    // could only be in one. The auto-selection spec's Phase 2 deleted the
+    // modes, and the argument moved rather than weakened.
+    //
+    // It is now one enum's worth, asked in three places against three
+    // different values. OcctViewWidget::selectionKind() DERIVES exactly one of
+    // None/Body/Face/Edge from the live selection; canPullSelectedFace()
+    // requires Face, bevelTarget() requires Edge, and this requires Body. Three
+    // predicates asking one function for three mutually exclusive answers
+    // cannot both hold, by construction rather than by being kept in step.
+    //
+    // What makes that foundation as solid as the mode one was is KIND-LOCKED
+    // ACCUMULATION: a Shift-click of a kind the selection is not already
+    // holding does nothing at all, so a selection can never hold two kinds at
+    // once and the derived value is never a coin toss between them. The old
+    // foundation guaranteed one kind by making the user choose an activation
+    // mode; the new one guarantees it by making the SELECTION single-kinded.
+    // selectionKind() is first-entry-wins, so that invariant is load-bearing -
+    // its own header comment enumerates every route that maintains it.
+    //
+    // The sketch and pending-face halves are canPullSelectedFace()'s, for the
+    // same reasons spelled out there, and they are what keep all three
+    // disjoint from ExtrudePreview.
     int transformableBodyId() const;
     bool canTransformSelectedBody() const { return transformableBodyId() > 0; }
 
@@ -159,9 +185,9 @@ public:
     int bodyIdForEdge(const TopoDS_Edge& edge) const;
 
     // THE predicate behind the bevel arrow, and everything the gizmo needs to
-    // stand itself up: ONE OR MORE straight edges selected, in edge selection
-    // mode, each with two adjacent faces that define an outward bisector on
-    // its OWN body - and no sketch in progress and no outline waiting.
+    // stand itself up: ONE OR MORE straight edges selected - selectionKind()
+    // == Edge - each with two adjacent faces that define an outward bisector
+    // on its OWN body, and no sketch in progress and no outline waiting.
     //
     // Milestone 5's cross-body bevel widened this a second time, from "one or
     // more on one body" to "one or more, on any number of bodies" - a
@@ -174,10 +200,11 @@ public:
     // body happened to be picked first).
     //
     // One function, used to show the arrow, to hide it, and to write the
-    // status label, so the three can never disagree. The mode check is what
-    // keeps this exclusive with the face pull (face mode) and the transform
-    // gizmo (body mode); the sketch and pending-face halves are
-    // canPullSelectedFace()'s, and they are what keep it exclusive with
+    // status label, so the three can never disagree. The selection-content
+    // term is what keeps this exclusive with the face pull (which needs Face)
+    // and the transform gizmo (which needs Body) - see THE DISJOINTNESS
+    // ARGUMENT on transformableBodyId(); the sketch and pending-face halves
+    // are canPullSelectedFace()'s, and they are what keep it exclusive with
     // ExtrudePreview - and so keep the two application-wide Enter/Escape
     // claims from ever being installed at once.
     //
@@ -313,15 +340,15 @@ public:
     // idea ("S always means toggle symmetry off, or place a plane to turn it
     // on"). See onSymmetryActionTriggered() in the .cpp.
     //
-    // ONE OR MORE bodies selected, in body selection mode, no sketch in
-    // progress, no outline waiting, render mode off, and no gesture already
-    // active - the same three terms canPullSelectedFace() opens with, plus
-    // the mode check transformableBodyId() carries for the same reason:
-    // mutual exclusivity by construction with the pull arrow (face mode),
-    // the bevel arrow (edge mode) and ExtrudePreview (pending face), all
-    // BEFORE either widget has to ask about the other. The transform gizmo
-    // is the one exception that needs an explicit cross-check, since exactly
-    // one body in body mode satisfies both this and
+    // ONE OR MORE WHOLE BODIES selected, no sketch in progress, no outline
+    // waiting, render mode off, and no gesture already active - the same three
+    // terms canPullSelectedFace() opens with, plus the selection-content term
+    // transformableBodyId() carries for the same reason: mutual exclusivity by
+    // construction with the pull arrow (which needs Face),
+    // the bevel arrow (which needs Edge) and ExtrudePreview (pending face),
+    // all BEFORE either widget has to ask about the other. The transform
+    // gizmo is the one exception that needs an explicit cross-check, since
+    // exactly one whole body selected satisfies both this and
     // transformableBodyId() - see that function's own added term.
     bool canBeginMirrorPlacement() const;
     // Enter's own handler, called by the gesture's own value chip - reads
@@ -350,7 +377,7 @@ public:
     // born unpaired - it does not inherit the source's own twin), and a
     // linked source may be duplicated (the copy is born outside the group).
     // Offsets the copy by the same one visible grid step Duplicate linked
-    // uses, selects the copy and leaves body-selection mode as it is -
+    // uses, and selects the copy - which is a WHOLE-BODY selection, so
     // refreshTransformGizmo() attaches the transform gizmo to it exactly as
     // it does for the linked gesture, the same machinery an ordinary click
     // already drives.
@@ -382,13 +409,13 @@ public:
     // reason, the same shape Union/Subtract/Delete already have.
     //
     // Model -> Duplicate linked (Ctrl+Shift+D - Ctrl+D moved to the plain
-    // Duplicate above in Milestone 5, item 8). Exactly one body selected, in
-    // body selection mode, no sketch in progress, no outline waiting, and not
-    // already paired with a mirror twin - see duplicateLinkedSourceId(). An
+    // Duplicate above in Milestone 5, item 8). Exactly one WHOLE BODY
+    // selected, no sketch in progress, no outline waiting, and not already
+    // paired with a mirror twin - see duplicateLinkedSourceId(). An
     // already-linked source is fine: the copy simply becomes another member
     // of its existing group (DocumentModel::createLinkedCopy()'s own rule).
     // Offsets the copy by one visible grid step so it never lands exactly on
-    // its source, selects the copy and leaves body-selection mode as it is -
+    // its source, and selects the copy - which is a WHOLE-BODY selection, so
     // refreshTransformGizmo() (an appStateChanged slot) is what attaches the
     // transform gizmo to it, the same machinery an ordinary click already
     // drives, nothing new. One checkpoint (createLinkedCopy() takes it
@@ -400,8 +427,8 @@ public:
     int duplicateLinkedSourceId() const;
     bool canDuplicateLinked() const { return duplicateLinkedSourceId() > 0; }
 
-    // Model -> Link selected. Two or more selected bodies, in body selection
-    // mode, no sketch in progress, no outline waiting, none already linked
+    // Model -> Link selected. Two or more WHOLE BODIES selected, no sketch
+    // in progress, no outline waiting, none already linked
     // and none already mirror-paired - see canLinkSelected(). Snaps every
     // selected body but the first onto the first's own shape, centre to
     // centre, through DocumentModel::linkExisting() - the visible shape
@@ -821,6 +848,10 @@ private slots:
     // goes into the status bar and nowhere else; see the definition for why it
     // is neither a toast nor the state label.
     void onPickRefused(const QString& reason);
+    // ...and its counterpart: a pick landed, so the sentence comes back down.
+    // Only ever clears the message THIS window painted, compared against what
+    // the bar is actually showing - see the definition.
+    void onPickRefusalWithdrawn();
     void onLockToFace();
     // "Set symmetry plane": reads the current face selection and calls
     // setSymmetryPlaneFromFace() - the Lock to Face idiom, one gizmo over.
@@ -931,26 +962,40 @@ private:
     void refreshEdgeAnnotation();
     // Fix round 1's own finding: a mirror-placement gesture's disjointness
     // from the other three gizmo claims held only at the PRESS that began
-    // it, not for the gesture's whole life - switching selection mode
-    // mid-gesture (still enabled; nothing had ever re-checked it) let
-    // PullArrow or BevelArrow rise while the mirror chip was still up, two
-    // application-wide key filters live at once. ExtrudePreview's own
-    // self-cancel discipline, one gizmo over: a slot on appStateChanged
-    // that recomputes mirrorPlacementEnvironmentOk() against an ALREADY
-    // active gesture and ends it the instant that predicate fails - mode
-    // switch, sketch start, render mode, all covered by the one recompute
-    // rather than three separate reminders. Reads state and moves AIS
-    // objects only, so it cannot recurse back into updateActions() - see
-    // its own definition for why that matters here specifically.
+    // it, not for the gesture's whole life - starting a sketch mid-gesture
+    // (still enabled; nothing had ever re-checked it) let PullArrow or
+    // BevelArrow rise while the mirror chip was still up, two application-
+    // wide key filters live at once. ExtrudePreview's own self-cancel
+    // discipline, one gizmo over: a slot on appStateChanged that recomputes
+    // mirrorPlacementEnvironmentOk() against an ALREADY active gesture and
+    // ends it the instant that predicate fails - sketch start, pending
+    // outline, render mode and the handoff to the library, all covered by
+    // the one recompute rather than four separate reminders. Reads state and
+    // moves AIS objects only, so it cannot recurse back into updateActions() -
+    // see its own definition for why that matters here specifically.
     void refreshMirrorPlacement();
     // The environment half of canBeginMirrorPlacement() - no sketch, no
-    // pending outline, no render mode, body selection mode - WITHOUT that
-    // function's other two terms ("not already active", "something is
-    // selected"), which only make sense at the moment of a BEGIN and would
-    // be wrong to ask of a gesture already running. Shared by
-    // canBeginMirrorPlacement() and refreshMirrorPlacement() so the two
-    // cannot drift into different ideas of what makes the gesture's
-    // surroundings valid.
+    // pending outline, no render mode, a furniture open, no compare pane -
+    // WITHOUT that function's other three terms ("not already active",
+    // "whole bodies selected", "something is selected"), every one of which
+    // only makes sense at the moment of a BEGIN and would be wrong to ask of
+    // a gesture already running. Shared by canBeginMirrorPlacement() and
+    // refreshMirrorPlacement() so the two cannot drift into different ideas
+    // of what makes the gesture's surroundings valid.
+    //
+    // THE SELECTION TERM LIVES IN canBeginMirrorPlacement(), NOT HERE, and
+    // the fix wave that moved it is worth a sentence: it was a mode check
+    // ("body selection mode") that the auto-selection switch re-keyed to
+    // selectionKind() == Body, which quietly turned a deliberate act into an
+    // accident. Under the old modes a press that missed the plane handle
+    // changed the selection but never the MODE, so a live placement survived
+    // it; under auto that same press picks a face, an edge or empty space,
+    // and refreshMirrorPlacement() destroyed the gesture on one stray click.
+    // A changed selection does not actually invalidate a running placement -
+    // beginMirrorPlacement() captured the ids it will pair and never re-reads
+    // them - so the term guards beginning only. OcctViewWidget additionally
+    // suspends ordinary picking outright while a placement is live, so in the
+    // shipped app the selection cannot change under one at all.
     bool mirrorPlacementEnvironmentOk() const;
     // The reason-specific refusal text for onSymmetryActionTriggered()'s own
     // "cannot begin" branch - fix round 1 (Task 3.2 review, Finding 3). Asks
@@ -1073,11 +1118,11 @@ private:
 
     // The environment shared by all three linked-copy actions above: no
     // sketch in progress, no outline waiting, a furniture actually open, and
-    // body selection mode explicitly - selectedSolidIds() reports the owning
+    // WHOLE BODIES selected explicitly - selectedSolidIds() reports the owning
     // body of a selected FACE or EDGE too, so without this a face or edge
-    // selection could satisfy a count check that means something different
-    // in body mode. The same mode check transformableBodyId() and
-    // mirrorPlacementEnvironmentOk() each carry, for the same reason.
+    // selection could satisfy a count check that means something different for
+    // bodies. The same selection-content term transformableBodyId() carries,
+    // for the same reason - see THE DISJOINTNESS ARGUMENT there.
     bool linkGestureEnvironmentOk() const;
 
     // THE single choke point every document-changing commit's checkpoint()
@@ -1387,6 +1432,11 @@ private:
     AppBar* myAppBar = nullptr;
     class ViewportOverlay* myOverlay = nullptr;
     class QLabel* myStateLabel = nullptr;
+    // The kind-lock refusal sentence THIS window last put in the status bar,
+    // or empty. Kept only so the withdrawal can be surgical - see
+    // onPickRefusalWithdrawn(). Never a second source of truth for the
+    // refusal itself: OcctViewWidget::autoPickRefusalText() is that.
+    QString myPaintedPickRefusal;
     class ItemsPanel* myItemsPanel = nullptr;
     AppearancePanel* myAppearancePanel = nullptr;
     // The render settings card and the camera shutter (Task 7.2) - both

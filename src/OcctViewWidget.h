@@ -571,6 +571,25 @@ public:
     // context loss, because the answer is recomputed from what is actually
     // selected every time it is asked. PickKind::None when nothing is
     // selected, which is what makes the next pick free to be of any kind.
+    //
+    // READ THIS BEFORE TRUSTING IT WITH A NEW SELECTION ROUTE: it is
+    // FIRST-ENTRY-WINS. It walks the selection, answers from the first entry
+    // that has a kind, and stops. A selection holding a face AND a body would
+    // therefore be reported as whichever of them OCCT happens to list first,
+    // and the three gizmo predicates - which are mutually exclusive precisely
+    // BECAUSE this returns one value - would hand the slot to one gizmo while
+    // selectedFace()/selectedEdges() disagreed with it. Silently.
+    //
+    // Nothing in the shipped app can produce such a selection, and that is an
+    // enumeration rather than a hope: setSelectedSolids() clears first; the
+    // Shift branch of mouseReleaseEvent() refuses a differing kind outright;
+    // selectDetectedBody(additive) is reachable additively only when the lock
+    // already held Body; setSelectionMode() clears; render mode clears; every
+    // document swap goes through MainWindow::resyncView() -> clearSolids();
+    // and no SelectMgr_Filter or owner-priority games exist anywhere. The
+    // invariant is maintained by the kind lock, not by this function - so any
+    // new route that can add to a selection MUST keep it, or this answer
+    // stops meaning what every caller reads it as.
     PickKind selectionKind() const;
 
     // Why the last Shift-click in Auto did nothing, or an empty string. A
@@ -1583,6 +1602,26 @@ signals:
     // and deliberately NOT a Failure toast: a toast on every mistaken
     // Shift-click would shout at a gesture that changed nothing.
     void autoPickRefused(const QString& reason);
+
+    // A pick LANDED, and whatever refusal was standing is withdrawn - take the
+    // sentence back down.
+    //
+    // It exists because of one gesture, and the gesture is the headline one:
+    // Shift+double-click to add a body. Qt delivers a double-click as
+    // press/release/DblClick/release, and that FIRST release runs an ordinary
+    // additive pick with bodies already held - which in auto always lands on a
+    // face or an edge, because mode 0 is not activated. So the kind lock
+    // correctly refuses it and correctly says why... half a beat before the
+    // DblClick adds the body and makes the sentence false. The bar then
+    // instructed the user to do the thing they had just done.
+    //
+    // A release cannot know a double-click is coming, so the refusal is
+    // WITHDRAWN rather than never made - the same retroactive shape
+    // myAutoBodyPickTaken already uses to disown the trailing release, one
+    // event earlier. Emitted wherever a pick clears a standing refusal, and
+    // emitted BEFORE selectionChanged() so the ordinary "N bodies selected"
+    // message is the last word rather than the withdrawal.
+    void autoPickRefusalWithdrawn();
 
 protected:
     // Qt's three GL callbacks, and the only places a current OpenGL context is
