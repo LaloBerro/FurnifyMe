@@ -131,6 +131,7 @@ if(FURNIFYME_BUILD_APP)
       src/ui/ExtrudePreview.cpp
       src/ui/PullArrow.cpp
       src/ui/BevelArrow.cpp
+      src/ui/TransformGizmo.cpp
       src/ui/InlineRename.cpp
       src/ui/SelectorWindow.cpp
       src/ui/VersionsPanel.cpp

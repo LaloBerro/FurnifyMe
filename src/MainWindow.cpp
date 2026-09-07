@@ -19,6 +19,7 @@
 #include "Toast.h"
 #include "ToolChip.h"
 #include "ToolCluster.h"
+#include "TransformGizmo.h"
 #include "ViewportOverlay.h"
 #include "VersionsPanel.h"
 #include "WalkthroughPanel.h"
@@ -1123,6 +1124,17 @@ void MainWindow::buildActions()
     // time triggered() fires; updateActions() at the end of every branch
     // resyncs it to whatever document().symmetryOn() genuinely is.
     mySymmetryAction = new QAction(tr("&Mirror"), this);
+    // Space cycles the handle a selected body wears (custom gizmo, Phase 1).
+    // An app QAction rather than a bare key handler, so the generated
+    // ShortcutSheet carries it for free and updateActions() stays the single
+    // place that decides whether it is available - the two rules every other
+    // binding in this function follows.
+    myNextToolAction = new QAction(tr("&Next Tool"), this);
+    myNextToolAction->setShortcut(QKeySequence(Qt::Key_Space));
+    myNextToolAction->setToolTip(tr("Switch the handle on the selected body\n"
+                                    "Move, then Rotate, then Scale."));
+    connect(myNextToolAction, &QAction::triggered, this, &MainWindow::onNextTool);
+
     mySymmetryAction->setCheckable(true);
     // No "(S)" here - the banned-word sweep matches "(s)" as a bare
     // substring, case-insensitive, for the vocabulary rule against a typed
@@ -1502,6 +1514,12 @@ QMenuBar* MainWindow::buildMenus()
     modelMenu->addAction(myUnionAction);
     modelMenu->addAction(mySubtractAction);
     modelMenu->addAction(myIntersectAction);
+    modelMenu->addSeparator();
+    // Menu-only, no rail chip: the rail-floor rule (see the shell section of
+    // CLAUDE.md - a fourteenth chip raises the viewport's minimum height), and
+    // this action's real home is the Space key beside a handle the user is
+    // already looking at.
+    modelMenu->addAction(myNextToolAction);
     modelMenu->addSeparator();
     // Menu-only - see mySymmetryAction's own declaration for why no rail
     // chip.
@@ -2006,6 +2024,13 @@ void MainWindow::buildOverlay()
     // appStateChanged. Nothing here shows or hides it.
     myBevelArrow = new BevelArrow(this, myView);
 
+    // The Move tool (custom gizmo, Phase 1), on exactly the same terms as the
+    // two arrows above: it parents itself to the viewport, places its chip
+    // beside the arm being dragged, and decides both its own visibility and
+    // its gizmo's from MainWindow::moveToolBodyId() on every appStateChanged.
+    // Nothing here shows or hides either.
+    myMoveTool = new MoveTool(this, myView);
+
     // The mirror-placement gesture's own value chip (Milestone 4, Phase 3),
     // on the same terms as the two arrows just above: it parents itself to
     // the viewport, places itself beside the handle's projected position,
@@ -2066,6 +2091,7 @@ void MainWindow::buildOverlay()
     connect(myOverlay, &ViewportOverlay::laidOut, myExtrudePreview, &ExtrudePreview::replace);
     connect(myOverlay, &ViewportOverlay::laidOut, myPullArrow, &PullArrow::replace);
     connect(myOverlay, &ViewportOverlay::laidOut, myBevelArrow, &BevelArrow::replace);
+    connect(myOverlay, &ViewportOverlay::laidOut, myMoveTool, &MoveTool::replace);
     connect(myOverlay, &ViewportOverlay::laidOut, mirrorChip, &MirrorPlacementChip::replace);
 }
 
@@ -2162,6 +2188,21 @@ void MainWindow::updateActions()
         mySymmetryAction->setChecked(myDocument.symmetryOn());
     }
     if (mySymmetryAction) mySymmetryAction->setEnabled(!atInit);
+
+    // Space, and only while a body is actually wearing a handle. A key that
+    // cycled an invisible tool would change state the user cannot see, and the
+    // disabled tooltip says which state is missing rather than going quiet -
+    // the rule this function keeps for every control it dims.
+    if (myNextToolAction) {
+        const bool haveHandle = canTransformSelectedBody();
+        myNextToolAction->setEnabled(haveHandle);
+        myNextToolAction->setToolTip(
+            haveHandle ? tr("Switch the handle on the selected body — now %1\n"
+                            "Move, then Rotate, then Scale.")
+                             .arg(bodyToolName(myBodyTool))
+                       : tr("Double-click a body to select the whole thing, then switch "
+                            "its handle"));
+    }
     // The off switch has something to do exactly while mirroring is on.
     if (mySymmetryOffAction) mySymmetryOffAction->setEnabled(!atInit && myDocument.symmetryOn());
     // The same pick as Lock to Face - one flat face, no sketch, no pending
@@ -3648,9 +3689,16 @@ void MainWindow::updateStateLabel()
             // this label is where most users will read that for the first
             // time - so it has to name the real gesture rather than the one
             // the old body-selection mode used to have.
+            // WHICH handle, not merely that there is one. The custom gizmo's
+            // Phase 1 made the tool a real piece of state that Space changes
+            // and nothing else announces permanently - and a mode with no
+            // persistent cue is a trap, which is the same argument the locked
+            // face's own lead clause makes two branches down. Read from
+            // bodyToolName(), the one place those three words are spelled.
             state = canTransformSelectedBody()
-                        ? tr("1 body selected — drag a handle to Move, Rotate or Scale — "
-                             "Shift+double-click another to combine them")
+                        ? tr("1 body selected — %1 — drag a handle, Space for the next "
+                             "tool — Shift+double-click another to combine them")
+                              .arg(bodyToolName(myBodyTool))
                         : tr("1 body selected — Shift+double-click another to combine them");
         } else if (bodies == 0) {
             state = tr("Nothing yet — press Ctrl+K to draw an outline");
@@ -4978,11 +5026,67 @@ int MainWindow::transformableBodyId() const
     return ids.front();
 }
 
+QString MainWindow::bodyToolName(BodyTool tool)
+{
+    // The vocabulary table's own three words - Move / Rotate / Scale, never
+    // "transform" or "translate". One place, read by the status label and by
+    // anything that has to name the active tool.
+    switch (tool) {
+        case BodyTool::Rotate: return tr("Rotate");
+        case BodyTool::Scale: return tr("Scale");
+        default: return tr("Move");
+    }
+}
+
+int MainWindow::moveToolBodyId() const
+{
+    if (myBodyTool != BodyTool::Move) return 0;
+    return transformableBodyId();
+}
+
+void MainWindow::setBodyTool(BodyTool tool)
+{
+    if (myBodyTool == tool) return;
+    myBodyTool = tool;
+    // updateActions() ends by emitting appStateChanged(), which is what moves
+    // both gizmos: refreshTransformGizmo() below attaches or detaches the
+    // manipulator, and MoveTool::refresh() shows or retires our own arms.
+    // Nothing here touches either directly - the derive-never-store rule this
+    // window keeps for every surface over the viewport.
+    updateActions();
+}
+
+void MainWindow::onNextTool()
+{
+    switch (myBodyTool) {
+        case BodyTool::Move: setBodyTool(BodyTool::Rotate); break;
+        case BodyTool::Rotate: setBodyTool(BodyTool::Scale); break;
+        default: setBodyTool(BodyTool::Move); break;
+    }
+    // Said out loud as well as shown. The status label carries the tool
+    // permanently (updateStateLabel()), but a user who pressed a key deserves
+    // a sentence rather than a change three words deep in a line they were not
+    // reading. Not a toast: nothing changed in the document, and a toast that
+    // offers no Undo for a state that is not an edit would be the wrong shape.
+    statusBar()->showMessage(tr("%1 — drag a handle, Space for the next tool")
+                                 .arg(bodyToolName(myBodyTool)));
+}
+
 void MainWindow::refreshTransformGizmo()
 {
     const int id = transformableBodyId();
-    if (id > 0) myView->attachManipulator(id);
-    else        myView->detachManipulator();
+    // THE SEAM, and it is one branch (custom gizmo, Phase 1): Move is drawn by
+    // MoveTool, which watches moveToolBodyId() itself, so all this has to do
+    // for that tool is make sure OCCT's manipulator is not ALSO standing on
+    // the body. Rotate and Scale are still the manipulator's, attached for the
+    // one role each - see OcctViewWidget::attachManipulator().
+    if (id <= 0 || myBodyTool == BodyTool::Move) {
+        myView->detachManipulator();
+        return;
+    }
+    myView->attachManipulator(id, myBodyTool == BodyTool::Rotate
+                                      ? OcctViewWidget::ManipulatorRole::Rotate
+                                      : OcctViewWidget::ManipulatorRole::Scale);
 }
 
 void MainWindow::refreshEdgeAnnotation()

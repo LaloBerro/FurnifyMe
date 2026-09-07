@@ -247,6 +247,7 @@ Source files under `src/`, plus `tests/`:
 | `ui/DimensionRenderer.{h,cpp}` | CAD length annotation; one renderer for the sketch and edges |
 | `ui/PullArrow.{h,cpp}` | face pull: 3D arrow + value chip, preview by the commit's own call |
 | `ui/BevelArrow.{h,cpp}` | edge drag: inward fillets, outward chamfers, same contract |
+| `ui/TransformGizmo.{h,cpp}` | the gizmo we draw: shared `GizmoRenderer` base + the Move tool |
 | `ui/AppearancePanel.{h,cpp}` | every Theme token editable live; debounced persistence |
 | `ui/AppBar.{h,cpp}` | the floating pill: app mark, wordmark, real `QMenuBar` |
 | `FurnifySerial.{h,cpp}` | binary shape (de)serialization via `BinTools`, **zero Qt includes** |
@@ -581,9 +582,10 @@ cannot express per-axis, and `GTransform` would convert faces to NURBS).
 
 Three selection-driven gizmos, no new rail buttons. Their visibility predicates are one
 derived function each, driven from `appStateChanged`, and **provably disjoint**:
-`ExtrudePreview` requires a pending face; the pull arrow, transform manipulator and bevel
-arrow all require none, plus three different values of `selectionKind()` — Face, Body and
-Edge respectively. (That last clause read "three different selection modes" until the
+`ExtrudePreview` requires a pending face; the pull arrow, the body-transform gizmo (ours
+for Move, `AIS_Manipulator` for Rotate and Scale — see "The split transform gizmo" below)
+and the bevel arrow all require none, plus three different values of `selectionKind()` —
+Face, Body and Edge respectively. (That last clause read "three different selection modes" until the
 auto-selection spec's Phase 2 deleted the modes; see "Selection" for the re-keyed argument
 and why kind-locked accumulation is what keeps the new foundation solid.) At most one
 app-wide Enter/Escape claim can therefore exist at a time. Gizmo previews go through the
@@ -594,12 +596,12 @@ app-wide Enter/Escape claim can therefore exist at a time. Gizmo previews go thr
   The distance is the closest-point parameter of the mouse ray against the outward-normal
   line (`CameraController::axisParameterForRay`, headless-tested; a near-parallel ray
   keeps the last value, and a press whose angle refuses still claims the gesture).
-- **Transform**: `AIS_Manipulator`, translation/rotation/uniform scaling, snapped deltas
-  (10 mm / 15° / 5%) rebuilt about the body's own pivot — naive `TranslationPart()`
-  snapping displaces the pivot. Scale bakes are clamped to [0.05, 20] at the UI; the
-  kernel accepts more. During an additive (Shift) pick the manipulator is `Deactivate`d
-  around the `MoveTo`/`SelectDetected` pair, or `AIS_ManipulatorOwner` outranks the
-  shape's owner and the second body cannot be picked.
+- **Transform**: snapped deltas (10 mm / 15° / 5%) rebuilt about the body's own pivot —
+  naive `TranslationPart()` snapping displaces the pivot. Scale bakes are clamped to
+  [0.05, 20] at the UI; the kernel accepts more. **Move is ours since the custom gizmo's
+  Phase 1** (see below); Rotate and Scale are still `AIS_Manipulator`, and during an
+  additive (Shift) pick it is `Deactivate`d around the `MoveTo`/`SelectDetected` pair, or
+  `AIS_ManipulatorOwner` outranks the shape's owner and the second body cannot be picked.
 - **Bevels**: the drag axis is the bisector of the adjacent faces' outward normals
   (`ModelingOps::bevelAxis`, 12-edge headless oracle); against the bisector = Fillet,
   along it = Chamfer. On a concave edge the mapping is unchanged but the fillet bulges
@@ -667,6 +669,69 @@ is a 14 px Qt-side test, not an AIS owner, so it does not *compete* for a pick �
 the press outright. The bevel arrow stands on the last edge picked and the next edge is
 usually right beside it, so the press handler excludes Shift from the arrow branch. Same
 hazard the transform gizmo's `Deactivate` closes, one layer up and by a different mechanism.
+
+#### The split transform gizmo, Phase 1: Move is ours
+
+Spec: `docs/superpowers/specs/2026-09-06-custom-gizmo-design.md`. `AIS_Manipulator` has a
+real, measured styling wall (below), so the only route to a gizmo wearing the axis card's
+language is drawing one. The split makes that tractable: **Move**, **Rotate** and **Scale**
+become three single-purpose tools, `Space` cycles them while a body is selected, and one is
+visible at a time. Phase 1 shipped Move; Phase 2 takes the other two and deletes
+`AIS_Manipulator` from the app.
+
+- **`src/ui/TransformGizmo.{h,cpp}` is PullArrow's split, one gizmo over.** `GizmoRenderer`
+  is a shared base owning the context, the object list, the pose cache, the display
+  discipline (mode −1, never pickable, `Topmost`) and `reapplyTheme()`; a subclass supplies
+  geometry alone through `buildStrokes()`. `MoveGizmoRenderer` draws three arms in
+  `Theme::gizmoAxisX/Y/Z` with cone tips and a neutral hub, sized in SCREEN PIXELS through
+  `worldPerPixel()` and rebuilt on `cameraChanged` — never OCCT's zoom-persistence flags.
+  `MoveTool` is the Qt half: the value chip, the ghost preview and the Escape claim.
+- **Cones are drawn as their own silhouette** (a base ring plus generatrices), because
+  `Graphic3d_ArrayOfTriangles` draws nothing at all in this build — the finding
+  `DimensionRenderer` and `SketchPointMarker` already paid for twice. Lines also keep the
+  colours EXACT, which is what lets `gui_smoke` count Dump pixels against the three tokens
+  rather than against something approximately like them.
+- **This gizmo needs none of the manipulator's workaround pile, structurally.** Its AIS
+  objects have no `ComputeSelection`, so they never enter the pick pipeline: no
+  `Deactivate`-around-picks, no owner-priority hazard. `OcctViewWidget::moveGizmoAxisAt()`
+  is a 14 px screen-space test (`kHandleGrabPx`, shared with `arrowHit()` through
+  `segmentPixelDistance()`) that takes a press outright, before the picker runs. The
+  NEAREST arm wins, and the inner third of every arm is a dead zone — all three meet at the
+  hub, where "nearest" would otherwise be decided by sub-pixel noise. The drag is
+  `AxisDrag` + `CameraController::axisParameterForRay`, the pull arrow's own maths; the
+  release is swallowed; Shift and Ctrl are excluded from the grab for the bevel arrow's and
+  the pull arrow's own reasons.
+- **A consequence worth having: the selector's tolerance stand-down is now the
+  manipulator's alone.** `applySelectionTolerance()` drops Auto's 8-logical-pixel edge
+  tolerance only while a manipulator is attached, because the tolerance inflates every
+  REGISTERED entity's sensitivity and merged the manipulator's parts. Our arms register
+  nothing, so on the Move tool — where the headline gesture leaves the user — the full edge
+  reach stays. Pinned in both directions.
+- **The pivot is `ModelingOps::boundingBoxCentre()`**, in the Qt-free library and
+  headless-tested, precisely because there are two callers that must agree exactly: our
+  gizmo and `AIS_Manipulator::OptionsForAttach::AdjustPosition`. Space swaps one for the
+  other on the same body, and a handle that jumped a few millimetres would be reporting a
+  difference that does not exist. It is NOT the centre of mass — a carved body's mass centre
+  can leave its own material.
+- **Escape is a drag-scoped claim.** `MoveTool`'s chip is visible exactly while a drag has
+  produced a distance, and the application-wide filter lives exactly as long as the chip —
+  narrower than `PullArrow`'s, and disjoint from every other claim by construction (this
+  needs one whole body selected; the pull arrow needs a face, the bevel arrow edges,
+  `ExtrudePreview` a pending outline). Cancelling swallows the trailing release too:
+  the button is still down, and that release would otherwise re-pick and retire the gizmo.
+- **Commit is `MainWindow::transformBody()`, unchanged.** Zero new commit logic — the
+  checkpoint, the toast with Undo, the mirror twin and the linked-copy propagation are the
+  path the manipulator has always used, and `gui_smoke` pins one wiring check on each.
+- **The seam is `MainWindow::BodyTool` + `OcctViewWidget::ManipulatorRole`.**
+  `moveToolBodyId()` is `transformableBodyId()` plus "the tool is Move" — one predicate read
+  by `MoveTool`, by `refreshTransformGizmo()` and by the status label. On Rotate or Scale
+  the manipulator is attached for that ONE role: its translation arms and plane handles are
+  `SetPart`-hidden **and** their manipulation modes are never enabled, because OCCT's header
+  is explicit that hiding a part does not manage its selection mode. `Next Tool` (Space) is
+  a real `QAction` — menu-only, no rail chip (the rail-floor rule) — so the generated
+  ShortcutSheet carries it and `updateActions()` owns its enabled state. Arm length is the
+  one number chosen by eye; the spec parks sizes, grab tolerances and chip placement for
+  Phase 3's feel-test.
 
 **`Theme` is spec-backed** since the Appearance panel: every colour accessor and the four
 derived fonts (badge = base−2, label = base−1, body = base, title = base+3 pt) read

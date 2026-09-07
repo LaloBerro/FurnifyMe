@@ -937,6 +937,18 @@ gp_Pnt centreOfMass(const TopoDS_Shape& shape)
     return props.CentreOfMass();
 }
 
+bool boundingBoxCentre(const TopoDS_Shape& shape, gp_Pnt& out)
+{
+    if (shape.IsNull()) return false;
+    Bnd_Box box;
+    BRepBndLib::Add(shape, box);
+    if (box.IsVoid()) return false;
+    Standard_Real x0, y0, z0, x1, y1, z1;
+    box.Get(x0, y0, z0, x1, y1, z1);
+    out = gp_Pnt(0.5 * (x0 + x1), 0.5 * (y0 + y1), 0.5 * (z0 + z1));
+    return true;
+}
+
 static int countOf(const TopoDS_Shape& shape, TopAbs_ShapeEnum type)
 {
     if (shape.IsNull()) return 0;

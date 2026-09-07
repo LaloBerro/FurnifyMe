@@ -1107,6 +1107,49 @@ int main()
         check(!boundingBoxStraddlesPlane(TopoDS_Shape(), yz), "a null shape never straddles");
     }
 
+    // --- boundingBoxCentre ---------------------------------------------------
+    //
+    // The pivot every body handle stands on, and the reason it is a shared
+    // function rather than two call sites: the custom Move gizmo and OCCT's
+    // AIS_Manipulator have to agree EXACTLY, because Space swaps one for the
+    // other on the same body.
+    {
+        gp_Pnt centre;
+        const TopoDS_Shape box = makeBox(gp_Pnt(10.0, -4.0, 0.0), 20.0, 10.0, 6.0);
+        check(boundingBoxCentre(box, centre), "a box has a bounding-box centre");
+        checkNear(centre.X(), 20.0, 1.0e-6, "at the middle of its x span");
+        checkNear(centre.Y(), 1.0, 1.0e-6, "the middle of its y span");
+        checkNear(centre.Z(), 3.0, 1.0e-6, "and the middle of its z span");
+
+        // The whole reason this is NOT centreOfMass(): carve a body and the
+        // two answers part company - a mass centre can leave the material
+        // entirely, and a handle standing there would float in the hole.
+        const TopoDS_Shape slab = makeBox(gp_Pnt(0.0, 0.0, 0.0), 100.0, 100.0, 10.0);
+        // A CORNER out of the slab, not an end off it: the bounding box is
+        // unchanged and the mass centre is not, which is the whole point.
+        const TopoDS_Shape tool = makeBox(gp_Pnt(50.0, 50.0, -1.0), 50.0, 50.0, 12.0);
+        const BooleanResult carved = applyBoolean(BooleanKind::Cut, slab, tool);
+        check(carved.ok, "an L-shaped body can be carved for the pivot probe");
+        if (carved.ok) {
+            gp_Pnt boxCentre;
+            check(boundingBoxCentre(carved.shape, boxCentre),
+                  "the carved body has a bounding-box centre too");
+            checkNear(boxCentre.X(), 50.0, 1.0e-6,
+                      "and it is still the BOX's middle - the corner came out of the "
+                      "material, not off the extents");
+            check(std::fabs(centreOfMass(carved.shape).X() - boxCentre.X()) > 5.0,
+                  "while the centre of MASS has moved well away from it, which is exactly "
+                  "why the two are different functions");
+        }
+
+        gp_Pnt untouched(1.0, 2.0, 3.0);
+        check(!boundingBoxCentre(TopoDS_Shape(), untouched),
+              "a null shape has no bounding-box centre");
+        check(untouched.Distance(gp_Pnt(1.0, 2.0, 3.0)) < 1.0e-12,
+              "and the refusal leaves the caller's point untouched rather than writing "
+              "the origin over it");
+    }
+
     std::printf("\n%s (%d failure%s)\n",
                 g_failures == 0 ? "PASS" : "FAIL",
                 g_failures, g_failures == 1 ? "" : "s");

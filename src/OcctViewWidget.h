@@ -28,6 +28,7 @@
 #include "DimensionRenderer.h"
 #include "GridRenderer.h"
 #include "PullArrow.h"
+#include "TransformGizmo.h"
 
 #include <QImage>
 #include <QOpenGLContext>
@@ -421,6 +422,47 @@ public:
     void setEdgeDimensionSuppressed(bool suppressed);
     bool edgeDimensionSuppressed() const { return myEdgeDimensionSuppressed; }
 
+    // --- the Move tool's own gizmo (custom gizmo, Phase 1) -----------------
+    //
+    // Three arms in the axis card's own hues, drawn by us. See
+    // src/ui/TransformGizmo.h for the presentation/chip split and for why this
+    // exists at all; what belongs HERE is the same wiring the two drag arrows
+    // already have - a screen-space press claim, an axis drag, a swallowed
+    // release.
+    //
+    // It needs NONE of the manipulator's workaround pile below, and the
+    // difference is structural rather than lucky: the arms are AIS objects
+    // with no ComputeSelection at all, so they never enter the pick pipeline.
+    // The manipulator has to be Deactivate()d around every additive pick
+    // because AIS_ManipulatorOwner outranks a shape's owner; an arm here is
+    // invisible to the picker and simply takes a press before the picker runs.
+    void showMoveGizmo(const gp_Pnt& pivot);
+    void clearMoveGizmo();
+    bool hasMoveGizmo() const { return myMoveGizmo.isShowing(); }
+    // The pivot the arms stand on. Meaningful only while showing.
+    gp_Pnt moveGizmoPivot() const { return myMoveGizmo.pivot(); }
+    // An arm's outer tip in world space, for placing the value chip and for
+    // aiming a test at the gizmo's OWN geometry rather than at a pixel guess.
+    // False when no gizmo is up or `axis` is not 0/1/2.
+    bool moveGizmoArmTip(int axis, gp_Pnt& out) const;
+    // Which arm (0/1/2) the 14 px screen-space hit test gives this LOGICAL
+    // pixel, or -1. This is the exact question mousePressEvent() asks before
+    // deciding whether a press belongs to the gizmo - exposed for the same
+    // reason pullArrowClaimsPoint() is: a check that a drag moved the body
+    // proves nothing unless something can say the press really was on an arm.
+    int moveGizmoAxisAt(const QPoint& logical) const;
+    // True between the press that grabbed an arm and the release that ends the
+    // move. While it is true this widget picks nothing on release - the same
+    // rule pullDragActive() carries, for the same reason.
+    bool moveDragActive() const { return myMoveDrag.active; }
+    // The arm being dragged (0/1/2), or -1.
+    int moveDragAxis() const { return myMoveDrag.active ? myMoveDragAxis : -1; }
+    // Abandons a live drag WITHOUT committing anything - Escape's route. The
+    // trailing release is swallowed rather than falling through to an ordinary
+    // pick, because the button is still down when this is called and that
+    // release still belongs to the gesture it ended.
+    void cancelMoveDrag();
+
     // The transform gizmo. AIS_Manipulator is OCCT's own: it draws the three
     // arrows, the three rings and the three scale cubes, and it owns the drag
     // maths that turns a cursor position into a gp_Trsf. This widget wires it
@@ -428,10 +470,19 @@ public:
     // here and not in a widget of its own, the way PullArrow's value chip
     // needed to (a field has to take a keystroke; a manipulator does not).
     //
-    // Attaching is idempotent per body, because the predicate that drives it
-    // fires on every appStateChanged and a fresh manipulator on each of those
-    // would reset its position mid-gesture.
-    void attachManipulator(int solidId);
+    // SINCE THE CUSTOM GIZMO'S PHASE 1 IT SERVES ROTATE AND SCALE ONLY. Move
+    // is ours now, and `role` is the seam that says so: the manipulator's
+    // translation arms and plane handles are hidden and their manipulation
+    // modes are never enabled, so the two tools can never both offer a
+    // translation. The seam is deliberately temporary - Phase 2 replaces the
+    // other two and deletes this class from the app entirely.
+    //
+    // Attaching is idempotent per body AND per role, because the predicate
+    // that drives it fires on every appStateChanged and a fresh manipulator on
+    // each of those would reset its position mid-gesture.
+    enum class ManipulatorRole { Rotate, Scale };
+    void attachManipulator(int solidId, ManipulatorRole role);
+    ManipulatorRole manipulatorRole() const { return myManipulatorRole; }
     void detachManipulator();
     bool hasManipulator() const { return !myManipulator.IsNull(); }
     // The body it is attached to, or -1.
@@ -1562,6 +1613,16 @@ signals:
     // The end of that gesture, on the same terms as pullReleased().
     void bevelReleased(bool dragged);
 
+    // A live drag of one arm of the Move gizmo. `axis` is 0/1/2 for world
+    // X/Y/Z and `distance` is the signed distance along it in millimetres,
+    // measured from the press and ALREADY SNAPPED to the grid step when Snap
+    // to Grid is on - pullDragged()'s own contract, one gizmo over.
+    void moveDragged(int axis, double distance);
+    // The end of that gesture, on pullReleased()'s own terms: `dragged` is
+    // false for a press and release that never moved, which is a cancel rather
+    // than an edit.
+    void moveReleased(bool dragged);
+
     // The end of a transform-gizmo drag. `delta` is the whole accumulated
     // transform of the gesture, ALREADY SNAPPED when Snap to Grid is on -
     // this widget owns the snap state, so snapping here keeps the rule in one
@@ -1792,6 +1853,19 @@ private:
     // be AIS-pickable objects. Takes the renderer rather than reading a member,
     // because two gizmos are hit-tested exactly this way.
     bool arrowHit(const PullArrowRenderer& arrow, const QPoint& point) const;
+    // How near a screen-space handle the cursor has to be, in LOGICAL pixels,
+    // for the press to belong to it. Generous on purpose: these handles are
+    // hairlines, and a target the user has to hit exactly is one they will
+    // miss. ONE constant for every such handle in this file, so a grab
+    // tolerance cannot be tuned for one gizmo and forgotten for the next.
+    static constexpr double kHandleGrabPx = 14.0;
+    // Distance from `point` to the projected segment a..b, in LOGICAL pixels,
+    // or a NEGATIVE number when either endpoint does not project. The one
+    // implementation of the screen-space handle test - both drag arrows and
+    // all three Move arms go through it, and the Move gizmo needs the distance
+    // rather than a yes/no because its three arms meet at one point and the
+    // NEAREST has to win.
+    double segmentPixelDistance(const gp_Pnt& a, const gp_Pnt& b, const QPoint& point) const;
     // Anchors `drag` at the press, and advances it on a move - the ONE
     // implementation of "turn a cursor position into a signed distance along a
     // scene arrow's axis, snapped". advanceAxisDrag() returns true when the
@@ -2225,6 +2299,11 @@ private:
     // about - the rotation and the scale both leave it fixed.
     Handle(AIS_Manipulator) myManipulator;
     int myManipulatorSolid = -1;
+    // Which of the two remaining jobs this manipulator is attached for - see
+    // attachManipulator(). Meaningless while myManipulator is null; Rotate
+    // rather than an extra "none" state, because the attach's own idempotence
+    // test reads it beside a null check that already answers that question.
+    ManipulatorRole myManipulatorRole = ManipulatorRole::Rotate;
     // The size AIS_Manipulator's own AdjustSize derived from the body's
     // bounding box at the moment of the attach, and the size actually installed
     // by the last updateManipulatorSize(). The first is the ceiling the clamp
@@ -2240,6 +2319,19 @@ private:
     bool myGizmoDragActive = false;
     gp_Trsf myGizmoDelta;
     gp_Ax2 myGizmoStartPosition;
+
+    // The Move tool's three arms and the drag along whichever one was grabbed
+    // - the SAME AxisDrag every other screen-space handle in this file uses,
+    // so the near-parallel refusal, the late anchor and the snap step cannot
+    // be remembered in one gesture and forgotten in this one.
+    MoveGizmoRenderer myMoveGizmo;
+    AxisDrag myMoveDrag;
+    int myMoveDragAxis = -1;
+    // Escape's leftover: the drag is over but the button is still down, so the
+    // release that is coming still belongs to the gesture that was cancelled
+    // and must not fall through to an ordinary pick. Consumed exactly once -
+    // myAutoBodyPickTaken's own shape, one gesture over.
+    bool myMoveDragCancelled = false;
 
     // The two axis drags, one per arrow. See AxisDrag above.
     AxisDrag myPullDrag;

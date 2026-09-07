@@ -495,6 +495,7 @@ void OcctViewWidget::releaseGlResources()
     myDimension.detach();
     myPullArrow.detach();
     myBevelArrow.detach();
+    myMoveGizmo.detach();
 
     // OCCT's own order: remove every presentation, drop the context, destroy
     // the view, then the viewer.
@@ -644,6 +645,7 @@ void OcctViewWidget::initializeViewer()
         myDimension.setZLayer(mySketchLayer);
         myPullArrow.attach(myContext);
         myBevelArrow.attach(myContext);
+        myMoveGizmo.attach(myContext);
     }
 
     // The field of view is fixed at kFovyDeg for ordinary modeling; render
@@ -1136,7 +1138,8 @@ void OcctViewWidget::removeSolid(int id)
     clearModelingPreview();
     clearPullArrow();
     clearBevelArrow();
-    // Same reason: the gizmo is attached to the presentation about to go.
+    // Same reason: both gizmos stand on the presentation about to go.
+    clearMoveGizmo();
     if (myManipulatorSolid == id) detachManipulator();
     // Same reason again: a mirror-placement gesture describes exactly the
     // ids captured at beginMirrorPlacement(), and one of them is about to
@@ -1169,6 +1172,7 @@ void OcctViewWidget::clearSolids()
     clearModelingPreview();   // same reasoning as removeSolid(), before the bodies go
     clearPullArrow();
     clearBevelArrow();
+    clearMoveGizmo();
     detachManipulator();
     cancelMirrorPlacement();   // same reasoning: every id it describes is about to go
 
@@ -1529,6 +1533,48 @@ bool OcctViewWidget::bevelArrowHead(gp_Pnt& out) const
     return true;
 }
 
+void OcctViewWidget::showMoveGizmo(const gp_Pnt& pivot)
+{
+    initializeViewer();
+    if (myView.IsNull()) return;
+    // The renderer draws; THIS asks for the frame - and only when the gizmo
+    // actually moved, which is its own equal-guard's answer. Skipped under
+    // myApplyingCamera because applyCameraState()'s own redraw is already
+    // coming: showPullArrow()'s rule, for the measured reason recorded there.
+    const bool changed =
+        myMoveGizmo.show(pivot, myView->Camera()->Direction(), worldPerPixel());
+    if (changed && !myApplyingCamera) scheduleRedraw();
+}
+
+void OcctViewWidget::clearMoveGizmo()
+{
+    const bool removed = myMoveGizmo.clear();
+    myMoveDrag.active = false;
+    myMoveDragAxis = -1;
+    if (removed) scheduleRedraw();
+}
+
+bool OcctViewWidget::moveGizmoArmTip(int axis, gp_Pnt& out) const
+{
+    if (!myMoveGizmo.isShowing() || axis < 0 || axis > 2) return false;
+    out = myMoveGizmo.armTip(axis);
+    return true;
+}
+
+void OcctViewWidget::cancelMoveDrag()
+{
+    if (!myMoveDrag.active) return;
+    myMoveDrag.active = false;
+    myMoveDrag.moved = false;
+    myMoveDragAxis = -1;
+    // The button is still down. Whatever release follows belongs to the
+    // gesture this just ended, and letting it reach the picker would replace
+    // the body selection the gizmo is standing on - which would retire the
+    // gizmo the user cancelled a drag on, rather than leaving them where they
+    // were.
+    myMoveDragCancelled = true;
+}
+
 void OcctViewWidget::setEdgeDimensionSuppressed(bool suppressed)
 {
     if (myEdgeDimensionSuppressed == suppressed) return;
@@ -1542,17 +1588,14 @@ void OcctViewWidget::setEdgeDimensionSuppressed(bool suppressed)
     scheduleRedraw();
 }
 
-bool OcctViewWidget::arrowHit(const PullArrowRenderer& arrow, const QPoint& point) const
+double OcctViewWidget::segmentPixelDistance(const gp_Pnt& a, const gp_Pnt& b,
+                                            const QPoint& point) const
 {
-    if (!arrow.isShowing()) return false;
-
     QPoint tail, head;
-    if (!projectToScreen(arrow.tail(), tail)) return false;
-    if (!projectToScreen(arrow.head(), head)) return false;
+    if (!projectToScreen(a, tail)) return -1.0;
+    if (!projectToScreen(b, head)) return -1.0;
 
-    // Distance from the point to the projected shaft, in pixels. A generous
-    // 14 px: the arrow is a hairline, and a target the user has to hit
-    // exactly is one they will miss.
+    // Distance from the point to the projected segment, in logical pixels.
     const double dx = head.x() - tail.x();
     const double dy = head.y() - tail.y();
     const double lengthSquared = dx * dx + dy * dy;
@@ -1563,7 +1606,39 @@ bool OcctViewWidget::arrowHit(const PullArrowRenderer& arrow, const QPoint& poin
     }
     const double nx = tail.x() + dx * t - point.x();
     const double ny = tail.y() + dy * t - point.y();
-    return std::sqrt(nx * nx + ny * ny) <= 14.0;
+    return std::sqrt(nx * nx + ny * ny);
+}
+
+bool OcctViewWidget::arrowHit(const PullArrowRenderer& arrow, const QPoint& point) const
+{
+    if (!arrow.isShowing()) return false;
+    const double distance = segmentPixelDistance(arrow.tail(), arrow.head(), point);
+    return distance >= 0.0 && distance <= kHandleGrabPx;
+}
+
+int OcctViewWidget::moveGizmoAxisAt(const QPoint& point) const
+{
+    if (!myMoveGizmo.isShowing()) return -1;
+
+    // NEAREST arm wins, not the first one within tolerance: all three meet at
+    // the hub, so on any camera two of them cross near the middle of the
+    // screen and a first-match rule would hand the user whichever happens to
+    // be checked first.
+    //
+    // The tested span starts a third of the way out (armGrabStart()) for the
+    // other half of the same problem: close to the hub every arm is within
+    // tolerance of every pixel, and "nearest" there is decided by sub-pixel
+    // noise. The inner third is dead, which is what makes the answer stable.
+    int best = -1;
+    double bestDistance = kHandleGrabPx;
+    for (int axis = 0; axis < 3; ++axis) {
+        const double distance =
+            segmentPixelDistance(myMoveGizmo.armGrabStart(axis), myMoveGizmo.armTip(axis), point);
+        if (distance < 0.0 || distance > bestDistance) continue;
+        best = axis;
+        bestDistance = distance;
+    }
+    return best;
 }
 
 void OcctViewWidget::beginAxisDrag(AxisDrag& drag, const gp_Lin& axis, const QPoint& at)
@@ -1611,22 +1686,42 @@ bool OcctViewWidget::advanceAxisDrag(AxisDrag& drag, const gp_Lin& axis, const Q
     return true;
 }
 
-void OcctViewWidget::attachManipulator(int solidId)
+void OcctViewWidget::attachManipulator(int solidId, ManipulatorRole role)
 {
     initializeViewer();
     if (myContext.IsNull()) return;
-    // Idempotent per body. The predicate that drives this runs on every
-    // appStateChanged, and a fresh AIS_Manipulator on each of those would
-    // re-derive its position from the bounding box every time - including in
-    // the middle of a gesture, which is how a gizmo ends up snapping back to
-    // the body while the user is still holding it.
-    if (!myManipulator.IsNull() && myManipulatorSolid == solidId) return;
+    // Idempotent per body AND per role. The predicate that drives this runs on
+    // every appStateChanged, and a fresh AIS_Manipulator on each of those
+    // would re-derive its position from the bounding box every time -
+    // including in the middle of a gesture, which is how a gizmo ends up
+    // snapping back to the body while the user is still holding it. The role
+    // joins the test because Space changes it without changing the body, and
+    // the parts are decided once, below, before Attach().
+    if (!myManipulator.IsNull() && myManipulatorSolid == solidId && myManipulatorRole == role)
+        return;
 
     detachManipulator();
     const auto it = mySolids.find(solidId);
     if (it == mySolids.end() || !myContext->IsDisplayed(it->second)) return;
 
+    myManipulatorRole = role;
     myManipulator = new AIS_Manipulator();
+
+    // WHAT THIS MANIPULATOR IS FOR, decided before Attach() computes its
+    // presentation - OCCT's own header example sets the parts first, and the
+    // presentation is built once inside Attach() (see the sizing comment at
+    // the end of this function for what a late change costs).
+    //
+    // Translation is OURS since the custom gizmo's Phase 1, so the arrows and
+    // the plane handles are hidden here whichever role this is. The header is
+    // explicit that hiding a part "does not manage the manipulation
+    // (selection) mode" - so activateManipulatorModes() has to enable only the
+    // one mode this role serves as well, or a hidden arrow would still be
+    // grabbable. Both halves, one role.
+    myManipulator->SetPart(AIS_MM_Translation, Standard_False);
+    myManipulator->SetPart(AIS_MM_TranslationPlane, Standard_False);
+    myManipulator->SetPart(AIS_MM_Rotation, role == ManipulatorRole::Rotate);
+    myManipulator->SetPart(AIS_MM_Scaling, role == ManipulatorRole::Scale);
     // Modes arm on DETECTION, not on selection. The alternative - OCCT's
     // default - activates a mode when a manipulator part is SELECTED, and
     // selecting a part replaces the body selection that raised the gizmo in
@@ -2243,14 +2338,21 @@ void OcctViewWidget::updateMirrorPlacementIndicator()
 void OcctViewWidget::activateManipulatorModes()
 {
     if (myManipulator.IsNull()) return;
-    // Move along an axis, Move in a plane, Rotate, Scale - every mode the API
-    // offers. gp_Trsf cannot express a per-axis scale, so the scale cubes are
-    // uniform whichever one is grabbed; see MainWindow's bake for the clamp
-    // that keeps a uniform scale to something that is still furniture.
-    myManipulator->EnableMode(AIS_MM_Translation);
-    myManipulator->EnableMode(AIS_MM_TranslationPlane);
-    myManipulator->EnableMode(AIS_MM_Rotation);
-    myManipulator->EnableMode(AIS_MM_Scaling);
+    // ONE mode: the role this manipulator was attached for. Since the custom
+    // gizmo's Phase 1 it serves Rotate or Scale and nothing else - translation
+    // belongs to our own arms, and enabling AIS_MM_Translation here would put
+    // a second, invisible mover on the same body (SetPart hides the arrows but
+    // the header is explicit that it does not touch the manipulation modes).
+    //
+    // gp_Trsf cannot express a per-axis scale, so the scale cubes are uniform
+    // whichever one is grabbed; see MainWindow's bake for the clamp that keeps
+    // a uniform scale to something that is still furniture.
+    //
+    // Two callers - the attach, and the restore after an additive pick has
+    // taken the modes out for the duration - so this stays the one place the
+    // list lives even now that the list is one entry long.
+    if (myManipulatorRole == ManipulatorRole::Rotate) myManipulator->EnableMode(AIS_MM_Rotation);
+    else                                              myManipulator->EnableMode(AIS_MM_Scaling);
 }
 
 void OcctViewWidget::detachManipulator()
@@ -2618,6 +2720,11 @@ void OcctViewWidget::resetPickGesture()
     myAutoBodyPickTaken = false;
     myAutoRefusal.clear();
     myLastPickedEdge.Nullify();
+    // The other swallow-the-trailing-release claim, and it belongs on the same
+    // list for the same reason: a document swap between a cancelled Move drag
+    // and the release that trails it would otherwise leave the flag armed to
+    // eat the first click in the new document.
+    myMoveDragCancelled = false;
 }
 
 int OcctViewWidget::selectionPixelTolerance() const
@@ -3935,6 +4042,8 @@ void OcctViewWidget::applyTheme()
     // appStateChanged, which onThemeChanged() ends by emitting.
     myPullArrow.reapplyTheme();
     myBevelArrow.reapplyTheme();
+    // And the Move gizmo, which bakes the three axis tokens in the same way.
+    myMoveGizmo.reapplyTheme();
 
     scheduleRedraw();
 }
@@ -5469,6 +5578,10 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
     const bool lockGesture = (event->modifiers() & Qt::ControlModifier) &&
                              (mySelectionMode == SelectionMode::Face ||
                               mySelectionMode == SelectionMode::Auto);
+    // Declared here rather than beside the bevel branch that first needed it:
+    // three screen-space handles now read it, and a modifier the FIRST of them
+    // consults has to be in scope before the first of them.
+    const bool additivePress = (event->modifiers() & Qt::ShiftModifier) != 0;
     if (event->button() == Qt::LeftButton && !mySketchMode && !lockGesture &&
         arrowHit(myPullArrow, myLastPos)) {
         // The press CLAIMS the gesture whether or not the drag maths can
@@ -5533,11 +5646,33 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
     // usually right beside it, so without this a Shift-click meant to
     // accumulate would start a drag on the edge already chosen instead. Same
     // hazard the transform gizmo's Deactivate() closes below, one layer up.
-    const bool additivePress = (event->modifiers() & Qt::ShiftModifier) != 0;
     if (event->button() == Qt::LeftButton && !mySketchMode && !additivePress &&
         arrowHit(myBevelArrow, myLastPos)) {
         beginAxisDrag(myBevelDrag, myBevelArrow.axis(), myLastPos);
         return;
+    }
+
+    // The Move gizmo's three arms, on exactly the same terms as the two arrows
+    // above - including claiming the gesture at an angle the maths refuses.
+    //
+    // Never up at the same time as either of them: this gizmo needs one whole
+    // BODY selected and the arrows need a face and edges (see
+    // MainWindow::moveToolBodyId()), so the order of these blocks is not
+    // load-bearing. Shift is excluded for the bevel arrow's own reason, one
+    // gizmo over: an arm lying over a second body would otherwise swallow the
+    // Shift press meant to add it. Ctrl is excluded because it is the face
+    // lock's gesture and never a grab - the pull arrow's own exemption, and
+    // the arms of a gizmo standing at a body's centre cross that body's faces
+    // exactly where a user aims to lock one.
+    if (event->button() == Qt::LeftButton && !mySketchMode && !additivePress && !lockGesture &&
+        myMoveGizmo.isShowing()) {
+        const int axis = moveGizmoAxisAt(myLastPos);
+        if (axis >= 0) {
+            myMoveDragAxis = axis;
+            myMoveDragCancelled = false;
+            beginAxisDrag(myMoveDrag, myMoveGizmo.armAxis(axis), myLastPos);
+            return;
+        }
     }
 
     // The transform gizmo owns LEFT drags that start on one of its parts, and
@@ -5612,6 +5747,24 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
     if (myBevelDrag.active && event->button() == Qt::LeftButton) {
         myBevelDrag.active = false;
         emit bevelReleased(myBevelDrag.moved);
+        return;
+    }
+
+    // The end of a Move drag, swallowed for exactly the same reason: the press
+    // was aimed at an arm, and re-picking here would take the body selection
+    // the gizmo is standing on and replace it with whichever face or edge the
+    // cursor happens to be over.
+    if (myMoveDrag.active && event->button() == Qt::LeftButton) {
+        myMoveDrag.active = false;
+        myMoveDragAxis = -1;
+        emit moveReleased(myMoveDrag.moved);
+        return;
+    }
+    // ...and the release trailing a drag Escape already cancelled, swallowed
+    // for the same reason one beat later. Consumed once, so a later click
+    // cannot inherit it.
+    if (myMoveDragCancelled && event->button() == Qt::LeftButton) {
+        myMoveDragCancelled = false;
         return;
     }
 
@@ -5814,6 +5967,14 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
     } else if (myBevelDrag.active) {
         if (advanceAxisDrag(myBevelDrag, myBevelArrow.axis(), pos))
             emit bevelDragged(myBevelDrag.value);
+    } else if (myMoveDrag.active) {
+        // The arm's axis is read back from the renderer rather than
+        // remembered: the gizmo is rebuilt on every camera step, and reading
+        // the line from the same place the press did is what stops a rebuild
+        // between two moves changing what this drag is measured along.
+        if (myMoveDragAxis >= 0 &&
+            advanceAxisDrag(myMoveDrag, myMoveGizmo.armAxis(myMoveDragAxis), pos))
+            emit moveDragged(myMoveDragAxis, myMoveDrag.value);
     } else if (myOrbiting) {
         const QPoint delta = pos - myLastPos;
         // Dragging right swings the scene right: azimuth decreases; dragging up

@@ -138,6 +138,32 @@ public:
     int transformableBodyId() const;
     bool canTransformSelectedBody() const { return transformableBodyId() > 0; }
 
+    // WHICH handle that one body wears. Space cycles it, the status label
+    // names it, and it is the whole of the custom gizmo's Phase 1 seam:
+    // Move is ours (src/ui/TransformGizmo.h), Rotate and Scale are still
+    // OCCT's AIS_Manipulator with its translation parts hidden. Phase 2
+    // replaces the other two and the seam goes with them.
+    //
+    // Session state, not document state - it rides in no checkpoint and no
+    // manifest, the same rule the selection itself follows. It is STICKY
+    // across selections on purpose: a user who cycled to Rotate to turn one
+    // body almost always wants to turn the next one too, and a tool that
+    // silently reset would make Space something you press twice.
+    enum class BodyTool { Move, Rotate, Scale };
+    BodyTool bodyTool() const { return myBodyTool; }
+    void setBodyTool(BodyTool tool);
+    // "Move", "Rotate" or "Scale" - the vocabulary table's own three words for
+    // repositioning a body, in ONE place, read by the status label and by the
+    // Space action's tooltip alike.
+    static QString bodyToolName(BodyTool tool);
+
+    // THE Move gizmo's predicate: the body its arms should stand on, or 0.
+    // transformableBodyId() plus "and the active tool is Move" - one function,
+    // read by MoveTool::refresh(), by refreshTransformGizmo() and by the
+    // status label, so the arms, the manipulator and the teaching text cannot
+    // disagree about which of the two is up.
+    int moveToolBodyId() const;
+
     // Bakes `delta` into body `id` through ModelingOps::transformShape and
     // replaces it, with an undo checkpoint and a Note toast offering Undo -
     // the one commit path for the transform gizmo, so nothing else touches
@@ -871,6 +897,10 @@ private slots:
     // has already put its presentation back by the time this runs (see
     // OcctViewWidget::endGizmoDrag), so there is nothing to undo here either.
     void onGizmoReleased(int solidId, const gp_Trsf& delta);
+    // Space: Move -> Rotate -> Scale -> Move. Enabled only while a body is
+    // actually wearing a handle, because a key that cycles a tool nothing is
+    // showing has silently changed state the user cannot see.
+    void onNextTool();
 
     // File -> Save version...: starts VersionsPanel's own create-a-version
     // gesture (VersionsPanel::beginNewVersion()), opening the drawer first
@@ -1451,6 +1481,14 @@ private:
     ExtrudePreview* myExtrudePreview = nullptr;
     PullArrow* myPullArrow = nullptr;
     BevelArrow* myBevelArrow = nullptr;
+    // The Move tool's value chip. Like the two arrows it parents itself to
+    // the viewport and derives its own visibility; this window keeps the
+    // pointer only for the laidOut() re-place every self-placing panel gets.
+    class MoveTool* myMoveTool = nullptr;
+    // Which handle a selected body wears - see bodyTool(). Move by default:
+    // it is the commonest edit and the one this phase drew.
+    BodyTool myBodyTool = BodyTool::Move;
+    QAction* myNextToolAction = nullptr;   // Space
 
     // --- versions and the side-by-side compare (Milestone 3) ---------------
     QAction* myVersionsPanelAction = nullptr;   // View -> Versions - the drawer's law
