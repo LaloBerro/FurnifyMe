@@ -22,6 +22,8 @@ class ExtrudePreview;
 class OcctViewWidget;
 class PullArrow;
 class QAction;
+class QActionGroup;
+class QMenu;
 class QMenuBar;
 class QSplitter;
 class RenderSettingsPanel;
@@ -575,17 +577,52 @@ public:
     // value (this is still void, matching every other route into it) -
     // isFurnitureDirty() and isShowingInitScreen() are what to read instead.
     void closeCurrentFurniture();
-    // File -> Save automatically (checkable, persisted). On, a debounced
-    // (400 ms) save runs after every document change; see
-    // kAutosaveWriteMs.
-    void setAutosaveEnabled(bool enabled);
-    bool autosaveEnabled() const { return myAutosaveOn; }
+    // File -> Autosave (Milestone 5, item 10): a submenu of five exclusive
+    // modes, replacing the old single checkable entry. "Off" and "After
+    // every change" carry the old boolean's two states forward exactly -
+    // AfterEveryChange is the debounced (400 ms) save-after-every-checkpoint
+    // behaviour the old ON state always meant (kAutosaveWriteMs), byte for
+    // byte. The three timed modes instead save on a plain wall-clock
+    // interval, independent of edit bursts, and ONLY when the furniture is
+    // actually dirty at the moment the timer fires - a clean fire writes
+    // nothing and reports nothing. The interval timer starts when a
+    // furniture opens and stops when it closes; close-saves-first and the
+    // failed-save-aborts-the-handoff laws are UNCHANGED by any of this -
+    // closeCurrentFurniture() always makes its own fresh save decision,
+    // regardless of which mode is active.
+    enum class AutosaveMode {
+        Off,
+        AfterEveryChange,
+        EveryMinute,
+        Every5Minutes,
+        Every15Minutes,
+    };
+    void setAutosaveMode(AutosaveMode mode);
+    AutosaveMode autosaveMode() const { return myAutosaveMode; }
     static constexpr int kAutosaveWriteMs = 400;
+    // The three timed intervals, real milliseconds - see
+    // debugFireAutosaveInterval() for how the suite exercises them without
+    // real minutes of waiting.
+    static constexpr int kAutosaveEveryMinuteMs = 60'000;
+    static constexpr int kAutosaveEvery5MinutesMs = 5 * 60'000;
+    static constexpr int kAutosaveEvery15MinutesMs = 15 * 60'000;
     // The live autosave countdown in ms, or -1 when nothing is pending -
     // ToastHost::remainingMs()'s own shape, for the same reason: the suite
     // asserts the ARMED timer rather than waiting kAutosaveWriteMs real
-    // milliseconds for it to fire.
+    // milliseconds for it to fire. This is the "After every change" debounce
+    // alone - see autosaveIntervalPendingMs() for the three timed modes' own
+    // countdown.
     int autosavePendingMs() const;
+    // The live countdown on the PERIODIC interval timer the three timed
+    // modes use, or -1 when none is running ("Off" and "After every change"
+    // never arm it). Same shape as autosavePendingMs().
+    int autosaveIntervalPendingMs() const;
+    // Test-only: fires the periodic interval tick immediately, exactly as
+    // myAutosaveIntervalTimer's own timeout() would on its own schedule -
+    // lets the suite exercise "Every minute"/"Every 5 minutes"/"Every 15
+    // minutes" without waiting real minutes for the timer. Production code
+    // never calls this; only the timer's own connection does.
+    void debugFireAutosaveInterval();
 
     FurnitureStore& furnitureStore() { return myStore; }
 
@@ -689,7 +726,7 @@ public:
     // and unlike every OTHER View toggle in this file, deliberately NEVER
     // persisted: CLAUDE.md's own words are "the app always starts in
     // modeling", so this never touches QSettings the way
-    // setShowBottomBar()/setAutosaveEnabled() and friends do.
+    // setShowBottomBar()/setAutosaveMode() and friends do.
     //
     // Also the one place that flips myRenderModeAction's checked state, in
     // BOTH directions - the user unchecking the box calls this through the
@@ -785,7 +822,7 @@ private slots:
     // setSymmetryPlaneFromFace() - the Lock to Face idiom, one gizmo over.
     // The checkable Symmetry action itself needs no slot of its own: its
     // toggled(bool) connects straight to setSymmetryEnabled(), exactly as
-    // myAutosaveAction connects to setAutosaveEnabled().
+    // myNotificationsAction connects to setShowNotifications().
     void onSetSymmetryPlane();
     // mySymmetryAction's own triggered() handler (NOT toggled() any more -
     // see the action's own comment in the .cpp for why the split matters):
@@ -1098,15 +1135,24 @@ private:
     // exactly as CLAUDE.md's never-silent-failure law requires.
     void setShowBottomBar(bool show);
 
-    // The one save implementation - Ctrl+S, autosave's debounce timer and
-    // "close with autosave off" all call this rather than each carrying its
-    // own copy. `announce` is what tells Ctrl+S's success apart from
-    // autosave's: a Note ("Saved Furniture NN") only when the user asked for
-    // it directly, never once per debounced background write, while a
-    // FAILURE is never conditional on it - CLAUDE.md's law that a refusal
-    // must report somewhere applies to a silent autosave exactly as it does
-    // to everything else.
-    bool performSave(bool announce);
+    // The one save implementation - Ctrl+S, the After-every-change debounce,
+    // the timed modes' periodic tick and "close with a background mode off"
+    // all call this rather than each carrying its own copy. `announce` is
+    // what tells Ctrl+S's success apart from a background write's: a Note
+    // ("Saved Furniture NN") only when the user asked for it directly, never
+    // once per debounced or timed background write.
+    //
+    // `reportFailure` (default true, so every call site above keeps its
+    // existing behaviour untouched) is the ONE exception to "a FAILURE is
+    // never conditional on announce" - it is conditional on THIS instead,
+    // and only onAutosaveIntervalTick() ever passes false. CLAUDE.md's
+    // never-silent-failure law is satisfied by the FIRST failure at a given
+    // dirty-state episode reporting; a periodic timer that kept re-toasting
+    // the identical unfixed problem every tick would just be noise, not a
+    // second law-abiding report. The ATTEMPT itself is never suppressed -
+    // only the toast - so the very next tick after whatever was wrong
+    // resolves itself saves clean with no new edit required.
+    bool performSave(bool announce, bool reportFailure = true);
     // The debounce timer's own timeout. closeCurrentFurniture() does NOT
     // route through this any more - it cancels the debounce and makes one
     // fresh save decision of its own, so a failed close-time save can abort
@@ -1116,9 +1162,27 @@ private:
     // Builds myAutosaveTimer on first use (same lazy-build reasoning as
     // persistAppearance()'s myAppearanceWrite) and (re)starts it - the ONE
     // place either happens, so the two call sites that arm it (a checkpoint,
-    // and the toggle turning on over an already-dirty document) cannot drift
-    // out of step with each other's interval or wiring.
+    // and the mode switching TO AfterEveryChange over an already-dirty
+    // document) cannot drift out of step with each other's interval or
+    // wiring.
     void armAutosaveTimer();
+    // The periodic interval timer's own timeout - the three timed modes'
+    // equivalent of flushAutosave(). A no-op when nothing is dirty (a clean
+    // fire writes nothing and reports nothing). Otherwise ALWAYS attempts a
+    // save - unlike flushAutosave(), this never skips the attempt itself, so
+    // a problem that resolves on its own (disk space freed, a folder
+    // restored) is picked up by the very next tick with no new edit
+    // required - but suppresses the FAILURE TOAST specifically when the
+    // LAST attempt at this exact revision already reported one
+    // (myAutosaveFailedAtRevision, via performSave()'s reportFailure
+    // parameter): one Failure per dirty-state episode, re-armed by a fresh
+    // edit (a new revision) or a successful save (see performSave()).
+    void onAutosaveIntervalTick();
+    // (Re)builds/starts/stops myAutosaveIntervalTimer to match the live mode
+    // and whether a furniture is actually open - the ONE place that happens,
+    // called from setAutosaveMode(), openFurniture() and showInitScreen()
+    // rather than each carrying its own copy of the decision.
+    void applyAutosaveIntervalTimer();
     // The window title from the furniture name and the dirty star - the
     // ONE place either is written, called from updateActions() the way
     // updateStateLabel() is, so a save, an undo/redo, or opening a different
@@ -1170,15 +1234,28 @@ private:
     // isFurnitureDirty(). 0 while no furniture is open, which is harmless:
     // isFurnitureDirty() refuses to answer true for that state regardless.
     int mySavedRevision = 0;
-    // File -> Save automatically, persisted under the same guard as every
-    // other preference. Defaults to on: CLAUDE.md's ruling for this branch
-    // is "never lose work, never block", and a new user who has not found
-    // the toggle yet should get the safer default.
-    bool myAutosaveOn = true;
-    // The debounce behind autosave - built on first use, exactly as
+    // File -> Autosave, persisted under the same guard as every other
+    // preference. Defaults to AfterEveryChange: CLAUDE.md's ruling for this
+    // branch is "never lose work, never block", and a new user who has not
+    // found the menu yet should get the safer default - the same reasoning
+    // the old boolean's own true default carried, and the migration target
+    // for it (see the constructor).
+    AutosaveMode myAutosaveMode = AutosaveMode::AfterEveryChange;
+    // The debounce behind AfterEveryChange - built on first use, exactly as
     // myAppearanceWrite is, and for the same reason: a window that never
-    // sees a checkpoint while autosave is on never creates one.
+    // sees a checkpoint in that mode never creates one.
     class QTimer* myAutosaveTimer = nullptr;
+    // The periodic timer behind the three timed modes - built on first use,
+    // same reasoning. Runs continuously on its own interval while a
+    // furniture is open in a timed mode, independent of edits; see
+    // applyAutosaveIntervalTimer().
+    class QTimer* myAutosaveIntervalTimer = nullptr;
+    // The document revision a TIMED-mode save last failed at, or -1 when
+    // nothing is outstanding - onAutosaveIntervalTick()'s own guard against
+    // re-toasting the same unfixed failure every tick. Cleared by a
+    // successful save (performSave()) and implicitly re-armed by any new
+    // edit, since a fresh checkpoint's revision can never equal this one.
+    int myAutosaveFailedAtRevision = -1;
 
     // Which outline item Extrude would consume, when the user has chosen one
     // from the drawer. Not the pending face itself and not a cursor into the
@@ -1254,10 +1331,20 @@ private:
     QAction* myLinkSelectedAction = nullptr;
     QAction* myUnlinkAction = nullptr;
     QAction* myAppearanceAction = nullptr;
-    // File -> Save / Save automatically / Close furniture - see the public
-    // methods above, which every one of these three triggers into.
+    // File -> Save / Autosave / Close furniture - see the public methods
+    // above, which every one of these triggers into.
     QAction* myFileSaveAction = nullptr;
-    QAction* myAutosaveAction = nullptr;
+    // The Autosave submenu (Milestone 5, item 10): an exclusive QActionGroup
+    // of five mode actions, indexed by AutosaveMode's own values so
+    // setAutosaveMode() can push the checked state onto the right one
+    // without a switch. myAutosaveMenuAction is the submenu's OWN action -
+    // the one updateActions() enables/disables, exactly as every other
+    // File-menu action here does, since disabling it greys out the whole
+    // submenu at once.
+    QMenu* myAutosaveMenu = nullptr;
+    QAction* myAutosaveMenuAction = nullptr;
+    QActionGroup* myAutosaveGroup = nullptr;
+    QAction* myAutosaveModeActions[5] = {};
     QAction* myCloseFurnitureAction = nullptr;
     // Checkable, and the single source of the base projection's truth: the
     // View menu entry, the O shortcut and the bar's readout button are all

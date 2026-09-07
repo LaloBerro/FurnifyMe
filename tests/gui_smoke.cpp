@@ -66,6 +66,7 @@
 
 #include <QAbstractButton>
 #include <QAction>
+#include <QActionGroup>
 #include <QApplication>
 #include <QCoreApplication>
 #include <QColorDialog>
@@ -483,7 +484,15 @@ void skipByEnvironment(int checks, const QString& why)
 // each of the two modes, the app-bar pricing's non-vacuity, the app bar's own
 // per-frame budget, the whole overlay tree's, and the structural pin that the
 // app mark is cached rather than re-decoded. 2682 + 9 = 2691.
-constexpr int kCheckFloor = 3209;
+//
+// Milestone 5, item 10 (Autosave modes and the two timed-save laws) raised
+// the floor from 3209 to 3289, matched against a real run rather than a hand
+// tally, per this file's own established rule: two new self-contained blocks
+// - the submenu/timed-mode/failure-guard probe and the QSettings persistence
+// + old-boolean-migration probe - plus the six adapted call sites across the
+// four pre-existing autosave blocks (the action lookups changed shape, not
+// the check count).
+constexpr int kCheckFloor = 3289;
 
 void check(bool condition, const QString& what)
 {
@@ -648,6 +657,8 @@ constexpr BlockInfo kBlocks[] = {
     { "an-orbit-step-costs-one-frame-in-both-modes", false, true },
     { "milestone-5-item-6-edge-and-outline-line-width-rows", false, true },
     { "milestone-5-item-8-plain-duplicate-ctrl-d", false, true },
+    { "milestone-5-item-10-autosave-modes-and-timed-saves", false, true },
+    { "milestone-5-item-10-autosave-persistence-and-migration", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -2570,7 +2581,8 @@ int main(int argc, char* argv[])
         check(!saveProbe.isShowingInitScreen(), "New furniture opens it");
         const QString furnitureId = saveProbe.currentFurnitureId();
 
-        check(saveProbe.autosaveEnabled(), "autosave starts on, per the default");
+        check(saveProbe.autosaveMode() == MainWindow::AutosaveMode::AfterEveryChange,
+              "autosave starts at After every change, per the default");
         check(!saveProbe.isFurnitureDirty(), "a fresh furniture is not dirty");
         check(!saveProbe.windowTitle().contains(QLatin1Char('*')),
               "and carries no dirty star");
@@ -2737,11 +2749,15 @@ int main(int argc, char* argv[])
                                     beforeMoveProps);
         const double xBeforeMove = beforeMoveProps.CentreOfMass().X();
 
-        QAction* autosaveAction = action(saveProbe, QStringLiteral("Save automatically"));
-        check(autosaveAction != nullptr && autosaveAction->isChecked(),
-              "the menu entry starts checked, matching the default");
-        if (autosaveAction) autosaveAction->trigger();
-        check(!saveProbe.autosaveEnabled(), "...and turns it off");
+        QAction* autosaveAfterEveryChangeAction =
+            action(saveProbe, QStringLiteral("After every change"));
+        check(autosaveAfterEveryChangeAction != nullptr &&
+                  autosaveAfterEveryChangeAction->isChecked(),
+              "the After every change entry starts checked, matching the default");
+        QAction* autosaveOffAction = action(saveProbe, QStringLiteral("Off"));
+        check(autosaveOffAction != nullptr, "the Off entry exists in the same exclusive group");
+        if (autosaveOffAction) autosaveOffAction->trigger();
+        check(saveProbe.autosaveMode() == MainWindow::AutosaveMode::Off, "...and turns it off");
 
         gp_Trsf move;
         move.SetTranslation(gp_Vec(15.0, 0.0, 0.0));
@@ -2884,9 +2900,10 @@ int main(int argc, char* argv[])
                                     handoffProps);
         const double handoffXBefore = handoffProps.CentreOfMass().X();
 
-        QAction* handoffAutosave = action(handoffWindow, QStringLiteral("Save automatically"));
-        if (handoffAutosave && handoffAutosave->isChecked()) handoffAutosave->trigger();
-        check(handoffAutosave != nullptr && !handoffWindow.autosaveEnabled(),
+        QAction* handoffAutosaveOff = action(handoffWindow, QStringLiteral("Off"));
+        if (handoffAutosaveOff) handoffAutosaveOff->trigger();
+        check(handoffAutosaveOff != nullptr &&
+                  handoffWindow.autosaveMode() == MainWindow::AutosaveMode::Off,
               "autosave is off for this probe - the native X has to save on its own, "
               "not merely flush an already-armed debounce");
 
@@ -3000,9 +3017,10 @@ int main(int argc, char* argv[])
         }
         check(!saveFailProbe.isShowingInitScreen(), "a fresh furniture is open for the probe");
 
-        QAction* saveFailAutosave = action(saveFailProbe, QStringLiteral("Save automatically"));
-        if (saveFailAutosave && saveFailAutosave->isChecked()) saveFailAutosave->trigger();
-        check(saveFailAutosave != nullptr && !saveFailProbe.autosaveEnabled(),
+        QAction* saveFailAutosaveOff = action(saveFailProbe, QStringLiteral("Off"));
+        if (saveFailAutosaveOff) saveFailAutosaveOff->trigger();
+        check(saveFailAutosaveOff != nullptr &&
+                  saveFailProbe.autosaveMode() == MainWindow::AutosaveMode::Off,
               "autosave off for this probe - the close-time save is the only save in play");
 
         check(buildBody(saveFailProbe, 0.30, 0.30, 0.5, 0.5, 60.0),
@@ -3079,7 +3097,8 @@ int main(int argc, char* argv[])
         enterFreshFurniture(autosaveFailProbe);
         check(!autosaveFailProbe.isShowingInitScreen(),
               "a fresh furniture is open for the autosave-failure probe");
-        check(autosaveFailProbe.autosaveEnabled(), "autosave starts on, per the default");
+        check(autosaveFailProbe.autosaveMode() == MainWindow::AutosaveMode::AfterEveryChange,
+              "autosave starts at After every change, per the default");
 
         QString autosaveFailDirPath;
         for (const FurnitureStore::FurnitureInfo& info :
@@ -3283,9 +3302,10 @@ int main(int argc, char* argv[])
         enterFreshFurniture(closeProbe);
         const QString closeId = closeProbe.currentFurnitureId();
 
-        QAction* closeProbeAutosave = action(closeProbe, QStringLiteral("Save automatically"));
-        if (closeProbeAutosave) closeProbeAutosave->trigger();
-        check(closeProbeAutosave != nullptr && !closeProbe.autosaveEnabled(),
+        QAction* closeProbeAutosaveOff = action(closeProbe, QStringLiteral("Off"));
+        if (closeProbeAutosaveOff) closeProbeAutosaveOff->trigger();
+        check(closeProbeAutosaveOff != nullptr &&
+                  closeProbe.autosaveMode() == MainWindow::AutosaveMode::Off,
               "autosave turned off for the close-saves-outright probe");
 
         trigger(closeProbe, QStringLiteral("Start Sketch"));
@@ -24517,6 +24537,431 @@ int main(int argc, char* argv[])
         }
 
         probe.close();
+    }
+
+    // --- Milestone 5, item 10: Autosave modes and the two timed-save laws ----
+    // An isolated probe, the same shape the linked-copies and plain-Duplicate
+    // blocks above use: this exercises a whole new File-menu submenu, a
+    // second QTimer with its own real (if bounded-for-the-suite) periods, and
+    // a failure-report guard with no business touching the shared `window`'s
+    // own thousands of later assumptions.
+    if (blockEnabled("milestone-5-item-10-autosave-modes-and-timed-saves")) {
+        RequiredTempDir autoDir;
+        MainWindow autoProbe(nullptr, /*persistProgress=*/false, autoDir.path());
+        autoProbe.setAttribute(Qt::WA_ShowWithoutActivating);
+        autoProbe.resize(1000, 700);
+        autoProbe.show();
+        settle(300);
+        autoProbe.view()->setAnimationsEnabled(false);
+        enterFreshFurniture(autoProbe);
+        check(!autoProbe.isShowingInitScreen(),
+              "a fresh furniture is open for the autosave-modes probe");
+
+        // --- the submenu exists: five exclusive, checkable entries ----------
+        QAction* offAction = action(autoProbe, QStringLiteral("Off"));
+        QAction* afterEveryChangeAction = action(autoProbe, QStringLiteral("After every change"));
+        QAction* everyMinuteAction = action(autoProbe, QStringLiteral("Every minute"));
+        QAction* every5MinutesAction = action(autoProbe, QStringLiteral("Every 5 minutes"));
+        QAction* every15MinutesAction = action(autoProbe, QStringLiteral("Every 15 minutes"));
+        check(offAction && afterEveryChangeAction && everyMinuteAction && every5MinutesAction &&
+                  every15MinutesAction,
+              "all five Autosave mode actions exist");
+        if (offAction && afterEveryChangeAction && everyMinuteAction && every5MinutesAction &&
+            every15MinutesAction) {
+            check(offAction->isCheckable() && afterEveryChangeAction->isCheckable() &&
+                      everyMinuteAction->isCheckable() && every5MinutesAction->isCheckable() &&
+                      every15MinutesAction->isCheckable(),
+                  "every mode entry is checkable");
+            QActionGroup* group = offAction->actionGroup();
+            check(group != nullptr && group->isExclusive(), "the five share one exclusive group");
+            check(group != nullptr && group == afterEveryChangeAction->actionGroup() &&
+                      group == everyMinuteAction->actionGroup() &&
+                      group == every5MinutesAction->actionGroup() &&
+                      group == every15MinutesAction->actionGroup(),
+                  "...the SAME group, all five");
+            check(group != nullptr && group->actions().size() == 5,
+                  QStringLiteral("...and it holds exactly these five, no more (found %1)")
+                      .arg(group ? group->actions().size() : -1));
+        }
+        check(afterEveryChangeAction != nullptr && afterEveryChangeAction->isChecked() &&
+                  autoProbe.autosaveMode() == MainWindow::AutosaveMode::AfterEveryChange,
+              "After every change starts checked, matching the default");
+
+        // --- a real SUBMENU under File, replacing the old single entry ------
+        {
+            QMenuBar* menuBar = autoProbe.findChild<QMenuBar*>();
+            QMenu* fileMenu = nullptr;
+            if (menuBar) {
+                for (QAction* top : menuBar->actions()) {
+                    if (top->text().remove(QLatin1Char('&')) == QStringLiteral("File")) {
+                        fileMenu = top->menu();
+                        break;
+                    }
+                }
+            }
+            check(fileMenu != nullptr, "the File menu is found");
+            QAction* autosaveSubmenu = nullptr;
+            if (fileMenu) {
+                for (QAction* candidate : fileMenu->actions()) {
+                    if (candidate->text().remove(QLatin1Char('&')) ==
+                        QStringLiteral("Autosave")) {
+                        autosaveSubmenu = candidate;
+                        break;
+                    }
+                }
+            }
+            check(autosaveSubmenu != nullptr && autosaveSubmenu->menu() != nullptr,
+                  "File -> Autosave is a real submenu, not a leaf action");
+            if (autosaveSubmenu && autosaveSubmenu->menu()) {
+                const QList<QAction*> subActions = autosaveSubmenu->menu()->actions();
+                check(subActions.contains(offAction) &&
+                          subActions.contains(afterEveryChangeAction) &&
+                          subActions.contains(everyMinuteAction) &&
+                          subActions.contains(every5MinutesAction) &&
+                          subActions.contains(every15MinutesAction),
+                      "...and it holds all five mode entries");
+            }
+            check(action(autoProbe, QStringLiteral("Save automatically")) == nullptr,
+                  "the old single checkable entry is gone");
+        }
+
+        // --- exclusivity: choosing one un-checks the others, both ways ------
+        if (everyMinuteAction) everyMinuteAction->trigger();
+        check(autoProbe.autosaveMode() == MainWindow::AutosaveMode::EveryMinute,
+              "triggering Every minute switches the live mode");
+        check(everyMinuteAction != nullptr && everyMinuteAction->isChecked() &&
+                  afterEveryChangeAction != nullptr && !afterEveryChangeAction->isChecked() &&
+                  offAction != nullptr && !offAction->isChecked(),
+              "...and only that entry reads checked now");
+
+        // --- the periodic interval timer: armed, real, bounded --------------
+        check(autoProbe.autosaveIntervalPendingMs() > 0 &&
+                  autoProbe.autosaveIntervalPendingMs() <= MainWindow::kAutosaveEveryMinuteMs,
+              QStringLiteral("opening a furniture in a timed mode arms the interval timer "
+                             "(%1 ms left of %2)")
+                  .arg(autoProbe.autosaveIntervalPendingMs())
+                  .arg(MainWindow::kAutosaveEveryMinuteMs));
+        check(autoProbe.autosavePendingMs() < 0,
+              "...and the After every change debounce is not the mechanism in a timed mode");
+
+        // --- a clean fire is a no-op: no write, no toast ---------------------
+        check(!autoProbe.isFurnitureDirty(), "the freshly opened furniture is clean");
+        QString autoFurnitureDir;
+        for (const FurnitureStore::FurnitureInfo& info :
+             autoProbe.furnitureStore().listFurniture()) {
+            if (info.id == autoProbe.currentFurnitureId()) autoFurnitureDir = info.filePath;
+        }
+        check(!autoFurnitureDir.isEmpty(), "the furniture's own directory is found");
+        const QString autoShapesPath = autoFurnitureDir + QStringLiteral("/shapes.bin");
+        check(QFileInfo::exists(autoShapesPath),
+              "the furniture's shapes file already exists, from creation");
+        const QDateTime mtimeAtOpen = QFileInfo(autoShapesPath).lastModified();
+        autoProbe.debugFireAutosaveInterval();
+        settle(80);
+        check(!autoProbe.isFurnitureDirty(), "still clean after a clean-fire tick");
+        check(QFileInfo(autoShapesPath).lastModified() == mtimeAtOpen,
+              "a clean fire wrote nothing at all - shapes.bin's own modification time is "
+              "untouched");
+
+        // --- the headline gesture: a dirty furniture saves when the timer ---
+        // fires --------------------------------------------------------------
+        check(buildBody(autoProbe, 0.30, 0.30, 0.5, 0.5, 40.0),
+              "a checkpoint for the timed-mode probe");
+        check(autoProbe.isFurnitureDirty(), "the checkpoint leaves the furniture dirty");
+        check(autoProbe.autosavePendingMs() < 0,
+              "...and a checkpoint under a timed mode arms no After-every-change debounce");
+        autoProbe.debugFireAutosaveInterval();
+        settle(80);
+        check(!autoProbe.isFurnitureDirty(), "the forced tick saved the dirty furniture");
+        {
+            DocumentModel reloadedTimed;
+            QString timedErr;
+            FurnitureStore timedStore(autoDir.path());
+            check(timedStore.loadFurniture(autoProbe.currentFurnitureId(), reloadedTimed,
+                                           &timedErr) &&
+                      reloadedTimed.count() == 1,
+                  QStringLiteral("...and the save genuinely reached disk (%1)")
+                      .arg(timedErr.isEmpty() ? QStringLiteral("ok") : timedErr));
+        }
+
+        // --- no-op when clean, proven a second way: mtime does not move -----
+        const QDateTime beforeCleanTick = QFileInfo(autoShapesPath).lastModified();
+        autoProbe.debugFireAutosaveInterval();
+        settle(80);
+        check(QFileInfo(autoShapesPath).lastModified() == beforeCleanTick,
+              "a clean fire after a real save still writes nothing - shapes.bin's own "
+              "modification time is untouched");
+
+        // --- switching mode changes the interval, restarting the period -----
+        if (every5MinutesAction) every5MinutesAction->trigger();
+        check(autoProbe.autosaveMode() == MainWindow::AutosaveMode::Every5Minutes,
+              "switching to Every 5 minutes");
+        check(autoProbe.autosaveIntervalPendingMs() > MainWindow::kAutosaveEveryMinuteMs &&
+                  autoProbe.autosaveIntervalPendingMs() <= MainWindow::kAutosaveEvery5MinutesMs,
+              QStringLiteral("...and the interval timer now carries the LONGER period (%1 ms)")
+                  .arg(autoProbe.autosaveIntervalPendingMs()));
+
+        if (every15MinutesAction) every15MinutesAction->trigger();
+        check(autoProbe.autosaveIntervalPendingMs() > MainWindow::kAutosaveEvery5MinutesMs &&
+                  autoProbe.autosaveIntervalPendingMs() <= MainWindow::kAutosaveEvery15MinutesMs,
+              "...and Every 15 minutes carries the longest period of the three");
+
+        // --- Off stops the periodic timer outright ---------------------------
+        if (offAction) offAction->trigger();
+        check(autoProbe.autosaveMode() == MainWindow::AutosaveMode::Off, "switching to Off");
+        check(autoProbe.autosaveIntervalPendingMs() < 0,
+              "...and the interval timer is stopped, not merely re-armed with a huge period");
+
+        // --- back to After every change: exactly today's debounce -----------
+        if (afterEveryChangeAction) afterEveryChangeAction->trigger();
+        check(autoProbe.autosaveMode() == MainWindow::AutosaveMode::AfterEveryChange,
+              "back to After every change");
+        check(autoProbe.autosaveIntervalPendingMs() < 0,
+              "...and the periodic timer is stopped again - the debounce is the only "
+              "mechanism this mode uses");
+
+        // --- one Failure per dirty-state episode, re-armed by a new edit ----
+        if (everyMinuteAction) everyMinuteAction->trigger();
+        settle(80);
+        QString blockedDirPath;
+        for (const FurnitureStore::FurnitureInfo& info :
+             autoProbe.furnitureStore().listFurniture()) {
+            if (info.id == autoProbe.currentFurnitureId()) blockedDirPath = info.filePath;
+        }
+        check(!blockedDirPath.isEmpty(), "the furniture's directory is found for the "
+                                          "failure-injection half");
+        const QString blockedTmpPath = blockedDirPath + QStringLiteral("/shapes.bin.tmp");
+        check(QDir().mkpath(blockedTmpPath),
+              "a directory blocks the shapes temp file, so the next save fails outright");
+        check(buildBody(autoProbe, 0.10, 0.10, 0.2, 0.2, 30.0),
+              "a second checkpoint - dirty going into the blocked tick");
+        ToastHost* autoToasts = autoProbe.findChild<ToastHost*>();
+        check(autoToasts != nullptr, "the probe has a toast host");
+        autoProbe.debugFireAutosaveInterval();
+        settle(100);
+        check(autoProbe.isFurnitureDirty(), "the blocked tick failed to save - still dirty");
+        const QString firstFailureText = autoToasts ? autoToasts->currentText() : QString();
+        check(autoToasts != nullptr && firstFailureText.contains(QStringLiteral("Couldn't save")),
+              QStringLiteral("...and the FIRST failure genuinely reports (\"%1\")")
+                  .arg(firstFailureText));
+        settle(300);
+        const int midCountdown = autoToasts ? autoToasts->remainingMs() : -1;
+        check(midCountdown >= 0, "the failure toast is still counting down, mid-episode");
+
+        // A second tick, same dirty revision, same blocked directory: must
+        // NOT re-toast - the countdown keeps falling rather than jumping back
+        // up to a freshly restarted Failure's own full lifetime.
+        autoProbe.debugFireAutosaveInterval();
+        settle(80);
+        const int afterSecondTickCountdown = autoToasts ? autoToasts->remainingMs() : -1;
+        check(autoProbe.isFurnitureDirty(), "...still dirty, still blocked");
+        check(afterSecondTickCountdown >= 0 && afterSecondTickCountdown <= midCountdown,
+              QStringLiteral("...and the SAME-episode retry raised no second Failure - the "
+                             "countdown kept falling (%1 ms) rather than jumping back up "
+                             "(%2 ms before)")
+                  .arg(afterSecondTickCountdown)
+                  .arg(midCountdown));
+
+        // A NEW edit moves the revision - re-armed, so the next tick (still
+        // blocked) DOES report again.
+        check(buildBody(autoProbe, 0.55, 0.55, 0.65, 0.65, 30.0),
+              "a THIRD checkpoint - a fresh episode for the re-arm half of the law");
+        settle(150);
+        const int beforeRearmedTickCountdown = autoToasts ? autoToasts->remainingMs() : -1;
+        autoProbe.debugFireAutosaveInterval();
+        settle(80);
+        const int afterRearmedTickCountdown = autoToasts ? autoToasts->remainingMs() : -1;
+        check(afterRearmedTickCountdown > beforeRearmedTickCountdown,
+              QStringLiteral("...a NEW edit re-arms the report - the retry on the new "
+                             "revision raised a fresh Failure, the countdown jumped back "
+                             "up (%1 ms, was %2 ms)")
+                  .arg(afterRearmedTickCountdown)
+                  .arg(beforeRearmedTickCountdown));
+
+        // Unblock and confirm the next tick succeeds, clearing the mark -
+        // "re-armed by ... a successful save" too.
+        check(QDir(blockedTmpPath).removeRecursively(), "the blocking directory is cleared");
+        autoProbe.debugFireAutosaveInterval();
+        settle(100);
+        check(!autoProbe.isFurnitureDirty(),
+              "unblocked, the tick finally saves - re-armed by success as well as by an edit");
+
+        check(autoProbe.findChild<QDialog*>() == nullptr,
+              "none of this - five modes, the timed save, the failure guard - ever opened a "
+              "QDialog");
+
+        // --- the ShortcutSheet's generated grouping picks the submenu up ----
+        // The five mode entries carry no shortcut of their own, so they must
+        // NOT appear as rows - "picks the submenu up" for a sheet that only
+        // lists BOUND actions means the submenu's own presence changes
+        // nothing about the count, worth pinning now that File's shape
+        // changed underneath it.
+        {
+            QAction* openSheet = action(autoProbe, QStringLiteral("Keyboard Shortcuts"));
+            check(openSheet != nullptr,
+                  "the shortcut sheet has an action to open it on this probe");
+            if (openSheet) {
+                openSheet->trigger();
+                settle(150);
+                ShortcutSheet* sheet = autoProbe.findChild<ShortcutSheet*>();
+                check(sheet != nullptr && sheet->isVisible(), "triggering it shows the sheet");
+                int expected = 0;
+                for (QAction* candidate : autoProbe.findChildren<QAction*>()) {
+                    if (!candidate->shortcut().isEmpty()) ++expected;
+                }
+                check(sheet != nullptr && sheet->rowCount() == expected,
+                      QStringLiteral("the sheet's count is unaffected by the new submenu - "
+                                     "all %1 bound actions, none of the five unbound mode "
+                                     "entries (got %2)")
+                          .arg(expected)
+                          .arg(sheet ? sheet->rowCount() : -1));
+                if (sheet) {
+                    const QStringList painted = sheet->paintedTexts();
+                    check(!painted.contains(QStringLiteral("Off")) &&
+                              !painted.contains(QStringLiteral("Every minute")) &&
+                              !painted.contains(QStringLiteral("Every 5 minutes")) &&
+                              !painted.contains(QStringLiteral("Every 15 minutes")),
+                          "none of the unbound mode entries painted a row");
+                    QKeyEvent escape(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+                    QCoreApplication::sendEvent(sheet, &escape);
+                    settle(120);
+                }
+            }
+        }
+
+        autoProbe.close();
+    }
+
+    // --- Milestone 5, item 10: autosave mode persists, and the old boolean ---
+    // migrates in both directions ----------------------------------------------
+    // A ScopedTestSettings probe, the render-settings block's own shape:
+    // multiple short-lived windows against one dedicated, file-backed
+    // QSettings location, never the real registry.
+    if (blockEnabled("milestone-5-item-10-autosave-persistence-and-migration")) {
+        ScopedTestSettings scopedSettings;
+
+        // --- no stored key at all reads the safe default --------------------
+        {
+            QSettings clean;
+            clean.remove(QStringLiteral("autosave"));
+            clean.remove(QStringLiteral("autosaveMode"));
+        }
+        {
+            RequiredTempDir freshLib;
+            MainWindow freshWindow(nullptr, /*persistProgress=*/true, freshLib.path());
+            freshWindow.setAttribute(Qt::WA_ShowWithoutActivating);
+            freshWindow.resize(900, 700);
+            freshWindow.show();
+            settle(200);
+            check(freshWindow.autosaveMode() == MainWindow::AutosaveMode::AfterEveryChange,
+                  "no stored key at all reads the safe default, After every change");
+            freshWindow.close();
+            settle(100);
+        }
+
+        // --- migration, direction one: the old boolean's true ---------------
+        {
+            QSettings clean;
+            clean.remove(QStringLiteral("autosaveMode"));
+            clean.setValue(QStringLiteral("autosave"), true);
+        }
+        {
+            RequiredTempDir migTrueLib;
+            MainWindow migTrueWindow(nullptr, /*persistProgress=*/true, migTrueLib.path());
+            migTrueWindow.setAttribute(Qt::WA_ShowWithoutActivating);
+            migTrueWindow.resize(900, 700);
+            migTrueWindow.show();
+            settle(200);
+            check(migTrueWindow.autosaveMode() == MainWindow::AutosaveMode::AfterEveryChange,
+                  "the old boolean's true migrates to After every change");
+            migTrueWindow.close();
+            settle(100);
+        }
+
+        // --- migration, direction two: the old boolean's false --------------
+        {
+            QSettings clean;
+            clean.remove(QStringLiteral("autosaveMode"));
+            clean.setValue(QStringLiteral("autosave"), false);
+        }
+        {
+            RequiredTempDir migFalseLib;
+            MainWindow migFalseWindow(nullptr, /*persistProgress=*/true, migFalseLib.path());
+            migFalseWindow.setAttribute(Qt::WA_ShowWithoutActivating);
+            migFalseWindow.resize(900, 700);
+            migFalseWindow.show();
+            settle(200);
+            check(migFalseWindow.autosaveMode() == MainWindow::AutosaveMode::Off,
+                  "the old boolean's false migrates to Off");
+            migFalseWindow.close();
+            settle(100);
+        }
+
+        // --- the new key round-trips through a real window, every mode ------
+        const std::vector<std::pair<MainWindow::AutosaveMode, QString>> modes = {
+            { MainWindow::AutosaveMode::Off, QStringLiteral("Off") },
+            { MainWindow::AutosaveMode::AfterEveryChange, QStringLiteral("After every change") },
+            { MainWindow::AutosaveMode::EveryMinute, QStringLiteral("Every minute") },
+            { MainWindow::AutosaveMode::Every5Minutes, QStringLiteral("Every 5 minutes") },
+            { MainWindow::AutosaveMode::Every15Minutes, QStringLiteral("Every 15 minutes") },
+        };
+        for (const auto& modePair : modes) {
+            {
+                QSettings clean;
+                clean.remove(QStringLiteral("autosave"));
+                clean.remove(QStringLiteral("autosaveMode"));
+            }
+            RequiredTempDir writeLib;
+            MainWindow writeWindow(nullptr, /*persistProgress=*/true, writeLib.path());
+            writeWindow.setAttribute(Qt::WA_ShowWithoutActivating);
+            writeWindow.resize(900, 700);
+            writeWindow.show();
+            settle(150);
+            QAction* modeAction = action(writeWindow, modePair.second);
+            check(modeAction != nullptr,
+                  QStringLiteral("the %1 action exists on a fresh window").arg(modePair.second));
+            if (modeAction) modeAction->trigger();
+            check(writeWindow.autosaveMode() == modePair.first,
+                  QStringLiteral("triggering %1 sets the live mode").arg(modePair.second));
+            writeWindow.close();
+            settle(100);
+
+            QString expectedKey;
+            switch (modePair.first) {
+                case MainWindow::AutosaveMode::Off: expectedKey = QStringLiteral("off"); break;
+                case MainWindow::AutosaveMode::AfterEveryChange:
+                    expectedKey = QStringLiteral("afterEveryChange");
+                    break;
+                case MainWindow::AutosaveMode::EveryMinute:
+                    expectedKey = QStringLiteral("everyMinute");
+                    break;
+                case MainWindow::AutosaveMode::Every5Minutes:
+                    expectedKey = QStringLiteral("every5Minutes");
+                    break;
+                case MainWindow::AutosaveMode::Every15Minutes:
+                    expectedKey = QStringLiteral("every15Minutes");
+                    break;
+            }
+            QSettings written;
+            check(written.value(QStringLiteral("autosaveMode")).toString() == expectedKey,
+                  QStringLiteral("...and %1 wrote the exact new-key string \"%2\"")
+                      .arg(modePair.second, expectedKey));
+
+            RequiredTempDir readLib;
+            MainWindow readWindow(nullptr, /*persistProgress=*/true, readLib.path());
+            readWindow.setAttribute(Qt::WA_ShowWithoutActivating);
+            readWindow.resize(900, 700);
+            readWindow.show();
+            settle(150);
+            check(readWindow.autosaveMode() == modePair.first,
+                  QStringLiteral("...and a FRESH window reads %1 back").arg(modePair.second));
+            QAction* readModeAction = action(readWindow, modePair.second);
+            check(readModeAction != nullptr && readModeAction->isChecked(),
+                  QStringLiteral("...with its own menu entry showing checked (%1)")
+                      .arg(modePair.second));
+            readWindow.close();
+            settle(100);
+        }
     }
 
     // The coverage floor, asserted OUTSIDE check() on purpose: an assertion

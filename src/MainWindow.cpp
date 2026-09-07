@@ -658,13 +658,36 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         // last chosen. Default ON, for the same reason.
         myShowBottomBar = settings.value(QStringLiteral("showBottomBar"), true).toBool();
 
-        // File -> Save automatically. Same guard, same "read before
-        // buildActions()" reason: the menu entry's initial checked state has
-        // to agree with what was last chosen rather than being corrected
-        // afterwards. Defaults to ON - see the member's own comment in the
-        // header for why the safer default wins for a user who has not found
-        // the toggle yet.
-        myAutosaveOn = settings.value(QStringLiteral("autosave"), true).toBool();
+        // File -> Autosave (Milestone 5, item 10). Same guard, same "read
+        // before buildActions()" reason: the submenu's checked entry has to
+        // agree with what was last chosen rather than being corrected
+        // afterwards. The mode is stored as a string under a NEW key
+        // ("autosaveMode"); an installation that only ever wrote the OLD
+        // boolean key ("autosave") is migrated in place, in the direction
+        // the old default itself always meant - true (its default) becomes
+        // AfterEveryChange (this feature's own default, and the
+        // byte-identical behaviour that boolean's ON state always
+        // described), false becomes Off. An unrecognised or garbled string
+        // under the new key falls back to AfterEveryChange too, on the same
+        // "the safer choice wins for a user who has not found the menu yet"
+        // reasoning the old boolean's own default comment gave.
+        if (settings.contains(QStringLiteral("autosaveMode"))) {
+            const QString stored = settings.value(QStringLiteral("autosaveMode")).toString();
+            if (stored == QStringLiteral("off"))
+                myAutosaveMode = AutosaveMode::Off;
+            else if (stored == QStringLiteral("everyMinute"))
+                myAutosaveMode = AutosaveMode::EveryMinute;
+            else if (stored == QStringLiteral("every5Minutes"))
+                myAutosaveMode = AutosaveMode::Every5Minutes;
+            else if (stored == QStringLiteral("every15Minutes"))
+                myAutosaveMode = AutosaveMode::Every15Minutes;
+            else
+                myAutosaveMode = AutosaveMode::AfterEveryChange;
+        } else {
+            myAutosaveMode = settings.value(QStringLiteral("autosave"), true).toBool()
+                                  ? AutosaveMode::AfterEveryChange
+                                  : AutosaveMode::Off;
+        }
 
         // Before a single widget exists, for the same reason as the unit
         // above: every card measures itself with the type scale in its own
@@ -1158,12 +1181,45 @@ void MainWindow::buildActions()
     connect(myFileSaveAction, &QAction::triggered, this,
             [this] { saveCurrentFurniture(); });
 
-    myAutosaveAction = new QAction(tr("Save &automatically"), this);
-    myAutosaveAction->setCheckable(true);
-    myAutosaveAction->setChecked(myAutosaveOn);
-    myAutosaveAction->setToolTip(tr("Save a moment after every change\n"
-                                    "Off, Ctrl+S is how a change reaches disk."));
-    connect(myAutosaveAction, &QAction::toggled, this, &MainWindow::setAutosaveEnabled);
+    // File -> Autosave (Milestone 5, item 10): an exclusive QActionGroup of
+    // five modes rather than the old single checkable entry. "Off" and
+    // "After every change" carry the old boolean's two states forward
+    // exactly (see the constructor's own migration of the "autosave" key);
+    // the three timed entries add a plain wall-clock interval, independent
+    // of edit bursts. connect()ed to triggered() rather than toggled() -
+    // an exclusive group's own members do not emit toggled(false) for the
+    // one that lost the check, so triggered() (fired by the one the user
+    // actually clicked) is the one signal that names the mode unambiguously.
+    myAutosaveGroup = new QActionGroup(this);
+    myAutosaveGroup->setExclusive(true);
+    auto makeAutosaveModeAction = [this](AutosaveMode mode, const QString& text,
+                                         const QString& tip) {
+        QAction* modeAction = new QAction(text, this);
+        modeAction->setCheckable(true);
+        modeAction->setChecked(myAutosaveMode == mode);
+        modeAction->setToolTip(tip);
+        myAutosaveGroup->addAction(modeAction);
+        connect(modeAction, &QAction::triggered, this, [this, mode] { setAutosaveMode(mode); });
+        myAutosaveModeActions[static_cast<int>(mode)] = modeAction;
+        return modeAction;
+    };
+    myAutosaveMenu = new QMenu(tr("&Autosave"), this);
+    myAutosaveMenu->addAction(makeAutosaveModeAction(
+        AutosaveMode::Off, tr("Off"),
+        tr("Nothing saves on its own\nCtrl+S is the only way a change reaches disk.")));
+    myAutosaveMenu->addAction(makeAutosaveModeAction(
+        AutosaveMode::AfterEveryChange, tr("After every change"),
+        tr("Save a moment after every change\nOff, Ctrl+S is how a change reaches disk.")));
+    myAutosaveMenu->addSeparator();
+    myAutosaveMenu->addAction(makeAutosaveModeAction(
+        AutosaveMode::EveryMinute, tr("Every minute"),
+        tr("Save once a minute, but only while there is a change to save")));
+    myAutosaveMenu->addAction(makeAutosaveModeAction(
+        AutosaveMode::Every5Minutes, tr("Every 5 minutes"),
+        tr("Save every 5 minutes, but only while there is a change to save")));
+    myAutosaveMenu->addAction(makeAutosaveModeAction(
+        AutosaveMode::Every15Minutes, tr("Every 15 minutes"),
+        tr("Save every 15 minutes, but only while there is a change to save")));
 
     myCloseFurnitureAction = new QAction(tr("&Close furniture"), this);
     myCloseFurnitureAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_W));
@@ -1293,8 +1349,8 @@ void MainWindow::buildActions()
     // unchecked regardless of how a previous session left it.
     //
     // toggled(bool) connects straight to the public setRenderModeEnabled(),
-    // exactly as myAutosaveAction connects to setAutosaveEnabled() - but
-    // this is also the one action in this file that gets un-checked from
+    // exactly as myNotificationsAction connects to setShowNotifications() -
+    // but this is also the one action in this file that gets un-checked from
     // CODE as often as from the user, since every exit gesture calls
     // setRenderModeEnabled(false) directly (see its own declaration).
     myRenderModeAction = new QAction(tr("&Render mode"), this);
@@ -1416,7 +1472,7 @@ QMenuBar* MainWindow::buildMenus()
 
     QMenu* fileMenu = bar->addMenu(tr("&File"));
     fileMenu->addAction(myFileSaveAction);
-    fileMenu->addAction(myAutosaveAction);
+    myAutosaveMenuAction = fileMenu->addMenu(myAutosaveMenu);
     fileMenu->addAction(mySaveVersionAction);
     fileMenu->addAction(myCloseFurnitureAction);
     fileMenu->addSeparator();
@@ -1894,17 +1950,21 @@ void MainWindow::buildOverlay()
     connect(this, &MainWindow::documentChanged, this,
             [this] { myToasts->documentMovedTo(myDocument.revision()); });
 
-    // File -> Save automatically's arm: documentChanged fires after every
-    // committed change to the document (every commit path checkpoints THEN
-    // mutates THEN emits this), which is functionally "after every
+    // The "After every change" mode's own arm: documentChanged fires after
+    // every committed change to the document (every commit path checkpoints
+    // THEN mutates THEN emits this), which is functionally "after every
     // checkpoint" without a second signal only this feature would need.
     // Restarted on every call, exactly like the appearance debounce - a
     // burst of edits inside the 400ms window lands one write, not one per
-    // edit. Skips entirely while no furniture is open or the toggle is off,
-    // so this never fires for the seeded startup document a test builds
-    // before opening anything.
+    // edit. Skips entirely while no furniture is open or a DIFFERENT mode is
+    // active - the three timed modes save on their own periodic schedule
+    // (myAutosaveIntervalTimer/onAutosaveIntervalTick()), never off this
+    // signal - so this never fires for the seeded startup document a test
+    // builds before opening anything, and never double-arms alongside a
+    // timed mode's own timer.
     connect(this, &MainWindow::documentChanged, this, [this] {
-        if (myShowingInitScreen || myFurnitureId.isEmpty() || !myAutosaveOn) return;
+        if (myShowingInitScreen || myFurnitureId.isEmpty()) return;
+        if (myAutosaveMode != AutosaveMode::AfterEveryChange) return;
         // openFurniture() emits this too, for a freshly loaded document that
         // is clean by construction (mySavedRevision is set to its revision
         // in the same call) - guarded here so opening a furniture cannot
@@ -2314,10 +2374,12 @@ void MainWindow::updateActions()
     myFaceSelectAction->setEnabled(!atInit);
     myEdgeSelectAction->setEnabled(!atInit);
 
-    // File -> Save / Save automatically / Close furniture: available only
-    // with a furniture actually open.
+    // File -> Save / Autosave / Close furniture: available only with a
+    // furniture actually open. Disabling the submenu's OWN action greys out
+    // the whole Autosave submenu at once, rather than disabling each of the
+    // five mode entries individually.
     if (myFileSaveAction) myFileSaveAction->setEnabled(!atInit);
-    if (myAutosaveAction) myAutosaveAction->setEnabled(!atInit);
+    if (myAutosaveMenuAction) myAutosaveMenuAction->setEnabled(!atInit);
     if (myCloseFurnitureAction) myCloseFurnitureAction->setEnabled(!atInit);
     // File -> Save version...: see canOpenSaveVersion()'s own declaration for
     // the full predicate - a furniture open, no sketch, no render mode, and
@@ -2672,6 +2734,13 @@ void MainWindow::showInitScreen()
     myFurnitureId.clear();
     myFurnitureName.clear();
     mySavedRevision = 0;
+    // No furniture is open any more, so the timed modes' periodic timer has
+    // nothing left to save - applyAutosaveIntervalTimer() reads
+    // myShowingInitScreen/myFurnitureId itself and stops it. The failure
+    // mark is furniture-scoped too; a stale one must not silently suppress
+    // the very first tick's report for whatever opens next.
+    applyAutosaveIntervalTimer();
+    myAutosaveFailedAtRevision = -1;
 
     // A FRESH document, not a cleared one: DocumentModel::clear() leaves the
     // undo stack standing, and the next furniture opened must not inherit
@@ -2735,6 +2804,13 @@ bool MainWindow::openFurniture(const QString& id)
 
     mySavedRevision = myDocument.revision();
     myShowingInitScreen = false;
+    // Fresh document, fresh episode - see showInitScreen()'s identical
+    // reasoning for why a stale failure mark must not carry over.
+    myAutosaveFailedAtRevision = -1;
+    // The timed modes' periodic timer starts here, on the newly open
+    // furniture's own clock - applyAutosaveIntervalTimer() reads the live
+    // mode and (no)-ops accordingly for Off/AfterEveryChange.
+    applyAutosaveIntervalTimer();
     mySelectedOutlineId = 0;
     myFaceLocked = false;
     // See showInitScreen()'s identical line - the same drift is possible here.
@@ -2762,7 +2838,7 @@ bool MainWindow::isFurnitureDirty() const
     return myDocument.revision() != mySavedRevision;
 }
 
-bool MainWindow::performSave(bool announce)
+bool MainWindow::performSave(bool announce, bool reportFailure)
 {
     if (myShowingInitScreen || myFurnitureId.isEmpty()) return false;
 
@@ -2782,12 +2858,17 @@ bool MainWindow::performSave(bool announce)
     const QImage thumb = myRenderModeOn ? QImage() : myView->captureThumbnail();
     if (!myStore.saveFurniture(myFurnitureId, myDocument, thumb)) {
         // A refusal reports here whether or not the caller wanted an
-        // announcement - CLAUDE.md's law that a Failure is never silenced
-        // applies to autosave's own background writes exactly as it does to
-        // Ctrl+S.
-        myToasts->show(tr("Couldn't save %1 — Check that its folder still exists "
-                          "and isn't read-only").arg(myFurnitureName),
-                      Toast::Kind::Failure, false);
+        // ANNOUNCEMENT - CLAUDE.md's law that a Failure is never silenced
+        // applies to a background write exactly as it does to Ctrl+S. The
+        // one exception is `reportFailure` itself: onAutosaveIntervalTick()
+        // passes false on a retry that already reported this exact episode,
+        // so the law is satisfied by the FIRST failure rather than repeated
+        // on every tick - see this method's own header comment.
+        if (reportFailure) {
+            myToasts->show(tr("Couldn't save %1 — Check that its folder still exists "
+                              "and isn't read-only").arg(myFurnitureName),
+                          Toast::Kind::Failure, false);
+        }
         return false;
     }
 
@@ -2799,6 +2880,11 @@ bool MainWindow::performSave(bool announce)
     // it actually explains, which is exactly what autosavePendingMs() exists
     // to let a test catch.
     if (myAutosaveTimer) myAutosaveTimer->stop();
+    // Re-arms the next timed-mode tick's own attempt - "re-armed by the
+    // next successful save" (CLAUDE.md), a save landing here through ANY
+    // route (Ctrl+S, the debounce, or the periodic tick itself succeeding
+    // on a retry).
+    myAutosaveFailedAtRevision = -1;
     updateActions();   // the dirty star and the Save action both follow this
     if (announce) {
         const QString message = tr("Saved %1").arg(myFurnitureName);
@@ -2823,19 +2909,47 @@ void MainWindow::flushAutosave()
     performSave(/*announce=*/false);
 }
 
-void MainWindow::setAutosaveEnabled(bool enabled)
+void MainWindow::setAutosaveMode(AutosaveMode mode)
 {
-    myAutosaveOn = enabled;
+    myAutosaveMode = mode;
     if (myPersistProgress) {
         QSettings settings;
-        settings.setValue(QStringLiteral("autosave"), enabled);
+        QString stored;
+        switch (mode) {
+            case AutosaveMode::Off: stored = QStringLiteral("off"); break;
+            case AutosaveMode::AfterEveryChange: stored = QStringLiteral("afterEveryChange"); break;
+            case AutosaveMode::EveryMinute: stored = QStringLiteral("everyMinute"); break;
+            case AutosaveMode::Every5Minutes: stored = QStringLiteral("every5Minutes"); break;
+            case AutosaveMode::Every15Minutes: stored = QStringLiteral("every15Minutes"); break;
+        }
+        settings.setValue(QStringLiteral("autosaveMode"), stored);
     }
-    // Turning it ON while a dirty furniture is open should not leave that
-    // furniture waiting for its NEXT checkpoint before the toggle's promise
-    // takes effect - the document has already moved since the last save,
-    // and that is exactly what "save after every change" means for the
-    // change that already happened.
-    if (enabled && isFurnitureDirty()) armAutosaveTimer();
+
+    // Reflects the choice onto the exclusive action group so a programmatic
+    // change - the QSettings migration in the constructor, a test - shows
+    // correctly checked without waiting for a user click.
+    if (QAction* checked = myAutosaveModeActions[static_cast<int>(mode)])
+        checked->setChecked(true);
+
+    // Switching AWAY from AfterEveryChange drops its debounce outright - a
+    // pending write that belonged to the mode just left is not the new
+    // mode's promise to keep. (A dirty document stays dirty; the new mode's
+    // own machinery, if any, takes over from here.)
+    if (mode != AutosaveMode::AfterEveryChange && myAutosaveTimer && myAutosaveTimer->isActive())
+        myAutosaveTimer->stop();
+
+    // Turning ON AfterEveryChange while a dirty furniture is open should not
+    // leave that furniture waiting for its NEXT checkpoint before the mode's
+    // promise takes effect - the document has already moved since the last
+    // save, and that is exactly what "save after every change" means for
+    // the change that already happened.
+    if (mode == AutosaveMode::AfterEveryChange && isFurnitureDirty()) armAutosaveTimer();
+
+    // The periodic interval timer belongs to the three timed modes alone -
+    // (re)build it for the new mode's interval, or tear it down outright for
+    // Off/AfterEveryChange.
+    applyAutosaveIntervalTimer();
+
     updateActions();
 }
 
@@ -2843,6 +2957,65 @@ int MainWindow::autosavePendingMs() const
 {
     return (myAutosaveTimer && myAutosaveTimer->isActive()) ? myAutosaveTimer->remainingTime()
                                                             : -1;
+}
+
+int MainWindow::autosaveIntervalPendingMs() const
+{
+    return (myAutosaveIntervalTimer && myAutosaveIntervalTimer->isActive())
+               ? myAutosaveIntervalTimer->remainingTime()
+               : -1;
+}
+
+void MainWindow::onAutosaveIntervalTick()
+{
+    if (myShowingInitScreen || myFurnitureId.isEmpty()) return;
+    if (!isFurnitureDirty()) return;   // a clean fire is a no-op - no toast, no write
+    // The ATTEMPT always runs while dirty - never skipped - so a problem
+    // that resolves on its own (disk space freed, a folder restored) is
+    // picked up by the very next tick with no new edit required. Only the
+    // FAILURE TOAST is throttled: one per dirty-state episode, suppressed on
+    // a retry that already reported this exact revision. A NEW edit moves
+    // the revision (this comparison then differs, so the next tick reports
+    // again if it too fails); a SUCCESSFUL save clears the mark outright
+    // (see performSave()).
+    const bool alreadyReportedThisRevision = myDocument.revision() == myAutosaveFailedAtRevision;
+    if (!performSave(/*announce=*/false, /*reportFailure=*/!alreadyReportedThisRevision))
+        myAutosaveFailedAtRevision = myDocument.revision();
+}
+
+void MainWindow::applyAutosaveIntervalTimer()
+{
+    int intervalMs = 0;
+    switch (myAutosaveMode) {
+        case AutosaveMode::EveryMinute: intervalMs = kAutosaveEveryMinuteMs; break;
+        case AutosaveMode::Every5Minutes: intervalMs = kAutosaveEvery5MinutesMs; break;
+        case AutosaveMode::Every15Minutes: intervalMs = kAutosaveEvery15MinutesMs; break;
+        case AutosaveMode::Off:
+        case AutosaveMode::AfterEveryChange:
+            intervalMs = 0;
+            break;
+    }
+
+    if (intervalMs <= 0 || myShowingInitScreen || myFurnitureId.isEmpty()) {
+        if (myAutosaveIntervalTimer) myAutosaveIntervalTimer->stop();
+        return;
+    }
+
+    if (!myAutosaveIntervalTimer) {
+        myAutosaveIntervalTimer = new QTimer(this);
+        connect(myAutosaveIntervalTimer, &QTimer::timeout, this,
+                &MainWindow::onAutosaveIntervalTick);
+    }
+    myAutosaveIntervalTimer->setInterval(intervalMs);
+    // start() on an already-running repeating timer restarts its period -
+    // a mode switch (Every minute -> Every 5 minutes) begins the new
+    // interval from now rather than from whenever the old one last fired.
+    myAutosaveIntervalTimer->start();
+}
+
+void MainWindow::debugFireAutosaveInterval()
+{
+    onAutosaveIntervalTick();
 }
 
 void MainWindow::armAutosaveTimer()
