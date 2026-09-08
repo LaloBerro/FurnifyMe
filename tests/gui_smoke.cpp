@@ -1183,6 +1183,12 @@ SelectorWindow* wireSelector(MainWindow& window, EditorSelectorHandoff::Hooks ho
 {
     auto* selector = new SelectorWindow(window.furnitureStore());   // no parent - see above
     selector->setAttribute(Qt::WA_ShowWithoutActivating);
+    // A probe window's native X requests QUIT since Milestone 5 (the editor
+    // no longer returns to the selector on close), and wire()'s default hook
+    // is the real QCoreApplication::quit(). Harmless with no exec() running,
+    // but "harmless" is not a contract - the suite substitutes a no-op so no
+    // probe can ever reach Qt's actual quit machinery by closing a window.
+    if (!hooks.quit) hooks.quit = [] {};
     EditorSelectorHandoff::wire(window, *selector, std::move(hooks));
     QObject::connect(&window, &QObject::destroyed, selector, [selector] { delete selector; });
 
@@ -3128,7 +3134,7 @@ int main(int argc, char* argv[])
 
         bool openMidpointBothVisible = false;
         bool returnMidpointBothVisible = false;
-        bool quitHookCalled = false;
+        int quitHookCalls = 0;
         EditorSelectorHandoff::Hooks handoffHooks;
         handoffHooks.onOpenMidpoint = [&handoffWindow, handoffSelector,
                                        &openMidpointBothVisible] {
@@ -3142,7 +3148,7 @@ int main(int argc, char* argv[])
             returnMidpointBothVisible =
                 handoffWindow.isVisible() && handoffSelector->isVisible();
         };
-        handoffHooks.quit = [&quitHookCalled] { quitHookCalled = true; };
+        handoffHooks.quit = [&quitHookCalls] { ++quitHookCalls; };
         EditorSelectorHandoff::wire(handoffWindow, *handoffSelector, handoffHooks);
         QObject::connect(&handoffWindow, &QObject::destroyed, handoffSelector,
                          [handoffSelector] { delete handoffSelector; });
@@ -3199,25 +3205,29 @@ int main(int argc, char* argv[])
               "an unsaved move - what the native X's own save has to carry to disk");
         check(handoffWindow.isFurnitureDirty(), "the furniture reads dirty going into the close");
 
-        // --- handoff, direction two: the native X, not the menu action --------
-        // The "Close furniture, autosave off" block above already drives the
-        // MENU route with this exact oracle shape; this is CLAUDE.md's OTHER
-        // named route - a real QCloseEvent, exactly what clicking the
-        // window's own titlebar X sends. MainWindow::closeEvent() ignores it
-        // and returns to the selector itself rather than letting Qt actually
-        // destroy/close the window - see its own comment.
+        // --- the native X: save, then QUIT (Milestone 5) ----------------------
+        // A real QCloseEvent, exactly what clicking the window's titlebar X
+        // sends. Since "dont show project selector when app closes" this
+        // means quit-the-app, never back-to-the-library: closeEvent()
+        // ignores the event, saves first, and emits quitRequested(), which
+        // wire() routes to the SAME quit hook the selector's own close has
+        // always used. The window itself stays where it was - in the real
+        // app the hook ends exec(); this probe's substitute hook only
+        // counts, which is precisely what lets the aftermath be inspected.
+        check(quitHookCalls == 0, "the quit hook has not fired from anything above");
         handoffWindow.close();
         settle(250);
-        check(!handoffWindow.isVisible(), "the native X hides the editor rather than quitting");
-        check(handoffSelector->isVisible(), "...and the selector reappears");
-        // Same order pin, the other direction: the selector was shown
-        // before the editor was hidden, not both hidden for even one
-        // statement - the exact CRITICAL finding this fix round closes.
-        check(returnMidpointBothVisible,
-              "...and at the instrumented midpoint of the RETURN handoff, both windows "
-              "were visible at once too - never a moment where neither was");
-        check(handoffWindow.isShowingInitScreen(),
-              "...with the editor's own state back to \"nothing open\"");
+        check(quitHookCalls == 1,
+              "the native X requests QUIT through the handoff's one quit hook");
+        check(!handoffSelector->isVisible(),
+              "...and the selector does NOT reappear - closing the app is not a "
+              "route to the library any more");
+        check(handoffWindow.isVisible(),
+              "...while the editor is still up (the substitute hook quits nothing), "
+              "so a real quit shows the user no window shuffle at all");
+        check(!handoffWindow.isShowingInitScreen(),
+              "...and the furniture is still the open one - a quit does not pass "
+              "through the init screen");
 
         DocumentModel handoffReloaded;
         QString handoffErr;
@@ -3239,34 +3249,44 @@ int main(int argc, char* argv[])
                       .arg(handoffXBefore + 22.0, 0, 'f', 3));
         }
 
+        // --- handoff, direction two: File -> Close furniture, the MENU route --
+        // The library route the X no longer takes. Shows the selector FIRST,
+        // hides the editor SECOND - the CRITICAL order pin from fix round 1,
+        // instrumented at the midpoint inside the wiring itself.
+        check(trigger(handoffWindow, QStringLiteral("Close furniture")),
+              "File -> Close furniture is reachable after the X's quit request");
+        settle(250);
+        check(!handoffWindow.isVisible(), "the menu route hides the editor");
+        check(handoffSelector->isVisible(), "...and the selector reappears");
+        check(returnMidpointBothVisible,
+              "...and at the instrumented midpoint of the RETURN handoff, both windows "
+              "were visible at once too - never a moment where neither was");
+        check(handoffWindow.isShowingInitScreen(),
+              "...with the editor's own state back to \"nothing open\"");
+        check(quitHookCalls == 1,
+              "and the menu route asked for no quit - the two gestures stay distinct");
+
         // --- the refreshed selector shows the reopened furniture ---------------
         check(handoffSelector->furnitureCount() == 1,
               "the selector's own refresh (on returnedToSelector()) lists the furniture "
-              "the native X just saved and closed");
+              "the native X saved and the menu route closed");
 
-        // --- the ONE honest quit gesture: closing the selector itself ---------
-        // CRITICAL finding, belt 2: with quitOnLastWindowClosed() disabled
-        // (main.cpp; harmless-but-set here too - see this file's own
-        // main()), NOTHING hides the app by accident any more - quitting is
-        // this one explicit wire. Driven for real (a genuine close() on the
-        // selector, which is visible right now after the return handoff
-        // above) against a SUBSTITUTE quit function rather than the real
-        // QCoreApplication::quit(), so this proves the WIRING reaches the
-        // hook without depending on Qt's own quit machinery (which this
-        // file never exercises via exec() anyway).
-        check(!quitHookCalled, "the quit hook has not fired from anything above");
+        // --- the selector's own close is still the other quit gesture --------
+        // With quitOnLastWindowClosed() disabled (main.cpp), NOTHING hides
+        // the app by accident - quitting is these two explicit wires and no
+        // more.
         handoffSelector->close();
         settle(120);
-        check(quitHookCalled,
-              "closing the selector runs the app's own quit hook - the one honest quit "
-              "gesture this two-window model has");
+        check(quitHookCalls == 2,
+              "closing the selector runs the app's own quit hook too - the other of "
+              "the two deliberate quit gestures this model has");
 
         check(handoffWindow.findChild<QDialog*>() == nullptr,
               "none of the handoff - boot, open, the native X - ever opened a QDialog");
     }
 
-    // --- Milestone 4 fix round 2: a FAILED close-time save must abort the ----
-    // handoff outright, not merely fail to save --------------------------------
+    // --- Milestone 4 fix round 2 (re-scoped by Milestone 5): a FAILED --------
+    // close-time save must abort the exit outright, whichever exit ------------
     // CLAUDE.md's never-silent-failure law: performSave() already raises a
     // Failure toast on refusal, but showInitScreen() hides this whole window
     // a moment later (EditorSelectorHandoff.h) - a toast on a window about to

@@ -155,6 +155,17 @@ if(FURNIFYME_BUILD_APP)
 
     add_executable(furnifyme src/main.cpp)
     target_link_libraries(furnifyme PRIVATE furnify_app)
+    if(WIN32)
+      # A GUI subsystem binary, so launching the app opens no console window
+      # (Milestone 5, "dont show the command window"). The entry point is
+      # forced back to the ordinary CRT main() rather than pulling in a
+      # WinMain shim, so src/main.cpp needs no Windows-only signature and
+      # gui_smoke - which PRINTS its results and so keeps the console
+      # subsystem - stays byte-for-byte the same source. qWarning() output
+      # goes nowhere in this mode, which is what a shipped GUI app does.
+      set_target_properties(furnifyme PROPERTIES WIN32_EXECUTABLE TRUE)
+      target_link_options(furnifyme PRIVATE "/ENTRY:mainCRTStartup")
+    endif()
 
     # The executable's own icon. QApplication::setWindowIcon covers everything
     # that runs our code; Explorer, the taskbar's pinned entry and Alt+Tab read

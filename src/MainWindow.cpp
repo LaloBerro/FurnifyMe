@@ -2694,17 +2694,21 @@ void MainWindow::writeRenderSettingsNow()
 
 void MainWindow::closeEvent(QCloseEvent* event)
 {
-    // Milestone 4: this window is never actually destroyed. Closing it -
-    // the native X, exactly as much as File -> Close furniture - always
-    // means "go back to the library", never "quit the app": quitting is the
-    // SELECTOR window's own close (SelectorWindow::closing(), wired to the
-    // app's real quit function by EditorSelectorHandoff::wire() - see
-    // src/EditorSelectorHandoff.h). Fix round 1: this used to lean on Qt's
-    // default quitOnLastWindowClosed() noticing this window went hidden
-    // with nothing else shown yet - which is exactly the CRITICAL quit-trap
-    // that finding closed. main.cpp now disables that default outright, so
-    // this event->ignore() only has to keep THIS window from ever actually
-    // closing - it no longer has any bearing on whether the app quits.
+    // Milestone 5, "dont show project selector when app closes": the native
+    // X means QUIT now, not "back to the library" - the user closing the
+    // window wants the app gone, and popping the selector instead read as
+    // the app refusing to close. The library stays one deliberate gesture
+    // away through File -> Close furniture, which still returns to the
+    // selector; the selector's own X still quits as it always did.
+    //
+    // The event is still ignore()d and the quit is still EXPLICIT, through
+    // quitRequested() -> EditorSelectorHandoff's one quit hook: main.cpp
+    // keeps quitOnLastWindowClosed() off (the Milestone 4 handoff quit-trap
+    // it closes is unchanged), so accepting this event would merely hide
+    // the window without ending the app - and ignoring it is also what
+    // lets a FAILED close-time save keep the window open with its Failure
+    // toast readable, the never-silent-failure law this route has always
+    // kept.
     event->ignore();
 
     // A window closed inside the debounce window still has to store what the
@@ -2719,25 +2723,18 @@ void MainWindow::closeEvent(QCloseEvent* event)
         writeRenderSettingsNow();
     }
 
-    // Close-saves-first, exactly as File -> Close furniture's own law - the
-    // native X is the OTHER route this task's brief names alongside it, and
-    // closeCurrentFurniture() already performs the full save-then-return
-    // sequence. Fix round 2: that sequence now ABORTS (returns without
-    // calling showInitScreen()) whenever the close-time save fails - and
-    // since event->ignore() above already, unconditionally, keeps this
-    // window from ever actually closing regardless of what
-    // closeCurrentFurniture() does, a failed save simply leaves the window
-    // open with nothing further required here: no separate "stay open on
-    // failure" branch to get right a second time. When nothing is open at
-    // all (the one state closeCurrentFurniture() itself refuses to act on -
-    // e.g. the X clicked on a blank editor after a failed openFurniture())
-    // there is nothing to save, so this just returns to the selector
-    // directly.
+    // Close-saves-first still binds. The save is closeCurrentFurniture()'s
+    // own fresh-decision rule (cancel the pending autosave debounce, one
+    // authoritative attempt, isFurnitureDirty() read fresh), without that
+    // function's return-to-selector tail: a quit does not go through the
+    // library. A failed save returns here with the toast up and the
+    // furniture open and dirty exactly as it was - no quit is requested for
+    // an app that could not put the work on disk.
     if (!myShowingInitScreen && !myFurnitureId.isEmpty()) {
-        closeCurrentFurniture();
-    } else {
-        showInitScreen();
+        if (myAutosaveTimer && myAutosaveTimer->isActive()) myAutosaveTimer->stop();
+        if (isFurnitureDirty() && !performSave(/*announce=*/false)) return;
     }
+    emit quitRequested();
 }
 
 void MainWindow::showInitScreen()

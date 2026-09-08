@@ -834,6 +834,15 @@ signals:
     // opposite order opened. This window knows nothing of that class,
     // exactly as it knows nothing of MainWindow.
     void returnedToSelector();
+    // The native X on THIS window asked to quit the app (Milestone 5, "dont
+    // show project selector when app closes"), and everything that had to
+    // happen first - the debounce flushes, the close-time save - already
+    // succeeded; a failed save aborts before this is ever emitted, on the
+    // never-silent-failure law. EditorSelectorHandoff::wire() connects it to
+    // the app's one quit function; this window still knows nothing of that
+    // class, and File -> Close furniture still returns to the library
+    // through returnedToSelector() above rather than through this.
+    void quitRequested();
 
 protected:
     // Flushes a pending appearance write - see myAppearanceWrite.

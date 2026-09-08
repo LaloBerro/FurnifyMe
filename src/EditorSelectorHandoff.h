@@ -35,8 +35,10 @@
 //   2. main.cpp calls QApplication::setQuitOnLastWindowClosed(false), so
 //      even a FUTURE ordering mistake elsewhere can no longer make a hidden
 //      window quit the app by accident. Quitting is wired explicitly
-//      instead - see Hooks::quit below - closing the selector is the one
-//      honest quit gesture this two-window model has.
+//      instead - see Hooks::quit below - through exactly two deliberate
+//      gestures: closing the selector, and (since Milestone 5's "dont show
+//      project selector when app closes") closing the editor, whose
+//      closeEvent() saves first and emits MainWindow::quitRequested().
 #include <functional>
 
 class MainWindow;
@@ -53,7 +55,8 @@ struct Hooks {
     std::function<void()> onOpenMidpoint;     // editor shown, selector not yet hidden
     std::function<void()> onReturnMidpoint;   // selector shown, editor not yet hidden
 
-    // What runs when the selector itself is closed - the one honest quit
+    // What runs on either quit gesture (the selector's close, the editor's
+    // quit request) - the one quit
     // gesture in this two-window model (see the file comment's belt 2).
     // Defaults to the real QCoreApplication::quit() when left null. A test
     // substitutes a flag-setting lambda so it can verify THIS WIRING reaches
@@ -66,8 +69,8 @@ struct Hooks {
 
 // Wires `window` and `selector` together exactly as the real app's boot
 // does: choosing a card shows the editor then hides the selector; the
-// editor handing back shows the selector then hides the editor; closing the
-// selector runs `hooks.quit`. Every connection uses `window`/`selector` as
+// editor handing back (File -> Close furniture) shows the selector then
+// hides the editor; closing the selector or the editor runs `hooks.quit`. Every connection uses `window`/`selector` as
 // its own context object, so the wiring tears down on its own if either is
 // destroyed - nothing here retains a pointer beyond the call itself.
 //

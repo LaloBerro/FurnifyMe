@@ -39,9 +39,9 @@ void wire(MainWindow& window, SelectorWindow& selector, Hooks hooks)
                          window.openFurniture(id);
                      });
 
-    // Direction two: the editor hands control back (Close furniture, the
-    // native X, a failed openFurniture()) - shows the selector FIRST, hides
-    // the editor SECOND. This is the CRITICAL fix itself:
+    // Direction two: the editor hands control back (File -> Close furniture,
+    // a failed openFurniture() - the native X quits instead since Milestone
+    // 5, see below) - shows the selector FIRST, hides the editor SECOND. This is the CRITICAL fix itself:
     // MainWindow::showInitScreen() no longer hides the window on its own -
     // it only emits returnedToSelector() once its own state reset is done
     // (see MainWindow.cpp), and THIS lambda is the one and only place that
@@ -56,12 +56,18 @@ void wire(MainWindow& window, SelectorWindow& selector, Hooks hooks)
                          window.hide();
                      });
 
-    // The one honest quit gesture: closing the selector itself. Paired with
-    // QApplication::setQuitOnLastWindowClosed(false) in main.cpp (belt 1 of
-    // the file comment's fix), this is belt 2 - quitting is deliberate
+    // The quit gestures - TWO since Milestone 5, both explicit wires. Paired
+    // with QApplication::setQuitOnLastWindowClosed(false) in main.cpp (belt 1
+    // of the file comment's fix), this is belt 2 - quitting is deliberate
     // rather than a side effect of whichever window Qt's last-window-closed
-    // scan happened to see hidden at a bad moment during a handoff.
+    // scan happened to see hidden at a bad moment during a handoff. Closing
+    // the selector quits as it always did; closing the EDITOR quits too now
+    // ("dont show project selector when app closes") - MainWindow emits
+    // quitRequested() only once its close-time save has succeeded, so a
+    // refused save never reaches the hook.
     QObject::connect(&selector, &SelectorWindow::closing, &window,
+                     [hooks] { hooks.quit(); });
+    QObject::connect(&window, &MainWindow::quitRequested, &selector,
                      [hooks] { hooks.quit(); });
 }
 

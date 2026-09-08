@@ -1137,7 +1137,14 @@ round caught exactly that drift. Two belts, both required: every leg shows the *
 first** and hides the source second, so at least one window is always visible; and
 `setQuitOnLastWindowClosed(false)`, because Qt fires the last-window-closed check on a
 mere `hide()` and a posted `QEvent::Quit` cannot be taken back later in the same call
-stack. Closing the selector is the one honest quit gesture in this model.
+stack. Quitting is TWO deliberate gestures since Milestone 5 ("dont show project selector
+when app closes"): closing the selector, and closing the EDITOR - whose `closeEvent()`
+still saves first (a failed save aborts the quit with its toast readable, never silently)
+and then emits `quitRequested()` into the same handoff quit hook, so the X no longer
+bounces the user to the library; File -> Close furniture remains the route back. The
+Windows binary is also a GUI-subsystem executable now (`WIN32_EXECUTABLE` +
+`/ENTRY:mainCRTStartup`, so `main()` stays portable) - no console window opens with the
+app, while `gui_smoke` keeps the console subsystem it prints through.
 
 **A live Mirror placement owns every left gesture in the viewport.** Auto's switch re-keyed
 `mirrorPlacementEnvironmentOk()` from "body selection mode" to `selectionKind() == Body`, and
