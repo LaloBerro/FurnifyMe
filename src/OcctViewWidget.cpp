@@ -1541,8 +1541,19 @@ void OcctViewWidget::showMoveGizmo(const gp_Pnt& pivot)
     // actually moved, which is its own equal-guard's answer. Skipped under
     // myApplyingCamera because applyCameraState()'s own redraw is already
     // coming: showPullArrow()'s rule, for the measured reason recorded there.
-    const bool changed = myMoveGizmo.show(pivot, myView->Camera()->Direction(), worldPerPixel(),
-                                          devicePixelRatioF());
+    GizmoPose pose;
+    pose.pivot = pivot;
+    // The camera frame from CameraController, NOT from the OCCT camera: the
+    // axis card lays its own drawing out along exactly these three vectors
+    // (AxisCard::computeTips()), and the whole point of the scene gizmo being
+    // that same drawing is that both read one frame rather than two that
+    // usually agree.
+    pose.right = myCamera.rightVector();
+    pose.up = myCamera.upVector();
+    pose.view = myCamera.viewDirection();
+    pose.worldPerPixel = worldPerPixel();
+    pose.pixelRatio = devicePixelRatioF();
+    const bool changed = myMoveGizmo.show(pose);
     if (changed && !myApplyingCamera) scheduleRedraw();
 }
 
@@ -1648,6 +1659,11 @@ int OcctViewWidget::moveGizmoAxisAt(const QPoint& point, bool* positive) const
     for (int axis = 0; axis < 3; ++axis) {
         for (int side = 0; side < 2; ++side) {
             const bool plus = side == 0;
+            // A handle whose tip falls inside the hub is not drawn and is not
+            // grabbable - see MoveGizmoRenderer::handleDrawn(). Without this
+            // an axis pointing at the eye collapses onto the hub and all six
+            // handles claim every press on it.
+            if (!myMoveGizmo.handleDrawn(axis, plus)) continue;
             const double distance =
                 segmentPixelDistance(myMoveGizmo.handleGrabStart(axis, plus),
                                      myMoveGizmo.handleTip(axis, plus), point);

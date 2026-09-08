@@ -31,6 +31,11 @@
 // (CameraController::setTemporaryOrtho) - an axis view IS a face-on view, and
 // perspective convergence is what stops one reading as square. The user's
 // first orbit hands it back.
+// OCCT first: Handle() is a macro that collides with some Windows headers Qt
+// drags in. gp_Dir is here because AxisCard::computeTips() below is THE
+// projection both drawings share, and a camera frame is three directions.
+#include <gp_Dir.hxx>
+
 #include <QColor>
 #include <QFont>
 #include <QPointF>
@@ -52,6 +57,17 @@ class OcctViewWidget;
 //
 // Every length is in the card's own logical pixels, against kArmPx. The scene
 // gizmo multiplies all of them by (its arm length / kArmPx).
+//
+// AND THE LAYOUT IS SHARED TOO, not only the sizes - computeTips() below. That
+// is the correction the first attempt at this needed: sharing the numbers made
+// the two drawings agree about how big a cone is and left them disagreeing
+// about where anything went. The card is a FLAT projection - every arm laid
+// out along the camera's right and up vectors, every cone, ball, letter and
+// hub a constant screen size - while the scene gizmo was true 3D geometry, so
+// perspective foreshortened an arm pointing at the eye into a stub and drew
+// its cone oversized because the cone was nearer. The scene gizmo builds ON
+// THE VIEW PLANE through the pivot now, from these same six tips, so at any
+// camera angle the two are one drawing at two scales.
 namespace AxisCard {
 
 constexpr double kArmPx = 36.0;              // a positive arm, hub to tip
@@ -99,6 +115,32 @@ double letterHeightPx(QChar letter);
 // machine at this DPI. Cap height and em share one ratio for one face, so
 // scaling THIS number is what makes the two INKS the same height.
 double letterEmPx();
+
+// One of the six axis ends, as the drawing lays it out.
+struct Tip {
+    int axis = 0;         // 0=X 1=Y 2=Z
+    bool positive = true;
+    // The tip's offset from the hub PER UNIT ARM LENGTH, in the camera's own
+    // frame: `right` along the camera's right vector, `up` along its up
+    // vector. Its magnitude is the axis's own foreshortening, between 0 (the
+    // axis points at the eye) and 1 (it lies in the screen plane).
+    //
+    // The card multiplies these by kArmPx and drops them straight into widget
+    // coordinates (negating `up`, since screen y runs downward). The scene
+    // gizmo multiplies them by its own arm length and lays them out along the
+    // camera's right and up vectors as WORLD offsets from the pivot, which
+    // puts every vertex on the view plane and therefore at one depth - so a
+    // pinhole projection maps the whole drawing to the screen with a single
+    // scale and no foreshortening of its own.
+    double right = 0.0;
+    double up = 0.0;
+    double depth = 0.0;   // along the view direction; larger = farther
+};
+
+// THE projection, in the order the card has always built it: X+, X-, Y+, Y-,
+// Z+, Z-. Shared rather than reimplemented, because two copies of a
+// projection is exactly how the scene gizmo came to be drawing something else.
+void computeTips(const gp_Dir& right, const gp_Dir& up, const gp_Dir& view, Tip tips[6]);
 
 }  // namespace AxisCard
 

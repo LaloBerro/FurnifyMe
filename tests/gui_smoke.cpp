@@ -604,7 +604,18 @@ void skipByEnvironment(int checks, const QString& why)
 //       claiming it for the X arm, the hit test naming the NEGATIVE end, the
 //       drag target projecting, the body moving the way the ball points,
 //       along X alone
-constexpr int kCheckFloor = 3480;
+//
+// The same block's SECOND round - the scene gizmo laid out on the VIEW PLANE
+// rather than as true 3D geometry, after the user's "im not seeing equally" -
+// raises it 3480 -> 3490, matched against a real full run. +10, all of it the
+// positional parity section at the end of that block: the card and the gizmo
+// both up, the probe running in PERSPECTIVE, the hub projecting, both drawings
+// captured at the one camera, four of six tips comparable, the foreshortenings
+// genuinely differing (the non-vacuity a 3D drawing would fail), every tip
+// pointing the same way, every tip at one scale, tip-to-opposite-tip at one
+// scale to two per cent, and every one of those tips being real ink in both
+// renderings
+constexpr int kCheckFloor = 3490;
 
 void check(bool condition, const QString& what)
 {
@@ -27179,6 +27190,199 @@ int main(int argc, char* argv[])
                 trigger(ratio, QStringLiteral("Undo"));
                 settle(250);
             }
+        }
+
+        // --- POSITIONAL parity, at an oblique PERSPECTIVE camera -------------
+        //
+        // The ratio pin above measures one arm on a squared, orthographic look
+        // and it passed with flying colours while the gizmo was still wrong:
+        // ratios are blind to LAYOUT. Built as true 3D geometry the scene
+        // gizmo foreshortened an arm pointing at the eye into a stub and drew
+        // its cone oversized because the cone was nearer, and only a camera
+        // that is oblique AND perspective shows it - which is exactly the
+        // camera a user models on.
+        //
+        // So: all six tips, both drawings, at the same camera. Each tip must
+        // point the same way, and the six length ratios must be ONE number -
+        // that is what "the same drawing at two scales" means, and neither
+        // half of it holds for a 3D drawing.
+        rv->setSelectedSolids({ratioId});
+        settle(250);
+        check(card != nullptr && rv->hasMoveGizmo(),
+              "the card and the gizmo are both up for the positional parity probe");
+        if (card && rv->hasMoveGizmo()) {
+            if (ratioOrtho && ratioOrtho->isChecked()) { ratioOrtho->trigger(); settle(150); }
+            check(ratioOrtho != nullptr && !ratioOrtho->isChecked(),
+                  "the parity probe runs in PERSPECTIVE - a parallel projection cannot show "
+                  "the defect this check exists for");
+
+            CameraState oblique = rv->camera().state();
+            oblique.target = rv->moveGizmoPivot();
+            oblique.azimuthDeg = 35.0;
+            oblique.elevationDeg = 25.0;
+            rv->animateTo(oblique);
+            settle(300);
+
+            QPoint pivotAt;
+            const bool havePivot = rv->projectToScreen(rv->moveGizmoPivot(), pivotAt);
+            check(havePivot, "the gizmo's hub projects into the viewport at the oblique look");
+
+            const QImage cardOblique = renderExact(card);
+            const QString cardPath = outDir + QStringLiteral("/move-gizmo-card.png");
+            const QString scenePath = outDir + QStringLiteral("/move-gizmo-oblique.png");
+            cardOblique.save(cardPath);
+            check(rv->saveSnapshot(scenePath),
+                  "the card and the scene are both captured at this one camera");
+            const QImage sceneOblique(scenePath);
+            const double toDump =
+                sceneOblique.isNull()
+                    ? 1.0
+                    : double(sceneOblique.width()) / double(std::max(1, rv->width()));
+            const QPointF cardCentre(cardOblique.width() / 2.0, cardOblique.height() / 2.0);
+            const QColor cardBg = Theme::panel();
+            const QColor sceneBg =
+                sceneOblique.isNull() ? Theme::viewport() : sceneOblique.pixelColor(4, 4);
+
+            // Ink within `radius` of a point, so a projected position is
+            // checked against where the drawing actually put its pixels rather
+            // than only against another projection.
+            auto inkNear = [&](const QImage& img, const QPointF& at, const QList<QColor>& fg,
+                               const QColor& bg, int radius) {
+                int hits = 0;
+                for (int dy = -radius; dy <= radius; ++dy) {
+                    for (int dx = -radius; dx <= radius; ++dx) {
+                        const int x = int(std::lround(at.x())) + dx;
+                        const int y = int(std::lround(at.y())) + dy;
+                        if (x < 0 || y < 0 || x >= img.width() || y >= img.height()) continue;
+                        for (const QColor& f : fg) {
+                            if (inkAlpha(img.pixelColor(x, y), f, bg) >= 0.5) { ++hits; break; }
+                        }
+                    }
+                }
+                return hits;
+            };
+
+            std::printf("       tip-by-tip parity (card offset -> scene offset):\n");
+            double worstAngle = 0.0;
+            double scaleLow = 1.0e9, scaleHigh = 0.0;
+            double reachLow = 1.0e9, reachHigh = 0.0;
+            int compared = 0;
+            int inkedCard = 0, inkedScene = 0, inkProbes = 0;
+            QPointF cardEnd[3][2];
+            QPointF sceneEnd[3][2];
+            bool haveEnd[3][2] = {{false, false}, {false, false}, {false, false}};
+            for (int axis = 0; axis < 3 && havePivot; ++axis) {
+                for (int side = 0; side < 2; ++side) {
+                    const bool plus = side == 0;
+                    const QPointF cardTip = card->tipCenter(axis, plus);
+                    const QPointF cardVec = cardTip - cardCentre;
+                    const double cardLen = std::hypot(cardVec.x(), cardVec.y());
+
+                    gp_Pnt sceneWorld;
+                    QPoint sceneAt;
+                    if (!rv->moveGizmoHandleTip(axis, plus, sceneWorld) ||
+                        !rv->projectToScreen(sceneWorld, sceneAt))
+                        continue;
+                    const QPointF sceneVec(double(sceneAt.x() - pivotAt.x()),
+                                           double(sceneAt.y() - pivotAt.y()));
+                    const double sceneLen = std::hypot(sceneVec.x(), sceneVec.y());
+
+                    // Short tips are skipped for DIRECTION only: projectToScreen()
+                    // answers in whole logical pixels, so a 20-pixel offset
+                    // carries a couple of degrees of quantization on its own.
+                    if (cardLen < 12.0 || sceneLen < 25.0) continue;
+                    ++compared;
+                    cardEnd[axis][side] = cardVec;
+                    sceneEnd[axis][side] = sceneVec;
+                    haveEnd[axis][side] = true;
+
+                    const double dot = (cardVec.x() * sceneVec.x() + cardVec.y() * sceneVec.y()) /
+                                       (cardLen * sceneLen);
+                    const double angle =
+                        std::acos(std::clamp(dot, -1.0, 1.0)) * 180.0 / 3.14159265358979323846;
+                    const double scale = sceneLen / cardLen;
+                    worstAngle = std::max(worstAngle, angle);
+                    scaleLow = std::min(scaleLow, scale);
+                    scaleHigh = std::max(scaleHigh, scale);
+                    reachLow = std::min(reachLow, cardLen);
+                    reachHigh = std::max(reachHigh, cardLen);
+                    std::printf("         %c%c  card (%6.1f,%6.1f) len %5.1f   scene len %6.1f"
+                                "   scale %5.3f   %4.1f deg\n",
+                                plus ? '+' : '-', char('X' + axis), cardVec.x(), cardVec.y(),
+                                cardLen, sceneLen, scale, angle);
+
+                    // ...and the same tip is INK in both renderings, so these
+                    // are positions of drawings rather than of two projections.
+                    const QColor axisColour = axis == 0   ? Theme::gizmoAxisX()
+                                              : axis == 1 ? Theme::gizmoAxisY()
+                                                          : Theme::gizmoAxisZ();
+                    const QList<QColor> family{
+                        axisColour, axisColour.darker(140),
+                        axisColour.lighter(AxisCard::kLetterLighten)};
+                    ++inkProbes;
+                    if (inkNear(cardOblique, cardTip, family, cardBg, 3) > 0) ++inkedCard;
+                    if (!sceneOblique.isNull() &&
+                        inkNear(sceneOblique, QPointF(sceneAt.x() * toDump, sceneAt.y() * toDump),
+                                family, sceneBg, int(4 * toDump)) > 0)
+                        ++inkedScene;
+                }
+            }
+
+            check(compared >= 4,
+                  QStringLiteral("at least four of the six tips are long enough on both drawings "
+                                 "to compare (%1)").arg(compared));
+            // NON-VACUITY, and it is the check that makes the rest mean
+            // something: a look where every axis foreshortens equally would
+            // satisfy "one scale" for a 3D drawing too.
+            check(compared >= 4 && reachLow > 0.0 && reachHigh / reachLow > 1.25,
+                  QStringLiteral("...at genuinely different foreshortenings, so a 3D drawing "
+                                 "could not pass this (%1 px shortest against %2 px longest)")
+                      .arg(reachLow, 0, 'f', 1).arg(reachHigh, 0, 'f', 1));
+            check(compared >= 4 && worstAngle <= 3.0,
+                  QStringLiteral("every tip points the same way on both drawings (worst %1 deg)")
+                      .arg(worstAngle, 0, 'f', 2));
+            const double scaleSpread =
+                scaleHigh > 0.0 && scaleLow < 1.0e9 ? (scaleHigh - scaleLow) / scaleHigh : 1.0;
+            // 5% per TIP, because projectToScreen() answers in whole logical
+            // pixels: two of them of uncertainty over the shortest scene tip
+            // here is already 2.3% on its own, and a tolerance under the
+            // instrument's resolution is a coin toss dressed as a check.
+            check(compared >= 4 && scaleSpread <= 0.05,
+                  QStringLiteral("and every tip is at ONE shared scale - the same drawing twice, "
+                                 "not two drawings (%1 to %2, %3% spread)")
+                      .arg(scaleLow, 0, 'f', 3).arg(scaleHigh, 0, 'f', 3)
+                      .arg(100.0 * scaleSpread, 0, 'f', 1));
+
+            // The same statement at twice the resolution: tip to opposite tip
+            // is double the span for the same whole-pixel uncertainty, so this
+            // one is pinned where it actually belongs.
+            double diamLow = 1.0e9, diamHigh = 0.0;
+            int diameters = 0;
+            for (int axis = 0; axis < 3; ++axis) {
+                if (!haveEnd[axis][0] || !haveEnd[axis][1]) continue;
+                const QPointF cardSpan = cardEnd[axis][0] - cardEnd[axis][1];
+                const QPointF sceneSpan = sceneEnd[axis][0] - sceneEnd[axis][1];
+                const double cardD = std::hypot(cardSpan.x(), cardSpan.y());
+                const double sceneD = std::hypot(sceneSpan.x(), sceneSpan.y());
+                if (cardD < 1.0) continue;
+                const double scale = sceneD / cardD;
+                diamLow = std::min(diamLow, scale);
+                diamHigh = std::max(diamHigh, scale);
+                ++diameters;
+                std::printf("         %c axis  card span %6.1f   scene span %6.1f   scale %5.3f\n",
+                            char('X' + axis), cardD, sceneD, scale);
+            }
+            const double diamSpread =
+                diamHigh > 0.0 && diamLow < 1.0e9 ? (diamHigh - diamLow) / diamHigh : 1.0;
+            check(diameters == 3 && diamSpread <= 0.02,
+                  QStringLiteral("tip to opposite tip, all three axes share one scale to within "
+                                 "two per cent (%1 to %2, %3% spread over %4 axes)")
+                      .arg(diamLow, 0, 'f', 3).arg(diamHigh, 0, 'f', 3)
+                      .arg(100.0 * diamSpread, 0, 'f', 1).arg(diameters));
+            check(inkProbes > 0 && inkedCard == inkProbes && inkedScene == inkProbes,
+                  QStringLiteral("and each of those tips is real ink in BOTH renderings, not "
+                                 "only a projected point (%1/%2 card, %3/%2 scene)")
+                      .arg(inkedCard).arg(inkProbes).arg(inkedScene));
         }
 
         ratio.close();

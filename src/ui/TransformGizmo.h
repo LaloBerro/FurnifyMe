@@ -52,6 +52,28 @@ class QShowEvent;
 // returns the lines to draw. A RotateGizmoRenderer is then three arcs and a
 // ScaleGizmoRenderer one small box, each about thirty lines, with no
 // opportunity to forget one of the disciplines above.
+// Everything a gizmo needs to know about where it stands and how the camera is
+// looking at it. A struct rather than six arguments because Phase 2's two
+// renderers take exactly the same set and a positional argument list of this
+// length is how one of them ends up handed `up` where it wanted `right`.
+struct GizmoPose {
+    gp_Pnt pivot;
+    // The camera's own frame. `right` and `up` span the VIEW PLANE, which is
+    // where the drawing is laid out - see MoveGizmoRenderer's header.
+    gp_Dir right{1.0, 0.0, 0.0};
+    gp_Dir up{0.0, 0.0, 1.0};
+    gp_Dir view{0.0, -1.0, 0.0};   // eye -> target
+    // World units per LOGICAL screen pixel, and how many DEVICE pixels one of
+    // those is worth. Both are needed and they are not interchangeable:
+    // worldPerPixel() divides by the widget's logical height, while the two
+    // things OCCT sizes for us rather than from our geometry - a line's width
+    // and a label's height - are counted in DEVICE pixels. Without the ratio a
+    // 150% display draws the whole drawing half again as big and its strokes
+    // and letters exactly as before, which is a different drawing.
+    double worldPerPixel = 1.0;
+    double pixelRatio = 1.0;
+};
+
 class GizmoRenderer {
 public:
     virtual ~GizmoRenderer() = default;
@@ -62,15 +84,7 @@ public:
     // (OcctViewWidget::releaseGlResources()).
     void detach();
 
-    // Draws the gizmo at `pivot`. `viewDirection` lets a subclass turn its
-    // geometry to face the eye; `worldPerPixel` sizes the whole thing in
-    // LOGICAL screen pixels, and `pixelRatio` is how many device pixels one of
-    // those is worth. Both are needed and they are not interchangeable:
-    // worldPerPixel() divides by the widget's own logical height, while the
-    // two things OCCT sizes for us rather than from our geometry - a line's
-    // width and a label's height - are counted in DEVICE pixels. Without the
-    // ratio a 150% display draws the whole drawing half again as big and its
-    // strokes and letters exactly as before, which is a different drawing.
+    // Draws the gizmo at `pose.pivot`, in the camera frame `pose` carries.
     // Replaces whatever was drawn before.
     //
     // Returns TRUE only when what is on screen actually changed - the caller
@@ -78,8 +92,7 @@ public:
     // measured saving PullArrowRenderer's own header records (a rebuild
     // riding along with applyCameraState()'s redraw rather than forcing a
     // second vsync).
-    bool show(const gp_Pnt& pivot, const gp_Dir& viewDirection, double worldPerPixel,
-              double pixelRatio);
+    bool show(const GizmoPose& pose);
     // TRUE when something was actually removed - show()'s own contract.
     bool clear();
     bool isShowing() const { return !myObjects.empty(); }
@@ -92,7 +105,7 @@ public:
     // showing, so it cannot make a gizmo appear.
     void reapplyTheme();
 
-    const gp_Pnt& pivot() const { return myPivot; }
+    const gp_Pnt& pivot() const { return myPose.pivot; }
 
     // One drawn line. Public only so the file-local geometry helpers that
     // build rings and discs can name it; nothing outside constructs one.
@@ -132,19 +145,17 @@ protected:
     // names and a gizmo whose letters are not the app's font at all.
     void addLabel(const QString& text, const gp_Pnt& at, const QColor& colour, double heightPx);
 
-    double worldPerPixel() const { return myWorldPerPixel; }
-    double pixelRatio() const { return myPixelRatio; }
-    const gp_Dir& viewDirection() const { return myViewDirection; }
+    const GizmoPose& pose() const { return myPose; }
+    double worldPerPixel() const { return myPose.worldPerPixel; }
+    double pixelRatio() const { return myPose.pixelRatio; }
+    const gp_Dir& viewDirection() const { return myPose.view; }
 
 private:
     Handle(AIS_InteractiveContext) myContext;
     std::vector<Handle(AIS_InteractiveObject)> myObjects;
-    gp_Pnt myPivot;
     // What the gizmo currently on screen was built from, so show() can tell a
     // call that changes nothing from one that does.
-    gp_Dir myViewDirection{0.0, 0.0, -1.0};
-    double myWorldPerPixel = 0.0;
-    double myPixelRatio = 1.0;
+    GizmoPose myPose;
     // Defeats show()'s pose cache for one call - the appearance changed, not
     // the geometry, and the cache key knows nothing about appearance.
     bool myForceRebuild = false;
@@ -162,11 +173,34 @@ private:
 // One number is chosen here rather than derived - how long an arm is - and
 // everything else is that scale times a card number.
 //
+// IT IS DRAWN ON THE VIEW PLANE, and that is the difference between the card's
+// drawing and a gizmo that merely resembles it. Built as true 3D geometry - an
+// arm along the world axis, a cone of revolution at its end - it is NOT the
+// same drawing at another size, and the user said so: perspective foreshortens
+// an arm pointing at the eye into a stub while drawing its cone OVERSIZED,
+// because the cone is nearer. The card has neither problem, because the card
+// is a flat projection.
+//
+// So every vertex here lies in the plane through the pivot spanned by the
+// camera's right and up vectors, laid out from AxisCard::computeTips() - the
+// card's own projection, shared rather than reimplemented - with the cone,
+// ball, hub and letters at constant screen size. That plane is perpendicular
+// to the view direction, so every vertex sits at ONE depth, and a pinhole
+// projection maps a plane at one depth to the screen with a single uniform
+// scale. The scene gizmo and the corner card are therefore the same drawing at
+// two scales at EVERY camera angle.
+//
+// The DRAG is untouched by any of this: an arm still drags along its TRUE
+// world axis through armAxis(), and only the hit band follows the drawn screen
+// segment.
+//
 // gui_smoke pins it by MEASUREMENT, not by shared constants: it renders the
-// card, dumps the scene, and compares five element-to-arm ratios read off the
-// two RENDERINGS. Shared constants only stop the two drawings disagreeing about
-// what the numbers are; the pin is what stops them disagreeing about how they
-// are used.
+// card, dumps the scene, compares element-to-arm ratios read off the two
+// RENDERINGS, and - at an oblique camera, which is where the 3D drawing failed
+// - asserts POSITIONAL agreement: each of the six tips pointing the same way
+// on both, at one shared scale. Shared constants only stop the two drawings
+// disagreeing about what the numbers are; the pin is what stops them
+// disagreeing about how they are used.
 //
 // The three negative balls are grab targets too, exactly as the three cones
 // are. A drag on one is measured against the SAME infinite world line the
@@ -187,16 +221,25 @@ public:
     // arm's drag with the other sign, and one line is what makes that true.
     gp_Lin armAxis(int axis) const;
 
-    // A handle's outer point - the cone's nominal tip on the positive side,
-    // the ball's centre on the negative one. Where the value chip goes, and
-    // where the hit test's span ends.
+    // A handle's outer point AS DRAWN - the cone's nominal tip on the positive
+    // side, the ball's centre on the negative one, both on the view plane.
+    // Where the value chip goes, and where the hit test's span ends. It is the
+    // DRAWN point rather than a point on the world axis on purpose: the hit
+    // band has to follow the segment the user can see, while the drag that
+    // band starts is still measured against armAxis().
     gp_Pnt handleTip(int axis, bool positive) const;
-    // Where a handle's GRABBABLE span starts, as a fraction of the arm. The
-    // inner third is excluded on purpose: all six handles meet at the hub, so
-    // near it the nearest-handle-wins rule would be decided by sub-pixel noise
-    // and the user would get an axis at random.
+    // Where a handle's GRABBABLE span starts, as a fraction of the drawn arm.
+    // The inner third is excluded on purpose: all six handles meet at the hub,
+    // so near it the nearest-handle-wins rule would be decided by sub-pixel
+    // noise and the user would get an axis at random.
     static constexpr double kGrabStartFraction = 0.3;
     gp_Pnt handleGrabStart(int axis, bool positive) const;
+    // FALSE when this handle's own tip falls inside the hub - an axis pointing
+    // very nearly at the eye. The card has the same handles at the same
+    // moments and they are just as unreachable there; what this stops is all
+    // six collapsing onto the hub and every one of them claiming a press on
+    // it.
+    bool handleDrawn(int axis, bool positive) const;
 
     // The positive spellings, kept because most callers only ever mean +axis.
     gp_Pnt armTip(int axis) const { return handleTip(axis, true); }
@@ -206,8 +249,14 @@ protected:
     void buildStrokes() override;
 
 private:
-    // The arm's world length, derived from worldPerPixel() at the last build.
-    double myArmLength = 1.0;
+    // Where the last build actually PUT each of the six handles, indexed
+    // [axis][positive ? 0 : 1]. Cached rather than recomputed because the
+    // layout is the card's projection of the pose, and the hit test must ask
+    // about the drawing that is on screen rather than about a pose that has
+    // moved on since.
+    gp_Pnt myTip[3][2];
+    gp_Pnt myGrabStart[3][2];
+    bool myDrawn[3][2] = {{false, false}, {false, false}, {false, false}};
 };
 
 // The Qt half of the Move gesture - the value chip, the live ghost preview and

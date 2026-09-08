@@ -102,6 +102,39 @@ double AxisCard::letterEmPx()
     return px > 0.0 ? px : QFontMetricsF(letterFont()).height();
 }
 
+void AxisCard::computeTips(const gp_Dir& right, const gp_Dir& up, const gp_Dir& view,
+                           Tip tips[6])
+{
+    // Project each world axis into the camera frame: `right` along the
+    // camera's right vector, `up` along its up vector, `depth` along the view
+    // direction (pointing away from the eye).
+    //
+    // At an EXACT named view (a true pole since Task 6.2's +-90 fix), the
+    // viewed axis and its opposite both project onto the hub, so the far tip
+    // is coincident with the near one and unreachable until the user orbits
+    // away - the same property Blender's and Fusion's gizmos have, permanent
+    // and harmless: a depth sort keeps the NEAR tip on top, so clicking the
+    // hub re-snaps the view already faced rather than flipping it.
+    int index = 0;
+    for (int axis = 0; axis < 3; ++axis) {
+        const double ax = axis == 0 ? 1.0 : 0.0;
+        const double ay = axis == 1 ? 1.0 : 0.0;
+        const double az = axis == 2 ? 1.0 : 0.0;
+        const double sx = ax * right.X() + ay * right.Y() + az * right.Z();
+        const double sy = ax * up.X() + ay * up.Y() + az * up.Z();
+        const double sz = ax * view.X() + ay * view.Y() + az * view.Z();
+        for (int sign = 0; sign < 2; ++sign) {
+            const double s = sign == 0 ? 1.0 : -1.0;
+            Tip& tip = tips[index++];
+            tip.axis = axis;
+            tip.positive = (sign == 0);
+            tip.right = s * sx;
+            tip.up = s * sy;
+            tip.depth = s * sz;
+        }
+    }
+}
+
 AxisGizmo::AxisGizmo(OcctViewWidget* view, QWidget* parent)
     : QWidget(parent)
     , myView(view)
@@ -149,39 +182,21 @@ void AxisGizmo::applyTheme()
 
 void AxisGizmo::computeTips(Tip tips[6]) const
 {
-    // Project each world axis into the camera frame: screen x along the
-    // camera's right vector, screen y along -up, depth along the view
-    // direction (pointing away from the eye).
-    //
-    // At an EXACT named view (a true pole since Task 6.2's ±90° fix), the
-    // viewed axis and its opposite both project onto the hub, so the far
-    // tip is screen-coincident with the near one and unreachable by a
-    // direct click until the user orbits away - the same property
-    // Blender's and Fusion's gizmos have, permanent and harmless: the
-    // depth sort below keeps the NEAR tip on top, so clicking the hub
-    // re-snaps the view already faced rather than flipping it.
+    // THE projection is AxisCard::computeTips() now, shared with the in-scene
+    // Move gizmo - see AxisGizmo.h for why two copies of it was the whole
+    // defect. All this adds is the card's own coordinates: kRadius pixels per
+    // unit, and screen y running downward where `up` runs up.
     const CameraController& cam = myView->camera();
-    const gp_Dir right = cam.rightVector();
-    const gp_Dir up = cam.upVector();
-    const gp_Dir viewDir = cam.viewDirection();
+    AxisCard::Tip projected[6];
+    AxisCard::computeTips(cam.rightVector(), cam.upVector(), cam.viewDirection(), projected);
 
     const QPointF centre = hubCenter(*this);
-    int index = 0;
-    for (int axis = 0; axis < 3; ++axis) {
-        const double ax = axis == 0 ? 1.0 : 0.0;
-        const double ay = axis == 1 ? 1.0 : 0.0;
-        const double az = axis == 2 ? 1.0 : 0.0;
-        const double sx = ax * right.X() + ay * right.Y() + az * right.Z();
-        const double sy = ax * up.X() + ay * up.Y() + az * up.Z();
-        const double sz = ax * viewDir.X() + ay * viewDir.Y() + az * viewDir.Z();
-        for (int sign = 0; sign < 2; ++sign) {
-            const double s = sign == 0 ? 1.0 : -1.0;
-            Tip& tip = tips[index++];
-            tip.axis = axis;
-            tip.positive = (sign == 0);
-            tip.screen = centre + QPointF(s * sx * kRadius, -s * sy * kRadius);
-            tip.depth = s * sz;
-        }
+    for (int i = 0; i < 6; ++i) {
+        tips[i].axis = projected[i].axis;
+        tips[i].positive = projected[i].positive;
+        tips[i].screen =
+            centre + QPointF(projected[i].right * kRadius, -projected[i].up * kRadius);
+        tips[i].depth = projected[i].depth;
     }
 }
 

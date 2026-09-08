@@ -686,8 +686,34 @@ visible at a time. Phase 1 shipped Move; Phase 2 takes the other two and deletes
   drawing, in the scene** — see the next bullet — sized in SCREEN PIXELS through
   `worldPerPixel()` and rebuilt on `cameraChanged`, never OCCT's zoom-persistence flags.
   `MoveTool` is the Qt half: the value chip, the ghost preview and the Escape claim.
-- **The gizmo IS the card's drawing, and that is pinned by measurement rather than by shared
-  constants.** The card's numbers live in `namespace AxisCard` (`src/ui/AxisGizmo.h`) and
+- **The gizmo IS the card's drawing, and the load-bearing half of that is that it is drawn
+  ON THE VIEW PLANE.** Sharing the card's *sizes* is not enough and the user said so
+  ("im not seeing equally"): built as true 3D geometry — an arm along the world axis, a cone
+  of revolution at its end — perspective foreshortens an arm pointing at the eye into a stub
+  while drawing its cone **oversized**, because the cone is nearer. The card has neither
+  problem, because the card is a flat projection. So `AxisCard::computeTips()` is now **THE**
+  projection, shared rather than reimplemented (`AxisGizmo::computeTips()` is a thin wrapper
+  that adds the card's own pixels and screen-y-runs-down), and `MoveGizmoRenderer` lays every
+  vertex out in the plane through the pivot spanned by the camera's `right` and `up` — cone,
+  ball, hub and letters at constant screen size, arms at `kArmPx × the tip's own projected
+  magnitude`. That plane is perpendicular to the view direction, so every vertex is at ONE
+  depth, and a pinhole projection maps a plane at one depth to the screen with a single
+  uniform scale: the two drawings are the same drawing at two scales at **every** camera
+  angle. Two consequences worth knowing: `GizmoPose` carries `right`/`up` as well as `view`
+  and all three are in the rebuild cache key (a **roll** about the view direction moves every
+  arm while leaving `view` untouched — the case a Top-view orbit reaches); and a coplanar
+  drawing has no draw order, so each tip is nudged along the view direction in proportion to
+  its own depth and the hub a step in front of all of them, which is the card's painter's
+  algorithm expressed as the thing a depth buffer obeys. The nudge is a fiftieth of an arm
+  against a camera distance of hundreds, so it costs the projection under half a per cent.
+  **The drag is untouched by any of it**: an arm still drags along its TRUE world axis
+  (`armAxis()`), and only the hit band follows the drawn screen segment —
+  `MoveGizmoRenderer::handleTip()`/`handleGrabStart()` return the DRAWN points, and
+  `handleDrawn()` is false for a handle whose tip falls inside the hub, without which an axis
+  pointing at the eye collapses all six onto the hub and every one of them claims a press
+  on it.
+- **The proportions are pinned by measurement rather than by shared constants.** The card's
+  numbers live in `namespace AxisCard` (`src/ui/AxisGizmo.h`) and
   both drawings read them, so neither can disagree about what they *are*; `kCardScale`
   (`kArmPixels / AxisCard::kArmPx`) is the one choice the scene makes and every other size
   is a card number times it. Element for element: three thin arms at the card's
@@ -698,7 +724,15 @@ visible at a time. Phase 1 shipped Move; Phase 2 takes the other two and deletes
   labels. But shared constants say nothing about how each drawing *uses* them, and every
   real divergence lived exactly there, so `gui_smoke`'s ratio pin renders the card
   (`renderExact`), dumps the scene, and compares five element-to-arm ratios read off the two
-  RENDERINGS at 5%. Four things that pin taught, each of which had been wrong:
+  RENDERINGS at 5%. **Ratios alone are blind to LAYOUT** — they passed with flying colours
+  while the gizmo was still 3D — so the same block also asserts POSITIONAL parity at an
+  oblique *perspective* camera: all six tips pointing the same way on both drawings (worst
+  0.56°), every tip at one shared scale, tip-to-opposite-tip at one scale to within 2%
+  (measured 0.9%, and that spelling is twice the span for the same whole-logical-pixel
+  `projectToScreen` uncertainty, which is why the per-tip bound is looser than the diameter
+  one), each of those tips being real ink in **both** renderings, and — the non-vacuity that
+  makes the rest mean anything — the six foreshortenings genuinely differing, which no 3D
+  drawing can satisfy. Four things the ratio pin taught, each of which had been wrong:
   - **The stroke scales with the arm.** A 2.0 px line was carried over verbatim at first;
     at 2.5× the arm that is a different drawing, not the same one further away.
   - **`show()` needs the DEVICE PIXEL RATIO as well as `worldPerPixel()`.** The latter
@@ -709,11 +743,10 @@ visible at a time. Phase 1 shipped Move; Phase 2 takes the other two and deletes
     this build fills anything, so both are stroked line-art whose ink runs half a line width
     past its path. Both are inset by that half width; the ball is NOT, because the card
     strokes its ball too.
-  - **"Hub on top of everything" is a draw-ORDER statement the scene cannot make.** Half of
-    every arm is genuinely nearer the eye than a disc at the pivot, so each arm's shaft
-    instead starts where the card's own shaft becomes visible: `hubRadius / foreshortening`
-    along the axis, foreshortening being the magnitude of the same `axis × view` the rings
-    are built on. Before that the arms cut the disc and it measured 6% under the card's.
+  - **"Hub on top of everything" is a draw-ORDER statement, and a depth buffer is what says
+    it here.** Before the view-plane rework the arms cut the disc and it measured 6% under
+    the card's; the depth-sort nudge above is what restores it, and the shafts start at the
+    pivot exactly as the card's do.
   The one element that is **not** reproducible: `AxisCard::letterFont()` is bold, Qt
   synthesizes that weight for a family shipping only a regular face, and OCCT does not —
   `Font_FTFontParams` carries `ToSynthesizeItalic` and has no bold counterpart, so
