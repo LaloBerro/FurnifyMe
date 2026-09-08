@@ -810,6 +810,7 @@ constexpr BlockInfo kBlocks[] = {
     { "auto-selection-phase-1-the-cursor-decides", false, true },
     { "auto-selection-phase-1-the-kind-lock", false, true },
     { "the-3d-gizmos-unlit-tokens-hover-and-handles", false, true },
+    { "view-isolate-holds-chosen-bodies-alone-on-screen", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -26115,6 +26116,97 @@ int main(int argc, char* argv[])
 
         probe.setBodyTool(MainWindow::BodyTool::Move);
         settle(150);
+        probe.close();
+        settle(150);
+    }
+
+    // --- View -> Isolate holds the chosen bodies alone on screen -------------
+    // Milestone 5, "option to Isolate an item". Session-only VIEW state:
+    // never a checkpoint, never persisted, and the eye buttons' own
+    // DocumentModel::isVisible() choice is untouched throughout - the two
+    // visibilities compose in MainWindow::applyIsolation(), the one writer.
+    if (blockEnabled("view-isolate-holds-chosen-bodies-alone-on-screen")) {
+        RequiredTempDir isolateDir;
+        MainWindow probe(nullptr, /*persistProgress=*/false, isolateDir.path());
+        probe.setAttribute(Qt::WA_ShowWithoutActivating);
+        probe.resize(1100, 800);
+        probe.show();
+        settle(300);
+        OcctViewWidget* iv = probe.view();
+        iv->setAnimationsEnabled(false);
+        enterFreshFurniture(probe);
+
+        check(buildBody(probe, 0.30, 0.30, 0.44, 0.44, 40.0),
+              "a first body for the Isolate probe");
+        check(buildBody(probe, 0.56, 0.56, 0.70, 0.70, 40.0), "and a second");
+        const auto& isoSolids = probe.document().solids();
+        const int idA = isoSolids.size() >= 2 ? isoSolids[isoSolids.size() - 2].id : -1;
+        const int idB = isoSolids.size() >= 2 ? isoSolids.back().id : -1;
+        check(idA > 0 && idB > 0 && idA != idB, "two distinct bodies exist");
+        iv->fitAll();
+        settle(200);
+
+        QAction* isolate = action(probe, QStringLiteral("Isolate"));
+        check(isolate != nullptr && isolate->isCheckable(),
+              "there is a checkable Isolate action");
+        check(isolate != nullptr && isolate->shortcut() == QKeySequence(Qt::Key_I),
+              "bound to I, so the generated sheet carries it for free");
+
+        iv->clearSelection();
+        settle(150);
+        check(isolate != nullptr && !isolate->isEnabled(),
+              "with nothing selected and Isolate off, the action is unavailable");
+
+        iv->setSelectedSolids({idA});
+        settle(150);
+        check(isolate != nullptr && isolate->isEnabled(),
+              "a selected body makes it available");
+        const std::size_t isoDepthBefore = probe.document().undoDepth();
+        trigger(probe, QStringLiteral("Isolate"));
+        settle(150);
+        check(probe.isolateActive() && isolate && isolate->isChecked(),
+              "triggering it turns Isolate on, and the action says so");
+        check(iv->isSolidVisible(idA), "the chosen body stays on screen");
+        check(!iv->isSolidVisible(idB), "...and the other body leaves it");
+        check(probe.document().isVisible(idB),
+              "while the DOCUMENT's own visibility for it is untouched - Isolate "
+              "is view state, not the eye button");
+        check(probe.document().undoDepth() == isoDepthBefore,
+              "and no checkpoint was taken - looking is not an edit");
+
+        // The same key leaves the mode, whatever the selection became.
+        iv->clearSelection();
+        settle(120);
+        check(isolate != nullptr && isolate->isEnabled(),
+              "the action stays available while Isolate is on, selection or not - "
+              "the key that entered the mode can always leave it");
+        trigger(probe, QStringLiteral("Isolate"));
+        settle(150);
+        check(!probe.isolateActive() && isolate && !isolate->isChecked(),
+              "triggering again turns it off");
+        check(iv->isSolidVisible(idA) && iv->isSolidVisible(idB),
+              "and everything is back on screen");
+
+        // Deleting the last isolated body ends the mode rather than leaving
+        // an empty filter hiding the whole document.
+        iv->setSelectedSolids({idA});
+        settle(120);
+        trigger(probe, QStringLiteral("Isolate"));
+        settle(120);
+        check(probe.isolateActive(), "Isolate is on for the delete probe");
+        trigger(probe, QStringLiteral("Delete Selected"));
+        settle(200);
+        check(!probe.isolateActive(),
+              "deleting the only isolated body ends Isolate itself");
+        check(iv->isSolidVisible(idB),
+              "...and the remaining body is back on screen, not orphan-hidden");
+
+        // Undo the delete mid-off: the resync must not resurrect a filter.
+        trigger(probe, QStringLiteral("Undo"));
+        settle(250);
+        check(iv->isSolidVisible(idA) && iv->isSolidVisible(idB),
+              "undoing the delete shows both bodies - no stale Isolate survives");
+
         probe.close();
         settle(150);
     }

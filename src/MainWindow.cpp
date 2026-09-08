@@ -1353,6 +1353,19 @@ void MainWindow::buildActions()
                                      "Off, a Failure toast still reaches you - only the bar hides."));
     connect(myBottomBarAction, &QAction::toggled, this, &MainWindow::setShowBottomBar);
 
+    // Isolate (Milestone 5, "option to Isolate an item") - everything but
+    // the chosen bodies leaves the screen until it is turned off. Checkable
+    // and SESSION-ONLY view state, render mode's own category: it rides in
+    // no checkpoint (acting like an edit would put "look at one body alone"
+    // on the undo stack), touches DocumentModel::isVisible() not at all (the
+    // eye buttons' persisted choices come back intact the moment it ends),
+    // and never persists. Menu-only, the rail-floor rule.
+    myIsolateAction = new QAction(tr("&Isolate"), this);
+    myIsolateAction->setCheckable(true);
+    myIsolateAction->setChecked(false);
+    myIsolateAction->setShortcut(QKeySequence(Qt::Key_I));
+    connect(myIsolateAction, &QAction::triggered, this, &MainWindow::onIsolate);
+
     // Render mode (Milestone 3, item 5) - strips the viewport to the
     // furniture alone. Checkable, but deliberately NOT initialised from
     // QSettings the way every toggle above it is: CLAUDE.md's own words for
@@ -1559,6 +1572,7 @@ QMenuBar* MainWindow::buildMenus()
     viewMenu->addSeparator();
     viewMenu->addAction(mySnapAction);
     viewMenu->addSeparator();
+    viewMenu->addAction(myIsolateAction);
     viewMenu->addAction(myItemsPanelAction);
     viewMenu->addAction(myVersionsPanelAction);
     viewMenu->addAction(myNotificationsAction);
@@ -2287,6 +2301,23 @@ void MainWindow::updateActions()
     myIntersectAction->setEnabled(booleanReady);
 
     myExportStepAction->setEnabled(!atInit && myDocument.count() > 0);
+
+    // Isolate is live with bodies to isolate, and stays live while ACTIVE so
+    // the same key that entered it always leaves it - a mode whose exit
+    // depends on what happens to be selected is a trap. selectedSolidIds()
+    // reports the owning body of a selected face or edge too, so isolating
+    // works from any selection kind. Two meanings, said out loud in the
+    // tooltip, Delete's own rule below.
+    myIsolateAction->setEnabled(!mySketching && !atInit &&
+                                (isolateActive() || selectedCount > 0));
+    myIsolateAction->setChecked(isolateActive());
+    myIsolateAction->setToolTip(
+        isolateActive()
+            ? tr("Show everything again (I) — Isolate is on, and only the chosen "
+                 "bodies are on screen")
+            : tr("Isolate the selected bodies (I) — everything else leaves the "
+                 "screen until you press it again"));
+
     // Delete has TWO meanings and one of them is new: bodies when bodies are
     // selected, and the waiting outline when nothing is. It is the outline's
     // only exit besides Extrude, and the whole reason it needed one is in
@@ -2747,6 +2778,11 @@ void MainWindow::showInitScreen()
     // backdrop that has nothing left to render mode a shot OF.
     if (myRenderModeOn) setRenderModeEnabled(false);
 
+    // Isolate is session view state for the furniture being closed; ids from
+    // one document mean nothing in the next (myNextId restarts at 1 per
+    // document - the mirror-placement gesture already learned that lesson).
+    myIsolatedIds.clear();
+
     // A compare pane reads a version of the furniture that is about to stop
     // being open at all - closing it here, before anything else, is what
     // keeps the splitter from outliving the furniture it was comparing.
@@ -2812,8 +2848,10 @@ void MainWindow::showInitScreen()
 bool MainWindow::openFurniture(const QString& id)
 {
     // Same reasoning as showInitScreen(): a compare pane belongs to
-    // whichever furniture is currently open, and that is about to change.
+    // whichever furniture is currently open, and that is about to change -
+    // and so does a live Isolate, whose ids describe the outgoing document.
     if (myCompareView) closeCompare();
+    myIsolatedIds.clear();
 
     QString error;
     DocumentModel loaded;
@@ -3790,8 +3828,11 @@ void MainWindow::resyncView()
     // written first. Undo, redo, and every other resync (six call sites)
     // rebuild the presentation wholesale exactly as a fresh open does, so a
     // hidden body must not silently reappear on any of them.
-    for (const DocumentModel::Solid& solid : myDocument.solids())
-        myView->setSolidVisible(solid.id, myDocument.isVisible(solid.id));
+    // ...through applyIsolation(), which IS that loop plus the session-only
+    // Isolate filter on top - one writer for body visibility, so a resync
+    // mid-Isolate (undo, redo, a restore) cannot resurrect the bodies the
+    // user asked off the screen.
+    applyIsolation();
     for (const DocumentModel::Outline& outline : myDocument.outlines())
         myView->setOutlineVisible(outline.id, myDocument.isVisible(outline.id));
 
@@ -3801,6 +3842,61 @@ void MainWindow::resyncView()
     // setSymmetryEnabled()/setSymmetryPlaneFromFace() - this is the one place
     // every one of those already rebuilds the viewport wholesale.
     myView->setSymmetryIndicator(myDocument.symmetryOn(), myDocument.symmetryPlane());
+}
+
+void MainWindow::onIsolate()
+{
+    // OFF is unconditional - the key that entered the mode always leaves it,
+    // whatever the selection has become in between.
+    if (isolateActive()) {
+        myIsolatedIds.clear();
+        applyIsolation();
+        statusBar()->showMessage(tr("Everything is back on screen"));
+        updateActions();
+        return;
+    }
+
+    const std::vector<int> ids = myView->selectedSolidIds();
+    if (ids.empty()) {
+        // updateActions() disables the action here; the guard is for the
+        // routes that never consult one (a test, a future caller).
+        return;
+    }
+    myIsolatedIds = std::set<int>(ids.begin(), ids.end());
+    applyIsolation();
+    statusBar()->showMessage(
+        myIsolatedIds.size() == 1
+            ? tr("Isolated 1 body — press I to show everything again")
+            : tr("Isolated %1 bodies — press I to show everything again")
+                  .arg(myIsolatedIds.size()));
+    updateActions();
+}
+
+void MainWindow::applyIsolation()
+{
+    if (!myView) return;
+
+    // Prune ids whose bodies are gone (undo past their creation, a Subtract
+    // that consumed the tool, Delete) - and when that leaves NOTHING
+    // isolated, the mode ends itself rather than holding an empty filter
+    // that hides every body on screen with no isolated one to explain why.
+    for (auto it = myIsolatedIds.begin(); it != myIsolatedIds.end();) {
+        if (myDocument.shapeOf(*it).IsNull()) it = myIsolatedIds.erase(it);
+        else ++it;
+    }
+    const bool active = isolateActive();
+
+    // ONE writer for body visibility: the document's own persisted choice
+    // (the eye buttons') AND the session filter, so neither can clobber the
+    // other's half. An eye toggled directly in the drawer while Isolate is
+    // on still writes the view immediately (ItemsPanel's own path); the next
+    // pass through here re-derives, which is the derive-never-store rule
+    // this window keeps everywhere.
+    for (const DocumentModel::Solid& solid : myDocument.solids()) {
+        const bool wanted = myDocument.isVisible(solid.id) &&
+                            (!active || myIsolatedIds.count(solid.id) > 0);
+        myView->setSolidVisible(solid.id, wanted);
+    }
 }
 
 void MainWindow::onDeleteSelected()
@@ -3863,6 +3959,10 @@ void MainWindow::onDeleteSelected()
         myView->removeSolid(id);
     }
     recordProgress("delete.used");
+
+    // Deleting the LAST isolated body must end Isolate rather than leave an
+    // empty filter hiding everything - applyIsolation() prunes and decides.
+    if (isolateActive()) applyIsolation();
 
     updateActions();
     emit documentChanged();

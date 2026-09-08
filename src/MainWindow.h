@@ -8,6 +8,8 @@
 
 #include <QMainWindow>
 
+#include <set>
+
 #include "DocumentModel.h"
 #include "FurnitureStore.h"
 #include "Measure.h"
@@ -150,6 +152,11 @@ public:
     // silently reset would make Space something you press twice.
     enum class BodyTool { Move, Rotate, Scale };
     BodyTool bodyTool() const { return myBodyTool; }
+
+    // Whether View -> Isolate is holding bodies alone on screen - the one
+    // predicate updateActions() checks the action against and the suite
+    // reads. Derived from the id set, never stored beside it.
+    bool isolateActive() const { return !myIsolatedIds.empty(); }
     void setBodyTool(BodyTool tool);
     // "Move", "Rotate" or "Scale" - the vocabulary table's own three words for
     // repositioning a body, in ONE place, read by the status label and by the
@@ -863,6 +870,13 @@ private slots:
     void onIntersect();
 
     void onDeleteSelected();
+    // View -> Isolate (Milestone 5): only the chosen bodies stay on screen.
+    // A TOGGLE with one key both ways - entering captures the selected
+    // bodies' ids, leaving shows everything; session-only view state, never
+    // a checkpoint, never persisted, and DocumentModel::isVisible() (the eye
+    // buttons' persisted choice) is untouched throughout - see
+    // applyIsolation() for how the two visibilities compose.
+    void onIsolate();
     void onRenameSelected();
     void onUndo();
     void onRedo();
@@ -981,6 +995,15 @@ private:
     // Rebuilds the viewport from the document. Cheaper than tracking individual
     // differences, and the only way to be sure the two agree after undo/redo.
     void resyncView();
+    // THE one writer for body visibility in the viewport: the document's
+    // persisted isVisible() AND the session Isolate filter, composed in one
+    // place so neither can clobber the other. Prunes dead isolated ids
+    // first, and an Isolate whose every body is gone ends itself - an empty
+    // filter that hid the whole document would be a mode with no evidence
+    // it is on. resyncView() routes its visibility reconciliation through
+    // this, which is what keeps undo/redo/restore from resurrecting bodies
+    // mid-Isolate.
+    void applyIsolation();
     // Shows or hides the transform gizmo from transformableBodyId(). A slot on
     // appStateChanged, and the ONE thing that attaches or detaches it - a
     // gizmo raised on a click and dismissed on some other click would be two
@@ -1371,6 +1394,11 @@ private:
     // control to switch (auto-selection spec, Phase 2).
     QAction* mySnapAction = nullptr;
     QAction* myDeleteAction = nullptr;
+    QAction* myIsolateAction = nullptr;
+    // The bodies View -> Isolate is holding on screen; empty means off. See
+    // onIsolate()/applyIsolation() - session-only, cleared on every document
+    // swap, pruned of dead ids on every application.
+    std::set<int> myIsolatedIds;
     // F2, and (like Delete) two meanings decided in ONE place - updateActions().
     // Unlike Delete, the two meanings never fall back on each other: renaming
     // is a single-item gesture (InlineRename edits one name), so this is
