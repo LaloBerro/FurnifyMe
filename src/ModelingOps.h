@@ -324,13 +324,12 @@ gp_Pnt centreOfMass(const TopoDS_Shape& shape);
 // handle standing there would float in the hole it was carved out of.
 //
 // It is the pivot every body-transform handle stands on, and it lives here -
-// in the Qt-free library, headless-tested - rather than at either call site,
-// because there are two of them and they must agree EXACTLY: the custom Move
-// gizmo (src/ui/TransformGizmo.cpp) and OCCT's own AIS_Manipulator, whose
-// OptionsForAttach::AdjustPosition derives the same point from the same box.
-// The two tools are interchangeable by a keypress, and a handle that jumped a
-// few millimetres as the user cycled Space would be reporting a difference
-// that does not exist.
+// in the Qt-free library, headless-tested - rather than at the call site,
+// because every consumer must agree EXACTLY: all three body gizmos
+// (src/ui/TransformGizmo.cpp) stand on it, the rotate and scale transforms
+// pivot about it, and the tools are interchangeable by a keypress - a handle
+// that jumped a few millimetres as the user cycled Space would be reporting
+// a difference that does not exist.
 //
 // False, leaving `out` untouched, for a null shape or a void box - there is no
 // such point, and the origin would be a plausible-looking lie.

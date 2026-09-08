@@ -811,9 +811,6 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // not. See onPickRefusalWithdrawn().
     connect(myView, &OcctViewWidget::autoPickRefusalWithdrawn, this,
             &MainWindow::onPickRefusalWithdrawn);
-    // The transform gizmo reports the end of a drag; this window decides what
-    // it means, exactly as it does for the face-pull arrow above.
-    connect(myView, &OcctViewWidget::gizmoReleased, this, &MainWindow::onGizmoReleased);
     // Render mode's own exit gesture - "a pick press in the viewport". The
     // viewport already swallowed the press (see its own mousePressEvent()),
     // so this window's only job is to turn the mode off through the single
@@ -954,12 +951,6 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // appear; and it only reads and repaints, so it cannot recurse back into
     // updateActions().
     connect(this, &MainWindow::appStateChanged, myView, &OcctViewWidget::refreshDimension);
-
-    // The transform gizmo's visibility, derived on every state change from the
-    // one predicate that decides it - never set from the event that happened
-    // to make it true. Only reads state and attaches or detaches an AIS
-    // object, so it cannot recurse back into updateActions().
-    connect(this, &MainWindow::appStateChanged, this, &MainWindow::refreshTransformGizmo);
 
     // And the edge annotation's, from the bevel arrow's predicate - two
     // annotations on one edge is noise, so the length label stands down for as
@@ -5052,10 +5043,10 @@ void MainWindow::setBodyTool(BodyTool tool)
     if (myBodyTool == tool) return;
     myBodyTool = tool;
     // updateActions() ends by emitting appStateChanged(), which is what moves
-    // both gizmos: refreshTransformGizmo() below attaches or detaches the
-    // manipulator, and MoveTool::refresh() shows or retires our own arms.
-    // Nothing here touches either directly - the derive-never-store rule this
-    // window keeps for every surface over the viewport.
+    // the gizmo: MoveTool::refresh() shows the new tool's renderer and
+    // retires the old one. Nothing here touches it directly - the
+    // derive-never-store rule this window keeps for every surface over the
+    // viewport.
     updateActions();
 }
 
@@ -5075,33 +5066,12 @@ void MainWindow::onNextTool()
                                  .arg(bodyToolName(myBodyTool)));
 }
 
-void MainWindow::refreshTransformGizmo()
-{
-    // Custom gizmo, Phase 2: all three tools are ours, drawn and retired by
-    // MoveTool off moveToolBodyId(). AIS_Manipulator is never attached any
-    // more; this keeps it that way across every path that used to raise it,
-    // until its machinery is deleted outright.
-    myView->detachManipulator();
-}
-
 void MainWindow::refreshEdgeAnnotation()
 {
     // Derived from the arrow's own predicate, not from the arrow's visibility
     // and not from the event that happened to raise it - the rule this file
     // keeps for every other surface over the viewport.
     myView->setEdgeDimensionSuppressed(canBevelSelectedEdge());
-}
-
-void MainWindow::onGizmoReleased(int solidId, const gp_Trsf& delta)
-{
-    // A drag that nets nothing is a cancel, not an edit: no checkpoint, no
-    // toast, no revision. It reaches here for two reasons that look identical
-    // from the document's side - a press and release at the same point, and a
-    // real drag the snap rounded back to where it started - and both deserve
-    // the same silence. The viewport already restored its own presentation
-    // before emitting, so there is nothing to put back.
-    if (ModelingOps::isIdentityTransform(delta)) return;
-    transformBody(solidId, delta);
 }
 
 bool MainWindow::transformBody(int id, const gp_Trsf& delta)
@@ -6025,9 +5995,8 @@ bool MainWindow::duplicateSelectedBody()
         }
     }
 
-    // Body mode is already active (linkGestureEnvironmentOk() required it) -
-    // selecting the copy here is what makes refreshTransformGizmo() (an
-    // appStateChanged slot) attach the transform gizmo to it, the same
+    // A WHOLE-BODY selection - which is what makes MoveTool::refresh() (an
+    // appStateChanged slot) stand the transform gizmo on the copy, the same
     // machinery an ordinary click already drives.
     myView->setSelectedSolids({id});
     recordProgress("duplicate.completed");
@@ -6176,9 +6145,8 @@ bool MainWindow::duplicateLinkedCopy()
     }
 
     myView->displaySolid(result.id, myDocument.shapeOf(result.id));
-    // Body mode is already active (linkGestureEnvironmentOk() required it) -
-    // selecting the copy here is what makes refreshTransformGizmo() (an
-    // appStateChanged slot) attach the transform gizmo to it, the same
+    // A WHOLE-BODY selection - which is what makes MoveTool::refresh() (an
+    // appStateChanged slot) stand the transform gizmo on the copy, the same
     // machinery an ordinary click already drives.
     myView->setSelectedSolids({result.id});
     recordProgress("link.duplicated");

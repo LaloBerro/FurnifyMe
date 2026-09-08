@@ -21,16 +21,16 @@ class QShowEvent;
 class TopoDS_Shape;
 class gp_Trsf;
 
-// The body-transform gizmo we draw ourselves - Phase 1 of the split design
-// (docs/superpowers/specs/2026-09-06-custom-gizmo-design.md), which is Move
-// alone. Rotate and Scale join in Phase 2 and OCCT's AIS_Manipulator dies with
-// them.
+// The body-transform gizmos we draw ourselves - the split design
+// (docs/superpowers/specs/2026-09-06-custom-gizmo-design.md), complete since
+// Phase 2: Move, Rotate and Scale are all here and AIS_Manipulator is
+// deleted from the app.
 //
-// Why ours at all: AIS_Manipulator has a real, measured styling wall (no
+// Why ours at all: AIS_Manipulator had a real, measured styling wall (no
 // setter reaches a per-axis colour at any access level, and a subclass that
 // reached the proportions measured the arm getting THICKER as the radius
-// shrank - both findings are recorded in CLAUDE.md). The only route to a gizmo
-// wearing the axis card's own language is drawing one.
+// shrank - both findings are recorded in CLAUDE.md). The only route to a
+// gizmo in this app's own language was drawing one.
 //
 // THE SPLIT, and it is PullArrow's, deliberately:
 //
@@ -40,8 +40,7 @@ class gp_Trsf;
 //                   OcctViewWidget::worldPerPixel() and rebuilt on
 //                   cameraChanged, so it reads the same at any zoom - the
 //                   solved-problem path, never OCCT's own zoom-persistence
-//                   flags (see attachManipulator()'s own account of what those
-//                   cost).
+//                   flags (CLAUDE.md's pitfalls record what those cost).
 //   MoveTool        is the Qt half - the value chip beside the arm being
 //                   dragged, and the application-wide Escape claim that
 //                   cancels a live drag.
@@ -87,9 +86,9 @@ public:
     // body's bounding-box centre, so the body's surface is nearer than every
     // stroke of it, and a handle a user can see through the thing it is
     // attached to is not a handle. Graphic3d_ZLayerId_Topmost clears depth too
-    // but is SHARED - OCCT's dynamic highlight lives there, so does
-    // AIS_Manipulator - and anything that joins arrives after that layer's one
-    // depth clear at its own true depth, cropping whatever is drawn behind it.
+    // but is SHARED - OCCT's dynamic highlight lives there - and anything
+    // that joins arrives after that layer's one depth clear at its own true
+    // depth, cropping whatever is drawn behind it.
     // See OcctViewWidget::initializeViewer(). Unset falls back to Topmost.
     void setZLayer(Graphic3d_ZLayerId layer) { myLayer = layer; }
     // Drops the context and everything built against it, WITHOUT touching the

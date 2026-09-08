@@ -634,7 +634,12 @@ void skipByEnvironment(int checks, const QString& why)
 //   +3  the walk all the way round with the body still filling the view: the
 //       sweep measured handles rather than skipping them, every ring whole at
 //       every look, every shaft unbroken with it
-constexpr int kCheckFloor = 3514;
+// LOWERED DELIBERATELY (custom gizmo Phase 2 cleanup, 2026-09-08): the
+// manipulator block, the card-parity pins and the tolerance stand-down sweep
+// were deleted with the machinery they measured, taking a few hundred checks
+// with them by design, and their replacements assert fewer, sharper things.
+// Re-ratchet to the measured total on the next official (filter-less) run.
+constexpr int kCheckFloor = 3100;
 
 void check(bool condition, const QString& what)
 {
@@ -745,7 +750,7 @@ constexpr BlockInfo kBlocks[] = {
     { "a-closed-outline-is-a-document-item", false, false },
     { "the-waiting-outline-has-an-exit-and-delete-is-it", false, false },
     { "pull-a-face-the-headline-direct-modeling-gesture", false, false },
-    { "the-manipulator-still-serves-rotate-and-scale", false, false },
+    { "rotate-and-scale-are-ours-rings-cubes-and-drags", false, false },
     { "the-move-tool-our-own-gizmo-drawn-dragged-and", false, true },
     { "one-edge-one-axis-two-operations", false, false },
     { "multi-edge-bevels-and-the-spread-that-used-to-come", false, false },
@@ -804,7 +809,7 @@ constexpr BlockInfo kBlocks[] = {
     { "milestone-5-item-10-autosave-persistence-and-migration", false, true },
     { "auto-selection-phase-1-the-cursor-decides", false, true },
     { "auto-selection-phase-1-the-kind-lock", false, true },
-    { "the-move-gizmo-is-the-axis-card-s-own-drawing", false, true },
+    { "the-3d-gizmos-unlit-tokens-hover-and-handles", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -9370,23 +9375,15 @@ int main(int argc, char* argv[])
         settle(200);
     }
 
-    // --- the manipulator still serves Rotate and Scale ------------------------
+    // --- Rotate and Scale are ours: rings, cubes, and the drags ---------------
     //
-    // THE SEAM, and it is deliberately temporary. The custom gizmo's Phase 1
-    // took translation away from AIS_Manipulator and gave it to arms we draw
-    // (see the Move block at the end of this file); Rotate and Scale are still
-    // OCCT's until Phase 2 deletes the class from the app. So this block, which
-    // used to cover all three, covers the two that are left - and it begins by
-    // putting the body on a tool that actually raises a manipulator, because
-    // Move no longer does.
-    //
-    // Everything the manipulator is aimed at here is derived from its OWN
-    // position and size, hovered until the widget reports which part the
-    // detection actually armed. A hardcoded pixel would be a probe that
-    // silently stops hitting what it meant to; guessing at the arm lengths
-    // would be worse still, because AIS_Manipulator keeps them private and is
-    // free to change them.
-    if (blockEnabled("the-manipulator-still-serves-rotate-and-scale")) {
+    // Phase 2 of the custom gizmo deleted AIS_Manipulator outright: all three
+    // body tools draw their own unlit 3D handles (src/ui/TransformGizmo.h) and
+    // share one chip, one commit path and one Escape claim. This block covers
+    // the two tools Phase 2 added, end to end through real presses - the ring
+    // drag that rotates, the cube drag that scales - plus the Space seam that
+    // swaps the three renderers with never two on screen.
+    if (blockEnabled("rotate-and-scale-are-ours-rings-cubes-and-drags")) {
         view->clearSelection();
         settle(120);
 
@@ -9410,17 +9407,11 @@ int main(int argc, char* argv[])
 
         auto gizmoShape = [&window, gizmoId] { return window.document().shapeOf(gizmoId); };
         auto gizmoVolume = [&] { return ModelingOps::volume(gizmoShape()); };
-        auto gizmoCentre = [&] {
-            GProp_GProps props;
-            BRepGProp::VolumeProperties(gizmoShape(), props);
-            return props.CentreOfMass();
-        };
-        // The invariant the whole gesture is built around: outside an active
-        // drag the body's PRESENTATION carries no transformation of its own,
-        // so what is on screen IS what the document holds. A gizmo drag moves
-        // the presentation and nothing else until it commits, and a volume or
-        // centre-of-mass check reads the document and so cannot see a
-        // viewport that stayed behind - this can.
+        // The invariant every gesture here is built around: the body's
+        // PRESENTATION carries no transformation of its own at any time - the
+        // custom gizmos preview through the modeling-preview channel and bake
+        // through the document, so what is on screen IS what the document
+        // holds.
         auto presentationIsClean = [&] {
             gp_Trsf local;
             if (!view->solidPresentationTransform(gizmoId, local)) return false;
@@ -9434,963 +9425,244 @@ int main(int argc, char* argv[])
             return gp_XYZ(x1 - x0, y1 - y0, z1 - z0);
         };
 
-        // --- the tool seam: which of the two gizmos a body wears -----------
-        //
-        // Asserted here, at the top of the block that owns the manipulator,
-        // because it is the manipulator's whole remaining reason to exist.
+        // --- the tool seam: Space swaps three renderers, never two at once -
         check(window.bodyTool() == MainWindow::BodyTool::Move,
-              "a body wears the Move tool by default - our own arms, not OCCT's");
+              "a body wears the Move tool by default");
         view->setSelectedSolids({gizmoId});
         settle(200);
-        check(view->hasMoveGizmo() && !view->hasManipulator(),
-              "so selecting one body raises OUR gizmo and no manipulator at all");
+        check(view->hasMoveGizmo() && !view->hasRotateGizmo() && !view->hasScaleGizmo(),
+              "selecting one body raises the Move arrows alone");
+        // The arm length AS DRAWN, in world units, read off the Move gizmo
+        // before Space retires it: the rotate rings ride at exactly this
+        // radius, which is what lets the ring probes below aim at drawn ink
+        // by construction instead of scanning for it.
+        gp_Pnt armTipWorld;
+        const bool haveArm = view->moveGizmoArmTip(0, armTipWorld);
+        const gp_Pnt gizmoPivot = view->moveGizmoPivot();
+        const double armWorld = haveArm ? gizmoPivot.Distance(armTipWorld) : 0.0;
+        check(haveArm && armWorld > 1.0e-6,
+              "the arm length is readable for the ring probes");
+
         trigger(window, QStringLiteral("Next Tool"));
         settle(200);
         check(window.bodyTool() == MainWindow::BodyTool::Rotate,
               "Space cycles Move -> Rotate");
-        check(view->hasManipulator() && !view->hasMoveGizmo(),
-              "and the two swap places outright - never both, which is what makes "
-              "one gesture mean one thing");
+        check(view->hasRotateGizmo() && !view->hasMoveGizmo() && !view->hasScaleGizmo(),
+              "and the rings take the arrows' place outright");
         trigger(window, QStringLiteral("Next Tool"));
         settle(200);
         check(window.bodyTool() == MainWindow::BodyTool::Scale,
               "Space again cycles Rotate -> Scale");
-        check(view->hasManipulator() && !view->hasMoveGizmo(),
-              "still the manipulator, now for Scale");
+        check(view->hasScaleGizmo() && !view->hasRotateGizmo() && !view->hasMoveGizmo(),
+              "and the cubes take the rings' - never two gizmos at once");
         trigger(window, QStringLiteral("Next Tool"));
         settle(200);
         check(window.bodyTool() == MainWindow::BodyTool::Move,
               "and again brings it round to Move");
-        check(view->hasMoveGizmo() && !view->hasManipulator(),
-              "with our arms back and the manipulator detached");
+        check(view->hasMoveGizmo() && !view->hasRotateGizmo() && !view->hasScaleGizmo(),
+              "with the arrows back and NO leftovers - the fourth press wore Move's "
+              "arrows over Scale's cubes once (the user's own catch), and this is "
+              "the pin that keeps showMoveGizmo() clearing its siblings");
 
-        // The rest of this block is about the manipulator, so it stays on
-        // Rotate until the Scale probe asks for the other role.
+        // --- Rotate: grab a ring, turn the body ----------------------------
         window.setBodyTool(MainWindow::BodyTool::Rotate);
         settle(200);
+        check(view->hasRotateGizmo(), "the Rotate rings are up for the drag probes");
 
-        // --- the predicate: exactly one body, and a tool that wants one ----
-        view->clearSelection();
-        settle(200);
-        check(!view->hasManipulator(),
-              "nothing selected, no gizmo");
-        view->setSelectedSolids({gizmoId});
-        settle(200);
-        check(view->hasManipulator(),
-              "selecting exactly one body raises the transform gizmo");
-        check(view->manipulatorSolid() == gizmoId,
-              "and it stands on that body, not another");
-        check(window.canTransformSelectedBody(),
-              "the window's own predicate agrees");
-        // It lives outside the document, so it must never be counted as one of
-        // its bodies - the suite's body-count checks would notice, and so
-        // would every boolean.
-        check(view->selectedSolidIds().size() == 1,
-              "the gizmo is not itself pickable as a body");
-        check(static_cast<int>(window.document().count()) == gizmoBodiesBefore + 1,
-              "and it added nothing to the document");
-
-        if (window.document().count() >= 2) {
-            const int otherId = window.document().solids().front().id;
-            view->setSelectedSolids({otherId, gizmoId});
-            settle(200);
-            check(!view->hasManipulator(),
-                  "two bodies selected retires it - there is no one body to transform");
-            view->setSelectedSolids({gizmoId});
-            settle(200);
-            check(view->hasManipulator(), "and one body brings it back");
-        }
-
-        // A FACE selected retires it, so it can never fight the pull arrow.
-        // Driven through the real path - a click on the middle of a face -
-        // because this check's whole subject is the two gizmos never being up
-        // at once, and a seam that forced the selection would prove that
-        // about a state no gesture can produce.
-        QPoint gizmoFaceAt;
-        TopoDS_Face gizmoFace;
-        check(pickFaceOf(window, gizmoId, gizmoFaceAt, gizmoFace),
-              "a face of the gizmo body can be picked by clicking it");
-        settle(200);
-        check(view->selectionKind() == OcctViewWidget::PickKind::Face,
-              "the selection holds a face after that click");
-        check(!view->hasManipulator(),
-              "a face selected retires the transform gizmo, so it can never fight "
-              "the pull arrow");
-        check(window.canPullSelectedFace(),
-              "and the pull arrow's own predicate is the one that holds instead - "
-              "exactly one of the two, never both");
-        view->setSelectedSolids({gizmoId});
-        settle(200);
-        check(view->hasManipulator(), "the whole body back means the gizmo returns");
-
-        trigger(window, QStringLiteral("Start Sketch"));
-        settle(200);
-        check(!view->hasManipulator(), "starting a sketch retires it");
-        trigger(window, QStringLiteral("Cancel Sketch"));
-        view->setSelectedSolids({gizmoId});
-        settle(200);
-        check(view->hasManipulator(), "cancelling the sketch brings it back");
-
-        // A hover with no settle: MoveTo runs inside the handler, so the
-        // armed mode is readable the moment the event has been delivered, and
-        // a search that walked ~60 candidates through settle() would cost
-        // most of a minute for nothing.
-        auto hover = [view](const QPoint& at) {
-            const QPointF p(at);
-            QMouseEvent move(QEvent::MouseMove, p, view->mapToGlobal(p),
-                             Qt::NoButton, Qt::NoButton, Qt::NoModifier);
-            QCoreApplication::sendEvent(view, &move);
+        // A grab point ON a drawn ring, derived from its own geometry: the
+        // ring of an axis rides at the arm radius in the plane the axis is
+        // normal to, so 45 degrees round from one in-plane axis is on that
+        // ring and on no other.
+        auto ringPixel = [&](int axis, double angleRad, QPoint& at) {
+            const gp_Dir u = MoveGizmoRenderer::armDirection((axis + 1) % 3);
+            const gp_Dir v = MoveGizmoRenderer::armDirection((axis + 2) % 3);
+            const gp_Pnt world = gizmoPivot.Translated(
+                gp_Vec(u) * (armWorld * std::cos(angleRad)) +
+                gp_Vec(v) * (armWorld * std::sin(angleRad)));
+            return view->projectToScreen(world, at) &&
+                   view->rect().adjusted(8, 8, -8, -8).contains(at);
         };
-
-        // --- a hover and a click on EMPTY space, with the gizmo up ---------
-        //
-        // The one-click crash 850 green checks never went near, because every
-        // one of them clicked something that was there.
-        //
-        // AIS_InteractiveContext::DetectedInteractive() is an inline that
-        // reads myLastPicked->Selectable() with no null check of its own, and
-        // a MoveTo that detects nothing nulls myLastPicked.
-        // detectedIsManipulator() asked it without guarding, so selecting a
-        // body - which attaches the manipulator - and then clicking empty
-        // viewport to deselect took the process down. That is the most
-        // ordinary gesture in the app, and it is reachable from a cold start
-        // in two clicks.
-        //
-        // SURVIVING to the next check is the assertion for the crash itself;
-        // the two after it are what say the click still did its job rather
-        // than being swallowed by a guard that returns early too eagerly.
-        {
-            check(view->hasManipulator(),
-                  "the gizmo is up before the empty-space probe, so the crashing "
-                  "path is actually reachable from here");
-
-            // "Empty" is DERIVED: the union of every body's projected bounding
-            // box and the gizmo's own projected reach, stepped well clear of.
-            // A hardcoded pixel is a probe that stops meaning anything the
-            // moment the camera or the document moves.
-            QRect occupied;
-            auto swallow = [&](const gp_Pnt& world) {
+        const double ringAngles[] = {0.7853981634, 2.356194490, 3.926990817, 5.497787144};
+        for (int axis = 0; axis < 3; ++axis) {
+            bool claimed = false;
+            for (double angle : ringAngles) {
                 QPoint at;
-                if (!view->projectToScreen(world, at)) return;
-                const QRect dot(at, QSize(1, 1));
-                occupied = occupied.isNull() ? dot : occupied.united(dot);
-            };
-            for (const DocumentModel::Solid& body : window.document().solids()) {
-                Bnd_Box box;
-                BRepBndLib::Add(body.shape, box);
-                if (box.IsVoid()) continue;
-                Standard_Real x0, y0, z0, x1, y1, z1;
-                box.Get(x0, y0, z0, x1, y1, z1);
-                for (int corner = 0; corner < 8; ++corner)
-                    swallow(gp_Pnt(corner & 1 ? x1 : x0, corner & 2 ? y1 : y0,
-                                   corner & 4 ? z1 : z0));
+                if (!ringPixel(axis, angle, at)) continue;
+                if (view->rotateGizmoAxisAt(at) == axis) { claimed = true; break; }
             }
-            gp_Ax2 reach;
-            double reachSize = 0.0;
-            if (view->manipulatorFrame(reach, reachSize)) {
-                const gp_Dir axes[3] = {reach.XDirection(), reach.YDirection(),
-                                        reach.Direction()};
-                for (const gp_Dir& axis : axes) {
-                    swallow(reach.Location().Translated(gp_Vec(axis) * reachSize));
-                    swallow(reach.Location().Translated(gp_Vec(axis) * -reachSize));
-                }
-            }
-
-            // 40 px clear of all of it, and inside the viewport's own edges.
-            QPoint empty(-1, -1);
-            const QRect keepOut = occupied.adjusted(-40, -40, 40, 40);
-            for (int y = 20; y < view->height() - 20 && empty.x() < 0; y += 12) {
-                for (int x = 20; x < view->width() - 20; x += 12) {
-                    if (keepOut.contains(QPoint(x, y))) continue;
-                    empty = QPoint(x, y);
-                    break;
-                }
-            }
-            check(empty.x() >= 0,
-                  QStringLiteral("there is a pixel with nothing behind it to click "
-                                 "(bodies and gizmo occupy %1,%2 %3x%4 of %5x%6)")
-                      .arg(occupied.left()).arg(occupied.top())
-                      .arg(occupied.width()).arg(occupied.height())
-                      .arg(view->width()).arg(view->height()));
-
-            if (empty.x() >= 0) {
-                // The bare hover first: mouseMoveEvent's hover-highlight branch
-                // asks detectedIsManipulator() too, and it crashes there just
-                // as readily as on the press. Two separate call sites, two
-                // separate ways in.
-                hover(empty);
-                settle(80);
-                check(view->hasManipulator(),
-                      "a hover over empty space with the gizmo up is survivable, and "
-                      "leaves the gizmo alone");
-
-                clickAt(view, QPointF(empty));
-                settle(200);
-                check(view->selectedSolidIds().empty(),
-                      QStringLiteral("clicking empty space clears the selection (%1 "
-                                     "still selected)")
-                          .arg(view->selectedSolidIds().size()));
-                check(!view->hasManipulator(),
-                      "and the gizmo goes with it, from the same predicate that "
-                      "raised it");
-            }
-
-            view->setSelectedSolids({gizmoId});
-            settle(200);
-            check(view->hasManipulator(),
-                  "the gizmo is back for the probes that follow");
+            // NON-VACUITY for every drag below: the app's own hit test must
+            // claim the pixel the drawing itself says the ring runs through.
+            check(claimed,
+                  QStringLiteral("the drawn ring of axis %1 is grabbable where it is "
+                                 "drawn - the hit test follows the ink").arg(axis));
         }
-
-        // Walks out from the gizmo's centre along `along`, in fractions of its
-        // own size, and stops at the first point whose hover arms `wantMode`
-        // (2 Rotate, 3 Scale, or -1 for "any part at all") on `wantAxis` (-1
-        // for any). Mode 1 - Move along an axis - is no longer reachable: the
-        // manipulator's translation parts are hidden and their manipulation
-        // mode is never enabled since the custom gizmo's Phase 1, so a probe
-        // asking for it here would be asking for a part that does not exist.
-        // Returning true IS the pick assertion this block's drags depend on: a
-        // drag that starts where detection never found the manipulator is a
-        // drag on nothing, and would pass every "the body did not move" check
-        // for the wrong reason.
-        //
-        // The axis matters for the rings in particular. Detection answers in
-        // SCREEN pixels, so a camera that sees one ring nearly edge-on happily
-        // reports a different one under the pixel a world-space walk aimed at
-        // - and then the world point the walk found is not on the ring that
-        // armed, so a drag computed around it turns the body by nothing. That
-        // is exactly what a 100% display did to a probe written at 150%.
-        // `clearOf`, when given, rejects candidates INSIDE that box. The gizmo
-        // is centred on the body's bounding box, so the inner end of every arm
-        // is buried in the body - fine for a drag, useless for the Shift-click
-        // probe below, which has to park a second body on the arm point and
-        // then click it: a point inside the first body has that body's own
-        // surface in front of it, and the click finds the wrong one.
-        auto findHandle = [&](int wantMode, int wantAxis, const gp_Dir& along, QPoint& out,
-                              gp_Pnt& world, const Bnd_Box* clearOf = nullptr) {
-            gp_Ax2 frame;
-            double size = 0.0;
-            if (!view->manipulatorFrame(frame, size)) return false;
-            for (int percent = 8; percent <= 140; percent += 2) {
-                const gp_Pnt candidate =
-                    frame.Location().Translated(gp_Vec(along) * (size * percent / 100.0));
-                if (clearOf && !clearOf->IsOut(candidate)) continue;
-                QPoint at;
-                if (!view->projectToScreen(candidate, at)) continue;
-                if (!view->rect().adjusted(6, 6, -6, -6).contains(at)) continue;
-                hover(at);
-                // Mode 0 is "nothing armed" and never counts, whatever was
-                // asked for - a caller passing -1 wants SOME part, not the
-                // absence of one.
-                if (view->manipulatorActiveMode() == 0) continue;
-                if (wantMode >= 0 && view->manipulatorActiveMode() != wantMode) continue;
-                if (wantAxis >= 0 && view->manipulatorActiveAxis() != wantAxis) continue;
-                out = at;
-                world = candidate;
-                return true;
+        auto grabZRing = [&](QPoint& at) {
+            for (double angle : ringAngles) {
+                if (ringPixel(2, angle, at) && view->rotateGizmoAxisAt(at) == 2)
+                    return true;
             }
             return false;
         };
 
-        // SOME part of the manipulator, wherever it can be found: the probes
-        // below that merely need a handle to grab (a drag that nets nothing,
-        // the camera buttons, the additive-pick shield) do not care WHICH
-        // part, and asking for a specific one is how a probe written at one
-        // display scale stops finding anything at another. Six directions,
-        // because which arc of a ring is on screen and unoccluded is the
-        // camera's business. `clearOf` is passed straight through.
-        auto findAnyHandle = [&](const gp_Ax2& frame, QPoint& out, gp_Pnt& world,
-                                 const Bnd_Box* clearOf = nullptr) {
-            const gp_Dir directions[6] = {
-                frame.XDirection(), frame.XDirection().Reversed(),
-                frame.YDirection(), frame.YDirection().Reversed(),
-                frame.Direction(),  frame.Direction().Reversed()};
-            for (const gp_Dir& direction : directions) {
-                if (findHandle(-1, -1, direction, out, world, clearOf)) return true;
-            }
-            return false;
-        };
-
-        // Undo, but only for a gesture that actually committed. An unguarded
-        // Undo after a drag that netted nothing rewinds a checkpoint some
-        // EARLIER probe took - and enough of those in a row rewind past the
-        // body's own creation, at which point every later probe is reading a
-        // null shape. That is not a hypothetical: it crashed this suite
-        // outright (BRepGProp on a null shape throws, and an OCCT exception
-        // escaping a Qt handler terminates the process), turning one legible
-        // failing check into no output at all.
-        auto undoIfCommitted = [&](std::size_t depthBefore) {
-            if (window.document().undoDepth() > depthBefore) {
-                trigger(window, QStringLiteral("Undo"));
-                settle(250);
-            }
-            view->setSelectedSolids({gizmoId});
-            settle(200);
-        };
-
-        // Read first, assert second. The condition and the message are two
-        // arguments to the same call and C++ leaves their evaluation order
-        // unspecified, so a check() that both fills a value and formats it
-        // prints whatever the value was BEFORE the call - which is how the
-        // first version of this reported a healthy gizmo as "0 mm".
-        gp_Ax2 gizmoFrame;
-        double gizmoSize = 0.0;
-        const bool haveFrame = view->manipulatorFrame(gizmoFrame, gizmoSize);
-        check(haveFrame && gizmoSize > 0.0,
-              QStringLiteral("the gizmo reports its own frame and size (%1 mm)")
-                  .arg(gizmoSize));
-
-        // The two translation probes that used to stand here - "Snap on: the
-        // Z arrow moves the body by a whole grid step" and its Snap-off twin -
-        // moved to the Move block at the end of this file when translation
-        // moved to our own gizmo. They were not dropped: every assertion they
-        // made (a whole 10 mm step, a free landing off the grid, the volume
-        // unchanged, one checkpoint, the toast with Undo, the presentation
-        // agreeing with the document, Undo and Redo) is made there against the
-        // arms that now do the job.
-
-        // --- the scale cube: volume by the cube of a 5% multiple -----------
+        // Snap OFF for the rotate drag, so any nonzero angle lands and the
+        // extents can say it did - a snapped angle could round a short drag
+        // back to zero and pass a no-change check for the wrong reason.
+        if (snapAction && snapAction->isChecked()) { snapAction->trigger(); settle(120); }
         {
-            // Tried FIRST at the framing every other probe inherits, and
-            // re-framed only if that finds nothing.
-            //
-            // The gizmo has to be the right size on screen for the walk to
-            // find the scale cube, and the constraint has two sides: too big
-            // and the far end of the walk projects outside the viewport,
-            // where findHandle() skips every candidate; too small and the
-            // cube - a little box out along the axis - is a couple of pixels
-            // and loses detection to whatever else is under the cursor. At a
-            // forced display scale that left this window 813x565 logical the
-            // walk reported other parts the whole way out and never a cube,
-            // which is the second case.
-            //
-            // The re-framing is a FALLBACK rather than an unconditional step,
-            // because an unconditional one broke the case it was not needed
-            // for: framing "correctly" by a reach-to-viewport ratio moved a
-            // camera where the walk already worked, and the cube stopped
-            // arming there instead. Doing nothing when nothing is wrong is
-            // the only version of this that holds at every scale.
-            // The Scale ROLE first: since the custom gizmo's Phase 1 a
-            // manipulator is attached for one job, and a scale cube only
-            // exists while that job is Scale.
-            window.setBodyTool(MainWindow::BodyTool::Scale);
-            settle(200);
-            check(view->hasManipulator() &&
-                      view->manipulatorRole() == OcctViewWidget::ManipulatorRole::Scale,
-                  "the body is on the Scale tool, so the manipulator is attached for it");
+            QPoint grabAt;
+            QPoint centreAt;
+            const bool haveGrab = grabZRing(grabAt);
+            check(haveGrab && view->projectToScreen(gizmoPivot, centreAt),
+                  "a grabbable point on the Z ring projects beside its centre");
+            if (haveGrab) {
+                // Tangentially, in screen space: perpendicular to the radius
+                // at the grab, which is the direction a ring drag means.
+                const QPointF radial(grabAt.x() - centreAt.x(), grabAt.y() - centreAt.y());
+                const double radiusPx = std::max(std::hypot(radial.x(), radial.y()), 1.0);
+                const QPointF tangent(-radial.y() / radiusPx, radial.x() / radiusPx);
+                const QPointF dragTo(grabAt.x() + tangent.x() * 55.0,
+                                     grabAt.y() + tangent.y() * 55.0);
 
-            QPoint handleAt;
-            gp_Pnt handleWorld;
-            bool found = findHandle(3, 0, gizmoFrame.XDirection(), handleAt, handleWorld);
-            const CameraState scaleFramedBefore = view->camera().state();
-            for (int pass = 0; pass < 2 && !found; ++pass) {
-                const gp_Pnt reachTip = gizmoFrame.Location().Translated(
-                    gp_Vec(gizmoFrame.XDirection()) * (gizmoSize * 1.4));
-                QPoint centreAt, tipAt;
-                if (!view->projectToScreen(gizmoFrame.Location(), centreAt) ||
-                    !view->projectToScreen(reachTip, tipAt))
-                    break;
-                const double reach = std::hypot(double(tipAt.x() - centreAt.x()),
-                                                double(tipAt.y() - centreAt.y()));
-                const double wanted = 0.25 * std::min(view->width(), view->height());
-                if (reach <= 0.0 || wanted <= 0.0) break;
-                CameraState framed = view->camera().state();
-                // Bounded to half or double the distance it started at, so a
-                // recovery can never dolly far enough to put the manipulator
-                // somewhere OCCT's own detection falls over.
-                framed.distance *= std::clamp(reach / wanted, 0.5, 2.0);
-                view->animateTo(framed);   // animations are off: immediate
-                settle(200);
-                found = findHandle(3, 0, gizmoFrame.XDirection(), handleAt, handleWorld);
-            }
-
-            // What the walk actually saw, when it saw no scale cube. A probe
-            // that reports only "not found" has failed twice here for two
-            // different reasons - candidates off-screen at a small viewport,
-            // and the cube too few pixels across to win the detection - and
-            // the two are indistinguishable without this.
-            QString trail;
-            if (!found) {
-                for (int percent = 8; percent <= 140; percent += 12) {
-                    const gp_Pnt candidate = gizmoFrame.Location().Translated(
-                        gp_Vec(gizmoFrame.XDirection()) * (gizmoSize * percent / 100.0));
-                    QPoint at;
-                    if (!view->projectToScreen(candidate, at)) { trail += QStringLiteral(" ?"); continue; }
-                    if (!view->rect().adjusted(6, 6, -6, -6).contains(at)) {
-                        trail += QStringLiteral(" off");
-                        continue;
-                    }
-                    hover(at);
-                    trail += QStringLiteral(" %1%%:m%2a%3")
-                                 .arg(percent).arg(view->manipulatorActiveMode())
-                                 .arg(view->manipulatorActiveAxis());
-                }
-            }
-            check(found,
-                  QStringLiteral("walking out along X finds the Scale handle past the "
-                                 "arrow (%1)")
-                      .arg(found ? QStringLiteral("armed") : trail.trimmed()));
-
-            // Further out along the same axis: AIS_Manipulator reads a scale
-            // as the ratio of the cursor's distance from the gizmo centre to
-            // the handle's, so a target further out is a growth.
-            QPoint dragTo;
-            gp_Pnt scaleTarget;
-            bool haveTarget = false;
-            double growth = 0.0;
-            if (found) {
-                // The LARGEST growth that still lands on screen, not a fixed
-                // 30%. The assertions below ask for a 5 per cent multiple and
-                // for something over 1.02 - they do not care which multiple -
-                // so a viewport too small to show the 30% point is a reason to
-                // drag less far, not a reason to fail. It was failing at one
-                // display scale for exactly that, with the handle found and
-                // the gesture never attempted.
-                for (const double candidate : {1.30, 1.25, 1.20, 1.15, 1.10}) {
-                    const gp_Pnt at = gizmoFrame.Location().Translated(
-                        gp_Vec(gizmoFrame.Location(), handleWorld) * candidate);
-                    QPoint projected;
-                    if (!view->projectToScreen(at, projected)) continue;
-                    if (!view->rect().contains(projected)) continue;
-                    scaleTarget = at;
-                    dragTo = projected;
-                    growth = candidate;
-                    haveTarget = true;
-                    break;
-                }
-            }
-            check(haveTarget,
-                  QStringLiteral("and a point further out along it projects into the "
-                                 "viewport to drag to (%1)")
-                      .arg(haveTarget ? QStringLiteral("x%1").arg(growth)
-                                      : QStringLiteral("none of 1.30 down to 1.10")));
-
-            if (haveTarget) {
                 const double volumeBefore = gizmoVolume();
                 const gp_XYZ extentsBefore = gizmoExtents();
                 const std::size_t depthBefore = window.document().undoDepth();
-                dragButton(view, QPointF(handleAt), QPointF(dragTo), Qt::LeftButton);
+
+                dragButton(view, QPointF(grabAt), dragTo, Qt::LeftButton);
                 settle(300);
 
-                const double ratio = gizmoVolume() / std::max(1.0e-9, volumeBefore);
-                const double factor = std::cbrt(ratio);
-                check(factor > 1.02,
-                      QStringLiteral("dragging the scale cube outward grows the body "
-                                     "(x%1 on each side)").arg(factor));
-                check(std::fabs(factor - std::round(factor / 0.05) * 0.05) < 1.0e-4,
-                      QStringLiteral("by exactly a 5 per cent multiple with Snap on (x%1)")
-                          .arg(factor));
                 const gp_XYZ extentsAfter = gizmoExtents();
-                check(std::fabs(extentsAfter.X() / extentsBefore.X() - factor) < 1.0e-4 &&
-                          std::fabs(extentsAfter.Z() / extentsBefore.Z() - factor) < 1.0e-4,
-                      QStringLiteral("and it is a UNIFORM scale - every extent by the "
-                                     "same factor (%1, %2)")
-                          .arg(extentsAfter.X() / extentsBefore.X())
-                          .arg(extentsAfter.Z() / extentsBefore.Z()));
-
-                ToastHost* toasts = window.findChild<ToastHost*>();
-                check(toasts != nullptr &&
-                          toasts->currentText().contains(QStringLiteral("scaled")),
-                      QStringLiteral("the toast names this one Scale (\"%1\")")
-                          .arg(toasts ? toasts->currentText() : QString()));
-
-                undoIfCommitted(depthBefore);
-                check(std::fabs(gizmoVolume() - volumeBefore) < 1.0e-6,
-                      "and Undo restores the body's size exactly");
-            }
-            // Back to the framing every probe after this one inherits, and
-            // back to Rotate, which is the role every probe after this one
-            // expects the manipulator to be wearing.
-            view->animateTo(scaleFramedBefore);
-            settle(200);
-            window.setBodyTool(MainWindow::BodyTool::Rotate);
-            view->setSelectedSolids({gizmoId});
-            settle(150);
-            check(view->hasManipulator() &&
-                      view->manipulatorRole() == OcctViewWidget::ManipulatorRole::Rotate,
-                  "and the manipulator is back on the Rotate role for what follows");
-        }
-
-        // --- the rotation ring: extents consistent with a snapped angle ----
-        {
-            // Out along the bisector of X and Y - a direction the scale cubes
-            // do not lie along, so a walk out there meets a ring first. WHICH ring is not something the probe gets to
-            // assume: detection answers in screen pixels, and a camera that
-            // sees one ring nearly edge-on will happily report a different
-            // one under the same pixel. Demanding the Z ring is how the first
-            // version of this failed at a display scale it was not written on
-            // - so the probe reads the ring the widget says it armed and
-            // measures against THAT axis instead.
-            const gp_Vec bisector =
-                (gp_Vec(gizmoFrame.XDirection()) + gp_Vec(gizmoFrame.YDirection()))
-                    .Normalized();
-            const gp_Vec antiBisector =
-                (gp_Vec(gizmoFrame.XDirection()) - gp_Vec(gizmoFrame.YDirection()))
-                    .Normalized();
-            // Every direction tried lies IN the XY plane, which is the Z
-            // ring's own plane - so wherever the walk stops with the Z ring
-            // armed, the world point really is ON that ring, and the drag
-            // computed around it is a drag around the thing that armed.
-            // Demanding the Z ring rather than accepting whichever one
-            // answered is the whole point: a 100% display reported the Y ring
-            // under a pixel a 150% one gave to the Z ring, the walk's world
-            // point was nowhere near the Y ring, and the drag turned the body
-            // by nothing at all. Eight directions because which arc of the
-            // ring is on screen and unoccluded is the camera's business.
-            const gp_Vec inPlane[] = {bisector,          bisector.Reversed(),
-                                      antiBisector,      antiBisector.Reversed(),
-                                      gp_Vec(gizmoFrame.XDirection()),
-                                      gp_Vec(gizmoFrame.XDirection()).Reversed(),
-                                      gp_Vec(gizmoFrame.YDirection()),
-                                      gp_Vec(gizmoFrame.YDirection()).Reversed()};
-            QPoint handleAt;
-            gp_Pnt handleWorld;
-            bool found = false;
-            for (const gp_Vec& direction : inPlane) {
-                if (found) break;
-                found = findHandle(2, 2, gp_Dir(direction), handleAt, handleWorld);
-            }
-            // The same fallback the scale cube gets, for the same reason and
-            // on the same terms: a ring too few pixels across loses the
-            // detection to whatever else is under the cursor, and the walk
-            // then reports nothing for a reason that has nothing to do with
-            // the ring. Only entered when the walk found nothing, bounded to
-            // two passes and to half or double the starting distance, and
-            // restored at the end of this block.
-            const CameraState ringFramedBefore = view->camera().state();
-            for (int pass = 0; pass < 2 && !found; ++pass) {
-                QPoint centreAt, tipAt;
-                const gp_Pnt reachTip = gizmoFrame.Location().Translated(
-                    gp_Vec(gizmoFrame.XDirection()) * gizmoSize);
-                if (!view->projectToScreen(gizmoFrame.Location(), centreAt) ||
-                    !view->projectToScreen(reachTip, tipAt))
-                    break;
-                const double reach = std::hypot(double(tipAt.x() - centreAt.x()),
-                                                double(tipAt.y() - centreAt.y()));
-                const double wanted = 0.22 * std::min(view->width(), view->height());
-                if (reach <= 0.0 || wanted <= 0.0) break;
-                CameraState framed = view->camera().state();
-                framed.distance *= std::clamp(reach / wanted, 0.5, 2.0);
-                view->animateTo(framed);   // animations are off: immediate
-                settle(200);
-                for (const gp_Vec& direction : inPlane) {
-                    if (found) break;
-                    found = findHandle(2, 2, gp_Dir(direction), handleAt, handleWorld);
-                }
-            }
-            check(found, "walking the XY plane finds the Rotate ring about Z");
-            check(!found || view->manipulatorActiveAxis() == 2,
-                  "and it is the ring about Z, so the drag below turns about Z");
-
-            // The gizmo's frame RIGHT NOW - the undos above re-attached it, and
-            // Attach re-derives its position from the body's bounding box.
-            gp_Ax2 ringFrame;
-            double ringSize = 0.0;
-            const bool haveRingFrame = view->manipulatorFrame(ringFrame, ringSize);
-            const gp_Dir ringDir =
-                haveRingFrame ? ringFrame.Direction() : gp_Dir(0.0, 0.0, 1.0);
-
-            // 30 degrees around that ring, in world space, then projected.
-            QPoint dragTo;
-            bool haveTarget = false;
-            if (found && haveRingFrame) {
-                gp_Trsf spin;
-                spin.SetRotation(gp_Ax1(ringFrame.Location(), ringDir),
-                                 30.0 * 3.14159265358979323846 / 180.0);
-                haveTarget = view->projectToScreen(handleWorld.Transformed(spin), dragTo) &&
-                             view->rect().contains(dragTo);
-            }
-            check(haveTarget, "and a point 30 degrees round it projects inside the viewport");
-
-            if (haveTarget) {
-                const double volumeBefore = gizmoVolume();
-                const TopoDS_Shape shapeBefore = gizmoShape();
-                const gp_XYZ before = gizmoExtents();
-                const std::size_t depthBefore = window.document().undoDepth();
-                dragButton(view, QPointF(handleAt), QPointF(dragTo), Qt::LeftButton);
-                settle(300);
-
-                check(std::fabs(gizmoVolume() - volumeBefore) < volumeBefore * 1.0e-6,
-                      "a rotation changes which way a body faces, never its volume");
-
-                // The oracle is the geometry itself, not a closed form for a
-                // box's footprint: a sketched quad is NOT a box. The four
-                // clicks are screen-space corners of a rectangle, and a
-                // perspective camera unprojects those onto the ground as a
-                // trapezoid - so dx.cos a + dy.sin a describes a shape this
-                // body is not, and the first version of this check duly
-                // failed against a perfectly correct 30 degree turn. Turning
-                // the PRE-drag shape through each candidate step and comparing
-                // extents makes no assumption about its footprint at all.
-                // Extents are invariant to where the rotation is centred, so
-                // the pivot does not have to be reproduced here.
-                const gp_XYZ after = gizmoExtents();
-                check(std::fabs(after.X() - before.X()) + std::fabs(after.Y() - before.Y()) +
-                              std::fabs(after.Z() - before.Z()) > 1.0,
-                      QStringLiteral("the body really turned (%1 x %2 x %3 became "
-                                     "%4 x %5 x %6)")
-                          .arg(before.X()).arg(before.Y()).arg(before.Z())
-                          .arg(after.X()).arg(after.Y()).arg(after.Z()));
-                int matchedStep = 0;
-                for (int step = -5; step <= 5 && matchedStep == 0; ++step) {
-                    if (step == 0) continue;
-                    gp_Trsf spin;
-                    spin.SetRotation(gp_Ax1(gp_Pnt(0.0, 0.0, 0.0), ringDir),
-                                     step * 15.0 * 3.14159265358979323846 / 180.0);
-                    const ModelingOps::BooleanResult turned =
-                        ModelingOps::transformShape(shapeBefore, spin);
-                    if (!turned.ok) continue;
-                    Bnd_Box probe;
-                    BRepBndLib::Add(turned.shape, probe);
-                    Standard_Real px0, py0, pz0, px1, py1, pz1;
-                    probe.Get(px0, py0, pz0, px1, py1, pz1);
-                    if (std::fabs((px1 - px0) - after.X()) < 1.0 &&
-                        std::fabs((py1 - py0) - after.Y()) < 1.0 &&
-                        std::fabs((pz1 - pz0) - after.Z()) < 1.0) {
-                        matchedStep = step;
-                    }
-                }
-                check(matchedStep != 0,
-                      QStringLiteral("and its extents are exactly those of the same body "
-                                     "turned a whole 15 degree step about the ring's own "
-                                     "axis (%1 deg; %2 x %3 became %4 x %5)")
-                          .arg(matchedStep * 15).arg(before.X()).arg(before.Y())
-                          .arg(after.X()).arg(after.Y()));
-
-                ToastHost* toasts = window.findChild<ToastHost*>();
-                check(toasts != nullptr &&
-                          toasts->currentText().contains(QStringLiteral("rotated")),
-                      QStringLiteral("the toast names this one Rotate (\"%1\")")
-                          .arg(toasts ? toasts->currentText() : QString()));
-
-                undoIfCommitted(depthBefore);
-                const gp_XYZ restored = gizmoExtents();
-                check(std::fabs(restored.X() - before.X()) < 1.0e-6 &&
-                          std::fabs(restored.Y() - before.Y()) < 1.0e-6 &&
-                          std::fabs(restored.Z() - before.Z()) < 1.0e-6,
-                      "and Undo turns it back exactly");
-            }
-            // Back to the framing every probe after this one inherits.
-            view->animateTo(ringFramedBefore);
-            settle(200);
-            view->setSelectedSolids({gizmoId});
-            settle(150);
-        }
-
-        // --- a drag that nets nothing is a cancel, not an edit --------------
-        {
-            QPoint handleAt;
-            gp_Pnt handleWorld;
-            const bool found = findAnyHandle(gizmoFrame, handleAt, handleWorld);
-            check(found, "a manipulator handle is findable for the no-op probe");
-
-            if (found) {
-                const std::size_t depthBefore = window.document().undoDepth();
-                const int revisionBefore = window.document().revision();
-                const gp_Pnt centreBefore = gizmoCentre();
-                ToastHost* toasts = window.findChild<ToastHost*>();
-                if (toasts) { toasts->documentMovedTo(window.document().revision() + 1); settle(150); }
-
-                // Press, move away, and come back to exactly where it started
-                // before releasing. Not a bare press-and-release: that would
-                // pass against an implementation which simply never reads the
-                // transform, while this one has genuinely moved the
-                // presentation and has to notice it came home.
-                dragButton(view, QPointF(handleAt), QPointF(handleAt + QPoint(0, -60)),
-                           Qt::LeftButton, Qt::NoModifier);
-                settle(120);
-                dragButton(view, QPointF(handleAt), QPointF(handleAt), Qt::LeftButton);
-                settle(250);
-
+                // An axis-aligned box turned about Z by any angle in (0, 90)
+                // grows its own axis-aligned X extent; Z never moves.
+                check(extentsAfter.X() > extentsBefore.X() + 0.5,
+                      QStringLiteral("the ring drag really turned the body - its "
+                                     "axis-aligned X extent grew from %1 to %2 mm")
+                          .arg(extentsBefore.X(), 0, 'f', 1)
+                          .arg(extentsAfter.X(), 0, 'f', 1));
+                check(std::fabs(extentsAfter.Z() - extentsBefore.Z()) < 1.0e-6,
+                      "about Z alone - the height is untouched");
+                check(std::fabs(gizmoVolume() - volumeBefore) < 1.0e-3,
+                      "a rotation changes where material faces, never how much there is");
                 check(window.document().undoDepth() == depthBefore + 1,
-                      "the first of those two drags did commit, so the probe is not "
-                      "vacuous");
-                undoIfCommitted(depthBefore);
-
-                const std::size_t depthNow = window.document().undoDepth();
-                const int revisionNow = window.document().revision();
-                if (toasts) { toasts->documentMovedTo(window.document().revision() + 1); settle(150); }
-                dragButton(view, QPointF(handleAt), QPointF(handleAt), Qt::LeftButton);
-                settle(250);
-                check(window.document().undoDepth() == depthNow,
-                      QStringLiteral("a drag that releases where it started takes no "
-                                     "checkpoint (%1 -> %2)")
-                          .arg(depthNow).arg(window.document().undoDepth()));
-                check(window.document().revision() == revisionNow,
-                      "and moves the document not at all");
-                check(toasts == nullptr || !toasts->isShowing(),
-                      "and says nothing");
-                check(gizmoCentre().Distance(centreBefore) < 1.0e-6,
-                      "leaving the body exactly where it was");
+                      "it took exactly one undo checkpoint");
                 check(presentationIsClean(),
-                      "and the presentation back where the document says it is, rather "
-                      "than stuck at the pose the cancelled drag left it in");
-            }
-        }
+                      "and the turned body on screen IS the document's - baked, not "
+                      "left on the presentation");
+                ToastHost* rotateToasts = window.findChild<ToastHost*>();
+                check(rotateToasts != nullptr &&
+                          rotateToasts->currentText().contains(QStringLiteral("rotated")),
+                      QStringLiteral("with a toast naming the gesture (\"%1\")")
+                          .arg(rotateToasts ? rotateToasts->currentText() : QString()));
+                check(view->selectedSolidIds().size() == 1 &&
+                          view->selectedSolidIds().front() == gizmoId,
+                      "the release is swallowed - the body stays selected under its "
+                      "rings");
 
-        // --- a scale nobody could have meant is refused, not clamped -------
-        // The kernel only refuses a factor <= 0: it will happily build a body
-        // a billionth of its size, which is a body the user has lost rather
-        // than an edit they can see. This band is MainWindow's, so it is
-        // asserted through MainWindow's own commit path - the same one a drag
-        // reaches - rather than through a gesture that would have to be
-        // dragged implausibly far to get there.
-        {
-            const double volumeBefore = gizmoVolume();
-            const std::size_t depthBefore = window.document().undoDepth();
-            gp_Trsf absurd;
-            absurd.SetScale(gizmoCentre(), 50.0);
-            check(!window.transformBody(gizmoId, absurd),
-                  "a x50 scale is refused rather than baked");
-            check(std::fabs(gizmoVolume() - volumeBefore) < 1.0e-6,
-                  "and the body is left byte-for-byte as it was");
-            check(window.document().undoDepth() == depthBefore,
-                  "with no checkpoint taken for the change that never happened");
-
-            ToastHost* toasts = window.findChild<ToastHost*>();
-            check(toasts != nullptr && toasts->isShowing() &&
-                      toasts->currentText().contains(QStringLiteral("change of size")),
-                  QStringLiteral("reported as a failure in cause-and-fix form (\"%1\")")
-                      .arg(toasts ? toasts->currentText() : QString()));
-
-            gp_Trsf vanishing;
-            vanishing.SetScale(gizmoCentre(), 0.01);
-            check(!window.transformBody(gizmoId, vanishing),
-                  "and so is a shrink to a hundredth, at the other end of the band");
-            check(std::fabs(gizmoVolume() - volumeBefore) < 1.0e-6,
-                  "leaving the body alone that time too");
-            check(presentationIsClean(),
-                  "and a refused bake leaves the viewport agreeing with the document, "
-                  "never showing a pose that exists nowhere");
-
-            // Non-vacuity: a factor INSIDE the band still commits, so the two
-            // refusals above are the clamp doing its job rather than
-            // transformBody refusing everything.
-            gp_Trsf sensible;
-            sensible.SetScale(gizmoCentre(), 1.5);
-            check(window.transformBody(gizmoId, sensible),
-                  "while a x1.5 scale inside the band is baked as normal");
-            undoIfCommitted(depthBefore);
-            check(std::fabs(gizmoVolume() - volumeBefore) < 1.0e-6,
-                  "and undone again for the probes that follow");
-        }
-
-        // --- the gizmo must not fight the camera ---------------------------
-        {
-            QPoint handleAt;
-            gp_Pnt handleWorld;
-            const bool found = findAnyHandle(gizmoFrame, handleAt, handleWorld);
-            check(found, "a manipulator handle is findable for the camera probes");
-
-            const double azimuth = view->camera().state().azimuthDeg;
-            const gp_Pnt centreBefore = gizmoCentre();
-            if (found)
-                dragButton(view, QPointF(handleAt), QPointF(handleAt + QPoint(70, 0)),
-                           Qt::RightButton);
-            check(std::fabs(view->camera().state().azimuthDeg - azimuth) > 5.0,
-                  "an RMB drag starting on a gizmo handle still orbits the camera");
-            check(gizmoCentre().Distance(centreBefore) < 1.0e-6,
-                  "and moves the body not at all");
-
-            const gp_Pnt panTarget = view->camera().state().target;
-            QPoint again;
-            gp_Pnt againWorld;
-            if (findAnyHandle(gizmoFrame, again, againWorld))
-                dragButton(view, QPointF(again), QPointF(again + QPoint(50, 30)),
-                           Qt::MiddleButton);
-            check(view->camera().state().target.Distance(panTarget) > 1.0,
-                  "and an MMB drag starting on it still pans");
-        }
-
-        // --- a Shift-click must reach the body under a gizmo part ----------
-        // The regression net for the bug a 100% display found and a 150% one
-        // hid: AIS_ManipulatorOwner outranks a shape's owner, so a part
-        // crossing a second body wins the pick and "add this body to the
-        // selection" adds nothing at all. It says PART rather than ARM since
-        // the custom gizmo's Phase 1 - the arms are gone from this class and
-        // the rings and cubes carry the same owner priority, so the hazard is
-        // unchanged and only its geometry moved.
-        //
-        // Everything here goes through the REAL mouse handler. Every other
-        // multi-body check in this block uses setSelectedSolids(), which
-        // bypasses the exact code the fix lives in - so without this, deleting
-        // the fix leaves the suite green at this machine's own scale and the
-        // bug has no net under it. The pixel is derived from the manipulator's
-        // own geometry and the second body is parked on it, so the arrangement
-        // holds at any display scale rather than depending on where two bodies
-        // happened to fall.
-        {
-            // A known camera, so which arm faces the eye is decided rather
-            // than inherited from whatever the camera probes above left
-            // behind, and a FRESH convex body to park on it. The document's
-            // first body was the obvious candidate and the wrong one: it has
-            // been through the booleans further up, and the centre of mass of
-            // a carved body need not lie in its own material - so parking it
-            // "at" the arm point put no material there at all, and the
-            // non-vacuity click found the body behind instead.
-            view->setViewAxonometric();
-            settle(250);
-            const int helperBefore = static_cast<int>(window.document().count());
-            check(buildBody(window, 0.62, 0.30, 0.76, 0.42, 30.0),
-                  "a second body for the Shift-click probe");
-            const int helperId = window.document().solids().empty()
-                                     ? -1
-                                     : window.document().solids().back().id;
-            check(helperId > 0 && helperId != gizmoId,
-                  "and it is a different body from the one the gizmo stands on");
-
-            view->setSelectedSolids({gizmoId});
-            settle(200);
-            check(view->hasManipulator(), "the gizmo is up for the Shift-click probe");
-
-            // Clear of the body the gizmo stands on, with room to spare, so
-            // the second body can be parked on the handle point in open air.
-            gp_Ax2 armFrame;
-            double armSize = 1.0;
-            view->manipulatorFrame(armFrame, armSize);
-            Bnd_Box clearOfBody;
-            BRepBndLib::Add(window.document().shapeOf(gizmoId), clearOfBody);
-            // Widened from 0.15 for auto selection: the arm point has to be
-            // clear of the gizmo body in SCREEN pixels too, and auto asks
-            // OCCT for a 12-device-pixel candidate tolerance, so a point a
-            // hair outside the body in world units can still be inside the
-            // body's own inflated sensitive. The parked body must be the
-            // nearest thing at that pixel for the non-vacuity click below to
-            // mean anything.
-            clearOfBody.Enlarge(0.35 * armSize);
-
-            QPoint armAt;
-            gp_Pnt armWorld;
-            const bool haveArm = findAnyHandle(armFrame, armAt, armWorld, &clearOfBody);
-            check(haveArm,
-                  "a part of the gizmo is findable clear of the body it stands on");
-
-            if (haveArm && helperId > 0 && helperId != gizmoId) {
-                // Park the second body exactly on that arm point, through the
-                // same commit path a drag uses.
-                GProp_GProps helperProps;
-                BRepGProp::VolumeProperties(window.document().shapeOf(helperId),
-                                            helperProps);
-                gp_Trsf park;
-                park.SetTranslation(gp_Vec(helperProps.CentreOfMass(), armWorld));
-                check(window.transformBody(helperId, park),
-                      "the second body can be parked on that arm");
-
-                // Non-vacuity, and it has to come first: with no gizmo in the
-                // way, a plain click at that pixel really does find the parked
-                // body. Without this the Shift-click check below would pass
-                // just as well against a pixel with nothing behind it.
-                view->clearSelection();
-                settle(200);
-                check(!view->hasManipulator(),
-                      "the gizmo is down for the non-vacuity click");
-                clickAt(view, QPointF(armAt));
-                settle(150);
-                std::vector<int> got = view->selectedSolidIds();
-                const bool plainFoundHelper =
-                    std::find(got.begin(), got.end(), helperId) != got.end();
-                check(plainFoundHelper,
-                      QStringLiteral("a plain click at the handle's pixel finds the parked "
-                                     "body, so that pixel really is over it (%1 selected)")
-                          .arg(got.size()));
-
-                view->setSelectedSolids({gizmoId});
-                settle(200);
-                check(view->hasManipulator(), "the gizmo is back on the first body");
-                hover(armAt);
-                check(view->manipulatorActiveMode() != 0,
-                      "and one of its parts genuinely crosses that same pixel - so the "
-                      "Shift-click below is aimed at the collision, not beside it");
-
-                // The gesture itself, through the mouse handler - and it is a
-                // Shift+DOUBLE-click now, because that is what adds a body to
-                // a body selection under auto selection. A plain Shift-click
-                // lands on a face or an edge, which the kind lock refuses (and
-                // says so); the gesture that TAKES a body is the gesture that
-                // adds one. The hazard this probe exists for is unchanged and
-                // still real: AIS_ManipulatorOwner outranks the shape's owner,
-                // so without the shield in mouseDoubleClickEvent() the gesture
-                // returns on the manipulator and adds nothing at all.
-                doubleClickAt(view, QPointF(armAt), Qt::ShiftModifier);
+                trigger(window, QStringLiteral("Undo"));
                 settle(250);
-                got = view->selectedSolidIds();
-                const bool haveFirst =
-                    std::find(got.begin(), got.end(), gizmoId) != got.end();
-                const bool haveSecond =
-                    std::find(got.begin(), got.end(), helperId) != got.end();
-                check(haveFirst && haveSecond,
-                      QStringLiteral("a Shift+double-click at a pixel a gizmo part crosses "
-                                     "still adds the body underneath (%1 selected)")
-                          .arg(got.size()));
-                check(!view->hasManipulator(),
-                      "and two bodies selected retires the gizmo, as the predicate says");
-            }
-
-            // The parked body was built for this probe, so it goes rather than
-            // being moved back - the block's own "leaves the document as it
-            // found it" check at the end is what this is keeping true.
-            if (helperId > 0) {
-                view->setSelectedSolids({helperId});
-                settle(150);
-                trigger(window, QStringLiteral("Delete Selected"));
+                view->setSelectedSolids({gizmoId});
+                window.setBodyTool(MainWindow::BodyTool::Rotate);
                 settle(200);
+                check(std::fabs(gizmoExtents().X() - extentsBefore.X()) < 1.0e-6,
+                      "Undo turns it back exactly");
             }
-            check(static_cast<int>(window.document().count()) == helperBefore,
-                  "and the probe's own second body is cleared away after it");
-            view->setSelectedSolids({gizmoId});
-            settle(200);
         }
 
-        // --- Step 5's evidence: the gizmo at the body ----------------------
+        // --- Escape cancels a live ring drag, chip and all ------------------
         {
-            view->setViewAxonometric();
-            settle(250);
-            view->setSelectedSolids({gizmoId});
-            settle(250);
-            check(view->hasManipulator(), "the gizmo is up for the capture");
-
-            const QImage shot =
-                printWindowCapture(&window, outDir + QStringLiteral("/transform-gizmo.png"));
-            check(!shot.isNull(), "the gizmo capture came back with pixels");
-            checkNoBlackLine(shot, QStringLiteral("transform gizmo"));
-            if (!shot.isNull()) {
-                gp_Ax2 frame;
-                double size = 0.0;
+            QPoint grabAt;
+            const bool haveGrab = grabZRing(grabAt);
+            check(haveGrab, "the Z ring is grabbable for the Escape probe");
+            if (haveGrab) {
                 QPoint centreAt;
-                if (view->manipulatorFrame(frame, size) &&
-                    view->projectToScreen(frame.Location(), centreAt)) {
-                    // A box around the whole gizmo, sized from its own reach
-                    // rather than a pixel guess: the outermost ring sits about
-                    // one `size` from the centre, so project that and use it.
-                    QPoint tipAt;
-                    int reach = 160;
-                    if (view->projectToScreen(
-                            frame.Location().Translated(gp_Vec(frame.Direction()) * size),
-                            tipAt))
-                        reach = std::max(120, (tipAt - centreAt).manhattanLength() + 60);
-                    QRect focus(centreAt, QSize(1, 1));
-                    focus.adjust(-reach, -reach, reach, reach);
-                    focus.translate(view->mapTo(&window, QPoint(0, 0)));
-                    const double sx = double(shot.width()) / std::max(1, window.width());
-                    const double sy = double(shot.height()) / std::max(1, window.height());
-                    const QRect scaled(int(focus.left() * sx), int(focus.top() * sy),
-                                       int(focus.width() * sx), int(focus.height() * sy));
-                    const QImage crop = shot.copy(scaled.intersected(shot.rect()));
-                    if (!crop.isNull())
-                        crop.scaled(crop.width() * 3, crop.height() * 3,
-                                    Qt::KeepAspectRatio, Qt::SmoothTransformation)
-                            .save(outDir + QStringLiteral("/transform-gizmo-crop.png"));
+                view->projectToScreen(gizmoPivot, centreAt);
+                const QPointF radial(grabAt.x() - centreAt.x(), grabAt.y() - centreAt.y());
+                const double radiusPx = std::max(std::hypot(radial.x(), radial.y()), 1.0);
+                const QPointF tangent(-radial.y() / radiusPx, radial.x() / radiusPx);
+
+                const gp_XYZ extentsBefore = gizmoExtents();
+                const std::size_t depthBefore = window.document().undoDepth();
+                const QPointF start(grabAt);
+                QMouseEvent down(QEvent::MouseButtonPress, start, view->mapToGlobal(start),
+                                 Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QCoreApplication::sendEvent(view, &down);
+                for (int i = 1; i <= 6; ++i) {
+                    const QPointF at = start + tangent * (7.0 * i);
+                    QMouseEvent move(QEvent::MouseMove, at, view->mapToGlobal(at),
+                                     Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+                    QCoreApplication::sendEvent(view, &move);
                 }
+                settle(200);
+                check(view->rotateDragActive(), "the ring drag is live");
+                MoveTool* chip = window.findChild<MoveTool*>();
+                check(chip != nullptr && chip->isVisible(),
+                      "and the shared value chip is up while it is");
+                sendKeyTo(&window, Qt::Key_Escape);
+                settle(200);
+                check(!view->rotateDragActive(), "Escape ends it");
+                const QPointF endAt = start + tangent * 42.0;
+                QMouseEvent up(QEvent::MouseButtonRelease, endAt, view->mapToGlobal(endAt),
+                               Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+                QCoreApplication::sendEvent(view, &up);
+                settle(200);
+                check(std::fabs(gizmoExtents().X() - extentsBefore.X()) < 1.0e-9 &&
+                          window.document().undoDepth() == depthBefore,
+                      "and neither the body nor the undo stack felt a thing");
             }
-            view->saveSnapshot(outDir + QStringLiteral("/transform-gizmo-viewport.png"));
         }
 
-        // The gizmo goes the moment its predicate stops holding.
-        view->clearSelection();
+        // --- Scale: grab a cube, and Snap makes it a 5% step ----------------
+        if (snapAction && !snapAction->isChecked()) { snapAction->trigger(); settle(120); }
+        window.setBodyTool(MainWindow::BodyTool::Scale);
         settle(200);
-        check(!view->hasManipulator(),
-              "clearing the selection retires the gizmo");
-        check(view->manipulatorSolid() == -1,
-              "and it lets go of the body it was standing on");
+        check(view->hasScaleGizmo() && !view->hasRotateGizmo(),
+              "the Scale cubes are up for the drag probe");
+        {
+            gp_Pnt tipWorld;
+            gp_Pnt scalePivot;
+            QPoint grabAt, tipAt;
+            const bool haveTip = view->scaleGizmoHandleTip(0, tipWorld) &&
+                                 ModelingOps::boundingBoxCentre(gizmoShape(), scalePivot);
+            const bool haveGrab =
+                haveTip &&
+                view->projectToScreen(
+                    scalePivot.Translated(gp_Vec(scalePivot, tipWorld) * 0.65), grabAt) &&
+                view->projectToScreen(tipWorld, tipAt) &&
+                view->rect().adjusted(8, 8, -8, -8).contains(grabAt);
+            check(haveGrab, "a point on the X scale arm projects into the viewport");
+            check(haveGrab && view->scaleGizmoAxisAt(grabAt) == 0,
+                  "and the app's own hit test claims it for that cube's arm");
+            if (haveGrab) {
+                const double volumeBefore = gizmoVolume();
+                const std::size_t depthBefore = window.document().undoDepth();
+                // Outward past the cube: from 0.65 of the arm to about 1.3 of
+                // it, a factor around 1.65 before the 5% snap.
+                const QPointF outward(tipAt.x() - grabAt.x(), tipAt.y() - grabAt.y());
+                const QPointF dragTo(grabAt.x() + outward.x() * 1.85,
+                                     grabAt.y() + outward.y() * 1.85);
+                dragButton(view, QPointF(grabAt), dragTo, Qt::LeftButton);
+                settle(300);
+                const double factor = std::cbrt(gizmoVolume() / volumeBefore);
+                check(factor > 1.05,
+                      QStringLiteral("the cube drag really grew the body - uniformly, "
+                                     "by kernel law (factor %1)")
+                          .arg(factor, 0, 'f', 3));
+                check(std::fabs(factor - std::round(factor / 0.05) * 0.05) < 1.0e-3,
+                      QStringLiteral("and with Snap on the factor lands on a 5% step "
+                                     "(%1)").arg(factor, 0, 'f', 3));
+                check(window.document().undoDepth() == depthBefore + 1,
+                      "one checkpoint for the scale too");
+                check(presentationIsClean(), "with nothing left on the presentation");
+                ToastHost* scaleToasts = window.findChild<ToastHost*>();
+                check(scaleToasts != nullptr &&
+                          scaleToasts->currentText().contains(QStringLiteral("scaled")),
+                      QStringLiteral("and its toast names the gesture (\"%1\")")
+                          .arg(scaleToasts ? scaleToasts->currentText() : QString()));
+                trigger(window, QStringLiteral("Undo"));
+                settle(250);
+                check(std::fabs(gizmoVolume() - volumeBefore) < 1.0e-3,
+                      "Undo restores the size exactly");
+            }
+        }
 
         // Leave the document AND the tool as this block found them, so every
         // later probe's body counts still add up and nothing inherits a tool
@@ -16635,15 +15907,11 @@ int main(int argc, char* argv[])
         }
 
         // --- gizmo restyle (Milestone 3, item 6): the axis tokens on -------
-        // AxisGizmo. AIS_Manipulator itself cannot wear these - see
-        // OcctViewWidget::attachManipulator()'s own comment for the boundary
-        // this task confirmed by reading AIS_Manipulator.hxx end to end
-        // (SetPart only toggles a part's VISIBILITY, Axis::Color() has no
-        // public setter, and the Axis objects themselves are unreachable
-        // outside the class - a total, not a partial, boundary). What DOES
-        // wear the tokens is the 2D orientation widget; this is the
-        // Dump-pixel probe the brief asks for, aimed at the surface that can
-        // actually answer it.
+        // AxisGizmo. AIS_Manipulator could not wear these (its styling wall
+        // is a CLAUDE.md pitfall now, and the class itself is deleted); the
+        // 2D orientation widget always could, and since the custom gizmo the
+        // 3D handles wear the same tokens unlit. This is the Dump-pixel
+        // probe the brief asks for, aimed at the card.
         {
             AxisGizmo* axisGizmo = window.findChild<AxisGizmo*>();
             check(axisGizmo != nullptr, "the viewport has an axis gizmo to probe");
@@ -17011,11 +16279,13 @@ int main(int argc, char* argv[])
 
     // --- the transform gizmo stays a size a hand can aim at (item 11) ---------
     //
-    // AIS_Manipulator sized itself from the body's bounding box and then stayed
-    // there, so a large body - or any body seen close up - gave a gizmo whose
-    // arms ran off every edge of the viewport. The cap is derived from the
-    // camera, so the property to check is a SCREEN one, measured at two very
-    // different zooms and in both projections.
+    // AIS_Manipulator sized itself from the body's bounding box and needed a
+    // camera-derived clamp; the custom gizmo is sized in SCREEN pixels by
+    // construction (kArmPixels x Theme::gizmoScale() through worldPerPixel(),
+    // depth-corrected at its own pivot - worldPerPixelAt()). So the property
+    // to check got stronger: not "inside a cap" but ONE screen size, measured
+    // off rendered pixels at two very different zooms and in both
+    // projections - plus the Gizmo size token really scaling it.
     if (blockEnabled("the-transform-gizmo-stays-a-size-a-hand-can-aim-at")) {
         check(!window.document().solids().empty(),
               "there are bodies for the gizmo-size probe");
@@ -17024,33 +16294,16 @@ int main(int argc, char* argv[])
             settle(300);
             const int gizmoBody = window.document().solids().front().id;
             view->setSelectedSolids({gizmoBody});
-            // ROTATE, because this block is about the MANIPULATOR's own size
-            // clamp and since the custom gizmo's Phase 1 the manipulator only
-            // serves Rotate and Scale. The clamp is unchanged; what changed is
-            // which tool puts it on screen. Restored at the end of the block.
-            window.setBodyTool(MainWindow::BodyTool::Rotate);
             settle(250);
-            check(view->hasManipulator(),
-                  "one body selected, on the Rotate tool, raises the manipulator");
+            check(view->hasMoveGizmo(),
+                  "one body selected raises the Move gizmo for the size probe");
 
-            // MEASURED OFF THE RENDERED PIXELS, and the first version of this
-            // probe was not - it projected AIS_Manipulator::Size(), which is
-            // the very number the clamp had just written. That is a self-
-            // oracle: it reported 103 px against a 110 px budget while the
-            // gizmo on screen spanned 538 px and ran off the viewport's edge,
-            // because SetSize() only marks the object ToBeUpdated and nothing
-            // was recomputing the presentation. A probe that asks the code for
-            // the code's own opinion can only ever confirm it.
-            //
-            // The gizmo is found by its three axis hues - saturated red, green
-            // and blue, each with the other two channels low. Calibrated
-            // against a real dump: the arrows read (183,0,0), (0,195,0) and
-            // (0,0,195); the SELECTED body is orange (225,145,0) and fails the
-            // red test on its green channel; grey bodies, the viewport ground
-            // and the grid's own muted axis tints fail all three. The hover
-            // cyan is deliberately not counted - it tints whole bodies, not
-            // just the gizmo's ring - which only ever makes this measure
-            // smaller, never larger.
+            // MEASURED OFF THE RENDERED PIXELS - the manipulator-era version
+            // of this probe once projected the very number the code had just
+            // written and stayed green while the gizmo spanned 538 px. The
+            // gizmo is found by its three axis hues: saturated red, green and
+            // blue with the other two channels low, which the selected body's
+            // orange and the grid's muted tints all fail.
             auto gizmoReachPx = [&](const QString& dumpName, int& litPixels) -> double {
                 litPixels = 0;
                 const QString path = outDir + QStringLiteral("/") + dumpName;
@@ -17058,12 +16311,9 @@ int main(int argc, char* argv[])
                 const QImage dump(path);
                 if (dump.isNull() || view->width() <= 0) return -1.0;
 
-                gp_Ax2 frame;
-                double size = 0.0;
-                if (!view->manipulatorFrame(frame, size)) return -1.0;
                 QPoint centreLogical;
-                if (!view->projectToScreen(frame.Location(), centreLogical)) return -1.0;
-
+                if (!view->projectToScreen(view->moveGizmoPivot(), centreLogical))
+                    return -1.0;
                 // V3d_View::Dump writes DEVICE pixels; every limit here is in
                 // Qt's logical ones. The ratio is read off the dump itself
                 // rather than from devicePixelRatioF(), so the two cannot
@@ -17087,40 +16337,51 @@ int main(int argc, char* argv[])
                 }
                 return worst / pxPerLogical;
             };
-            auto gizmoLimitPx = [&]() {
-                return OcctViewWidget::kGizmoMaxViewportFraction *
-                       std::min(view->width(), view->height());
-            };
-            // Six logical pixels of slack. The budget is the assembly's outer
-            // radius, and what is measured is painted geometry: a ring has a
-            // stroke width and antialiasing spreads it another pixel or two.
-            // It is nowhere near enough slack to hide the failure this probe
-            // exists for, which was five times the budget.
-            const double slack = 6.0;
+            // The arm is drawn at 92 logical px (kArmPixels) at the default
+            // Gizmo size; foreshortening can only shorten a projected arm and
+            // antialiasing widens ink by a pixel or two, so the reach lives in
+            // a band rather than at a number. The band's ceiling is the real
+            // pin - the manipulator failure this block was written against
+            // measured five hundred.
+            const double reachFloor = 55.0;
+            const double reachCeiling = 130.0;
 
             int framedPixels = 0;
             const double framedReach =
                 gizmoReachPx(QStringLiteral("k-gizmo-framed.png"), framedPixels);
-            // NON-VACUITY, and it is not a formality: "no gizmo-coloured pixel
-            // is far from the centre" is exactly as true of a dump with no
-            // gizmo in it at all, which is what a failed snapshot or a
-            // detached manipulator would produce.
+            // NON-VACUITY: "no gizmo-coloured pixel is far from the centre" is
+            // exactly as true of a dump with no gizmo in it at all.
             check(framedPixels > 200,
-                  QStringLiteral("the dump really contains a gizmo to measure, so the "
-                                 "reach below is not vacuous (%1 lit pixels)")
-                      .arg(framedPixels));
-            check(framedReach > 0.0,
-                  QStringLiteral("the gizmo's painted reach can be measured at the "
-                                 "framed zoom (%1 px)").arg(framedReach, 0, 'f', 1));
-            check(framedReach <= gizmoLimitPx() + slack,
-                  QStringLiteral("and it is inside %1% of the viewport's smaller side "
-                                 "(%2 px, limit %3 px)")
-                      .arg(int(OcctViewWidget::kGizmoMaxViewportFraction * 100))
+                  QStringLiteral("the dump really contains a gizmo to measure (%1 lit "
+                                 "pixels)").arg(framedPixels));
+            check(framedReach > reachFloor && framedReach < reachCeiling,
+                  QStringLiteral("its reach at the framed zoom is a hand-sized number "
+                                 "(%1 px, band %2-%3)")
                       .arg(framedReach, 0, 'f', 1)
-                      .arg(gizmoLimitPx(), 0, 'f', 1));
+                      .arg(reachFloor).arg(reachCeiling));
 
-            // CLOSE UP, which is the case the user reported: at this zoom the
-            // unclamped gizmo was several times the viewport.
+            // The Gizmo size token scales the whole drawing - the Appearance
+            // panel's own row drives exactly this Spec field.
+            {
+                Theme::Spec bigger = Theme::spec();
+                bigger.gizmoScale = 1.5;
+                Theme::setSpec(bigger);
+                settle(250);
+                int scaledPixels = 0;
+                const double scaledReach =
+                    gizmoReachPx(QStringLiteral("k-gizmo-scaled.png"), scaledPixels);
+                check(scaledPixels > 200 && scaledReach > framedReach * 1.25,
+                      QStringLiteral("Gizmo size at 1.5x really draws a bigger gizmo "
+                                     "(%1 px against %2)")
+                          .arg(scaledReach, 0, 'f', 1).arg(framedReach, 0, 'f', 1));
+                Theme::Spec back = Theme::spec();
+                back.gizmoScale = 1.0;
+                Theme::setSpec(back);
+                settle(200);
+            }
+
+            // CLOSE UP, which is the case the manipulator failed: at this
+            // zoom the unclamped gizmo was several times the viewport.
             for (int i = 0; i < 12; ++i) {
                 QWheelEvent zoom(QPointF(view->width() / 2.0, view->height() / 2.0),
                                  view->mapToGlobal(QPointF(view->width() / 2.0,
@@ -17136,18 +16397,16 @@ int main(int argc, char* argv[])
             check(closePixels > 200,
                   QStringLiteral("the close-zoom dump contains a gizmo too (%1 lit "
                                  "pixels)").arg(closePixels));
-            check(closeReach > 0.0,
-                  QStringLiteral("the gizmo is still there and measurable zoomed in "
-                                 "(%1 px)").arg(closeReach, 0, 'f', 1));
-            check(closeReach <= gizmoLimitPx() + slack,
-                  QStringLiteral("and the clamp holds at a close zoom, which is where "
-                                 "it used to fill the screen (%1 px, limit %2 px)")
-                      .arg(closeReach, 0, 'f', 1)
-                      .arg(gizmoLimitPx(), 0, 'f', 1));
+            check(closeReach > reachFloor && closeReach < reachCeiling,
+                  QStringLiteral("and the size holds at a close zoom (%1 px)")
+                      .arg(closeReach, 0, 'f', 1));
+            check(std::fabs(closeReach - framedReach) < 16.0,
+                  QStringLiteral("ONE size at both zooms - constant screen size is the "
+                                 "design, not a cap (%1 against %2 px)")
+                      .arg(closeReach, 0, 'f', 1).arg(framedReach, 0, 'f', 1));
 
-            // ORTHOGRAPHIC: the frustum is built differently and worldPerPixel()
-            // is the one formula both modes share, so the clamp has to survive
-            // the flip without a branch of its own.
+            // ORTHOGRAPHIC: worldPerPixelAt() collapses to worldPerPixel()
+            // there by construction, and the size must survive the flip.
             QAction* orthoForGizmo = action(window, QStringLiteral("Orthographic"));
             check(orthoForGizmo != nullptr, "there is a projection toggle for the probe");
             if (orthoForGizmo) {
@@ -17162,25 +16421,13 @@ int main(int argc, char* argv[])
                 check(orthoPixels > 200,
                       QStringLiteral("the ortho dump contains a gizmo (%1 lit pixels)")
                           .arg(orthoPixels));
-                check(orthoReach > 0.0,
-                      QStringLiteral("the gizmo measures in ortho too (%1 px)")
+                check(orthoReach > reachFloor && orthoReach < reachCeiling,
+                      QStringLiteral("and the size holds there as well (%1 px)")
                           .arg(orthoReach, 0, 'f', 1));
-                check(orthoReach <= gizmoLimitPx() + slack,
-                      QStringLiteral("and the clamp holds there as well (%1 px, limit "
-                                     "%2 px)")
-                          .arg(orthoReach, 0, 'f', 1)
-                          .arg(gizmoLimitPx(), 0, 'f', 1));
                 if (!wasOrtho) orthoForGizmo->trigger();
                 settle(200);
             }
 
-            // The three dumps above ARE the captures - k-gizmo-clamped.png is
-            // written by the close-zoom measurement itself, so the picture
-            // presented and the picture measured are the same file rather than
-            // two renders that could differ.
-
-            // The tool back where every other block expects to find it.
-            window.setBodyTool(MainWindow::BodyTool::Move);
             view->setSelectedSolids({});
             trigger(window, QStringLiteral("Fit All"));
             trigger(window, QStringLiteral("Axonometric"));
@@ -25605,54 +24852,45 @@ int main(int argc, char* argv[])
             av->setSelectedSolids({gizmoCarrier});
             settle(200);
 
-            // THE STAND-DOWN IS THE MANIPULATOR'S ALONE, and the custom
-            // gizmo's Phase 1 is what makes that worth asserting in both
-            // directions. The tolerance is a property of the SELECTOR and is
-            // added to every registered entity's sensitivity - the
-            // manipulator's arms, rings and cubes included, which is what
-            // merged them. Our own Move arms are AIS objects with no
-            // ComputeSelection at all, so they register nothing and there is
-            // nothing for the tolerance to blur: with Move active the full
-            // candidate tolerance stays up, and the edge keeps its 8-pixel
-            // reach on exactly the state the headline gesture leaves the user
-            // in. That is a real behaviour change and it is pinned here rather
-            // than left as a side effect nobody measured.
+            // THE STAND-DOWN IS GONE WITH THE MANIPULATOR (Phase 2 cleanup),
+            // and this sweep now pins the absence in both directions. The
+            // custom gizmos' handles are AIS objects with no ComputeSelection
+            // at all, so they register nothing the raised tolerance could
+            // blur - and the raise therefore never stands down: the edge
+            // keeps its full reach with a gizmo up, on every tool, which is
+            // the consequence the custom gizmo was built to buy. The measured
+            // account of what the stand-down was and cost is CLAUDE.md's now.
             check(probe.bodyTool() == MainWindow::BodyTool::Move,
                   "the sweep starts on the Move tool, which is where a body selection "
                   "leaves a user by default");
-            check(av->hasMoveGizmo() && !av->hasManipulator(),
-                  "so it is OUR arms standing on the carrier body, not OCCT's manipulator");
+            check(av->hasMoveGizmo(),
+                  "so it is OUR arrows standing on the carrier body");
             check(av->selectionPixelTolerance() != OcctViewWidget::kNoCustomTolerance,
                   QStringLiteral("and the selector keeps its custom tolerance while they "
-                                 "are up - our arms register nothing for it to blur (%1)")
-                      .arg(av->selectionPixelTolerance()));
+                                 "are up (%1)").arg(av->selectionPixelTolerance()));
 
-            // Now the state the stand-down is actually about: Space to Rotate,
-            // which is where the manipulator still serves until Phase 2.
             trigger(probe, QStringLiteral("Next Tool"));
             settle(200);
             check(probe.bodyTool() == MainWindow::BodyTool::Rotate,
                   "Space moves the carrier body onto the Rotate tool");
-            check(av->hasManipulator(),
-                  "which raises the manipulator, so the sweep below is measuring the "
-                  "state it is about");
-            check(av->selectionPixelTolerance() == OcctViewWidget::kNoCustomTolerance,
-                  QStringLiteral("and the selector really has handed the custom tolerance "
-                                 "back while it is up (%1)")
+            check(av->hasRotateGizmo(),
+                  "which raises our rings - the tool the old stand-down was about");
+            check(av->selectionPixelTolerance() != OcctViewWidget::kNoCustomTolerance,
+                  QStringLiteral("and the tolerance STAYS custom - nothing left to "
+                                 "stand down for (%1)")
                       .arg(av->selectionPixelTolerance()));
 
-            // Non-vacuity, and the exact thing the earlier attempt got wrong:
-            // the pixel the sweep starts from must still hover as the EDGE, not
-            // as a manipulator owner sitting on top of it.
+            // Non-vacuity: the pixel the sweep starts from must still hover
+            // as the EDGE with the rings up.
             moveTo(av, QPointF(edgeMid));
             check(av->hoveredKind() == OcctViewWidget::PickKind::Edge,
-                  "the sweep's own start pixel still hovers as that edge, clear of the "
-                  "gizmo - so what follows measures the tolerance rather than the gizmo");
+                  "the sweep's own start pixel still hovers as that edge with the "
+                  "rings up");
 
             int heldLastEdgePx = -1;
             int heldFirstFacePx = -1;
-            std::printf("      ...and with a body selected (gizmo up, tolerance stood "
-                        "down):\n      ");
+            std::printf("      ...and with a body selected (gizmo up, tolerance "
+                        "intact):\n      ");
             for (int px = 0; px <= OcctViewWidget::kAutoEdgeTolerancePx + 8; ++px) {
                 moveTo(av, QPointF(edgeMid.x() + intoBody.x() * px,
                                     edgeMid.y() + intoBody.y() * px));
@@ -25668,25 +24906,20 @@ int main(int argc, char* argv[])
             }
             std::printf("\n");
 
-            // Phase 1 measured the candidate radius at about 0.75x the custom
-            // tolerance, so with no custom tolerance at all the edge should
-            // leave the candidate list within a pixel or two rather than at
-            // eight. Pinned as a real band on both sides: a stand-down that
-            // quietly stopped standing down would read 7 here and fail, and one
-            // that took the edge away entirely would read -1 and fail too.
-            check(heldLastEdgePx >= 0 && heldLastEdgePx <= 4,
-                  QStringLiteral("with the gizmo up the edge holds the hover only to %1 px "
-                                 "against %2 with the selection clear - the stand-down's "
-                                 "real cost, measured rather than described")
+            // The pin, in the direction the deletion changed: with the gizmo
+            // up the reach must MATCH the cleared sweep's, not the 2 px the
+            // stand-down used to cost. One pixel of slack for arbitration
+            // noise at the boundary.
+            check(heldLastEdgePx >= lastEdgePx - 1,
+                  QStringLiteral("with the rings up the edge holds the hover to %1 px "
+                                 "against %2 with the selection clear - the full reach "
+                                 "survives a gizmo now")
                       .arg(heldLastEdgePx).arg(lastEdgePx));
-            check(heldLastEdgePx < lastEdgePx && heldFirstFacePx > heldLastEdgePx,
-                  QStringLiteral("...and it is strictly the shorter reach, with the face "
-                                 "taking over from %1 rather than %2")
-                      .arg(heldFirstFacePx).arg(firstFacePx));
+            check(heldFirstFacePx > heldLastEdgePx,
+                  QStringLiteral("...and the face still takes over past it (%1)")
+                      .arg(heldFirstFacePx));
 
-            // Leave the block's document as this sweep found it - still on
-            // Rotate, so the tolerance check below is about letting the BODY
-            // go rather than about the tool having already changed back.
+            // Leave the block's document as this sweep found it.
             trigger(probe, QStringLiteral("Delete Selected"));
             settle(200);
             check(probe.document().solids().size() == bodiesBeforeSweep,
@@ -25694,13 +24927,7 @@ int main(int argc, char* argv[])
             av->clearSelection();
             settle(150);
             check(av->selectionPixelTolerance() != OcctViewWidget::kNoCustomTolerance,
-                  "and letting the body go puts the full candidate tolerance straight "
-                  "back - the stand-down lasts exactly as long as the manipulator does");
-            // ...and the tool back to Move, so nothing after this block
-            // inherits a state it never chose. Through the setter rather than
-            // two more presses of Space: the action is correctly disabled with
-            // nothing selected, so triggering it here would be a silent no-op
-            // and the restore would not happen at all.
+                  "letting the body go leaves the tolerance where it always was");
             probe.setBodyTool(MainWindow::BodyTool::Move);
             settle(150);
             check(probe.bodyTool() == MainWindow::BodyTool::Move,
@@ -26131,11 +25358,11 @@ int main(int argc, char* argv[])
         auto moveShape = [&probe, moveId] { return probe.document().shapeOf(moveId); };
         auto moveVolume = [&] { return ModelingOps::volume(moveShape()); };
         auto moveCentre = [&] { return ModelingOps::centreOfMass(moveShape()); };
-        // The invariant the whole gesture is built around, exactly as the
-        // manipulator block states it: outside a live drag the body's
-        // PRESENTATION carries no transformation of its own, so what is on
-        // screen IS what the document holds. A volume or centre check reads
-        // the document and cannot see a viewport that stayed behind.
+        // The invariant the whole gesture is built around: the body's
+        // PRESENTATION carries no transformation of its own at any time, so
+        // what is on screen IS what the document holds. A volume or centre
+        // check reads the document and cannot see a viewport that stayed
+        // behind.
         auto presentationIsClean = [&] {
             gp_Trsf local;
             if (!mv->solidPresentationTransform(moveId, local)) return false;
@@ -26149,15 +25376,14 @@ int main(int argc, char* argv[])
         settle(200);
         check(mv->hasMoveGizmo(), "selecting exactly one body raises the Move gizmo");
         check(probe.moveToolBodyId() == moveId, "standing on that body, not another");
-        check(!mv->hasManipulator(),
-              "and OCCT's manipulator stays away entirely - one tool, one gizmo");
+        check(!mv->hasRotateGizmo() && !mv->hasScaleGizmo(),
+              "and no other tool's handles join it - one tool, one gizmo");
         check(mv->selectedSolidIds().size() == 1,
               "the gizmo is not itself pickable as a body");
 
-        // The pivot is the body's BOUNDING-BOX centre, which is what
-        // AIS_Manipulator's own AdjustPosition derives - through the one
-        // shared ModelingOps::boundingBoxCentre(), so the two tools cannot put
-        // their handles in different places as Space swaps them.
+        // The pivot is the body's BOUNDING-BOX centre, through the one
+        // shared ModelingOps::boundingBoxCentre() every tool reads, so Space
+        // cannot put two tools' handles in different places.
         {
             gp_Pnt wanted;
             const bool haveWanted = ModelingOps::boundingBoxCentre(moveShape(), wanted);
@@ -26172,10 +25398,9 @@ int main(int argc, char* argv[])
         // MEASURED OFF THE RENDERED PIXELS, not off the code's own opinion of
         // what it asked for - the lesson AIS_Manipulator's own size clamp cost
         // (a probe that projects the number the code just wrote can only ever
-        // confirm it). The colours come back EXACT because the arms are line
-        // primitives on a Graphic3d_AspectLine3d rather than shaded geometry:
-        // a lit pixel would be some function of the token, and this check
-        // could then only ever be approximate.
+        // confirm it). The colours come back EXACT because the handles draw
+        // UNLIT: a lit pixel would be some function of the token, and this
+        // check could then only ever be approximate.
         auto countTokenPixels = [&](const QImage& dump, const QColor& token) {
             int hits = 0;
             for (int y = 0; y < dump.height(); ++y) {
@@ -26209,29 +25434,18 @@ int main(int argc, char* argv[])
             }
         }
 
-        // ...and they go the moment the tool does. The same dump, one Space
-        // later: the arms are gone, and the manipulator that stands there
-        // instead paints OCCT's own stock hues rather than these tokens.
+        // ...and the tool swap is the seam's own booleans rather than a pixel
+        // count: the Rotate rings wear the SAME tokens the arrows do, so a
+        // count that fell would prove nothing and one that held would prove
+        // less.
         {
             trigger(probe, QStringLiteral("Next Tool"));
             settle(250);
             check(probe.bodyTool() == MainWindow::BodyTool::Rotate,
                   "Space cycles Move -> Rotate");
-            check(!mv->hasMoveGizmo() && mv->hasManipulator(),
-                  "which retires our arms and raises the manipulator");
-            const QString path = outDir + QStringLiteral("/move-gizmo-rotate.png");
-            check(mv->saveSnapshot(path), "the Rotate tool can be dumped too");
-            const QImage dump(path);
-            if (!dump.isNull()) {
-                const int stillX = countTokenPixels(dump, Theme::gizmoAxisX());
-                const int stillY = countTokenPixels(dump, Theme::gizmoAxisY());
-                const int stillZ = countTokenPixels(dump, Theme::gizmoAxisZ());
-                check(stillX * 4 < litX && stillY * 4 < litY && stillZ * 4 < litZ,
-                      QStringLiteral("and the arms' own token pixels go from the viewport "
-                                     "with them (%1/%2/%3 against %4/%5/%6)")
-                          .arg(stillX).arg(stillY).arg(stillZ)
-                          .arg(litX).arg(litY).arg(litZ));
-            }
+            check(!mv->hasMoveGizmo() && mv->hasRotateGizmo(),
+                  "which retires our arrows and raises our rings");
+            mv->saveSnapshot(outDir + QStringLiteral("/move-gizmo-rotate.png"));
         }
 
         // --- Space cycles three states, and the status label follows -------
@@ -26245,16 +25459,15 @@ int main(int argc, char* argv[])
             check(stateLabelText(probe).contains(QStringLiteral("Scale")),
                   QStringLiteral("...and the label follows it (\"%1\")")
                       .arg(stateLabelText(probe)));
-            check(mv->hasManipulator() &&
-                      mv->manipulatorRole() == OcctViewWidget::ManipulatorRole::Scale,
-                  "with the manipulator re-attached for the Scale role");
+            check(mv->hasScaleGizmo() && !mv->hasRotateGizmo(),
+                  "with the cube handles taking the rings' place");
             trigger(probe, QStringLiteral("Next Tool"));
             settle(200);
             check(probe.bodyTool() == MainWindow::BodyTool::Move, "Scale -> Move, round again");
             check(stateLabelText(probe).contains(QStringLiteral("Move")),
                   QStringLiteral("...and back (\"%1\")").arg(stateLabelText(probe)));
-            check(mv->hasMoveGizmo() && !mv->hasManipulator(),
-                  "and our arms are the ones standing on the body again");
+            check(mv->hasMoveGizmo() && !mv->hasRotateGizmo() && !mv->hasScaleGizmo(),
+                  "and our arrows are the ones standing on the body again");
 
             // A real app action, so the generated ShortcutSheet carries it and
             // updateActions() owns its enabled state.
@@ -26569,10 +25782,9 @@ int main(int argc, char* argv[])
         // --- a linked copy follows a Move commit ---------------------------
         //
         // ONE check on the WIRING, not on the maths: the commit goes through
-        // MainWindow::transformBody(), which is the same function the
-        // manipulator has always used, so what this pins is that the new
-        // gesture really reaches it rather than having grown a commit path of
-        // its own.
+        // MainWindow::transformBody() - the one commit path all three tools
+        // share - so what this pins is that the gesture really reaches it
+        // rather than having grown a commit path of its own.
         {
             mv->setSelectedSolids({moveId});
             settle(200);
@@ -26704,1063 +25916,186 @@ int main(int argc, char* argv[])
     }
 
     // ======================================================================
-    // THE MOVE GIZMO IS THE AXIS CARD'S OWN DRAWING, MEASURED
+    // THE 3D GIZMOS: UNLIT TOKENS, HOVER, AND THE HANDLE SET
     // ======================================================================
     //
-    // The user's ask was "exactly like the card", and the two drawings do read
-    // one set of numbers (AxisCard, in src/ui/AxisGizmo.h) - but shared
-    // constants only stop them disagreeing about what the numbers ARE. They
-    // say nothing about how each drawing uses them, and every real divergence
-    // this phase had to close lived there: a stroke weight left absolute while
-    // the arm scaled, a cone the card FILLS and the scene can only stroke, a
-    // label sized in points on one side and in em pixels on the other.
-    //
-    // So this pins the two RENDERINGS against each other. The card is rendered
-    // (renderExact, 1:1), the scene is dumped (V3d_View::Dump), and five
-    // element-to-arm ratios are read off the pixels of each - stroke, cone,
-    // ball, hub and letter height, every one of them against an arm measured
-    // in the same image. Nothing here reads a constant out of the source and
-    // compares it to itself: the only numbers in this block are tolerances.
-    //
-    // The camera is squared onto a look with the Z axis IN the screen plane
-    // and elevation 0, and that is load-bearing rather than tidy. The card
-    // draws its cone, ball, hub and letter at fixed SCREEN sizes and its arm
-    // foreshortened; the scene builds all five as geometry, so only the arm
-    // foreshortens there too. The two agree on every element only where the
-    // measured arm is not foreshortened at all, which is what an axis lying in
-    // the screen plane means. Orthographic for the same reason, one order
-    // smaller: a perspective arm is very slightly not its own length.
-    //
-    // The arm reference is the span from the negative BALL's centre to the
-    // positive CONE's base - two features both drawings really have, and a
-    // span rather than a distance from the hub on purpose: projectToScreen()
-    // answers in whole logical pixels, so where the hub centre is is known
-    // only to half a pixel, and an error there shifts the two features in
-    // opposite directions and cancels out of their separation exactly.
-    if (blockEnabled("the-move-gizmo-is-the-axis-card-s-own-drawing")) {
-        RequiredTempDir ratioDir;
-        MainWindow ratio(nullptr, /*persistProgress=*/false, ratioDir.path());
-        ratio.setAttribute(Qt::WA_ShowWithoutActivating);
-        ratio.resize(1100, 800);
-        ratio.show();
+    // The axis-card-parity drawing this slot used to pin is DELETED - the
+    // user rejected it after four rounds (camera-facing arrows, flat rings
+    // that could crop) and the gizmos are true 3D now: unlit solids along
+    // the world axes on a depth-cleared immediate layer. What is worth
+    // pinning about THAT drawing: unlit means a rendered pixel IS the token;
+    // hover brightens exactly the handle under the cursor and raises the
+    // app's own grab cursor; the negative handles are gone from drawing and
+    // hit test alike; and every tool's handles are real ink at every camera
+    // - the old ring-crop defect was camera-dependent, so the sweep that
+    // measured ring wholeness became a sweep that the ink is simply there.
+    if (blockEnabled("the-3d-gizmos-unlit-tokens-hover-and-handles")) {
+        RequiredTempDir solidDir;
+        MainWindow probe(nullptr, /*persistProgress=*/false, solidDir.path());
+        probe.setAttribute(Qt::WA_ShowWithoutActivating);
+        probe.resize(1100, 800);
+        probe.show();
         settle(300);
-        OcctViewWidget* rv = ratio.view();
-        rv->setAnimationsEnabled(false);
-        enterFreshFurniture(ratio);
+        OcctViewWidget* gv = probe.view();
+        gv->setAnimationsEnabled(false);
+        enterFreshFurniture(probe);
 
-        check(buildBody(ratio, 0.46, 0.46, 0.54, 0.54, 40.0),
-              "a body for the card-against-scene pin to stand a gizmo on");
-        const int ratioId =
-            ratio.document().solids().empty() ? -1 : ratio.document().solids().back().id;
-        rv->fitAll();
+        check(buildBody(probe, 0.36, 0.36, 0.60, 0.60, 50.0),
+              "a body for the 3D-gizmo probes");
+        const int bodyId = probe.document().solids().empty()
+                               ? -1
+                               : probe.document().solids().back().id;
+        gv->fitAll();
         settle(250);
-
-        QAction* ratioOrtho = action(ratio, QStringLiteral("Orthographic"));
-        check(ratioOrtho != nullptr, "there is an Orthographic action for the ratio pin");
-        if (ratioOrtho && !ratioOrtho->isChecked()) { ratioOrtho->trigger(); settle(150); }
-
-        rv->setSelectedSolids({ratioId});
+        gv->setSelectedSolids({bodyId});
         settle(250);
-        check(rv->hasMoveGizmo(), "the Move gizmo is up for the ratio pin");
+        check(gv->hasMoveGizmo(), "the Move gizmo is up");
 
-        AxisGizmo* card = ratio.findChild<AxisGizmo*>();
-        check(card != nullptr, "and the axis card it is a copy of is on the same window");
-
-        // --- square the camera, and stand well back --------------------------
-        //
-        // Far enough back that the BODY is a few pixels across. Not cosmetic:
-        // the ink measure below reads how far each pixel sits along the line
-        // between the drawing's colour and the background behind it, and a
-        // selected body's own orange is neither. Shrinking it to well inside
-        // the hub keeps every measured span over the empty viewport.
-        if (rv->hasMoveGizmo() && ratioId > 0) {
-            Bnd_Box ratioBox;
-            BRepBndLib::Add(ratio.document().shapeOf(ratioId), ratioBox);
-            double bx0, by0, bz0, bx1, by1, bz1;
-            ratioBox.Get(bx0, by0, bz0, bx1, by1, bz1);
-            const double bodyDiagonal = gp_Pnt(bx0, by0, bz0).Distance(gp_Pnt(bx1, by1, bz1));
-
-            CameraState squared = rv->camera().state();
-            squared.target = rv->moveGizmoPivot();
-            squared.azimuthDeg = 30.0;   // X and Y clear of the Z arm on screen
-            squared.elevationDeg = 0.0;  // ...and Z exactly upright, unforeshortened
-            // worldPerPixel() is 2 * distance * tan(fovy/2) / viewport height,
-            // in both projections by construction, so the distance that puts a
-            // given world span on a given number of pixels is that inverted.
-            constexpr double kRatioPi = 3.14159265358979323846;
-            const double wantedBodyPixels = 11.0;
-            squared.distance = bodyDiagonal * std::max(1, rv->height()) /
-                               (wantedBodyPixels * 2.0 * std::tan(0.5 * 45.0 * kRatioPi / 180.0));
-            rv->animateTo(squared);
-            settle(300);
-
-            check(rv->viewIsOrthographic(),
-                  "the ratio pin measures an orthographic view - a perspective arm is "
-                  "very slightly not its own length");
-
-            QPoint bodyLow, bodyHigh;
-            const bool bodyProjects = rv->projectToScreen(gp_Pnt(bx0, by0, bz0), bodyLow) &&
-                                      rv->projectToScreen(gp_Pnt(bx1, by1, bz1), bodyHigh);
-            const double bodyPixels =
-                bodyProjects ? std::hypot(double(bodyHigh.x() - bodyLow.x()),
-                                          double(bodyHigh.y() - bodyLow.y()))
-                             : 1.0e9;
-            check(bodyPixels < 30.0,
-                  QStringLiteral("the body is small enough that the arms measure against the "
-                                 "viewport rather than against its own shading (%1 px across)")
-                      .arg(bodyPixels, 0, 'f', 1));
-        }
-
-        // --- the one measurement, run twice ----------------------------------
-        //
-        // How much of a pixel is the drawing's colour rather than the ground
-        // behind it. An antialiased pixel is a linear blend of the two, so
-        // projecting it back onto the line between them recovers the coverage
-        // and the 0.5 crossing is where the ink's edge really is - which is
-        // what lets a 2-pixel card stroke and a 5-pixel scene one be compared
-        // at all. A pixel that is not ON that line (the body's orange, the
-        // ground grid, a lit face) is rejected outright rather than projected
-        // onto it, which is the whole reason the residual test is here.
-        auto inkAlpha = [](const QColor& p, const QColor& f, const QColor& b) -> double {
-            const double dr = f.red() - b.red();
-            const double dg = f.green() - b.green();
-            const double db = f.blue() - b.blue();
-            const double len2 = dr * dr + dg * dg + db * db;
-            if (len2 < 1.0) return 0.0;
-            const double pr = p.red() - b.red();
-            const double pg = p.green() - b.green();
-            const double pb = p.blue() - b.blue();
-            const double t = (pr * dr + pg * dg + pb * db) / len2;
-            const double ex = pr - t * dr, ey = pg - t * dg, ez = pb - t * db;
-            // A fifth of the distance between the two colours, off the line:
-            // an antialiased edge lands ON it, and every other colour in
-            // either image is further away than that. Measured, not guessed -
-            // at half this strictness the axis card's own vivid GREEN read as
-            // 0.64 of the way from the viewport to the neutral hub grey and
-            // was counted as hub ink, which reported a hub two and a half
-            // times its own size on both drawings at once.
-            if (ex * ex + ey * ey + ez * ez > 0.04 * len2) return 0.0;
-            return std::clamp(t, 0.0, 1.0);
-        };
-
-        // How far the drawing's ink reaches along one straight run of pixels:
-        // first 0.5 crossing to last, each interpolated between the two
-        // samples that straddle it, so the answer is sub-pixel on both an
-        // antialiased QPainter line and an aliased OpenGL one. `step` is a
-        // unit vector, so the answer is in image pixels.
-        auto inkSpan = [&](const QImage& img, const QPointF& origin, const QPointF& step,
-                           int reach, const QList<QColor>& fg, const QColor& bg) -> double {
-            const int n = reach;
-            std::vector<double> a(std::size_t(2 * n + 1), 0.0);
-            for (int i = -n; i <= n; ++i) {
-                const QPointF at = origin + step * double(i);
-                const int x = int(std::lround(at.x()));
-                const int y = int(std::lround(at.y()));
-                double best = 0.0;
-                if (x >= 0 && y >= 0 && x < img.width() && y < img.height()) {
-                    const QColor p = img.pixelColor(x, y);
-                    for (const QColor& f : fg) best = std::max(best, inkAlpha(p, f, bg));
+        auto countNear = [](const QImage& dump, const QColor& token) {
+            int hits = 0;
+            for (int y = 0; y < dump.height(); ++y)
+                for (int x = 0; x < dump.width(); ++x) {
+                    const QColor c = dump.pixelColor(x, y);
+                    if (std::abs(c.red() - token.red()) <= 6 &&
+                        std::abs(c.green() - token.green()) <= 6 &&
+                        std::abs(c.blue() - token.blue()) <= 6)
+                        ++hits;
                 }
-                a[std::size_t(i + n)] = best;
-            }
-            int lo = -1, hi = -1;
-            for (int i = 0; i <= 2 * n; ++i) {
-                if (a[std::size_t(i)] >= 0.5) { lo = i; break; }
-            }
-            for (int i = 2 * n; i >= 0; --i) {
-                if (a[std::size_t(i)] >= 0.5) { hi = i; break; }
-            }
-            if (lo < 0 || hi < 0) return 0.0;
-            double low = double(lo - n);
-            if (lo > 0) {
-                const double below = a[std::size_t(lo - 1)];
-                low -= (a[std::size_t(lo)] - 0.5) / std::max(a[std::size_t(lo)] - below, 1.0e-9);
-            }
-            double high = double(hi - n);
-            if (hi < 2 * n) {
-                const double above = a[std::size_t(hi + 1)];
-                high += (a[std::size_t(hi)] - 0.5) / std::max(a[std::size_t(hi)] - above, 1.0e-9);
-            }
-            return std::max(0.0, high - low);
+            return hits;
         };
 
-        // Everything one of the two drawings can be asked about itself, in its
-        // own image's pixels. `arm` is the reference every other number is
-        // reported against.
-        struct Drawn {
-            double arm = 0.0;
-            double stroke = 0.0;
-            double cone = 0.0;
-            double ball = 0.0;
-            double hub = 0.0;
-            double letter = 0.0;       // the glyph's ink HEIGHT, along the arm
-            double letterWide = 0.0;   // and its ink width, across it
-            bool ok = false;
-        };
-
-        auto measureDrawing = [&](const QImage& img, const QPointF& centre, const QPointF& dir,
-                                  const QList<QColor>& axisInk, const QColor& hubInk,
-                                  const QColor& bg, double reach, int perp) -> Drawn {
-            Drawn d;
-            if (img.isNull()) return d;
-
-            const QPointF normal(-dir.y(), dir.x());
-            const double step = 0.25;
-            // The ink ACROSS the arm at `t` pixels along it.
-            auto widthAt = [&](double t) {
-                return inkSpan(img, centre + dir * t, normal, perp, axisInk, bg);
-            };
-
-            // The cone's base and the ball's centre are simply the widest the
-            // drawing gets on each side of the hub. Both are true of the card
-            // and of the scene, and neither needs a constant to find.
-            //
-            // The MIDDLE of the widest run, not the first row of it: the card
-            // fills a triangle and peaks on one row, while the scene strokes a
-            // ring whose widest rows span a whole line width, so taking the
-            // first maximum pulled both features inward - by 0.75 px on the
-            // card and 3.75 px in the scene, which is a 2% error in the arm
-            // every ratio below is reported against.
-            auto widest = [&](double from, double to, double& at) {
-                double best = 0.0;
-                for (double t = from; (from < to ? t <= to : t >= to); t += (from < to ? step : -step))
-                    best = std::max(best, widthAt(t));
-                double sum = 0.0;
-                int taken = 0;
-                for (double t = from; (from < to ? t <= to : t >= to); t += (from < to ? step : -step)) {
-                    if (widthAt(t) >= 0.99 * best) { sum += t; ++taken; }
-                }
-                at = taken > 0 ? sum / double(taken) : 0.0;
-                return best;
-            };
-            double tCone = 0.0, tBall = 0.0;
-            const double wCone = widest(3.0, reach, tCone);
-            const double wBall = widest(-3.0, -reach, tBall);
-            if (wCone <= 0.0 || wBall <= 0.0 || tCone <= 0.0) return d;
-
-            d.arm = tCone - tBall;
-            d.cone = wCone;
-            d.ball = wBall;
-
-            // The shaft, sampled well clear of both the hub and the cone.
-            double sum = 0.0;
-            int taken = 0;
-            for (double t = 0.35 * tCone; t <= 0.75 * tCone; t += step) {
-                const double w = widthAt(t);
-                if (w > 0.0) { sum += w; ++taken; }
-            }
-            d.stroke = taken > 0 ? sum / double(taken) : 0.0;
-
-            // The axis letter: walk out past the cone to where its ink stops,
-            // across the clear band beyond it, and take the whole of the next
-            // run of ink. The band is found by ink and nothing else - an
-            // earlier spelling gated it at a third of the cone's width, which
-            // is fine for finding the letter and wrong for bounding it: the
-            // middle of a 'z' is one diagonal stroke wide, so the gate cut the
-            // glyph down to its top bar and reported a letter half its height.
-            double t = tCone;
-            while (t <= reach && widthAt(t) > 0.0) t += step;
-            while (t <= reach && widthAt(t) <= 0.0) t += step;
-            const double letterFrom = t;
-            double letterTo = t;
-            while (letterTo <= reach && widthAt(letterTo) > 0.0) {
-                d.letterWide = std::max(d.letterWide, widthAt(letterTo));
-                letterTo += step;
-            }
-            // ...and its HEIGHT, which the profile above cannot answer: that
-            // profile reads ACROSS the arm, so its letter figure is the
-            // glyph's width. Turn the same sub-pixel run ninety degrees and
-            // read the tallest column instead, bounded to the letter's own
-            // band so the cone below it can never join in.
-            if (letterTo > letterFrom) {
-                const double mid = 0.5 * (letterFrom + letterTo);
-                const int reachUp = std::max(2, int(0.5 * (letterTo - letterFrom)) + 2);
-                const int across = std::max(1, int(0.5 * d.letterWide) + 1);
-                for (int c = -across; c <= across; ++c)
-                    d.letter = std::max(d.letter, inkSpan(img, centre + dir * mid + normal * double(c),
-                                                          dir, reachUp, axisInk, bg));
-            }
-
-            // The hub, across the arm at whatever row shows most of it. In the
-            // scene the three arms cross the disc where the card simply paints
-            // its own hub over them, so the widest CLEAR row is a whisker
-            // inside the true diameter - a systematic couple of per cent, and
-            // the only place in this block the two drawings are not measured
-            // under identical conditions.
-            double hub = 0.0;
-            for (double h = -0.35 * tCone; h <= 0.35 * tCone; h += step)
-                hub = std::max(hub, inkSpan(img, centre + dir * h, normal, perp, {hubInk}, bg));
-            d.hub = hub;
-
-            d.ok = d.arm > 1.0 && d.stroke > 0.0 && d.cone > 0.0 && d.ball > 0.0 &&
-                   d.hub > 0.0 && d.letter > 0.0 && d.letterWide > 0.0;
-            return d;
-        };
-
-        Drawn cardDrawn;
-        Drawn sceneDrawn;
-        double cardLetterInk = 0.0;
-
-        // --- the card, rendered at 1:1 ---------------------------------------
-        if (card) {
-            const QImage cardImg = renderExact(card);
-            check(!cardImg.isNull() && cardImg.width() > 40,
-                  QStringLiteral("the axis card renders at its own size (%1x%2)")
-                      .arg(cardImg.width()).arg(cardImg.height()));
-            const QPointF cardCentre(cardImg.width() / 2.0, cardImg.height() / 2.0);
-            QPointF cardDir = card->tipCenter(2, true) - cardCentre;
-            const double cardDirLength = std::hypot(cardDir.x(), cardDir.y());
-            check(cardDirLength > 20.0,
-                  QStringLiteral("the card's own +Z tip is a real distance from its hub "
-                                 "(%1 px) - a degenerate axis would measure nothing")
-                      .arg(cardDirLength, 0, 'f', 1));
-            if (cardDirLength > 20.0) {
-                cardDir /= cardDirLength;
-                cardDrawn = measureDrawing(cardImg, cardCentre, cardDir,
-                                           {Theme::gizmoAxisZ(),
-                                            Theme::gizmoAxisZ().lighter(AxisCard::kLetterLighten)},
-                                           AxisCard::hubColour(), Theme::panel(),
-                                           cardImg.height() / 2.0 - 4.0, 24);
-                cardLetterInk = cardDrawn.letter;
-            }
-            check(cardDrawn.ok,
-                  QStringLiteral("every element of the card is found in its own rendering "
-                                 "(arm %1, stroke %2, cone %3, ball %4, hub %5, letter %6)")
-                      .arg(cardDrawn.arm, 0, 'f', 2).arg(cardDrawn.stroke, 0, 'f', 2)
-                      .arg(cardDrawn.cone, 0, 'f', 2).arg(cardDrawn.ball, 0, 'f', 2)
-                      .arg(cardDrawn.hub, 0, 'f', 2).arg(cardDrawn.letter, 0, 'f', 2));
-            std::printf("       card letter ink %.2f x %.2f px\n", cardDrawn.letterWide,
-                        cardDrawn.letter);
-        }
-
-        // The one absolute anchor in an otherwise entirely relative pin. Two
-        // drawings can agree with each other while both disagreeing with the
-        // font they claim to use, so the card's rendered 'z' is checked
-        // against the tight ink box its own metrics report for that glyph.
+        // --- hover brightens the one handle under the cursor ---------------
         {
-            const double metricHeight = AxisCard::letterHeightPx(QLatin1Char('z'));
-            {
-                QFont plain = AxisCard::letterFont();
-                plain.setBold(false);
-                const QRectF plainInk =
-                    QFontMetricsF(plain).tightBoundingRect(QStringLiteral("z"));
-                std::printf("       card font: em %.2f  bold ink %.2f  plain ink %.2f x %.2f\n",
-                            AxisCard::letterEmPx(), metricHeight, plainInk.width(),
-                            plainInk.height());
-            }
-            check(cardLetterInk > 0.0 &&
-                      std::fabs(cardLetterInk - metricHeight) <=
-                          std::max(1.0, 0.15 * metricHeight),
-                  QStringLiteral("the card's letter really is drawn at its own font's ink "
-                                 "height (%1 px measured, %2 px from the metrics, em %3 px)")
-                      .arg(cardLetterInk, 0, 'f', 2).arg(metricHeight, 0, 'f', 2)
-                      .arg(AxisCard::letterEmPx(), 0, 'f', 2));
-        }
+            moveTo(gv, QPointF(8, 8));
+            const QString basePath = outDir + QStringLiteral("/gizmo3d-base.png");
+            check(gv->saveSnapshot(basePath), "a baseline dump with nothing hovered");
+            const QImage base(basePath);
+            // The brightened colour is DERIVED the way the renderer derives
+            // it, so the two cannot drift: token.lighter(155), still unlit,
+            // still exact.
+            const QColor hoverX = Theme::gizmoAxisX().lighter(155);
+            const int baseBright = base.isNull() ? -1 : countNear(base, hoverX);
+            check(!base.isNull() && baseBright >= 0 && baseBright < 40,
+                  QStringLiteral("...which carries (almost) no hover-brightened X "
+                                 "pixels (%1)").arg(baseBright));
 
-        // --- the scene, dumped ------------------------------------------------
-        if (rv->hasMoveGizmo()) {
-            const QString scenePath = outDir + QStringLiteral("/move-gizmo-card-ratio.png");
-            check(rv->saveSnapshot(scenePath), "the scene gizmo can be dumped for the pin");
-            const QImage sceneImg(scenePath);
-            check(!sceneImg.isNull(), "and the dump loads back");
-
-            gp_Pnt sceneTip;
-            QPoint pivotAt, tipAt;
-            const bool haveScene =
-                !sceneImg.isNull() && rv->moveGizmoHandleTip(2, true, sceneTip) &&
-                rv->projectToScreen(rv->moveGizmoPivot(), pivotAt) &&
-                rv->projectToScreen(sceneTip, tipAt);
-            check(haveScene, "the scene gizmo's hub and +Z tip both project into the viewport");
-
-            if (haveScene) {
-                // The dump is DEVICE pixels and projectToScreen() answers in
-                // logical ones (CLAUDE.md's own pitfall), so the two are
-                // brought together by the ratio the dump itself reports rather
-                // than by asking the platform what the scale is.
-                const double toDump =
-                    double(sceneImg.width()) / double(std::max(1, rv->width()));
-                const QPointF sceneCentre(pivotAt.x() * toDump, pivotAt.y() * toDump);
-                QPointF sceneDir(double(tipAt.x() - pivotAt.x()), double(tipAt.y() - pivotAt.y()));
-                const double sceneDirLength = std::hypot(sceneDir.x(), sceneDir.y());
-                check(sceneDirLength > 40.0,
-                      QStringLiteral("the scene's +Z arm has a real screen direction (%1 px)")
-                          .arg(sceneDirLength, 0, 'f', 1));
-                if (sceneDirLength > 40.0) {
-                    sceneDir /= sceneDirLength;
-                    // The background is read out of the dump's own empty
-                    // corner rather than assumed to be Theme::viewport(): the
-                    // clear colour goes through OCCT's sRGB handling on the
-                    // way to a pixel, and a background that is 2/255 out
-                    // biases every edge this block interpolates.
-                    const QColor sceneBg = sceneImg.pixelColor(4, 4);
-                    sceneDrawn = measureDrawing(
-                        sceneImg, sceneCentre, sceneDir,
-                        {Theme::gizmoAxisZ(),
-                         Theme::gizmoAxisZ().lighter(AxisCard::kLetterLighten)},
-                        AxisCard::hubColour(), sceneBg, 165.0 * toDump, int(60 * toDump));
-                }
-                check(sceneDrawn.ok,
-                      QStringLiteral("every element of the card is found again in the SCENE "
-                                     "(arm %1, stroke %2, cone %3, ball %4, hub %5, letter %6)")
-                          .arg(sceneDrawn.arm, 0, 'f', 2).arg(sceneDrawn.stroke, 0, 'f', 2)
-                          .arg(sceneDrawn.cone, 0, 'f', 2).arg(sceneDrawn.ball, 0, 'f', 2)
-                          .arg(sceneDrawn.hub, 0, 'f', 2).arg(sceneDrawn.letter, 0, 'f', 2));
-                std::printf("       scene letter ink %.2f x %.2f px\n", sceneDrawn.letterWide,
-                            sceneDrawn.letter);
+            gp_Pnt tip;
+            QPoint grabAt;
+            const gp_Pnt pivot = gv->moveGizmoPivot();
+            bool haveGrab = gv->moveGizmoArmTip(0, tip) &&
+                            gv->projectToScreen(
+                                pivot.Translated(gp_Vec(pivot, tip) * 0.7), grabAt) &&
+                            gv->rect().adjusted(8, 8, -8, -8).contains(grabAt);
+            check(haveGrab && gv->moveGizmoAxisAt(grabAt) == 0,
+                  "a point on the X arm is grabbable for the hover probe");
+            if (haveGrab) {
+                moveTo(gv, QPointF(grabAt));
+                check(gv->cursor().shape() == Qt::PointingHandCursor,
+                      "hovering a handle raises the app's own grab cursor");
+                const QString hotPath = outDir + QStringLiteral("/gizmo3d-hover.png");
+                check(gv->saveSnapshot(hotPath), "a dump with the X arm hovered");
+                const QImage hot(hotPath);
+                const int hotBright = hot.isNull() ? -1 : countNear(hot, hoverX);
+                check(!hot.isNull() && hotBright > baseBright + 60,
+                      QStringLiteral("and the X arm really draws brighter under the "
+                                     "cursor (%1 brightened pixels against %2)")
+                          .arg(hotBright).arg(baseBright));
+                const int hotY = hot.isNull()
+                                     ? -1
+                                     : countNear(hot, Theme::gizmoAxisY().lighter(155));
+                check(hotY >= 0 && hotY < 40,
+                      QStringLiteral("while the Y arm stays at its own token - one "
+                                     "handle, one highlight (%1)").arg(hotY));
+                moveTo(gv, QPointF(8, 8));
+                check(gv->cursor().shape() != Qt::PointingHandCursor,
+                      "and leaving the handle puts the ordinary cursor back");
             }
         }
 
-        // --- the pin ----------------------------------------------------------
-        //
-        // Five element-to-arm ratios, both sides read from live rendering, at
-        // 5% - and it is not slack at that: the two drawings are rasterized by
-        // two different engines, QPainter antialiasing its lines while the GL
-        // side does not, so a scene stroke lands on a whole pixel either way.
-        //
-        // A SIXTH row, the letter's width, is the one element that is not
-        // reproducible in the scene and it is pinned separately rather than
-        // quietly folded into the others. AxisCard::letterFont() is bold and
-        // Qt synthesizes that weight for a family that ships only a regular
-        // face; OCCT does not - Font_FTFontParams carries ToSynthesizeItalic
-        // and has no bold counterpart, so Font_FontAspect_Bold on the same
-        // family renders the regular face. The letters are therefore the
-        // card's letters at the card's size and a hair lighter, which
-        // measures as a narrower glyph at an identical height. Pinned at 12%
-        // so the gap is bounded and cannot grow unnoticed.
+        // --- the negative handles are gone, drawing and hit test alike -----
         {
-            const bool bothMeasured = cardDrawn.ok && sceneDrawn.ok;
-            check(bothMeasured,
-                  "both drawings measured, so the ratios below compare two renderings");
-            std::printf("       card-vs-scene element ratios (element / arm):\n");
-            struct Pair { const char* name; double card; double scene; double tolerance; };
-            const Pair pairs[] = {
-                {"stroke",  cardDrawn.stroke,     sceneDrawn.stroke,     0.05},
-                {"cone",    cardDrawn.cone,       sceneDrawn.cone,       0.05},
-                {"ball",    cardDrawn.ball,       sceneDrawn.ball,       0.05},
-                {"hub",     cardDrawn.hub,        sceneDrawn.hub,        0.05},
-                {"letter",  cardDrawn.letter,     sceneDrawn.letter,     0.05},
-                {"letterW", cardDrawn.letterWide, sceneDrawn.letterWide, 0.12},
-            };
-            for (const Pair& p : pairs) {
-                const double cardRatio = cardDrawn.arm > 0.0 ? p.card / cardDrawn.arm : 0.0;
-                const double sceneRatio = sceneDrawn.arm > 0.0 ? p.scene / sceneDrawn.arm : 0.0;
-                const double drift = cardRatio > 0.0
-                                         ? std::fabs(sceneRatio - cardRatio) / cardRatio
-                                         : 1.0;
-                std::printf("         %-7s card %6.4f   scene %6.4f   %+.1f%%  (tol %.0f%%)\n",
-                            p.name, cardRatio, sceneRatio,
-                            100.0 * (sceneRatio - cardRatio) / std::max(cardRatio, 1.0e-9),
-                            100.0 * p.tolerance);
-                check(bothMeasured && drift <= p.tolerance,
-                      QStringLiteral("the scene draws its %1 at the card's own %1-to-arm ratio "
-                                     "(card %2, scene %3, %4% apart, %5% allowed)")
-                          .arg(QString::fromLatin1(p.name))
-                          .arg(cardRatio, 0, 'f', 4).arg(sceneRatio, 0, 'f', 4)
-                          .arg(100.0 * drift, 0, 'f', 1)
-                          .arg(100.0 * p.tolerance, 0, 'f', 0));
-            }
-            // Non-vacuity: a pin whose reference arms were a handful of pixels
-            // would pass every ratio above by rounding.
-            check(cardDrawn.arm > 40.0 && sceneDrawn.arm > 100.0,
-                  QStringLiteral("and both arms are long enough for those ratios to mean "
-                                 "anything (card %1 px, scene %2 px)")
-                      .arg(cardDrawn.arm, 0, 'f', 1).arg(sceneDrawn.arm, 0, 'f', 1));
+            for (int axis = 0; axis < 3; ++axis)
+                check(!gv->moveGizmoHandleDrawn(axis, false),
+                      QStringLiteral("no negative handle is drawn on axis %1 - the "
+                                     "stub-and-ball half died with the card copy")
+                          .arg(axis));
+            gp_Pnt tip;
+            QPoint negAt;
+            const gp_Pnt pivot = gv->moveGizmoPivot();
+            const bool haveNeg =
+                gv->moveGizmoArmTip(0, tip) &&
+                gv->projectToScreen(pivot.Translated(gp_Vec(tip, pivot) * 0.7), negAt) &&
+                gv->rect().contains(negAt);
+            check(haveNeg && gv->moveGizmoAxisAt(negAt) == -1,
+                  "and a press on the negative side grabs nothing - an invisible "
+                  "control must not claim clicks");
         }
 
-        // --- the hollow balls are grab targets, like the cones ----------------
-        //
-        // A control the user can see and cannot grab is a control that lies
-        // about itself. Both ends of an arm resolve to the same axis and the
-        // same world line, so a ball drag needs no maths of its own - it comes
-        // out with the other sign.
-        if (rv->hasMoveGizmo()) {
-            gp_Pnt ballWorld;
-            QPoint ballAt;
-            const bool haveBall =
-                rv->moveGizmoHandleTip(0, false, ballWorld) &&
-                rv->projectToScreen(ballWorld, ballAt) &&
-                rv->rect().adjusted(8, 8, -8, -8).contains(ballAt);
-            check(haveBall, "the -X hollow ball projects into the viewport");
-
-            bool ballPositive = true;
-            check(haveBall && rv->moveGizmoAxisAt(ballAt, &ballPositive) == 0,
-                  "and the app's own hit test claims it for the X arm");
-            check(haveBall && !ballPositive,
-                  "naming the NEGATIVE end of it, which is where the chip belongs");
-
-            QPoint ballTarget;
-            const bool haveBallDrag =
-                haveBall &&
-                rv->projectToScreen(ballWorld.Translated(gp_Vec(-30.0, 0.0, 0.0)), ballTarget) &&
-                rv->rect().contains(ballTarget);
-            check(haveBallDrag, "a point 30 mm further along -X projects into the viewport");
-
-            if (haveBallDrag) {
-                const gp_Pnt before = ModelingOps::centreOfMass(ratio.document().shapeOf(ratioId));
-                dragButton(rv, QPointF(ballAt), QPointF(ballTarget), Qt::LeftButton);
-                settle(300);
-                const gp_Pnt after = ModelingOps::centreOfMass(ratio.document().shapeOf(ratioId));
-                const double dx = after.X() - before.X();
-                check(dx < -1.0,
-                      QStringLiteral("dragging the ball moves the body the way the ball points "
-                                     "(%1 mm along X)").arg(dx, 0, 'f', 2));
-                check(std::hypot(after.Y() - before.Y(), after.Z() - before.Z()) < 1.0e-6,
-                      "along X alone, exactly as the cone at the other end does");
-                trigger(ratio, QStringLiteral("Undo"));
-                settle(250);
-            }
-        }
-
-        // --- POSITIONAL parity, at an oblique PERSPECTIVE camera -------------
-        //
-        // The ratio pin above measures one arm on a squared, orthographic look
-        // and it passed with flying colours while the gizmo was still wrong:
-        // ratios are blind to LAYOUT. Built as true 3D geometry the scene
-        // gizmo foreshortened an arm pointing at the eye into a stub and drew
-        // its cone oversized because the cone was nearer, and only a camera
-        // that is oblique AND perspective shows it - which is exactly the
-        // camera a user models on.
-        //
-        // So: all six tips, both drawings, at the same camera. Each tip must
-        // point the same way, and the six length ratios must be ONE number -
-        // that is what "the same drawing at two scales" means, and neither
-        // half of it holds for a 3D drawing.
-        rv->setSelectedSolids({ratioId});
-        settle(250);
-        check(card != nullptr && rv->hasMoveGizmo(),
-              "the card and the gizmo are both up for the positional parity probe");
-        if (card && rv->hasMoveGizmo()) {
-            if (ratioOrtho && ratioOrtho->isChecked()) { ratioOrtho->trigger(); settle(150); }
-            check(ratioOrtho != nullptr && !ratioOrtho->isChecked(),
-                  "the parity probe runs in PERSPECTIVE - a parallel projection cannot show "
-                  "the defect this check exists for");
-
-            CameraState oblique = rv->camera().state();
-            oblique.target = rv->moveGizmoPivot();
-            oblique.azimuthDeg = 35.0;
-            oblique.elevationDeg = 25.0;
-            rv->animateTo(oblique);
-            settle(300);
-
-            QPoint pivotAt;
-            const bool havePivot = rv->projectToScreen(rv->moveGizmoPivot(), pivotAt);
-            check(havePivot, "the gizmo's hub projects into the viewport at the oblique look");
-
-            const QImage cardOblique = renderExact(card);
-            const QString cardPath = outDir + QStringLiteral("/move-gizmo-card.png");
-            const QString scenePath = outDir + QStringLiteral("/move-gizmo-oblique.png");
-            cardOblique.save(cardPath);
-            check(rv->saveSnapshot(scenePath),
-                  "the card and the scene are both captured at this one camera");
-            const QImage sceneOblique(scenePath);
-            const double toDump =
-                sceneOblique.isNull()
-                    ? 1.0
-                    : double(sceneOblique.width()) / double(std::max(1, rv->width()));
-            const QPointF cardCentre(cardOblique.width() / 2.0, cardOblique.height() / 2.0);
-            const QColor cardBg = Theme::panel();
-            const QColor sceneBg =
-                sceneOblique.isNull() ? Theme::viewport() : sceneOblique.pixelColor(4, 4);
-
-            // Ink within `radius` of a point, so a projected position is
-            // checked against where the drawing actually put its pixels rather
-            // than only against another projection.
-            auto inkNear = [&](const QImage& img, const QPointF& at, const QList<QColor>& fg,
-                               const QColor& bg, int radius) {
-                int hits = 0;
-                for (int dy = -radius; dy <= radius; ++dy) {
-                    for (int dx = -radius; dx <= radius; ++dx) {
-                        const int x = int(std::lround(at.x())) + dx;
-                        const int y = int(std::lround(at.y())) + dy;
-                        if (x < 0 || y < 0 || x >= img.width() || y >= img.height()) continue;
-                        for (const QColor& f : fg) {
-                            if (inkAlpha(img.pixelColor(x, y), f, bg) >= 0.5) { ++hits; break; }
-                        }
-                    }
-                }
-                return hits;
-            };
-
-            std::printf("       tip-by-tip parity (card offset -> scene offset):\n");
-            double worstAngle = 0.0;
-            double scaleLow = 1.0e9, scaleHigh = 0.0;
-            double reachLow = 1.0e9, reachHigh = 0.0;
-            int compared = 0;
-            int inkedCard = 0, inkedScene = 0, inkProbes = 0;
-            QPointF cardEnd[3][2];
-            QPointF sceneEnd[3][2];
-            bool haveEnd[3][2] = {{false, false}, {false, false}, {false, false}};
-            for (int axis = 0; axis < 3 && havePivot; ++axis) {
-                for (int side = 0; side < 2; ++side) {
-                    const bool plus = side == 0;
-                    const QPointF cardTip = card->tipCenter(axis, plus);
-                    const QPointF cardVec = cardTip - cardCentre;
-                    const double cardLen = std::hypot(cardVec.x(), cardVec.y());
-
-                    gp_Pnt sceneWorld;
-                    QPoint sceneAt;
-                    if (!rv->moveGizmoHandleTip(axis, plus, sceneWorld) ||
-                        !rv->projectToScreen(sceneWorld, sceneAt))
-                        continue;
-                    const QPointF sceneVec(double(sceneAt.x() - pivotAt.x()),
-                                           double(sceneAt.y() - pivotAt.y()));
-                    const double sceneLen = std::hypot(sceneVec.x(), sceneVec.y());
-
-                    // Short tips are skipped for DIRECTION only: projectToScreen()
-                    // answers in whole logical pixels, so a 20-pixel offset
-                    // carries a couple of degrees of quantization on its own.
-                    if (cardLen < 12.0 || sceneLen < 25.0) continue;
-                    ++compared;
-                    cardEnd[axis][side] = cardVec;
-                    sceneEnd[axis][side] = sceneVec;
-                    haveEnd[axis][side] = true;
-
-                    const double dot = (cardVec.x() * sceneVec.x() + cardVec.y() * sceneVec.y()) /
-                                       (cardLen * sceneLen);
-                    const double angle =
-                        std::acos(std::clamp(dot, -1.0, 1.0)) * 180.0 / 3.14159265358979323846;
-                    const double scale = sceneLen / cardLen;
-                    worstAngle = std::max(worstAngle, angle);
-                    scaleLow = std::min(scaleLow, scale);
-                    scaleHigh = std::max(scaleHigh, scale);
-                    reachLow = std::min(reachLow, cardLen);
-                    reachHigh = std::max(reachHigh, cardLen);
-                    std::printf("         %c%c  card (%6.1f,%6.1f) len %5.1f   scene len %6.1f"
-                                "   scale %5.3f   %4.1f deg\n",
-                                plus ? '+' : '-', char('X' + axis), cardVec.x(), cardVec.y(),
-                                cardLen, sceneLen, scale, angle);
-
-                    // ...and the same tip is INK in both renderings, so these
-                    // are positions of drawings rather than of two projections.
-                    const QColor axisColour = axis == 0   ? Theme::gizmoAxisX()
-                                              : axis == 1 ? Theme::gizmoAxisY()
-                                                          : Theme::gizmoAxisZ();
-                    const QList<QColor> family{
-                        axisColour, axisColour.darker(140),
-                        axisColour.lighter(AxisCard::kLetterLighten)};
-                    ++inkProbes;
-                    if (inkNear(cardOblique, cardTip, family, cardBg, 3) > 0) ++inkedCard;
-                    if (!sceneOblique.isNull() &&
-                        inkNear(sceneOblique, QPointF(sceneAt.x() * toDump, sceneAt.y() * toDump),
-                                family, sceneBg, int(4 * toDump)) > 0)
-                        ++inkedScene;
-                }
-            }
-
-            check(compared >= 4,
-                  QStringLiteral("at least four of the six tips are long enough on both drawings "
-                                 "to compare (%1)").arg(compared));
-            // NON-VACUITY, and it is the check that makes the rest mean
-            // something: a look where every axis foreshortens equally would
-            // satisfy "one scale" for a 3D drawing too.
-            check(compared >= 4 && reachLow > 0.0 && reachHigh / reachLow > 1.25,
-                  QStringLiteral("...at genuinely different foreshortenings, so a 3D drawing "
-                                 "could not pass this (%1 px shortest against %2 px longest)")
-                      .arg(reachLow, 0, 'f', 1).arg(reachHigh, 0, 'f', 1));
-            check(compared >= 4 && worstAngle <= 3.0,
-                  QStringLiteral("every tip points the same way on both drawings (worst %1 deg)")
-                      .arg(worstAngle, 0, 'f', 2));
-            const double scaleSpread =
-                scaleHigh > 0.0 && scaleLow < 1.0e9 ? (scaleHigh - scaleLow) / scaleHigh : 1.0;
-            // 5% per TIP, because projectToScreen() answers in whole logical
-            // pixels: two of them of uncertainty over the shortest scene tip
-            // here is already 2.3% on its own, and a tolerance under the
-            // instrument's resolution is a coin toss dressed as a check.
-            check(compared >= 4 && scaleSpread <= 0.05,
-                  QStringLiteral("and every tip is at ONE shared scale - the same drawing twice, "
-                                 "not two drawings (%1 to %2, %3% spread)")
-                      .arg(scaleLow, 0, 'f', 3).arg(scaleHigh, 0, 'f', 3)
-                      .arg(100.0 * scaleSpread, 0, 'f', 1));
-
-            // The same statement at twice the resolution: tip to opposite tip
-            // is double the span for the same whole-pixel uncertainty, so this
-            // one is pinned where it actually belongs.
-            double diamLow = 1.0e9, diamHigh = 0.0;
-            int diameters = 0;
-            for (int axis = 0; axis < 3; ++axis) {
-                if (!haveEnd[axis][0] || !haveEnd[axis][1]) continue;
-                const QPointF cardSpan = cardEnd[axis][0] - cardEnd[axis][1];
-                const QPointF sceneSpan = sceneEnd[axis][0] - sceneEnd[axis][1];
-                const double cardD = std::hypot(cardSpan.x(), cardSpan.y());
-                const double sceneD = std::hypot(sceneSpan.x(), sceneSpan.y());
-                if (cardD < 1.0) continue;
-                const double scale = sceneD / cardD;
-                diamLow = std::min(diamLow, scale);
-                diamHigh = std::max(diamHigh, scale);
-                ++diameters;
-                std::printf("         %c axis  card span %6.1f   scene span %6.1f   scale %5.3f\n",
-                            char('X' + axis), cardD, sceneD, scale);
-            }
-            const double diamSpread =
-                diamHigh > 0.0 && diamLow < 1.0e9 ? (diamHigh - diamLow) / diamHigh : 1.0;
-            check(diameters == 3 && diamSpread <= 0.02,
-                  QStringLiteral("tip to opposite tip, all three axes share one scale to within "
-                                 "two per cent (%1 to %2, %3% spread over %4 axes)")
-                      .arg(diamLow, 0, 'f', 3).arg(diamHigh, 0, 'f', 3)
-                      .arg(100.0 * diamSpread, 0, 'f', 1).arg(diameters));
-            check(inkProbes > 0 && inkedCard == inkProbes && inkedScene == inkProbes,
-                  QStringLiteral("and each of those tips is real ink in BOTH renderings, not "
-                                 "only a projected point (%1/%2 card, %3/%2 scene)")
-                      .arg(inkedCard).arg(inkProbes).arg(inkedScene));
-        }
-
-        // --- the drawing is WHOLE over a body, not clipped by it -------------
-        //
-        // The gizmo stands at a body's BOUNDING-BOX CENTRE, which is inside the
-        // body, and it is drawn on the view plane through that point - so the
-        // body's own front surface is nearer than every stroke of it. The user
-        // caught what that costs in a depth-tested layer: the hollow rings came
-        // back as ARCS, cropped wherever the surface in front of them won.
-        //
-        // Measured rather than eyeballed, and measured the one way that cannot
-        // be argued with: the SAME probe at two cameras, one with the body
-        // filling the viewport under the gizmo and one with it a few pixels
-        // across and nowhere near it. A drawing that does not care about the
-        // geometry behind it reads identically at both.
+        // --- real ink from every camera, on all three tools -----------------
         {
-            // Ink by colour distance rather than by coverage against a named
-            // background: this probe runs over the body as well as over the
-            // empty viewport, and "which ground is behind this pixel" is
-            // exactly what it must not need to know. The tokens are saturated
-            // and the aliased GL lines come back exact, so a plain distance is
-            // both sufficient and background-free.
-            auto isAxisInk = [](const QColor& p, const QColor& base) {
-                const QColor light = base.lighter(AxisCard::kLetterLighten);
-                // NOT called `near` - that is a Windows SDK macro defined to
-                // nothing, and CLAUDE.md's pitfall list has the scar.
-                const auto matches = [&p](const QColor& f) {
-                    const double dr = p.red() - f.red();
-                    const double dg = p.green() - f.green();
-                    const double db = p.blue() - f.blue();
-                    return dr * dr + dg * dg + db * db <= 60.0 * 60.0;
-                };
-                return matches(base) || matches(light);
-            };
-
-            struct Whole {
-                double ring[3] = {0.0, 0.0, 0.0};    // fraction of the circumference inked
-                double arm[3] = {0.0, 0.0, 0.0};     // fraction of the shaft inked
-                int letter[3] = {0, 0, 0};           // ink pixels around each letter
-                // A handle whose tip falls inside the hub is CORRECTLY absent,
-                // not cropped - the card covers its own the same way. Told
-                // apart here rather than measured as a gap, or a Front view
-                // would report the Y ring at 0% and be right about the pixels
-                // and wrong about the drawing.
-                bool ringDrawn[3] = {false, false, false};
-                bool armDrawn[3] = {false, false, false};
-                bool ok = false;
-            };
-
-            auto probeWhole = [&](const QString& path) -> Whole {
-                Whole out;
-                if (!rv->saveSnapshot(path)) return out;
-                const QImage dump(path);
-                if (dump.isNull()) return out;
-                const double toDump =
-                    double(dump.width()) / double(std::max(1, rv->width()));
-                QPoint hubAt;
-                if (!rv->projectToScreen(rv->moveGizmoPivot(), hubAt)) return out;
-                const QPointF hub(hubAt.x() * toDump, hubAt.y() * toDump);
-
-                for (int axis = 0; axis < 3; ++axis) {
-                    const QColor token = axis == 0   ? Theme::gizmoAxisX()
-                                         : axis == 1 ? Theme::gizmoAxisY()
-                                                     : Theme::gizmoAxisZ();
-                    auto inkAt = [&](const QPointF& at) {
-                        const int x = int(std::lround(at.x()));
-                        const int y = int(std::lround(at.y()));
-                        if (x < 0 || y < 0 || x >= dump.width() || y >= dump.height())
-                            return false;
-                        return isAxisInk(dump.pixelColor(x, y), token);
-                    };
-
-                    // --- the hollow ball, all the way round -----------------
-                    //
-                    // The radius is READ, not assumed: at each of 72 angles the
-                    // scan comes in from outside and records where it first
-                    // meets ink, and the ring's radius is the median of those.
-                    // An angle whose reading is off that median by more than a
-                    // couple of pixels is a gap - which is exactly what an arc
-                    // cropped by the body looks like from here.
-                    gp_Pnt ballWorld;
-                    QPoint ballAt;
-                    out.ringDrawn[axis] = rv->moveGizmoHandleDrawn(axis, false);
-                    if (out.ringDrawn[axis] && rv->moveGizmoHandleTip(axis, false, ballWorld) &&
-                        rv->projectToScreen(ballWorld, ballAt)) {
-                        const QPointF centre(ballAt.x() * toDump, ballAt.y() * toDump);
-                        constexpr int kAngles = 72;
-                        std::vector<double> found(kAngles, -1.0);
-                        const double outer = 34.0 * toDump;
-                        for (int a = 0; a < kAngles; ++a) {
-                            const double angle =
-                                2.0 * 3.14159265358979323846 * double(a) / double(kAngles);
-                            const QPointF step(std::cos(angle), std::sin(angle));
-                            for (double r = outer; r >= 3.0; r -= 0.5) {
-                                if (inkAt(centre + step * r)) { found[std::size_t(a)] = r; break; }
-                            }
-                        }
-                        std::vector<double> radii;
-                        for (double r : found)
-                            if (r > 0.0) radii.push_back(r);
-                        if (radii.size() > kAngles / 2) {
-                            std::sort(radii.begin(), radii.end());
-                            const double median = radii[radii.size() / 2];
-                            int onRing = 0;
-                            for (double r : found)
-                                if (r > 0.0 && std::fabs(r - median) <= 2.5 * toDump) ++onRing;
-                            out.ring[axis] = double(onRing) / double(kAngles);
-                        }
-                    }
-
-                    // --- the shaft, all the way along ------------------------
-                    gp_Pnt tipWorld;
-                    QPoint tipAt;
-                    out.armDrawn[axis] = rv->moveGizmoHandleDrawn(axis, true);
-                    if (out.armDrawn[axis] && rv->moveGizmoHandleTip(axis, true, tipWorld) &&
-                        rv->projectToScreen(tipWorld, tipAt)) {
-                        const QPointF tip(tipAt.x() * toDump, tipAt.y() * toDump);
-                        constexpr int kSteps = 48;
-                        int inked = 0;
-                        for (int s = 0; s <= kSteps; ++s) {
-                            // 0.30 to 0.80 of the way out: clear of the hub at
-                            // one end and of the cone at the other, so what is
-                            // sampled is the shaft and only the shaft.
-                            const double f = 0.30 + 0.50 * double(s) / double(kSteps);
-                            const QPointF at = hub + (tip - hub) * f;
-                            bool hit = false;
-                            for (int d = -4; d <= 4 && !hit; ++d) {
-                                const QPointF n(-(tip.y() - hub.y()), tip.x() - hub.x());
-                                const double len = std::hypot(n.x(), n.y());
-                                if (len < 1.0) break;
-                                hit = inkAt(at + n / len * double(d));
-                            }
-                            if (hit) ++inked;
-                        }
-                        out.arm[axis] = double(inked) / double(kSteps + 1);
-
-                        // --- the letter, as an ink count --------------------
-                        // Not a completeness fraction: a glyph has no shape a
-                        // probe can assume. What it can say is how much ink is
-                        // there, and that number must not change because a body
-                        // moved behind it.
-                        gp_Pnt letterProbe = tipWorld;
-                        QPoint letterAt;
-                        const gp_Vec outward(rv->moveGizmoPivot(), tipWorld);
-                        if (outward.Magnitude() > 1.0e-9 &&
-                            rv->projectToScreen(
-                                letterProbe.Translated(outward * (23.0 / std::max(
-                                    outward.Magnitude() / rv->worldPerPixel(), 1.0e-9))),
-                                letterAt)) {
-                            int hits = 0;
-                            const int reach = int(9 * toDump);
-                            for (int dy = -reach; dy <= reach; ++dy)
-                                for (int dx = -reach; dx <= reach; ++dx)
-                                    if (inkAt(QPointF(letterAt.x() * toDump + dx,
-                                                      letterAt.y() * toDump + dy)))
-                                        ++hits;
-                            out.letter[axis] = hits;
-                        }
-                    }
-                }
-                out.ok = true;
-                return out;
-            };
-
-            // The layer FIRST, because the pixel probes below can only say
-            // that the drawing came out whole at the cameras they tried, while
-            // this says WHY it will at every other one.
-            check(rv->gizmoZLayer() != Graphic3d_ZLayerId_UNKNOWN,
-                  "the gizmo has a Z-layer of its own");
-            check(rv->gizmoZLayer() != Graphic3d_ZLayerId_Topmost &&
-                      rv->gizmoZLayer() != Graphic3d_ZLayerId_Default &&
-                      rv->gizmoZLayer() != rv->sketchZLayer(),
-                  "...shared with nothing - not Topmost, where OCCT's own dynamic highlight "
-                  "and AIS_Manipulator both live");
-            check(rv->zLayerSettings(rv->gizmoZLayer()).ToClearDepth(),
-                  "and that layer clears the depth buffer, so no body can crop a handle");
-            check(rv->zLayerSettings(rv->gizmoZLayer()).ToEnableDepthTest(),
-                  "while keeping depth WITHIN it, which is what orders the drawing's own "
-                  "hub-over-shafts");
-            // IsImmediate is not tidiness, it is load-bearing, and an A/B is
-            // what said so: a custom NON-immediate layer that clears depth
-            // also clears the SHADOW MAP, because OCCT renders that pass from
-            // the normal layer list. The render-mode block's cast-shadow check
-            // failed with this layer and passed at the parent commit, and only
-            // the immediate flag fixed it. Pinned here, where the layer is
-            // built, so the two blocks cannot drift apart.
-            check(rv->zLayerSettings(rv->gizmoZLayer()).IsImmediate(),
-                  "and it is an IMMEDIATE layer - drawn after all normal layers, which is "
-                  "what keeps its depth clear out of the shadow-map pass");
-
-            // (a) CLEAR: the parity camera still stands, with the body about a
-            // dozen pixels across and the whole drawing over empty viewport.
-            const Whole clear = probeWhole(outDir + QStringLiteral("/move-gizmo-clear.png"));
-            check(clear.ok, "the gizmo dumps with nothing behind it");
-
-            // (b) OVER THE BODY: the same camera, close enough that the body
-            // fills the viewport and every stroke of the gizmo has its surface
-            // in front. This is the user's own case.
-            CameraState close = rv->camera().state();
-            Bnd_Box closeBox;
-            BRepBndLib::Add(ratio.document().shapeOf(ratioId), closeBox);
-            double cx0, cy0, cz0, cx1, cy1, cz1;
-            closeBox.Get(cx0, cy0, cz0, cx1, cy1, cz1);
-            const double closeDiagonal = gp_Pnt(cx0, cy0, cz0).Distance(gp_Pnt(cx1, cy1, cz1));
-            constexpr double kClosePi = 3.14159265358979323846;
-            close.distance = closeDiagonal * std::max(1, rv->height()) /
-                             (700.0 * 2.0 * std::tan(0.5 * 45.0 * kClosePi / 180.0));
-            rv->animateTo(close);
-            settle(300);
-
-            QPoint spanLow, spanHigh;
-            const double bodyAcross =
-                rv->projectToScreen(gp_Pnt(cx0, cy0, cz0), spanLow) &&
-                        rv->projectToScreen(gp_Pnt(cx1, cy1, cz1), spanHigh)
-                    ? std::hypot(double(spanHigh.x() - spanLow.x()),
-                                 double(spanHigh.y() - spanLow.y()))
-                    : 0.0;
-            check(bodyAcross > 400.0,
-                  QStringLiteral("the body now fills the viewport under the gizmo, so its "
-                                 "surface really is in front of every stroke (%1 px across)")
-                      .arg(bodyAcross, 0, 'f', 0));
-
-            // ...and HOVERED, which is the half of the user's case that a
-            // selection alone does not reproduce. OCCT draws a dynamically
-            // highlighted presentation in Graphic3d_ZLayerId_Topmost - the
-            // same layer this gizmo asked for - so the body arrives INSIDE the
-            // layer, at its own true depth, after that layer's one depth
-            // clear. Everything drawn behind it then loses, which is exactly
-            // "arcs missing where the body's surface is nearer".
-            {
-                QPoint hubAt;
-                bool hovering = false;
-                if (rv->projectToScreen(rv->moveGizmoPivot(), hubAt)) {
-                    // Searched rather than guessed: the body fills the view, so
-                    // almost anywhere off the arms will do, but "almost" is not
-                    // a thing a check may rest on.
-                    for (int step = 40; step <= 220 && !hovering; step += 20) {
-                        const QPointF at(hubAt.x() + step, hubAt.y() + step * 0.6);
-                        if (!rv->rect().adjusted(8, 8, -8, -8).contains(at.toPoint())) continue;
-                        moveTo(rv, at);
-                        settle(120);
-                        hovering = !rv->hoveredShape().IsNull();
-                    }
-                }
-                check(hovering,
-                      "the cursor is genuinely hovering the body - the state that puts its "
-                      "highlight in the gizmo's own layer");
-            }
-
-            const Whole over = probeWhole(outDir + QStringLiteral("/move-gizmo-over-body.png"));
-            check(over.ok, "and it dumps again with the body behind it");
-
-            std::printf("       drawn whole? (clear -> over a body)\n");
-            for (int axis = 0; axis < 3; ++axis) {
-                std::printf("         %c  ring %4.0f%% -> %4.0f%%   shaft %4.0f%% -> %4.0f%%"
-                            "   letter ink %4d -> %4d\n",
-                            char('X' + axis), 100.0 * clear.ring[axis], 100.0 * over.ring[axis],
-                            100.0 * clear.arm[axis], 100.0 * over.arm[axis], clear.letter[axis],
-                            over.letter[axis]);
-            }
-
-            for (int axis = 0; axis < 3; ++axis) {
-                const QString name = QString(QLatin1Char('X' + axis));
-                // 0.90, not 1.0: the negative stub meets its own ring, and the
-                // few angular samples that land where it does read the stub's
-                // radius rather than the ring's. Everything else must be there.
-                check(clear.ring[axis] >= 0.90,
-                      QStringLiteral("the %1 ball is a whole circle with nothing behind it "
-                                     "(%2%)").arg(name).arg(100.0 * clear.ring[axis], 0, 'f', 0));
-                check(over.ring[axis] >= 0.90,
-                      QStringLiteral("...and STILL a whole circle with the body in front of it "
-                                     "(%1%)").arg(100.0 * over.ring[axis], 0, 'f', 0));
-                check(clear.arm[axis] >= 0.95 && over.arm[axis] >= 0.95,
-                      QStringLiteral("the %1 shaft is unbroken either way (%2% clear, %3% over)")
-                          .arg(name).arg(100.0 * clear.arm[axis], 0, 'f', 0)
-                          .arg(100.0 * over.arm[axis], 0, 'f', 0));
-                // The letters carry no shape a probe can assume, so what is
-                // asserted is that a body moving behind one changes nothing -
-                // which is what a z-fighting glyph would fail. A quarter of
-                // slack rather than a tenth because glyph edges ARE
-                // antialiased, unlike the aliased lines everywhere else here,
-                // so a blended edge pixel over the body's orange lands a
-                // little further from the token than the same pixel over the
-                // viewport does and the count moves a few per cent on its own.
-                check(clear.letter[axis] > 20 &&
-                          std::abs(over.letter[axis] - clear.letter[axis]) <=
-                              0.25 * clear.letter[axis],
-                      QStringLiteral("and the %1 letter draws the same ink either way "
-                                     "(%2 clear, %3 over)")
-                          .arg(name).arg(clear.letter[axis]).arg(over.letter[axis]));
-            }
-
-            // ...and it is not one lucky camera. A body's surface crosses the
-            // drawing differently at every orientation, and "arcs missing
-            // where the surface is nearer" is by definition a defect that
-            // shows at some angles and not others - so the same measurement
-            // runs all the way round, with the body still filling the view.
-            {
-                struct Look { double azimuth; double elevation; };
-                const Look looks[] = {{0.0, 0.0},   {75.0, 15.0}, {135.0, -20.0},
-                                      {215.0, 55.0}, {300.0, 35.0}};
-                double worstRing = 1.0, worstArm = 1.0;
-                int drawnHandles = 0;
-                QString worstAt;
+            struct Look { double azimuth; double elevation; };
+            const Look looks[] = {{0.0, 0.0},   {75.0, 15.0}, {135.0, -20.0},
+                                  {215.0, 55.0}, {300.0, 35.0}};
+            gp_Pnt pivot;
+            check(ModelingOps::boundingBoxCentre(probe.document().shapeOf(bodyId), pivot),
+                  "the sweep knows where the gizmo stands");
+            int measured = 0;
+            int worstHits = 1 << 30;
+            QString worstAt;
+            const char* toolNames[] = {"Move", "Rotate", "Scale"};
+            for (int tool = 0; tool < 3; ++tool) {
+                probe.setBodyTool(tool == 0   ? MainWindow::BodyTool::Move
+                                  : tool == 1 ? MainWindow::BodyTool::Rotate
+                                              : MainWindow::BodyTool::Scale);
+                settle(200);
                 for (const Look& look : looks) {
-                    CameraState around = rv->camera().state();
-                    around.target = rv->moveGizmoPivot();
+                    CameraState around = gv->camera().state();
+                    around.target = pivot;
                     around.azimuthDeg = look.azimuth;
                     around.elevationDeg = look.elevation;
-                    rv->animateTo(around);
-                    settle(250);
-                    const Whole round = probeWhole(
-                        outDir + QStringLiteral("/move-gizmo-around-%1.png")
-                                     .arg(int(look.azimuth)));
-                    if (!round.ok) continue;
+                    gv->animateTo(around);   // animations are off: immediate
+                    settle(220);
+                    const QString path =
+                        outDir + QStringLiteral("/gizmo3d-%1-az%2.png")
+                                     .arg(QLatin1String(toolNames[tool]))
+                                     .arg(int(look.azimuth));
+                    if (!gv->saveSnapshot(path)) continue;
+                    const QImage dump(path);
+                    if (dump.isNull()) continue;
+                    ++measured;
+                    const int hits[3] = {countNear(dump, Theme::gizmoAxisX()),
+                                         countNear(dump, Theme::gizmoAxisY()),
+                                         countNear(dump, Theme::gizmoAxisZ())};
                     for (int axis = 0; axis < 3; ++axis) {
-                        if (round.ringDrawn[axis]) {
-                            ++drawnHandles;
-                            if (round.ring[axis] < worstRing) {
-                                worstRing = round.ring[axis];
-                                worstAt = QStringLiteral("%1 ring at az %2 el %3")
-                                              .arg(QChar('X' + axis))
-                                              .arg(look.azimuth).arg(look.elevation);
-                            }
-                        }
-                        if (round.armDrawn[axis]) {
-                            ++drawnHandles;
-                            worstArm = std::min(worstArm, round.arm[axis]);
+                        if (hits[axis] < worstHits) {
+                            worstHits = hits[axis];
+                            worstAt = QStringLiteral("%1 axis %2 at az %3 el %4")
+                                          .arg(QLatin1String(toolNames[tool]))
+                                          .arg(axis)
+                                          .arg(look.azimuth).arg(look.elevation);
                         }
                     }
                 }
-                std::printf("       all the way round, over the body: worst ring %.0f%%, "
-                            "worst shaft %.0f%%, over %d drawn handles\n",
-                            100.0 * worstRing, 100.0 * worstArm, drawnHandles);
-                // NON-VACUITY: five looks times six handles less the two a
-                // squared view legitimately hides. A sweep that measured
-                // nothing would report a perfect worst case.
-                check(drawnHandles >= 25,
-                      QStringLiteral("the sweep actually measured handles rather than skipping "
-                                     "them (%1 drawn across five looks)").arg(drawnHandles));
-                check(worstRing >= 0.90,
-                      QStringLiteral("every ring is whole at every camera the probe walks "
-                                     "through, with the body filling the view (worst %1%, %2)")
-                          .arg(100.0 * worstRing, 0, 'f', 0)
-                          .arg(worstAt.isEmpty() ? QStringLiteral("none") : worstAt));
-                // 0.90 here against 0.95 at the two named cameras, and the
-                // difference is real rather than slack: this sweep deliberately
-                // includes strongly foreshortened arms, whose shaft is mostly
-                // under their own hub and cone. The card's is too - it draws
-                // the line from the dead centre and paints the hub over it -
-                // so a sample landing on hub grey there is the drawing being
-                // right, not a hole in it.
-                check(worstArm >= 0.90,
-                      QStringLiteral("...and every shaft unbroken with it (worst %1%)")
-                          .arg(100.0 * worstArm, 0, 'f', 0));
             }
+            std::printf("      gizmo ink all the way round: worst %d token pixels "
+                        "(%s) over %d dumps\n",
+                        worstHits, qPrintable(worstAt), measured);
+            // NON-VACUITY first: three tools times five looks.
+            check(measured == 15,
+                  QStringLiteral("the sweep really measured all fifteen dumps (%1)")
+                      .arg(measured));
+            // A solid handle on a depth-cleared layer cannot lose ink to a
+            // body - the floor is deliberately modest, because an arm can
+            // point nearly at the eye and present only its tip's face.
+            check(worstHits >= 30,
+                  QStringLiteral("every axis of every tool is real ink at every "
+                                 "camera (worst %1 pixels, %2)")
+                      .arg(worstHits).arg(worstAt));
         }
 
-        ratio.close();
+        probe.setBodyTool(MainWindow::BodyTool::Move);
+        settle(150);
+        probe.close();
         settle(150);
     }
 

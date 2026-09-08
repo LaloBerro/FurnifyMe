@@ -521,9 +521,6 @@ void OcctViewWidget::releaseGlResources()
     myPlacedMarkers.clear();
     myFirstPointMarker.Nullify();
     myCursorMarker.Nullify();
-    myManipulator.Nullify();
-    myManipulatorSolid = -1;
-    myGizmoDragActive = false;
     mySymmetryIndicator.Nullify();
     mySymmetryIndicatorBuiltHalfSpan = 0.0;
     myMirrorPlacementPlaneObject.Nullify();
@@ -586,7 +583,7 @@ void OcctViewWidget::initializeViewer()
     // resizes before the first paint - but auto is the constructed default
     // now, so the raise belongs where the viewer comes up in it rather than
     // in the one other place that happens to re-derive it. Safe here: it only
-    // reads mySelectionMode and myManipulator (null) and writes the selector.
+    // reads mySelectionMode and writes the selector.
     applySelectionTolerance();
     // Nothing below this line touches a window or a GL context, and that is
     // the point: this function is reached from every entry point that displays
@@ -1148,11 +1145,6 @@ void OcctViewWidget::displaySolid(int id, const TopoDS_Shape& shape)
 
     const auto existing = mySolids.find(id);
     if (existing != mySolids.end()) {
-        // The gizmo holds a handle to the presentation about to be removed, so
-        // it goes first. MainWindow's predicate re-attaches it on the next
-        // updateActions() if the body is still the one selected - which is how
-        // a transform leaves the gizmo standing on the body it just moved.
-        if (myManipulatorSolid == id) detachManipulator();
         myContext->Remove(existing->second, Standard_False);
         mySolids.erase(existing);
     }
@@ -1196,9 +1188,8 @@ void OcctViewWidget::removeSolid(int id)
     clearModelingPreview();
     clearPullArrow();
     clearBevelArrow();
-    // Same reason: both gizmos stand on the presentation about to go.
+    // Same reason: the body gizmos stand on the presentation about to go.
     clearBodyGizmos();
-    if (myManipulatorSolid == id) detachManipulator();
     // Same reason again: a mirror-placement gesture describes exactly the
     // ids captured at beginMirrorPlacement(), and one of them is about to
     // stop existing - undo/redo and Delete are not gated off this gesture
@@ -1231,7 +1222,6 @@ void OcctViewWidget::clearSolids()
     clearPullArrow();
     clearBevelArrow();
     clearBodyGizmos();
-    detachManipulator();
     cancelMirrorPlacement();   // same reasoning: every id it describes is about to go
 
     for (auto& entry : mySolids) myContext->Remove(entry.second, Standard_False);
@@ -1666,9 +1656,10 @@ double OcctViewWidget::worldPerPixelAt(const gp_Pnt& at) const
     // worldPerPixel() answers for the camera TARGET's plane; a gizmo stands
     // wherever its body's pivot is, and in PERSPECTIVE a pivot nearer than
     // the target projects larger than that number says - the size drifted
-    // with every zoom until the depth term joined. This is
-    // updateManipulatorSize()'s own depth ratio, applied at the source the
-    // custom gizmos size themselves from. Along the view axis, never the
+    // with every zoom until the depth term joined. The depth ratio is the
+    // one the manipulator's own size clamp carried before it died, applied
+    // at the source the custom gizmos size themselves from. Along the view
+    // axis, never the
     // straight-line distance: depth is what scales a projection, and an
     // off-centre pivot is further away without being any deeper. A parallel
     // projection has no depth term, so the factor is exactly 1 there by
@@ -1736,6 +1727,8 @@ void OcctViewWidget::clearBodyGizmos()
     myMoveGizmo.setHoveredAxis(-1);
     myRotateGizmo.setHoveredAxis(-1);
     myScaleGizmo.setHoveredAxis(-1);
+    // The grab cursor goes with the handles it was pointing at.
+    unsetCursor();
     if (removed) scheduleRedraw();
 }
 
@@ -1823,6 +1816,19 @@ void OcctViewWidget::updateBodyGizmoHover(const QPoint& logical)
     if (myScaleGizmo.isShowing() && !myScaleDrag.active)
         changed = myScaleGizmo.setHoveredAxis(scaleGizmoAxisAt(logical)) || changed;
     if (changed) scheduleRedraw();
+
+    // The cursor says "grabbable" over a handle - the same PointingHand every
+    // chip and card in this app already wears, DERIVED here from the same
+    // hover answer the brightening reads rather than toggled by whichever
+    // event ran last. unsetCursor(), never an explicit arrow: the widget has
+    // no cursor of its own to restore.
+    const bool overHandle = myMoveGizmo.hoveredAxis() >= 0 ||
+                            myRotateGizmo.hoveredAxis() >= 0 ||
+                            myScaleGizmo.hoveredAxis() >= 0;
+    if (overHandle)
+        setCursor(Qt::PointingHandCursor);
+    else
+        unsetCursor();
 }
 
 void OcctViewWidget::setEdgeDimensionSuppressed(bool suppressed)
@@ -1956,340 +1962,6 @@ bool OcctViewWidget::advanceAxisDrag(AxisDrag& drag, const gp_Lin& axis, const Q
     return true;
 }
 
-void OcctViewWidget::attachManipulator(int solidId, ManipulatorRole role)
-{
-    initializeViewer();
-    if (myContext.IsNull()) return;
-    // Idempotent per body AND per role. The predicate that drives this runs on
-    // every appStateChanged, and a fresh AIS_Manipulator on each of those
-    // would re-derive its position from the bounding box every time -
-    // including in the middle of a gesture, which is how a gizmo ends up
-    // snapping back to the body while the user is still holding it. The role
-    // joins the test because Space changes it without changing the body, and
-    // the parts are decided once, below, before Attach().
-    if (!myManipulator.IsNull() && myManipulatorSolid == solidId && myManipulatorRole == role)
-        return;
-
-    detachManipulator();
-    const auto it = mySolids.find(solidId);
-    if (it == mySolids.end() || !myContext->IsDisplayed(it->second)) return;
-
-    myManipulatorRole = role;
-    myManipulator = new AIS_Manipulator();
-
-    // WHAT THIS MANIPULATOR IS FOR, decided before Attach() computes its
-    // presentation - OCCT's own header example sets the parts first, and the
-    // presentation is built once inside Attach() (see the sizing comment at
-    // the end of this function for what a late change costs).
-    //
-    // Translation is OURS since the custom gizmo's Phase 1, so the arrows and
-    // the plane handles are hidden here whichever role this is. The header is
-    // explicit that hiding a part "does not manage the manipulation
-    // (selection) mode" - so activateManipulatorModes() has to enable only the
-    // one mode this role serves as well, or a hidden arrow would still be
-    // grabbable. Both halves, one role.
-    myManipulator->SetPart(AIS_MM_Translation, Standard_False);
-    myManipulator->SetPart(AIS_MM_TranslationPlane, Standard_False);
-    myManipulator->SetPart(AIS_MM_Rotation, role == ManipulatorRole::Rotate);
-    myManipulator->SetPart(AIS_MM_Scaling, role == ManipulatorRole::Scale);
-    // Modes arm on DETECTION, not on selection. The alternative - OCCT's
-    // default - activates a mode when a manipulator part is SELECTED, and
-    // selecting a part replaces the body selection that raised the gizmo in
-    // the first place: the gizmo would vanish under the hand reaching for it.
-    myManipulator->SetModeActivationOnDetection(Standard_True);
-    // PLAIN WORLD SPACE. OCCT 8.0 constructs AIS_Manipulator with zoom
-    // persistence ON - the header documents OptionsForAttach::AdjustSize as
-    // defaulting to false and says nothing about this one, and it cost the best
-    // part of a fix round to find. In that mode the manipulator's presentation
-    // is anchored to the screen: its drawn size tracks SetSize() but ignores
-    // the camera entirely, so every camera-derived correction below wrote a
-    // number that could not reach a pixel. The measurements said so plainly
-    // once they were taken from a dump rather than from the code's own
-    // opinion - the painted size per unit came out 1.08 px at one zoom and
-    // 1.10 px at another, across a 4.2x change in world-per-pixel.
-    //
-    // Turned off rather than accommodated, for three reasons: worldPerPixel()
-    // is how everything else in this file relates world units to pixels and it
-    // is verified in both projections; manipulatorFrame()'s size becomes an
-    // honest world measurement, which is what every probe that projects a
-    // point from it already assumes; and accommodating it would mean carrying
-    // a screen-space constant nobody can derive from the API.
-    //
-    // It must be set BEFORE Attach() - the header's own warning is that
-    // enabling this mode overrides transform-persistence flags and the local
-    // transformation, which is exactly the machinery the drag path uses.
-    myManipulator->SetZoomPersistence(Standard_False);
-
-    // The body's own measurements, which the clamp needs and which nothing
-    // else can answer for it. The SIZING itself happens at the END of this
-    // function - see the comment there for why it cannot happen here.
-    Bnd_Box box;
-    BRepBndLib::Add(it->second->Shape(), box);
-    if (!box.IsVoid()) {
-        Standard_Real x0, y0, z0, x1, y1, z1;
-        box.Get(x0, y0, z0, x1, y1, z1);
-        // The longest side - SetSize() documents its argument as the side of
-        // the manipulator's cubic bounding box, so a side is the like measure.
-        myManipulatorNaturalSize = std::max({x1 - x0, y1 - y0, z1 - z0});
-        // And where it stands, which the clamp needs in order to know how deep
-        // the gizmo is. From the BODY's box rather than from
-        // AIS_Manipulator::Position(), which cannot answer until AdjustPosition
-        // has run inside Attach() - asked before that it says the world origin,
-        // and a depth measured to the origin made the budget 2.5x too generous.
-        myManipulatorCentre = gp_Pnt(0.5 * (x0 + x1), 0.5 * (y0 + y1), 0.5 * (z0 + z1));
-    }
-    // AdjustSize stays ON as the fallback the clamp narrows a moment later: if
-    // the body's box ever comes back void, a gizmo framed from the object is a
-    // better answer than OCCT's bare default.
-    AIS_Manipulator::OptionsForAttach options;
-    options.SetAdjustPosition(Standard_True);
-    options.SetAdjustSize(Standard_True);
-    options.SetEnableModes(Standard_True);
-    myManipulator->Attach(it->second, options);
-    activateManipulatorModes();
-    // The gizmo is up, so the selector's custom tolerance stands down - see
-    // applySelectionTolerance() for the measurement behind that.
-    applySelectionTolerance();
-    // The one COLOUR styling hook AIS_Manipulator actually exposes: the
-    // shading aspect its parts are computed from. The per-axis HUES are
-    // private (AIS_Manipulator::Axis::myColor, set in init() and reachable
-    // through no public setter at ANY access level - see the corrected
-    // paragraph below), and red/green/blue for X/Y/Z is the universal gizmo
-    // language anyway - tinting all three to one accent would cost more than
-    // it bought. What this does reach is the material, so the gizmo reads as
-    // part of this app's matte surface family rather than a glossy default.
-    //
-    // CONFIRMED, not assumed - Task 5 (Theme::gizmoAxisX/Y/Z, the 2D
-    // AxisGizmo's own restyle) went looking for a way to carry those same
-    // three tokens onto THIS manipulator too, and read AIS_Manipulator.hxx
-    // end to end rather than trust the paragraph above at face value.
-    //
-    // CORRECTED in fix round 1 (review), TWICE - once by the review, once by
-    // actually building and measuring what it found. It is real and total
-    // for COLOUR - AIS_Manipulator::Axis::Color() is a const getter with no
-    // matching setter anywhere, and Axis::myColor is protected to Axis's OWN
-    // class hierarchy, unreachable even from a subclass of AIS_Manipulator.
-    // It is NOT total for API SURFACE alone: `protected Axis myAxes[3]` on
-    // AIS_Manipulator IS reachable from a subclass (protected members are),
-    // and Axis::SetAxisRadius()/AxisRadius() ARE public on Axis itself - the
-    // review correctly caught that the first pass had stopped at "the Axis
-    // objects are unreachable" without separating "unreachable" (false, for
-    // a subclass) from "myColor is unreachable regardless" (true).
-    //
-    // But REACHABLE is not the same as USABLE, and this file went looking
-    // for that difference rather than assuming the header settled it: a
-    // SlimAxisManipulator subclass was built exactly as described, and its
-    // effect was measured against real Dump pixels - not a Size()/
-    // AxisRadius() read-back, three independent methodologies, several
-    // scale factors, at points OCCT's own hover detection confirmed were
-    // genuinely on the X translation arm. Every measurement moved the WRONG
-    // way: the arm's rendered cross-section GREW as the radius shrank (34 px
-    // stock to 40 px at a 0.3 scale to 80 px at 0.02 - reproducible and
-    // monotonic, not noise), almost certainly because the shrinking shaft
-    // revealed an adjacent manipulator part - the rotation ring or the hub
-    // cluster - that shares the exact same uniform matte material this file
-    // already applies below, so a thinner shaft did not read as "less grey"
-    // anywhere the probe could isolate it. Reverted rather than shipped:
-    // CLAUDE.md's zoom-persistence lesson is to trust a measured pixel over
-    // a setter's own claim, and here the measurement said the setter's name
-    // did not describe what actually reached the screen. SetPart(axisIndex,
-    // mode, enabled) is still visibility-only, not colour, despite the name;
-    // Attributes()->ShadingAspect(), the hook used below, is still the ONE
-    // material for the whole object, which is why it recolours all three
-    // arms uniformly and could never single out "the uniform-scale handle";
-    // and SetGap() is still public with no matching getter at all, so a
-    // spacing tweak through it was never attempted. The manipulator wears
-    // OCCT's stock proportions AND stock per-axis hues; both boundaries are
-    // real, and only one of the two was ever a matter of API surface.
-    const Handle(Prs3d_ShadingAspect) gizmoAspect =
-        myManipulator->Attributes()->ShadingAspect();
-    if (!gizmoAspect.IsNull()) {
-        Graphic3d_MaterialAspect material(Graphic3d_NameOfMaterial_UserDefined);
-        material.SetAmbientColor(Quantity_Color(0.35, 0.35, 0.35, Quantity_TOC_sRGB));
-        material.SetDiffuseColor(Quantity_Color(0.75, 0.75, 0.75, Quantity_TOC_sRGB));
-        material.SetSpecularColor(Quantity_Color(0.05, 0.05, 0.05, Quantity_TOC_sRGB));
-        gizmoAspect->SetMaterial(material);
-    }
-
-    // TOPMOST, and it is the clamp below that makes this necessary. A
-    // manipulator stands at its body's own centre, and once its arms are
-    // capped to a share of the SCREEN they are routinely shorter than the body
-    // is wide - which in the default layer means a gizmo drawn inside the solid
-    // it belongs to, depth-tested away and invisible at exactly the zoom the
-    // clamp exists for. A manipulator is a control rather than geometry, and
-    // every CAD application draws one over the model for this reason.
-    //
-    // CLAUDE.md rejects this layer for the ground GRID, and that ruling stands:
-    // the layer clears depth, so a grid in it would paint over every body
-    // standing on it. Here painting over the body IS the requirement. Depth
-    // still applies within the layer, so the gizmo's own three arms occlude
-    // each other correctly.
-    //
-    // It DOES change picking, and saying otherwise would be convenient rather
-    // than true: SelectMgr_SortCriterion::IsCloserDepth ranks ZLayerPosition
-    // ahead of depth, so a manipulator part now wins picks against a body in
-    // front of it that it would previously have lost. That is the right
-    // outcome for a control the user can see and reach - a handle that is
-    // drawn on top and picks underneath is worse than either - and it costs
-    // nothing already relied on: the one place a body MUST outrank the gizmo
-    // is the additive Shift pick, which Deactivates the manipulator around the
-    // MoveTo/SelectDetected pair rather than trusting the ordering.
-    myContext->SetZLayer(myManipulator, Graphic3d_ZLayerId_Topmost);
-
-    myManipulatorSolid = solidId;
-    // ON SCREEN FIRST, THEN SIZED, and the order is the whole fix rather than
-    // fussiness. Measured three ways: with the clamp applied before or during
-    // the attach, AIS_Manipulator reported the clamped size while the viewport
-    // drew the bounding-diagonal one - 731 mm painted against a 256 mm budget -
-    // because the presentation is computed once, inside Attach(), and a
-    // Redisplay() issued before the object has been through a redraw does not
-    // dislodge it. The identical call one frame later does. So the update runs
-    // after this first UpdateCurrentViewer(), which is what puts the
-    // manipulator on screen, and the second one carries the resized
-    // presentation out.
-    //
-    // The cost is one extra viewer update per attach - once per selection, not
-    // per frame - and the alternative is a gizmo that is the right size only
-    // after the user touches the camera, which is never the frame they are
-    // shown first.
-    //
-    // This is one of the few places a SYNCHRONOUS frame is the requirement
-    // rather than a habit - "a Redisplay() issued before the object has been
-    // through a redraw does not dislodge it" only means anything if the redraw
-    // has actually happened before applyCameraState() re-sizes below. Since the
-    // QOpenGLWidget migration that means holding the GL context ourselves;
-    // scheduling a Qt frame would put the redraw AFTER the resize, which is the
-    // ordering this whole comment exists to avoid.
-    {
-        GlScope gl(this);
-        myContext->UpdateCurrentViewer();
-    }
-    myManipulatorAppliedSize = 0.0;   // nothing of ours installed yet: force it
-    applyCameraState();
-}
-
-void OcctViewWidget::updateManipulatorSize()
-{
-    if (myManipulator.IsNull() || myView.IsNull()) return;
-    // Never mid-gesture: AIS_Manipulator's drag maths is anchored on the arm
-    // the press landed on, and resizing that arm under the cursor moves the
-    // handle away from the hand holding it.
-    if (myGizmoDragActive) return;
-    if (myManipulatorNaturalSize <= 0.0) return;
-
-    // worldPerPixel() is ONE formula for both projections here (see its
-    // definition - the orthographic scale is set to exactly the perspective
-    // frustum's height at the target), so this needs no branch on the
-    // projection and is correct the moment the Persp/Ortho toggle flips.
-    //
-    // The smaller viewport dimension, because a gizmo that fits a wide
-    // viewport's width can still run off the top and bottom of a short one.
-    // Both are logical pixels, which is what worldPerPixel() divides by.
-    const double smallerSide = std::min(std::max(1, width()), std::max(1, height()));
-
-    // Two things separate a screen budget from a world size, and both of them
-    // are perspective. Neither exists in a parallel projection, where a world
-    // length projects to the same pixels at every depth - so both fall out to
-    // 1 there by construction rather than by a branch that could go stale.
-    //
-    // FIRST, DEPTH. worldPerPixel() answers for the camera TARGET's plane,
-    // which is the right question for the ground grid and for a dimension the
-    // user is looking straight at. A gizmo stands wherever its body stands, and
-    // a body nearer than the target projects larger than that number says.
-    //
-    // SECOND, THE ARM ITSELF. An arm pointing towards the eye ends nearer than
-    // it starts, so its tip projects further out than a flat depth-scaled
-    // estimate - measured at 9% over budget at 175% zoomed in, which is not a
-    // rounding error and is not fixed by the depth term alone. Requiring the
-    // NEAREST point of the gizmo to fit rather than its centre means solving
-    //     side / (k * (depth - side)) <= limitPixels,  k = worldPerPixel/depth
-    // for side, which is the closed form below - no iteration, and it collapses
-    // to the flat budget whenever the gizmo is small against its own depth.
-    double depthRatio = 1.0;
-    double gizmoDepth = 0.0;
-    const bool perspective = !myCamera.effectiveOrtho();
-    if (perspective) {
-        const gp_Pnt eye = myCamera.eyePosition();
-        const gp_Dir viewDir = myCamera.viewDirection();
-        // Along the view axis, never the straight-line distance: it is the
-        // depth that scales a perspective projection, and an off-centre gizmo
-        // is further away without being any deeper.
-        gizmoDepth = gp_Vec(eye, myManipulatorCentre).Dot(gp_Vec(viewDir));
-        const double targetDepth = myCamera.state().distance;
-        if (gizmoDepth > 1.0e-6 && targetDepth > 1.0e-6) depthRatio = gizmoDepth / targetDepth;
-    }
-
-    const double flatBudget =
-        kGizmoMaxViewportFraction * smallerSide * worldPerPixel() * depthRatio;
-    const double maxWorld = (perspective && gizmoDepth > 1.0e-6)
-                                ? flatBudget / (1.0 + flatBudget / gizmoDepth)
-                                : flatBudget;
-    if (maxWorld <= 0.0) return;
-
-    // The user's Gizmo size token scales the RESULT - the natural size and
-    // the screen cap alike - so the Rotate/Scale gizmo and the Move tool's
-    // arms answer one setting at one ratio, and Space still swaps between
-    // them without a jump.
-    const double wanted =
-        std::min(myManipulatorNaturalSize, maxWorld) * Theme::gizmoScale();
-    // The equal-guard, in the shape the view label's is: this runs on every
-    // frame of an orbit and a pan, and SetSize() recomputes all seven of the
-    // manipulator's presentations. Relative, not absolute, because the same
-    // gizmo is legitimately 3 mm on a drawer front and 3 m on a wardrobe.
-    //
-    // It keys on `wanted`, which is a pure function of the camera and the
-    // body - NOT on what the manipulator reports afterwards - so a call that
-    // does not return early always performs exactly the same work below, and
-    // the correction cannot ratchet across frames.
-    if (std::fabs(wanted - myManipulatorAppliedSize) <= 1.0e-3 * std::fabs(wanted)) return;
-
-    myManipulatorAppliedSize = wanted;
-
-    // Installed, then CORRECTED, because Size() is not SetSize()'s own unit
-    // (see the attach): what it reports is the assembly's outer reach, and that
-    // is the number which actually has to fit inside the fraction. Scaling the
-    // side length by the overshoot very nearly lands it but not exactly - the
-    // relation is affine with an offset, since the gap between the parts does
-    // not always scale with the whole - so it is applied until the reach is
-    // inside budget rather than assumed to converge in one. Two passes is the
-    // observed worst case; the bound is a bound, not a schedule, and the
-    // equal-guard above means none of this runs again until the camera or the
-    // body actually moves.
-    double side = wanted;
-    myManipulator->SetSize(static_cast<float>(side));
-    for (int pass = 0; pass < 4; ++pass) {
-        const double reported = myManipulator->Size();
-        if (reported <= maxWorld || reported <= 1.0e-9) break;
-        side *= maxWorld / reported;
-        myManipulator->SetSize(static_cast<float>(side));
-    }
-
-    // AND THEN REDRAWN, which is the whole difference between a number and a
-    // gizmo. SetSize() writes the axes' parameters and marks the object
-    // ToBeUpdated; it does NOT recompute the presentation, so without this the
-    // manipulator kept drawing at whatever AdjustSize() gave it on attach while
-    // Size() cheerfully reported the clamped value. Everything above was
-    // arithmetically correct and reached no pixel: the first capture of this
-    // work shows a gizmo 538 px across a 110 px budget, taken from a build
-    // whose own probe read 103 px, because that probe asked the code for the
-    // number the code had just written.
-    // Only once it is on screen. Before the attach there is no presentation to
-    // rebuild - the size set above is simply the one the first Compute will
-    // use - and asking the context to redisplay an object it does not yet hold
-    // is at best a no-op.
-    if (!myContext.IsNull() && myContext->IsDisplayed(myManipulator))
-        myContext->Redisplay(myManipulator, Standard_False);
-
-    // OCCT's own SetZoomPersistence(true) would hold a FIXED screen size
-    // instead, and was rejected rather than missed: it overrides the local
-    // transformation and the transform-persistence flags of every
-    // sub-presentation, which is precisely the machinery the drag path here
-    // already leans on (see endGizmoDrag and the presentation reset it
-    // performs). A cap that is re-derived from the camera keeps the drag maths
-    // untouched, and it also lets a small body keep a small gizmo instead of
-    // giving every body the same one.
-}
-
 void OcctViewWidget::setSymmetryIndicator(bool on, const gp_Pln& plane)
 {
     mySymmetryIndicatorOn = on;
@@ -2347,8 +2019,8 @@ void OcctViewWidget::updateSymmetryIndicator()
     // that shrinks to nothing as the camera pulls back. ~220 px half-span
     // reads as a generous plane without swallowing a small body.
     const double halfSpan = worldPerPixel() * 220.0;
-    // The equal-guard updateManipulatorSize() uses, one call site over: this
-    // runs on every frame of an orbit, and a rebuild is a real allocation.
+    // An equal-guard, because this runs on every frame of an orbit and a
+    // rebuild is a real allocation.
     if (mySymmetryIndicatorBuiltHalfSpan > 0.0 &&
         halfSpan < mySymmetryIndicatorBuiltHalfSpan * 1.1 &&
         halfSpan > mySymmetryIndicatorBuiltHalfSpan * 0.9) {
@@ -2610,144 +2282,12 @@ void OcctViewWidget::updateMirrorPlacementIndicator()
     myMirrorPlacementBuiltNormal = normal0;
 }
 
-void OcctViewWidget::activateManipulatorModes()
-{
-    if (myManipulator.IsNull()) return;
-    // ONE mode: the role this manipulator was attached for. Since the custom
-    // gizmo's Phase 1 it serves Rotate or Scale and nothing else - translation
-    // belongs to our own arms, and enabling AIS_MM_Translation here would put
-    // a second, invisible mover on the same body (SetPart hides the arrows but
-    // the header is explicit that it does not touch the manipulation modes).
-    //
-    // gp_Trsf cannot express a per-axis scale, so the scale cubes are uniform
-    // whichever one is grabbed; see MainWindow's bake for the clamp that keeps
-    // a uniform scale to something that is still furniture.
-    //
-    // Two callers - the attach, and the restore after an additive pick has
-    // taken the modes out for the duration - so this stays the one place the
-    // list lives even now that the list is one entry long.
-    if (myManipulatorRole == ManipulatorRole::Rotate) myManipulator->EnableMode(AIS_MM_Rotation);
-    else                                              myManipulator->EnableMode(AIS_MM_Scaling);
-}
-
-void OcctViewWidget::detachManipulator()
-{
-    if (myManipulator.IsNull()) {
-        myManipulatorSolid = -1;
-        return;
-    }
-
-    // A gesture cannot outlive the gizmo it was made on - and OCCT's Detach()
-    // does NOT put back the local transformations a live drag has written, so
-    // dropping the flag alone would leave the body frozen at the pose the drag
-    // reached while the document still said something else. Cancelling it is
-    // the reset. Unreachable today, because every route in here runs between
-    // gestures rather than during one; that is exactly what makes the line
-    // cheap to have, and it is the difference between a future mid-drag detach
-    // being harmless and being a body stuck where nothing put it.
-    if (myManipulator->HasActiveTransformation())
-        myManipulator->StopTransform(Standard_False);
-    myGizmoDragActive = false;
-    myGizmoDelta = gp_Trsf();
-    // Detach() erases it from the context as well as letting go of the body.
-    myManipulator->Detach();
-    if (!myContext.IsNull()) {
-        myContext->Remove(myManipulator, Standard_False);
-        scheduleRedraw();
-    }
-    myManipulator.Nullify();
-    myManipulatorSolid = -1;
-    myManipulatorNaturalSize = 0.0;
-    myManipulatorAppliedSize = 0.0;
-    // ...and back up again the moment it goes. Nullified FIRST, because
-    // applySelectionTolerance() reads myManipulator to decide.
-    applySelectionTolerance();
-}
-
-bool OcctViewWidget::manipulatorFrame(gp_Ax2& position, double& size) const
-{
-    if (myManipulator.IsNull()) return false;
-    position = myManipulator->Position();
-    size = myManipulator->Size();
-    return true;
-}
-
-int OcctViewWidget::manipulatorActiveMode() const
-{
-    return myManipulator.IsNull() ? 0 : static_cast<int>(myManipulator->ActiveMode());
-}
-
-int OcctViewWidget::manipulatorActiveAxis() const
-{
-    if (myManipulator.IsNull() || myManipulator->ActiveMode() == AIS_MM_None) return -1;
-    return myManipulator->ActiveAxisIndex();
-}
-
 bool OcctViewWidget::solidPresentationTransform(int id, gp_Trsf& out) const
 {
     const auto it = mySolids.find(id);
     if (it == mySolids.end() || it->second.IsNull()) return false;
     out = it->second->LocalTransformation();
     return true;
-}
-
-bool OcctViewWidget::detectedIsManipulator() const
-{
-    if (myManipulator.IsNull() || myContext.IsNull()) return false;
-    // HasDetected() FIRST, and it is not defensive padding - it is the whole
-    // reason this function does not crash the app.
-    //
-    // AIS_InteractiveContext::DetectedInteractive() is an inline that reads
-    // `myLastPicked->Selectable()` with no null check of its own, and a MoveTo
-    // that detects nothing sets myLastPicked to null. HasDetected() is
-    // literally `!myLastPicked.IsNull()`, so this line is the guard OCCT's own
-    // accessor does not carry.
-    //
-    // The reachable trigger was one click: select a body (which attaches the
-    // manipulator), then click empty viewport to deselect. The press handler
-    // MoveTo's, detects nothing, and asks this - null deref, process gone. It
-    // is a hover away too, through mouseMoveEvent's hover-highlight branch.
-    // Every other DetectedInteractive() call in this file already sits behind
-    // an explicit HasDetected() (see mouseDoubleClickEvent, which MoveTo's and
-    // returns early on !HasDetected() before it asks anything); this one
-    // function was the exception, and 850 green checks never went near it
-    // because nothing in the suite clicked empty space with a gizmo up.
-    if (!myContext->HasDetected()) return false;
-    const Handle(AIS_InteractiveObject) detected = myContext->DetectedInteractive();
-    return !detected.IsNull() && detected.get() == myManipulator.get();
-}
-
-void OcctViewWidget::endGizmoDrag()
-{
-    myGizmoDragActive = false;
-    if (myManipulator.IsNull()) return;
-
-    const int solidId = myManipulatorSolid;
-    const gp_Pnt pivot = myGizmoStartPosition.Location();
-    gp_Trsf delta = myGizmoDelta;
-    myGizmoDelta = gp_Trsf();
-
-    // StopTransform(false), not (true): it restores every attached object's
-    // local transformation and the manipulator's own position to what they
-    // were at the press. The drag moved the PRESENTATION and nothing else, and
-    // the document only changes if the bake that follows succeeds - so the
-    // presentation goes back first, unconditionally, and the consumer's job is
-    // purely to add a change rather than to undo one it did not make. A bake
-    // that is refused therefore leaves the viewport already agreeing with the
-    // document instead of showing a pose that exists nowhere.
-    myManipulator->StopTransform(Standard_False);
-    myManipulator->DeactivateCurrentMode();
-    scheduleRedraw();
-
-    if (mySnapEnabled) {
-        // The same 10 mm grid outline points and face pulls land on, plus the
-        // two steps this gesture adds. 15 degrees is the smallest rotation
-        // anyone eyeballs; 5% is a size change you can see without measuring.
-        delta = ModelingOps::snapTransform(delta, pivot, mySnapStep,
-                                           kGizmoRotationStepDeg, kGizmoScaleStep);
-    }
-
-    emit gizmoReleased(solidId, delta);
 }
 
 void OcctViewWidget::setSketchPointMarkers(const std::vector<gp_Pnt>& points)
@@ -2911,51 +2451,19 @@ void OcctViewWidget::applySelectionTolerance()
 {
     if (myContext.IsNull()) return;
 
-    // THE TRANSFORM GIZMO IS THE ONE THING THIS TOLERANCE MUST NOT BLUR, and
-    // that was found by measurement rather than reasoned about in advance.
-    // OCCT's custom tolerance is a property of the SELECTOR, not of a
-    // presentation, and it is ADDED to every registered entity's own
-    // sensitivity - AIS_Manipulator's parts included. The manipulator's arms,
-    // its translation-plane quadrants, its rotation rings and its scale cubes
-    // sit within a few tens of pixels of one another by construction, so
-    // inflating all of them by 12 device pixels merges them: hovering out
-    // along the Z arm armed the rotation ring about Y at every step of the
-    // way, and walking out along X found the translation PLANE and then the
-    // ring, never the arrow and never the cube. A gizmo whose arms cannot be
-    // aimed at is worse than a shorter edge reach.
-    //
-    // So the raise is suspended for exactly as long as a manipulator is
-    // ATTACHED. That is not the same as "a body is selected" and the
-    // difference is worth stating rather than glossing: attachManipulator()
-    // additionally requires exactly ONE body, no sketch in progress, no
-    // pending outline, no render mode and no live mirror placement - so two
-    // selected bodies, or one selected while an outline waits, keep the full
-    // tolerance. The stand-down is narrower than "a body is selected", which
-    // is the safe direction.
-    //
-    // WHAT IT COSTS, AS A MEASURED NUMBER RATHER THAN A SHRUG. gui_smoke
-    // sweeps the cursor out from a real edge one logical pixel at a time in
-    // BOTH states and prints both tables. Cleared, the edge holds the hover to
-    // 7 px and the face takes it at 8. With the gizmo up it holds to 2 px and
-    // the face takes it at 3 - which is what Phase 1's own 0.75x candidate
-    // radius predicts once the custom tolerance is gone. So while the
-    // transform gizmo is up an edge has to be hovered very nearly dead-on to
-    // win, not merely nearer, and that is the state the headline gesture
-    // (double-click a body) leaves the user in most of the time. Both numbers
-    // are pinned, so a stand-down that quietly stopped standing down - or one
-    // that took the edge away entirely - fails rather than drifts.
-    //
-    // preferDetectedEdge()'s own kAutoEdgeTolerancePx promise is unchanged -
-    // it is a ceiling, not a floor - and "the highlight is the contract"
-    // holds either way, because hover and click still arbitrate identically.
-    // Clear the selection (or pick a sub-shape) and the full tolerance is
-    // back on the very next MoveTo.
+    // Raised in Auto, OCCT's default in the seam modes. The manipulator-era
+    // STAND-DOWN is gone with the manipulator itself (Phase 2 cleanup): the
+    // custom gizmos register no selectable entities at all, so there is
+    // nothing left for the raised tolerance to blur and the full 8-logical-
+    // pixel edge reach holds with a gizmo up - the consequence the custom
+    // gizmo was built to buy. The measured account of what the stand-down
+    // was and what it cost lives in CLAUDE.md's selection section.
     //
     // Device pixels: the selector measures in the window's own pixel space,
     // which is what toDevicePixels() converts into, and at 150% an 8-logical-
     // pixel promise is 12 device pixels or it is not that promise.
     const int wanted =
-        (mySelectionMode == SelectionMode::Auto && myManipulator.IsNull())
+        mySelectionMode == SelectionMode::Auto
             ? std::max(1, toDevicePixels(QPoint(kAutoCandidateTolerancePx, 0)).x())
             : myDefaultPixelTolerance;
     if (selectionPixelTolerance() == wanted) return;
@@ -3027,8 +2535,9 @@ OcctViewWidget::PickKind OcctViewWidget::kindOfShape(const TopoDS_Shape& shape)
 OcctViewWidget::PickKind OcctViewWidget::hoveredKind() const
 {
     if (myContext.IsNull()) return PickKind::None;
-    // HasDetected() first, always - see detectedIsManipulator()'s own comment
-    // for what an unguarded read of the detection costs.
+    // HasDetected() first, always - DetectedInteractive()/DetectedShape()
+    // dereference a null unguarded, and one such read crashed the app in a
+    // single click (see CLAUDE.md's pitfalls).
     if (!myContext->HasDetected()) return PickKind::None;
     if (!myContext->HasDetectedShape()) return PickKind::Body;
     return kindOfShape(myContext->DetectedShape());
@@ -3997,13 +3506,10 @@ void OcctViewWidget::applyCameraState()
 
     myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane(),
                           Theme::gridDensity());
-    // The transform gizmo is sized in world units and judged in screen ones,
-    // so the zoom is half of its arithmetic - re-derived here, before the
-    // redraw below carries it, rather than from a slot on cameraChanged()
-    // that would need its own UpdateCurrentViewer(). Its own guards make this
-    // free on a camera move that does not change the scale.
-    updateManipulatorSize();
-    // Screen-sized the same way - see its own header comment.
+    // Screen-sized things follow the zoom here, before the redraw below
+    // carries them. (The body gizmos need no call of their own: MoveTool
+    // drives their rebuild from cameraChanged, and their pose cache no-ops
+    // any move that does not change what they draw.)
     updateSymmetryIndicator();
     // Screen-sized the same way, and no-ops itself the same way - see its
     // own equal-guard.
@@ -4323,10 +3829,6 @@ void OcctViewWidget::applyTheme()
     myMoveGizmo.reapplyTheme();
     myRotateGizmo.reapplyTheme();
     myScaleGizmo.reapplyTheme();
-    // The Rotate/Scale gizmo reads the same token: its equal-guard keys on
-    // the wanted size, which the token is now part of, so this is a no-op
-    // when the token did not move.
-    updateManipulatorSize();
 
     scheduleRedraw();
 }
@@ -6026,34 +5528,6 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
         }
     }
 
-    // The transform gizmo owns LEFT drags that start on one of its parts, and
-    // only those. RMB orbit and MMB pan returned above; a Shift-click is the
-    // "add this body to the selection" gesture and must reach the picker even
-    // when it lands on an arm of the gizmo standing on the first body.
-    if (event->button() == Qt::LeftButton && !mySketchMode && !additivePress &&
-        !myManipulator.IsNull() && !myContext.IsNull() && !myView.IsNull()) {
-        // Detection is what arms a mode (SetModeActivationOnDetection), so the
-        // press asks for it at its own pixel rather than trusting whatever the
-        // last hover happened to leave behind.
-        const QPoint device = toDevicePixels(myLastPos);
-        myContext->MoveTo(device.x(), device.y(), myView, Standard_False);
-        if (detectedIsManipulator()) {
-            // The press CLAIMS the gesture whether or not a mode armed - the
-            // pull arrow's lesson one gizmo over. If it fell through, the
-            // release would run an ordinary pick, select a manipulator part,
-            // and drop the body selection that raised the gizmo in the first
-            // place: the thing the user just grabbed would deselect itself.
-            myGizmoDragActive = true;
-            myGizmoDelta = gp_Trsf();
-            myGizmoStartPosition = myManipulator->Position();
-            if (myManipulator->HasActiveMode())
-                myManipulator->StartTransform(device.x(), device.y(), myView);
-            return;
-        }
-        // Nothing in OCCT disarms a mode when the cursor leaves the part that
-        // armed it, so a press that missed says so explicitly.
-        myManipulator->DeactivateCurrentMode();
-    }
 }
 
 void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
@@ -6066,7 +5540,7 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
     // picker), so a left click in the compare pane simply does nothing
     // rather than selecting whatever is under it. None of the drag flags
     // below can be true here either: nothing ever calls showPullArrow(),
-    // showBevelArrow() or attachManipulator() on a viewer-only widget, so
+    // showBevelArrow() or any body gizmo's show on a viewer-only widget, so
     // mousePressEvent() never arms one in the first place.
     if (myViewerOnly) return;
 
@@ -6130,18 +5604,12 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
         return;
     }
 
-    // The end of a gizmo drag, swallowed for exactly the same reason.
-    if (myGizmoDragActive && event->button() == Qt::LeftButton) {
-        endGizmoDrag();
-        return;
-    }
-
     if (event->button() != Qt::LeftButton || myContext.IsNull()) return;
 
     // The other half of the press guard above: a live placement suspends
     // ordinary picking outright, so a left release changes neither the
     // selection nor the gesture. Both halves are needed - the press claim
-    // stops a manipulator mode arming and the release claim stops the pick -
+    // stops a handle grab and the release claim stops the pick -
     // and it is the same "the gesture that started owns the release that ends
     // it" rule every drag in this file already keeps, widened from one drag to
     // one modal gesture.
@@ -6169,43 +5637,21 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
     }
 
     const bool additive = (event->modifiers() & Qt::ShiftModifier) != 0;
-    // A Shift-click means "add this body to the selection", and the gizmo
-    // standing on the FIRST body must not be what the pick lands on.
-    // AIS_ManipulatorOwner carries a higher selection priority than a shape's
-    // owner, so an arm or a ring crossing the second body wins the pick
-    // outright and the click selects nothing at all - which is how a 100%
-    // display found this and a 150% one did not: at the smaller scale the
-    // second body sat under a ring, at the larger it did not.
-    //
-    // Deactivate(), not a detach: the pick only needs the manipulator's owners
-    // out of the CANDIDATES, and that is exactly what deactivating its modes
-    // does. Destroying and re-attaching it would do the same by demolition -
-    // an Attach and four EnableMode calls and two viewer updates on every
-    // additive click, even one nowhere near an arm - and would have to be put
-    // back indirectly, by relying on the selectionChanged() below to reach
-    // MainWindow's predicate. This restores itself, locally and
-    // unconditionally, a few lines down.
-    const bool hideGizmoFromPick = additive && !myManipulator.IsNull();
-    if (hideGizmoFromPick) myContext->Deactivate(myManipulator);
+    // (The manipulator-era Deactivate-around-this-pick shield is gone with
+    // the manipulator: the custom gizmos register nothing, so there is
+    // nothing for an additive pick to land on but the scene.)
 
     const QPoint device = toDevicePixels(pos);
     myContext->MoveTo(device.x(), device.y(), myView, Standard_False);
-    // A click that landed on the gizmo but never became a drag - a press the
-    // gizmo declined, or a cursor that wandered onto it between press and
-    // release - must not select a manipulator part: SelectDetected would
-    // replace the body selection with an owner that belongs to no document,
-    // and the gizmo would erase itself. It cannot be detected at all on the
-    // additive path above, which is the point of that branch.
-    const bool onGizmo = detectedIsManipulator();
     // The same preference the hover applies, at the same point in the same
-    // sequence - after the manipulator has had its say, before anything reads
-    // the detected shape. A click must take what the last hover was glowing,
-    // and the only way to guarantee that is for both to arbitrate identically.
-    if (!onGizmo) preferDetectedEdge(pos);
+    // sequence, before anything reads the detected shape. A click must take
+    // what the last hover was glowing, and the only way to guarantee that is
+    // for both to arbitrate identically.
+    preferDetectedEdge(pos);
     // Read BEFORE SelectDetected, because a Replace clears the detection's
     // relationship to the selection and an XOR may have just removed it.
     TopoDS_Edge justPicked;
-    if (!onGizmo && myContext->HasDetectedShape() &&
+    if (myContext->HasDetectedShape() &&
         myContext->DetectedShape().ShapeType() == TopAbs_EDGE) {
         justPicked = TopoDS::Edge(myContext->DetectedShape());
     }
@@ -6224,7 +5670,7 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
     // read from selectionKind(), which derives it from the live selection -
     // so an undo, a delete or a programmatic selection change moves the lock
     // with them and there is nothing to keep in step.
-    if (!onGizmo && mySelectionMode == SelectionMode::Auto) {
+    if (mySelectionMode == SelectionMode::Auto) {
         // What this selection was OF before this click touched it. Qt delivers
         // a double-click as press/release/DblClick/release, so by the time
         // mouseDoubleClickEvent() runs, the gesture's OWN first click has
@@ -6238,47 +5684,31 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
         // "what is held".
         myAutoKindBeforeClick = selectionKind();
     }
-    if (!onGizmo && mySelectionMode == SelectionMode::Auto && additive) {
+    if (mySelectionMode == SelectionMode::Auto && additive) {
         const PickKind held = myAutoKindBeforeClick;
         const PickKind asked = hoveredKind();
         if (held != PickKind::None && asked != PickKind::None && asked != held) {
-            // Restore the picker before any return - the same unconditional
-            // rule the ordinary path keeps a few lines down, for the same
-            // reason: a restore some path can skip is a gizmo that silently
-            // stops being grabbable.
-            if (hideGizmoFromPick) activateManipulatorModes();
             myAutoRefusal = autoKindRefusalText(held, asked);
             emit autoPickRefused(myAutoRefusal);
             return;
         }
     }
 
-    if (!onGizmo) {
-        myContext->SelectDetected(additive ? AIS_SelectionScheme_XOR
-                                           : AIS_SelectionScheme_Replace);
-        // A pick that landed answers whatever the last refusal was asking
-        // about, so the sentence goes with it - off the member AND off
-        // whatever is painting it. See autoPickRefusalWithdrawn().
-        if (!myAutoRefusal.isEmpty()) {
-            myAutoRefusal.clear();
-            emit autoPickRefusalWithdrawn();
-        }
-        // "The edge you picked last" - remembered here because it cannot be
-        // read back out of the selection afterwards (see lastSelectedEdge()).
-        // A click on nothing clears it, so the arrow cannot linger on an edge
-        // the user has just dropped.
-        myLastPickedEdge = justPicked;
+    myContext->SelectDetected(additive ? AIS_SelectionScheme_XOR
+                                       : AIS_SelectionScheme_Replace);
+    // A pick that landed answers whatever the last refusal was asking
+    // about, so the sentence goes with it - off the member AND off
+    // whatever is painting it. See autoPickRefusalWithdrawn().
+    if (!myAutoRefusal.isEmpty()) {
+        myAutoRefusal.clear();
+        emit autoPickRefusalWithdrawn();
     }
+    // "The edge you picked last" - remembered here because it cannot be
+    // read back out of the selection afterwards (see lastSelectedEdge()).
+    // A click on nothing clears it, so the arrow cannot linger on an edge
+    // the user has just dropped.
+    myLastPickedEdge = justPicked;
 
-    // Straight back into the picker, before anything can return. Unconditional
-    // on purpose: a restore that some path can skip is a gizmo that silently
-    // stops being grabbable.
-    if (hideGizmoFromPick) activateManipulatorModes();
-
-    if (onGizmo) {
-        myManipulator->DeactivateCurrentMode();
-        return;
-    }
     // The selection just changed, and in edge mode the dimension follows it as
     // well as the hover - selecting a second edge has to stop the annotation
     // claiming to measure the one before it.
@@ -6293,27 +5723,7 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
 
     const QPoint pos = event->position().toPoint();
 
-    if (myGizmoDragActive) {
-        // AIS_Manipulator does the drag maths. ObjectTransformation() answers
-        // "given this cursor position, what transform does the armed part
-        // mean" WITHOUT applying it, and returns false for a position it
-        // cannot resolve - which is why it is used in place of the
-        // Transform(x, y, view) convenience, whose return value is an identity
-        // transform in exactly that case and would clobber the accumulated
-        // delta with nothing.
-        //
-        // The transform it hands back is measured from the ORIGINAL press, not
-        // from the previous move, so the last one is the whole gesture.
-        if (!myManipulator.IsNull() && myManipulator->HasActiveTransformation()) {
-            const QPoint device = toDevicePixels(pos);
-            gp_Trsf trsf;
-            if (myManipulator->ObjectTransformation(device.x(), device.y(), myView, trsf)) {
-                myManipulator->Transform(trsf);
-                myGizmoDelta = trsf;
-                scheduleRedraw();
-            }
-        }
-    } else if (myMirrorDrag.active) {
+    if (myMirrorDrag.active) {
         if (advanceAxisDrag(myMirrorDrag, mirrorPlacementAxisLine(), pos)) {
             // ABSOLUTE offset, not the raw delta advanceAxisDrag() returns -
             // see mirrorPlaneDragged()'s own comment on the header for why a
@@ -6436,13 +5846,6 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
         // no hover highlight either.
         const QPoint device = toDevicePixels(pos);
         myContext->MoveTo(device.x(), device.y(), myView, Standard_True);
-        // The manipulator arms a manipulation mode when one of its parts is
-        // DETECTED, and OCCT disarms it for nobody - so a hover that once
-        // brushed an arrow would leave every later press anywhere in the
-        // viewport claiming a gizmo drag. Answered here, at the detection that
-        // would otherwise have armed it, rather than guessed at later.
-        if (!myManipulator.IsNull() && !detectedIsManipulator())
-            myManipulator->DeactivateCurrentMode();
 
         // Auto's edge-over-face preference, applied BEFORE the owner
         // comparison below so the repaint is asked for against the owner that
@@ -6567,34 +5970,15 @@ void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
     // selection mode left for it to yank out from under a live drag.
     if (onArrow && !lockGesture && mySelectionMode != SelectionMode::Auto) return;
 
-    // THE TRANSFORM GIZMO MUST NOT WIN THE PICK OF AN ADDITIVE BODY GESTURE,
-    // and in Auto that gesture is the Shift+DOUBLE-click rather than the
-    // Shift-click mouseReleaseEvent() already shields. Same hazard, same fix,
-    // one gesture over: AIS_ManipulatorOwner carries a higher selection
-    // priority than a shape's owner, so an arm or a ring crossing the second
-    // body wins the pick outright and the double-click adds nothing at all -
-    // it returns on the detectedIsManipulator() guard three lines down.
-    // Deactivate(), not a detach, for the reasons that path spells out; the
-    // shield puts the picker back on EVERY exit from here, because a restore
-    // some return can skip is a gizmo that silently stops being grabbable.
+    // (The manipulator-era GizmoPickShield around this MoveTo is gone with
+    // the manipulator: the custom gizmos' handles are invisible to the
+    // picker, so a Shift+double-click over an arm reaches the body under it
+    // with no Deactivate dance at all.)
     const bool additiveDouble = (event->modifiers() & Qt::ShiftModifier) != 0;
-    struct GizmoPickShield {
-        OcctViewWidget* self;
-        bool armed = false;
-        ~GizmoPickShield() { if (armed) self->activateManipulatorModes(); }
-    } shield{this};
-    if (additiveDouble && mySelectionMode == SelectionMode::Auto &&
-        !myManipulator.IsNull() && !myContext.IsNull()) {
-        myContext->Deactivate(myManipulator);
-        shield.armed = true;
-    }
 
     const QPoint device = toDevicePixels(pos);
     myContext->MoveTo(device.x(), device.y(), myView, Standard_False);
     if (!myContext->HasDetected()) return;
-    // A second click on a gizmo handle is another grab, not a request to frame
-    // the body underneath it - the same rule the pull arrow keeps above.
-    if (detectedIsManipulator()) return;
 
     // CTRL+double-click in face mode means "sketch on this" - the second route
     // to Lock to Face, alongside the action and its L shortcut. It carried no

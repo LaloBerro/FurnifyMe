@@ -113,11 +113,11 @@ struct Spec {
     // value, because the two are the same outline at two moments of its
     // life. 2.0 is today's hardcoded width, byte-identical.
     double sketchLineWidthPx = 2.0;
-    // Multiplies the drawn size of the body gizmos - the Move tool's arms
-    // (kArmPixels in TransformGizmo.cpp) and the Rotate/Scale manipulator's
-    // applied size both read it, so Space swaps between two tools at one
-    // consistent scale whatever the user set. 1.0 is today's size,
-    // byte-identical - the same rule gridDensity's 1.0 default follows.
+    // Multiplies the drawn size of the body gizmos - all three renderers in
+    // TransformGizmo.cpp read it (kArmPixels times this), so Space swaps
+    // between tools at one consistent scale whatever the user set. 1.0 is
+    // today's size, byte-identical - the same rule gridDensity's 1.0 default
+    // follows.
     double gizmoScale = 1.0;
 };
 
@@ -245,11 +245,10 @@ QColor axisY();         // ground grid, Y axis tint (muted green)
 QColor gizmoAxisX();    // AxisGizmo's X arm/tip - the vivid red the grid's
                         // own axisX() is deliberately NOT (see Spec)
 QColor gizmoAxisY();    // AxisGizmo's Y arm/tip - vivid green
-QColor gizmoAxisZ();    // AxisGizmo's Z arm/tip - vivid blue; the transform
-                        // manipulator's own arms are NOT reachable through any
-                        // public OCCT 8.0 API and stay OCCT's stock colours -
-                        // see OcctViewWidget::attachManipulator()'s own
-                        // comment for the boundary this was probed against
+QColor gizmoAxisZ();    // AxisGizmo's Z arm/tip - vivid blue. The 3D body
+                        // gizmos draw their handles UNLIT in these exact
+                        // tokens too (TransformGizmo.cpp), which is what
+                        // finally retired the AIS_Manipulator styling wall
 QColor sketchPointMarker(); // in-progress sketch: the dot at each placed
                         // point and the ring on the first one - a hue none
                         // of the above already carries (not the yellow

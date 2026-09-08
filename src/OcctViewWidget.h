@@ -3,8 +3,6 @@
 // that Qt drags in.
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_InteractiveObject.hxx>
-#include <AIS_Manipulator.hxx>
-#include <AIS_ManipulatorMode.hxx>
 #include <AIS_Shape.hxx>
 #include <Aspect_NeutralWindow.hxx>
 #include <SelectMgr_EntityOwner.hxx>
@@ -432,12 +430,13 @@ public:
     // already have - a screen-space press claim, an axis drag, a swallowed
     // release.
     //
-    // It needs NONE of the manipulator's workaround pile below, and the
-    // difference is structural rather than lucky: the arms are AIS objects
-    // with no ComputeSelection at all, so they never enter the pick pipeline.
-    // The manipulator has to be Deactivate()d around every additive pick
-    // because AIS_ManipulatorOwner outranks a shape's owner; an arm here is
-    // invisible to the picker and simply takes a press before the picker runs.
+    // It needed NONE of AIS_Manipulator's workaround pile (now deleted - see
+    // the tombstone below), and the difference is structural rather than
+    // lucky: the arms are AIS objects with no ComputeSelection at all, so
+    // they never enter the pick pipeline. The manipulator had to be
+    // Deactivate()d around every additive pick because AIS_ManipulatorOwner
+    // outranks a shape's owner; an arm here is invisible to the picker and
+    // simply takes a press before the picker runs.
     void showMoveGizmo(const gp_Pnt& pivot);
     void clearMoveGizmo();
     bool hasMoveGizmo() const { return myMoveGizmo.isShowing(); }
@@ -516,70 +515,21 @@ public:
     // cancel keeps cancelMoveDrag()'s own release-swallowing contract.
     void cancelBodyGizmoDrag();
 
-    // The transform gizmo. AIS_Manipulator is OCCT's own: it draws the three
-    // arrows, the three rings and the three scale cubes, and it owns the drag
-    // maths that turns a cursor position into a gp_Trsf. This widget wires it
-    // to Qt's mouse events and nothing more - which is exactly why it lives
-    // here and not in a widget of its own, the way PullArrow's value chip
-    // needed to (a field has to take a keystroke; a manipulator does not).
-    //
-    // SINCE THE CUSTOM GIZMO'S PHASE 1 IT SERVES ROTATE AND SCALE ONLY. Move
-    // is ours now, and `role` is the seam that says so: the manipulator's
-    // translation arms and plane handles are hidden and their manipulation
-    // modes are never enabled, so the two tools can never both offer a
-    // translation. The seam is deliberately temporary - Phase 2 replaces the
-    // other two and deletes this class from the app entirely.
-    //
-    // Attaching is idempotent per body AND per role, because the predicate
-    // that drives it fires on every appStateChanged and a fresh manipulator on
-    // each of those would reset its position mid-gesture.
-    enum class ManipulatorRole { Rotate, Scale };
-    void attachManipulator(int solidId, ManipulatorRole role);
-    ManipulatorRole manipulatorRole() const { return myManipulatorRole; }
-    void detachManipulator();
-    bool hasManipulator() const { return !myManipulator.IsNull(); }
-    // The body it is attached to, or -1.
-    int manipulatorSolid() const { return myManipulatorSolid; }
-
-    // Where the manipulator is and how big it is, in world units. Exposed so a
-    // test can aim at the gizmo's OWN geometry - a hardcoded pixel is a probe
-    // that silently stops hitting what it meant to the moment the camera or
-    // the body moves.
-    bool manipulatorFrame(gp_Ax2& position, double& size) const;
-
-    // The share of the viewport's SMALLER dimension one arm of the transform
-    // gizmo may occupy on screen. AIS_Manipulator's own AdjustSize sizes it
-    // from the body's bounding box and then leaves it there, which is right at
-    // the zoom the body was selected at and wrong at every other: a wardrobe,
-    // or any body seen close up, gave a gizmo whose arms ran off all four
-    // edges of the viewport with the body invisible behind it.
-    //
-    // A CAP, not a target. The bounding-box size still wins whenever it is the
-    // smaller of the two, so a gizmo never grows to fill this - zooming out
-    // shrinks it with the body, exactly as it should - and the clamp only bites
-    // when the arms would otherwise be bigger than a hand can aim at.
-    static constexpr double kGizmoMaxViewportFraction = 0.15;
-
-    // The manipulation mode hover detection has armed right now: 0 none,
-    // 1 Move along an axis, 2 Rotate, 3 Scale, 4 Move in a plane - the values
-    // of OCCT's own AIS_ManipulatorMode. A test hovers candidate points and
-    // reads this to find a handle, rather than guessing at the arrow lengths
-    // the API keeps to itself.
-    int manipulatorActiveMode() const;
-    // 0, 1 or 2 for the armed part's axis, or -1.
-    int manipulatorActiveAxis() const;
-    // True between the press that grabbed a manipulator part and the release
-    // that ends the gesture. While it is true this widget picks nothing on
-    // release - the same rule pullDragActive() carries, for the same reason.
-    bool gizmoDragActive() const { return myGizmoDragActive; }
+    // TOMBSTONE (custom gizmo, Phase 2 cleanup, 2026-09-08): AIS_Manipulator
+    // is deleted from the app. Its API lived here - attachManipulator(),
+    // ManipulatorRole, manipulatorFrame(), the active-mode probes,
+    // gizmoDragActive() and the kGizmoMaxViewportFraction screen cap. The
+    // measured findings it accumulated (the zoom-persistence default, the
+    // styling wall, the tolerance stand-down) are CLAUDE.md's pitfalls now.
 
     // The local transformation sitting on a body's PRESENTATION right now.
-    // Outside an active gizmo drag it is the identity for every body, because
-    // the gizmo moves the presentation and puts it back before it reports -
-    // so this is how the "the viewport and the document must never disagree"
-    // invariant is asserted. A volume check cannot answer it: a body drawn
-    // 200 mm from where the document says it is has exactly the right volume.
-    // False for an unknown id.
+    // It is the identity for every body at all times since the manipulator
+    // died - the custom gizmos preview through the modeling-preview channel
+    // and never touch a presentation transform - so this is how the "the
+    // viewport and the document must never disagree" invariant is asserted.
+    // A volume check cannot answer it: a body drawn 200 mm from where the
+    // document says it is has exactly the right volume. False for an unknown
+    // id.
     bool solidPresentationTransform(int id, gp_Trsf& out) const;
 
     // THE TEST SEAM. No shipped UI path reaches this - see the enum.
@@ -1694,16 +1644,6 @@ signals:
     void scaleDragged(int axis, double factor);
     void scaleReleased(bool dragged);
 
-    // The end of a transform-gizmo drag. `delta` is the whole accumulated
-    // transform of the gesture, ALREADY SNAPPED when Snap to Grid is on -
-    // this widget owns the snap state, so snapping here keeps the rule in one
-    // place rather than handing a raw transform out and hoping the consumer
-    // remembers. An identity `delta` means the drag netted nothing and must be
-    // treated as a cancel; the presentation has already been put back either
-    // way, so a consumer that ignores this signal entirely still leaves the
-    // viewport agreeing with the document.
-    void gizmoReleased(int solidId, const gp_Trsf& delta);
-
     // A live drag of the mirror-plane handle. `offset` is the plane's whole
     // signed distance from the selection's combined centre along its CURRENT
     // normal - not a delta - already snapped to the grid step when Snap to
@@ -1946,32 +1886,10 @@ private:
     // the other.
     void beginAxisDrag(AxisDrag& drag, const gp_Lin& axis, const QPoint& at);
     bool advanceAxisDrag(AxisDrag& drag, const gp_Lin& axis, const QPoint& at);
-    // Whether the context's LAST detection landed on the manipulator. The
-    // caller is responsible for the MoveTo that produced it, so the question
-    // and the answer belong to the same event.
-    bool detectedIsManipulator() const;
-    // Puts the manipulator's four manipulation modes back into the context's
-    // pick candidates. Two callers - the attach, and the restore after an
-    // additive pick has taken it out for the duration - so the list of modes
-    // lives in one place rather than being repeated and drifting.
-    void activateManipulatorModes();
-    // Re-derives the manipulator's world size from the camera so its on-screen
-    // arms stay inside kGizmoMaxViewportFraction of the viewport's smaller
-    // dimension - see that constant. Called from attachManipulator() and from
-    // applyCameraState(), because the zoom is half of the arithmetic and the
-    // camera is the only thing that moves it.
-    //
-    // Guarded twice. It does nothing while a gizmo drag is live - resizing the
-    // thing under the user's hand mid-gesture would move the handle away from
-    // the cursor that grabbed it - and it does not call SetSize() for a value
-    // the manipulator already holds, since that recomputes every one of its
-    // presentations and this runs on every frame of an orbit.
-    void updateManipulatorSize();
     // Rebuilds the symmetry plane indicator from myCamera's current distance
-    // (screen-sized, so it has to follow zoom the way updateManipulatorSize()
-    // follows it) - guarded the same way, against rebuilding on a camera move
-    // that would not visibly change its size. A no-op while the indicator is
-    // off.
+    // (screen-sized, so it has to follow zoom) - guarded against rebuilding on
+    // a camera move that would not visibly change its size. A no-op while the
+    // indicator is off.
     void updateSymmetryIndicator();
     // Rebuilds the mirror-placement plane and its handle from the live
     // gesture state - updateSymmetryIndicator()'s own shape, one call site
@@ -1997,13 +1915,6 @@ private:
     // the ordinary pick pipeline and compete with (or replace) the body
     // selection the gesture is standing on.
     bool mirrorHandleHit(const QPoint& point) const;
-    // Reads the accumulated transform, puts the PRESENTATION back to where the
-    // document says it should be, snaps, and emits gizmoReleased(). The
-    // presentation reset is unconditional and happens here rather than in the
-    // consumer: a bake can be refused, and a viewport still showing the
-    // dragged pose above a document that never changed is the one outcome
-    // this gesture must not be able to produce.
-    void endGizmoDrag();
     void applySelectionMode(const Handle(AIS_Shape)& shape);
     // Pushes the selector tolerance the CURRENT mode wants onto the context -
     // kAutoEdgeTolerancePx (converted to device pixels through this class's
@@ -2365,36 +2276,6 @@ private:
     // emission, so a slot that changes the scene can skip its own viewer
     // update and let that function's redraw carry it - see showPullArrow().
     bool myApplyingCamera = false;
-
-    // The transform gizmo and the live drag on it. myGizmoDelta is the WHOLE
-    // transform from the press, not an increment: AIS_Manipulator recomputes
-    // it from the original pick on every move (Transform() sets the object's
-    // local transformation to `delta * startTrsf`), so the last one it handed
-    // back is the accumulated answer. myGizmoStartPosition is the manipulator's
-    // own frame at the press, and it is the pivot snapTransform() decomposes
-    // about - the rotation and the scale both leave it fixed.
-    Handle(AIS_Manipulator) myManipulator;
-    int myManipulatorSolid = -1;
-    // Which of the two remaining jobs this manipulator is attached for - see
-    // attachManipulator(). Meaningless while myManipulator is null; Rotate
-    // rather than an extra "none" state, because the attach's own idempotence
-    // test reads it beside a null check that already answers that question.
-    ManipulatorRole myManipulatorRole = ManipulatorRole::Rotate;
-    // The size AIS_Manipulator's own AdjustSize derived from the body's
-    // bounding box at the moment of the attach, and the size actually installed
-    // by the last updateManipulatorSize(). The first is the ceiling the clamp
-    // never grows past; the second is the equal-guard, so an orbit that leaves
-    // the zoom alone costs no presentation rebuilds at all. Both are 0 while
-    // nothing is attached.
-    double myManipulatorNaturalSize = 0.0;
-    double myManipulatorAppliedSize = 0.0;
-    // Where the gizmo stands, from the body's own bounding box at the attach.
-    // The clamp needs its DEPTH, and AIS_Manipulator::Position() cannot answer
-    // that during the attach itself - see attachManipulator().
-    gp_Pnt myManipulatorCentre;
-    bool myGizmoDragActive = false;
-    gp_Trsf myGizmoDelta;
-    gp_Ax2 myGizmoStartPosition;
 
     // The Move tool's three arms and the drag along whichever one was grabbed
     // - the SAME AxisDrag every other screen-space handle in this file uses,

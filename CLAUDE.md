@@ -582,9 +582,9 @@ cannot express per-axis, and `GTransform` would convert faces to NURBS).
 
 Three selection-driven gizmos, no new rail buttons. Their visibility predicates are one
 derived function each, driven from `appStateChanged`, and **provably disjoint**:
-`ExtrudePreview` requires a pending face; the pull arrow, the body-transform gizmo (ours
-for Move, `AIS_Manipulator` for Rotate and Scale — see "The split transform gizmo" below)
-and the bevel arrow all require none, plus three different values of `selectionKind()` —
+`ExtrudePreview` requires a pending face; the pull arrow, the body-transform gizmo (all
+three tools ours — see "The custom transform gizmos" below) and the bevel arrow all
+require none, plus three different values of `selectionKind()` —
 Face, Body and Edge respectively. (That last clause read "three different selection modes" until the
 auto-selection spec's Phase 2 deleted the modes; see "Selection" for the re-keyed argument
 and why kind-locked accumulation is what keeps the new foundation solid.) At most one
@@ -596,12 +596,11 @@ app-wide Enter/Escape claim can therefore exist at a time. Gizmo previews go thr
   The distance is the closest-point parameter of the mouse ray against the outward-normal
   line (`CameraController::axisParameterForRay`, headless-tested; a near-parallel ray
   keeps the last value, and a press whose angle refuses still claims the gesture).
-- **Transform**: snapped deltas (10 mm / 15° / 5%) rebuilt about the body's own pivot —
-  naive `TranslationPart()` snapping displaces the pivot. Scale bakes are clamped to
-  [0.05, 20] at the UI; the kernel accepts more. **Move is ours since the custom gizmo's
-  Phase 1** (see below); Rotate and Scale are still `AIS_Manipulator`, and during an
-  additive (Shift) pick it is `Deactivate`d around the `MoveTo`/`SelectDetected` pair, or
-  `AIS_ManipulatorOwner` outranks the shape's owner and the second body cannot be picked.
+- **Transform**: all three tools are OUR OWN 3D gizmos since the custom gizmo's Phase 2
+  (see below) — `AIS_Manipulator` is deleted from the app. Deltas about the body's own
+  pivot (naive `TranslationPart()` snapping displaces the pivot), snapped when Snap to
+  Grid is on (10 mm / 15° / 5%); Scale bakes are clamped to [0.05, 20] at the UI, and
+  scale is uniform by kernel law (`gp_Trsf` has no per-axis form).
 - **Bevels**: the drag axis is the bisector of the adjacent faces' outward normals
   (`ModelingOps::bevelAxis`, 12-edge headless oracle); against the bisector = Fillet,
   along it = Chamfer. On a concave edge the mapping is unchanged but the fillet bulges
@@ -670,155 +669,73 @@ the press outright. The bevel arrow stands on the last edge picked and the next 
 usually right beside it, so the press handler excludes Shift from the arrow branch. Same
 hazard the transform gizmo's `Deactivate` closes, one layer up and by a different mechanism.
 
-#### The split transform gizmo, Phase 1: Move is ours
+#### The custom transform gizmos: three 3D tools, one chip, no AIS_Manipulator
 
-Spec: `docs/superpowers/specs/2026-09-06-custom-gizmo-design.md`. `AIS_Manipulator` has a
-real, measured styling wall (below), so the only route to a gizmo wearing the axis card's
-language is drawing one. The split makes that tractable: **Move**, **Rotate** and **Scale**
-become three single-purpose tools, `Space` cycles them while a body is selected, and one is
-visible at a time. Phase 1 shipped Move; Phase 2 takes the other two and deletes
-`AIS_Manipulator` from the app.
+Spec: `docs/superpowers/specs/2026-09-06-custom-gizmo-design.md`, complete through Phase 2
+plus a user-directed redesign (2026-09-08): the original "exactly like the axis card"
+view-plane drawing shipped, went through four visual feedback rounds (proportions, then
+foreshortening, then cropped rings twice), and was **rejected by the user** in favour of a
+true 3D Unity/Blender-style gizmo. Do not resurrect the card-parity drawing; its lessons
+that still bind (ratio pins beat shared constants, trust the pixel) are recorded where
+they generalize.
 
-- **`src/ui/TransformGizmo.{h,cpp}` is PullArrow's split, one gizmo over.** `GizmoRenderer`
-  is a shared base owning the context, the object list, the pose cache, the display
-  discipline (mode −1, never pickable, `Topmost`) and `reapplyTheme()`; a subclass supplies
-  geometry alone through `buildStrokes()`. `MoveGizmoRenderer` draws **the axis card's own
-  drawing, in the scene** — see the next bullet — sized in SCREEN PIXELS through
-  `worldPerPixel()` and rebuilt on `cameraChanged`, never OCCT's zoom-persistence flags.
-  `MoveTool` is the Qt half: the value chip, the ghost preview and the Escape claim.
-- **The gizmo IS the card's drawing, and the load-bearing half of that is that it is drawn
-  ON THE VIEW PLANE.** Sharing the card's *sizes* is not enough and the user said so
-  ("im not seeing equally"): built as true 3D geometry — an arm along the world axis, a cone
-  of revolution at its end — perspective foreshortens an arm pointing at the eye into a stub
-  while drawing its cone **oversized**, because the cone is nearer. The card has neither
-  problem, because the card is a flat projection. So `AxisCard::computeTips()` is now **THE**
-  projection, shared rather than reimplemented (`AxisGizmo::computeTips()` is a thin wrapper
-  that adds the card's own pixels and screen-y-runs-down), and `MoveGizmoRenderer` lays every
-  vertex out in the plane through the pivot spanned by the camera's `right` and `up` — cone,
-  ball, hub and letters at constant screen size, arms at `kArmPx × the tip's own projected
-  magnitude`. That plane is perpendicular to the view direction, so every vertex is at ONE
-  depth, and a pinhole projection maps a plane at one depth to the screen with a single
-  uniform scale: the two drawings are the same drawing at two scales at **every** camera
-  angle. Two consequences worth knowing: `GizmoPose` carries `right`/`up` as well as `view`
-  and all three are in the rebuild cache key (a **roll** about the view direction moves every
-  arm while leaving `view` untouched — the case a Top-view orbit reaches); and a coplanar
-  drawing has no draw order, so each tip is nudged along the view direction in proportion to
-  its own depth and the hub a step in front of all of them, which is the card's painter's
-  algorithm expressed as the thing a depth buffer obeys. The nudge is a fiftieth of an arm
-  against a camera distance of hundreds, so it costs the projection under half a per cent.
-  **The drag is untouched by any of it**: an arm still drags along its TRUE world axis
-  (`armAxis()`), and only the hit band follows the drawn screen segment —
-  `MoveGizmoRenderer::handleTip()`/`handleGrabStart()` return the DRAWN points, and
-  `handleDrawn()` is false for a handle whose tip falls inside the hub, without which an axis
-  pointing at the eye collapses all six onto the hub and every one of them claims a press
-  on it.
-- **The proportions are pinned by measurement rather than by shared constants.** The card's
-  numbers live in `namespace AxisCard` (`src/ui/AxisGizmo.h`) and
-  both drawings read them, so neither can disagree about what they *are*; `kCardScale`
-  (`kArmPixels / AxisCard::kArmPx`) is the one choice the scene makes and every other size
-  is a card number times it. Element for element: three thin arms at the card's
-  stroke-to-arm ratio, filled cone tips at its cone proportions, **hollow balls on the three
-  negative directions**, the neutral filled hub, and the small lowercase `x`/`y`/`z` past
-  each cone in `AxisCard::letterFont()`'s face — through `DimensionRenderer::fontFamily()`,
-  which is public precisely so one registration of the app's DM Sans serves both in-scene
-  labels. But shared constants say nothing about how each drawing *uses* them, and every
-  real divergence lived exactly there, so `gui_smoke`'s ratio pin renders the card
-  (`renderExact`), dumps the scene, and compares five element-to-arm ratios read off the two
-  RENDERINGS at 5%. **Ratios alone are blind to LAYOUT** — they passed with flying colours
-  while the gizmo was still 3D — so the same block also asserts POSITIONAL parity at an
-  oblique *perspective* camera: all six tips pointing the same way on both drawings (worst
-  0.56°), every tip at one shared scale, tip-to-opposite-tip at one scale to within 2%
-  (measured 0.9%, and that spelling is twice the span for the same whole-logical-pixel
-  `projectToScreen` uncertainty, which is why the per-tip bound is looser than the diameter
-  one), each of those tips being real ink in **both** renderings, and — the non-vacuity that
-  makes the rest mean anything — the six foreshortenings genuinely differing, which no 3D
-  drawing can satisfy. Four things the ratio pin taught, each of which had been wrong:
-  - **The stroke scales with the arm.** A 2.0 px line was carried over verbatim at first;
-    at 2.5× the arm that is a different drawing, not the same one further away.
-  - **`show()` needs the DEVICE PIXEL RATIO as well as `worldPerPixel()`.** The latter
-    divides by the widget's LOGICAL height, while a line's width and a label's height are
-    counted by OCCT in DEVICE pixels — so without the ratio a 150% display draws the
-    geometry half again as big and the strokes and letters exactly as before.
-  - **Ink is not path.** The card FILLS its cone and its hub with no pen, and nothing in
-    this build fills anything, so both are stroked line-art whose ink runs half a line width
-    past its path. Both are inset by that half width; the ball is NOT, because the card
-    strokes its ball too.
-  - **"Hub on top of everything" is a draw-ORDER statement, and a depth buffer is what says
-    it here.** Before the view-plane rework the arms cut the disc and it measured 6% under
-    the card's; the depth-sort nudge above is what restores it, and the shafts start at the
-    pivot exactly as the card's do.
-  The one element that is **not** reproducible: `AxisCard::letterFont()` is bold, Qt
-  synthesizes that weight for a family shipping only a regular face, and OCCT does not —
-  `Font_FTFontParams` carries `ToSynthesizeItalic` and has no bold counterpart, so
-  `Font_FontAspect_Bold` renders the regular face. The letters are the card's letters at the
-  card's size and a hair lighter: measured, that is an identical ink HEIGHT (−2.3%) and a
-  9.5% narrower glyph. Pinned separately at 12% so the gap is bounded rather than folded
-  into the others and forgotten.
-- **The gizmo has a Z-LAYER OF ITS OWN, cleared of depth and IMMEDIATE.** A handle stands at
-  its body's bounding-box centre, so the body's own surface is nearer than every stroke of
-  it, and a handle you can see through the thing it is attached to is not a handle — this is
-  the one place the app wants exactly the property CLAUDE.md's grid section rejects for the
-  GRID. `Graphic3d_ZLayerId_Topmost` clears depth too and is where this used to live, but it
-  is **shared**: OCCT puts dynamically highlighted presentations there, this file puts
-  `AIS_Manipulator` there, and whatever joins arrives *inside* the layer after its one depth
-  clear, at its own true depth, cropping everything drawn behind it — the user's report was
-  arcs missing from the hollow rings where a body's surface was nearer, which is that shape
-  of failure. A layer of our own removes the question rather than reasoning about who else is
-  in the room. Depth **testing** stays on within it, because the drawing is coplanar and
-  carries its own painter's order as depth nudges. `MoveGizmoRenderer` falls back to Topmost
-  if the viewer ever refuses the layer.
-- **The negative balls are grab targets, like the cones.** `moveGizmoAxisAt()` tests six
-  handles and reports which END through an out parameter; a ball drag is measured against
-  the SAME infinite world line (`armAxis()` is direction-agnostic on purpose) and simply
-  comes out with the other sign, so it adds no drag maths at all. The value chip stands at
-  the handle actually being held (`moveGizmoHandleTip`, `moveDragPositive`), not always at
-  the cone. A control the user can see and cannot grab is a control that lies about itself.
-- **Cones are drawn as their own silhouette** (a base ring plus generatrices), because
-  `Graphic3d_ArrayOfTriangles` draws nothing at all in this build — the finding
-  `DimensionRenderer` and `SketchPointMarker` already paid for twice. Lines also keep the
-  colours EXACT, which is what lets `gui_smoke` count Dump pixels against the three tokens
-  rather than against something approximately like them.
-- **This gizmo needs none of the manipulator's workaround pile, structurally.** Its AIS
-  objects have no `ComputeSelection`, so they never enter the pick pipeline: no
-  `Deactivate`-around-picks, no owner-priority hazard. `OcctViewWidget::moveGizmoAxisAt()`
-  is a 14 px screen-space test (`kHandleGrabPx`, shared with `arrowHit()` through
-  `segmentPixelDistance()`) that takes a press outright, before the picker runs. The
-  NEAREST handle wins, and the inner third of every arm is a dead zone — all six meet at the
-  hub, where "nearest" would otherwise be decided by sub-pixel noise. The drag is
-  `AxisDrag` + `CameraController::axisParameterForRay`, the pull arrow's own maths; the
-  release is swallowed; Shift and Ctrl are excluded from the grab for the bevel arrow's and
-  the pull arrow's own reasons.
-- **A consequence worth having: the selector's tolerance stand-down is now the
-  manipulator's alone.** `applySelectionTolerance()` drops Auto's 8-logical-pixel edge
-  tolerance only while a manipulator is attached, because the tolerance inflates every
-  REGISTERED entity's sensitivity and merged the manipulator's parts. Our arms register
-  nothing, so on the Move tool — where the headline gesture leaves the user — the full edge
-  reach stays. Pinned in both directions.
-- **The pivot is `ModelingOps::boundingBoxCentre()`**, in the Qt-free library and
-  headless-tested, precisely because there are two callers that must agree exactly: our
-  gizmo and `AIS_Manipulator::OptionsForAttach::AdjustPosition`. Space swaps one for the
-  other on the same body, and a handle that jumped a few millimetres would be reporting a
-  difference that does not exist. It is NOT the centre of mass — a carved body's mass centre
-  can leave its own material.
-- **Escape is a drag-scoped claim.** `MoveTool`'s chip is visible exactly while a drag has
-  produced a distance, and the application-wide filter lives exactly as long as the chip —
-  narrower than `PullArrow`'s, and disjoint from every other claim by construction (this
-  needs one whole body selected; the pull arrow needs a face, the bevel arrow edges,
-  `ExtrudePreview` a pending outline). Cancelling swallows the trailing release too:
-  the button is still down, and that release would otherwise re-pick and retire the gizmo.
-- **Commit is `MainWindow::transformBody()`, unchanged.** Zero new commit logic — the
-  checkpoint, the toast with Undo, the mirror twin and the linked-copy propagation are the
-  path the manipulator has always used, and `gui_smoke` pins one wiring check on each.
-- **The seam is `MainWindow::BodyTool` + `OcctViewWidget::ManipulatorRole`.**
-  `moveToolBodyId()` is `transformableBodyId()` plus "the tool is Move" — one predicate read
-  by `MoveTool`, by `refreshTransformGizmo()` and by the status label. On Rotate or Scale
-  the manipulator is attached for that ONE role: its translation arms and plane handles are
-  `SetPart`-hidden **and** their manipulation modes are never enabled, because OCCT's header
-  is explicit that hiding a part does not manage its selection mode. `Next Tool` (Space) is
-  a real `QAction` — menu-only, no rail chip (the rail-floor rule) — so the generated
-  ShortcutSheet carries it and `updateActions()` owns its enabled state. Arm length is the
-  one number chosen by eye; the spec parks sizes, grab tolerances and chip placement for
-  Phase 3's feel-test.
+- **The design: unlit 3D solids along the world axes.** `MoveGizmoRenderer` is three
+  arrows (cylinder shaft + cone of revolution, `BRepPrimAPI`) with a neutral pivot sphere;
+  `RotateGizmoRenderer` is three tori; `ScaleGizmoRenderer` is cube-tipped arms plus the
+  sphere. Everything draws UNLIT (`Graphic3d_TypeOfShadingModel_Unlit` per aspect) in the
+  exact `Theme::gizmoAxisX/Y/Z` tokens — a rendered pixel IS the token, which is what the
+  suite's colour counts stand on — with `SetFaceBoundaryDraw(false)` and meshed by
+  `BRepMesh_IncrementalMesh` before display (an untessellated face draws nothing).
+  Perspective foreshortens the arms naturally; a sphere is a perfect circle from every
+  angle, so the flat-ring crop defect cannot exist by construction.
+- **Sized in screen pixels at its own depth.** `kArmPixels` (92) × `Theme::gizmoScale()`
+  (a persisted Appearance token, "Gizmo size", 0.5–2×) × `worldPerPixelAt(pivot)` —
+  `worldPerPixel()` answers at the camera TARGET's depth, a gizmo stands at the body's
+  pivot, and in perspective the difference made its screen size drift with every zoom
+  until the depth ratio joined. `GizmoRenderer::viewDependent()` is false for all three:
+  the drawing depends on the pivot and the zoom only, so an orbit at constant distance
+  rebuilds nothing at all.
+- **Hover is ours, and so is the cursor.** The handles have no `ComputeSelection`, so
+  OCCT's hover pipeline cannot see them; `updateBodyGizmoHover()` runs the screen-space
+  hit tests on the ordinary hover path, pushes the hovered axis into the showing renderer
+  (which redraws that handle at `.lighter(155)` — still unlit, still exact), and derives
+  the `PointingHandCursor` from the same answer. A live drag keeps the highlight the
+  press set.
+- **Drag maths, one rule per tool, all frozen at the press.** Move measures against
+  `myMoveDragLine`, the world axis line captured at the press — never the renderer's live
+  `armAxis()`, because the Move gizmo TRAVELS with its drag (standing where the body will
+  land, same offset as the ghost) and a live line's origin would carry the very offset
+  being measured. Rotate intersects the cursor ray with the grabbed ring's own plane and
+  takes the signed angle from the press vector about the frozen axis (15° snap); Rotate
+  and Scale gizmos stay put, their pivot being the fixed point of the edit. Scale is the
+  Move maths read out as a factor of the arm's press length (5% snap, clamped to the
+  Milestone 2 band in `dragTransform()` and at the viewport alike). Hit tests:
+  `moveGizmoAxisAt()`/`scaleGizmoAxisAt()` (nearest handle, dead inner third),
+  `rotateGizmoAxisAt()` (the drawn torus sampled as a screen polyline), all through
+  `segmentPixelDistance()` at the shared 14 px `kHandleGrabPx`.
+- **One chip serves all three.** `MoveTool` (name kept — the suite and MainWindow address
+  it) reads `MainWindow::bodyTool()`, shows the active tool's renderer (each `show*Gizmo()`
+  clears its two siblings — the missing clear in `showMoveGizmo()` was the user-caught
+  fourth-Space bug), previews through `dragTransform()` — ONE derivation for ghost and
+  commit — and commits through `MainWindow::transformBody()` unchanged. Escape cancels via
+  `cancelBodyGizmoDrag()`; every release is swallowed. `moveToolBodyId()` is
+  `transformableBodyId()` whole — the "and the tool is Move" term died with the
+  manipulator.
+- **`AIS_Manipulator` is DELETED** (Phase 2 cleanup, 2026-09-08): the attach/detach/size
+  machinery, the drag branches, the Deactivate-around-picks shields, the double-click
+  `GizmoPickShield` and the `gizmoReleased` signal are gone from
+  `OcctViewWidget`/`MainWindow`, and the selector tolerance stand-down went with them —
+  `applySelectionTolerance()` keeps Auto's raised tolerance up unconditionally now, since
+  our handles register nothing it could blur, and the suite pins that the edge's full
+  reach survives a gizmo. Tombstones at the old API sites; the measured findings
+  (zoom-persistence default, the styling wall) stay in Pitfalls as history.
+- **The suite's gizmo blocks were rewritten with the deletion** —
+  `rotate-and-scale-are-ours-rings-cubes-and-drags` (ring and cube drags end to end),
+  `the-3d-gizmos-unlit-tokens-hover-and-handles` (hover brighten + cursor, dead negative
+  handles, ink at fifteen tool×camera combinations), and the size block now pins ONE
+  screen size at every zoom plus the `gizmoScale` token. `kCheckFloor` was LOWERED
+  deliberately to 3100 with the deletions and must be re-ratcheted on the next official
+  run.
 
 **`Theme` is spec-backed** since the Appearance panel: every colour accessor and the four
 derived fonts (badge = base−2, label = base−1, body = base, title = base+3 pt) read
@@ -834,22 +751,16 @@ because a colour-wheel drag fires per mouse-move. The picker opens with `show()`
 nothing in this app blocks. The OCCT body/preview materials are the remaining untokenised
 colours, by scope ruling.
 
-**The transform gizmo's colour is a real, total API wall; its proportions are not, and
-measuring the difference cost a revert.** Milestone 3 tried to carry `gizmoAxisX/Y/Z` onto
-`AIS_Manipulator` too, and read `AIS_Manipulator.hxx` end to end rather than trusting the
-brief's "as far as the API allows": no setter reaches `Axis::myColor` at any access level, so
-colour stops at the 2D `AxisGizmo` card by construction, not by choice. Proportions looked
-reachable — `protected Axis myAxes[3]` plus public `Axis::SetAxisRadius()` — so a
-`SlimAxisManipulator` subclass was built and then *measured* against real `Dump` pixels,
-three independent methodologies, several scale factors, at a point OCCT's own hover
-detection confirmed was on the arm: the cross-section **grew** as the radius shrank (34 px
-stock → 80 px at an extreme 0.02 scale, monotonic, not noise) — most likely the thinning
-shaft revealing the rotation ring/hub cluster underneath, which shares the same material.
-Reverted rather than shipped; the manipulator wears stock hues and stock proportions,
-unchanged, and the finding lives as a comment at the read site in `OcctViewWidget.cpp`. The
-zoom-persistence lesson generalizes: **trust the pixel over the setter's name** — a setter
-that compiles and a header that looks reachable are not evidence a control is doing what its
-name says.
+**HISTORICAL: the AIS_Manipulator styling wall** (the class is deleted since the custom
+gizmo's Phase 2, and the wall is WHY the custom gizmo exists). Milestone 3 tried to carry
+`gizmoAxisX/Y/Z` onto `AIS_Manipulator` and read its header end to end: no setter reaches
+`Axis::myColor` at any access level, and a `SlimAxisManipulator` subclass that reached the
+proportions measured the rendered cross-section **growing** as the radius shrank (34 px
+stock → 80 px at 0.02 scale, monotonic — the thinning shaft revealing same-material parts
+underneath). Reverted rather than shipped. The lesson that outlives the class: **trust the
+pixel over the setter's name** — a setter that compiles and a header that looks reachable
+are not evidence a control is doing what its name says. The 3D gizmos wear the exact
+tokens unlit, which is what finally closed the ask.
 
 ### Dimensions, planes and units
 
@@ -1645,8 +1556,7 @@ calls `Redraw()`. `resizeGL()` resizes the neutral window and calls `MustBeResiz
 on screen".** OCCT no longer owns the surface, so it does not get to decide when a frame is
 presented — `update()` does. The exceptions are the paths that need pixels *before they
 return* (`saveSnapshot`, the render-mode tier probe and every measuring probe,
-`awaitPathTracingConvergence`, `redrawRenderModeLive`, and the manipulator attach's
-documented on-screen-first ordering): those open a `GlScope`, which makes the context
+`awaitPathTracingConvergence`, `redrawRenderModeLive`): those open a `GlScope`, which makes the context
 current, keeps the framebuffer wrapper in step, and asks for a composite on the way out. It
 is nesting-safe, so a probe calling a probe cannot have the context pulled from under it.
 
@@ -1861,7 +1771,7 @@ menu entries and their glyphs are DELETED**, and `Solid`/`Face`/`Edge` survive a
 driving the real hover path would add nothing (each use justified in place); a check whose
 SUBJECT is selection or a gizmo drives the real path — `pickFaceOf()`, `pickEdgeOf()` and
 `pickBodyOf()` are the three helpers that do it, and they clear the selection first, because
-a live arrow or manipulator takes a press outright before the picker ever runs.
+a live arrow or gizmo handle takes a press outright before the picker ever runs.
 
 **Two OCCT facts the arbitration cost a measurement each.** Raising the tolerance is not
 enough on its own: `AIS_InteractiveContext::SetPixelTolerance` sets a CUSTOM tolerance that
@@ -1894,30 +1804,16 @@ keeps the **nearest on screen**, with a strict comparison so ties still fall to 
 which is the case that matters for one edge hidden directly behind another, where both
 project to the same pixel and the nearer one is still taken.
 
-**The custom tolerance stands down while the transform gizmo is attached, and that is a
-measurement too.** OCCT's custom tolerance belongs to the SELECTOR, not to a presentation,
-and is added to *every* registered entity's sensitivity — `AIS_Manipulator`'s parts included.
-Its arms, translation-plane quadrants, rotation rings and scale cubes sit within a few tens
-of pixels of one another by construction, so inflating all of them by 12 device pixels merges
-them: hovering out along the Z arm armed the rotation ring about Y at every step, and walking
-out along X found the translation plane and then the ring, never the arrow and never the
-cube. `applySelectionTolerance()` therefore uses the classic default whenever `myManipulator`
-is non-null — which is *narrower* than "a whole body is selected": `attachManipulator()` also
-requires exactly one body, no sketch, no pending outline, no render mode and no live mirror
-placement, so two selected bodies keep the full tolerance. It is applied from
-`initializeViewer()` and from `attachManipulator()`/`detachManipulator()`, and re-derived by
-`resizeGL()`. **The cost is a measured number, not a shrug:** `gui_smoke` sweeps
-the cursor out from a real edge one logical pixel at a time in **both** states and prints both
-tables — cleared, the edge holds the hover to **7 px** and the face takes it at 8; with the
-gizmo up it holds to **2 px** and the face takes it at 3, which is what Phase 1's own 0.75×
-candidate radius predicts once the custom tolerance is gone. So while the transform gizmo is
-up an edge has to be hovered very nearly dead-on, and that is the state the headline gesture
-(double-click a body) leaves the user in most of the time. The stand-down sweep carries the
-gizmo on a SECOND body deliberately: selecting the edge's own body puts the manipulator over
-the sweep line and every pixel answers `Body`, which says a great deal about the gizmo's reach
-and nothing about the tolerance. The 8 px promise is a ceiling, not
-a floor, and "the highlight is the contract" holds either way, because hover and click still
-arbitrate identically.
+**HISTORICAL: the custom tolerance used to stand down while `AIS_Manipulator` was
+attached** — OCCT's custom tolerance belongs to the SELECTOR and is added to every
+registered entity's sensitivity, and it merged the manipulator's tightly-packed parts
+(hovering out along the Z arm armed the rotation ring about Y at every step). Measured cost:
+the edge's hover reach fell from 7 px to 2 px with a gizmo up. **The stand-down died with
+the manipulator** (custom gizmo Phase 2): our handles have no `ComputeSelection`, register
+nothing the tolerance could blur, and `applySelectionTolerance()` keeps Auto's raised
+tolerance up unconditionally — the full 8 px edge reach now survives a gizmo on every tool,
+which was the consequence the custom gizmo was built to buy, and the suite's sweep pins the
+reach as EQUAL with the rings up rather than shorter.
 
 **A refusal a double-click makes moot is WITHDRAWN, not left standing.** Qt delivers a
 double-click as press/release/DblClick/release, so a Shift+double-click's own FIRST release
@@ -1978,12 +1874,12 @@ inference is gone.
   and take the whole body out from under the arrow, which is the precise harm the exemption's
   own comment names. Ctrl means "lock this face" and nothing else; if the detection is not a
   face it means nothing at all, so it keeps the pre-phase guard in auto as in the seam modes.
-- **A Shift+double-click over a gizmo arm must still add the body underneath.**
-  `AIS_ManipulatorOwner` outranks a shape's owner, so the double-click returned on
-  `detectedIsManipulator()` and added nothing. `mouseDoubleClickEvent()` now `Deactivate()`s
-  the manipulator around its own `MoveTo`, restoring it on every exit through a local scope
-  guard — the same shield `mouseReleaseEvent()` already carried for the Shift-CLICK, one
-  gesture over.
+- **A Shift+double-click over a gizmo arm must still add the body underneath.** In the
+  manipulator era `AIS_ManipulatorOwner` outranked a shape's owner and the double-click
+  added nothing, so both `mouseDoubleClickEvent()` and the additive release carried a
+  `Deactivate`-around-`MoveTo` shield. The hazard AND the shields died with the
+  manipulator (Phase 2 cleanup): the custom gizmos' handles never enter the pick
+  pipeline, so the double-click reaches the body under an arm with no dance at all.
 
 **What is NOT closed, and is ruled rather than overlooked: a live arrow owns a band of pixels
 around what it stands on.** `arrowHit()` is a 14 px screen-space test that takes a press
@@ -2114,11 +2010,12 @@ document-only predicate.
   before `<windows.h>` where possible.
 - **Tessellate before display or STL export:** `BRepMesh_IncrementalMesh(shape, 0.1)`.
   Without it, curved faces render faceted or not at all.
-- **`AIS_Manipulator` is constructed with zoom persistence ON in OCCT 8.0** — undocumented
-  beside `AdjustSize`'s documented default. Its drawn size never follows the camera, so any
-  camera-derived sizing writes numbers that never reach a pixel, and a probe that reads
-  `Size()` back is a self-oracle that stays green. `SetZoomPersistence(false)` before
-  `Attach`, and measure gizmo pixels in a `Dump`, never the setter's own data.
+- **HISTORICAL: `AIS_Manipulator` is constructed with zoom persistence ON in OCCT 8.0** —
+  undocumented beside `AdjustSize`'s documented default; its drawn size never followed the
+  camera, so camera-derived sizing wrote numbers that never reached a pixel and a probe
+  reading `Size()` back was a self-oracle. The class is deleted from this app (custom
+  gizmo Phase 2), but the rule it taught is permanent: **measure gizmo pixels in a
+  `Dump`, never the setter's own data.**
 - **`near` and `far` are Windows SDK macros defined to nothing.** A parameter named `near`
   silently becomes unnamed, `near + QPoint(...)` becomes unary plus, and the code compiles
   clean while reading the wrong corner. Do not name anything `near` or `far`.
@@ -2208,8 +2105,9 @@ document-only predicate.
   `(194,191,186)` path-traces to `(227,225,222)`, which draws a horizon line across the top
   of every shot. `kPathTracingBackdropGain` is the measured pre-scale that lands it back on
   the token, kept as a *fraction* of the token so an Appearance edit still moves it.
-- **`AIS_Manipulator` styling has a real API wall for colour and a separate, only
-  pixel-measurable one for proportions (OCCT 8.0.1).** No setter reaches a per-axis colour at
+- **HISTORICAL: `AIS_Manipulator` styling has a real API wall for colour and a separate,
+  only pixel-measurable one for proportions (OCCT 8.0.1)** — the class is deleted from
+  this app, kept because the finding is about OCCT.** No setter reaches a per-axis colour at
   any access level — `Axis::myColor` has none — so restyling the 3D transform gizmo to match
   a token stops there, structurally. Proportions look reachable (`protected Axis myAxes[3]`
   plus public `Axis::SetAxisRadius()`), but a measured `Dump` probe of a subclass that used

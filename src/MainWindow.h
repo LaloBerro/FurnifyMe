@@ -139,10 +139,9 @@ public:
     bool canTransformSelectedBody() const { return transformableBodyId() > 0; }
 
     // WHICH handle that one body wears. Space cycles it, the status label
-    // names it, and it is the whole of the custom gizmo's Phase 1 seam:
-    // Move is ours (src/ui/TransformGizmo.h), Rotate and Scale are still
-    // OCCT's AIS_Manipulator with its translation parts hidden. Phase 2
-    // replaces the other two and the seam goes with them.
+    // names it, and since the custom gizmo's Phase 2 all three tools are
+    // ours (src/ui/TransformGizmo.h) - MoveTool raises the active tool's
+    // renderer and AIS_Manipulator is deleted.
     //
     // Session state, not document state - it rides in no checkpoint and no
     // manifest, the same rule the selection itself follows. It is STICKY
@@ -157,11 +156,10 @@ public:
     // Space action's tooltip alike.
     static QString bodyToolName(BodyTool tool);
 
-    // THE Move gizmo's predicate: the body its arms should stand on, or 0.
-    // transformableBodyId() plus "and the active tool is Move" - one function,
-    // read by MoveTool::refresh(), by refreshTransformGizmo() and by the
-    // status label, so the arms, the manipulator and the teaching text cannot
-    // disagree about which of the two is up.
+    // THE body gizmo's predicate: the body the active tool's handles should
+    // stand on, or 0. transformableBodyId() whole since Phase 2 - one
+    // function, read by MoveTool::refresh() and the status label, so the
+    // handles and the teaching text cannot disagree.
     int moveToolBodyId() const;
 
     // Bakes `delta` into body `id` through ModelingOps::transformShape and
@@ -404,9 +402,8 @@ public:
     // linked source may be duplicated (the copy is born outside the group).
     // Offsets the copy by the same one visible grid step Duplicate linked
     // uses, and selects the copy - which is a WHOLE-BODY selection, so
-    // refreshTransformGizmo() attaches the transform gizmo to it exactly as
-    // it does for the linked gesture, the same machinery an ordinary click
-    // already drives.
+    // MoveTool::refresh() stands the transform gizmo on it, the same
+    // machinery an ordinary click already drives.
     //
     // Under live mirroring the copy still follows the ORDINARY new-body
     // creation rule (the same one onExtrude() applies to a freshly extruded
@@ -442,8 +439,8 @@ public:
     // of its existing group (DocumentModel::createLinkedCopy()'s own rule).
     // Offsets the copy by one visible grid step so it never lands exactly on
     // its source, and selects the copy - which is a WHOLE-BODY selection, so
-    // refreshTransformGizmo() (an appStateChanged slot) is what attaches the
-    // transform gizmo to it, the same machinery an ordinary click already
+    // MoveTool::refresh() (an appStateChanged slot) is what stands the
+    // transform gizmo on it, the same machinery an ordinary click already
     // drives, nothing new. One checkpoint (createLinkedCopy() takes it
     // itself - see its own header comment), one Note toast with Undo naming
     // the group's new size.
@@ -896,7 +893,6 @@ private slots:
     // away - and a cancel takes no checkpoint and says nothing. The viewport
     // has already put its presentation back by the time this runs (see
     // OcctViewWidget::endGizmoDrag), so there is nothing to undo here either.
-    void onGizmoReleased(int solidId, const gp_Trsf& delta);
     // Space: Move -> Rotate -> Scale -> Move. Enabled only while a body is
     // actually wearing a handle, because a key that cycles a tool nothing is
     // showing has silently changed state the user cannot see.
@@ -979,10 +975,6 @@ private:
     // Shows or hides the transform gizmo from transformableBodyId(). A slot on
     // appStateChanged, and the ONE thing that attaches or detaches it - a
     // gizmo raised on a click and dismissed on some other click would be two
-    // rules that drift, which is PullArrow's rule one gizmo over. Reads state
-    // and moves AIS objects only, so it cannot recurse back into
-    // updateActions().
-    void refreshTransformGizmo();
     // Holds the edge-length annotation back for as long as the bevel arrow is
     // up, and lets it come back when the arrow goes. A slot on
     // appStateChanged, derived from the SAME predicate that raises the arrow -
@@ -1081,9 +1073,9 @@ private:
     // moves those heights. See its definition for the measurement.
     void syncChromeHeights();
     // The two halves transformOperationName()/transformPastVerb() agree on.
-    // Scale is asked first: AIS_Manipulator leaves the rotation part identity
-    // during a scale, and a gesture that somehow carried both is a scale the
-    // user is watching happen.
+    // Scale is asked first; a gp_Trsf carries at most one of the two the way
+    // the chip builds them, and a gesture that somehow carried both is a
+    // scale the user is watching happen.
     static bool transformIsScale(const gp_Trsf& delta);
     static bool transformIsRotation(const gp_Trsf& delta);
     void runBoolean(int kind);   // ModelingOps::BooleanKind as int, to keep it out of the header
