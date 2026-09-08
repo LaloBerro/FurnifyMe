@@ -251,16 +251,16 @@ void GizmoRenderer::addStrokes(const std::vector<Stroke>& strokes, const QColor&
     object->colour = toOcct(colour);
     object->width = widthPx;
     myContext->Display(object, 0, -1, Standard_False);   // mode -1: feedback only
-    // Drawn over everything. A move gizmo stands at its body's own bounding-box
-    // centre, which is INSIDE the body - in the default layer it would be
-    // depth-tested away and invisible, which is the same argument
-    // attachManipulator() makes for putting the manipulator here. CLAUDE.md
-    // rejects this layer for the ground GRID and that ruling stands: the layer
-    // clears depth, so a grid on it would paint over every body standing on it.
-    // Here painting over the body IS the requirement, and depth still applies
-    // WITHIN the layer, so the three arms occlude each other correctly.
-    myContext->SetZLayer(object, Graphic3d_ZLayerId_Topmost);
+    myContext->SetZLayer(object, drawLayer());
     myObjects.push_back(object);
+}
+
+Graphic3d_ZLayerId GizmoRenderer::drawLayer() const
+{
+    // The gizmo's own layer when the viewer gave us one, and Topmost when it
+    // did not - which is where this used to live and is still right in every
+    // way except that it is shared. See setZLayer()'s own comment.
+    return myLayer != Graphic3d_ZLayerId_UNKNOWN ? myLayer : Graphic3d_ZLayerId_Topmost;
 }
 
 void GizmoRenderer::addLabel(const QString& text, const gp_Pnt& at, const QColor& colour,
@@ -288,7 +288,7 @@ void GizmoRenderer::addLabel(const QString& text, const gp_Pnt& at, const QColor
     // tip, and the card paints no such box.
     label->SetDisplayType(Aspect_TODT_NORMAL);
     myContext->Display(label, 0, -1, Standard_False);   // mode -1: feedback only
-    myContext->SetZLayer(label, Graphic3d_ZLayerId_Topmost);
+    myContext->SetZLayer(label, drawLayer());
     myObjects.push_back(label);
 }
 

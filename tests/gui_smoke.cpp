@@ -615,7 +615,26 @@ void skipByEnvironment(int checks, const QString& why)
 // pointing the same way, every tip at one scale, tip-to-opposite-tip at one
 // scale to two per cent, and every one of those tips being real ink in both
 // renderings
-constexpr int kCheckFloor = 3490;
+//
+// The same block's THIRD round - the gizmo moved out of the shared Topmost
+// layer into one of its own, after the user's cropped rings - raises it
+// 3490 -> 3514, matched against a real full run. +24, all of it the
+// drawn-whole section at the end of that block:
+//
+//   +5  the layer itself: it exists, it is shared with nothing, it clears
+//       depth, it keeps depth testing WITHIN it, and it is IMMEDIATE - the
+//       one an A/B had to find, since a non-immediate layer that clears depth
+//       clears the shadow map with it
+//   +4  the two dumps and the two states they are taken in - the body filling
+//       the viewport, and the cursor genuinely hovering it (the state that
+//       puts OCCT's own highlight in the layer the gizmo used to share)
+//  +12  four assertions on each of the three axes: the ball whole with nothing
+//       behind it, the ball STILL whole with the body in front, the shaft
+//       unbroken either way, and the letter drawing the same ink either way
+//   +3  the walk all the way round with the body still filling the view: the
+//       sweep measured handles rather than skipping them, every ring whole at
+//       every look, every shaft unbroken with it
+constexpr int kCheckFloor = 3514;
 
 void check(bool condition, const QString& what)
 {
@@ -27383,6 +27402,362 @@ int main(int argc, char* argv[])
                   QStringLiteral("and each of those tips is real ink in BOTH renderings, not "
                                  "only a projected point (%1/%2 card, %3/%2 scene)")
                       .arg(inkedCard).arg(inkProbes).arg(inkedScene));
+        }
+
+        // --- the drawing is WHOLE over a body, not clipped by it -------------
+        //
+        // The gizmo stands at a body's BOUNDING-BOX CENTRE, which is inside the
+        // body, and it is drawn on the view plane through that point - so the
+        // body's own front surface is nearer than every stroke of it. The user
+        // caught what that costs in a depth-tested layer: the hollow rings came
+        // back as ARCS, cropped wherever the surface in front of them won.
+        //
+        // Measured rather than eyeballed, and measured the one way that cannot
+        // be argued with: the SAME probe at two cameras, one with the body
+        // filling the viewport under the gizmo and one with it a few pixels
+        // across and nowhere near it. A drawing that does not care about the
+        // geometry behind it reads identically at both.
+        {
+            // Ink by colour distance rather than by coverage against a named
+            // background: this probe runs over the body as well as over the
+            // empty viewport, and "which ground is behind this pixel" is
+            // exactly what it must not need to know. The tokens are saturated
+            // and the aliased GL lines come back exact, so a plain distance is
+            // both sufficient and background-free.
+            auto isAxisInk = [](const QColor& p, const QColor& base) {
+                const QColor light = base.lighter(AxisCard::kLetterLighten);
+                // NOT called `near` - that is a Windows SDK macro defined to
+                // nothing, and CLAUDE.md's pitfall list has the scar.
+                const auto matches = [&p](const QColor& f) {
+                    const double dr = p.red() - f.red();
+                    const double dg = p.green() - f.green();
+                    const double db = p.blue() - f.blue();
+                    return dr * dr + dg * dg + db * db <= 60.0 * 60.0;
+                };
+                return matches(base) || matches(light);
+            };
+
+            struct Whole {
+                double ring[3] = {0.0, 0.0, 0.0};    // fraction of the circumference inked
+                double arm[3] = {0.0, 0.0, 0.0};     // fraction of the shaft inked
+                int letter[3] = {0, 0, 0};           // ink pixels around each letter
+                // A handle whose tip falls inside the hub is CORRECTLY absent,
+                // not cropped - the card covers its own the same way. Told
+                // apart here rather than measured as a gap, or a Front view
+                // would report the Y ring at 0% and be right about the pixels
+                // and wrong about the drawing.
+                bool ringDrawn[3] = {false, false, false};
+                bool armDrawn[3] = {false, false, false};
+                bool ok = false;
+            };
+
+            auto probeWhole = [&](const QString& path) -> Whole {
+                Whole out;
+                if (!rv->saveSnapshot(path)) return out;
+                const QImage dump(path);
+                if (dump.isNull()) return out;
+                const double toDump =
+                    double(dump.width()) / double(std::max(1, rv->width()));
+                QPoint hubAt;
+                if (!rv->projectToScreen(rv->moveGizmoPivot(), hubAt)) return out;
+                const QPointF hub(hubAt.x() * toDump, hubAt.y() * toDump);
+
+                for (int axis = 0; axis < 3; ++axis) {
+                    const QColor token = axis == 0   ? Theme::gizmoAxisX()
+                                         : axis == 1 ? Theme::gizmoAxisY()
+                                                     : Theme::gizmoAxisZ();
+                    auto inkAt = [&](const QPointF& at) {
+                        const int x = int(std::lround(at.x()));
+                        const int y = int(std::lround(at.y()));
+                        if (x < 0 || y < 0 || x >= dump.width() || y >= dump.height())
+                            return false;
+                        return isAxisInk(dump.pixelColor(x, y), token);
+                    };
+
+                    // --- the hollow ball, all the way round -----------------
+                    //
+                    // The radius is READ, not assumed: at each of 72 angles the
+                    // scan comes in from outside and records where it first
+                    // meets ink, and the ring's radius is the median of those.
+                    // An angle whose reading is off that median by more than a
+                    // couple of pixels is a gap - which is exactly what an arc
+                    // cropped by the body looks like from here.
+                    gp_Pnt ballWorld;
+                    QPoint ballAt;
+                    out.ringDrawn[axis] = rv->moveGizmoHandleDrawn(axis, false);
+                    if (out.ringDrawn[axis] && rv->moveGizmoHandleTip(axis, false, ballWorld) &&
+                        rv->projectToScreen(ballWorld, ballAt)) {
+                        const QPointF centre(ballAt.x() * toDump, ballAt.y() * toDump);
+                        constexpr int kAngles = 72;
+                        std::vector<double> found(kAngles, -1.0);
+                        const double outer = 34.0 * toDump;
+                        for (int a = 0; a < kAngles; ++a) {
+                            const double angle =
+                                2.0 * 3.14159265358979323846 * double(a) / double(kAngles);
+                            const QPointF step(std::cos(angle), std::sin(angle));
+                            for (double r = outer; r >= 3.0; r -= 0.5) {
+                                if (inkAt(centre + step * r)) { found[std::size_t(a)] = r; break; }
+                            }
+                        }
+                        std::vector<double> radii;
+                        for (double r : found)
+                            if (r > 0.0) radii.push_back(r);
+                        if (radii.size() > kAngles / 2) {
+                            std::sort(radii.begin(), radii.end());
+                            const double median = radii[radii.size() / 2];
+                            int onRing = 0;
+                            for (double r : found)
+                                if (r > 0.0 && std::fabs(r - median) <= 2.5 * toDump) ++onRing;
+                            out.ring[axis] = double(onRing) / double(kAngles);
+                        }
+                    }
+
+                    // --- the shaft, all the way along ------------------------
+                    gp_Pnt tipWorld;
+                    QPoint tipAt;
+                    out.armDrawn[axis] = rv->moveGizmoHandleDrawn(axis, true);
+                    if (out.armDrawn[axis] && rv->moveGizmoHandleTip(axis, true, tipWorld) &&
+                        rv->projectToScreen(tipWorld, tipAt)) {
+                        const QPointF tip(tipAt.x() * toDump, tipAt.y() * toDump);
+                        constexpr int kSteps = 48;
+                        int inked = 0;
+                        for (int s = 0; s <= kSteps; ++s) {
+                            // 0.30 to 0.80 of the way out: clear of the hub at
+                            // one end and of the cone at the other, so what is
+                            // sampled is the shaft and only the shaft.
+                            const double f = 0.30 + 0.50 * double(s) / double(kSteps);
+                            const QPointF at = hub + (tip - hub) * f;
+                            bool hit = false;
+                            for (int d = -4; d <= 4 && !hit; ++d) {
+                                const QPointF n(-(tip.y() - hub.y()), tip.x() - hub.x());
+                                const double len = std::hypot(n.x(), n.y());
+                                if (len < 1.0) break;
+                                hit = inkAt(at + n / len * double(d));
+                            }
+                            if (hit) ++inked;
+                        }
+                        out.arm[axis] = double(inked) / double(kSteps + 1);
+
+                        // --- the letter, as an ink count --------------------
+                        // Not a completeness fraction: a glyph has no shape a
+                        // probe can assume. What it can say is how much ink is
+                        // there, and that number must not change because a body
+                        // moved behind it.
+                        gp_Pnt letterProbe = tipWorld;
+                        QPoint letterAt;
+                        const gp_Vec outward(rv->moveGizmoPivot(), tipWorld);
+                        if (outward.Magnitude() > 1.0e-9 &&
+                            rv->projectToScreen(
+                                letterProbe.Translated(outward * (23.0 / std::max(
+                                    outward.Magnitude() / rv->worldPerPixel(), 1.0e-9))),
+                                letterAt)) {
+                            int hits = 0;
+                            const int reach = int(9 * toDump);
+                            for (int dy = -reach; dy <= reach; ++dy)
+                                for (int dx = -reach; dx <= reach; ++dx)
+                                    if (inkAt(QPointF(letterAt.x() * toDump + dx,
+                                                      letterAt.y() * toDump + dy)))
+                                        ++hits;
+                            out.letter[axis] = hits;
+                        }
+                    }
+                }
+                out.ok = true;
+                return out;
+            };
+
+            // The layer FIRST, because the pixel probes below can only say
+            // that the drawing came out whole at the cameras they tried, while
+            // this says WHY it will at every other one.
+            check(rv->gizmoZLayer() != Graphic3d_ZLayerId_UNKNOWN,
+                  "the gizmo has a Z-layer of its own");
+            check(rv->gizmoZLayer() != Graphic3d_ZLayerId_Topmost &&
+                      rv->gizmoZLayer() != Graphic3d_ZLayerId_Default &&
+                      rv->gizmoZLayer() != rv->sketchZLayer(),
+                  "...shared with nothing - not Topmost, where OCCT's own dynamic highlight "
+                  "and AIS_Manipulator both live");
+            check(rv->zLayerSettings(rv->gizmoZLayer()).ToClearDepth(),
+                  "and that layer clears the depth buffer, so no body can crop a handle");
+            check(rv->zLayerSettings(rv->gizmoZLayer()).ToEnableDepthTest(),
+                  "while keeping depth WITHIN it, which is what orders the drawing's own "
+                  "hub-over-shafts");
+            // IsImmediate is not tidiness, it is load-bearing, and an A/B is
+            // what said so: a custom NON-immediate layer that clears depth
+            // also clears the SHADOW MAP, because OCCT renders that pass from
+            // the normal layer list. The render-mode block's cast-shadow check
+            // failed with this layer and passed at the parent commit, and only
+            // the immediate flag fixed it. Pinned here, where the layer is
+            // built, so the two blocks cannot drift apart.
+            check(rv->zLayerSettings(rv->gizmoZLayer()).IsImmediate(),
+                  "and it is an IMMEDIATE layer - drawn after all normal layers, which is "
+                  "what keeps its depth clear out of the shadow-map pass");
+
+            // (a) CLEAR: the parity camera still stands, with the body about a
+            // dozen pixels across and the whole drawing over empty viewport.
+            const Whole clear = probeWhole(outDir + QStringLiteral("/move-gizmo-clear.png"));
+            check(clear.ok, "the gizmo dumps with nothing behind it");
+
+            // (b) OVER THE BODY: the same camera, close enough that the body
+            // fills the viewport and every stroke of the gizmo has its surface
+            // in front. This is the user's own case.
+            CameraState close = rv->camera().state();
+            Bnd_Box closeBox;
+            BRepBndLib::Add(ratio.document().shapeOf(ratioId), closeBox);
+            double cx0, cy0, cz0, cx1, cy1, cz1;
+            closeBox.Get(cx0, cy0, cz0, cx1, cy1, cz1);
+            const double closeDiagonal = gp_Pnt(cx0, cy0, cz0).Distance(gp_Pnt(cx1, cy1, cz1));
+            constexpr double kClosePi = 3.14159265358979323846;
+            close.distance = closeDiagonal * std::max(1, rv->height()) /
+                             (700.0 * 2.0 * std::tan(0.5 * 45.0 * kClosePi / 180.0));
+            rv->animateTo(close);
+            settle(300);
+
+            QPoint spanLow, spanHigh;
+            const double bodyAcross =
+                rv->projectToScreen(gp_Pnt(cx0, cy0, cz0), spanLow) &&
+                        rv->projectToScreen(gp_Pnt(cx1, cy1, cz1), spanHigh)
+                    ? std::hypot(double(spanHigh.x() - spanLow.x()),
+                                 double(spanHigh.y() - spanLow.y()))
+                    : 0.0;
+            check(bodyAcross > 400.0,
+                  QStringLiteral("the body now fills the viewport under the gizmo, so its "
+                                 "surface really is in front of every stroke (%1 px across)")
+                      .arg(bodyAcross, 0, 'f', 0));
+
+            // ...and HOVERED, which is the half of the user's case that a
+            // selection alone does not reproduce. OCCT draws a dynamically
+            // highlighted presentation in Graphic3d_ZLayerId_Topmost - the
+            // same layer this gizmo asked for - so the body arrives INSIDE the
+            // layer, at its own true depth, after that layer's one depth
+            // clear. Everything drawn behind it then loses, which is exactly
+            // "arcs missing where the body's surface is nearer".
+            {
+                QPoint hubAt;
+                bool hovering = false;
+                if (rv->projectToScreen(rv->moveGizmoPivot(), hubAt)) {
+                    // Searched rather than guessed: the body fills the view, so
+                    // almost anywhere off the arms will do, but "almost" is not
+                    // a thing a check may rest on.
+                    for (int step = 40; step <= 220 && !hovering; step += 20) {
+                        const QPointF at(hubAt.x() + step, hubAt.y() + step * 0.6);
+                        if (!rv->rect().adjusted(8, 8, -8, -8).contains(at.toPoint())) continue;
+                        moveTo(rv, at);
+                        settle(120);
+                        hovering = !rv->hoveredShape().IsNull();
+                    }
+                }
+                check(hovering,
+                      "the cursor is genuinely hovering the body - the state that puts its "
+                      "highlight in the gizmo's own layer");
+            }
+
+            const Whole over = probeWhole(outDir + QStringLiteral("/move-gizmo-over-body.png"));
+            check(over.ok, "and it dumps again with the body behind it");
+
+            std::printf("       drawn whole? (clear -> over a body)\n");
+            for (int axis = 0; axis < 3; ++axis) {
+                std::printf("         %c  ring %4.0f%% -> %4.0f%%   shaft %4.0f%% -> %4.0f%%"
+                            "   letter ink %4d -> %4d\n",
+                            char('X' + axis), 100.0 * clear.ring[axis], 100.0 * over.ring[axis],
+                            100.0 * clear.arm[axis], 100.0 * over.arm[axis], clear.letter[axis],
+                            over.letter[axis]);
+            }
+
+            for (int axis = 0; axis < 3; ++axis) {
+                const QString name = QString(QLatin1Char('X' + axis));
+                // 0.90, not 1.0: the negative stub meets its own ring, and the
+                // few angular samples that land where it does read the stub's
+                // radius rather than the ring's. Everything else must be there.
+                check(clear.ring[axis] >= 0.90,
+                      QStringLiteral("the %1 ball is a whole circle with nothing behind it "
+                                     "(%2%)").arg(name).arg(100.0 * clear.ring[axis], 0, 'f', 0));
+                check(over.ring[axis] >= 0.90,
+                      QStringLiteral("...and STILL a whole circle with the body in front of it "
+                                     "(%1%)").arg(100.0 * over.ring[axis], 0, 'f', 0));
+                check(clear.arm[axis] >= 0.95 && over.arm[axis] >= 0.95,
+                      QStringLiteral("the %1 shaft is unbroken either way (%2% clear, %3% over)")
+                          .arg(name).arg(100.0 * clear.arm[axis], 0, 'f', 0)
+                          .arg(100.0 * over.arm[axis], 0, 'f', 0));
+                // The letters carry no shape a probe can assume, so what is
+                // asserted is that a body moving behind one changes nothing -
+                // which is what a z-fighting glyph would fail. A quarter of
+                // slack rather than a tenth because glyph edges ARE
+                // antialiased, unlike the aliased lines everywhere else here,
+                // so a blended edge pixel over the body's orange lands a
+                // little further from the token than the same pixel over the
+                // viewport does and the count moves a few per cent on its own.
+                check(clear.letter[axis] > 20 &&
+                          std::abs(over.letter[axis] - clear.letter[axis]) <=
+                              0.25 * clear.letter[axis],
+                      QStringLiteral("and the %1 letter draws the same ink either way "
+                                     "(%2 clear, %3 over)")
+                          .arg(name).arg(clear.letter[axis]).arg(over.letter[axis]));
+            }
+
+            // ...and it is not one lucky camera. A body's surface crosses the
+            // drawing differently at every orientation, and "arcs missing
+            // where the surface is nearer" is by definition a defect that
+            // shows at some angles and not others - so the same measurement
+            // runs all the way round, with the body still filling the view.
+            {
+                struct Look { double azimuth; double elevation; };
+                const Look looks[] = {{0.0, 0.0},   {75.0, 15.0}, {135.0, -20.0},
+                                      {215.0, 55.0}, {300.0, 35.0}};
+                double worstRing = 1.0, worstArm = 1.0;
+                int drawnHandles = 0;
+                QString worstAt;
+                for (const Look& look : looks) {
+                    CameraState around = rv->camera().state();
+                    around.target = rv->moveGizmoPivot();
+                    around.azimuthDeg = look.azimuth;
+                    around.elevationDeg = look.elevation;
+                    rv->animateTo(around);
+                    settle(250);
+                    const Whole round = probeWhole(
+                        outDir + QStringLiteral("/move-gizmo-around-%1.png")
+                                     .arg(int(look.azimuth)));
+                    if (!round.ok) continue;
+                    for (int axis = 0; axis < 3; ++axis) {
+                        if (round.ringDrawn[axis]) {
+                            ++drawnHandles;
+                            if (round.ring[axis] < worstRing) {
+                                worstRing = round.ring[axis];
+                                worstAt = QStringLiteral("%1 ring at az %2 el %3")
+                                              .arg(QChar('X' + axis))
+                                              .arg(look.azimuth).arg(look.elevation);
+                            }
+                        }
+                        if (round.armDrawn[axis]) {
+                            ++drawnHandles;
+                            worstArm = std::min(worstArm, round.arm[axis]);
+                        }
+                    }
+                }
+                std::printf("       all the way round, over the body: worst ring %.0f%%, "
+                            "worst shaft %.0f%%, over %d drawn handles\n",
+                            100.0 * worstRing, 100.0 * worstArm, drawnHandles);
+                // NON-VACUITY: five looks times six handles less the two a
+                // squared view legitimately hides. A sweep that measured
+                // nothing would report a perfect worst case.
+                check(drawnHandles >= 25,
+                      QStringLiteral("the sweep actually measured handles rather than skipping "
+                                     "them (%1 drawn across five looks)").arg(drawnHandles));
+                check(worstRing >= 0.90,
+                      QStringLiteral("every ring is whole at every camera the probe walks "
+                                     "through, with the body filling the view (worst %1%, %2)")
+                          .arg(100.0 * worstRing, 0, 'f', 0)
+                          .arg(worstAt.isEmpty() ? QStringLiteral("none") : worstAt));
+                // 0.90 here against 0.95 at the two named cameras, and the
+                // difference is real rather than slack: this sweep deliberately
+                // includes strongly foreshortened arms, whose shaft is mostly
+                // under their own hub and cone. The card's is too - it draws
+                // the line from the dead centre and paints the hub over it -
+                // so a sample landing on hub grey there is the drawing being
+                // right, not a hole in it.
+                check(worstArm >= 0.90,
+                      QStringLiteral("...and every shaft unbroken with it (worst %1%)")
+                          .arg(100.0 * worstArm, 0, 'f', 0));
+            }
         }
 
         ratio.close();

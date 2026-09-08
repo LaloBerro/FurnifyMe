@@ -3,6 +3,7 @@
 // drags in.
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_InteractiveObject.hxx>
+#include <Graphic3d_ZLayerId.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Lin.hxx>
 #include <gp_Pnt.hxx>
@@ -79,6 +80,16 @@ public:
     virtual ~GizmoRenderer() = default;
 
     void attach(const Handle(AIS_InteractiveContext)& context);
+    // The Z-layer everything this gizmo draws goes into. It wants one of its
+    // OWN, cleared of depth and shared with nothing: a gizmo stands at its
+    // body's bounding-box centre, so the body's surface is nearer than every
+    // stroke of it, and a handle a user can see through the thing it is
+    // attached to is not a handle. Graphic3d_ZLayerId_Topmost clears depth too
+    // but is SHARED - OCCT's dynamic highlight lives there, so does
+    // AIS_Manipulator - and anything that joins arrives after that layer's one
+    // depth clear at its own true depth, cropping whatever is drawn behind it.
+    // See OcctViewWidget::initializeViewer(). Unset falls back to Topmost.
+    void setZLayer(Graphic3d_ZLayerId layer) { myLayer = layer; }
     // Drops the context and everything built against it, WITHOUT touching the
     // viewer - PullArrowRenderer::detach()'s own contract, same one caller
     // (OcctViewWidget::releaseGlResources()).
@@ -145,6 +156,10 @@ protected:
     // names and a gizmo whose letters are not the app's font at all.
     void addLabel(const QString& text, const gp_Pnt& at, const QColor& colour, double heightPx);
 
+    // Where both of those put what they draw: setZLayer()'s value, or Topmost
+    // if the viewer never gave us a layer of our own.
+    Graphic3d_ZLayerId drawLayer() const;
+
     const GizmoPose& pose() const { return myPose; }
     double worldPerPixel() const { return myPose.worldPerPixel; }
     double pixelRatio() const { return myPose.pixelRatio; }
@@ -156,6 +171,7 @@ private:
     // What the gizmo currently on screen was built from, so show() can tell a
     // call that changes nothing from one that does.
     GizmoPose myPose;
+    Graphic3d_ZLayerId myLayer = Graphic3d_ZLayerId_UNKNOWN;
     // Defeats show()'s pose cache for one call - the appearance changed, not
     // the geometry, and the cache key knows nothing about appearance.
     bool myForceRebuild = false;

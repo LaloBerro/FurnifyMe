@@ -631,6 +631,57 @@ void OcctViewWidget::initializeViewer()
         Graphic3d_ZLayerId layer = Graphic3d_ZLayerId_UNKNOWN;
         if (myViewer->InsertLayerAfter(layer, settings, after)) mySketchLayer = layer;
     }
+    // A FOURTH layer, above every one of them, for the transform gizmo alone.
+    //
+    // A gizmo is fully visible over the geometry it stands on, always - that is
+    // what a gizmo IS, it is what AIS_Manipulator did, and it is the one place
+    // this app wants the property CLAUDE.md's grid section rejects for the
+    // GRID: a layer that clears depth paints over every body, which is a defect
+    // for a ground grid and the entire requirement for a handle standing at a
+    // body's own bounding-box centre.
+    //
+    // Graphic3d_ZLayerId_Topmost already clears depth, and the gizmo used it -
+    // but it is a SHARED layer. OCCT puts dynamically highlighted presentations
+    // there, this file puts AIS_Manipulator there, and anything else may join;
+    // whatever does arrives INSIDE the layer, after its one depth clear, at its
+    // own true depth, and everything drawn behind it loses. The user's report
+    // was arcs missing from the hollow rings where a body's surface was nearer,
+    // which is exactly that shape of failure. A layer of our own removes the
+    // question rather than reasoning about who else is in the room.
+    //
+    // Depth TEST stays on inside it, deliberately: the drawing is coplanar and
+    // carries its own painter's order as small depth nudges (see
+    // MoveGizmoRenderer::buildStrokes()), and turning the test off would leave
+    // that order to whatever sequence OCCT happens to render the objects in.
+    //
+    // AND IT MUST BE AN IMMEDIATE LAYER, which cost an A/B to find. A custom,
+    // NON-immediate layer that clears depth also clears the SHADOW MAP: OCCT
+    // renders the shadow-map pass from the normal layer list, so a depth clear
+    // sitting in that list wipes the depth texture the Shadows render tier is
+    // built on. Measured, not reasoned about - `render-mode`'s own
+    // cast-shadow check (a Dump()-differ, the same proof the tier probe uses)
+    // failed with the layer and passed at the parent commit, and
+    // SetRenderInDepthPrepass(false) did NOT fix it while SetImmediate(true)
+    // did. Immediate is the honest description anyway: "drawn after all normal
+    // layers" is what an overlay handle is, and it is the company the hover
+    // highlight already keeps.
+    {
+        Graphic3d_ZLayerSettings settings;
+        settings.SetName("FurnifyMe gizmo");
+        settings.SetClearDepth(Standard_True);
+        settings.SetEnableDepthTest(Standard_True);
+        settings.SetEnableDepthWrite(Standard_True);
+        // Ignored for an immediate layer, per the header, and set anyway so the
+        // intent survives if the immediate flag ever comes off: a handle is
+        // feedback, never something for a path tracer to integrate. Render mode
+        // hides the gizmo outright regardless.
+        settings.SetRaytracable(Standard_False);
+        settings.SetRenderInDepthPrepass(Standard_False);
+        settings.SetImmediate(Standard_True);
+        Graphic3d_ZLayerId layer = Graphic3d_ZLayerId_UNKNOWN;
+        if (myViewer->InsertLayerAfter(layer, settings, Graphic3d_ZLayerId_Topmost))
+            myGizmoLayer = layer;
+    }
     myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane(),
                           Theme::gridDensity());
     // None of these three are ever driven for a viewer-only widget - nothing
@@ -646,6 +697,7 @@ void OcctViewWidget::initializeViewer()
         myPullArrow.attach(myContext);
         myBevelArrow.attach(myContext);
         myMoveGizmo.attach(myContext);
+        myMoveGizmo.setZLayer(myGizmoLayer);
     }
 
     // The field of view is fixed at kFovyDeg for ordinary modeling; render
@@ -1568,6 +1620,11 @@ void OcctViewWidget::clearMoveGizmo()
 bool OcctViewWidget::moveGizmoArmTip(int axis, gp_Pnt& out) const
 {
     return moveGizmoHandleTip(axis, true, out);
+}
+
+bool OcctViewWidget::moveGizmoHandleDrawn(int axis, bool positive) const
+{
+    return myMoveGizmo.isShowing() && myMoveGizmo.handleDrawn(axis, positive);
 }
 
 bool OcctViewWidget::moveGizmoHandleTip(int axis, bool positive, gp_Pnt& out) const

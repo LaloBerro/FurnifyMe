@@ -448,6 +448,11 @@ public:
     // The same, for either end of an arm: the cone's nominal tip on the
     // positive side, the hollow ball's centre on the negative one.
     bool moveGizmoHandleTip(int axis, bool positive, gp_Pnt& out) const;
+    // FALSE when that handle's tip falls inside the hub - an axis pointing very
+    // nearly at the eye, whose tip the card's own hub covers too. Exposed
+    // because a probe asking whether a handle is DRAWN WHOLE has to be able to
+    // tell "cropped" from "correctly absent".
+    bool moveGizmoHandleDrawn(int axis, bool positive) const;
     // Which arm (0/1/2) the 14 px screen-space hit test gives this LOGICAL
     // pixel, or -1, and through `positive` which END of it - the cone or the
     // ball. This is the exact question mousePressEvent() asks before deciding
@@ -879,6 +884,10 @@ public:
     // reject a sketch pixel. See GridRenderer::zLayer() for the whole argument
     // and for why Graphic3d_ZLayerId_Topmost is the wrong tool here.
     Graphic3d_ZLayerId sketchZLayer() const { return mySketchLayer; }
+    // The transform gizmo's own layer - depth cleared, and shared with nothing.
+    // Exposed so a check can say WHICH layer the gizmo is in rather than only
+    // that it happens to be visible today.
+    Graphic3d_ZLayerId gizmoZLayer() const { return myGizmoLayer; }
     // The grid's layer, forwarded so a test can assert the order of the three
     // without reaching through to the renderer.
     Graphic3d_ZLayerId gridZLayer() const { return myGridRenderer.zLayer(); }
@@ -2208,6 +2217,11 @@ private:
     // and if the viewer ever refuses the layer everything below simply
     // displays into the default layer as it did before.
     Graphic3d_ZLayerId mySketchLayer = Graphic3d_ZLayerId_UNKNOWN;
+    // The transform gizmo's own layer, above every other, depth cleared - see
+    // initializeViewer() for why it is not simply Graphic3d_ZLayerId_Topmost.
+    // UNKNOWN if the viewer refused it, in which case the gizmo falls back to
+    // Topmost, which is where it used to live.
+    Graphic3d_ZLayerId myGizmoLayer = Graphic3d_ZLayerId_UNKNOWN;
     Handle(AIS_Shape) myPreview;
     // The direct-modeling channel, kept strictly apart from myPreview above.
     // Milestone 5's cross-body bevel is the reason these are vectors rather

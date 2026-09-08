@@ -754,6 +754,19 @@ visible at a time. Phase 1 shipped Move; Phase 2 takes the other two and deletes
   card's size and a hair lighter: measured, that is an identical ink HEIGHT (−2.3%) and a
   9.5% narrower glyph. Pinned separately at 12% so the gap is bounded rather than folded
   into the others and forgotten.
+- **The gizmo has a Z-LAYER OF ITS OWN, cleared of depth and IMMEDIATE.** A handle stands at
+  its body's bounding-box centre, so the body's own surface is nearer than every stroke of
+  it, and a handle you can see through the thing it is attached to is not a handle — this is
+  the one place the app wants exactly the property CLAUDE.md's grid section rejects for the
+  GRID. `Graphic3d_ZLayerId_Topmost` clears depth too and is where this used to live, but it
+  is **shared**: OCCT puts dynamically highlighted presentations there, this file puts
+  `AIS_Manipulator` there, and whatever joins arrives *inside* the layer after its one depth
+  clear, at its own true depth, cropping everything drawn behind it — the user's report was
+  arcs missing from the hollow rings where a body's surface was nearer, which is that shape
+  of failure. A layer of our own removes the question rather than reasoning about who else is
+  in the room. Depth **testing** stays on within it, because the drawing is coplanar and
+  carries its own painter's order as depth nudges. `MoveGizmoRenderer` falls back to Topmost
+  if the viewer ever refuses the layer.
 - **The negative balls are grab targets, like the cones.** `moveGizmoAxisAt()` tests six
   handles and reports which END through an out parameter; a ball drag is measured against
   the SAME infinite world line (`armAxis()` is direction-agnostic on purpose) and simply
@@ -2142,6 +2155,18 @@ document-only predicate.
   calls. The rule it stood for still holds for anything that needs the CONTEXT:
   `GridRenderer::update()`'s discipline — a no-op until one exists, desired state recorded
   first and re-applied on the first real frame.
+- **A custom Z-layer that clears depth also clears the SHADOW MAP, unless it is `Immediate`.**
+  OCCT renders the shadow-map pass from the *normal* layer list, so a `SetClearDepth(true)`
+  layer sitting in that list wipes the depth texture the Shadows render tier is built on —
+  the cast shadow simply stops being drawn, with nothing logged and no error anywhere. Found
+  by A/B rather than by reasoning: adding the transform gizmo's own layer turned
+  `render-mode`'s cast-shadow check (a `Dump()`-differ, the same proof the tier probe itself
+  uses) red, and the identical run at the parent commit was green.
+  `SetRenderInDepthPrepass(false)` did **not** fix it; `SetImmediate(true)` did, because an
+  immediate layer is drawn after all the normal ones and is not in the list that pass walks.
+  The stock `Graphic3d_ZLayerId_Topmost` clears depth and does *not* break shadows, which is
+  exactly what makes this easy to miss — the stock layers are special-cased and a custom one
+  is not.
 - **`Graphic3d_MaterialAspect` describes a surface THREE times, and OCCT's path
   tracer reads only the third.** The classic reflectance colours (ambient/diffuse/
   specular/emissive) drive rasterization and Whitted ray tracing; `Graphic3d_PBRMaterial`
