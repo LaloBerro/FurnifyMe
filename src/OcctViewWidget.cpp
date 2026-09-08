@@ -1595,6 +1595,13 @@ void OcctViewWidget::showMoveGizmo(const gp_Pnt& pivot)
 {
     initializeViewer();
     if (myView.IsNull()) return;
+    // One body gizmo at a time - the same clear showRotateGizmo() and
+    // showScaleGizmo() open with. Its absence HERE was the Space-cycle bug:
+    // the two Phase 2 shows cleared their siblings, cycling back to Move
+    // cleared nothing, and the fourth press wore Move's arrows over Scale's
+    // cubes.
+    bool cleared = myRotateGizmo.clear();
+    cleared = myScaleGizmo.clear() || cleared;
     // The renderer draws; THIS asks for the frame - and only when the gizmo
     // actually moved, which is its own equal-guard's answer. Skipped under
     // myApplyingCamera because applyCameraState()'s own redraw is already
@@ -1611,7 +1618,7 @@ void OcctViewWidget::showMoveGizmo(const gp_Pnt& pivot)
     pose.view = myCamera.viewDirection();
     pose.worldPerPixel = worldPerPixel();
     pose.pixelRatio = devicePixelRatioF();
-    const bool changed = myMoveGizmo.show(pose);
+    const bool changed = myMoveGizmo.show(pose) || cleared;
     if (changed && !myApplyingCamera) scheduleRedraw();
 }
 
