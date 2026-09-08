@@ -1616,7 +1616,7 @@ void OcctViewWidget::showMoveGizmo(const gp_Pnt& pivot)
     pose.right = myCamera.rightVector();
     pose.up = myCamera.upVector();
     pose.view = myCamera.viewDirection();
-    pose.worldPerPixel = worldPerPixel();
+    pose.worldPerPixel = worldPerPixelAt(pivot);
     pose.pixelRatio = devicePixelRatioF();
     const bool changed = myMoveGizmo.show(pose) || cleared;
     if (changed && !myApplyingCamera) scheduleRedraw();
@@ -1661,6 +1661,28 @@ void OcctViewWidget::cancelMoveDrag()
     myMoveDragCancelled = true;
 }
 
+double OcctViewWidget::worldPerPixelAt(const gp_Pnt& at) const
+{
+    // worldPerPixel() answers for the camera TARGET's plane; a gizmo stands
+    // wherever its body's pivot is, and in PERSPECTIVE a pivot nearer than
+    // the target projects larger than that number says - the size drifted
+    // with every zoom until the depth term joined. This is
+    // updateManipulatorSize()'s own depth ratio, applied at the source the
+    // custom gizmos size themselves from. Along the view axis, never the
+    // straight-line distance: depth is what scales a projection, and an
+    // off-centre pivot is further away without being any deeper. A parallel
+    // projection has no depth term, so the factor is exactly 1 there by
+    // construction.
+    double wpp = worldPerPixel();
+    if (!myCamera.effectiveOrtho()) {
+        const double depth =
+            gp_Vec(myCamera.eyePosition(), at).Dot(gp_Vec(myCamera.viewDirection()));
+        const double targetDepth = myCamera.state().distance;
+        if (depth > 1.0e-6 && targetDepth > 1.0e-6) wpp *= depth / targetDepth;
+    }
+    return wpp;
+}
+
 // --- the Rotate and Scale gizmos (custom gizmo, Phase 2) --------------------
 
 void OcctViewWidget::showRotateGizmo(const gp_Pnt& pivot)
@@ -1676,7 +1698,7 @@ void OcctViewWidget::showRotateGizmo(const gp_Pnt& pivot)
     pose.right = myCamera.rightVector();
     pose.up = myCamera.upVector();
     pose.view = myCamera.viewDirection();
-    pose.worldPerPixel = worldPerPixel();
+    pose.worldPerPixel = worldPerPixelAt(pivot);
     pose.pixelRatio = devicePixelRatioF();
     changed = myRotateGizmo.show(pose) || changed;
     if (changed && !myApplyingCamera) scheduleRedraw();
@@ -1693,7 +1715,7 @@ void OcctViewWidget::showScaleGizmo(const gp_Pnt& pivot)
     pose.right = myCamera.rightVector();
     pose.up = myCamera.upVector();
     pose.view = myCamera.viewDirection();
-    pose.worldPerPixel = worldPerPixel();
+    pose.worldPerPixel = worldPerPixelAt(pivot);
     pose.pixelRatio = devicePixelRatioF();
     changed = myScaleGizmo.show(pose) || changed;
     if (changed && !myApplyingCamera) scheduleRedraw();

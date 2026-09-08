@@ -2426,6 +2426,10 @@ private:
     // handle brighter. Runs on the ordinary hover path only - a live drag
     // keeps the highlight the press set.
     void updateBodyGizmoHover(const QPoint& logical);
+    // worldPerPixel() corrected to the depth of `at` - what a gizmo standing
+    // there must size itself from in perspective, or its screen size drifts
+    // with every zoom. See its definition.
+    double worldPerPixelAt(const gp_Pnt& at) const;
 
     // The Rotate and Scale gizmos (custom gizmo, Phase 2) and their drags.
     RotateGizmoRenderer myRotateGizmo;
