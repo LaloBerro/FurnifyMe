@@ -21,8 +21,10 @@
 #include <gp_Ax2.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pln.hxx>
+#include <gp_Lin.hxx>
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
+#include <gp_Vec.hxx>
 
 #include "CameraController.h"
 #include "DimensionRenderer.h"
@@ -475,6 +477,44 @@ public:
     // pick, because the button is still down when this is called and that
     // release still belongs to the gesture it ended.
     void cancelMoveDrag();
+
+    // --- the Rotate and Scale gizmos (custom gizmo, Phase 2) ---------------
+    //
+    // Same discipline as the Move gizmo above - never-pickable AIS solids,
+    // screen-space press claims, swallowed releases - so the manipulator's
+    // workaround pile applies to none of them. Each show clears the other two
+    // gizmos: exactly one body gizmo is ever up, which is the split design's
+    // own law.
+    void showRotateGizmo(const gp_Pnt& pivot);
+    void showScaleGizmo(const gp_Pnt& pivot);
+    // All three at once - MoveTool::end()'s route, so a retiring predicate
+    // cannot leave whichever gizmo the current tool happened not to be.
+    void clearBodyGizmos();
+    bool hasRotateGizmo() const { return myRotateGizmo.isShowing(); }
+    bool hasScaleGizmo() const { return myScaleGizmo.isShowing(); }
+    // Which ring / which cube the hit test gives this LOGICAL pixel, or -1 -
+    // moveGizmoAxisAt()'s question for the other two gizmos. The ring test
+    // samples the drawn torus in screen space; the cube test is the arm test.
+    int rotateGizmoAxisAt(const QPoint& logical) const;
+    int scaleGizmoAxisAt(const QPoint& logical) const;
+    bool rotateDragActive() const { return myRotateDrag.active; }
+    bool scaleDragActive() const { return myScaleDrag.active; }
+    // ANY body-gizmo drag - the one predicate the shared value chip derives
+    // its visibility from.
+    bool bodyGizmoDragActive() const
+    {
+        return myMoveDrag.active || myRotateDrag.active || myScaleDrag.active;
+    }
+    // Where the live rotate drag grabbed its ring, in world space - the chip
+    // stands there, a ring having no tip to stand on. False when no rotate
+    // drag is live.
+    bool rotateDragAnchor(gp_Pnt& out) const;
+    // The dragged cube's centre, for the same chip. False when no scale gizmo
+    // is up or `axis` is not 0/1/2.
+    bool scaleGizmoHandleTip(int axis, gp_Pnt& out) const;
+    // Escape's route for whichever body-gizmo drag is live - each tool's
+    // cancel keeps cancelMoveDrag()'s own release-swallowing contract.
+    void cancelBodyGizmoDrag();
 
     // The transform gizmo. AIS_Manipulator is OCCT's own: it draws the three
     // arrows, the three rings and the three scale cubes, and it owns the drag
@@ -1640,6 +1680,20 @@ signals:
     // than an edit.
     void moveReleased(bool dragged);
 
+    // A live drag of one ring of the Rotate gizmo. `degrees` is the signed
+    // whole-gesture angle about world axis `axis`, measured from the press,
+    // ALREADY SNAPPED to 15 degrees when Snap to Grid is on - the Milestone 2
+    // step, applied where the snap state lives.
+    void rotateDragged(int axis, double degrees);
+    void rotateReleased(bool dragged);
+    // A live drag of one cube of the Scale gizmo. `factor` is the whole
+    // uniform scale of the gesture (1.0 = unchanged), ALREADY SNAPPED to 5%
+    // steps when Snap to Grid is on. `axis` names the cube being held - the
+    // chip stands on it - not a scaling direction; the scale is uniform by
+    // kernel law.
+    void scaleDragged(int axis, double factor);
+    void scaleReleased(bool dragged);
+
     // The end of a transform-gizmo drag. `delta` is the whole accumulated
     // transform of the gesture, ALREADY SNAPPED when Snap to Grid is on -
     // this widget owns the snap state, so snapping here keeps the rule in one
@@ -2349,6 +2403,13 @@ private:
     MoveGizmoRenderer myMoveGizmo;
     AxisDrag myMoveDrag;
     int myMoveDragAxis = -1;
+    // The measuring line, FROZEN at the press. The gizmo itself follows the
+    // drag (MoveTool re-shows it at the offset pivot on every step), and
+    // armAxis() runs through the live pivot - measuring against that would
+    // shift the ruler by exactly what was just measured, a feedback loop.
+    // One line for the whole gesture instead; translating the gizmo along
+    // its own axis never changes the direction, only the origin.
+    gp_Lin myMoveDragLine;
     // Which end of that arm the press landed on. Not part of the drag maths -
     // both ends measure against one line - but the chip has to stand beside
     // the handle actually being held rather than always at the cone.
@@ -2356,8 +2417,48 @@ private:
     // Escape's leftover: the drag is over but the button is still down, so the
     // release that is coming still belongs to the gesture that was cancelled
     // and must not fall through to an ordinary pick. Consumed exactly once -
-    // myAutoBodyPickTaken's own shape, one gesture over.
+    // myAutoBodyPickTaken's own shape, one gesture over. SHARED by all three
+    // body-gizmo drags: at most one can be live, so one flag serves.
     bool myMoveDragCancelled = false;
+
+    // The hover half of the gizmo hit tests: which handle the resting cursor
+    // is over, pushed into whichever gizmo is showing so it can draw that
+    // handle brighter. Runs on the ordinary hover path only - a live drag
+    // keeps the highlight the press set.
+    void updateBodyGizmoHover(const QPoint& logical);
+
+    // The Rotate and Scale gizmos (custom gizmo, Phase 2) and their drags.
+    RotateGizmoRenderer myRotateGizmo;
+    ScaleGizmoRenderer myScaleGizmo;
+    // A rotate drag: the grabbed ring's axis, the press's vector from the
+    // pivot in the ring plane (the zero of the angle), and where on the ring
+    // the press landed (the chip's anchor). The pivot and axis are FROZEN at
+    // the press, myMoveDragLine's own reasoning one gesture over.
+    struct RotateDrag {
+        bool active = false;
+        bool moved = false;
+        int axis = -1;
+        double degrees = 0.0;
+        gp_Pnt pivot;
+        gp_Vec pressVec;
+        bool hasPress = false;
+        gp_Pnt anchor;
+    };
+    RotateDrag myRotateDrag;
+    // A scale drag: AxisDrag's shape with a factor instead of a distance -
+    // the parameter delta along the frozen arm line, divided by the arm's
+    // own length at the press, is the factor's departure from 1.0.
+    struct ScaleDrag {
+        bool active = false;
+        bool moved = false;
+        int axis = -1;
+        double factor = 1.0;
+        double pressParam = 0.0;
+        bool hasPressParam = false;
+        double baseLength = 0.0;
+        gp_Lin line;
+    };
+    ScaleDrag myScaleDrag;
 
     // The two axis drags, one per arrow. See AxisDrag above.
     AxisDrag myPullDrag;

@@ -113,6 +113,12 @@ struct Spec {
     // value, because the two are the same outline at two moments of its
     // life. 2.0 is today's hardcoded width, byte-identical.
     double sketchLineWidthPx = 2.0;
+    // Multiplies the drawn size of the body gizmos - the Move tool's arms
+    // (kArmPixels in TransformGizmo.cpp) and the Rotate/Scale manipulator's
+    // applied size both read it, so Space swaps between two tools at one
+    // consistent scale whatever the user set. 1.0 is today's size,
+    // byte-identical - the same rule gridDensity's 1.0 default follows.
+    double gizmoScale = 1.0;
 };
 
 bool operator==(const Spec& a, const Spec& b);
@@ -134,6 +140,12 @@ constexpr double kMaxChipStrokePx = 4.0;
 // into a solid wash (past a handful of times finer).
 constexpr double kMinGridDensity = 0.5;
 constexpr double kMaxGridDensity = 2.0;
+
+// The band the gizmo size multiplier may be set to - see Spec::gizmoScale.
+// Half size still leaves every handle grabbable at the 14px screen tolerance;
+// double is already most of a small viewport's height.
+constexpr double kMinGizmoScale = 0.5;
+constexpr double kMaxGizmoScale = 2.0;
 
 // The band the body edge-line width may be set to - see Spec::edgeWidthPx.
 // 0 removes the boundary lines outright; past 4 the crease lines start to
@@ -264,6 +276,7 @@ double chipStrokePx();      // ToolChip border width - see Spec::chipStrokePx
 double gridDensity();       // grid line density multiplier - see Spec::gridDensity
 double edgeWidthPx();       // body boundary-line width - see Spec::edgeWidthPx
 double sketchLineWidthPx(); // outline line width - see Spec::sketchLineWidthPx
+double gizmoScale();        // body gizmo size multiplier - see Spec::gizmoScale
 
 // The whole app's type scale: four sizes, and every widget that paints text
 // reads one of them - a fifth size anywhere is a smell, not a design choice.

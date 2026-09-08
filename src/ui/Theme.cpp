@@ -93,6 +93,7 @@ Spec graphite()
     s.gridDensity = 1.0;
     s.edgeWidthPx = 1.0;
     s.sketchLineWidthPx = 2.0;
+    s.gizmoScale = 1.0;
     return s;
 }
 
@@ -218,7 +219,8 @@ bool operator==(const Spec& a, const Spec& b)
            std::fabs(a.chipStrokePx - b.chipStrokePx) < 1.0e-9 &&
            std::fabs(a.gridDensity - b.gridDensity) < 1.0e-9 &&
            std::fabs(a.edgeWidthPx - b.edgeWidthPx) < 1.0e-9 &&
-           std::fabs(a.sketchLineWidthPx - b.sketchLineWidthPx) < 1.0e-9;
+           std::fabs(a.sketchLineWidthPx - b.sketchLineWidthPx) < 1.0e-9 &&
+           std::fabs(a.gizmoScale - b.gizmoScale) < 1.0e-9;
 }
 
 const QVector<ColourToken>& colourTokens()
@@ -316,6 +318,7 @@ QString serializeSpec(const Spec& s)
     parts << QStringLiteral("gridDensity=") + QString::number(s.gridDensity);
     parts << QStringLiteral("edgeWidth=") + QString::number(s.edgeWidthPx);
     parts << QStringLiteral("sketchLineWidth=") + QString::number(s.sketchLineWidthPx);
+    parts << QStringLiteral("gizmoScale=") + QString::number(s.gizmoScale);
     return parts.join(QLatin1Char(';'));
 }
 
@@ -391,6 +394,14 @@ bool deserializeSpec(const QString& text, Spec& out)
             sawSomething = true;
             continue;
         }
+        if (key == QLatin1String("gizmoScale")) {
+            bool ok = false;
+            const double scale = value.toDouble(&ok);
+            if (!ok || scale < kMinGizmoScale || scale > kMaxGizmoScale) return false;
+            parsed.gizmoScale = scale;
+            sawSomething = true;
+            continue;
+        }
 
         QColor Spec::*member = nullptr;
         for (const ColourToken& token : colourTokens()) {
@@ -441,6 +452,7 @@ double chipStrokePx() { return spec().chipStrokePx; }
 double gridDensity()  { return spec().gridDensity; }
 double edgeWidthPx()  { return spec().edgeWidthPx; }
 double sketchLineWidthPx() { return spec().sketchLineWidthPx; }
+double gizmoScale() { return spec().gizmoScale; }
 
 QString fontFamily() { return spec().fontFamily; }
 

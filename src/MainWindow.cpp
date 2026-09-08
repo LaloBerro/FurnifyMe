@@ -5040,7 +5040,10 @@ QString MainWindow::bodyToolName(BodyTool tool)
 
 int MainWindow::moveToolBodyId() const
 {
-    if (myBodyTool != BodyTool::Move) return 0;
+    // Since the custom gizmo's Phase 2 every tool is ours, so the predicate
+    // is transformableBodyId() whole - the "and the tool is Move" term died
+    // with the manipulator. The name stays: the suite and the chip both
+    // address it, and it still means "the body the custom gizmo stands on".
     return transformableBodyId();
 }
 
@@ -5074,19 +5077,11 @@ void MainWindow::onNextTool()
 
 void MainWindow::refreshTransformGizmo()
 {
-    const int id = transformableBodyId();
-    // THE SEAM, and it is one branch (custom gizmo, Phase 1): Move is drawn by
-    // MoveTool, which watches moveToolBodyId() itself, so all this has to do
-    // for that tool is make sure OCCT's manipulator is not ALSO standing on
-    // the body. Rotate and Scale are still the manipulator's, attached for the
-    // one role each - see OcctViewWidget::attachManipulator().
-    if (id <= 0 || myBodyTool == BodyTool::Move) {
-        myView->detachManipulator();
-        return;
-    }
-    myView->attachManipulator(id, myBodyTool == BodyTool::Rotate
-                                      ? OcctViewWidget::ManipulatorRole::Rotate
-                                      : OcctViewWidget::ManipulatorRole::Scale);
+    // Custom gizmo, Phase 2: all three tools are ours, drawn and retired by
+    // MoveTool off moveToolBodyId(). AIS_Manipulator is never attached any
+    // more; this keeps it that way across every path that used to raise it,
+    // until its machinery is deleted outright.
+    myView->detachManipulator();
 }
 
 void MainWindow::refreshEdgeAnnotation()

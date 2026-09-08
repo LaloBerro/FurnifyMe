@@ -496,6 +496,8 @@ void OcctViewWidget::releaseGlResources()
     myPullArrow.detach();
     myBevelArrow.detach();
     myMoveGizmo.detach();
+    myRotateGizmo.detach();
+    myScaleGizmo.detach();
 
     // OCCT's own order: remove every presentation, drop the context, destroy
     // the view, then the viewer.
@@ -698,6 +700,10 @@ void OcctViewWidget::initializeViewer()
         myBevelArrow.attach(myContext);
         myMoveGizmo.attach(myContext);
         myMoveGizmo.setZLayer(myGizmoLayer);
+        myRotateGizmo.attach(myContext);
+        myRotateGizmo.setZLayer(myGizmoLayer);
+        myScaleGizmo.attach(myContext);
+        myScaleGizmo.setZLayer(myGizmoLayer);
     }
 
     // The field of view is fixed at kFovyDeg for ordinary modeling; render
@@ -1191,7 +1197,7 @@ void OcctViewWidget::removeSolid(int id)
     clearPullArrow();
     clearBevelArrow();
     // Same reason: both gizmos stand on the presentation about to go.
-    clearMoveGizmo();
+    clearBodyGizmos();
     if (myManipulatorSolid == id) detachManipulator();
     // Same reason again: a mirror-placement gesture describes exactly the
     // ids captured at beginMirrorPlacement(), and one of them is about to
@@ -1224,7 +1230,7 @@ void OcctViewWidget::clearSolids()
     clearModelingPreview();   // same reasoning as removeSolid(), before the bodies go
     clearPullArrow();
     clearBevelArrow();
-    clearMoveGizmo();
+    clearBodyGizmos();
     detachManipulator();
     cancelMirrorPlacement();   // same reasoning: every id it describes is about to go
 
@@ -1648,6 +1654,148 @@ void OcctViewWidget::cancelMoveDrag()
     myMoveDragCancelled = true;
 }
 
+// --- the Rotate and Scale gizmos (custom gizmo, Phase 2) --------------------
+
+void OcctViewWidget::showRotateGizmo(const gp_Pnt& pivot)
+{
+    initializeViewer();
+    if (myView.IsNull()) return;
+    // One body gizmo at a time - the split design's law, enforced where the
+    // showing happens rather than trusted to every caller.
+    bool changed = myMoveGizmo.clear();
+    changed = myScaleGizmo.clear() || changed;
+    GizmoPose pose;
+    pose.pivot = pivot;
+    pose.right = myCamera.rightVector();
+    pose.up = myCamera.upVector();
+    pose.view = myCamera.viewDirection();
+    pose.worldPerPixel = worldPerPixel();
+    pose.pixelRatio = devicePixelRatioF();
+    changed = myRotateGizmo.show(pose) || changed;
+    if (changed && !myApplyingCamera) scheduleRedraw();
+}
+
+void OcctViewWidget::showScaleGizmo(const gp_Pnt& pivot)
+{
+    initializeViewer();
+    if (myView.IsNull()) return;
+    bool changed = myMoveGizmo.clear();
+    changed = myRotateGizmo.clear() || changed;
+    GizmoPose pose;
+    pose.pivot = pivot;
+    pose.right = myCamera.rightVector();
+    pose.up = myCamera.upVector();
+    pose.view = myCamera.viewDirection();
+    pose.worldPerPixel = worldPerPixel();
+    pose.pixelRatio = devicePixelRatioF();
+    changed = myScaleGizmo.show(pose) || changed;
+    if (changed && !myApplyingCamera) scheduleRedraw();
+}
+
+void OcctViewWidget::clearBodyGizmos()
+{
+    bool removed = myMoveGizmo.clear();
+    removed = myRotateGizmo.clear() || removed;
+    removed = myScaleGizmo.clear() || removed;
+    myMoveDrag.active = false;
+    myMoveDragAxis = -1;
+    myRotateDrag.active = false;
+    myScaleDrag.active = false;
+    // Stale hover must not survive into the next showing - the cursor may be
+    // somewhere else entirely by then. Reset AFTER clear(), where it is free:
+    // setHoveredAxis() only rebuilds a gizmo that is still showing.
+    myMoveGizmo.setHoveredAxis(-1);
+    myRotateGizmo.setHoveredAxis(-1);
+    myScaleGizmo.setHoveredAxis(-1);
+    if (removed) scheduleRedraw();
+}
+
+int OcctViewWidget::rotateGizmoAxisAt(const QPoint& point) const
+{
+    if (!myRotateGizmo.isShowing()) return -1;
+    // The drawn tori, sampled in screen space: walk each ring as a polyline
+    // and keep the nearest ring within the shared grab tolerance - the same
+    // nearest-wins rule the arm handles keep, for the same reason (rings
+    // cross each other twice per pair).
+    constexpr int kSamples = 48;
+    int best = -1;
+    double bestDistance = kHandleGrabPx;
+    for (int axis = 0; axis < 3; ++axis) {
+        gp_Pnt previous = myRotateGizmo.ringPoint(axis, 0.0);
+        for (int i = 1; i <= kSamples; ++i) {
+            const double angle = 2.0 * 3.14159265358979323846 * double(i) / double(kSamples);
+            const gp_Pnt current = myRotateGizmo.ringPoint(axis, angle);
+            const double distance = segmentPixelDistance(previous, current, point);
+            previous = current;
+            if (distance < 0.0 || distance > bestDistance) continue;
+            best = axis;
+            bestDistance = distance;
+        }
+    }
+    return best;
+}
+
+int OcctViewWidget::scaleGizmoAxisAt(const QPoint& point) const
+{
+    if (!myScaleGizmo.isShowing()) return -1;
+    // moveGizmoAxisAt()'s test on the scale gizmo's own handles - nearest
+    // wins, dead inner third, drawn-only.
+    int best = -1;
+    double bestDistance = kHandleGrabPx;
+    for (int axis = 0; axis < 3; ++axis) {
+        if (!myScaleGizmo.handleDrawn(axis, true)) continue;
+        const double distance = segmentPixelDistance(myScaleGizmo.handleGrabStart(axis, true),
+                                                     myScaleGizmo.handleTip(axis, true), point);
+        if (distance < 0.0 || distance > bestDistance) continue;
+        best = axis;
+        bestDistance = distance;
+    }
+    return best;
+}
+
+bool OcctViewWidget::rotateDragAnchor(gp_Pnt& out) const
+{
+    if (!myRotateDrag.active) return false;
+    out = myRotateDrag.anchor;
+    return true;
+}
+
+bool OcctViewWidget::scaleGizmoHandleTip(int axis, gp_Pnt& out) const
+{
+    if (!myScaleGizmo.isShowing() || axis < 0 || axis > 2) return false;
+    out = myScaleGizmo.handleTip(axis, true);
+    return true;
+}
+
+void OcctViewWidget::cancelBodyGizmoDrag()
+{
+    cancelMoveDrag();
+    if (myRotateDrag.active) {
+        myRotateDrag.active = false;
+        myRotateDrag.moved = false;
+        // cancelMoveDrag()'s own release-swallowing contract: the button is
+        // still down and the coming release belongs to the cancelled gesture.
+        myMoveDragCancelled = true;
+    }
+    if (myScaleDrag.active) {
+        myScaleDrag.active = false;
+        myScaleDrag.moved = false;
+        myMoveDragCancelled = true;
+    }
+}
+
+void OcctViewWidget::updateBodyGizmoHover(const QPoint& logical)
+{
+    bool changed = false;
+    if (myMoveGizmo.isShowing() && !myMoveDrag.active)
+        changed = myMoveGizmo.setHoveredAxis(moveGizmoAxisAt(logical)) || changed;
+    if (myRotateGizmo.isShowing() && !myRotateDrag.active)
+        changed = myRotateGizmo.setHoveredAxis(rotateGizmoAxisAt(logical)) || changed;
+    if (myScaleGizmo.isShowing() && !myScaleDrag.active)
+        changed = myScaleGizmo.setHoveredAxis(scaleGizmoAxisAt(logical)) || changed;
+    if (changed) scheduleRedraw();
+}
+
 void OcctViewWidget::setEdgeDimensionSuppressed(bool suppressed)
 {
     if (myEdgeDimensionSuppressed == suppressed) return;
@@ -2049,7 +2197,12 @@ void OcctViewWidget::updateManipulatorSize()
                                 : flatBudget;
     if (maxWorld <= 0.0) return;
 
-    const double wanted = std::min(myManipulatorNaturalSize, maxWorld);
+    // The user's Gizmo size token scales the RESULT - the natural size and
+    // the screen cap alike - so the Rotate/Scale gizmo and the Move tool's
+    // arms answer one setting at one ratio, and Space still swaps between
+    // them without a jump.
+    const double wanted =
+        std::min(myManipulatorNaturalSize, maxWorld) * Theme::gizmoScale();
     // The equal-guard, in the shape the view label's is: this runs on every
     // frame of an orbit and a pan, and SetSize() recomputes all seven of the
     // manipulator's presentations. Relative, not absolute, because the same
@@ -4135,8 +4288,16 @@ void OcctViewWidget::applyTheme()
     // appStateChanged, which onThemeChanged() ends by emitting.
     myPullArrow.reapplyTheme();
     myBevelArrow.reapplyTheme();
-    // And the Move gizmo, which bakes the three axis tokens in the same way.
+    // And the Move gizmo, which bakes the three axis tokens in the same way -
+    // its forced rebuild is also what carries a Gizmo size edit onto a live
+    // gizmo, since buildStrokes() reads Theme::gizmoScale().
     myMoveGizmo.reapplyTheme();
+    myRotateGizmo.reapplyTheme();
+    myScaleGizmo.reapplyTheme();
+    // The Rotate/Scale gizmo reads the same token: its equal-guard keys on
+    // the wanted size, which the token is now part of, so this is a no-op
+    // when the token did not move.
+    updateManipulatorSize();
 
     scheduleRedraw();
 }
@@ -5765,11 +5926,73 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
             myMoveDragAxis = axis;
             myMoveDragPositive = positive;
             myMoveDragCancelled = false;
-            // ONE line for both ends of an arm. A drag begun on the negative
-            // ball is the positive arm's drag with the other sign, so it needs
-            // no maths of its own - which is also why armAxis() is deliberately
-            // direction-agnostic.
-            beginAxisDrag(myMoveDrag, myMoveGizmo.armAxis(axis), myLastPos);
+            // ONE line for both ends of an arm, FROZEN here - the gizmo
+            // follows the drag, so its live armAxis() moves with it and
+            // cannot be the ruler (see myMoveDragLine).
+            myMoveDragLine = myMoveGizmo.armAxis(axis);
+            beginAxisDrag(myMoveDrag, myMoveDragLine, myLastPos);
+            return;
+        }
+    }
+
+    // The Rotate gizmo's press claim - same guards, same outright take. The
+    // drag's zero is the press's own vector from the pivot in the ring's
+    // plane; a press whose ray runs too flat to the plane anchors on the
+    // first move that can be measured instead, beginAxisDrag()'s own rule.
+    if (event->button() == Qt::LeftButton && !mySketchMode && !additivePress && !lockGesture &&
+        myRotateGizmo.isShowing()) {
+        const int axis = rotateGizmoAxisAt(myLastPos);
+        if (axis >= 0) {
+            myRotateDrag = RotateDrag();
+            myRotateDrag.active = true;
+            myRotateDrag.axis = axis;
+            // FROZEN at the press, myMoveDragLine's reasoning: the preview
+            // rotates the body, and a pivot re-read mid-gesture would follow
+            // whatever the preview does.
+            myRotateDrag.pivot = myRotateGizmo.pivot();
+            myRotateDrag.anchor = myRotateDrag.pivot;
+            myMoveDragCancelled = false;
+            gp_Lin ray;
+            gp_Pnt hit;
+            const gp_Pln plane(myRotateDrag.pivot,
+                               MoveGizmoRenderer::armDirection(axis));
+            if (rayThroughPixel(myLastPos.x(), myLastPos.y(), ray) &&
+                SketchController::intersectRayWithPlane(ray, plane, hit)) {
+                const gp_Vec fromPivot(myRotateDrag.pivot, hit);
+                if (fromPivot.Magnitude() > 1.0e-9) {
+                    myRotateDrag.pressVec = fromPivot;
+                    myRotateDrag.hasPress = true;
+                    // The chip's anchor: where the press landed, put ON the
+                    // drawn ring so the chip stands on ink rather than a few
+                    // pixels off it.
+                    myRotateDrag.anchor = myRotateDrag.pivot.Translated(
+                        fromPivot.Normalized() * myRotateGizmo.ringRadius());
+                }
+            }
+            return;
+        }
+    }
+
+    // The Scale gizmo's press claim. The drag is the Move drag's own maths -
+    // a parameter along the frozen arm line - read out as a factor of the
+    // arm's length at the press instead of as millimetres.
+    if (event->button() == Qt::LeftButton && !mySketchMode && !additivePress && !lockGesture &&
+        myScaleGizmo.isShowing()) {
+        const int axis = scaleGizmoAxisAt(myLastPos);
+        if (axis >= 0) {
+            myScaleDrag = ScaleDrag();
+            myScaleDrag.active = true;
+            myScaleDrag.axis = axis;
+            myScaleDrag.line =
+                gp_Lin(myScaleGizmo.pivot(), MoveGizmoRenderer::armDirection(axis));
+            myScaleDrag.baseLength = std::max(
+                myScaleGizmo.pivot().Distance(myScaleGizmo.handleTip(axis, true)), 1.0e-9);
+            myMoveDragCancelled = false;
+            gp_Lin ray;
+            myScaleDrag.hasPressParam =
+                rayThroughPixel(myLastPos.x(), myLastPos.y(), ray) &&
+                CameraController::axisParameterForRay(ray, myScaleDrag.line,
+                                                      myScaleDrag.pressParam);
             return;
         }
     }
@@ -5857,6 +6080,17 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
         myMoveDrag.active = false;
         myMoveDragAxis = -1;
         emit moveReleased(myMoveDrag.moved);
+        return;
+    }
+    // The Rotate and Scale drags end on identical terms.
+    if (myRotateDrag.active && event->button() == Qt::LeftButton) {
+        myRotateDrag.active = false;
+        emit rotateReleased(myRotateDrag.moved);
+        return;
+    }
+    if (myScaleDrag.active && event->button() == Qt::LeftButton) {
+        myScaleDrag.active = false;
+        emit scaleReleased(myScaleDrag.moved);
         return;
     }
     // ...and the release trailing a drag Escape already cancelled, swallowed
@@ -6067,13 +6301,77 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
         if (advanceAxisDrag(myBevelDrag, myBevelArrow.axis(), pos))
             emit bevelDragged(myBevelDrag.value);
     } else if (myMoveDrag.active) {
-        // The arm's axis is read back from the renderer rather than
-        // remembered: the gizmo is rebuilt on every camera step, and reading
-        // the line from the same place the press did is what stops a rebuild
-        // between two moves changing what this drag is measured along.
+        // Measured against the line FROZEN at the press, never the
+        // renderer's live armAxis(): the gizmo follows the drag now, so the
+        // live line's origin carries the very offset being measured - reading
+        // it back each move would subtract the current value from itself.
         if (myMoveDragAxis >= 0 &&
-            advanceAxisDrag(myMoveDrag, myMoveGizmo.armAxis(myMoveDragAxis), pos))
+            advanceAxisDrag(myMoveDrag, myMoveDragLine, pos))
             emit moveDragged(myMoveDragAxis, myMoveDrag.value);
+    } else if (myRotateDrag.active) {
+        // The whole-gesture angle: where the cursor's ray meets the ring's
+        // own plane, measured against the press vector about the frozen
+        // axis. atan2 of (v0 x v1)·axis against v0·v1 gives the SIGNED angle
+        // - a positive drag is a positive rotation, with no branch on which
+        // side of the ring was grabbed. A ray running too flat to the plane
+        // measures nothing and the last value stands, the axis drags' rule.
+        gp_Lin ray;
+        gp_Pnt hit;
+        const gp_Pln plane(myRotateDrag.pivot,
+                           MoveGizmoRenderer::armDirection(myRotateDrag.axis));
+        if (rayThroughPixel(pos.x(), pos.y(), ray) &&
+            SketchController::intersectRayWithPlane(ray, plane, hit)) {
+            const gp_Vec fromPivot(myRotateDrag.pivot, hit);
+            if (fromPivot.Magnitude() > 1.0e-9) {
+                if (!myRotateDrag.hasPress) {
+                    // The press could not be measured - anchor here, the
+                    // late-anchor rule beginAxisDrag() records.
+                    myRotateDrag.pressVec = fromPivot;
+                    myRotateDrag.hasPress = true;
+                } else {
+                    const gp_Vec axisVec(
+                        MoveGizmoRenderer::armDirection(myRotateDrag.axis));
+                    double degrees =
+                        std::atan2(myRotateDrag.pressVec.Crossed(fromPivot).Dot(axisVec),
+                                   myRotateDrag.pressVec.Dot(fromPivot)) *
+                        180.0 / 3.14159265358979323846;
+                    // The Milestone 2 step, applied where the snap state
+                    // lives - 15 degrees, as the grid step is millimetres.
+                    if (mySnapEnabled) degrees = std::round(degrees / 15.0) * 15.0;
+                    if (std::fabs(degrees - myRotateDrag.degrees) > 1.0e-9) {
+                        myRotateDrag.degrees = degrees;
+                        if (std::fabs(degrees) > 1.0e-9) myRotateDrag.moved = true;
+                        emit rotateDragged(myRotateDrag.axis, degrees);
+                    }
+                }
+            }
+        }
+    } else if (myScaleDrag.active) {
+        gp_Lin ray;
+        double parameter = 0.0;
+        if (rayThroughPixel(pos.x(), pos.y(), ray) &&
+            CameraController::axisParameterForRay(ray, myScaleDrag.line, parameter)) {
+            if (!myScaleDrag.hasPressParam) {
+                myScaleDrag.pressParam = parameter;
+                myScaleDrag.hasPressParam = true;
+            } else {
+                // Outward along the arm grows, inward shrinks: the cube sits
+                // at baseLength, so dragging it to twice that distance reads
+                // 200%. Snapped to 5% steps when Snap to Grid is on and
+                // clamped to the Milestone 2 band the commit enforces too, so
+                // the chip can never show a factor the commit would refuse.
+                double factor =
+                    (myScaleDrag.baseLength + (parameter - myScaleDrag.pressParam)) /
+                    myScaleDrag.baseLength;
+                if (mySnapEnabled) factor = std::round(factor / 0.05) * 0.05;
+                factor = std::clamp(factor, 0.05, 20.0);
+                if (std::fabs(factor - myScaleDrag.factor) > 1.0e-9) {
+                    myScaleDrag.factor = factor;
+                    if (std::fabs(factor - 1.0) > 1.0e-9) myScaleDrag.moved = true;
+                    emit scaleDragged(myScaleDrag.axis, factor);
+                }
+            }
+        }
     } else if (myOrbiting) {
         const QPoint delta = pos - myLastPos;
         // Dragging right swings the scene right: azimuth decreases; dragging up
@@ -6099,6 +6397,10 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
             emit sketchCursorMoved(onPlane);
         }
     } else if (!myViewerOnly && !myContext.IsNull()) {
+        // The gizmos' own hover, before OCCT's: their handles are invisible
+        // to the picker, so MoveTo below can never light one - this is the
+        // screen-space counterpart, and it only rebuilds on enter/leave.
+        updateBodyGizmoHover(pos);
         // Hover highlight. Suppressed while sketching so the in-progress wire
         // does not fight the highlighter for attention. Suppressed
         // altogether in viewer-only mode - see the header: no picking means

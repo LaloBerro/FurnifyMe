@@ -336,6 +336,30 @@ AppearancePanel::AppearancePanel(QWidget* parent)
     sketchLineWidthLine->addWidget(mySketchLineWidth);
     outer->addWidget(sketchLineWidthRow);
 
+    // The same bare-"x" multiplier template Grid detail set - this is not a
+    // length either, so it never goes near Measure.
+    auto* gizmoScaleRow = new QWidget(this);
+    makeTransparent(gizmoScaleRow, QStringLiteral("appearanceGizmoScaleRow"));
+    auto* gizmoScaleLine = new QHBoxLayout(gizmoScaleRow);
+    gizmoScaleLine->setContentsMargins(0, 0, 0, 0);
+    gizmoScaleLine->setSpacing(8);
+    myGizmoScaleLabel = new QLabel(tr("Gizmo size"), gizmoScaleRow);
+    makeTransparent(myGizmoScaleLabel, QStringLiteral("appearanceGizmoScaleLabel"));
+    gizmoScaleLine->addWidget(myGizmoScaleLabel, 1);
+    myGizmoScale = new QDoubleSpinBox(gizmoScaleRow);
+    myGizmoScale->setRange(Theme::kMinGizmoScale, Theme::kMaxGizmoScale);
+    myGizmoScale->setSingleStep(0.1);
+    myGizmoScale->setDecimals(1);
+    myGizmoScale->setSuffix(QStringLiteral("x"));
+    myGizmoScale->setToolTip(tr("How large the Move, Rotate and Scale handles "
+                                "draw over a selected body"));
+    connect(myGizmoScale, &QDoubleSpinBox::valueChanged, this, [this](double scale) {
+        if (mySyncing) return;
+        setGizmoScale(scale);
+    });
+    gizmoScaleLine->addWidget(myGizmoScale);
+    outer->addWidget(gizmoScaleRow);
+
     auto* strokeRow = new QWidget(this);
     makeTransparent(strokeRow, QStringLiteral("appearanceStrokeRow"));
     auto* strokeLine = new QHBoxLayout(strokeRow);
@@ -453,6 +477,7 @@ void AppearancePanel::applyTheme()
     if (myGridDensity) myGridDensity->setValue(live.gridDensity);
     if (myEdgeWidth) myEdgeWidth->setValue(live.edgeWidthPx);
     if (mySketchLineWidth) mySketchLineWidth->setValue(live.sketchLineWidthPx);
+    if (myGizmoScale) myGizmoScale->setValue(live.gizmoScale);
     if (myStroke) myStroke->setValue(static_cast<int>(live.chipStrokePx));
     if (myFamily) {
         const int index = myFamily->findText(live.fontFamily);
@@ -520,6 +545,13 @@ void AppearancePanel::setSketchLineWidth(double px)
     Theme::Spec next = Theme::spec();
     next.sketchLineWidthPx =
         std::clamp(px, Theme::kMinSketchLineWidthPx, Theme::kMaxSketchLineWidthPx);
+    Theme::setSpec(next);
+}
+
+void AppearancePanel::setGizmoScale(double scale)
+{
+    Theme::Spec next = Theme::spec();
+    next.gizmoScale = std::clamp(scale, Theme::kMinGizmoScale, Theme::kMaxGizmoScale);
     Theme::setSpec(next);
 }
 
@@ -711,6 +743,7 @@ QStringList AppearancePanel::paintedTexts() const
     if (myGridDensityLabel) texts << myGridDensityLabel->text();
     if (myEdgeWidthLabel) texts << myEdgeWidthLabel->text();
     if (mySketchLineWidthLabel) texts << mySketchLineWidthLabel->text();
+    if (myGizmoScaleLabel) texts << myGizmoScaleLabel->text();
     if (myStrokeLabel) texts << myStrokeLabel->text();
     if (myFamilyLabel) texts << myFamilyLabel->text();
     if (mySave) texts << mySave->text();

@@ -18,6 +18,8 @@ class MainWindow;
 class OcctViewWidget;
 class QHideEvent;
 class QShowEvent;
+class TopoDS_Shape;
+class gp_Trsf;
 
 // The body-transform gizmo we draw ourselves - Phase 1 of the split design
 // (docs/superpowers/specs/2026-09-06-custom-gizmo-design.md), which is Move
@@ -47,12 +49,12 @@ class QShowEvent;
 // GizmoRenderer is a BASE, not a copy target. Everything in it is the part
 // Phase 2's rings and centre handle need unchanged - the context, the object
 // list, the pose cache that stops a rebuild on every idle camera tick, the
-// display discipline (mode -1, never pickable, Topmost) and the theme
-// re-application. What a subclass supplies is geometry and nothing else:
-// buildStrokes() is handed a pivot, a view direction and a world-per-pixel and
-// returns the lines to draw. A RotateGizmoRenderer is then three arcs and a
-// ScaleGizmoRenderer one small box, each about thirty lines, with no
-// opportunity to forget one of the disciplines above.
+// display discipline (mode -1, never pickable, the gizmo's own layer) and the
+// theme re-application. What a subclass supplies is geometry and nothing
+// else: buildStrokes() is handed the pose and adds shaded solids through
+// addSolid(). A RotateGizmoRenderer is then three tori and a
+// ScaleGizmoRenderer three cube tips, with no opportunity to forget one of
+// the disciplines above.
 // Everything a gizmo needs to know about where it stands and how the camera is
 // looking at it. A struct rather than six arguments because Phase 2's two
 // renderers take exactly the same set and a positional argument list of this
@@ -116,45 +118,38 @@ public:
     // showing, so it cannot make a gizmo appear.
     void reapplyTheme();
 
+    // Which handle the cursor is over (0/1/2), or -1. Driven by
+    // OcctViewWidget's own screen-space hit test - these objects are never
+    // pickable, so OCCT's hover pipeline cannot answer this - and read by
+    // buildStrokes(), which draws the hovered handle brighter. Returns TRUE
+    // when the change actually redrew something, so the caller knows to ask
+    // for a frame.
+    bool setHoveredAxis(int axis);
+    int hoveredAxis() const { return myHoveredAxis; }
+
     const gp_Pnt& pivot() const { return myPose.pivot; }
 
-    // One drawn line. Public only so the file-local geometry helpers that
-    // build rings and discs can name it; nothing outside constructs one.
-    struct Stroke {
-        gp_Pnt a;
-        gp_Pnt b;
-    };
-
 protected:
-    // THE subclass hook. Called with myPivot/myViewDirection/myWorldPerPixel
-    // already set; adds whatever the tool draws through addStrokes().
+    // THE subclass hook. Called with the pose already set; adds whatever the
+    // tool draws through addSolid().
     virtual void buildStrokes() = 0;
 
-    // One AIS object per call, drawn in `colour` at `widthPx`. Lines only, and
-    // that is not a stylistic preference: Graphic3d_ArrayOfTriangles draws
-    // NOTHING AT ALL in this build (recorded twice in this tree - see
-    // DimensionRenderer's arrowhead comment and SketchPointMarker's), so a
-    // filled cone would be an invisible one. A cone is therefore its own
-    // silhouette: a ring plus generatrices, which at eighteen screen pixels
-    // reads as solid.
-    //
-    // It also keeps every colour this gizmo paints EXACT. A shaded AIS_Shape
-    // cone would be lit, and a lit pixel is not the token pixel - which would
-    // cost gui_smoke the one check that can say the arms are drawn in
-    // Theme::gizmoAxisX/Y/Z rather than in something approximately like them.
-    void addStrokes(const std::vector<Stroke>& strokes, const QColor& colour, double widthPx);
+    // Whether the drawn geometry depends on where the camera LOOKS, or only on
+    // where it stands. A gizmo laid out along the WORLD axes (the 3D one) is
+    // the latter: return false and show()'s rebuild key drops the camera-frame
+    // terms, so an orbit at constant distance rebuilds nothing at all - the
+    // zoom (worldPerPixel) and the pivot are the only things that can move it.
+    virtual bool viewDependent() const { return true; }
 
-    // One AIS_TextLabel, same discipline as addStrokes(): mode -1, Topmost,
-    // never pickable. `heightPx` is the font's EM box in DEVICE pixels, which
-    // is the unit OCCT sizes a non-zoomable label in - see AxisCard::
-    // letterEmPx() for why that is not the same number Qt was given.
-    //
-    // The face is DimensionRenderer::fontFamily(), deliberately shared rather
-    // than resolved again here: that function spills the app's DM Sans out of
-    // the Qt resource and registers it with Font_FontMgr exactly once, and two
-    // registrations of one resource are two chances to end up with two family
-    // names and a gizmo whose letters are not the app's font at all.
-    void addLabel(const QString& text, const gp_Pnt& at, const QColor& colour, double heightPx);
+    // One shaded 3D solid, drawn UNLIT in exactly `colour` - Unity's own gizmo
+    // look: a flat solid-colour arrow whose 3D-ness shows through perspective
+    // and self-occlusion, not through lighting. Unlit also keeps the token
+    // colour EXACT in a Dump, which a lit mesh could not promise. The shape
+    // must be meshed (BRepMesh_IncrementalMesh) before it is handed in; AIS
+    // draws nothing for an untessellated face. Displayed in AIS_Shaded at
+    // selection mode -1, never pickable, on drawLayer() - the same discipline
+    // every gizmo object here has always kept.
+    void addSolid(const TopoDS_Shape& shape, const QColor& colour);
 
     // Where both of those put what they draw: setZLayer()'s value, or Topmost
     // if the viewer never gave us a layer of our own.
@@ -175,53 +170,32 @@ private:
     // Defeats show()'s pose cache for one call - the appearance changed, not
     // the geometry, and the cache key knows nothing about appearance.
     bool myForceRebuild = false;
+    int myHoveredAxis = -1;
 };
 
-// The MOVE tool's presentation: THE AXIS CARD'S OWN DRAWING, in the scene.
+// The MOVE tool's presentation: a TRUE 3D GIZMO, Unity's and Blender's own
+// shape (user ruling, 2026-09-08, replacing the axis-card copy outright).
 //
-// Not "the card's language" or "the card's family" - the card's drawing. Every
-// element of AxisGizmo::paintEvent() has its counterpart here at the card's own
-// proportions, and both read one set of numbers (AxisCard, in AxisGizmo.h):
-// three thin arms in Theme::gizmoAxisX/Y/Z at the card's stroke-to-arm ratio,
-// filled cone tips at the card's cone-to-arm ratio, HOLLOW BALLS on the three
-// negative directions at the card's ball-to-arm ratio, the neutral filled hub,
-// and the small lowercase x/y/z past each cone in the card's own badge face.
-// One number is chosen here rather than derived - how long an arm is - and
-// everything else is that scale times a card number.
+// Three shaded arrows along the WORLD axes - a thin cylinder shaft, a real
+// cone of revolution at its end - and a sphere at the pivot, each an unlit
+// solid in its axis token so the colours stay exact. Being genuine 3D
+// geometry, it foreshortens naturally with the camera instead of always
+// facing it, and a sphere is a perfect circle from every angle - the flat
+// ring's cropped-arc failure cannot exist here by construction. It draws on
+// the gizmo's own depth-cleared immediate Z-layer, so it stands on top of
+// every body while its own parts still occlude each other correctly.
 //
-// IT IS DRAWN ON THE VIEW PLANE, and that is the difference between the card's
-// drawing and a gizmo that merely resembles it. Built as true 3D geometry - an
-// arm along the world axis, a cone of revolution at its end - it is NOT the
-// same drawing at another size, and the user said so: perspective foreshortens
-// an arm pointing at the eye into a stub while drawing its cone OVERSIZED,
-// because the cone is nearer. The card has neither problem, because the card
-// is a flat projection.
+// Sized in SCREEN pixels (kArmPixels x Theme::gizmoScale(), converted through
+// worldPerPixel()) and laid out along fixed world directions, so the only
+// things that can move it are the pivot and the zoom - viewDependent() is
+// false, and an orbit at constant distance rebuilds nothing.
 //
-// So every vertex here lies in the plane through the pivot spanned by the
-// camera's right and up vectors, laid out from AxisCard::computeTips() - the
-// card's own projection, shared rather than reimplemented - with the cone,
-// ball, hub and letters at constant screen size. That plane is perpendicular
-// to the view direction, so every vertex sits at ONE depth, and a pinhole
-// projection maps a plane at one depth to the screen with a single uniform
-// scale. The scene gizmo and the corner card are therefore the same drawing at
-// two scales at EVERY camera angle.
-//
-// The DRAG is untouched by any of this: an arm still drags along its TRUE
-// world axis through armAxis(), and only the hit band follows the drawn screen
-// segment.
-//
-// gui_smoke pins it by MEASUREMENT, not by shared constants: it renders the
-// card, dumps the scene, compares element-to-arm ratios read off the two
-// RENDERINGS, and - at an oblique camera, which is where the 3D drawing failed
-// - asserts POSITIONAL agreement: each of the six tips pointing the same way
-// on both, at one shared scale. Shared constants only stop the two drawings
-// disagreeing about what the numbers are; the pin is what stops them
-// disagreeing about how they are used.
-//
-// The three negative balls are grab targets too, exactly as the three cones
-// are. A drag on one is measured against the SAME infinite world line the
-// positive arm uses (armAxis()), so it needs no maths of its own - it simply
-// resolves to a negative distance.
+// The DRAG is untouched by any of this: an arm drags along its TRUE world
+// axis through armAxis(), and the hit band follows the drawn segment from
+// grab-start to cone tip. Only the three positive handles exist (the negative
+// stub-and-ball handles were removed by the same user ruling); the [axis][1]
+// slots stay in the cache arrays so the shared accessors keep their shape,
+// permanently marked not-drawn.
 class MoveGizmoRenderer : public GizmoRenderer {
 public:
     // World +X / +Y / +Z. The one place the axis-index -> gp_Dir mapping
@@ -237,12 +211,8 @@ public:
     // arm's drag with the other sign, and one line is what makes that true.
     gp_Lin armAxis(int axis) const;
 
-    // A handle's outer point AS DRAWN - the cone's nominal tip on the positive
-    // side, the ball's centre on the negative one, both on the view plane.
-    // Where the value chip goes, and where the hit test's span ends. It is the
-    // DRAWN point rather than a point on the world axis on purpose: the hit
-    // band has to follow the segment the user can see, while the drag that
-    // band starts is still measured against armAxis().
+    // A handle's outer point AS DRAWN - the cone's tip, in world coordinates.
+    // Where the value chip goes, and where the hit test's span ends.
     gp_Pnt handleTip(int axis, bool positive) const;
     // Where a handle's GRABBABLE span starts, as a fraction of the drawn arm.
     // The inner third is excluded on purpose: all six handles meet at the hub,
@@ -250,11 +220,9 @@ public:
     // noise and the user would get an axis at random.
     static constexpr double kGrabStartFraction = 0.3;
     gp_Pnt handleGrabStart(int axis, bool positive) const;
-    // FALSE when this handle's own tip falls inside the hub - an axis pointing
-    // very nearly at the eye. The card has the same handles at the same
-    // moments and they are just as unreachable there; what this stops is all
-    // six collapsing onto the hub and every one of them claiming a press on
-    // it.
+    // TRUE for the three positive handles, FALSE always for the negative
+    // slots, which no longer draw anything - and a handle that is not drawn
+    // must not grab (moveGizmoAxisAt() reads this as its gate).
     bool handleDrawn(int axis, bool positive) const;
 
     // The positive spellings, kept because most callers only ever mean +axis.
@@ -263,20 +231,72 @@ public:
 
 protected:
     void buildStrokes() override;
+    bool viewDependent() const override { return false; }
 
 private:
-    // Where the last build actually PUT each of the six handles, indexed
-    // [axis][positive ? 0 : 1]. Cached rather than recomputed because the
-    // layout is the card's projection of the pose, and the hit test must ask
-    // about the drawing that is on screen rather than about a pose that has
-    // moved on since.
+    // Where the last build actually PUT each handle, indexed
+    // [axis][positive ? 0 : 1]. Cached so the hit test asks about the drawing
+    // that is on screen rather than about a pose that has moved on since.
     gp_Pnt myTip[3][2];
     gp_Pnt myGrabStart[3][2];
     bool myDrawn[3][2] = {{false, false}, {false, false}, {false, false}};
 };
 
-// The Qt half of the Move gesture - the value chip, the live ghost preview and
-// the Escape claim.
+// The ROTATE tool's presentation (custom gizmo, Phase 2): three unlit tori,
+// one per axis, each lying in the plane its axis is normal to - Blender's own
+// rotate gizmo. Real 3D rings, so they occlude each other correctly and can
+// never crop: what the eye sees is the torus's actual silhouette. Grabbing a
+// ring rotates about its axis; the hit test samples the drawn ring in screen
+// space (OcctViewWidget::rotateGizmoAxisAt()), the same never-pickable
+// discipline every gizmo object here keeps.
+class RotateGizmoRenderer : public GizmoRenderer {
+public:
+    // A point on the drawn ring of `axis` at `angleRad`, in world
+    // coordinates - the hit test and the value chip both walk the ring
+    // through this, so neither can disagree with the drawing about where it
+    // is.
+    gp_Pnt ringPoint(int axis, double angleRad) const;
+    double ringRadius() const { return myRadius; }
+
+protected:
+    void buildStrokes() override;
+    bool viewDependent() const override { return false; }
+
+private:
+    double myRadius = 0.0;
+};
+
+// The SCALE tool's presentation (custom gizmo, Phase 2): the Move gizmo's
+// three arms wearing CUBE tips instead of cones - Unity's own scale language -
+// plus the neutral pivot sphere. The kernel can only express UNIFORM scale
+// (gp_Trsf has no per-axis form; GTransform would convert faces to NURBS), so
+// dragging ANY cube scales the whole body uniformly; three handles rather
+// than one centre cube because a handle out on an arm gives the drag a line
+// to be measured along, which a centre grab cannot.
+class ScaleGizmoRenderer : public GizmoRenderer {
+public:
+    // The same handle accessors MoveGizmoRenderer exposes, so
+    // OcctViewWidget's one screen-space hit test serves both gizmos.
+    gp_Pnt handleTip(int axis, bool positive) const;
+    gp_Pnt handleGrabStart(int axis, bool positive) const;
+    bool handleDrawn(int axis, bool positive) const;
+
+protected:
+    void buildStrokes() override;
+    bool viewDependent() const override { return false; }
+
+private:
+    gp_Pnt myTip[3][2];
+    gp_Pnt myGrabStart[3][2];
+    bool myDrawn[3][2] = {{false, false}, {false, false}, {false, false}};
+};
+
+// The Qt half of ALL THREE body-tool gestures since Phase 2 - the value chip,
+// the live ghost preview and the Escape claim, for whichever of Move, Rotate
+// and Scale is active (MainWindow::bodyTool() decides, and showGizmo() raises
+// that tool's renderer). The class keeps its Phase 1 name because the suite
+// and MainWindow address it by it; it is the ONE transform chip, not a
+// Move-only one.
 //
 // Its contract is PullArrow's, and the long-form reasons for every rule are
 // recorded there and on ExtrudePreview. The two real differences:
@@ -359,7 +379,14 @@ private:
     QString valueText() const;
     QString hintText() const;
     void onDragged(int axis, double millimetres);
+    void onRotateDragged(int axis, double degrees);
+    void onScaleDragged(int axis, double factor);
     void onReleased(bool dragged);
+    // The delta the live drag has produced, as one gp_Trsf about the body's
+    // own pivot - the ONE derivation updatePreview() and commit() both read,
+    // switched on the active tool, so the ghost and the checkpoint can never
+    // be two different transforms.
+    bool dragTransform(gp_Trsf& out) const;
 
     MainWindow* myWindow = nullptr;
     OcctViewWidget* myView = nullptr;
@@ -367,9 +394,11 @@ private:
     // The body the gizmo stands on, re-derived from the live predicate on
     // every refresh() rather than trusted across a rebuild.
     int myBodyId = 0;
-    // Which arm is being dragged (0/1/2) and how far, in millimetres. Both
-    // are meaningful only while a drag is live.
+    // Which arm is being dragged (0/1/2) and the drag's value - millimetres
+    // for Move, degrees for Rotate, a factor for Scale (myFactor). All
+    // meaningful only while a drag is live.
     int myAxis = -1;
     double myDistance = 0.0;
+    double myFactor = 1.0;
     bool myHasPreview = false;
 };
