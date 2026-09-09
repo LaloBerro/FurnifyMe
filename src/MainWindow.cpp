@@ -741,6 +741,8 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
             settings.value(QStringLiteral("renderMode/fov"), myStartRenderFov).toDouble();
         myStartRenderQuick =
             settings.value(QStringLiteral("renderMode/quick"), false).toBool();
+        myStartRenderWood =
+            settings.value(QStringLiteral("renderMode/wood"), false).toBool();
     }
 
     // The title bar's and the taskbar's mark, painted rather than loaded - see
@@ -932,6 +934,7 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         if (myRenderSettingsPanel) {
             myRenderSettingsPanel->setVisible(hiddenForRenderMode);
             myRenderSettingsPanel->setQuick(myView->renderQuick());
+            myRenderSettingsPanel->setWood(myView->renderWood());
             // The footer's tier line follows the mode: pushed here on every
             // state change, and per-second by the polish ticker below while
             // render mode is on.
@@ -1957,6 +1960,13 @@ void MainWindow::buildOverlay()
     // entry path they have always taken, so a flip re-enters render mode.
     myView->setRenderQuick(myStartRenderQuick);
     myRenderSettingsPanel->setQuick(myStartRenderQuick);
+    myView->setRenderWood(myStartRenderWood);
+    myRenderSettingsPanel->setWood(myStartRenderWood);
+    connect(myRenderSettingsPanel, &RenderSettingsPanel::woodChanged, this,
+            [this](bool wood) {
+                myView->setRenderWood(wood);
+                persistRenderSettings();
+            });
     connect(myRenderSettingsPanel, &RenderSettingsPanel::quickChanged, this,
             [this](bool quick) {
                 myView->setRenderQuick(quick);
@@ -2778,6 +2788,7 @@ void MainWindow::writeRenderSettingsNow()
                       bg.isValid() ? bg.name(QColor::HexArgb) : QString());
     settings.setValue(QStringLiteral("renderMode/fov"), myView->renderFov());
     settings.setValue(QStringLiteral("renderMode/quick"), myView->renderQuick());
+    settings.setValue(QStringLiteral("renderMode/wood"), myView->renderWood());
 }
 
 void MainWindow::closeEvent(QCloseEvent* event)

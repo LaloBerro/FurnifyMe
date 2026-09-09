@@ -39,6 +39,9 @@
 #include <Graphic3d_BSDF.hxx>
 #include <Graphic3d_PBRMaterial.hxx>
 #include <Graphic3d_ArrayOfSegments.hxx>
+#include <Graphic3d_Texture2D.hxx>
+#include <Graphic3d_TextureParams.hxx>
+#include <Image_PixMap.hxx>
 #include <Graphic3d_AspectLine3d.hxx>
 #include <Graphic3d_AspectMarker3d.hxx>
 #include <Graphic3d_Camera.hxx>
@@ -210,6 +213,12 @@ public:
 // comparison. Eight matches Auto's edge-hover promise: the two are the same
 // kind of forgiveness.
 constexpr double kMagnetSnapPx = 8.0;
+
+// The wood look (Milestone 5): one mid-tone the PBR/BSDF albedo and the
+// Phong diffuse both derive from, so the two pipelines disagree about
+// shading, never about what colour wood is. The texture's own palette
+// brackets it either side.
+const Quantity_Color kWoodTone(0.55, 0.38, 0.23, Quantity_TOC_sRGB);
 
 // One tiny point in world space, drawn as a marker whose size lives in
 // screen pixels - Graphic3d_AspectMarker3d/Prs3d_PointAspect's own documented
@@ -532,6 +541,7 @@ void OcctViewWidget::releaseGlResources()
     myPlacedMarkers.clear();
     myFirstPointMarker.Nullify();
     myCursorMarker.Nullify();
+    myWoodTexture.Nullify();
     myMagnetGuide.Nullify();
     myMagnetGuideShown = false;
     mySymmetryIndicator.Nullify();
@@ -4355,6 +4365,107 @@ bool OcctViewWidget::renderMaterialControlsApply() const
     return usesPbrMaterials(myRenderTier);
 }
 
+void OcctViewWidget::setRenderWood(bool on)
+{
+    if (myRenderWood == on) return;
+    myRenderWood = on;
+    if (!myRenderModeActive || myContext.IsNull()) return;
+    // Re-dress the bodies for the tier that is actually up - the same pair
+    // applyRenderTier() chooses between, so wood cannot invent a third
+    // material path.
+    if (usesPbrMaterials(myRenderTier))
+        applyRenderBodyMaterials();
+    else
+        clearRenderBodyMaterials();
+    redrawRenderModeLive();
+}
+
+void OcctViewWidget::ensureWoodTexture()
+{
+    if (!myWoodTexture.IsNull()) return;
+
+    // A procedural plank: wavy longitudinal grain bands with fine per-pixel
+    // variation, drawn once into a QImage and handed to OCCT as an
+    // Image_PixMap - no asset, no file, nothing to deploy. 512 wraps
+    // seamlessly enough at the repeat scale below that seams read as grain.
+    constexpr int kSize = 512;
+    QImage image(kSize, kSize, QImage::Format_RGB888);
+    const QColor dark(0x6b, 0x48, 0x2a);
+    const QColor mid(0x8f, 0x6a, 0x45);
+    const QColor light(0xa8, 0x82, 0x58);
+    auto mix = [](const QColor& a, const QColor& b, double t) {
+        return QColor(int(a.red() + (b.red() - a.red()) * t),
+                      int(a.green() + (b.green() - a.green()) * t),
+                      int(a.blue() + (b.blue() - a.blue()) * t));
+    };
+    // Deterministic hash noise, so every session grows the same tree.
+    auto noise = [](int x, int y) {
+        unsigned n = static_cast<unsigned>(x) * 374761393u + static_cast<unsigned>(y) * 668265263u;
+        n = (n ^ (n >> 13)) * 1274126177u;
+        return double((n ^ (n >> 16)) & 0xffff) / 65535.0;
+    };
+    for (int y = 0; y < kSize; ++y) {
+        for (int x = 0; x < kSize; ++x) {
+            // Grain runs along Y: bands are a function of X, wobbled by a
+            // slow sine of Y and a touch of noise so no two lines match.
+            const double wobble = 6.0 * std::sin(y * 0.024 + x * 0.01) +
+                                  2.0 * std::sin(y * 0.11);
+            const double band = std::sin((x + wobble) * 0.55) * 0.5 + 0.5;
+            const double fine = noise(x, y) * 0.18;
+            double t = band * 0.75 + fine;
+            QColor c = t < 0.5 ? mix(dark, mid, t * 2.0) : mix(mid, light, (t - 0.5) * 2.0);
+            // Occasional darker vessel line.
+            if (noise(x / 3, y / 7) > 0.978) c = c.darker(130);
+            image.setPixelColor(x, y, c);
+        }
+    }
+
+    Handle(Image_PixMap) pix = new Image_PixMap();
+    if (!pix->InitTrash(Image_Format_RGB, kSize, kSize)) return;
+    for (int y = 0; y < kSize; ++y) {
+        for (int x = 0; x < kSize; ++x) {
+            const QColor c = image.pixelColor(x, y);
+            pix->SetPixelColor(x, y,
+                              Quantity_ColorRGBA(float(c.redF()), float(c.greenF()),
+                                                 float(c.blueF()), 1.0f));
+        }
+    }
+
+    Handle(Graphic3d_Texture2D) texture = new Graphic3d_Texture2D(pix);
+    // A face's natural UVs are its surface parameters - MILLIMETRES on the
+    // planar faces furniture is made of - so an unscaled texture would tile
+    // once per millimetre and read as noise. 1/180 puts one grain period
+    // across ~180 mm, a plank's own rhythm. Modulated, so the lighting
+    // pipeline still shades it; repeated, because furniture is bigger than
+    // one tile.
+    texture->GetParams()->SetModulate(Standard_True);
+    texture->GetParams()->SetRepeat(Standard_True);
+    texture->GetParams()->SetScale(Graphic3d_Vec2(1.0f / 180.0f, 1.0f / 180.0f));
+    myWoodTexture = texture;
+}
+
+void OcctViewWidget::applyWoodTexture(bool on)
+{
+    if (myContext.IsNull()) return;
+    if (on) ensureWoodTexture();
+    if (on && myWoodTexture.IsNull()) return;
+    for (auto& entry : mySolids) {
+        if (entry.second.IsNull()) continue;
+        // Own aspect first, never the drawer link's - a texture written into
+        // the shared default would dress every future presentation in wood.
+        entry.second->Attributes()->SetupOwnShadingAspect();
+        const Handle(Graphic3d_AspectFillArea3d) aspect =
+            entry.second->Attributes()->ShadingAspect()->Aspect();
+        if (on) {
+            aspect->SetTextureMap(myWoodTexture);
+            aspect->SetTextureMapOn(true);
+        } else {
+            aspect->SetTextureMapOn(false);
+        }
+        myContext->Redisplay(entry.second, Standard_False);
+    }
+}
+
 void OcctViewWidget::setRenderSurfaceRoughness(double roughness01)
 {
     myRenderRoughness = std::clamp(roughness01, 0.0, 1.0);
@@ -4666,9 +4777,14 @@ void OcctViewWidget::applyRenderBodyMaterials()
     // literals exactly, so a session that never opens the render settings
     // card gets the identical look this always shipped.
     Graphic3d_MaterialAspect material(Graphic3d_NameOfMaterial_UserDefined);
-    material.SetColor(Quantity_Color(0.70, 0.70, 0.68, Quantity_TOC_RGB));
+    material.SetColor(myRenderWood ? kWoodTone
+                                   : Quantity_Color(0.70, 0.70, 0.68, Quantity_TOC_RGB));
     Graphic3d_PBRMaterial pbr;
-    pbr.SetColor(Quantity_Color(0.55, 0.55, 0.53, Quantity_TOC_RGB));
+    // Wood swaps the albedo and nothing else - roughness and metal stay the
+    // user's own sliders, so a satin-varnished or a raw plank both remain
+    // one drag away.
+    pbr.SetColor(myRenderWood ? kWoodTone
+                              : Quantity_Color(0.55, 0.55, 0.53, Quantity_TOC_RGB));
     pbr.SetMetallic(static_cast<float>(myRenderMetallic));
     pbr.SetRoughness(static_cast<float>(myRenderRoughness));
     material.SetPBRMaterial(pbr);
@@ -4685,6 +4801,7 @@ void OcctViewWidget::applyRenderBodyMaterials()
     // GI defect for three fix rounds. CreateMetallicRoughness() is OCCT's
     // own conversion, so the BSDF cannot drift from the PBR block above it.
     material.SetBSDF(Graphic3d_BSDF::CreateMetallicRoughness(pbr));
+    // The grain itself - after the material below, see applyWoodTexture().
     for (auto& entry : mySolids) {
         entry.second->SetMaterial(material);
         // Every OTHER place in this file that changes a displayed
@@ -4698,11 +4815,29 @@ void OcctViewWidget::applyRenderBodyMaterials()
         // what does and does not.
         myContext->Redisplay(entry.second, Standard_False);
     }
+    applyWoodTexture(myRenderWood);
 }
 
 void OcctViewWidget::clearRenderBodyMaterials()
 {
     if (myContext.IsNull()) return;
+
+    // The wood branch (Milestone 5): on the Phong tiers wood is a classic
+    // diffuse in the same tone the PBR albedo wears, under the same grain
+    // texture - so Quick and Deep disagree about shading, never about the
+    // material. Only while render mode is actually up: the EXIT path runs
+    // through here too on a tier switch, and the full revert below is what
+    // modeling must always get back.
+    if (myRenderModeActive && myRenderWood) {
+        Graphic3d_MaterialAspect wood(Graphic3d_NameOfMaterial_UserDefined);
+        wood.SetColor(kWoodTone);
+        for (auto& entry : mySolids) {
+            entry.second->SetMaterial(wood);
+            myContext->Redisplay(entry.second, Standard_False);
+        }
+        applyWoodTexture(true);
+        return;
+    }
     // The Shadows/Plain half of the pair - fix round 2's scoping. A plain
     // UnsetMaterial() per solid is a complete revert to whatever stood
     // before render mode touched it, on the exact terms
@@ -4712,6 +4847,7 @@ void OcctViewWidget::clearRenderBodyMaterials()
     // carries one on its own SetMaterial() call - a presentation change
     // that is not followed by one is not guaranteed to reach the next
     // redraw.
+    applyWoodTexture(false);
     for (auto& entry : mySolids) {
         entry.second->UnsetMaterial();
         myContext->Redisplay(entry.second, Standard_False);
@@ -5435,6 +5571,10 @@ void OcctViewWidget::setRenderMode(bool on)
             // The render-mode PBR material off, back to whatever stood
             // before applyRenderBodyMaterials() ran - see that function's
             // own comment on why UnsetMaterial() is a complete restore here.
+            // The wood grain goes with it - the aspect bit is presentation
+            // state exactly as the material is.
+            entry.second->Attributes()->SetupOwnShadingAspect();
+            entry.second->Attributes()->ShadingAspect()->Aspect()->SetTextureMapOn(false);
             entry.second->UnsetMaterial();
             myContext->SetDisplayMode(entry.second, mode, Standard_False);
             myContext->Redisplay(entry.second, Standard_False);

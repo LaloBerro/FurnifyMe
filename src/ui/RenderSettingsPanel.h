@@ -114,6 +114,15 @@ public:
     void setQuick(bool quick);
     bool quick() const { return myQuick; }
 
+    // The Wood preset (Milestone 5): a material of its own rather than a
+    // gloss/metal pair, so it is a flag beside the sliders, not a write into
+    // them. setWood() is the silent return path; a tile click emits
+    // woodChanged() and MainWindow owns what it does
+    // (OcctViewWidget::setRenderWood() plus persistence). Clicking any of
+    // the three gloss/metal tiles takes wood off in the same gesture.
+    void setWood(bool wood);
+    bool wood() const { return myWood; }
+
     // The footer's live line: the active tier's name and - for the
     // path-traced tier - how polished the on-screen picture is right now
     // (progress01 in [0,1]; anything negative hides the bar). Pushed by
@@ -162,6 +171,7 @@ public:
 
 signals:
     void quickChanged(bool quick);
+    void woodChanged(bool wood);
     void surfaceGlossinessChanged(double glossiness01);
     void metalChanged(double metallic01);
     void lightAngleChanged(double azimuthDeg);
@@ -191,6 +201,7 @@ private:
     class SegChip* myDeepChip = nullptr;
     class SegChip* mySimpleChip = nullptr;
     bool myQuick = false;
+    bool myWood = false;
     // The three material preset tiles (the mockup's "B material selector").
     std::vector<class MaterialTile*> myPresetTiles;
     class RenderShutterButton* myShutter = nullptr;

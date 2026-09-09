@@ -9,6 +9,7 @@
 #include <Graphic3d_CLight.hxx>
 #include <Graphic3d_RenderingParams.hxx>
 #include <Graphic3d_ToneMappingMethod.hxx>
+#include <Graphic3d_TextureMap.hxx>
 #include <Graphic3d_TypeOfShadingModel.hxx>
 #include <Graphic3d_ZLayerSettings.hxx>
 #include <TopoDS_Edge.hxx>
@@ -1187,6 +1188,17 @@ public:
     // is derived from the probed best AND this flag at entry.
     void setRenderQuick(bool quick) { myRenderQuick = quick; }
     bool renderQuick() const { return myRenderQuick; }
+
+    // The wood material (Milestone 5): render-mode bodies dress in a
+    // procedurally generated wood grain - a texture on the raster tiers,
+    // and at minimum a wood-toned PBR/BSDF on the path-traced one (whether
+    // this build's ray pipeline samples the texture too is the user's pixel
+    // to judge; the albedo makes wood read as wood either way). Session +
+    // persisted state exactly as Surface/Metal are; applies live while
+    // render mode is on, restored completely on exit - modeling never sees
+    // it.
+    void setRenderWood(bool on);
+    bool renderWood() const { return myRenderWood; }
 
     // What the tier probe actually MEASURED, kept so the decision can be
     // audited rather than only its outcome reported. Phase 3 of the
@@ -2518,6 +2530,16 @@ private:
     // capped by the Quick flag (see effectiveRenderTier()).
     RenderTier myRenderTierBest = RenderTier::Plain;
     bool myRenderQuick = false;
+    // Wood (Milestone 5) - see setRenderWood(). The texture is built once
+    // per session, lazily, from a procedural QImage; the handle lives for
+    // the widget's life and dies with the GL resources.
+    bool myRenderWood = false;
+    Handle(Graphic3d_TextureMap) myWoodTexture;
+    void ensureWoodTexture();
+    // Turns the wood texture on or off across every body presentation -
+    // the ONE place the aspect bit is written, called from both material
+    // appliers and from the exit restore.
+    void applyWoodTexture(bool on);
     // The probe's own working, kept beside its answer - see TierProbeTimings.
     TierProbeTimings myTierProbeTimings;
     // See showRenderFloor(). Null whenever render mode is off.

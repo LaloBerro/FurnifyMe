@@ -1498,6 +1498,7 @@ private:
     double myStartRenderLightStrength = 2.0;
     QColor myStartRenderBackground;             // invalid = no stored override
     bool myStartRenderQuick = false;
+    bool myStartRenderWood = false;
     double myStartRenderFov = 45.0;
 
     AppBar* myAppBar = nullptr;

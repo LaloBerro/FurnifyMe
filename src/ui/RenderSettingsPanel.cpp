@@ -145,11 +145,13 @@ private:
 // reads as current when both sliders sit within a hair of its own values.
 class MaterialTile : public QAbstractButton {
 public:
-    MaterialTile(const QString& name, double glossiness01, double metallic01, QWidget* parent)
+    MaterialTile(const QString& name, double glossiness01, double metallic01, QWidget* parent,
+                 bool wood = false)
         : QAbstractButton(parent)
         , myName(name)
         , myGloss(glossiness01)
         , myMetal(metallic01)
+        , myWood(wood)
     {
         setCursor(Qt::PointingHandCursor);
         setFocusPolicy(Qt::StrongFocus);
@@ -162,6 +164,7 @@ public:
     QString name() const { return myName; }
     double glossiness() const { return myGloss; }
     double metallic() const { return myMetal; }
+    bool isWood() const { return myWood; }
     void setCurrent(bool current)
     {
         if (myCurrent == current) return;
@@ -189,7 +192,34 @@ protected:
         painter.fillRect(QRect(0, int(height() * 0.66), width(), height()),
                          QColor(0xb7, 0xb4, 0xae));
 
-        // The sphere: base tone by metal, highlight sharpness by gloss.
+        // The sphere: base tone by metal, highlight sharpness by gloss -
+        // and the wood tile paints its own grain across the whole face
+        // instead, the thumbnail being the material.
+        if (myWood) {
+            for (int x = 0; x < width(); ++x) {
+                const double band =
+                    std::sin((x + 4.0 * std::sin(x * 0.10)) * 0.55) * 0.5 + 0.5;
+                const QColor grain =
+                    band < 0.5 ? QColor(0x6b, 0x48, 0x2a) : QColor(0x8f, 0x6a, 0x45);
+                painter.fillRect(QRect(x, 0, 1, height()), grain);
+            }
+            const QRect woodStrip(0, height() - 13, width(), 13);
+            painter.fillRect(woodStrip, QColor(0, 0, 0, 150));
+            painter.setPen(myCurrent ? QColor(Qt::white) : Theme::textMuted());
+            painter.setFont(Theme::badgeFont());
+            painter.drawText(woodStrip, Qt::AlignCenter, myName);
+            painter.restore();
+            Theme::drawCrispBorder(painter, body,
+                                   myCurrent ? Theme::accent() : Theme::border(), kTileRadius,
+                                   myCurrent ? 2.0 : 1.0);
+            if (this == window()->focusWidget()) {
+                const bool active = window()->isActiveWindow();
+                Theme::drawCrispBorder(painter, body.adjusted(3, 3, -3, -3),
+                                       active ? Theme::focusRing() : Theme::focusRingMuted(),
+                                       kTileRadius - 3, active ? 2.0 : 1.5);
+            }
+            return;
+        }
         const QRectF ball(width() * 0.5 - height() * 0.30, height() * 0.16,
                           height() * 0.60, height() * 0.60);
         const QColor base = myMetal > 0.5 ? QColor(0x9a, 0x9c, 0xa2)
@@ -238,6 +268,7 @@ private:
     QString myName;
     double myGloss = 0.0;
     double myMetal = 0.0;
+    bool myWood = false;
     bool myCurrent = false;
 };
 
@@ -466,12 +497,29 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
         for (const auto& preset : presets) {
             auto* tile = new MaterialTile(tr(preset.name), preset.gloss, preset.metal, row);
             connect(tile, &QAbstractButton::clicked, this, [this, tile] {
+                // A gloss/metal pick takes wood off in the same gesture -
+                // one material at a time, said once here.
+                if (myWood) {
+                    setWood(false);
+                    emit woodChanged(false);
+                }
                 setSurfaceGlossiness(tile->glossiness());
                 setMetal(tile->metallic());
             });
             line->addWidget(tile);
             myPresetTiles.push_back(tile);
         }
+        // The Wood tile (Milestone 5's own item): a material flag, not a
+        // slider pair - see setWood().
+        auto* woodTile = new MaterialTile(tr("Wood"), 0.0, 0.0, row, /*wood=*/true);
+        woodTile->setToolTip(tr("Dress every body in wood grain for the picture"));
+        connect(woodTile, &QAbstractButton::clicked, this, [this] {
+            if (myWood) return;
+            setWood(true);
+            emit woodChanged(true);
+        });
+        line->addWidget(woodTile);
+        myPresetTiles.push_back(woodTile);
         line->addStretch(1);
         outer->addWidget(row);
     }
@@ -720,6 +768,12 @@ void RenderSettingsPanel::setQuick(bool quick)
     if (mySimpleChip) mySimpleChip->setCurrent(quick);
 }
 
+void RenderSettingsPanel::setWood(bool wood)
+{
+    myWood = wood;
+    syncPresetTiles();
+}
+
 void RenderSettingsPanel::setTierStatus(const QString& tierName, double progress01)
 {
     if (myTierLabel) myTierLabel->setText(tierName);
@@ -756,12 +810,19 @@ void RenderSettingsPanel::syncValueLabels()
 
 void RenderSettingsPanel::syncPresetTiles()
 {
-    // Which tile reads as current is derived from the two sliders, so a
-    // drag that leaves a preset's exact values un-marks it honestly.
+    // Which tile reads as current is derived - from the wood flag for the
+    // wood tile, from the two sliders for the rest - so a drag that leaves
+    // a preset's exact values un-marks it honestly, and wood outranks the
+    // pair while it is on (the sliders still shape its roughness, but the
+    // MATERIAL is wood).
     const double gloss = surfaceGlossiness();
     const double metallic = metal();
     for (MaterialTile* tile : myPresetTiles) {
-        tile->setCurrent(std::fabs(tile->glossiness() - gloss) < 0.02 &&
+        if (tile->isWood()) {
+            tile->setCurrent(myWood);
+            continue;
+        }
+        tile->setCurrent(!myWood && std::fabs(tile->glossiness() - gloss) < 0.02 &&
                          std::fabs(tile->metallic() - metallic) < 0.02);
     }
 }
