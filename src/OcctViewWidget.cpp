@@ -219,6 +219,12 @@ constexpr double kMagnetSnapPx = 8.0;
 // shading, never about what colour wood is. The texture's own palette
 // brackets it either side.
 const Quantity_Color kWoodTone(0.55, 0.38, 0.23, Quantity_TOC_sRGB);
+// What sits UNDER the grain texture: near-white, because the modulate
+// pipeline MULTIPLIES the texture by this - the path tracer proved it by
+// red-shifting the user's oak through kWoodTone (their own two-tier
+// screenshot comparison). The texture carries the colour; this only keeps
+// a hair of warmth from clipping.
+const Quantity_Color kWoodUnderTexture(0.95, 0.94, 0.92, Quantity_TOC_sRGB);
 
 // One tiny point in world space, drawn as a marker whose size lives in
 // screen pixels - Graphic3d_AspectMarker3d/Prs3d_PointAspect's own documented
@@ -4832,13 +4838,15 @@ void OcctViewWidget::applyRenderBodyMaterials()
     // literals exactly, so a session that never opens the render settings
     // card gets the identical look this always shipped.
     Graphic3d_MaterialAspect material(Graphic3d_NameOfMaterial_UserDefined);
-    material.SetColor(myRenderWood ? kWoodTone
+    material.SetColor(myRenderWood ? kWoodUnderTexture
                                    : Quantity_Color(0.70, 0.70, 0.68, Quantity_TOC_RGB));
     Graphic3d_PBRMaterial pbr;
     // Wood swaps the albedo and nothing else - roughness and metal stay the
     // user's own sliders, so a satin-varnished or a raw plank both remain
-    // one drag away.
-    pbr.SetColor(myRenderWood ? kWoodTone
+    // one drag away. NEAR-WHITE, not kWoodTone: the path tracer multiplies
+    // the sampled grain by this albedo, and a brown-times-brown red-shifted
+    // the user's oak (measured against the Shadows tier's correct colour).
+    pbr.SetColor(myRenderWood ? kWoodUnderTexture
                               : Quantity_Color(0.55, 0.55, 0.53, Quantity_TOC_RGB));
     pbr.SetMetallic(static_cast<float>(myRenderMetallic));
     pbr.SetRoughness(static_cast<float>(myRenderRoughness));
@@ -4885,7 +4893,9 @@ void OcctViewWidget::clearRenderBodyMaterials()
     // modeling must always get back.
     if (myRenderModeActive && myRenderWood) {
         Graphic3d_MaterialAspect wood(Graphic3d_NameOfMaterial_UserDefined);
-        wood.SetColor(kWoodTone);
+        // The same neutral the PBR path wears under the grain - the two
+        // tiers must disagree about shading, never about the material.
+        wood.SetColor(kWoodUnderTexture);
         for (auto& entry : mySolids) {
             entry.second->SetMaterial(wood);
             myContext->Redisplay(entry.second, Standard_False);
