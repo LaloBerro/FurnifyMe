@@ -44,8 +44,16 @@ public:
     // also what pushes TopLeft's own stack down clear of it (symmetric to
     // how the spine's width already pushes TopLeft/LeftCenter/BottomLeft
     // right of it) - see relayout()'s own comment for the arithmetic.
+    // RightEdge (Milestone 5, render-mode UI): LeftEdge's mirror for a
+    // single full-height panel pinned to the RIGHT edge - it stretches from
+    // the viewport's top to its bottom at kEdgeMargin, and while visible it
+    // pushes the three right-hand anchors (TopRight, RightCenter,
+    // BottomRight) out past its width, exactly as the spine pushes the
+    // left-hand ones. No header/spine split on this side: every RightEdge
+    // entry stretches, there being only one caller (the render settings
+    // panel) and no column to lead it.
     enum class Anchor { TopLeft, LeftCenter, BottomLeft, TopRight, RightCenter, BottomRight,
-                        LeftEdge };
+                        LeftEdge, RightEdge };
 
     // How far a LeftEdge entry (the rail) stands off the viewport's left,
     // top and bottom edges - the plan's 14px, two pixels tighter than the

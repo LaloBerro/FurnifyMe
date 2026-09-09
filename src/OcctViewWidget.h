@@ -1176,6 +1176,18 @@ public:
     RenderTier renderModeTier() const { return myRenderTier; }
     bool renderModeTierProbed() const { return myRenderTierProbed; }
 
+    // The render-quality choice (Milestone 5, render-mode UI): Quick caps
+    // the session's probed-best tier at the shadow-mapped raster tier, so a
+    // path-traced machine can trade the deep render for instant frames
+    // without leaving render mode's dressing behind. Just a stored flag
+    // here - MainWindow re-enters render mode after flipping it, which
+    // re-dresses lights, materials, background and convergence for the tier
+    // through the one entry path they have always taken. Persisted with the
+    // other render settings; myRenderTier (what every live read consults)
+    // is derived from the probed best AND this flag at entry.
+    void setRenderQuick(bool quick) { myRenderQuick = quick; }
+    bool renderQuick() const { return myRenderQuick; }
+
     // What the tier probe actually MEASURED, kept so the decision can be
     // audited rather than only its outcome reported. Phase 3 of the
     // QOpenGLWidget migration is what forced this into the open: "which tier
@@ -1992,6 +2004,13 @@ private:
     // for the full argument on each step and why each is measured rather
     // than trusted as setter data.
     RenderTier probeRenderTier();
+    // The tier live reads follow: the probed best, capped to Shadows when
+    // Quick is on (Plain stays Plain - there is nothing simpler to fall to).
+    RenderTier effectiveRenderTier() const
+    {
+        if (!myRenderQuick) return myRenderTierBest;
+        return myRenderTierBest == RenderTier::Plain ? RenderTier::Plain : RenderTier::Shadows;
+    }
     // Writes `tier`'s rendering params (Method, IsShadowEnabled, GI/adaptive
     // sampling/antialiasing for path tracing, the PBR shading model and
     // tone-mapping method that CLAUDE.md's brief for this task asks applied
@@ -2495,6 +2514,10 @@ private:
     bool myRenderModeActive = false;
     bool myRenderTierProbed = false;
     RenderTier myRenderTier = RenderTier::Plain;
+    // What the probe actually found this session - myRenderTier is this,
+    // capped by the Quick flag (see effectiveRenderTier()).
+    RenderTier myRenderTierBest = RenderTier::Plain;
+    bool myRenderQuick = false;
     // The probe's own working, kept beside its answer - see TierProbeTimings.
     TierProbeTimings myTierProbeTimings;
     // See showRenderFloor(). Null whenever render mode is off.

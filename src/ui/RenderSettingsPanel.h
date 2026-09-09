@@ -1,9 +1,12 @@
 #pragma once
-// The render-mode-only settings card and its camera shutter (Task 7.2) -
-// Option A from the picked mockup ("one floating card"): a single card at
-// the viewport's right edge, in AppearancePanel's own visual language
-// (paintSurface() family, same radius/pad, Theme tokens throughout), plus a
-// separate round shutter control at the bottom-right corner.
+// The render-mode-only STUDIO PANEL and its camera shutter - Milestone 5's
+// render-UI rework (mockup pick: "A, with B's material selector, plus a
+// quality switch"): a full-height panel pinned to the viewport's right edge
+// (ViewportOverlay::Anchor::RightEdge), sectioned Light / Material / Scene /
+// Camera, with visual material preset tiles, a Quality (Deep/Simple)
+// segmented pair, and a footer carrying the live tier, the path-tracing
+// polish progress and a WIDE shutter - all in AppearancePanel's own visual
+// language (paintSurface() family, Theme tokens throughout).
 //
 // Both classes are pure VIEWS, exactly as AppearancePanel is a view of
 // Theme::spec() - but there is no Theme-shaped global these six render
@@ -102,6 +105,29 @@ public:
     void setMaterialRowsApply(bool apply);
     bool materialRowsApply() const { return myMaterialRowsApply; }
 
+    // The Quality pair (Milestone 5): Deep = the session's probed-best tier,
+    // Simple = the shadow-mapped raster tier, instant frames. setQuick() is
+    // the silent return path (MainWindow pushes the persisted/live value
+    // in); a user click emits quickChanged() and nothing else - MainWindow
+    // owns what a flip actually does (OcctViewWidget::setRenderQuick() plus
+    // a render-mode re-entry).
+    void setQuick(bool quick);
+    bool quick() const { return myQuick; }
+
+    // The footer's live line: the active tier's name and - for the
+    // path-traced tier - how polished the on-screen picture is right now
+    // (progress01 in [0,1]; anything negative hides the bar). Pushed by
+    // MainWindow on a timer while render mode is on; this panel stores and
+    // paints, nothing more.
+    void setTierStatus(const QString& tierName, double progress01);
+
+    // Builds the WIDE shutter into the footer, wired to `action` - Save
+    // Screenshot - on RenderShutterButton's own action-driven terms. Called
+    // once by MainWindow::buildOverlay(); the button is a child of this
+    // panel, so its visibility rides the panel's own.
+    void setShutterAction(QAction* action);
+    class RenderShutterButton* shutter() const { return myShutter; }
+
     double surfaceGlossiness() const;
     double metal() const;
     double lightAngle() const;
@@ -135,6 +161,7 @@ public:
     QColorDialog* activeColourDialog() const { return myDialog; }
 
 signals:
+    void quickChanged(bool quick);
     void surfaceGlossinessChanged(double glossiness01);
     void metalChanged(double metallic01);
     void lightAngleChanged(double azimuthDeg);
@@ -157,6 +184,22 @@ private:
     void applyTheme();
 
     QLabel* myTitle = nullptr;
+    // The footer's live status pair - see setTierStatus().
+    QLabel* myTierLabel = nullptr;
+    class ProgressLine* myProgress = nullptr;
+    // The Quality pair and its state - see setQuick().
+    class SegChip* myDeepChip = nullptr;
+    class SegChip* mySimpleChip = nullptr;
+    bool myQuick = false;
+    // The three material preset tiles (the mockup's "B material selector").
+    std::vector<class MaterialTile*> myPresetTiles;
+    class RenderShutterButton* myShutter = nullptr;
+    // Per-slider value readouts, keyed by the slider they follow.
+    std::vector<std::pair<QSlider*, QLabel*>> myValueLabels;
+    // Section headers, styled apart from row labels by applyTheme().
+    std::vector<QLabel*> mySectionLabels;
+    void syncValueLabels();
+    void syncPresetTiles();
     QSlider* mySurfaceSlider = nullptr;
     QSlider* myMetalSlider = nullptr;
     QSlider* myLightAngleSlider = nullptr;
@@ -191,7 +234,12 @@ class RenderShutterButton : public QAbstractButton {
     Q_OBJECT
 
 public:
-    explicit RenderShutterButton(QAction* action, QWidget* parent = nullptr);
+    // `wide` (Milestone 5's render-UI rework) trades the round floating
+    // shutter for a full-width bar living inside the studio panel's footer -
+    // same action-driven contract, same accent, camera glyph plus the
+    // action's own text.
+    explicit RenderShutterButton(QAction* action, QWidget* parent = nullptr,
+                                 bool wide = false);
 
     // ToolChip's own accessor, on ToolChip's own terms: this button stores
     // nothing of its own, so proving it is wired to a particular action is
@@ -215,4 +263,5 @@ private:
 
     QAction* myAction = nullptr;
     bool myHovered = false;
+    bool myWide = false;
 };

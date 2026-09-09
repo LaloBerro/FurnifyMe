@@ -543,6 +543,8 @@ public:
     class ItemsPanel* itemsPanel() const { return myItemsPanel; }
     AppearancePanel* appearancePanel() const { return myAppearancePanel; }
     RenderSettingsPanel* renderSettingsPanel() const { return myRenderSettingsPanel; }
+    // The wide footer shutter - owned by the panel since the Milestone 5
+    // rework; kept as an accessor so the suite's wiring pins hold.
     RenderShutterButton* renderShutter() const { return myRenderShutter; }
     // The floating pill (Milestone 5, item 3) - the window's own menu strip
     // before this task, a ViewportOverlay::Anchor::TopLeft card now. Exposed
@@ -880,6 +882,11 @@ private slots:
     // View -> Magnet (Milestone 5): the Move drag's stick-to-alignments aid.
     // The behaviour itself lives in OcctViewWidget::setMagnetEnabled().
     void onMagnetToggled(bool enabled);
+    // Pushes the active render tier's name - and, on the path-traced tier,
+    // the live polish fraction - into the studio panel's footer. Driven on
+    // every appStateChanged and by a 500 ms ticker while render mode is on
+    // (the accumulation deepens with no state change to ride).
+    void syncRenderTierStatus();
     void onRenameSelected();
     void onUndo();
     void onRedo();
@@ -1490,6 +1497,7 @@ private:
     double myStartRenderLightAngleDeg = -1.0;   // sentinel: "use the viewport's own default"
     double myStartRenderLightStrength = 2.0;
     QColor myStartRenderBackground;             // invalid = no stored override
+    bool myStartRenderQuick = false;
     double myStartRenderFov = 45.0;
 
     AppBar* myAppBar = nullptr;
@@ -1508,6 +1516,7 @@ private:
     // when render mode does), kept here on myRail/myAxisGizmo's own terms so
     // the appStateChanged-driven visibility lambda can reach them.
     RenderSettingsPanel* myRenderSettingsPanel = nullptr;
+    class QTimer* myRenderTierTicker = nullptr;
     RenderShutterButton* myRenderShutter = nullptr;
     class ShortcutSheet* myShortcutSheet = nullptr;
     ToastHost* myToasts = nullptr;

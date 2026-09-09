@@ -739,6 +739,8 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         }
         myStartRenderFov =
             settings.value(QStringLiteral("renderMode/fov"), myStartRenderFov).toDouble();
+        myStartRenderQuick =
+            settings.value(QStringLiteral("renderMode/quick"), false).toBool();
     }
 
     // The title bar's and the taskbar's mark, painted rather than loaded - see
@@ -929,6 +931,11 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         // is read as their whole visibility rather than negated into it.
         if (myRenderSettingsPanel) {
             myRenderSettingsPanel->setVisible(hiddenForRenderMode);
+            myRenderSettingsPanel->setQuick(myView->renderQuick());
+            // The footer's tier line follows the mode: pushed here on every
+            // state change, and per-second by the polish ticker below while
+            // render mode is on.
+            syncRenderTierStatus();
             // Two of the six controls are read only by the deepest tier
             // (OcctViewWidget::renderMaterialControlsApply(), which IS the
             // gate the setters are wrapped in, not a second copy of the
@@ -937,7 +944,15 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
             // than being set once at the toggle site.
             myRenderSettingsPanel->setMaterialRowsApply(myView->renderMaterialControlsApply());
         }
-        if (myRenderShutter) myRenderShutter->setVisible(hiddenForRenderMode);
+        if (myRenderTierTicker) {
+            // The polish bar is live data - the accumulation deepens frame
+            // by frame with no appStateChanged to ride - so a 500 ms ticker
+            // runs for exactly as long as render mode does.
+            if (hiddenForRenderMode && !myRenderTierTicker->isActive())
+                myRenderTierTicker->start(500);
+            else if (!hiddenForRenderMode)
+                myRenderTierTicker->stop();
+        }
         if (myOverlay) myOverlay->relayout();
     });
 
@@ -1880,7 +1895,11 @@ void MainWindow::buildOverlay()
     // lambda alone, never to addWidget()'s default show().
     myRenderSettingsPanel = new RenderSettingsPanel(myView);
     myRenderSettingsPanel->hide();
-    myOverlay->addWidget(myRenderSettingsPanel, ViewportOverlay::Anchor::TopRight);
+    // The full-height studio panel (Milestone 5's render-UI rework, mockup
+    // pick A): RightEdge, the anchor added for exactly this - it stretches
+    // top to bottom and pushes the view-controls cluster left past itself,
+    // so the two never overlap while render mode is on.
+    myOverlay->addWidget(myRenderSettingsPanel, ViewportOverlay::Anchor::RightEdge);
     // Seeded from whatever the constructor already applied to the viewport
     // (QSettings, or OcctViewWidget's own shipped defaults) - setValuesSilently()
     // so this first sync does not immediately re-emit six signals and
@@ -1923,14 +1942,36 @@ void MainWindow::buildOverlay()
                 persistRenderSettings();
             });
 
-    // The camera shutter - a round, standalone control at the viewport's
-    // bottom-right corner, holding no state of its own: it triggers the
-    // EXISTING Save Screenshot action, exactly as the mockup calls for,
-    // rather than growing a second export path. Same hidden-before-added,
-    // render-mode-derived visibility as the settings card above.
-    myRenderShutter = new RenderShutterButton(myScreenshotAction, myView);
-    myRenderShutter->hide();
-    myOverlay->addWidget(myRenderShutter, ViewportOverlay::Anchor::BottomRight);
+    // The camera shutter - WIDE now, and living inside the studio panel's
+    // own footer rather than floating at the corner (Milestone 5's rework).
+    // Still the same action-driven control triggering the EXISTING Save
+    // Screenshot action; being the panel's child, its visibility rides the
+    // panel's, so the standalone hidden/anchored dance is gone with the
+    // corner placement.
+    myRenderSettingsPanel->setShutterAction(myScreenshotAction);
+    myRenderShutter = myRenderSettingsPanel->shutter();
+
+    // Quality (Deep / Simple): the panel says which; the viewport stores it;
+    // and the honest way to re-dress every tier-derived thing - lights,
+    // materials, background, tone mapping, the convergence loop - is the one
+    // entry path they have always taken, so a flip re-enters render mode.
+    myView->setRenderQuick(myStartRenderQuick);
+    myRenderSettingsPanel->setQuick(myStartRenderQuick);
+    connect(myRenderSettingsPanel, &RenderSettingsPanel::quickChanged, this,
+            [this](bool quick) {
+                myView->setRenderQuick(quick);
+                if (myRenderModeOn) {
+                    setRenderModeEnabled(false);
+                    setRenderModeEnabled(true);
+                }
+                persistRenderSettings();
+                updateActions();
+            });
+
+    // The polish ticker - see the visibility lambda above for start/stop.
+    myRenderTierTicker = new QTimer(this);
+    connect(myRenderTierTicker, &QTimer::timeout, this,
+            &MainWindow::syncRenderTierStatus);
 
     // Every outcome the app reports - success or failure - goes through this
     // one host rather than a modal dialog. It parents itself (and its Toast)
@@ -2736,6 +2777,7 @@ void MainWindow::writeRenderSettingsNow()
     settings.setValue(QStringLiteral("renderMode/background"),
                       bg.isValid() ? bg.name(QColor::HexArgb) : QString());
     settings.setValue(QStringLiteral("renderMode/fov"), myView->renderFov());
+    settings.setValue(QStringLiteral("renderMode/quick"), myView->renderQuick());
 }
 
 void MainWindow::closeEvent(QCloseEvent* event)
@@ -4873,6 +4915,42 @@ QString MainWindow::bevelLinkGroupRefusalText(bool fillet)
              "gesture — Unlink one first, then try again")
         : tr("Chamfer can't combine two copies of the same linked group in one "
              "gesture — Unlink one first, then try again");
+}
+
+void MainWindow::syncRenderTierStatus()
+{
+    if (!myRenderSettingsPanel || !myView) return;
+    if (!myRenderModeOn) {
+        myRenderSettingsPanel->setTierStatus(QString(), -1.0);
+        return;
+    }
+    QString name;
+    double progress = -1.0;
+    switch (myView->renderModeTier()) {
+        case OcctViewWidget::RenderTier::PathTracing: {
+            // How polished the on-screen picture is, as a fraction of the
+            // idle-polish budget the convergence loop actually runs to -
+            // the same numbers, so the bar cannot promise more than the
+            // loop delivers.
+            const double depth = static_cast<double>(myView->accumulationDepth());
+            progress = std::min(1.0, depth / OcctViewWidget::kPathTracingIdlePasses);
+            name = progress >= 1.0
+                       ? tr("Path tracing — polished")
+                       : tr("Path tracing — polishing %1%")
+                             .arg(static_cast<int>(std::floor(progress * 100.0)));
+            break;
+        }
+        case OcctViewWidget::RenderTier::RayTracing:
+            name = tr("Ray tracing");
+            break;
+        case OcctViewWidget::RenderTier::Shadows:
+            name = tr("Quick render with shadows");
+            break;
+        default:
+            name = tr("Quick render");
+            break;
+    }
+    myRenderSettingsPanel->setTierStatus(name, progress);
 }
 
 QString MainWindow::transformOperationName(const gp_Trsf& delta)

@@ -7,8 +7,10 @@
 #include <QColorDialog>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLinearGradient>
 #include <QPainter>
 #include <QPainterPath>
+#include <QRadialGradient>
 #include <QSlider>
 #include <QVBoxLayout>
 #include <QWheelEvent>
@@ -49,6 +51,18 @@ constexpr int kSwatchRadius = 4;
 // IS half its side rather than a small corner cut.
 constexpr int kShutterSide = 56;
 constexpr int kShutterGlyph = 22;
+// The wide footer shutter's own height and radius (Milestone 5).
+constexpr int kShutterWideHeight = 36;
+constexpr int kShutterWideRadius = 9;
+constexpr int kShutterWideGlyph = 16;
+
+// The material preset tiles - small painted thumbnails, B's own selector.
+constexpr int kTileWidth = 66;
+constexpr int kTileHeight = 40;
+constexpr int kTileRadius = 6;
+
+// The Quality chips share the tile height's rhythm at a text size.
+constexpr int kSegHeight = 26;
 
 // Light strength's own slider convention: the integer value IS the
 // multiplier times 100 (so 200 == 2.00x), the same "slider units are the
@@ -122,6 +136,206 @@ private:
     QColor myColour;
 };
 
+// --- MaterialTile ---------------------------------------------------------
+
+// One preset thumbnail: a painted sphere-on-ground look whose gloss and
+// metal MATCH the values the tile writes into the two sliders, so what the
+// thumbnail promises is derived from the same two numbers the click sets -
+// never a bitmap that could drift from them. Selection is DERIVED: the tile
+// reads as current when both sliders sit within a hair of its own values.
+class MaterialTile : public QAbstractButton {
+public:
+    MaterialTile(const QString& name, double glossiness01, double metallic01, QWidget* parent)
+        : QAbstractButton(parent)
+        , myName(name)
+        , myGloss(glossiness01)
+        , myMetal(metallic01)
+    {
+        setCursor(Qt::PointingHandCursor);
+        setFocusPolicy(Qt::StrongFocus);
+        setAttribute(Qt::WA_NoMousePropagation);
+        Theme::makeSurfaceTransparent(this);
+        setFixedSize(kTileWidth, kTileHeight);
+        setToolTip(name);
+    }
+
+    QString name() const { return myName; }
+    double glossiness() const { return myGloss; }
+    double metallic() const { return myMetal; }
+    void setCurrent(bool current)
+    {
+        if (myCurrent == current) return;
+        myCurrent = current;
+        update();
+    }
+
+    QSize sizeHint() const override { return QSize(kTileWidth, kTileHeight); }
+
+protected:
+    void paintEvent(QPaintEvent*) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+
+        QPainterPath clip;
+        const QRectF body(rect());
+        clip.addRoundedRect(body, kTileRadius, kTileRadius);
+        painter.save();
+        painter.setClipPath(clip);
+
+        // The studio in miniature: warm backdrop over a slightly deeper
+        // floor band - the same flat-grey world render mode dresses.
+        painter.fillRect(rect(), QColor(0xc6, 0xc3, 0xbe));
+        painter.fillRect(QRect(0, int(height() * 0.66), width(), height()),
+                         QColor(0xb7, 0xb4, 0xae));
+
+        // The sphere: base tone by metal, highlight sharpness by gloss.
+        const QRectF ball(width() * 0.5 - height() * 0.30, height() * 0.16,
+                          height() * 0.60, height() * 0.60);
+        const QColor base = myMetal > 0.5 ? QColor(0x9a, 0x9c, 0xa2)
+                                          : QColor(0x8f, 0x6a, 0x45);
+        QRadialGradient shade(ball.center() + QPointF(-ball.width() * 0.18,
+                                                      -ball.height() * 0.22),
+                              ball.width() * 0.85);
+        const double sharp = 0.15 + 0.5 * (1.0 - myGloss);
+        shade.setColorAt(0.0, base.lighter(myMetal > 0.5 ? 175 : 145));
+        shade.setColorAt(std::min(0.95, sharp), base);
+        shade.setColorAt(1.0, base.darker(150));
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(shade);
+        painter.drawEllipse(ball);
+        // A glossy surface carries a hard white catchlight.
+        if (myGloss > 0.35) {
+            painter.setBrush(QColor(255, 255, 255,
+                                    int(90 + 130 * std::min(1.0, myGloss))));
+            const double r = ball.width() * (0.06 + 0.06 * myGloss);
+            painter.drawEllipse(QPointF(ball.center().x() - ball.width() * 0.2,
+                                        ball.center().y() - ball.height() * 0.24),
+                                r, r);
+        }
+
+        // The caption strip, panel-dark so the name reads on any thumbnail.
+        const QRect strip(0, height() - 13, width(), 13);
+        painter.fillRect(strip, QColor(0, 0, 0, 150));
+        painter.setPen(myCurrent ? QColor(Qt::white) : Theme::textMuted());
+        QFont f = Theme::badgeFont();
+        painter.setFont(f);
+        painter.drawText(strip, Qt::AlignCenter, myName);
+        painter.restore();
+
+        Theme::drawCrispBorder(painter, body,
+                               myCurrent ? Theme::accent() : Theme::border(), kTileRadius,
+                               myCurrent ? 2.0 : 1.0);
+        if (this == window()->focusWidget()) {
+            const bool active = window()->isActiveWindow();
+            Theme::drawCrispBorder(painter, body.adjusted(3, 3, -3, -3),
+                                   active ? Theme::focusRing() : Theme::focusRingMuted(),
+                                   kTileRadius - 3, active ? 2.0 : 1.5);
+        }
+    }
+
+private:
+    QString myName;
+    double myGloss = 0.0;
+    double myMetal = 0.0;
+    bool myCurrent = false;
+};
+
+// --- SegChip ----------------------------------------------------------------
+
+// One half of the Quality pair - a small checkable-looking chip that holds
+// no state of its own: the panel derives which half reads as current from
+// myQuick, ToolChip's own action-mirroring discipline at panel scale.
+class SegChip : public QAbstractButton {
+public:
+    SegChip(const QString& text, QWidget* parent) : QAbstractButton(parent)
+    {
+        setText(text);
+        setCursor(Qt::PointingHandCursor);
+        setFocusPolicy(Qt::StrongFocus);
+        setAttribute(Qt::WA_NoMousePropagation);
+        Theme::makeSurfaceTransparent(this);
+        setFixedHeight(kSegHeight);
+        setAttribute(Qt::WA_Hover, true);
+    }
+
+    void setCurrent(bool current)
+    {
+        if (myCurrent == current) return;
+        myCurrent = current;
+        update();
+    }
+
+    QSize sizeHint() const override
+    {
+        const QFontMetrics fm(Theme::labelFont());
+        return QSize(fm.horizontalAdvance(text()) + 22, kSegHeight);
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        const QRectF body(rect());
+        QPainterPath path;
+        path.addRoundedRect(body, 7, 7);
+        QColor fill = Theme::chip();
+        if (myCurrent)           fill = Theme::chipActive();
+        else if (underMouse())   fill = Theme::chipHover();
+        painter.fillPath(path, fill);
+        Theme::drawCrispBorder(painter, body,
+                               myCurrent ? Theme::accent() : Theme::border(), 7,
+                               myCurrent ? 1.6 : 1.0);
+        painter.setFont(Theme::labelFont());
+        painter.setPen(myCurrent ? Theme::text() : Theme::textMuted());
+        painter.drawText(rect(), Qt::AlignCenter, text());
+        if (this == window()->focusWidget()) {
+            const bool active = window()->isActiveWindow();
+            Theme::drawCrispBorder(painter, body.adjusted(2.5, 2.5, -2.5, -2.5),
+                                   active ? Theme::focusRing() : Theme::focusRingMuted(),
+                                   4.5, active ? 2.0 : 1.5);
+        }
+    }
+
+private:
+    bool myCurrent = false;
+};
+
+// --- ProgressLine -----------------------------------------------------------
+
+// The footer's thin polish bar - a 3px line filled to a fraction. Hidden
+// entirely when the tier has no notion of "polishing" (everything but the
+// path-traced one).
+class ProgressLine : public QWidget {
+public:
+    explicit ProgressLine(QWidget* parent) : QWidget(parent)
+    {
+        Theme::makeSurfaceTransparent(this);
+        setFixedHeight(3);
+    }
+    void setFraction(double f)
+    {
+        f = std::clamp(f, 0.0, 1.0);
+        if (std::fabs(f - myFraction) < 0.005) return;
+        myFraction = f;
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override
+    {
+        QPainter painter(this);
+        painter.fillRect(rect(), Theme::border());
+        QRect fill = rect();
+        fill.setWidth(int(std::round(width() * myFraction)));
+        painter.fillRect(fill, Theme::accent());
+    }
+
+private:
+    double myFraction = 0.0;
+};
+
 // --- RenderSettingsPanel --------------------------------------------------
 
 RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
@@ -146,6 +360,18 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
 
     myTitle = new QLabel(tr("Render settings"), this);
     outer->addWidget(myTitle);
+
+    // A section header - smaller and more muted than a row label, the studio
+    // panel's own grouping device (mockup A). Collected for applyTheme() and
+    // for paintedTexts().
+    auto addSection = [&](const QString& label) {
+        auto* head = new QLabel(label, this);
+        makeTransparent(head, QStringLiteral("renderSettingsSection_") +
+                                  QString::number(mySectionLabels.size()));
+        mySectionLabels.push_back(head);
+        outer->addSpacing(2);
+        outer->addWidget(head);
+    };
 
     auto addRule = [&] {
         auto* rule = new QWidget(this);
@@ -191,11 +417,64 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
         slider->setFixedWidth(kSliderWidth);
         line->addWidget(slider);
 
+        // The value readout (mockup A: every slider wears its number). The
+        // TEXT is derived in syncValueLabels() so a programmatic set and a
+        // drag paint through one formatter.
+        auto* readout = new QLabel(row);
+        makeTransparent(readout, QStringLiteral("renderSettingsValue_") + key);
+        readout->setMinimumWidth(34);
+        readout->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+        line->addWidget(readout);
+        myValueLabels.push_back({slider, readout});
+        connect(slider, &QSlider::valueChanged, this,
+                &RenderSettingsPanel::syncValueLabels);
+
         outer->addWidget(row);
         return slider;
     };
 
-    // --- section 1: Surface, Metal ------------------------------------
+    // --- Light ----------------------------------------------------------
+    addSection(tr("Light"));
+    myLightAngleSlider = addRow(QStringLiteral("lightAngle"), tr("Angle"), 0, 359, 0);
+    connect(myLightAngleSlider, &QSlider::valueChanged, this, [this](int v) {
+        if (mySyncing) return;
+        emit lightAngleChanged(static_cast<double>(v));
+    });
+    myLightStrengthSlider = addRow(QStringLiteral("lightStrength"), tr("Strength"),
+                                   kLightStrengthMin, kLightStrengthMax, 200);
+    connect(myLightStrengthSlider, &QSlider::valueChanged, this, [this](int v) {
+        if (mySyncing) return;
+        emit lightStrengthChanged(v / 100.0);
+    });
+
+    addRule();
+
+    // --- Material (mockup B's selector: preset tiles over the sliders) ---
+    addSection(tr("Material"));
+    {
+        auto* row = new QWidget(this);
+        makeTransparent(row, QStringLiteral("renderSettingsPresetRow"));
+        auto* line = new QHBoxLayout(row);
+        line->setContentsMargins(0, 0, 0, 0);
+        line->setSpacing(7);
+        // Each tile IS its two slider values - clicking writes them through
+        // the same setters a drag uses, so the signals, the persistence and
+        // the tier gate all come along for free. Which tile reads as current
+        // is DERIVED from the sliders in syncPresetTiles(), never stored.
+        const struct { const char* name; double gloss; double metal; } presets[] = {
+            {"Matte", 0.25, 0.0}, {"Satin", 0.65, 0.05}, {"Metal", 0.80, 1.0}};
+        for (const auto& preset : presets) {
+            auto* tile = new MaterialTile(tr(preset.name), preset.gloss, preset.metal, row);
+            connect(tile, &QAbstractButton::clicked, this, [this, tile] {
+                setSurfaceGlossiness(tile->glossiness());
+                setMetal(tile->metallic());
+            });
+            line->addWidget(tile);
+            myPresetTiles.push_back(tile);
+        }
+        line->addStretch(1);
+        outer->addWidget(row);
+    }
     mySurfaceSlider = addRow(QStringLiteral("surface"), tr("Surface"), 0, 100, 45);
     connect(mySurfaceSlider, &QSlider::valueChanged, this, [this](int v) {
         if (mySyncing) return;
@@ -206,6 +485,10 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
         if (mySyncing) return;
         emit metalChanged(v / 100.0);
     });
+    connect(mySurfaceSlider, &QSlider::valueChanged, this,
+            &RenderSettingsPanel::syncPresetTiles);
+    connect(myMetalSlider, &QSlider::valueChanged, this,
+            &RenderSettingsPanel::syncPresetTiles);
 
     // The muted note under those two rows - shown only while the active
     // tier does not read them (see setMaterialRowsApply()). Word-wrapped
@@ -222,22 +505,8 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
 
     addRule();
 
-    // --- section 2: Light angle, Light strength -------------------------
-    myLightAngleSlider = addRow(QStringLiteral("lightAngle"), tr("Light angle"), 0, 359, 0);
-    connect(myLightAngleSlider, &QSlider::valueChanged, this, [this](int v) {
-        if (mySyncing) return;
-        emit lightAngleChanged(static_cast<double>(v));
-    });
-    myLightStrengthSlider = addRow(QStringLiteral("lightStrength"), tr("Light strength"),
-                                   kLightStrengthMin, kLightStrengthMax, 200);
-    connect(myLightStrengthSlider, &QSlider::valueChanged, this, [this](int v) {
-        if (mySyncing) return;
-        emit lightStrengthChanged(v / 100.0);
-    });
-
-    addRule();
-
-    // --- section 3: Background, Camera FOV -------------------------------
+    // --- Scene ----------------------------------------------------------
+    addSection(tr("Scene"));
     {
         auto* row = new QWidget(this);
         makeTransparent(row, QStringLiteral("renderSettingsBackgroundRow"));
@@ -257,12 +526,63 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
         outer->addWidget(row);
     }
 
-    myFovSlider = addRow(QStringLiteral("fov"), tr("Camera FOV"), 20, 120, 45);
+    addRule();
+
+    // --- Camera ----------------------------------------------------------
+    addSection(tr("Camera"));
+    myFovSlider = addRow(QStringLiteral("fov"), tr("FOV"), 20, 120, 45);
     connect(myFovSlider, &QSlider::valueChanged, this, [this](int v) {
         if (mySyncing) return;
         emit fovChanged(static_cast<double>(v));
     });
 
+    addRule();
+
+    // --- Quality ---------------------------------------------------------
+    addSection(tr("Quality"));
+    {
+        auto* row = new QWidget(this);
+        makeTransparent(row, QStringLiteral("renderSettingsQualityRow"));
+        auto* line = new QHBoxLayout(row);
+        line->setContentsMargins(0, 0, 0, 0);
+        line->setSpacing(7);
+        myDeepChip = new SegChip(tr("Deep"), row);
+        myDeepChip->setToolTip(tr("The richest picture this machine reaches — slower, "
+                                  "and it keeps polishing while you watch"));
+        mySimpleChip = new SegChip(tr("Simple"), row);
+        mySimpleChip->setToolTip(tr("Instant frames with real shadows — for framing a "
+                                    "shot or a quicker machine"));
+        connect(myDeepChip, &QAbstractButton::clicked, this, [this] {
+            if (!myQuick) return;
+            setQuick(false);
+            emit quickChanged(false);
+        });
+        connect(mySimpleChip, &QAbstractButton::clicked, this, [this] {
+            if (myQuick) return;
+            setQuick(true);
+            emit quickChanged(true);
+        });
+        line->addWidget(myDeepChip);
+        line->addWidget(mySimpleChip);
+        line->addStretch(1);
+        outer->addWidget(row);
+    }
+    setQuick(false);
+
+    // --- footer: the live tier, the polish bar, the shutter ---------------
+    // Pushed to the panel's bottom edge - this panel is a full-height
+    // RightEdge spine, so the stretch is what separates the sections above
+    // from the footer below.
+    outer->addStretch(1);
+    myTierLabel = new QLabel(this);
+    makeTransparent(myTierLabel, QStringLiteral("renderSettingsTierLabel"));
+    outer->addWidget(myTierLabel);
+    myProgress = new ProgressLine(this);
+    myProgress->hide();
+    outer->addWidget(myProgress);
+
+    syncValueLabels();
+    syncPresetTiles();
     applyTheme();
     connect(Theme::notifier(), &Theme::Notifier::changed, this,
             &RenderSettingsPanel::applyTheme);
@@ -381,10 +701,69 @@ QStringList RenderSettingsPanel::paintedTexts() const
 {
     QStringList texts;
     if (myTitle) texts << myTitle->text();
+    for (QLabel* label : mySectionLabels) texts << label->text();
     for (QLabel* label : myRowLabels) texts << label->text();
+    for (const auto& pair : myValueLabels) texts << pair.second->text();
+    for (MaterialTile* tile : myPresetTiles) texts << tile->name();
+    if (myDeepChip) texts << myDeepChip->text();
+    if (mySimpleChip) texts << mySimpleChip->text();
+    if (myTierLabel) texts << myTierLabel->text();
     // Reported whether or not it is currently shown - see the header.
     if (myMaterialNote) texts << myMaterialNote->text();
     return texts;
+}
+
+void RenderSettingsPanel::setQuick(bool quick)
+{
+    myQuick = quick;
+    if (myDeepChip) myDeepChip->setCurrent(!quick);
+    if (mySimpleChip) mySimpleChip->setCurrent(quick);
+}
+
+void RenderSettingsPanel::setTierStatus(const QString& tierName, double progress01)
+{
+    if (myTierLabel) myTierLabel->setText(tierName);
+    if (myProgress) {
+        const bool show = progress01 >= 0.0;
+        myProgress->setVisible(show);
+        if (show) myProgress->setFraction(progress01);
+    }
+}
+
+void RenderSettingsPanel::setShutterAction(QAction* action)
+{
+    if (myShutter || !action) return;
+    myShutter = new RenderShutterButton(action, this, /*wide=*/true);
+    // Straight into the outer layout's tail, after the footer status pair.
+    if (auto* outer = qobject_cast<QVBoxLayout*>(layout())) outer->addWidget(myShutter);
+}
+
+void RenderSettingsPanel::syncValueLabels()
+{
+    for (const auto& pair : myValueLabels) {
+        QSlider* slider = pair.first;
+        QLabel* readout = pair.second;
+        QString text;
+        if (slider == myLightAngleSlider || slider == myFovSlider)
+            text = QStringLiteral("%1\u00b0").arg(slider->value());
+        else if (slider == myLightStrengthSlider)
+            text = QStringLiteral("%1%").arg(slider->value());
+        else
+            text = QString::number(slider->value());
+        readout->setText(text);
+    }
+}
+
+void RenderSettingsPanel::syncPresetTiles()
+{
+    // Which tile reads as current is derived from the two sliders, so a
+    // drag that leaves a preset's exact values un-marks it honestly.
+    const double gloss = surfaceGlossiness();
+    const double metallic = metal();
+    for (MaterialTile* tile : myPresetTiles) {
+        tile->setCurrent(std::fabs(tile->glossiness() - gloss) < 0.02 &&
+                         std::fabs(tile->metallic() - metallic) < 0.02);
+    }
 }
 
 QWidget* RenderSettingsPanel::materialNoteRow() const
@@ -415,6 +794,25 @@ void RenderSettingsPanel::applyTheme()
                                  .arg(Theme::text().name())
                                  .arg(Theme::labelFont().pointSizeF()));
     }
+    for (QLabel* label : mySectionLabels) {
+        label->setStyleSheet(QStringLiteral("background: transparent; color: %1; "
+                                            "font-weight: 600; font-size: %2pt; "
+                                            "letter-spacing: 1px;")
+                                 .arg(Theme::textMuted().name())
+                                 .arg(Theme::badgeFont().pointSizeF()));
+    }
+    for (const auto& pair : myValueLabels) {
+        pair.second->setStyleSheet(QStringLiteral("background: transparent; color: %1; "
+                                                  "font-size: %2pt;")
+                                       .arg(Theme::textMuted().name())
+                                       .arg(Theme::badgeFont().pointSizeF()));
+    }
+    if (myTierLabel) {
+        myTierLabel->setStyleSheet(QStringLiteral("background: transparent; color: %1; "
+                                                  "font-size: %2pt;")
+                                       .arg(Theme::textMuted().name())
+                                       .arg(Theme::badgeFont().pointSizeF()));
+    }
     // Muted, and at the badge size - the smallest step on Theme's own type
     // scale, which is where a footnote belongs and what gui_smoke's
     // font-size sweep expects to find.
@@ -443,9 +841,10 @@ void RenderSettingsPanel::wheelEvent(QWheelEvent* event)
 
 // --- RenderShutterButton --------------------------------------------------
 
-RenderShutterButton::RenderShutterButton(QAction* action, QWidget* parent)
+RenderShutterButton::RenderShutterButton(QAction* action, QWidget* parent, bool wide)
     : QAbstractButton(parent)
     , myAction(action)
+    , myWide(wide)
 {
     setAttribute(Qt::WA_NoSystemBackground);
     // This card's own law, restated: a floating control over the viewport
@@ -459,7 +858,12 @@ RenderShutterButton::RenderShutterButton(QAction* action, QWidget* parent)
     setAttribute(Qt::WA_Hover, true);
     setCursor(Qt::PointingHandCursor);
     setFocusPolicy(Qt::StrongFocus);
-    setFixedSize(kShutterSide, kShutterSide);
+    if (myWide) {
+        setFixedHeight(kShutterWideHeight);
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    } else {
+        setFixedSize(kShutterSide, kShutterSide);
+    }
 
     applyTheme();
     connect(Theme::notifier(), &Theme::Notifier::changed, this,
@@ -490,7 +894,10 @@ void RenderShutterButton::applyTheme()
     update();
 }
 
-QSize RenderShutterButton::sizeHint() const { return QSize(kShutterSide, kShutterSide); }
+QSize RenderShutterButton::sizeHint() const
+{
+    return myWide ? QSize(160, kShutterWideHeight) : QSize(kShutterSide, kShutterSide);
+}
 
 void RenderShutterButton::paintEvent(QPaintEvent*)
 {
@@ -498,6 +905,49 @@ void RenderShutterButton::paintEvent(QPaintEvent*)
     painter.setRenderHint(QPainter::Antialiasing, true);
 
     const QRectF body(rect());
+
+    if (myWide) {
+        // The footer bar: accent-filled, camera glyph beside the action's
+        // own words - the one control on the panel loud on purpose, being
+        // the panel's whole verb.
+        QColor fill = Theme::accent();
+        if (!isEnabled())   fill = Theme::chip();
+        else if (isDown())  fill = Theme::accent().darker(125);
+        else if (myHovered) fill = Theme::accent().lighter(112);
+        QPainterPath path;
+        path.addRoundedRect(body, kShutterWideRadius, kShutterWideRadius);
+        painter.fillPath(path, fill);
+        Theme::drawCrispBorder(painter, body, Theme::border(), kShutterWideRadius);
+
+        const QString label =
+            myAction ? QString(myAction->text()).remove(QLatin1Char('&'))
+                        .remove(QStringLiteral("..."))
+                     : QString();
+        painter.setFont(Theme::labelFont());
+        const QFontMetrics fm(Theme::labelFont());
+        const int textW = fm.horizontalAdvance(label);
+        const int glyphAndGap = kShutterWideGlyph + 8;
+        const int startX = std::max(10, (width() - textW - glyphAndGap) / 2);
+        const QRect iconRect(startX,
+                             (height() - kShutterWideGlyph) / 2,
+                             kShutterWideGlyph, kShutterWideGlyph);
+        IconSet::icon(IconSet::Glyph::Camera)
+            .paint(&painter, iconRect, Qt::AlignCenter,
+                  isEnabled() ? QIcon::Normal : QIcon::Disabled);
+        painter.setPen(isEnabled() ? QColor(Qt::white) : Theme::textDisabled());
+        painter.drawText(QRect(startX + glyphAndGap, 0, width() - startX - glyphAndGap,
+                               height()),
+                         Qt::AlignVCenter | Qt::AlignLeft, label);
+
+        if (this == window()->focusWidget()) {
+            const bool active = window()->isActiveWindow();
+            Theme::drawCrispBorder(painter, body.adjusted(3, 3, -3, -3),
+                                   active ? Theme::focusRing() : Theme::focusRingMuted(),
+                                   kShutterWideRadius - 3, active ? 2.0 : 1.5);
+        }
+        return;
+    }
+
     const double radius = body.width() / 2.0;
 
     // No ground fill outside the circle any more - Theme::paintSurface()'s

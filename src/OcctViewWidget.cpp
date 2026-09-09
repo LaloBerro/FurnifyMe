@@ -5379,9 +5379,14 @@ void OcctViewWidget::setRenderMode(bool on)
         // full Dump()s); every later one just reapplies what was already
         // found.
         if (!myRenderTierProbed) {
-            myRenderTier = probeRenderTier();
+            myRenderTierBest = probeRenderTier();
             myRenderTierProbed = true;
+            myRenderTier = effectiveRenderTier();
+            // The probe leaves its own best choice applied; a Quick cap has
+            // to re-dress down to the tier it actually asked for.
+            if (myRenderTier != myRenderTierBest) applyRenderTier(myRenderTier);
         } else {
+            myRenderTier = effectiveRenderTier();
             applyRenderTier(myRenderTier);
         }
 

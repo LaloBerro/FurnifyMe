@@ -100,6 +100,11 @@ void ViewportOverlay::relayout()
     // next left-hand card is placed beside the rail for free, and means the
     // answer does not depend on which entry happens to have been added first.
     int leftX = kMargin;
+    // ...and its right-hand mirror: a visible RightEdge panel pushes the
+    // three right-hand anchors out past its own width, so the view-controls
+    // cluster lands BESIDE the render settings panel rather than underneath
+    // it.
+    int rightX = kMargin;
 
     // The bottom of whatever LeftEdge HEADERS precede the spine in the same
     // column (Milestone 5, item 3's fix round: the pill leads the rail) -
@@ -148,6 +153,8 @@ void ViewportOverlay::relayout()
             else
                 leftEdgeHeaderBottom += entry.widget->height() + kGap;
         }
+        if (entry.anchor == Anchor::RightEdge)
+            rightX = std::max(rightX, kEdgeMargin + entry.widget->width() + kGap);
     }
     int leftCursor = (h - (leftCenterY - kGap)) / 2;
     int rightCursor = (h - (rightCenterY - kGap)) / 2;
@@ -238,17 +245,26 @@ void ViewportOverlay::relayout()
                 bottomLeftY -= kGap;
                 break;
             case Anchor::TopRight:
-                placed->move(snapped(w - cw - kMargin, topRightY));
+                placed->move(snapped(w - cw - rightX, topRightY));
                 topRightY += ch + kGap;
                 break;
             case Anchor::RightCenter:
-                placed->move(snapped(w - cw - kMargin, rightCursor));
+                placed->move(snapped(w - cw - rightX, rightCursor));
                 rightCursor += ch + kGap;
                 break;
             case Anchor::BottomRight:
                 bottomRightY -= ch;
-                placed->move(snapped(w - cw - kMargin, bottomRightY));
+                placed->move(snapped(w - cw - rightX, bottomRightY));
                 bottomRightY -= kGap;
+                break;
+            case Anchor::RightEdge:
+                // The right-hand spine: pinned to the edge, stretched to the
+                // viewport's full height, on LeftEdge's own terms (std::max
+                // against the natural height, wholeDevicePixels on the
+                // arbitrary stretch - see the LeftEdge comment below).
+                placed->move(snapped(w - cw - kEdgeMargin, kEdgeMargin));
+                placed->resize(cw, Theme::wholeDevicePixels(
+                                       std::max(ch, h - 2 * kEdgeMargin)));
                 break;
             case Anchor::LeftEdge:
                 // Every LeftEdge entry shares x = kEdgeMargin and stacks at

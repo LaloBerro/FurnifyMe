@@ -21874,8 +21874,9 @@ int main(int argc, char* argv[])
         // case (radius = half its side), which excludes all four corners
         // rather than the one corner an ordinary rounded rect already loses.
         if (panel) checkCardCorners(panel, QStringLiteral("RenderSettingsPanel"));
-        if (shutter)
-            checkCardCorners(shutter, QStringLiteral("RenderShutterButton"), /*circular=*/true);
+        // WIDE since the Milestone 5 rework - an ordinary rounded card in the
+        // panel's footer, not the old floating circle.
+        if (shutter) checkCardCorners(shutter, QStringLiteral("RenderShutterButton"));
 
         // --- Surface and Metal are read by the deepest tier alone, and the
         // card says so whenever the active tier is not it. An ENABLED
