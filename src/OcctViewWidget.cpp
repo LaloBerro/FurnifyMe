@@ -4380,9 +4380,57 @@ void OcctViewWidget::setRenderWood(bool on)
     redrawRenderModeLive();
 }
 
+void OcctViewWidget::setRenderTextureFile(const QString& path)
+{
+    if (myWoodTextureFile == path) return;
+    myWoodTextureFile = path;
+    // The cache is per-source; the next ensureWoodTexture() rebuilds.
+    myWoodTexture.Nullify();
+    if (myRenderModeActive && myRenderWood && !myContext.IsNull()) {
+        if (usesPbrMaterials(myRenderTier))
+            applyRenderBodyMaterials();
+        else
+            clearRenderBodyMaterials();
+        redrawRenderModeLive();
+    }
+}
+
 void OcctViewWidget::ensureWoodTexture()
 {
     if (!myWoodTexture.IsNull()) return;
+
+    // The user's own image first, when one is chosen - the procedural plank
+    // below is the fallback, not the point.
+    if (!myWoodTextureFile.isEmpty()) {
+        const QImage file(myWoodTextureFile);
+        if (!file.isNull()) {
+            const QImage rgb = file.convertToFormat(QImage::Format_RGB888);
+            Handle(Image_PixMap) filePix = new Image_PixMap();
+            if (filePix->InitTrash(Image_Format_RGB, rgb.width(), rgb.height())) {
+                for (int y = 0; y < rgb.height(); ++y) {
+                    for (int x = 0; x < rgb.width(); ++x) {
+                        const QColor c = rgb.pixelColor(x, y);
+                        filePix->SetPixelColor(x, y,
+                                              Quantity_ColorRGBA(float(c.redF()),
+                                                                 float(c.greenF()),
+                                                                 float(c.blueF()), 1.0f));
+                    }
+                }
+                Handle(Graphic3d_Texture2D) fileTexture = new Graphic3d_Texture2D(filePix);
+                fileTexture->GetParams()->SetModulate(Standard_True);
+                fileTexture->GetParams()->SetRepeat(Standard_True);
+                // One tile of a real photographed texture reads as ~300 mm
+                // of material - a plank-and-a-bit - against the procedural
+                // grain's tighter 180. Tuned by eye with the user's files.
+                fileTexture->GetParams()->SetScale(
+                    Graphic3d_Vec2(1.0f / 300.0f, 1.0f / 300.0f));
+                myWoodTexture = fileTexture;
+                return;
+            }
+        }
+        // A file that fails to load falls through to the procedural grain
+        // rather than to no material at all.
+    }
 
     // A procedural plank: wavy longitudinal grain bands with fine per-pixel
     // variation, drawn once into a QImage and handed to OCCT as an

@@ -5,6 +5,7 @@
 
 #include <QAction>
 #include <QColorDialog>
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLinearGradient>
@@ -57,9 +58,14 @@ constexpr int kShutterWideRadius = 9;
 constexpr int kShutterWideGlyph = 16;
 
 // The material preset tiles - small painted thumbnails, B's own selector.
+// THREE per row in a wrapping grid: however many materials the user's
+// folder holds, the selector grows rows rather than clipping (the fixed
+// single row clipped at four - the user's own report).
 constexpr int kTileWidth = 66;
 constexpr int kTileHeight = 40;
 constexpr int kTileRadius = 6;
+constexpr int kTileColumns = 3;
+constexpr int kTileGap = 7;
 
 // The Quality chips share the tile height's rhythm at a text size.
 constexpr int kSegHeight = 26;
@@ -161,7 +167,32 @@ public:
         setToolTip(name);
     }
 
+    // The image-backed variant: one tile per file the user dropped into the
+    // materials folder. The thumbnail is decoded and scaled ONCE, here -
+    // CLAUDE.md's own law: no paintEvent may decode or rescale an asset,
+    // and this tile repaints on every hover.
+    MaterialTile(const QString& name, const QString& filePath, QWidget* parent)
+        : QAbstractButton(parent)
+        , myName(name)
+        , myFilePath(filePath)
+        , myWood(true)
+    {
+        setCursor(Qt::PointingHandCursor);
+        setFocusPolicy(Qt::StrongFocus);
+        setAttribute(Qt::WA_NoMousePropagation);
+        Theme::makeSurfaceTransparent(this);
+        setFixedSize(kTileWidth, kTileHeight);
+        setToolTip(name);
+        const QImage image(filePath);
+        if (!image.isNull()) {
+            myThumb = QPixmap::fromImage(image.scaled(
+                kTileWidth * 2, kTileHeight * 2, Qt::KeepAspectRatioByExpanding,
+                Qt::SmoothTransformation));
+        }
+    }
+
     QString name() const { return myName; }
+    QString filePath() const { return myFilePath; }
     double glossiness() const { return myGloss; }
     double metallic() const { return myMetal; }
     bool isWood() const { return myWood; }
@@ -195,6 +226,29 @@ protected:
         // The sphere: base tone by metal, highlight sharpness by gloss -
         // and the wood tile paints its own grain across the whole face
         // instead, the thumbnail being the material.
+        if (myWood && !myThumb.isNull()) {
+            // The user's own image is the thumbnail - what the tile promises
+            // is literally the file the click applies.
+            painter.drawPixmap(rect(), myThumb,
+                               QRect((myThumb.width() - width()) / 2,
+                                     (myThumb.height() - height()) / 2, width(), height()));
+            const QRect texStrip(0, height() - 13, width(), 13);
+            painter.fillRect(texStrip, QColor(0, 0, 0, 150));
+            painter.setPen(myCurrent ? QColor(Qt::white) : Theme::textMuted());
+            painter.setFont(Theme::badgeFont());
+            painter.drawText(texStrip, Qt::AlignCenter, myName);
+            painter.restore();
+            Theme::drawCrispBorder(painter, body,
+                                   myCurrent ? Theme::accent() : Theme::border(), kTileRadius,
+                                   myCurrent ? 2.0 : 1.0);
+            if (this == window()->focusWidget()) {
+                const bool active = window()->isActiveWindow();
+                Theme::drawCrispBorder(painter, body.adjusted(3, 3, -3, -3),
+                                       active ? Theme::focusRing() : Theme::focusRingMuted(),
+                                       kTileRadius - 3, active ? 2.0 : 1.5);
+            }
+            return;
+        }
         if (myWood) {
             for (int x = 0; x < width(); ++x) {
                 const double band =
@@ -266,6 +320,8 @@ protected:
 
 private:
     QString myName;
+    QString myFilePath;
+    QPixmap myThumb;
     double myGloss = 0.0;
     double myMetal = 0.0;
     bool myWood = false;
@@ -483,19 +539,24 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
     // --- Material (mockup B's selector: preset tiles over the sliders) ---
     addSection(tr("Material"));
     {
-        auto* row = new QWidget(this);
-        makeTransparent(row, QStringLiteral("renderSettingsPresetRow"));
-        auto* line = new QHBoxLayout(row);
-        line->setContentsMargins(0, 0, 0, 0);
-        line->setSpacing(7);
-        // Each tile IS its two slider values - clicking writes them through
-        // the same setters a drag uses, so the signals, the persistence and
-        // the tier gate all come along for free. Which tile reads as current
-        // is DERIVED from the sliders in syncPresetTiles(), never stored.
+        auto* grid = new QWidget(this);
+        makeTransparent(grid, QStringLiteral("renderSettingsPresetGrid"));
+        myTileGrid = new QGridLayout(grid);
+        myTileGrid->setContentsMargins(0, 0, 0, 0);
+        myTileGrid->setHorizontalSpacing(kTileGap);
+        myTileGrid->setVerticalSpacing(kTileGap);
+        // Left-packed: the grid's own columns stay at tile width and a
+        // stretch column soaks the slack, so a row of one or two tiles
+        // does not spread them across the panel.
+        myTileGrid->setColumnStretch(kTileColumns, 1);
+        // Each gloss/metal tile IS its two slider values - clicking writes
+        // them through the same setters a drag uses, so the signals, the
+        // persistence and the tier gate all come along for free. Which tile
+        // reads as current is DERIVED in syncPresetTiles(), never stored.
         const struct { const char* name; double gloss; double metal; } presets[] = {
             {"Matte", 0.25, 0.0}, {"Satin", 0.65, 0.05}, {"Metal", 0.80, 1.0}};
         for (const auto& preset : presets) {
-            auto* tile = new MaterialTile(tr(preset.name), preset.gloss, preset.metal, row);
+            auto* tile = new MaterialTile(tr(preset.name), preset.gloss, preset.metal, grid);
             connect(tile, &QAbstractButton::clicked, this, [this, tile] {
                 // A gloss/metal pick takes wood off in the same gesture -
                 // one material at a time, said once here.
@@ -506,22 +567,21 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
                 setSurfaceGlossiness(tile->glossiness());
                 setMetal(tile->metallic());
             });
-            line->addWidget(tile);
-            myPresetTiles.push_back(tile);
+            addTile(tile);
         }
-        // The Wood tile (Milestone 5's own item): a material flag, not a
-        // slider pair - see setWood().
-        auto* woodTile = new MaterialTile(tr("Wood"), 0.0, 0.0, row, /*wood=*/true);
+        // The built-in Wood tile: a material flag, not a slider pair - see
+        // setWood(). File-backed materials join the same grid through
+        // addTextureMaterials().
+        auto* woodTile = new MaterialTile(tr("Wood"), 0.0, 0.0, grid, /*wood=*/true);
         woodTile->setToolTip(tr("Dress every body in wood grain for the picture"));
-        connect(woodTile, &QAbstractButton::clicked, this, [this] {
-            if (myWood) return;
+        connect(woodTile, &QAbstractButton::clicked, this, [this, woodTile] {
+            if (myWood && myWoodName == woodTile->name()) return;
+            myWoodName = woodTile->name();
             setWood(true);
-            emit woodChanged(true);
+            emit woodTextureChosen(woodTile->name(), QString());
         });
-        line->addWidget(woodTile);
-        myPresetTiles.push_back(woodTile);
-        line->addStretch(1);
-        outer->addWidget(row);
+        addTile(woodTile);
+        outer->addWidget(grid);
     }
     mySurfaceSlider = addRow(QStringLiteral("surface"), tr("Surface"), 0, 100, 45);
     connect(mySurfaceSlider, &QSlider::valueChanged, this, [this](int v) {
@@ -752,7 +812,13 @@ QStringList RenderSettingsPanel::paintedTexts() const
     for (QLabel* label : mySectionLabels) texts << label->text();
     for (QLabel* label : myRowLabels) texts << label->text();
     for (const auto& pair : myValueLabels) texts << pair.second->text();
-    for (MaterialTile* tile : myPresetTiles) texts << tile->name();
+    for (MaterialTile* tile : myPresetTiles) {
+        // A file-backed tile's name IS the user's own filename - their word
+        // choice, not this app's copy, so it is exempt from the banned-word
+        // sweep on ItemsPanel's own isUserData terms and simply not
+        // reported here (this list has no per-entry exemption channel).
+        if (tile->filePath().isEmpty()) texts << tile->name();
+    }
     if (myDeepChip) texts << myDeepChip->text();
     if (mySimpleChip) texts << mySimpleChip->text();
     if (myTierLabel) texts << myTierLabel->text();
@@ -771,6 +837,35 @@ void RenderSettingsPanel::setQuick(bool quick)
 void RenderSettingsPanel::setWood(bool wood)
 {
     myWood = wood;
+    syncPresetTiles();
+}
+
+void RenderSettingsPanel::setWoodSelection(const QString& name)
+{
+    myWoodName = name.isEmpty() ? QStringLiteral("Wood") : name;
+    syncPresetTiles();
+}
+
+void RenderSettingsPanel::addTile(MaterialTile* tile)
+{
+    const int index = static_cast<int>(myPresetTiles.size());
+    myTileGrid->addWidget(tile, index / kTileColumns, index % kTileColumns);
+    myPresetTiles.push_back(tile);
+}
+
+void RenderSettingsPanel::addTextureMaterials(
+    const std::vector<std::pair<QString, QString>>& namesAndPaths)
+{
+    for (const auto& entry : namesAndPaths) {
+        auto* tile = new MaterialTile(entry.first, entry.second, this);
+        connect(tile, &QAbstractButton::clicked, this, [this, tile] {
+            if (myWood && myWoodName == tile->name()) return;
+            myWoodName = tile->name();
+            setWood(true);
+            emit woodTextureChosen(tile->name(), tile->filePath());
+        });
+        addTile(tile);
+    }
     syncPresetTiles();
 }
 
@@ -819,7 +914,7 @@ void RenderSettingsPanel::syncPresetTiles()
     const double metallic = metal();
     for (MaterialTile* tile : myPresetTiles) {
         if (tile->isWood()) {
-            tile->setCurrent(myWood);
+            tile->setCurrent(myWood && myWoodName == tile->name());
             continue;
         }
         tile->setCurrent(!myWood && std::fabs(tile->glossiness() - gloss) < 0.02 &&

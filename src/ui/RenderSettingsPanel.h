@@ -122,6 +122,18 @@ public:
     // the three gloss/metal tiles takes wood off in the same gesture.
     void setWood(bool wood);
     bool wood() const { return myWood; }
+    // Which textured material is the active one while wood() is on - "Wood"
+    // for the built-in grain, otherwise the tile's own name (derived from
+    // the image's filename). Silent, persistence's return path.
+    void setWoodSelection(const QString& name);
+    QString woodSelection() const { return myWoodName; }
+
+    // One tile per image the user dropped into the materials folder -
+    // MainWindow scans and calls this once, right after construction. The
+    // selector lays every tile (the three gloss/metal presets, the built-in
+    // Wood, and however many of these) in a WRAPPING grid, so more
+    // materials grow rows rather than clipping - the user's own ask.
+    void addTextureMaterials(const std::vector<std::pair<QString, QString>>& namesAndPaths);
 
     // The footer's live line: the active tier's name and - for the
     // path-traced tier - how polished the on-screen picture is right now
@@ -172,6 +184,10 @@ public:
 signals:
     void quickChanged(bool quick);
     void woodChanged(bool wood);
+    // A textured tile was clicked: `path` is the image file, empty for the
+    // built-in procedural grain. MainWindow routes it into
+    // OcctViewWidget::setRenderTextureFile() + setRenderWood(true).
+    void woodTextureChosen(const QString& name, const QString& path);
     void surfaceGlossinessChanged(double glossiness01);
     void metalChanged(double metallic01);
     void lightAngleChanged(double azimuthDeg);
@@ -202,6 +218,9 @@ private:
     class SegChip* mySimpleChip = nullptr;
     bool myQuick = false;
     bool myWood = false;
+    QString myWoodName = QStringLiteral("Wood");
+    class QGridLayout* myTileGrid = nullptr;
+    void addTile(class MaterialTile* tile);
     // The three material preset tiles (the mockup's "B material selector").
     std::vector<class MaterialTile*> myPresetTiles;
     class RenderShutterButton* myShutter = nullptr;

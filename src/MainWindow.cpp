@@ -46,6 +46,7 @@
 #include <QActionGroup>
 #include <QCoreApplication>
 #include <QDir>
+#include <QFileInfo>
 #include <QFileDialog>
 #include <QFontMetrics>
 #include <QHBoxLayout>
@@ -743,6 +744,10 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
             settings.value(QStringLiteral("renderMode/quick"), false).toBool();
         myStartRenderWood =
             settings.value(QStringLiteral("renderMode/wood"), false).toBool();
+        myStartRenderWoodName =
+            settings.value(QStringLiteral("renderMode/woodName")).toString();
+        myStartRenderWoodPath =
+            settings.value(QStringLiteral("renderMode/woodPath")).toString();
     }
 
     // The title bar's and the taskbar's mark, painted rather than loaded - see
@@ -1960,11 +1965,39 @@ void MainWindow::buildOverlay()
     // entry path they have always taken, so a flip re-enters render mode.
     myView->setRenderQuick(myStartRenderQuick);
     myRenderSettingsPanel->setQuick(myStartRenderQuick);
+    // The materials folder: one tile per image dropped into
+    // <library root>/materials - the same injected root the furniture
+    // library itself lives under, so the suite's temp roots simply hold
+    // none and see only the built-ins. Scanned once at build; a new image
+    // appears on the next launch.
+    {
+        std::vector<std::pair<QString, QString>> textures;
+        const QDir materialsDir(myStore.rootPath() + QStringLiteral("/materials"));
+        const QStringList imageFilters{QStringLiteral("*.png"), QStringLiteral("*.jpg"),
+                                       QStringLiteral("*.jpeg"), QStringLiteral("*.bmp")};
+        for (const QFileInfo& info :
+             materialsDir.entryInfoList(imageFilters, QDir::Files, QDir::Name)) {
+            QString name = info.completeBaseName();
+            if (!name.isEmpty()) name[0] = name[0].toUpper();
+            textures.push_back({name, info.absoluteFilePath()});
+        }
+        myRenderSettingsPanel->addTextureMaterials(textures);
+    }
+
+    myView->setRenderTextureFile(myStartRenderWoodPath);
     myView->setRenderWood(myStartRenderWood);
+    myRenderSettingsPanel->setWoodSelection(myStartRenderWoodName);
     myRenderSettingsPanel->setWood(myStartRenderWood);
     connect(myRenderSettingsPanel, &RenderSettingsPanel::woodChanged, this,
             [this](bool wood) {
                 myView->setRenderWood(wood);
+                persistRenderSettings();
+            });
+    connect(myRenderSettingsPanel, &RenderSettingsPanel::woodTextureChosen, this,
+            [this](const QString& name, const QString& path) {
+                Q_UNUSED(name);
+                myView->setRenderTextureFile(path);
+                myView->setRenderWood(true);
                 persistRenderSettings();
             });
     connect(myRenderSettingsPanel, &RenderSettingsPanel::quickChanged, this,
@@ -2789,6 +2822,10 @@ void MainWindow::writeRenderSettingsNow()
     settings.setValue(QStringLiteral("renderMode/fov"), myView->renderFov());
     settings.setValue(QStringLiteral("renderMode/quick"), myView->renderQuick());
     settings.setValue(QStringLiteral("renderMode/wood"), myView->renderWood());
+    settings.setValue(QStringLiteral("renderMode/woodName"),
+                      myRenderSettingsPanel ? myRenderSettingsPanel->woodSelection()
+                                            : QString());
+    settings.setValue(QStringLiteral("renderMode/woodPath"), myView->renderTextureFile());
 }
 
 void MainWindow::closeEvent(QCloseEvent* event)

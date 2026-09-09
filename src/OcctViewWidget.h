@@ -1199,6 +1199,11 @@ public:
     // it.
     void setRenderWood(bool on);
     bool renderWood() const { return myRenderWood; }
+    // Which image file the wood texture is built from - empty means the
+    // built-in procedural grain. Changing it drops the cached texture and,
+    // mid-render-mode with wood on, re-dresses the bodies live.
+    void setRenderTextureFile(const QString& path);
+    QString renderTextureFile() const { return myWoodTextureFile; }
 
     // What the tier probe actually MEASURED, kept so the decision can be
     // audited rather than only its outcome reported. Phase 3 of the
@@ -2534,6 +2539,7 @@ private:
     // per session, lazily, from a procedural QImage; the handle lives for
     // the widget's life and dies with the GL resources.
     bool myRenderWood = false;
+    QString myWoodTextureFile;
     Handle(Graphic3d_TextureMap) myWoodTexture;
     void ensureWoodTexture();
     // Turns the wood texture on or off across every body presentation -

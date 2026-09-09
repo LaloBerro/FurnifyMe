@@ -49,6 +49,11 @@ public:
 
     explicit FurnitureStore(const QString& rootDir);
 
+    // The injected root itself - the render settings' materials folder
+    // (<root>/materials) is scanned relative to it, so the suite's temp
+    // roots hold no user images and see only the built-in tiles.
+    QString rootPath() const { return myRootDir; }
+
     // Newest-edited first. Skips any subdirectory that is not a readable
     // furniture (no manifest.json, or one this build cannot parse) rather
     // than failing the whole listing - one damaged entry must not hide

@@ -1499,6 +1499,8 @@ private:
     QColor myStartRenderBackground;             // invalid = no stored override
     bool myStartRenderQuick = false;
     bool myStartRenderWood = false;
+    QString myStartRenderWoodName;
+    QString myStartRenderWoodPath;
     double myStartRenderFov = 45.0;
 
     AppBar* myAppBar = nullptr;
