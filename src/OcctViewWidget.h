@@ -934,6 +934,21 @@ public:
     // Snapping applies to points reported while sketching, not to the camera.
     void setSnap(bool enabled, double step);
     bool snapEnabled() const { return mySnapEnabled; }
+
+    // Magnet (Milestone 5): while a Move drag runs, the dragged body sticks
+    // to alignments with OTHER visible bodies - min face, centre or max face
+    // along the drag axis matching the moving body's own - the way Photoshop
+    // magnets a dragged image to its neighbours' edges and centres. Magnet
+    // OUTRANKS the grid snap (an alignment is exact by definition; rounding
+    // it to 10 mm first would round it away), and a bright guide line flashes
+    // through both bodies in the alignment plane while it holds. Candidates
+    // are captured at the press from bounding boxes, so the drag itself does
+    // no geometry walks. Session state like the grid snap; Move only - a
+    // rotate or scale has no alignment to offer.
+    void setMagnetEnabled(bool on);
+    bool magnetEnabled() const { return myMagnetEnabled; }
+    // Whether the alignment guide is on screen right now - the suite's seam.
+    bool magnetGuideVisible() const { return myMagnetGuideShown; }
     double snapStep() const { return mySnapStep; }
 
     // The live length annotation - the last placed sketch point out to the
@@ -1886,6 +1901,20 @@ private:
     // the other.
     void beginAxisDrag(AxisDrag& drag, const gp_Lin& axis, const QPoint& at);
     bool advanceAxisDrag(AxisDrag& drag, const gp_Lin& axis, const QPoint& at);
+    // The measurement half of advanceAxisDrag(), snap-free: the late anchor
+    // and the near-parallel refusal live HERE, once, and the raw distance
+    // comes out for the caller to snap as its gesture demands. The Move drag
+    // needs the raw value because Magnet must compare against the true
+    // cursor position - a grid-rounded one can sit a whole half-step from
+    // the alignment the user is aiming at.
+    bool measureAxisDrag(AxisDrag& drag, const gp_Lin& axis, const QPoint& at, double& raw);
+
+    // Magnet's own pieces - see setMagnetEnabled(). Candidates at the press,
+    // nearest-within-tolerance at each move, one guide line while it holds.
+    void collectMagnetCandidates(int axis);
+    bool magnetSnap(double raw, double& value, gp_Pnt& guideA, gp_Pnt& guideB) const;
+    void showMagnetGuide(const gp_Pnt& a, const gp_Pnt& b);
+    void clearMagnetGuide();
     // Rebuilds the symmetry plane indicator from myCamera's current distance
     // (screen-sized, so it has to follow zoom) - guarded against rebuilding on
     // a camera move that would not visibly change its size. A no-op while the
@@ -2344,6 +2373,23 @@ private:
         gp_Lin line;
     };
     ScaleDrag myScaleDrag;
+
+    // Magnet state - see setMagnetEnabled(). Candidates are FROZEN at the
+    // press (bounding boxes of the moving body and every other visible one),
+    // myMoveDragLine's own reasoning: the moving body's ghost travels with
+    // the drag, and re-reading it would chase the preview.
+    bool myMagnetEnabled = true;
+    struct MagnetCandidate {
+        double value;          // the drag value that lands this alignment exactly
+        double target;         // the aligned coordinate along the drag axis
+        gp_Pnt movingCentre;   // moving body's bbox centre at the press
+        gp_Pnt targetCentre;   // aligned body's bbox centre
+    };
+    std::vector<MagnetCandidate> myMoveMagnetCandidates;
+    int myMoveMagnetAxis = -1;
+    Handle(AIS_InteractiveObject) myMagnetGuide;
+    bool myMagnetGuideShown = false;
+    gp_Pnt myMagnetGuideA, myMagnetGuideB;
 
     // The two axis drags, one per arrow. See AxisDrag above.
     AxisDrag myPullDrag;

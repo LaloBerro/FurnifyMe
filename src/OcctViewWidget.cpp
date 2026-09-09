@@ -182,14 +182,18 @@ class SymmetryPlaneObject : public AIS_InteractiveObject {
 public:
     Handle(Graphic3d_ArrayOfSegments) segments;
     Quantity_Color colour;
+    // 1.2 is the indicator's own historical width; the Magnet guide reuses
+    // this class bolder, because a guide that flashes for half a drag has to
+    // read at a glance.
+    double width = 1.2;
 
     void Compute(const Handle(PrsMgr_PresentationManager)&,
                  const Handle(Prs3d_Presentation)& presentation, const Standard_Integer) override
     {
         if (segments.IsNull()) return;
         Handle(Graphic3d_Group) group = presentation->NewGroup();
-        Handle(Graphic3d_AspectLine3d) aspect =
-            new Graphic3d_AspectLine3d(colour, Aspect_TOL_SOLID, 1.2);
+        Handle(Graphic3d_AspectLine3d) aspect = new Graphic3d_AspectLine3d(
+            colour, Aspect_TOL_SOLID, static_cast<Standard_ShortReal>(width));
         group->SetGroupPrimitivesAspect(aspect);
         group->AddPrimitiveArray(segments);
     }
@@ -199,6 +203,13 @@ public:
         // Never pickable - an indicator, not a body.
     }
 };
+
+// How close the RAW Move-drag value has to be to an alignment before Magnet
+// takes it, in LOGICAL screen pixels - a reach the hand feels the same at
+// every zoom, converted through worldPerPixel() at the moment of the
+// comparison. Eight matches Auto's edge-hover promise: the two are the same
+// kind of forgiveness.
+constexpr double kMagnetSnapPx = 8.0;
 
 // One tiny point in world space, drawn as a marker whose size lives in
 // screen pixels - Graphic3d_AspectMarker3d/Prs3d_PointAspect's own documented
@@ -521,6 +532,8 @@ void OcctViewWidget::releaseGlResources()
     myPlacedMarkers.clear();
     myFirstPointMarker.Nullify();
     myCursorMarker.Nullify();
+    myMagnetGuide.Nullify();
+    myMagnetGuideShown = false;
     mySymmetryIndicator.Nullify();
     mySymmetryIndicatorBuiltHalfSpan = 0.0;
     myMirrorPlacementPlaneObject.Nullify();
@@ -1643,6 +1656,8 @@ void OcctViewWidget::cancelMoveDrag()
     myMoveDrag.active = false;
     myMoveDrag.moved = false;
     myMoveDragAxis = -1;
+    clearMagnetGuide();
+    myMoveMagnetCandidates.clear();
     // The button is still down. Whatever release follows belongs to the
     // gesture this just ended, and letting it reach the picker would replace
     // the body selection the gizmo is standing on - which would retire the
@@ -1727,6 +1742,8 @@ void OcctViewWidget::clearBodyGizmos()
     myMoveGizmo.setHoveredAxis(-1);
     myRotateGizmo.setHoveredAxis(-1);
     myScaleGizmo.setHoveredAxis(-1);
+    clearMagnetGuide();
+    myMoveMagnetCandidates.clear();
     // The grab cursor goes with the handles it was pointing at.
     unsetCursor();
     if (removed) scheduleRedraw();
@@ -1927,7 +1944,8 @@ void OcctViewWidget::beginAxisDrag(AxisDrag& drag, const gp_Lin& axis, const QPo
                          CameraController::axisParameterForRay(ray, axis, drag.pressParam);
 }
 
-bool OcctViewWidget::advanceAxisDrag(AxisDrag& drag, const gp_Lin& axis, const QPoint& at)
+bool OcctViewWidget::measureAxisDrag(AxisDrag& drag, const gp_Lin& axis, const QPoint& at,
+                                     double& raw)
 {
     // Where the cursor now points along the arrow's axis, minus where it
     // pointed at the press. A ray too close to parallel with the axis resolves
@@ -1950,7 +1968,14 @@ bool OcctViewWidget::advanceAxisDrag(AxisDrag& drag, const gp_Lin& axis, const Q
         return false;
     }
 
-    double value = parameter - drag.pressParam;
+    raw = parameter - drag.pressParam;
+    return true;
+}
+
+bool OcctViewWidget::advanceAxisDrag(AxisDrag& drag, const gp_Lin& axis, const QPoint& at)
+{
+    double value = 0.0;
+    if (!measureAxisDrag(drag, axis, at, value)) return false;
     // The same grid the outline points snap to, applied to the dragged
     // distance rather than to a position.
     if (mySnapEnabled && mySnapStep > 0.0)
@@ -1960,6 +1985,166 @@ bool OcctViewWidget::advanceAxisDrag(AxisDrag& drag, const gp_Lin& axis, const Q
     drag.value = value;
     if (std::fabs(value) > 1.0e-9) drag.moved = true;
     return true;
+}
+
+// --- Magnet (Milestone 5) ---------------------------------------------------
+
+void OcctViewWidget::setMagnetEnabled(bool on)
+{
+    myMagnetEnabled = on;
+    // Mid-drag, honesty over continuity: candidates captured at the press
+    // stop being consulted the moment the option goes, and the guide goes
+    // with them.
+    if (!on) {
+        myMoveMagnetCandidates.clear();
+        clearMagnetGuide();
+    }
+}
+
+void OcctViewWidget::collectMagnetCandidates(int axis)
+{
+    myMoveMagnetCandidates.clear();
+    myMoveMagnetAxis = axis;
+    if (!myMagnetEnabled || axis < 0 || axis > 2 || myContext.IsNull()) return;
+
+    // The Move gizmo stands on exactly one whole selected body - its
+    // predicate says so - and that body is the one being dragged.
+    const std::vector<int> selected = selectedSolidIds();
+    if (selected.size() != 1) return;
+    const int movingId = selected.front();
+
+    struct Box {
+        double lo[3];
+        double hi[3];
+        gp_Pnt centre;
+    };
+    auto boxOf = [](const TopoDS_Shape& shape, Box& out) {
+        if (shape.IsNull()) return false;
+        Bnd_Box box;
+        BRepBndLib::Add(shape, box);
+        if (box.IsVoid()) return false;
+        Standard_Real x0, y0, z0, x1, y1, z1;
+        box.Get(x0, y0, z0, x1, y1, z1);
+        out.lo[0] = x0; out.lo[1] = y0; out.lo[2] = z0;
+        out.hi[0] = x1; out.hi[1] = y1; out.hi[2] = z1;
+        out.centre = gp_Pnt(0.5 * (x0 + x1), 0.5 * (y0 + y1), 0.5 * (z0 + z1));
+        return true;
+    };
+
+    const auto movingIt = mySolids.find(movingId);
+    Box moving;
+    if (movingIt == mySolids.end() || movingIt->second.IsNull() ||
+        !boxOf(movingIt->second->Shape(), moving))
+        return;
+    const double movingFeatures[3] = {moving.lo[axis], 0.5 * (moving.lo[axis] + moving.hi[axis]),
+                                      moving.hi[axis]};
+
+    for (const auto& entry : mySolids) {
+        if (entry.first == movingId || entry.second.IsNull()) continue;
+        // A hidden body offers no alignment - the user cannot see what the
+        // drag would be sticking to.
+        if (!myContext->IsDisplayed(entry.second)) continue;
+        Box other;
+        if (!boxOf(entry.second->Shape(), other)) continue;
+        const double targets[3] = {other.lo[axis], 0.5 * (other.lo[axis] + other.hi[axis]),
+                                   other.hi[axis]};
+        for (double target : targets) {
+            for (double feature : movingFeatures) {
+                MagnetCandidate candidate;
+                candidate.value = target - feature;
+                candidate.target = target;
+                candidate.movingCentre = moving.centre;
+                candidate.targetCentre = other.centre;
+                myMoveMagnetCandidates.push_back(candidate);
+            }
+        }
+    }
+}
+
+bool OcctViewWidget::magnetSnap(double raw, double& value, gp_Pnt& guideA, gp_Pnt& guideB) const
+{
+    if (!myMagnetEnabled || myMoveMagnetCandidates.empty()) return false;
+    const double tolerance = kMagnetSnapPx * worldPerPixel();
+
+    const MagnetCandidate* best = nullptr;
+    double bestDistance = tolerance;
+    for (const MagnetCandidate& candidate : myMoveMagnetCandidates) {
+        const double distance = std::fabs(raw - candidate.value);
+        // <= the tolerance so an alignment exactly at the reach still takes;
+        // NEAREST wins among those inside it, first-seen on an exact tie, so
+        // two alignments in reach cannot flicker between moves.
+        if (distance <= tolerance && (!best || distance < bestDistance)) {
+            best = &candidate;
+            bestDistance = distance;
+        }
+    }
+    if (!best) return false;
+
+    value = best->value;
+    // The guide runs through both bodies IN the alignment plane: both bbox
+    // centres, their drag-axis coordinate replaced by the aligned one. The
+    // moving centre's other two coordinates never change during an axis
+    // drag, so the press-time capture is still where the body is.
+    guideA = best->movingCentre;
+    guideB = best->targetCentre;
+    switch (myMoveMagnetAxis) {
+        case 0: guideA.SetX(best->target); guideB.SetX(best->target); break;
+        case 1: guideA.SetY(best->target); guideB.SetY(best->target); break;
+        default: guideA.SetZ(best->target); guideB.SetZ(best->target); break;
+    }
+    // Two concentric bodies leave no line to draw; showMagnetGuide() clears
+    // rather than inventing a direction, and the snap itself still holds.
+    return true;
+}
+
+void OcctViewWidget::showMagnetGuide(const gp_Pnt& a, const gp_Pnt& b)
+{
+    if (myContext.IsNull()) return;
+    if (a.Distance(b) < 1.0e-6) {
+        clearMagnetGuide();
+        return;
+    }
+    // Equal-guard: the guide only ever moves between alignments, so most
+    // drag steps re-ask for the line already on screen.
+    if (myMagnetGuideShown && myMagnetGuideA.IsEqual(a, 1.0e-9) &&
+        myMagnetGuideB.IsEqual(b, 1.0e-9))
+        return;
+
+    clearMagnetGuide();
+    // Overshoot past both centres so the line reads as a guide crossing the
+    // bodies, not a connector between them - Photoshop's own look.
+    const gp_Vec along(a, b);
+    const gp_Vec overshoot = along.Normalized() * (0.25 * along.Magnitude());
+    Handle(Graphic3d_ArrayOfSegments) segments = new Graphic3d_ArrayOfSegments(2);
+    segments->AddVertex(a.Translated(-overshoot));
+    segments->AddVertex(b.Translated(overshoot));
+
+    Handle(SymmetryPlaneObject) guide = new SymmetryPlaneObject();
+    guide->segments = segments;
+    guide->colour = toOcctColor(Theme::accent());
+    guide->width = 2.0;
+    myContext->Display(guide, 0, -1, Standard_False);   // never pickable
+    // The gizmo's own depth-cleared immediate layer, so the guide is visible
+    // through the bodies it aligns - a guide the nearer body hides is no
+    // guide during exactly the drags it exists for.
+    myContext->SetZLayer(guide, myGizmoLayer != Graphic3d_ZLayerId_UNKNOWN
+                                    ? myGizmoLayer
+                                    : Graphic3d_ZLayerId_Topmost);
+    myMagnetGuide = guide;
+    myMagnetGuideShown = true;
+    myMagnetGuideA = a;
+    myMagnetGuideB = b;
+    scheduleRedraw();
+}
+
+void OcctViewWidget::clearMagnetGuide()
+{
+    if (!myMagnetGuideShown && myMagnetGuide.IsNull()) return;
+    if (!myContext.IsNull() && !myMagnetGuide.IsNull())
+        myContext->Remove(myMagnetGuide, Standard_False);
+    myMagnetGuide.Nullify();
+    myMagnetGuideShown = false;
+    scheduleRedraw();
 }
 
 void OcctViewWidget::setSymmetryIndicator(bool on, const gp_Pln& plane)
@@ -5462,6 +5647,8 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
             // cannot be the ruler (see myMoveDragLine).
             myMoveDragLine = myMoveGizmo.armAxis(axis);
             beginAxisDrag(myMoveDrag, myMoveDragLine, myLastPos);
+            // Magnet's alignment candidates, frozen alongside the line.
+            collectMagnetCandidates(axis);
             return;
         }
     }
@@ -5582,6 +5769,11 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
     if (myMoveDrag.active && event->button() == Qt::LeftButton) {
         myMoveDrag.active = false;
         myMoveDragAxis = -1;
+        // The guide is the drag's own feedback and goes with it; the
+        // candidates were frozen at this drag's press and mean nothing to
+        // the next one.
+        clearMagnetGuide();
+        myMoveMagnetCandidates.clear();
         emit moveReleased(myMoveDrag.moved);
         return;
     }
@@ -5744,9 +5936,30 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
         // renderer's live armAxis(): the gizmo follows the drag now, so the
         // live line's origin carries the very offset being measured - reading
         // it back each move would subtract the current value from itself.
-        if (myMoveDragAxis >= 0 &&
-            advanceAxisDrag(myMoveDrag, myMoveDragLine, pos))
-            emit moveDragged(myMoveDragAxis, myMoveDrag.value);
+        //
+        // RAW first, then Magnet, then the grid - in that order and
+        // exclusively: Magnet compares against the true cursor distance (a
+        // grid-rounded one can sit half a step from the alignment being
+        // aimed at), and an alignment it takes is exact by definition, so
+        // the grid never rounds it away afterwards.
+        double raw = 0.0;
+        if (myMoveDragAxis >= 0 && measureAxisDrag(myMoveDrag, myMoveDragLine, pos, raw)) {
+            double value = raw;
+            gp_Pnt guideA, guideB;
+            const bool magnetHeld = magnetSnap(raw, value, guideA, guideB);
+            if (magnetHeld)
+                showMagnetGuide(guideA, guideB);
+            else {
+                clearMagnetGuide();
+                if (mySnapEnabled && mySnapStep > 0.0)
+                    value = std::round(value / mySnapStep) * mySnapStep;
+            }
+            if (std::fabs(value - myMoveDrag.value) > 1.0e-9) {
+                myMoveDrag.value = value;
+                if (std::fabs(value) > 1.0e-9) myMoveDrag.moved = true;
+                emit moveDragged(myMoveDragAxis, value);
+            }
+        }
     } else if (myRotateDrag.active) {
         // The whole-gesture angle: where the cursor's ray meets the ring's
         // own plane, measured against the press vector about the frozen

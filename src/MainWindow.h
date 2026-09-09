@@ -877,6 +877,9 @@ private slots:
     // buttons' persisted choice) is untouched throughout - see
     // applyIsolation() for how the two visibilities compose.
     void onIsolate();
+    // View -> Magnet (Milestone 5): the Move drag's stick-to-alignments aid.
+    // The behaviour itself lives in OcctViewWidget::setMagnetEnabled().
+    void onMagnetToggled(bool enabled);
     void onRenameSelected();
     void onUndo();
     void onRedo();
@@ -1395,6 +1398,7 @@ private:
     QAction* mySnapAction = nullptr;
     QAction* myDeleteAction = nullptr;
     QAction* myIsolateAction = nullptr;
+    QAction* myMagnetAction = nullptr;
     // The bodies View -> Isolate is holding on screen; empty means off. See
     // onIsolate()/applyIsolation() - session-only, cleared on every document
     // swap, pruned of dead ids on every application.

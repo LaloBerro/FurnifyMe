@@ -1293,6 +1293,19 @@ void MainWindow::buildActions()
     mySnapAction->setToolTip(snapTooltipText());
     connect(mySnapAction, &QAction::toggled, this, &MainWindow::onSnapToggled);
 
+    // Magnet (Milestone 5): while a body is Move-dragged, it sticks to
+    // alignments with other bodies - faces flush, centres lined up - with a
+    // guide line through both while it holds. Session state exactly as Snap
+    // to Grid is, menu-only (the rail-floor rule), on by default because an
+    // alignment aid nobody has discovered yet costs nothing until a drag
+    // passes within its 8 px reach.
+    myMagnetAction = new QAction(tr("&Magnet"), this);
+    myMagnetAction->setCheckable(true);
+    myMagnetAction->setChecked(true);
+    myMagnetAction->setToolTip(tr("Stick a moved body to other bodies’ faces and "
+                                  "centres — a guide line shows what lined up"));
+    connect(myMagnetAction, &QAction::toggled, this, &MainWindow::onMagnetToggled);
+
     myItemsPanelAction = new QAction(tr("Items"), this);
     myItemsPanelAction->setCheckable(true);
     myItemsPanelAction->setChecked(true);
@@ -1571,6 +1584,7 @@ QMenuBar* MainWindow::buildMenus()
     viewMenu->addAction(myOrthographicAction);
     viewMenu->addSeparator();
     viewMenu->addAction(mySnapAction);
+    viewMenu->addAction(myMagnetAction);
     viewMenu->addSeparator();
     viewMenu->addAction(myIsolateAction);
     viewMenu->addAction(myItemsPanelAction);
@@ -2439,6 +2453,7 @@ void MainWindow::updateActions()
     // already leaves it harmless. The three selection-mode actions that used
     // to be gated alongside it no longer exist.
     mySnapAction->setEnabled(!atInit);
+    myMagnetAction->setEnabled(!atInit);
 
     // File -> Save / Autosave / Close furniture: available only with a
     // furniture actually open. Disabling the submenu's OWN action greys out
@@ -4119,6 +4134,14 @@ void MainWindow::onSnapToggled(bool enabled)
         enabled ? tr("Snapping to the %1 grid")
                       .arg(QString::fromStdString(Measure::formatLength(10.0)))
                 : tr("Snapping off — points land exactly where you click"));
+}
+
+void MainWindow::onMagnetToggled(bool enabled)
+{
+    myView->setMagnetEnabled(enabled);
+    statusBar()->showMessage(
+        enabled ? tr("Magnet on — a moved body sticks when it lines up with another")
+                : tr("Magnet off — moves pass alignments without sticking"));
 }
 
 void MainWindow::onSketchCursorMoved(const gp_Pnt& point)

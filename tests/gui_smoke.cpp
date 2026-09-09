@@ -811,6 +811,7 @@ constexpr BlockInfo kBlocks[] = {
     { "auto-selection-phase-1-the-kind-lock", false, true },
     { "the-3d-gizmos-unlit-tokens-hover-and-handles", false, true },
     { "view-isolate-holds-chosen-bodies-alone-on-screen", false, true },
+    { "magnet-a-move-drag-sticks-to-another-body-s-alignments", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -26206,6 +26207,177 @@ int main(int argc, char* argv[])
         settle(250);
         check(iv->isSolidVisible(idA) && iv->isSolidVisible(idB),
               "undoing the delete shows both bodies - no stale Isolate survives");
+
+        probe.close();
+        settle(150);
+    }
+
+    // --- Magnet: a Move drag sticks to another body's alignments -------------
+    // Milestone 5, "Magnet/Snap ... like in photoshop". The dragged body's
+    // bbox features (min/centre/max along the drag axis) stick to any other
+    // visible body's within an 8 px reach, a guide line flashes through both
+    // while the alignment holds, and Magnet OUTRANKS the grid snap - an
+    // alignment is exact by definition. The oracle is exactness: the landing
+    // equals the geometric alignment delta to a micron, which no 10 mm grid
+    // landing can fake.
+    if (blockEnabled("magnet-a-move-drag-sticks-to-another-body-s-alignments")) {
+        RequiredTempDir magnetDir;
+        MainWindow probe(nullptr, /*persistProgress=*/false, magnetDir.path());
+        probe.setAttribute(Qt::WA_ShowWithoutActivating);
+        probe.resize(1100, 800);
+        probe.show();
+        settle(300);
+        OcctViewWidget* mgv = probe.view();
+        mgv->setAnimationsEnabled(false);
+        enterFreshFurniture(probe);
+
+        QAction* magnet = action(probe, QStringLiteral("Magnet"));
+        check(magnet != nullptr && magnet->isCheckable() && magnet->isChecked(),
+              "there is a checkable Magnet action, on by default");
+        QAction* magnetSnapAction = action(probe, QStringLiteral("Snap to Grid"));
+        if (magnetSnapAction && !magnetSnapAction->isChecked()) {
+            magnetSnapAction->trigger();
+            settle(120);
+        }
+        check(magnetSnapAction != nullptr && magnetSnapAction->isChecked(),
+              "Snap to Grid is ON, so the exact landing below can only be Magnet's");
+
+        check(buildBody(probe, 0.28, 0.30, 0.42, 0.44, 40.0),
+              "a body to drag for the Magnet probe");
+        check(buildBody(probe, 0.57, 0.30, 0.73, 0.44, 40.0), "and one to stick to");
+        const auto& magSolids = probe.document().solids();
+        const int dragId = magSolids.size() >= 2 ? magSolids[magSolids.size() - 2].id : -1;
+        const int anchorId = magSolids.size() >= 2 ? magSolids.back().id : -1;
+        check(dragId > 0 && anchorId > 0, "both bodies exist");
+        mgv->fitAll();
+        settle(250);
+
+        auto minXOf = [&probe](int id) {
+            Bnd_Box box;
+            BRepBndLib::Add(probe.document().shapeOf(id), box);
+            Standard_Real x0, y0, z0, x1, y1, z1;
+            box.Get(x0, y0, z0, x1, y1, z1);
+            return double(x0);
+        };
+        auto centreOf = [&probe](int id) {
+            return ModelingOps::centreOfMass(probe.document().shapeOf(id));
+        };
+
+        // The alignment this probe aims for: the two bodies' -X faces flush.
+        const double alignDelta = minXOf(anchorId) - minXOf(dragId);
+        check(std::fabs(alignDelta) > 20.0,
+              QStringLiteral("the bodies start well apart (%1 mm), so a landing at the "
+                             "alignment cannot be an accident of the start")
+                  .arg(alignDelta, 0, 'f', 1));
+        // NON-VACUITY for "Magnet outranks the grid": if the alignment sat on
+        // a 10 mm step the two landings would agree and prove nothing.
+        const double gridLanding = std::round(alignDelta / 10.0) * 10.0;
+        check(std::fabs(alignDelta - gridLanding) > 0.75,
+              QStringLiteral("and the alignment (%1 mm) is well off the 10 mm grid "
+                             "(nearest step %2), so the two snaps are distinguishable")
+                  .arg(alignDelta, 0, 'f', 3).arg(gridLanding, 0, 'f', 1));
+
+        mgv->setSelectedSolids({dragId});
+        settle(200);
+        check(mgv->hasMoveGizmo(), "the Move gizmo stands on the dragged body");
+
+        // A grab on the X arm, the Move block's own derivation.
+        auto grabX = [&](QPoint& at, gp_Pnt& world) {
+            gp_Pnt tip;
+            if (!mgv->moveGizmoArmTip(0, tip)) return false;
+            const gp_Pnt pivot = mgv->moveGizmoPivot();
+            world = pivot.Translated(gp_Vec(pivot, tip) * 0.65);
+            return mgv->projectToScreen(world, at) &&
+                   mgv->rect().adjusted(6, 6, -6, -6).contains(at);
+        };
+        // Aim DELIBERATELY OFF the alignment by ~4 px worth of millimetres -
+        // inside Magnet's 8 px reach, and far enough from it that a landing
+        // at the exact delta can only be the snap, not the aim.
+        const double aimError = 4.0 * mgv->worldPerPixel();
+
+        // --- Magnet on: mid-drag guide, then an exact landing --------------
+        {
+            QPoint grabAt, dragTo;
+            gp_Pnt grabWorld;
+            const bool haveGrab = grabX(grabAt, grabWorld);
+            const bool haveTarget =
+                haveGrab &&
+                mgv->projectToScreen(
+                    grabWorld.Translated(gp_Vec(alignDelta - aimError, 0.0, 0.0)), dragTo) &&
+                mgv->rect().contains(dragTo);
+            check(haveTarget, "the near-alignment aim point projects into the viewport");
+            if (haveTarget) {
+                const gp_Pnt before = centreOf(dragId);
+
+                const QPointF start(grabAt);
+                QMouseEvent down(QEvent::MouseButtonPress, start, mgv->mapToGlobal(start),
+                                 Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QCoreApplication::sendEvent(mgv, &down);
+                for (int i = 1; i <= 8; ++i) {
+                    const QPointF at = start + (QPointF(dragTo) - start) * (double(i) / 8.0);
+                    QMouseEvent move(QEvent::MouseMove, at, mgv->mapToGlobal(at),
+                                     Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+                    QCoreApplication::sendEvent(mgv, &move);
+                }
+                settle(200);
+                check(mgv->moveDragActive(), "the drag is live at the aim point");
+                check(mgv->magnetGuideVisible(),
+                      "and the guide line is up while the alignment holds - the "
+                      "Photoshop half of the feature, asserted mid-drag");
+
+                QMouseEvent up(QEvent::MouseButtonRelease, QPointF(dragTo),
+                               mgv->mapToGlobal(QPointF(dragTo)), Qt::LeftButton,
+                               Qt::NoButton, Qt::NoModifier);
+                QCoreApplication::sendEvent(mgv, &up);
+                settle(250);
+                check(!mgv->magnetGuideVisible(), "the guide goes with the drag");
+
+                const double dx = centreOf(dragId).X() - before.X();
+                check(std::fabs(dx - alignDelta) < 1.0e-6,
+                      QStringLiteral("the body lands EXACTLY at the alignment (%1 mm "
+                                     "against %2 wanted) - Magnet outranked the grid")
+                          .arg(dx, 0, 'f', 4).arg(alignDelta, 0, 'f', 4));
+                check(std::fabs(minXOf(dragId) - minXOf(anchorId)) < 1.0e-6,
+                      "...which is the two -X faces genuinely flush");
+
+                trigger(probe, QStringLiteral("Undo"));
+                settle(250);
+                check(std::fabs(centreOf(dragId).X() - before.X()) < 1.0e-6,
+                      "Undo puts the dragged body back");
+            }
+        }
+
+        // --- Magnet off: the same aim lands on the grid instead ------------
+        {
+            if (magnet) { magnet->trigger(); settle(120); }
+            check(magnet != nullptr && !magnet->isChecked(),
+                  "the Magnet action toggles off");
+            mgv->setSelectedSolids({dragId});
+            settle(200);
+            QPoint grabAt, dragTo;
+            gp_Pnt grabWorld;
+            const bool haveGrab = grabX(grabAt, grabWorld);
+            const bool haveTarget =
+                haveGrab &&
+                mgv->projectToScreen(
+                    grabWorld.Translated(gp_Vec(alignDelta - aimError, 0.0, 0.0)), dragTo) &&
+                mgv->rect().contains(dragTo);
+            check(haveTarget, "the off-probe's aim point projects too");
+            if (haveTarget) {
+                const gp_Pnt before = centreOf(dragId);
+                dragButton(mgv, QPointF(grabAt), QPointF(dragTo), Qt::LeftButton);
+                settle(250);
+                const double dx = centreOf(dragId).X() - before.X();
+                check(std::fabs(dx - std::round(dx / 10.0) * 10.0) < 1.0e-6,
+                      QStringLiteral("with Magnet off the same aim lands on a 10 mm "
+                                     "step (%1 mm)").arg(dx, 0, 'f', 3));
+                check(std::fabs(dx - alignDelta) > 0.5,
+                      "...and NOT at the alignment - the stick really was Magnet's");
+                trigger(probe, QStringLiteral("Undo"));
+                settle(250);
+            }
+            if (magnet && !magnet->isChecked()) { magnet->trigger(); settle(120); }
+        }
 
         probe.close();
         settle(150);
