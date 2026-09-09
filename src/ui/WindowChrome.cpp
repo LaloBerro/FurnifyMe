@@ -349,10 +349,16 @@ public:
             case WM_NCLBUTTONUP:
                 if (msg->wParam == HTMAXBUTTON) {
                     if (entry->buttons) entry->buttons->setMaxPressed(false);
-                    if (w->isMaximized())
-                        w->showNormal();
-                    else
-                        w->showMaximized();
+                    // POSTED, never performed here: calling showMaximized()
+                    // synchronously from inside this filter changes the
+                    // window's state in the middle of Qt's own dispatch of
+                    // the very message being filtered, and that crashed the
+                    // app on the first click of this chip. WM_SYSCOMMAND
+                    // through the queue runs after this message completes,
+                    // down Windows' own maximize path - animations, Qt's
+                    // state sync and all.
+                    PostMessageW(msg->hwnd, WM_SYSCOMMAND,
+                                 IsZoomed(msg->hwnd) ? SC_RESTORE : SC_MAXIMIZE, 0);
                     *result = 0;
                     return true;
                 }
