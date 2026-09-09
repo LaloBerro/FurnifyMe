@@ -748,6 +748,10 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
             settings.value(QStringLiteral("renderMode/woodName")).toString();
         myStartRenderWoodPath =
             settings.value(QStringLiteral("renderMode/woodPath")).toString();
+        myStartRenderWoodTile =
+            settings.value(QStringLiteral("renderMode/woodTile"), 300.0).toDouble();
+        myStartRenderWoodAngle =
+            settings.value(QStringLiteral("renderMode/woodAngle"), 0.0).toDouble();
     }
 
     // The title bar's and the taskbar's mark, painted rather than loaded - see
@@ -2020,6 +2024,20 @@ void MainWindow::buildOverlay()
                 myView->setRenderWood(true);
                 persistRenderSettings();
             });
+    myView->setRenderWoodTileMm(myStartRenderWoodTile);
+    myView->setRenderWoodAngleDeg(myStartRenderWoodAngle);
+    myRenderSettingsPanel->setWoodTileMm(myStartRenderWoodTile);
+    myRenderSettingsPanel->setWoodAngle(myStartRenderWoodAngle);
+    connect(myRenderSettingsPanel, &RenderSettingsPanel::woodTileChanged, this,
+            [this](double mm) {
+                myView->setRenderWoodTileMm(mm);
+                persistRenderSettings();
+            });
+    connect(myRenderSettingsPanel, &RenderSettingsPanel::woodAngleChanged, this,
+            [this](double degrees) {
+                myView->setRenderWoodAngleDeg(degrees);
+                persistRenderSettings();
+            });
     connect(myRenderSettingsPanel, &RenderSettingsPanel::quickChanged, this,
             [this](bool quick) {
                 myView->setRenderQuick(quick);
@@ -2846,6 +2864,8 @@ void MainWindow::writeRenderSettingsNow()
                       myRenderSettingsPanel ? myRenderSettingsPanel->woodSelection()
                                             : QString());
     settings.setValue(QStringLiteral("renderMode/woodPath"), myView->renderTextureFile());
+    settings.setValue(QStringLiteral("renderMode/woodTile"), myView->renderWoodTileMm());
+    settings.setValue(QStringLiteral("renderMode/woodAngle"), myView->renderWoodAngleDeg());
 }
 
 void MainWindow::closeEvent(QCloseEvent* event)

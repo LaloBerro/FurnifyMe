@@ -247,6 +247,7 @@ public:
     Handle(Graphic3d_TextureMap) texture;
     Graphic3d_MaterialAspect material;
     double tileMm = 300.0;
+    double angleDeg = 0.0;
 
     void Compute(const Handle(PrsMgr_PresentationManager)&,
                  const Handle(Prs3d_Presentation)& presentation, const Standard_Integer) override
@@ -310,12 +311,20 @@ public:
                 if (normal.SquareMagnitude() < 1.0e-12) continue;
                 normal.Normalize();
                 const gp_Dir dir(normal);
-                auto uv = [this, dominant](const gp_Pnt& p) {
+                const double angleRad = angleDeg * 3.14159265358979323846 / 180.0;
+                const double cosA = std::cos(angleRad);
+                const double sinA = std::sin(angleRad);
+                auto uv = [this, dominant, cosA, sinA](const gp_Pnt& p) {
+                    double a, b;
                     switch (dominant) {
-                        case 2:  return gp_Pnt2d(p.X() / tileMm, p.Y() / tileMm);
-                        case 0:  return gp_Pnt2d(p.Y() / tileMm, p.Z() / tileMm);
-                        default: return gp_Pnt2d(p.X() / tileMm, p.Z() / tileMm);
+                        case 2:  a = p.X(); b = p.Y(); break;
+                        case 0:  a = p.Y(); b = p.Z(); break;
+                        default: a = p.X(); b = p.Z(); break;
                     }
+                    // The grain-angle dial: rotate the projection inside the
+                    // face's own plane before scaling to tiles.
+                    return gp_Pnt2d((a * cosA - b * sinA) / tileMm,
+                                    (a * sinA + b * cosA) / tileMm);
                 };
                 array->AddVertex(p1, dir, uv(p1));
                 array->AddVertex(p2, dir, uv(p2));
@@ -4518,6 +4527,29 @@ void OcctViewWidget::setRenderTextureFile(const QString& path)
     }
 }
 
+void OcctViewWidget::setRenderWoodTileMm(double mm)
+{
+    mm = std::clamp(mm, 50.0, 1000.0);
+    if (std::fabs(mm - myWoodTileMm) < 1.0e-6) return;
+    myWoodTileMm = mm;
+    if (myRenderModeActive && myRenderWood) {
+        applyWoodTexture(true);
+        redrawRenderModeLive();
+    }
+}
+
+void OcctViewWidget::setRenderWoodAngleDeg(double degrees)
+{
+    double wrapped = std::fmod(degrees, 360.0);
+    if (wrapped < 0.0) wrapped += 360.0;
+    if (std::fabs(wrapped - myWoodAngleDeg) < 1.0e-6) return;
+    myWoodAngleDeg = wrapped;
+    if (myRenderModeActive && myRenderWood) {
+        applyWoodTexture(true);
+        redrawRenderModeLive();
+    }
+}
+
 void OcctViewWidget::ensureWoodTexture()
 {
     if (!myWoodTexture.IsNull()) return;
@@ -4663,6 +4695,8 @@ void OcctViewWidget::refreshWoodOverlays(const Graphic3d_MaterialAspect& materia
         overlay->shape = entry.second->Shape();
         overlay->texture = myWoodTexture;
         overlay->material = material;
+        overlay->tileMm = std::max(10.0, myWoodTileMm);
+        overlay->angleDeg = myWoodAngleDeg;
         myContext->Display(overlay, 0, -1, Standard_False);   // never pickable
 
         // The real presentation steps aside - two shaded meshes at one

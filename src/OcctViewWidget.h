@@ -1204,6 +1204,14 @@ public:
     // mid-render-mode with wood on, re-dresses the bodies live.
     void setRenderTextureFile(const QString& path);
     QString renderTextureFile() const { return myWoodTextureFile; }
+    // The material's own two dials (user feedback): how much real material
+    // one tile of the image covers, and which way the grain runs (a
+    // rotation of the UV projection inside each face's plane). Both rebuild
+    // the overlays live while wood is up.
+    void setRenderWoodTileMm(double mm);
+    double renderWoodTileMm() const { return myWoodTileMm; }
+    void setRenderWoodAngleDeg(double degrees);
+    double renderWoodAngleDeg() const { return myWoodAngleDeg; }
 
     // What the tier probe actually MEASURED, kept so the decision can be
     // audited rather than only its outcome reported. Phase 3 of the
@@ -2539,6 +2547,8 @@ private:
     // per session, lazily, from a procedural QImage; the handle lives for
     // the widget's life and dies with the GL resources.
     bool myRenderWood = false;
+    double myWoodTileMm = 300.0;
+    double myWoodAngleDeg = 0.0;
     QString myWoodTextureFile;
     Handle(Graphic3d_TextureMap) myWoodTexture;
     void ensureWoodTexture();

@@ -1501,6 +1501,8 @@ private:
     bool myStartRenderWood = false;
     QString myStartRenderWoodName;
     QString myStartRenderWoodPath;
+    double myStartRenderWoodTile = 300.0;
+    double myStartRenderWoodAngle = 0.0;
     double myStartRenderFov = 45.0;
 
     AppBar* myAppBar = nullptr;

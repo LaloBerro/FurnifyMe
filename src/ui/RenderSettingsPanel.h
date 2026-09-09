@@ -127,6 +127,11 @@ public:
     // the image's filename). Silent, persistence's return path.
     void setWoodSelection(const QString& name);
     QString woodSelection() const { return myWoodName; }
+    // The material's two dials, silent return paths - see the signals.
+    void setWoodTileMm(double mm);
+    void setWoodAngle(double degrees);
+    double woodTileMm() const;
+    double woodAngle() const;
 
     // One tile per image the user dropped into the materials folder -
     // MainWindow scans and calls this once, right after construction. The
@@ -188,6 +193,10 @@ signals:
     // built-in procedural grain. MainWindow routes it into
     // OcctViewWidget::setRenderTextureFile() + setRenderWood(true).
     void woodTextureChosen(const QString& name, const QString& path);
+    // Grain size (how much real material one tile of the image covers) and
+    // grain angle (which way it runs).
+    void woodTileChanged(double mm);
+    void woodAngleChanged(double degrees);
     void surfaceGlossinessChanged(double glossiness01);
     void metalChanged(double metallic01);
     void lightAngleChanged(double azimuthDeg);
@@ -230,6 +239,8 @@ private:
     std::vector<QLabel*> mySectionLabels;
     void syncValueLabels();
     void syncPresetTiles();
+    QSlider* myWoodTileSlider = nullptr;
+    QSlider* myWoodAngleSlider = nullptr;
     QSlider* mySurfaceSlider = nullptr;
     QSlider* myMetalSlider = nullptr;
     QSlider* myLightAngleSlider = nullptr;

@@ -1,6 +1,7 @@
 #include "RenderSettingsPanel.h"
 
 #include "IconSet.h"
+#include "Measure.h"
 #include "Theme.h"
 
 #include <QAction>
@@ -598,6 +599,22 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
     connect(myMetalSlider, &QSlider::valueChanged, this,
             &RenderSettingsPanel::syncPresetTiles);
 
+    // The material's own two dials (user feedback on the wood): how much
+    // real material one image tile covers, and which way the grain runs.
+    // They shape the TEXTURED materials - the gloss/metal presets ignore
+    // them - but they stay visible either way: two rows that appear and
+    // vanish with the active tile would bounce the whole section.
+    myWoodTileSlider = addRow(QStringLiteral("woodTile"), tr("Grain size"), 50, 1000, 300);
+    connect(myWoodTileSlider, &QSlider::valueChanged, this, [this](int v) {
+        if (mySyncing) return;
+        emit woodTileChanged(static_cast<double>(v));
+    });
+    myWoodAngleSlider = addRow(QStringLiteral("woodAngle"), tr("Grain angle"), 0, 359, 0);
+    connect(myWoodAngleSlider, &QSlider::valueChanged, this, [this](int v) {
+        if (mySyncing) return;
+        emit woodAngleChanged(static_cast<double>(v));
+    });
+
     // The muted note under those two rows - shown only while the active
     // tier does not read them (see setMaterialRowsApply()). Word-wrapped
     // rather than elided: the card's width is fixed, and a truncated
@@ -840,6 +857,36 @@ void RenderSettingsPanel::setWood(bool wood)
     syncPresetTiles();
 }
 
+void RenderSettingsPanel::setWoodTileMm(double mm)
+{
+    mySyncing = true;
+    if (myWoodTileSlider)
+        myWoodTileSlider->setValue(static_cast<int>(std::round(std::clamp(mm, 50.0, 1000.0))));
+    mySyncing = false;
+    syncValueLabels();
+}
+
+void RenderSettingsPanel::setWoodAngle(double degrees)
+{
+    double wrapped = std::fmod(degrees, 360.0);
+    if (wrapped < 0.0) wrapped += 360.0;
+    mySyncing = true;
+    if (myWoodAngleSlider)
+        myWoodAngleSlider->setValue(static_cast<int>(std::round(wrapped)));
+    mySyncing = false;
+    syncValueLabels();
+}
+
+double RenderSettingsPanel::woodTileMm() const
+{
+    return myWoodTileSlider ? static_cast<double>(myWoodTileSlider->value()) : 300.0;
+}
+
+double RenderSettingsPanel::woodAngle() const
+{
+    return myWoodAngleSlider ? static_cast<double>(myWoodAngleSlider->value()) : 0.0;
+}
+
 void RenderSettingsPanel::setWoodSelection(const QString& name)
 {
     myWoodName = name.isEmpty() ? QStringLiteral("Wood") : name;
@@ -893,10 +940,16 @@ void RenderSettingsPanel::syncValueLabels()
         QSlider* slider = pair.first;
         QLabel* readout = pair.second;
         QString text;
-        if (slider == myLightAngleSlider || slider == myFovSlider)
+        if (slider == myLightAngleSlider || slider == myFovSlider ||
+            slider == myWoodAngleSlider)
             text = QStringLiteral("%1\u00b0").arg(slider->value());
         else if (slider == myLightStrengthSlider)
             text = QStringLiteral("%1%").arg(slider->value());
+        else if (slider == myWoodTileSlider)
+            // A LENGTH, so it reads through Measure like every other length
+            // in this app - which is also what makes it follow the unit.
+            text = QString::fromStdString(
+                Measure::formatLength(static_cast<double>(slider->value())));
         else
             text = QString::number(slider->value());
         readout->setText(text);
