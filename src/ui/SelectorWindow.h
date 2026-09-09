@@ -48,6 +48,8 @@ class QLineEdit;
 class QPushButton;
 class QScrollArea;
 class QTimer;
+class QVBoxLayout;
+class WindowButtons;
 
 class SelectorWindow : public QWidget {
     Q_OBJECT
@@ -186,6 +188,17 @@ private:
     void showFailure(const QString& text);
 
     FurnitureStore& myStore;
+    // The custom title bar (Milestone 5): the strip across the very top -
+    // app mark, wordmark, min/max/close - now that WindowChrome eats the
+    // native caption. Dragging anywhere on it that is not a control moves
+    // the window (see the WindowChrome::attach() lambda in the ctor).
+    QWidget* myTitleBar = nullptr;
+    QLabel* myBarTitle = nullptr;
+    WindowButtons* myWindowButtons = nullptr;
+    // The content column below the strip - where showFailure() inserts its
+    // banner (below the header row), now that layout() is the outer shell
+    // holding the strip.
+    QVBoxLayout* myContentLayout = nullptr;
     QLabel* myTitle = nullptr;
     QPushButton* myNewButton = nullptr;
     QLineEdit* mySearch = nullptr;

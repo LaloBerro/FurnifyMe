@@ -23,6 +23,7 @@
 #include "ViewportOverlay.h"
 #include "VersionsPanel.h"
 #include "WalkthroughPanel.h"
+#include "WindowChrome.h"
 
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
@@ -873,6 +874,29 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     connect(this, &MainWindow::appStateChanged, this, &MainWindow::refreshMirrorPlacement);
 
     buildOverlay();
+
+    // The custom title bar (Milestone 5): the native caption is gone
+    // (WindowChrome's WM_NCCALCSIZE), and the editor's pick is variant 2 -
+    // no strip of our own either. The window buttons over the viewport are
+    // the controls, and DRAGGING lives on the pill: any point inside the
+    // app bar whose deepest child is nothing (the painted mark, the
+    // wordmark, the pill's own empty ground - the menu bar is a real child
+    // and stays clickable) answers Caption, which buys native drag,
+    // double-click-to-maximize and the right-click system menu in one word.
+    WindowChrome::attach(
+        this,
+        [this](const QPoint& p) -> WindowChrome::Hit {
+            if (myWindowButtons && myWindowButtons->isVisible() &&
+                myWindowButtons->maxChipRectIn(this).contains(p))
+                return WindowChrome::Hit::MaxButton;
+            if (myAppBar && myAppBar->isVisible()) {
+                const QPoint inBar = myAppBar->mapFrom(this, p);
+                if (myAppBar->rect().contains(inBar) && !myAppBar->childAt(inBar))
+                    return WindowChrome::Hit::Caption;
+            }
+            return WindowChrome::Hit::Client;
+        },
+        myWindowButtons);
 
     myShortcutSheet = new ShortcutSheet(this);
     connect(myShortcutsAction, &QAction::triggered, myShortcutSheet, &ShortcutSheet::showSheet);
@@ -1816,6 +1840,18 @@ void MainWindow::buildOverlay()
     // Wireframe and Fit All are buttons in the app bar, and Save Screenshot -
     // the least used of the three, and absent from the design's bar and rail
     // alike - is reachable from the File menu.
+
+    // The window controls (Milestone 5, custom title bar - the editor's
+    // pick: no strip at all, the controls float over the viewport). FIRST
+    // TopRight entry, so they hold the corner and everything else in that
+    // column - the gizmo, the view controls, the two settings cards -
+    // stacks one gap further down for free. Deliberately NOT in render
+    // mode's hide list: minimize and close must stay reachable in every
+    // mode, the same reasoning that keeps the view-controls cluster up.
+    // The maximize chip's clicks and hover are native (HTMAXBUTTON, for
+    // Windows 11's snap layouts) - see WindowChrome.h.
+    myWindowButtons = new WindowButtons(WindowButtons::Look::Card, myView);
+    myOverlay->addWidget(myWindowButtons, ViewportOverlay::Anchor::TopRight);
 
     // The orientation gizmo. Its own label chip and the unit readout that sat
     // under it are in the app bar; only the axes stay over the viewport.

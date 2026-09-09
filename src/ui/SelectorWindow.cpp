@@ -1,8 +1,10 @@
 #include "SelectorWindow.h"
 
 #include "FurnitureStore.h"
+#include "IconSet.h"
 #include "InlineRename.h"
 #include "Theme.h"
+#include "WindowChrome.h"
 
 #include <QCloseEvent>
 #include <QDateTime>
@@ -361,9 +363,49 @@ SelectorWindow::SelectorWindow(FurnitureStore& store, QWidget* parent)
     setWindowTitle(tr("FurnifyMe"));
     setAttribute(Qt::WA_NoSystemBackground);
 
-    auto* outer = new QVBoxLayout(this);
-    outer->setContentsMargins(kGridMargin, kGridMargin, kGridMargin, kGridMargin);
+    // The outer shell: the custom title strip across the very top (the
+    // native caption is gone - WindowChrome::attach() at the bottom of this
+    // ctor), then the content column with the gallery's own margins. The
+    // strip runs edge to edge, which is exactly what "integrated" means
+    // here - it is the same chrome() ground as the rest of the window, with
+    // the app mark, the wordmark and the three window controls on it.
+    auto* shell = new QVBoxLayout(this);
+    shell->setContentsMargins(0, 0, 0, 0);
+    shell->setSpacing(0);
+
+    myTitleBar = new QWidget(this);
+    myTitleBar->setAttribute(Qt::WA_NoSystemBackground);
+    myTitleBar->setStyleSheet(QStringLiteral("background: transparent;"));
+    auto* barLayout = new QHBoxLayout(myTitleBar);
+    barLayout->setContentsMargins(12, 0, 0, 0);
+    barLayout->setSpacing(8);
+    auto* mark = new QLabel(myTitleBar);
+    mark->setPixmap(IconSet::appMarkPixmap(18));
+    // Mouse-transparent, both of them: childAt() skips a transparent
+    // widget, and "the deepest child here is nothing" is precisely how the
+    // hit-test lambda below decides a point on the strip is CAPTION - so
+    // the mark and the wordmark stay draggable ground instead of dead
+    // pixels.
+    mark->setAttribute(Qt::WA_TransparentForMouseEvents);
+    barLayout->addWidget(mark);
+    myBarTitle = new QLabel(tr("FurnifyMe"), myTitleBar);
+    myBarTitle->setAttribute(Qt::WA_TransparentForMouseEvents);
+    barLayout->addWidget(myBarTitle);
+    barLayout->addStretch(1);
+    myWindowButtons = new WindowButtons(WindowButtons::Look::Flat, myTitleBar);
+    barLayout->addWidget(myWindowButtons);
+    shell->addWidget(myTitleBar);
+
+    auto* content = new QWidget(this);
+    content->setAttribute(Qt::WA_NoSystemBackground);
+    content->setStyleSheet(QStringLiteral("background: transparent;"));
+    auto* outer = new QVBoxLayout(content);
+    // Top margin halved against the other three - the strip above already
+    // contributes its own height of breathing room.
+    outer->setContentsMargins(kGridMargin, kGridMargin / 2, kGridMargin, kGridMargin);
     outer->setSpacing(16);
+    myContentLayout = outer;
+    shell->addWidget(content, 1);
 
     auto* header = new QWidget(this);
     header->setAttribute(Qt::WA_NoSystemBackground);
@@ -501,8 +543,9 @@ SelectorWindow::SelectorWindow(FurnitureStore& store, QWidget* parent)
                           gm.left() + gm.right();
         const int gridH = rows * cellH + (rows - 1) * kGridSpacing + gm.top() + gm.bottom();
         const int chromeW = 2 * kGridMargin + 24;   // margins + the scrollbar's own lane
-        const int chromeH =
-            2 * kGridMargin + outer->spacing() + header->sizeHint().height();
+        const QMargins cm = outer->contentsMargins();
+        const int chromeH = myTitleBar->sizeHint().height() + cm.top() + cm.bottom() +
+                            outer->spacing() + header->sizeHint().height();
         QSize wanted = Theme::wholeDevicePixels(QSize(gridW + chromeW, gridH + chromeH));
         if (const QScreen* screen = QGuiApplication::primaryScreen()) {
             wanted = wanted.boundedTo(screen->availableSize() * 9 / 10);
@@ -510,6 +553,25 @@ SelectorWindow::SelectorWindow(FurnitureStore& store, QWidget* parent)
         resize(wanted);
         setMinimumWidth(std::min(wanted.width(), Theme::wholeDevicePixels(gridW + chromeW)));
     }
+
+    // The custom title bar's native half: eat the caption, answer hit tests.
+    // Any point on the strip whose deepest child is nothing (the mark and
+    // the wordmark are mouse-transparent, so childAt() skips them) drags
+    // the window; the maximize chip answers MaxButton so Windows 11's snap
+    // layouts appear over it; everything else - the three window controls
+    // included - is ordinary client content. See WindowChrome.h.
+    WindowChrome::attach(
+        this,
+        [this](const QPoint& p) -> WindowChrome::Hit {
+            if (myWindowButtons && myWindowButtons->isVisible() &&
+                myWindowButtons->maxChipRectIn(this).contains(p))
+                return WindowChrome::Hit::MaxButton;
+            if (myTitleBar && myTitleBar->geometry().contains(p) &&
+                !myTitleBar->childAt(myTitleBar->mapFrom(this, p)))
+                return WindowChrome::Hit::Caption;
+            return WindowChrome::Hit::Client;
+        },
+        myWindowButtons);
 }
 
 QWidget* SelectorWindow::buildCard(const QString& id, const QString& name,
@@ -646,9 +708,10 @@ void SelectorWindow::showFailure(const QString& text)
         myFailureBanner = new QLabel(this);
         myFailureBanner->setWordWrap(true);
         myFailureBanner->setAttribute(Qt::WA_NoSystemBackground);
-        auto* outer = qobject_cast<QVBoxLayout*>(layout());
-        // Index 1: just below the header (index 0), above the grid.
-        if (outer) outer->insertWidget(1, myFailureBanner);
+        // Index 1: just below the header (index 0), above the grid - in the
+        // CONTENT column, since layout() is the outer shell holding the
+        // title strip now.
+        if (myContentLayout) myContentLayout->insertWidget(1, myFailureBanner);
         myFailureTimer = new QTimer(this);
         myFailureTimer->setSingleShot(true);
         myFailureTimer->setInterval(kFailureMs);
@@ -743,6 +806,7 @@ QStringList SelectorWindow::paintedTexts() const
 {
     QStringList texts;
     if (myTitle) texts << myTitle->text();
+    if (myBarTitle) texts << myBarTitle->text();
     if (myNewButton) texts << myNewButton->text();
     if (mySearch) texts << mySearch->placeholderText();
     if (mySortRecent) texts << mySortRecent->text();
@@ -760,6 +824,9 @@ QStringList SelectorWindow::paintedTexts() const
 void SelectorWindow::applyTheme()
 {
     if (myTitle) myTitle->setStyleSheet(labelChrome(Theme::text(), Theme::titleFont(), true));
+    if (myBarTitle)
+        myBarTitle->setStyleSheet(labelChrome(Theme::text(), Theme::labelFont(), true));
+    if (myWindowButtons) myWindowButtons->update();
     // The New card paints itself from live tokens in its own paintEvent -
     // only a repaint is owed on a theme edit, never a stylesheet.
     if (myNewButton) myNewButton->update();

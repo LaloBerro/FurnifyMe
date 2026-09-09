@@ -1506,6 +1506,12 @@ private:
     double myStartRenderFov = 45.0;
 
     AppBar* myAppBar = nullptr;
+    // The window controls (Milestone 5, custom title bar): min/max/close as
+    // a Card-look row floating at the viewport's top-right, the native
+    // caption having been eaten by WindowChrome - see buildOverlay() and
+    // the WindowChrome::attach() call in the constructor. Never hidden by
+    // render mode: closing the window must stay reachable in every mode.
+    class WindowButtons* myWindowButtons = nullptr;
     class ViewportOverlay* myOverlay = nullptr;
     class QLabel* myStateLabel = nullptr;
     // The kind-lock refusal sentence THIS window last put in the status bar,
