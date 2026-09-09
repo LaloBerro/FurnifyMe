@@ -224,6 +224,15 @@ if(FURNIFYME_BUILD_APP)
     if(TARGET Qt6::QModernWindowsStylePlugin)
       list(APPEND QT_RUNTIME_PLUGINS Qt6::QModernWindowsStylePlugin)
     endif()
+    # The JPEG image plugin (Milestone 5, material textures): QImage reads
+    # JPEG through a plugin exactly as the window reads the platform through
+    # one, and without imageformats/qjpeg.dll beside the exe every .jpg
+    # material silently loaded null and fell back to the procedural grain -
+    # the user's own report ("the 3 woods seems the same"). PNG needs no
+    # entry: the app icon proves it decodes without a deployed plugin here.
+    if(TARGET Qt6::QJpegPlugin)
+      list(APPEND QT_RUNTIME_PLUGINS Qt6::QJpegPlugin)
+    endif()
 
     foreach(plugin IN LISTS QT_RUNTIME_PLUGINS)
       if(NOT TARGET ${plugin})
