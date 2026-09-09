@@ -2542,10 +2542,22 @@ private:
     QString myWoodTextureFile;
     Handle(Graphic3d_TextureMap) myWoodTexture;
     void ensureWoodTexture();
-    // Turns the wood texture on or off across every body presentation -
-    // the ONE place the aspect bit is written, called from both material
-    // appliers and from the exit restore.
+    // The wood overlays (user feedback round): AIS_Shape stretches a texture
+    // 0..1 across EACH face's own parametric box, so a long side smeared the
+    // grain and a bevel strip squeezed the whole image into a sliver. These
+    // are per-body textured MESH presentations with UVs we generate
+    // ourselves - every vertex mapped from its world MILLIMETRE coordinates,
+    // projected along the face's dominant normal axis - so grain density is
+    // uniform on every face and continuous across a bevel. While they are up
+    // the real body presentations are erased (recorded, restored on the way
+    // out); render mode swallows picks anyway, so nothing user-facing is
+    // lost. `on` routes through the current material so a Surface/Metal drag
+    // rebuilds the look live.
     void applyWoodTexture(bool on);
+    void refreshWoodOverlays(const Graphic3d_MaterialAspect& material);
+    void clearWoodOverlays();
+    std::map<int, Handle(AIS_InteractiveObject)> myWoodOverlays;
+    std::vector<int> myWoodHiddenIds;
     // The probe's own working, kept beside its answer - see TierProbeTimings.
     TierProbeTimings myTierProbeTimings;
     // See showRenderFloor(). Null whenever render mode is off.

@@ -39,7 +39,10 @@
 #include <Graphic3d_BSDF.hxx>
 #include <Graphic3d_PBRMaterial.hxx>
 #include <Graphic3d_ArrayOfSegments.hxx>
+#include <Graphic3d_ArrayOfTriangles.hxx>
+#include <Graphic3d_AspectFillArea3d.hxx>
 #include <Graphic3d_Texture2D.hxx>
+#include <Poly_Triangulation.hxx>
 #include <Graphic3d_TextureParams.hxx>
 #include <Image_PixMap.hxx>
 #include <Graphic3d_AspectLine3d.hxx>
@@ -84,6 +87,7 @@
 #include <StdSelect_ViewerSelector3d.hxx>
 #include <TopAbs_ShapeEnum.hxx>
 #include <TopExp.hxx>
+#include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
@@ -225,6 +229,117 @@ const Quantity_Color kWoodTone(0.55, 0.38, 0.23, Quantity_TOC_sRGB);
 // screenshot comparison). The texture carries the colour; this only keeps
 // a hair of warmth from clipping.
 const Quantity_Color kWoodUnderTexture(0.95, 0.94, 0.92, Quantity_TOC_sRGB);
+
+// One body dressed in wood (Milestone 5 feedback round) - a textured mesh
+// presentation with UVs THIS class generates, because AIS_Shape's own
+// texture mapping normalizes 0..1 per face (its header says so) and the
+// user's table showed exactly what that costs: a perfect top, smeared
+// sides, and bevel strips wearing the whole image as a sliver. Every
+// vertex's UV comes from its WORLD position in millimetres, projected
+// along its face's dominant normal axis and divided by one tile's real
+// size - so the grain runs at one density on every face, and a bevel
+// between two faces picks up where its larger neighbour left off instead
+// of restarting the image. Never pickable, exactly as every other bespoke
+// presentation in this file is.
+class WoodBodyObject : public AIS_InteractiveObject {
+public:
+    TopoDS_Shape shape;
+    Handle(Graphic3d_TextureMap) texture;
+    Graphic3d_MaterialAspect material;
+    double tileMm = 300.0;
+
+    void Compute(const Handle(PrsMgr_PresentationManager)&,
+                 const Handle(Prs3d_Presentation)& presentation, const Standard_Integer) override
+    {
+        if (shape.IsNull() || texture.IsNull() || tileMm <= 1.0e-6) return;
+
+        // Count first, so the array is allocated once. Non-indexed with
+        // per-vertex normals and texels: flat normals per triangle are right
+        // for furniture's planar faces, and the duplication this costs is a
+        // few thousand vertices.
+        int nbTriangles = 0;
+        for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+            TopLoc_Location location;
+            const Handle(Poly_Triangulation)& triangulation =
+                BRep_Tool::Triangulation(TopoDS::Face(it.Current()), location);
+            if (!triangulation.IsNull()) nbTriangles += triangulation->NbTriangles();
+        }
+        if (nbTriangles == 0) return;
+
+        Handle(Graphic3d_ArrayOfTriangles) array = new Graphic3d_ArrayOfTriangles(
+            nbTriangles * 3, 0,
+            Graphic3d_ArrayFlags_VertexNormal | Graphic3d_ArrayFlags_VertexTexel);
+
+        for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+            const TopoDS_Face face = TopoDS::Face(it.Current());
+            TopLoc_Location location;
+            const Handle(Poly_Triangulation)& triangulation =
+                BRep_Tool::Triangulation(face, location);
+            if (triangulation.IsNull()) continue;
+            const gp_Trsf transform = location.Transformation();
+            const bool reversed = face.Orientation() == TopAbs_REVERSED;
+
+            // The face's dominant axis, from its accumulated triangle
+            // normals - ONE projection per face, so a face's own mapping
+            // cannot switch mid-strip, while a bevel's average leans toward
+            // whichever neighbour it blends into.
+            gp_XYZ accumulated(0.0, 0.0, 0.0);
+            std::vector<gp_Pnt> points(triangulation->NbNodes());
+            for (int n = 1; n <= triangulation->NbNodes(); ++n)
+                points[n - 1] = triangulation->Node(n).Transformed(transform);
+            for (int t = 1; t <= triangulation->NbTriangles(); ++t) {
+                int n1, n2, n3;
+                triangulation->Triangle(t).Get(n1, n2, n3);
+                const gp_Vec edge1(points[n1 - 1], points[n2 - 1]);
+                const gp_Vec edge2(points[n1 - 1], points[n3 - 1]);
+                accumulated += edge1.Crossed(edge2).XYZ();
+            }
+            const double ax = std::fabs(accumulated.X());
+            const double ay = std::fabs(accumulated.Y());
+            const double az = std::fabs(accumulated.Z());
+            const int dominant = (az >= ax && az >= ay) ? 2 : (ax >= ay ? 0 : 1);
+
+            for (int t = 1; t <= triangulation->NbTriangles(); ++t) {
+                int n1, n2, n3;
+                triangulation->Triangle(t).Get(n1, n2, n3);
+                if (reversed) std::swap(n2, n3);
+                const gp_Pnt& p1 = points[n1 - 1];
+                const gp_Pnt& p2 = points[n2 - 1];
+                const gp_Pnt& p3 = points[n3 - 1];
+                gp_Vec normal = gp_Vec(p1, p2).Crossed(gp_Vec(p1, p3));
+                if (normal.SquareMagnitude() < 1.0e-12) continue;
+                normal.Normalize();
+                const gp_Dir dir(normal);
+                auto uv = [this, dominant](const gp_Pnt& p) {
+                    switch (dominant) {
+                        case 2:  return gp_Pnt2d(p.X() / tileMm, p.Y() / tileMm);
+                        case 0:  return gp_Pnt2d(p.Y() / tileMm, p.Z() / tileMm);
+                        default: return gp_Pnt2d(p.X() / tileMm, p.Z() / tileMm);
+                    }
+                };
+                array->AddVertex(p1, dir, uv(p1));
+                array->AddVertex(p2, dir, uv(p2));
+                array->AddVertex(p3, dir, uv(p3));
+            }
+        }
+
+        Handle(Graphic3d_AspectFillArea3d) aspect = new Graphic3d_AspectFillArea3d(
+            Aspect_IS_SOLID, material.Color(), Quantity_NOC_BLACK, Aspect_TOL_SOLID, 1.0,
+            material, material);
+        aspect->SetTextureMap(texture);
+        aspect->SetTextureMapOn(true);
+
+        Handle(Graphic3d_Group) group = presentation->NewGroup();
+        group->SetGroupPrimitivesAspect(aspect);
+        group->AddPrimitiveArray(array);
+    }
+
+    void ComputeSelection(const Handle(SelectMgr_Selection)&, const Standard_Integer) override
+    {
+        // Never pickable - render mode swallows picks regardless, and this
+        // object exists only inside it.
+    }
+};
 
 // One tiny point in world space, drawn as a marker whose size lives in
 // screen pixels - Graphic3d_AspectMarker3d/Prs3d_PointAspect's own documented
@@ -548,6 +663,8 @@ void OcctViewWidget::releaseGlResources()
     myFirstPointMarker.Nullify();
     myCursorMarker.Nullify();
     myWoodTexture.Nullify();
+    myWoodOverlays.clear();
+    myWoodHiddenIds.clear();
     myMagnetGuide.Nullify();
     myMagnetGuideShown = false;
     mySymmetryIndicator.Nullify();
@@ -4507,24 +4624,79 @@ void OcctViewWidget::ensureWoodTexture()
 
 void OcctViewWidget::applyWoodTexture(bool on)
 {
+    // Kept as the one switchboard the material appliers call; the actual
+    // mechanism moved from per-face aspect textures to the overlay meshes -
+    // see WoodBodyObject and refreshWoodOverlays() for why.
     if (myContext.IsNull()) return;
-    if (on) ensureWoodTexture();
-    if (on && myWoodTexture.IsNull()) return;
+    if (!on) {
+        clearWoodOverlays();
+        return;
+    }
+    ensureWoodTexture();
+    if (myWoodTexture.IsNull()) return;
+    // The material the overlays wear is the one the caller just derived -
+    // rebuilt here from the same fields rather than passed, so the two
+    // appliers need no signature change: wood base under the grain, the
+    // user's own roughness/metal on the PBR pipeline.
+    Graphic3d_MaterialAspect material(Graphic3d_NameOfMaterial_UserDefined);
+    material.SetColor(Quantity_Color(0.95, 0.94, 0.92, Quantity_TOC_sRGB));
+    Graphic3d_PBRMaterial pbr;
+    pbr.SetColor(material.Color());
+    pbr.SetMetallic(static_cast<float>(myRenderMetallic));
+    pbr.SetRoughness(static_cast<float>(myRenderRoughness));
+    material.SetPBRMaterial(pbr);
+    material.SetBSDF(Graphic3d_BSDF::CreateMetallicRoughness(pbr));
+    refreshWoodOverlays(material);
+}
+
+void OcctViewWidget::refreshWoodOverlays(const Graphic3d_MaterialAspect& material)
+{
+    clearWoodOverlays();
+    if (myContext.IsNull() || myWoodTexture.IsNull()) return;
     for (auto& entry : mySolids) {
         if (entry.second.IsNull()) continue;
-        // Own aspect first, never the drawer link's - a texture written into
-        // the shared default would dress every future presentation in wood.
-        entry.second->Attributes()->SetupOwnShadingAspect();
-        const Handle(Graphic3d_AspectFillArea3d) aspect =
-            entry.second->Attributes()->ShadingAspect()->Aspect();
-        if (on) {
-            aspect->SetTextureMap(myWoodTexture);
-            aspect->SetTextureMapOn(true);
-        } else {
-            aspect->SetTextureMapOn(false);
-        }
-        myContext->Redisplay(entry.second, Standard_False);
+        // Only bodies the user can SEE dress up; a hidden body stays hidden
+        // and is not recorded for the restore.
+        if (!myContext->IsDisplayed(entry.second)) continue;
+
+        Handle(WoodBodyObject) overlay = new WoodBodyObject();
+        overlay->shape = entry.second->Shape();
+        overlay->texture = myWoodTexture;
+        overlay->material = material;
+        myContext->Display(overlay, 0, -1, Standard_False);   // never pickable
+
+        // The real presentation steps aside - two shaded meshes at one
+        // depth would z-fight, and the overlay IS the body for as long as
+        // wood is on.
+        myContext->Erase(entry.second, Standard_False);
+        myWoodHiddenIds.push_back(entry.first);
+        myWoodOverlays[entry.first] = overlay;
     }
+    scheduleRedraw();
+}
+
+void OcctViewWidget::clearWoodOverlays()
+{
+    if (myContext.IsNull()) {
+        myWoodOverlays.clear();
+        myWoodHiddenIds.clear();
+        return;
+    }
+    const bool had = !myWoodOverlays.empty();
+    for (auto& entry : myWoodOverlays) myContext->Remove(entry.second, Standard_False);
+    myWoodOverlays.clear();
+    for (int id : myWoodHiddenIds) {
+        const auto it = mySolids.find(id);
+        if (it == mySolids.end() || it->second.IsNull()) continue;
+        // Back exactly as setSolidVisible()'s show branch puts a body up -
+        // the display mode the viewport is actually in, selection modes
+        // re-applied.
+        myContext->Display(it->second, myWireframe ? AIS_WireFrame : AIS_Shaded,
+                           kSelectionModeWholeShape, Standard_False);
+        if (!myViewerOnly) applySelectionMode(it->second);
+    }
+    myWoodHiddenIds.clear();
+    if (had) scheduleRedraw();
 }
 
 void OcctViewWidget::setRenderSurfaceRoughness(double roughness01)
@@ -5602,6 +5774,10 @@ void OcctViewWidget::setRenderMode(bool on)
             stopPathTracingConvergence();
     } else {
         stopPathTracingConvergence();
+        // The wood overlays go FIRST, restoring the real presentations the
+        // loops below then operate on - an erased body cannot have its
+        // display mode or material put back.
+        clearWoodOverlays();
         for (auto& entry : mySolids) applySelectionMode(entry.second);
         hideRenderFloor();
         // The two restorations that mirror the entry edits above: the lights
@@ -5636,10 +5812,6 @@ void OcctViewWidget::setRenderMode(bool on)
             // The render-mode PBR material off, back to whatever stood
             // before applyRenderBodyMaterials() ran - see that function's
             // own comment on why UnsetMaterial() is a complete restore here.
-            // The wood grain goes with it - the aspect bit is presentation
-            // state exactly as the material is.
-            entry.second->Attributes()->SetupOwnShadingAspect();
-            entry.second->Attributes()->ShadingAspect()->Aspect()->SetTextureMapOn(false);
             entry.second->UnsetMaterial();
             myContext->SetDisplayMode(entry.second, mode, Standard_False);
             myContext->Redisplay(entry.second, Standard_False);
