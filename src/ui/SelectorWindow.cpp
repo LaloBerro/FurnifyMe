@@ -459,20 +459,31 @@ SelectorWindow::SelectorWindow(FurnitureStore& store, QWidget* parent)
         emit furnitureChosen(id);
     });
 
-    // Sized so the pick's own 3x3 is what a fresh window shows: three
-    // columns wide, three rows tall, the scrollbar carrying everything past
-    // that. A minimum width holds the three columns; the user may still
-    // grow the window, which buys breathing room, never a fourth column.
-    // Bounded by the screen the window will land on: three rows of 260-wide
-    // cards outgrow a 1080-row display at 150% scaling and beyond, and a
-    // window taller than the screen is this suite's own documented capture
-    // hazard as well as a real user's clipped scrollbar. The cap costs
-    // nothing - fewer rows fit and the scrollbar carries the rest, which is
-    // exactly what the pick says happens past 3x3 anyway.
+    applyTheme();
+    connect(Theme::notifier(), &Theme::Notifier::changed, this, &SelectorWindow::applyTheme);
+
+    refresh();
+
+    // Sized to what the library actually holds (user feedback on the first
+    // build, which always opened at the full 3x3 and left a small library
+    // over a field of empty rows): as many rows as the New card plus the
+    // real furniture fill, capped at the pick's own three - the scrollbar
+    // carries everything past that. Width always holds the three columns;
+    // the user may still grow the window, which buys breathing room, never
+    // a fourth column. Bounded by the screen the window will land on: even
+    // three rows of 260-wide cards outgrow a 1080-row display at 150%
+    // scaling and beyond, and a window taller than the screen is this
+    // suite's own documented capture hazard as well as a real user's
+    // clipped scrollbar. Sizing runs AFTER refresh(), which is what fills
+    // myCards - the row count is derived from the same cards the grid just
+    // laid out.
     {
+        const int cellCount = 1 + static_cast<int>(myCards.size());   // the New card leads
+        const int rows =
+            std::clamp((cellCount + kGridColumns - 1) / kGridColumns, 1, 3);
         const int cellH = thumbHeight() + kCellSpacing + kUnderRowHeight;
         const int gridW = kGridColumns * kThumbWidth + (kGridColumns - 1) * kGridSpacing;
-        const int gridH = 3 * cellH + 2 * kGridSpacing;
+        const int gridH = rows * cellH + (rows - 1) * kGridSpacing;
         const int chromeW = 2 * kGridMargin + 24;   // margins + the scrollbar's own lane
         const int chromeH = 2 * kGridMargin + 16 + Theme::wholeDevicePixels(32);  // + header
         QSize wanted = Theme::wholeDevicePixels(QSize(gridW + chromeW, gridH + chromeH));
@@ -482,11 +493,6 @@ SelectorWindow::SelectorWindow(FurnitureStore& store, QWidget* parent)
         resize(wanted);
         setMinimumWidth(std::min(wanted.width(), Theme::wholeDevicePixels(gridW + chromeW)));
     }
-
-    applyTheme();
-    connect(Theme::notifier(), &Theme::Notifier::changed, this, &SelectorWindow::applyTheme);
-
-    refresh();
 }
 
 QWidget* SelectorWindow::buildCard(const QString& id, const QString& name,
