@@ -2654,6 +2654,125 @@ int main(int argc, char* argv[])
         checkNoBlackLine(sweepShot, QStringLiteral("SelectorWindow"));
     }
 
+    // --- the Gallery grid: three columns, New leads, search filters, sort ----
+    // Milestone 5's selector redesign, the pick verbatim: "A, but the list
+    // working as a grid max 3x3 and if it bigger get scroll to the bottom".
+    // Pinned here: the column cap holds however wide the window is, the
+    // "+ New furniture" card is the grid's own first cell (top-left-most,
+    // still the QPushButton every older block clicks), the search field
+    // filters cards live without rebuilding them, and the Name sort chip
+    // reorders the LAYOUT while every *At(index) accessor keeps answering
+    // in store order.
+    if (blockEnabled("the-gallery-grid-three-columns-search-and-sort")) {
+        RequiredTempDir gridDir;
+        FurnitureStore gridStore(gridDir.path());
+        for (const QString& name :
+             {QStringLiteral("Alpha Chair"), QStringLiteral("Bench"), QStringLiteral("Console"),
+              QStringLiteral("Desk"), QStringLiteral("Zebra Table")}) {
+            check(!gridStore.createFurniture(name).isEmpty(),
+                  QStringLiteral("seeding \"%1\" for the grid probe").arg(name));
+        }
+
+        SelectorWindow gridSelector(gridStore);
+        gridSelector.setAttribute(Qt::WA_ShowWithoutActivating);
+        // WIDE on purpose - room for five columns of 260 px cards, so a cap
+        // that quietly fell back to width-derived perRow would show four or
+        // five and fail below, while the real cap shows exactly three.
+        gridSelector.resize(1600, 700);
+        gridSelector.show();
+        settle(300);
+
+        check(gridSelector.furnitureCount() == 5, "the grid probe's library shows all five");
+
+        QPushButton* newCard = gridSelector.newFurnitureButton();
+        check(newCard != nullptr && newCard->isVisible(),
+              "the New furniture card is up in the grid");
+
+        // Every cell shares one parent (the grid widget), so raw pos() is
+        // comparable across all of them.
+        std::vector<QWidget*> cells;
+        if (newCard) cells.push_back(newCard);
+        for (int i = 0; i < gridSelector.furnitureCount(); ++i) {
+            if (QWidget* c = gridSelector.cardAt(i)) cells.push_back(c);
+        }
+        check(cells.size() == 6, "six cells stand in the grid - New plus five furniture");
+
+        QSet<int> columnXs;
+        for (QWidget* c : cells) columnXs.insert(c->x());
+        check(columnXs.size() == 3,
+              QStringLiteral("six cells in a 1600 px window still land on exactly three "
+                             "columns (%1 distinct x positions)")
+                  .arg(columnXs.size()));
+        bool hasSecondRow = false;
+        for (QWidget* c : cells) {
+            if (newCard && c->y() > newCard->y()) hasSecondRow = true;
+        }
+        check(hasSecondRow, "...so the fourth cell wrapped to a second row");
+        for (QWidget* c : cells) {
+            check(newCard == nullptr ||
+                      (c->x() >= newCard->x() && c->y() >= newCard->y()),
+                  "the New card is the grid's own first cell - nothing sits above or "
+                  "left of it");
+        }
+
+        // --- search filters live, and never filters the New card away --------
+        QLineEdit* search = gridSelector.searchField();
+        check(search != nullptr, "the header carries a search field");
+        if (search) {
+            search->setText(QStringLiteral("zebra"));
+            settle(60);
+        }
+        check(gridSelector.visibleCardCount() == 1,
+              QStringLiteral("searching \"zebra\" leaves one card on screen (%1)")
+                  .arg(gridSelector.visibleCardCount()));
+        check(newCard != nullptr && newCard->isVisible(),
+              "...and the New card survives the search - creating is never filtered");
+        int zebraIndex = -1;
+        for (int i = 0; i < gridSelector.furnitureCount(); ++i) {
+            if (gridSelector.cardName(i) == QStringLiteral("Zebra Table")) zebraIndex = i;
+        }
+        check(zebraIndex >= 0 && gridSelector.cardAt(zebraIndex) != nullptr &&
+                  gridSelector.cardAt(zebraIndex)->isVisible(),
+              "the surviving card is Zebra Table itself");
+        if (search) {
+            search->clear();
+            settle(60);
+        }
+        check(gridSelector.visibleCardCount() == 5, "clearing the search brings all five back");
+
+        // --- the sort chips: one exclusive pair, Name reorders the layout ----
+        check(!gridSelector.sortedByName(), "Recent is the default sort");
+        QPushButton* nameChip = gridSelector.sortNameButton();
+        QPushButton* recentChip = gridSelector.sortRecentButton();
+        check(nameChip != nullptr && recentChip != nullptr, "both sort chips exist");
+        if (nameChip) {
+            clickAt(nameChip, QPointF(nameChip->width() / 2.0, nameChip->height() / 2.0));
+            settle(60);
+        }
+        check(gridSelector.sortedByName(), "clicking Name switches the sort");
+        // Under Name, the first FURNITURE cell - the top-left-most card, the
+        // one beside the New card - is Alpha Chair. Found by geometry, since
+        // the accessors deliberately keep store order (see SelectorWindow.h's
+        // Card comment).
+        int firstIndex = -1;
+        for (int i = 0; i < gridSelector.furnitureCount(); ++i) {
+            QWidget* c = gridSelector.cardAt(i);
+            if (!c || !c->isVisible()) continue;
+            QWidget* best = firstIndex >= 0 ? gridSelector.cardAt(firstIndex) : nullptr;
+            if (!best || c->y() < best->y() || (c->y() == best->y() && c->x() < best->x()))
+                firstIndex = i;
+        }
+        check(firstIndex >= 0 &&
+                  gridSelector.cardName(firstIndex) == QStringLiteral("Alpha Chair"),
+              QStringLiteral("under Name, the first furniture cell is Alpha Chair (\"%1\")")
+                  .arg(firstIndex >= 0 ? gridSelector.cardName(firstIndex) : QString()));
+        if (recentChip) {
+            clickAt(recentChip, QPointF(recentChip->width() / 2.0, recentChip->height() / 2.0));
+            settle(60);
+        }
+        check(!gridSelector.sortedByName(), "clicking Recent switches back");
+    }
+
     // --- the gallery's two (now three) refusals are never silent ---------------
     // createFurniture()/renameFurniture()/deleteFurniture() can all refuse;
     // before Milestone 3's fix round, InitScreen swallowed either of the

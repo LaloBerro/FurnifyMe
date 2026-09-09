@@ -8,14 +8,17 @@
 #include <QDateTime>
 #include <QFileInfo>
 #include <QGridLayout>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
 #include <QLocale>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
 #include <QPushButton>
+#include <QScreen>
 #include <QScrollArea>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -28,8 +31,10 @@ namespace {
 
 // Landscape 16:10, per the picked mockup - the thumbnail's own width drives
 // its height, the same relationship VersionsPanel's kThumbAspect already
-// uses for its own cards.
-constexpr int kThumbWidth = 220;
+// uses for its own cards. 260 since the Gallery redesign's "bigger preview
+// cards" - the grid is capped at three columns now (see kGridColumns), so
+// width no longer buys more columns, it buys a bigger preview.
+constexpr int kThumbWidth = 260;
 constexpr double kThumbAspect = 10.0 / 16.0;
 constexpr int kCardRadius = 10;
 constexpr int kUnderRowHeight = 26;
@@ -37,6 +42,11 @@ constexpr int kActionButtonHeight = 22;
 constexpr int kCellSpacing = 8;     // between the thumbnail and its under-row
 constexpr int kGridSpacing = 24;
 constexpr int kGridMargin = 32;
+// THREE columns always - the Gallery pick's own words ("a grid max 3x3 and
+// if it bigger get scroll to the bottom"). A wider window gets breathing
+// room, never a fourth column; a fuller library grows rows behind
+// myScroll's vertical scrollbar.
+constexpr int kGridColumns = 3;
 // How long the inline failure banner stays up - Toast::Kind::Failure's own
 // duration (Toast.h), so a refusal here reads for exactly as long as one
 // would if this window had a real ToastHost to route it through.
@@ -293,6 +303,48 @@ private:
     bool myDeleteArmed = false;
 };
 
+// The "+ New furniture" CARD - the Gallery redesign moved creating into the
+// grid as its permanent first cell, so the library reads as one uniform
+// grid rather than a header verb above a list. Still a QPushButton, so
+// SelectorWindow::newFurnitureButton() keeps its type and every existing
+// caller - the handoff wiring, gui_smoke's childAt-real click probes -
+// drives it unchanged; only the paint is ours: a dashed accent outline at
+// exactly a furniture cell's size, filled faintly on hover, its label
+// centred where a thumbnail would be.
+class NewFurnitureCard : public QPushButton {
+public:
+    explicit NewFurnitureCard(QWidget* parent) : QPushButton(parent)
+    {
+        setText(tr("+ New furniture"));
+        setCursor(Qt::PointingHandCursor);
+        setAttribute(Qt::WA_NoSystemBackground);
+        Theme::makeSurfaceTransparent(this);
+        setFixedSize(Theme::wholeDevicePixels(
+            QSize(kThumbWidth, thumbHeight() + kCellSpacing + kUnderRowHeight)));
+    }
+
+protected:
+    void enterEvent(QEnterEvent*) override { update(); }
+    void leaveEvent(QEvent*) override { update(); }
+
+    void paintEvent(QPaintEvent*) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        QPainterPath path;
+        path.addRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), kCardRadius,
+                            kCardRadius);
+        if (underMouse() || isDown()) painter.fillPath(path, Theme::chipHover());
+        QPen pen(underMouse() ? Theme::accent() : Theme::border(), 1.0);
+        pen.setStyle(Qt::DashLine);
+        painter.setPen(pen);
+        painter.drawPath(path);
+        painter.setPen(Theme::accent());
+        painter.setFont(Theme::bodyFont());
+        painter.drawText(rect(), Qt::AlignCenter, text());
+    }
+};
+
 }  // namespace
 
 SelectorWindow::SelectorWindow(FurnitureStore& store, QWidget* parent)
@@ -324,25 +376,36 @@ SelectorWindow::SelectorWindow(FurnitureStore& store, QWidget* parent)
     headerLayout->addWidget(myTitle);
     headerLayout->addStretch(1);
 
-    myNewButton = new QPushButton(tr("+ New furniture"), header);
-    myNewButton->setFixedHeight(Theme::wholeDevicePixels(32));
-    headerLayout->addWidget(myNewButton);
-    connect(myNewButton, &QPushButton::clicked, this, [this] {
-        emit createRequested();
-        const QString name = myStore.nextFurnitureName();
-        const QString id = myStore.createFurniture(name);
-        // FurnitureStore::createFurniture() refuses (empty id) when the root
-        // or the furniture's own directory cannot be created - never
-        // swallowed: InitScreen's own furnitureCreateFailed() ruling, moved
-        // in-window since there is no MainWindow toast to route it through
-        // from here.
-        if (id.isEmpty()) {
-            showFailure(tr("Couldn't create %1 — Check that the library folder "
-                          "still exists and isn't read-only")
-                            .arg(name));
-            return;
-        }
-        emit furnitureChosen(id);
+    // The Gallery header's own controls (the New button moved into the grid
+    // below - see NewFurnitureCard). Search filters live on every keystroke;
+    // the two sort chips are one exclusive pair whose state lives in
+    // mySortByName alone, restyled through applyTheme() so active/inactive
+    // is derived, never a second flag.
+    mySearch = new QLineEdit(header);
+    mySearch->setPlaceholderText(tr("Search"));
+    mySearch->setClearButtonEnabled(true);
+    mySearch->setFixedSize(Theme::wholeDevicePixels(QSize(180, 28)));
+    connect(mySearch, &QLineEdit::textChanged, this, [this] { relayoutCards(); });
+    headerLayout->addWidget(mySearch);
+
+    mySortRecent = new QPushButton(tr("Recent"), header);
+    mySortName = new QPushButton(tr("Name"), header);
+    for (QPushButton* chip : {mySortRecent, mySortName}) {
+        chip->setFixedHeight(Theme::wholeDevicePixels(28));
+        chip->setCursor(Qt::PointingHandCursor);
+        headerLayout->addWidget(chip);
+    }
+    connect(mySortRecent, &QPushButton::clicked, this, [this] {
+        if (!mySortByName) return;
+        mySortByName = false;
+        applyTheme();
+        relayoutCards();
+    });
+    connect(mySortName, &QPushButton::clicked, this, [this] {
+        if (mySortByName) return;
+        mySortByName = true;
+        applyTheme();
+        relayoutCards();
     });
 
     outer->addWidget(header);
@@ -376,6 +439,49 @@ SelectorWindow::SelectorWindow(FurnitureStore& store, QWidget* parent)
     myGrid->setStyleSheet(QStringLiteral("background: transparent;"));
     new QGridLayout(myGrid);
     myScroll->setWidget(myGrid);
+
+    myNewButton = new NewFurnitureCard(myGrid);
+    connect(myNewButton, &QPushButton::clicked, this, [this] {
+        emit createRequested();
+        const QString name = myStore.nextFurnitureName();
+        const QString id = myStore.createFurniture(name);
+        // FurnitureStore::createFurniture() refuses (empty id) when the root
+        // or the furniture's own directory cannot be created - never
+        // swallowed: InitScreen's own furnitureCreateFailed() ruling, moved
+        // in-window since there is no MainWindow toast to route it through
+        // from here.
+        if (id.isEmpty()) {
+            showFailure(tr("Couldn't create %1 — Check that the library folder "
+                          "still exists and isn't read-only")
+                            .arg(name));
+            return;
+        }
+        emit furnitureChosen(id);
+    });
+
+    // Sized so the pick's own 3x3 is what a fresh window shows: three
+    // columns wide, three rows tall, the scrollbar carrying everything past
+    // that. A minimum width holds the three columns; the user may still
+    // grow the window, which buys breathing room, never a fourth column.
+    // Bounded by the screen the window will land on: three rows of 260-wide
+    // cards outgrow a 1080-row display at 150% scaling and beyond, and a
+    // window taller than the screen is this suite's own documented capture
+    // hazard as well as a real user's clipped scrollbar. The cap costs
+    // nothing - fewer rows fit and the scrollbar carries the rest, which is
+    // exactly what the pick says happens past 3x3 anyway.
+    {
+        const int cellH = thumbHeight() + kCellSpacing + kUnderRowHeight;
+        const int gridW = kGridColumns * kThumbWidth + (kGridColumns - 1) * kGridSpacing;
+        const int gridH = 3 * cellH + 2 * kGridSpacing;
+        const int chromeW = 2 * kGridMargin + 24;   // margins + the scrollbar's own lane
+        const int chromeH = 2 * kGridMargin + 16 + Theme::wholeDevicePixels(32);  // + header
+        QSize wanted = Theme::wholeDevicePixels(QSize(gridW + chromeW, gridH + chromeH));
+        if (const QScreen* screen = QGuiApplication::primaryScreen()) {
+            wanted = wanted.boundedTo(screen->availableSize() * 9 / 10);
+        }
+        resize(wanted);
+        setMinimumWidth(std::min(wanted.width(), Theme::wholeDevicePixels(gridW + chromeW)));
+    }
 
     applyTheme();
     connect(Theme::notifier(), &Theme::Notifier::changed, this, &SelectorWindow::applyTheme);
@@ -431,6 +537,8 @@ void SelectorWindow::rebuildCards()
         Card c;
         c.id = info.id;
         c.widget = widget;
+        c.name = info.name;
+        c.lastEdited = info.lastEdited;
         myCards.push_back(c);
     }
 }
@@ -442,22 +550,58 @@ void SelectorWindow::relayoutCards()
 
     while (QLayoutItem* item = grid->takeAt(0)) delete item;   // widgets themselves are kept
 
-    const int available =
-        std::max(kThumbWidth, myScroll ? myScroll->viewport()->width() : width());
-    const int perRow = std::max(1, (available + kGridSpacing) / (kThumbWidth + kGridSpacing));
-
     grid->setHorizontalSpacing(kGridSpacing);
     grid->setVerticalSpacing(kGridSpacing);
 
+    // Sort a VIEW over the cards - Recent (newest edit first, a never-saved
+    // furniture last) or Name, id as the tie-break so equal keys stay in
+    // one stable order - then filter that view by the live search text.
+    // myCards itself never reorders: it keeps the store's own enumeration,
+    // which is the order every *At(index) accessor answers in.
+    std::vector<const Card*> ordered;
+    ordered.reserve(myCards.size());
+    for (const Card& c : myCards) {
+        if (c.widget) ordered.push_back(&c);
+    }
+    if (mySortByName) {
+        std::sort(ordered.begin(), ordered.end(), [](const Card* a, const Card* b) {
+            const int byName = QString::compare(a->name, b->name, Qt::CaseInsensitive);
+            return byName != 0 ? byName < 0 : a->id < b->id;
+        });
+    } else {
+        std::sort(ordered.begin(), ordered.end(), [](const Card* a, const Card* b) {
+            if (a->lastEdited.isValid() != b->lastEdited.isValid())
+                return a->lastEdited.isValid();
+            if (a->lastEdited != b->lastEdited) return a->lastEdited > b->lastEdited;
+            return a->id < b->id;
+        });
+    }
+    const QString needle = mySearch ? mySearch->text().trimmed() : QString();
+
     int row = 0, col = 0;
     std::vector<QWidget*> placedWidgets;
-    for (const Card& c : myCards) {
-        if (!c.widget) continue;
-        grid->addWidget(c.widget, row, col);
-        c.widget->show();
-        placedWidgets.push_back(c.widget);
-        if (++col >= perRow) { col = 0; ++row; }
+    auto place = [&](QWidget* widget) {
+        grid->addWidget(widget, row, col, Qt::AlignLeft | Qt::AlignTop);
+        widget->show();
+        placedWidgets.push_back(widget);
+        if (++col >= kGridColumns) { col = 0; ++row; }
+    };
+    // The New card leads the grid, always - creating is the one action a
+    // search must never filter away.
+    if (myNewButton) place(myNewButton);
+    for (const Card* c : ordered) {
+        if (!needle.isEmpty() && !c->name.contains(needle, Qt::CaseInsensitive)) {
+            c->widget->hide();
+            continue;
+        }
+        place(c->widget);
     }
+    // Park the slack: an empty stretch column past the third and an empty
+    // stretch row past the last keep a wider or taller viewport from
+    // spreading the fixed-size cells apart instead of leaving the grid
+    // packed to the top left.
+    grid->setColumnStretch(kGridColumns, 1);
+    grid->setRowStretch(row + (col > 0 ? 1 : 0), 1);
 
     // Whole-device-pixel positions - InitScreen::relayoutCards()'s own
     // reasoning: each card's own SIZE already rounds up whole, but
@@ -507,6 +651,15 @@ QString SelectorWindow::currentFailureText() const
 bool SelectorWindow::failureVisible() const
 {
     return myFailureBanner && myFailureBanner->isVisible();
+}
+
+int SelectorWindow::visibleCardCount() const
+{
+    int count = 0;
+    for (const Card& c : myCards) {
+        if (c.widget && !c.widget->isHidden()) ++count;
+    }
+    return count;
 }
 
 QWidget* SelectorWindow::cardAt(int index) const
@@ -568,6 +721,9 @@ QStringList SelectorWindow::paintedTexts() const
     QStringList texts;
     if (myTitle) texts << myTitle->text();
     if (myNewButton) texts << myNewButton->text();
+    if (mySearch) texts << mySearch->placeholderText();
+    if (mySortRecent) texts << mySortRecent->text();
+    if (mySortName) texts << mySortName->text();
     // Rename/Delete's two labels are fixed copy, painted identically on
     // every card - one representative pair is enough, the same reasoning
     // VersionsPanel's own static deleteLabel()/deleteArmedLabel() sweep via.
@@ -581,21 +737,35 @@ QStringList SelectorWindow::paintedTexts() const
 void SelectorWindow::applyTheme()
 {
     if (myTitle) myTitle->setStyleSheet(labelChrome(Theme::text(), Theme::titleFont(), true));
-    if (myNewButton) {
-        // Accent-FILLED, per the picked mockup's own words ("an accent-
-        // filled '+ New furniture' button") - unlike VersionsPanel's own +
-        // button, which is only accent-BORDERED. White text reads against
-        // every shipped accent hue in this app's palette (all saturated,
-        // none pastel), the same assumption PullArrow/BevelArrow's own
-        // value chips already make for text on a coloured ground.
-        myNewButton->setStyleSheet(
-            QStringLiteral("QPushButton { background-color: %1; color: white; "
-                          "border: none; border-radius: 6px; padding: 4px 14px; "
-                          "font-weight: 600; font-size: %2pt; } "
-                          "QPushButton:hover { background-color: %1; }")
-                .arg(Theme::accent().name())
-                .arg(Theme::bodyFont().pointSizeF()));
+    // The New card paints itself from live tokens in its own paintEvent -
+    // only a repaint is owed on a theme edit, never a stylesheet.
+    if (myNewButton) myNewButton->update();
+    if (mySearch) {
+        mySearch->setStyleSheet(
+            QStringLiteral("QLineEdit { background-color: %1; color: %2; border: 1px "
+                          "solid %3; border-radius: 8px; padding: 2px 9px; "
+                          "font-size: %4pt; }")
+                .arg(Theme::chip().name(), Theme::text().name(), Theme::border().name())
+                .arg(Theme::labelFont().pointSizeF()));
     }
+    // The two sort chips: the active one wears chipActive() under an accent
+    // border, the idle one the ordinary chip/border pair - derived from
+    // mySortByName alone, both restyled together so the pair can never both
+    // read active.
+    auto chipCss = [](bool on) {
+        return QStringLiteral("QPushButton { background-color: %1; color: %2; border: 1px "
+                              "solid %3; border-radius: 8px; padding: 2px 12px; "
+                              "font-size: %4pt;%5 } "
+                              "QPushButton:hover { background-color: %6; }")
+            .arg(on ? Theme::chipActive().name() : Theme::chip().name(),
+                 on ? Theme::text().name() : Theme::textMuted().name(),
+                 on ? Theme::accent().name() : Theme::border().name())
+            .arg(Theme::labelFont().pointSizeF())
+            .arg(on ? QStringLiteral(" font-weight: 600;") : QString(),
+                 Theme::chipHover().name());
+    };
+    if (mySortRecent) mySortRecent->setStyleSheet(chipCss(!mySortByName));
+    if (mySortName) mySortName->setStyleSheet(chipCss(mySortByName));
     for (const Card& c : myCards) {
         if (auto* card = static_cast<SelectorCardWidget*>(c.widget)) card->restyle();
     }

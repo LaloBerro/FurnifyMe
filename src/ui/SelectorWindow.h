@@ -10,16 +10,21 @@
 // picker out is that it must be safe to show before the editor's viewer has
 // ever been realized.
 //
-// The picked mockup (Option B, "Shelf" - task-2.1's own brief): a header row
-// (title left, an accent-filled "+ New furniture" button right - the ONLY
-// way to create one now, replacing the old init screen's own +-card, since
-// every grid card here is a real furniture), then a grid of landscape 16:10
-// preview cards with the name and last-edited date BELOW each one (not
-// painted on it, unlike the retired InitScreen). Hovering a card swaps its
-// border to accent() and swaps its under-row's date for two small bordered
-// buttons, Rename and Delete - reusing VersionsPanel's own hover-reveal and
-// two-click-confirm idioms (Task 1.2), because both are already this app's
-// established shape for "an action that should not clutter a card at rest".
+// The picked design (Milestone 5's Gallery round, "A, but the list working
+// as a grid max 3x3 and if it bigger get scroll to the bottom", reworking
+// Milestone 4's Option B "Shelf"): a header row (title left; a live Search
+// field and the Recent/Name sort chips right), then a grid of landscape
+// 16:10 preview cards CAPPED AT THREE COLUMNS - a wider window buys bigger
+// breathing room, never a fourth column, and everything past three rows
+// scrolls vertically. The grid's permanent FIRST cell is the dashed
+// "+ New furniture" card (still the ONLY way to create one, and still the
+// QPushButton newFurnitureButton() promises); the name and last-edited
+// date sit BELOW each furniture card (not painted on it, unlike the
+// retired InitScreen). Hovering a card swaps its border to accent() and
+// swaps its under-row's date for two small bordered buttons, Rename and
+// Delete - reusing VersionsPanel's own hover-reveal and two-click-confirm
+// idioms, because both are already this app's established shape for "an
+// action that should not clutter a card at rest".
 //
 // Talks to FurnitureStore ALONE for data - enumerate, create, rename,
 // delete, and thumbnails as plain PNG paths a QPixmap loads directly. It
@@ -29,6 +34,7 @@
 // two signals below, and performs its OWN FurnitureStore calls for create/
 // rename/delete, reporting either outcome (never silently) through its own
 // inline failure banner - it has no OcctViewWidget to hang a ToastHost off.
+#include <QDateTime>
 #include <QString>
 #include <QStringList>
 #include <QWidget>
@@ -37,8 +43,8 @@
 
 class FurnitureStore;
 class QCloseEvent;
-class QDateTime;
 class QLabel;
+class QLineEdit;
 class QPushButton;
 class QScrollArea;
 class QTimer;
@@ -77,7 +83,24 @@ public:
     // assert the swap in both directions.
     QLabel* dateLabelAt(int index) const;
 
+    // Still a QPushButton by contract - but since the Gallery redesign
+    // (Milestone 5, "A, but the list working as a grid max 3x3") it is the
+    // grid's own FIRST cell, a dashed accent card, rather than a header
+    // button. Every caller that clicks it (the handoff wiring, gui_smoke's
+    // childAt-real probes) keeps working untouched.
     QPushButton* newFurnitureButton() const { return myNewButton; }
+
+    // The Gallery header's own controls: search filters cards by name as
+    // you type (a filtered card is hidden, never rebuilt), and the two sort
+    // chips are one exclusive pair - Recent (newest edit first, the
+    // default) or Name.
+    QLineEdit* searchField() const { return mySearch; }
+    QPushButton* sortRecentButton() const { return mySortRecent; }
+    QPushButton* sortNameButton() const { return mySortName; }
+    bool sortedByName() const { return mySortByName; }
+    // How many furniture cards the live search leaves on screen. The New
+    // card is not counted - creating is never filtered away.
+    int visibleCardCount() const;
 
     // How long a first Delete click on a card stays armed before it disarms
     // itself - VersionsPanel::kDeleteConfirmMs's own shape and value, so a
@@ -138,6 +161,12 @@ private:
     struct Card {
         QString id;
         QWidget* widget = nullptr;   // the whole cell - see cardAt()
+        // Carried here for the sort chips and the search filter, so a
+        // reorder or a filter pass never rebuilds a widget - relayoutCards()
+        // sorts a VIEW over these, and myCards itself keeps the store's own
+        // order, which is what every *At(index) accessor answers in.
+        QString name;
+        QDateTime lastEdited;
     };
 
     void rebuildCards();
@@ -159,6 +188,10 @@ private:
     FurnitureStore& myStore;
     QLabel* myTitle = nullptr;
     QPushButton* myNewButton = nullptr;
+    QLineEdit* mySearch = nullptr;
+    QPushButton* mySortRecent = nullptr;
+    QPushButton* mySortName = nullptr;
+    bool mySortByName = false;
     QLabel* myFailureBanner = nullptr;   // built lazily, see showFailure()
     QTimer* myFailureTimer = nullptr;
     QStringList myShownFailures;         // every message shown this run - see paintedTexts()
