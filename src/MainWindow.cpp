@@ -1971,16 +1971,36 @@ void MainWindow::buildOverlay()
     // none and see only the built-ins. Scanned once at build; a new image
     // appears on the next launch.
     {
+        // TWO folders, bundled first: assets/materials ships beside the
+        // executable (see CMakeLists' POST_BUILD copy), and the user's own
+        // <library root>/materials adds to it - the same injected root the
+        // furniture library lives under, so the suite's temp roots hold no
+        // user images. A user file sharing a bundled file's name REPLACES
+        // it, which is what lets them retune a shipped texture without
+        // touching the install.
         std::vector<std::pair<QString, QString>> textures;
-        const QDir materialsDir(myStore.rootPath() + QStringLiteral("/materials"));
         const QStringList imageFilters{QStringLiteral("*.png"), QStringLiteral("*.jpg"),
                                        QStringLiteral("*.jpeg"), QStringLiteral("*.bmp")};
-        for (const QFileInfo& info :
-             materialsDir.entryInfoList(imageFilters, QDir::Files, QDir::Name)) {
-            QString name = info.completeBaseName();
-            if (!name.isEmpty()) name[0] = name[0].toUpper();
-            textures.push_back({name, info.absoluteFilePath()});
-        }
+        auto scan = [&](const QString& dirPath) {
+            const QDir dir(dirPath);
+            for (const QFileInfo& info :
+                 dir.entryInfoList(imageFilters, QDir::Files, QDir::Name)) {
+                QString name = info.completeBaseName().replace(QLatin1Char('-'), QLatin1Char(' '))
+                                   .replace(QLatin1Char('_'), QLatin1Char(' '));
+                if (!name.isEmpty()) name[0] = name[0].toUpper();
+                bool replaced = false;
+                for (auto& existing : textures) {
+                    if (existing.first == name) {
+                        existing.second = info.absoluteFilePath();
+                        replaced = true;
+                        break;
+                    }
+                }
+                if (!replaced) textures.push_back({name, info.absoluteFilePath()});
+            }
+        };
+        scan(QCoreApplication::applicationDirPath() + QStringLiteral("/materials"));
+        scan(myStore.rootPath() + QStringLiteral("/materials"));
         myRenderSettingsPanel->addTextureMaterials(textures);
     }
 

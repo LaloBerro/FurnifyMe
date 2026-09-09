@@ -155,6 +155,18 @@ if(FURNIFYME_BUILD_APP)
 
     add_executable(furnifyme src/main.cpp)
     target_link_libraries(furnifyme PRIVATE furnify_app)
+
+    # The bundled material textures (Milestone 5): every image in
+    # assets/materials ships beside the executable, where MainWindow's scan
+    # finds them alongside whatever the user drops into their own library
+    # folder. copy_directory alone would fail the build the day the folder
+    # is emptied, so it is guarded on existence.
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/materials")
+      add_custom_command(TARGET furnifyme POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${CMAKE_CURRENT_SOURCE_DIR}/assets/materials"
+                "$<TARGET_FILE_DIR:furnifyme>/materials")
+    endif()
     if(WIN32)
       # A GUI subsystem binary, so launching the app opens no console window
       # (Milestone 5, "dont show the command window"). The entry point is

@@ -4402,8 +4402,15 @@ void OcctViewWidget::ensureWoodTexture()
     // The user's own image first, when one is chosen - the procedural plank
     // below is the fallback, not the point.
     if (!myWoodTextureFile.isEmpty()) {
-        const QImage file(myWoodTextureFile);
+        QImage file(myWoodTextureFile);
         if (!file.isNull()) {
+            // Capped at 2048: the user's 4K oak is 16.7M pixels through the
+            // per-pixel copy below and just as many texels for a texture
+            // that repeats every ~300 mm - half the side keeps every visible
+            // detail at this tile size and a quarter of both costs.
+            if (file.width() > 2048 || file.height() > 2048)
+                file = file.scaled(2048, 2048, Qt::KeepAspectRatio,
+                                   Qt::SmoothTransformation);
             const QImage rgb = file.convertToFormat(QImage::Format_RGB888);
             Handle(Image_PixMap) filePix = new Image_PixMap();
             if (filePix->InitTrash(Image_Format_RGB, rgb.width(), rgb.height())) {
