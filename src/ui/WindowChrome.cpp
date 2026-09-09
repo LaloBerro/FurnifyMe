@@ -237,10 +237,19 @@ std::vector<ChromeEntry>& entries()
 
 ChromeEntry* entryFor(HWND hwnd)
 {
+    if (!hwnd) return nullptr;
     for (ChromeEntry& e : entries()) {
         if (!e.widget) continue;
-        const QWindow* handle = e.widget->windowHandle();
-        if (handle && reinterpret_cast<HWND>(handle->winId()) == hwnd) return &e;
+        // internalWinId(), NEVER winId() or QWindow::winId(): both of those
+        // CREATE the platform window when it does not exist yet, and this
+        // filter runs for messages Windows pumps DURING CreateWindowEx
+        // (WM_GETMINMAXINFO, WM_NCCALCSIZE) - so a forcing read here
+        // re-entered window creation from inside window creation and
+        // crashed the app before its first window ever appeared (the
+        // startup crash the first build of this file shipped).
+        // internalWinId() reads the handle and is zero until the window
+        // genuinely exists, which is exactly the answer wanted here.
+        if (reinterpret_cast<HWND>(e.widget->internalWinId()) == hwnd) return &e;
     }
     return nullptr;
 }
@@ -404,9 +413,12 @@ ChromeFilter* installedFilter()
 // its native caption the moment chrome is attached.
 void announceFrameChange(QWidget* widget)
 {
-    const QWindow* handle = widget->windowHandle();
-    if (!handle) return;
-    SetWindowPos(reinterpret_cast<HWND>(handle->winId()), nullptr, 0, 0, 0, 0,
+    // internalWinId(), for the same never-force reason entryFor() records:
+    // zero means the native window does not exist yet, and the
+    // FrameChangeWatcher will announce once it does.
+    HWND hwnd = reinterpret_cast<HWND>(widget->internalWinId());
+    if (!hwnd) return;
+    SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
                  SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
                      SWP_FRAMECHANGED);
 }
@@ -441,8 +453,7 @@ void WindowChrome::attach(QWidget* topLevel, std::function<Hit(const QPoint&)> h
 {
     installedFilter();
     entries().push_back({topLevel, std::move(hitTest), buttons});
-    if (topLevel->windowHandle())
-        announceFrameChange(topLevel);
+    announceFrameChange(topLevel);   // a no-op until the native window exists
     new FrameChangeWatcher(topLevel);   // parented; covers later re-creation too
 }
 
