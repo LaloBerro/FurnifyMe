@@ -413,6 +413,12 @@ SelectorWindow::SelectorWindow(FurnitureStore& store, QWidget* parent)
     myScroll = new QScrollArea(this);
     myScroll->setWidgetResizable(true);
     myScroll->setFrameShape(QFrame::NoFrame);
+    // Vertical scroll ONLY - the pick's own words ("if it bigger get scroll
+    // to the bottom"). The window's minimum width already holds the three
+    // columns, so a horizontal bar could only ever appear as an artefact of
+    // the two bars stealing each other's lane, which is exactly what the
+    // first build showed.
+    myScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     myScroll->setAttribute(Qt::WA_NoSystemBackground);
     myScroll->viewport()->setAttribute(Qt::WA_NoSystemBackground);
     // WA_NoSystemBackground alone is not enough here, unlike everywhere else
@@ -477,15 +483,26 @@ SelectorWindow::SelectorWindow(FurnitureStore& store, QWidget* parent)
     // clipped scrollbar. Sizing runs AFTER refresh(), which is what fills
     // myCards - the row count is derived from the same cards the grid just
     // laid out.
+    // The arithmetic reads MEASURED sizes, not re-derived ones - the first
+    // pass re-computed the cell height from the same constants the cells
+    // were built from and still came up short (the cells' own
+    // wholeDevicePixels rounding and the grid layout's default contents
+    // margins were both missing), which put a scrollbar over a window that
+    // was supposed to fit exactly. The New card IS a cell, so its measured
+    // minimum height is every cell's; the grid layout's margins are asked
+    // for; the header answers its own sizeHint.
     {
         const int cellCount = 1 + static_cast<int>(myCards.size());   // the New card leads
         const int rows =
             std::clamp((cellCount + kGridColumns - 1) / kGridColumns, 1, 3);
-        const int cellH = thumbHeight() + kCellSpacing + kUnderRowHeight;
-        const int gridW = kGridColumns * kThumbWidth + (kGridColumns - 1) * kGridSpacing;
-        const int gridH = rows * cellH + (rows - 1) * kGridSpacing;
+        const int cellH = myNewButton->minimumHeight();
+        const QMargins gm = myGrid->layout()->contentsMargins();
+        const int gridW = kGridColumns * kThumbWidth + (kGridColumns - 1) * kGridSpacing +
+                          gm.left() + gm.right();
+        const int gridH = rows * cellH + (rows - 1) * kGridSpacing + gm.top() + gm.bottom();
         const int chromeW = 2 * kGridMargin + 24;   // margins + the scrollbar's own lane
-        const int chromeH = 2 * kGridMargin + 16 + Theme::wholeDevicePixels(32);  // + header
+        const int chromeH =
+            2 * kGridMargin + outer->spacing() + header->sizeHint().height();
         QSize wanted = Theme::wholeDevicePixels(QSize(gridW + chromeW, gridH + chromeH));
         if (const QScreen* screen = QGuiApplication::primaryScreen()) {
             wanted = wanted.boundedTo(screen->availableSize() * 9 / 10);
