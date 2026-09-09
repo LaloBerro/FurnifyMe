@@ -4426,11 +4426,15 @@ void OcctViewWidget::ensureWoodTexture()
                 Handle(Graphic3d_Texture2D) fileTexture = new Graphic3d_Texture2D(filePix);
                 fileTexture->GetParams()->SetModulate(Standard_True);
                 fileTexture->GetParams()->SetRepeat(Standard_True);
-                // One tile of a real photographed texture reads as ~300 mm
-                // of material - a plank-and-a-bit - against the procedural
-                // grain's tighter 180. Tuned by eye with the user's files.
-                fileTexture->GetParams()->SetScale(
-                    Graphic3d_Vec2(1.0f / 300.0f, 1.0f / 300.0f));
+                // NO params scale - the first ship carried 1/300 on a
+                // millimetre-UV assumption, and the user's pixel corrected
+                // it: AIS_Shape maps a texture across each face's NORMALIZED
+                // parametric space (its own header: "parametrized in
+                // (0,1)x(0,1)"), so that scale crushed sampling into a
+                // single corner texel and every wood rendered as one flat
+                // brown. At identity each face wears the image once - a
+                // veneer sheet per panel, which is how furniture is actually
+                // faced.
                 myWoodTexture = fileTexture;
                 return;
             }
@@ -4487,15 +4491,11 @@ void OcctViewWidget::ensureWoodTexture()
     }
 
     Handle(Graphic3d_Texture2D) texture = new Graphic3d_Texture2D(pix);
-    // A face's natural UVs are its surface parameters - MILLIMETRES on the
-    // planar faces furniture is made of - so an unscaled texture would tile
-    // once per millimetre and read as noise. 1/180 puts one grain period
-    // across ~180 mm, a plank's own rhythm. Modulated, so the lighting
-    // pipeline still shades it; repeated, because furniture is bigger than
-    // one tile.
+    // Identity scale, for the reason the file branch above records: face
+    // UVs are normalized, so any down-scale samples one texel and reads as
+    // flat paint. One grain image per face.
     texture->GetParams()->SetModulate(Standard_True);
     texture->GetParams()->SetRepeat(Standard_True);
-    texture->GetParams()->SetScale(Graphic3d_Vec2(1.0f / 180.0f, 1.0f / 180.0f));
     myWoodTexture = texture;
 }
 
