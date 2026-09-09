@@ -232,6 +232,17 @@ if(FURNIFYME_BUILD_APP)
     # entry: the app icon proves it decodes without a deployed plugin here.
     if(TARGET Qt6::QJpegPlugin)
       list(APPEND QT_RUNTIME_PLUGINS Qt6::QJpegPlugin)
+      # The plugin's OWN dependency: vcpkg's Qt links libjpeg-turbo as a
+      # separate jpeg62.dll, which vcpkg's applocal step never copies (it
+      # walks the exe's imports, and only the plugin - loaded at runtime -
+      # imports it). Without it qjpeg.dll fails to LOAD, silently, and every
+      # .jpg still reads as null - the exact symptom deploying the plugin
+      # alone was supposed to fix. Located beside Qt6Core.dll, which is
+      # where vcpkg puts every runtime DLL.
+      add_custom_command(TARGET furnifyme POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE_DIR:Qt6::Core>/jpeg62.dll"
+                "$<TARGET_FILE_DIR:furnifyme>/")
     endif()
 
     foreach(plugin IN LISTS QT_RUNTIME_PLUGINS)
