@@ -279,6 +279,17 @@ public:
         if (!entry || !entry->widget) return false;
         QWidget* w = entry->widget;
 
+        // `result` is NULL for every POSTED message: QWindowsContext's
+        // windowsProc passes a real pointer for sent messages (WM_NCHITTEST
+        // among them, which is why hover worked), but QEventDispatcherWin32
+        // retrieves queued messages - all mouse CLICKS included - and calls
+        // the filters with result = nullptr, ignoring the value entirely.
+        // The unguarded `*result = 0` below was this file's third and
+        // sneakiest startup-week crash: pressing the maximize chip died on
+        // the WM_NCLBUTTONDOWN write before any maximize code ever ran.
+        qintptr resultSink = 0;
+        if (!result) result = &resultSink;
+
         switch (msg->message) {
             case WM_NCCALCSIZE: {
                 // Remove the caption; keep the side and bottom resize
