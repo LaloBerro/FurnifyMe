@@ -212,14 +212,21 @@ bool ShapeFlyout::eventFilter(QObject* watched, QEvent* event)
             // A press OUTSIDE closes - and its release is swallowed too, or
             // the viewport under it would pick on the release (ShortcutSheet's
             // own finding, kept as a law here).
-            QWidget* w = qobject_cast<QWidget*>(watched);
-            if (w && (w == this || isAncestorOf(w))) break;
-            if (event->type() == QEvent::MouseButtonPress) {
-                mySwallowNextRelease = true;
-                hide();
-                return true;
-            }
-            break;
+            //
+            // Outside-ness is GEOMETRIC, never `watched`'s identity: a real
+            // mouse press reaches an application filter FIRST as the
+            // top-level QWidgetWindow's event - not any widget's - so an
+            // identity test reads every real click, the flyout's own tiles
+            // included, as outside and swallows it. That was the shipped
+            // first cut: the suite's sendEvent clicks (delivered straight
+            // to the tile, no window stage) passed while a real mouse
+            // could not pick a shape at all - the user's own report.
+            auto* mouse = static_cast<QMouseEvent*>(event);
+            const QPoint local = mapFromGlobal(mouse->globalPosition().toPoint());
+            if (rect().contains(local)) break;   // ours - let Qt route it
+            mySwallowNextRelease = true;
+            hide();
+            return true;
         }
         default:
             break;
