@@ -243,13 +243,15 @@ void GridRenderer::rebuild(double minorStep, double centerU, double centerV,
 
     Handle(GridObject) grid = new GridObject();
 
-    // 48, up from 12 (the same feedback round): the fade band spans about a
-    // quarter of the built extent, and 12 chunks put only two or three
-    // vertices across it - colour interpolates linearly between a chunk's
-    // endpoints, so the circle read as a polygon. Four times the chunks put
-    // ~10 vertices across the band; the vertex count is still trivial and a
-    // rebuild is occasional by the staleness guard above.
-    constexpr int kChunks = 48;
+    // 96 (feedback round three): colour interpolates linearly between a
+    // chunk's two endpoints, so every line's brightness profile is a
+    // polyline with knots at chunk boundaries - and the knots of
+    // neighbouring parallel lines ALIGN, which drew the circle's rim as
+    // chevrons at 12 and still faintly at 48. At 96 a chunk is ~2.5% of
+    // the built width and the kinks drop below what the eye separates
+    // from the antialiasing. The vertex count stays trivial (tens of
+    // thousands) and a rebuild is occasional by the staleness guard above.
+    constexpr int kChunks = 96;
     const double chunk = 2.0 * extent / kChunks;
 
     struct Vertex { gp_Pnt p; Quantity_Color c; };
@@ -271,26 +273,29 @@ void GridRenderer::rebuild(double minorStep, double centerU, double centerV,
     };
 
     // One chunked, vertex-faded line at `offset` in each of the two grid
-    // directions. A chunk both of whose ends have fully faded is pure
-    // background - skipped, which is what trims the corners for free.
+    // directions. EVERY chunk draws (feedback round three): the old
+    // trims-the-corners skip dropped a chunk once both ENDPOINTS read
+    // fully faded, which truncated lines that were still faintly visible
+    // between the samples - each line ended at a different chunk boundary
+    // and the rim came out as hard stair-steps. A fully faded chunk now
+    // simply renders in exactly the background colour: invisible by
+    // COLOUR, never by absence, so there is no boundary left to see. The
+    // corner geometry this keeps is invisible ink at a vertex cost that
+    // does not matter.
     auto addLine = [&](const QColor& base, double offset, std::vector<Vertex>& out) {
         for (int i = 0; i < kChunks; ++i) {
             const double a0 = -extent + i * chunk;
             const double a1 = -extent + (i + 1) * chunk;
             const double fv0 = fadeAt(offset, a0), fv1 = fadeAt(offset, a1);
-            if (fv0 < 0.999 || fv1 < 0.999) {
-                out.push_back({at(centerU + offset, centerV + a0),
-                               toOcct(lerp(base, background, fv0))});
-                out.push_back({at(centerU + offset, centerV + a1),
-                               toOcct(lerp(base, background, fv1))});
-            }
+            out.push_back({at(centerU + offset, centerV + a0),
+                           toOcct(lerp(base, background, fv0))});
+            out.push_back({at(centerU + offset, centerV + a1),
+                           toOcct(lerp(base, background, fv1))});
             const double fu0 = fadeAt(a0, offset), fu1 = fadeAt(a1, offset);
-            if (fu0 < 0.999 || fu1 < 0.999) {
-                out.push_back({at(centerU + a0, centerV + offset),
-                               toOcct(lerp(base, background, fu0))});
-                out.push_back({at(centerU + a1, centerV + offset),
-                               toOcct(lerp(base, background, fu1))});
-            }
+            out.push_back({at(centerU + a0, centerV + offset),
+                           toOcct(lerp(base, background, fu0))});
+            out.push_back({at(centerU + a1, centerV + offset),
+                           toOcct(lerp(base, background, fu1))});
         }
     };
 
@@ -326,7 +331,6 @@ void GridRenderer::rebuild(double minorStep, double centerU, double centerV,
                 // centre coordinate itself.
                 const double f0 = isU ? fadeAt(a0, centerV) : fadeAt(centerU, a0);
                 const double f1 = isU ? fadeAt(a1, centerV) : fadeAt(centerU, a1);
-                if (f0 >= 0.999 && f1 >= 0.999) continue;
                 if (isU) {
                     verts.push_back({at(centerU + a0, 0.0),
                                      toOcct(lerp(colour, background, f0))});
