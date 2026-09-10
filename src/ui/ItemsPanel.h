@@ -127,6 +127,12 @@ public:
     QStringList paintedTexts() const;
 
 signals:
+    // An eye button changed an item's visibility. MainWindow answers by
+    // re-deriving the session filter over it (applyIsolation()) and by
+    // updateActions(), whose appStateChanged refreshes this panel's own
+    // dimming - the eye's direct view write stays for immediacy, but the
+    // composed answer is re-derived at the one writer.
+    void visibilityToggled();
     void solidActivated(int id);
     // An outline row was clicked. A separate signal rather than one id
     // channel with a kind flag: the two do genuinely different things -

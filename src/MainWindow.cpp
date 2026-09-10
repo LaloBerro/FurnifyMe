@@ -909,6 +909,14 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // touches no document but still has to reread every dimension the panel
     // shows (see setDisplayUnit()).
     connect(this, &MainWindow::appStateChanged, myItemsPanel, &ItemsPanel::refresh);
+    // The eye's write composed with the session filter at the one writer -
+    // see ItemsPanel's visibilityToggled() comment. updateActions() ends in
+    // appStateChanged, which re-runs the refresh above, re-deriving the
+    // rows' own dimming from the view's composed answer.
+    connect(myItemsPanel, &ItemsPanel::visibilityToggled, this, [this] {
+        if (isolateActive()) applyIsolation();
+        updateActions();
+    });
     // The versions drawer, on the same terms - built in buildOverlay(),
     // which has already run by this point in the constructor.
     if (myVersionsPanel)
@@ -2480,7 +2488,14 @@ void MainWindow::updateActions()
     // reports the owning body of a selected face or edge too, so isolating
     // works from any selection kind. Two meanings, said out loud in the
     // tooltip, Delete's own rule below.
-    myIsolateAction->setEnabled(!mySketching && !atInit &&
+    // "!myRenderModeOn": Isolate was the ONE visibility-changing action
+    // reachable inside render mode, and it wrote setSolidVisible() straight
+    // past the wood-overlay machinery that had Erased the real
+    // presentations - re-Displaying a body on top of its own wood overlay,
+    // a genuine z-fight (the branch review's finding). Render mode is "the
+    // furniture alone" by its own law; changing WHICH furniture is a
+    // modeling gesture, taken before entering or after leaving.
+    myIsolateAction->setEnabled(!mySketching && !atInit && !myRenderModeOn &&
                                 (isolateActive() || selectedCount > 0));
     myIsolateAction->setChecked(isolateActive());
     myIsolateAction->setToolTip(
@@ -2963,6 +2978,7 @@ void MainWindow::showInitScreen()
     // one document mean nothing in the next (myNextId restarts at 1 per
     // document - the mirror-placement gesture already learned that lesson).
     myIsolatedIds.clear();
+    myIsolateWatermark = 0;
 
     // A compare pane reads a version of the furniture that is about to stop
     // being open at all - closing it here, before anything else, is what
@@ -3033,6 +3049,7 @@ bool MainWindow::openFurniture(const QString& id)
     // and so does a live Isolate, whose ids describe the outgoing document.
     if (myCompareView) closeCompare();
     myIsolatedIds.clear();
+    myIsolateWatermark = 0;
 
     QString error;
     DocumentModel loaded;
@@ -4027,10 +4044,15 @@ void MainWindow::resyncView()
 
 void MainWindow::onIsolate()
 {
+    // The shortcut route never consults the action - the same belt the
+    // ids-empty guard below wears. See updateActions() for why render mode
+    // refuses Isolate outright.
+    if (myRenderModeOn) return;
     // OFF is unconditional - the key that entered the mode always leaves it,
     // whatever the selection has become in between.
     if (isolateActive()) {
         myIsolatedIds.clear();
+        myIsolateWatermark = 0;
         applyIsolation();
         statusBar()->showMessage(tr("Everything is back on screen"));
         updateActions();
@@ -4044,6 +4066,16 @@ void MainWindow::onIsolate()
         return;
     }
     myIsolatedIds = std::set<int>(ids.begin(), ids.end());
+    // The watermark: every body id above it was CREATED after Isolate began
+    // and joins the isolation automatically (see applyIsolation()) - an
+    // extrude, a mirror twin, a boolean's result, a transform commit's
+    // replacement body. Without it, the next applyIsolation() pass silently
+    // hid the body the user had just made (the branch review's finding).
+    // Ids are monotonic within a document (myNextId never rolls back), which
+    // is what makes "above the watermark" mean "made while isolated".
+    myIsolateWatermark = 0;
+    for (const DocumentModel::Solid& solid : myDocument.solids())
+        myIsolateWatermark = std::max(myIsolateWatermark, solid.id);
     applyIsolation();
     statusBar()->showMessage(
         myIsolatedIds.size() == 1
@@ -4064,6 +4096,16 @@ void MainWindow::applyIsolation()
     for (auto it = myIsolatedIds.begin(); it != myIsolatedIds.end();) {
         if (myDocument.shapeOf(*it).IsNull()) it = myIsolatedIds.erase(it);
         else ++it;
+    }
+    // Bodies born SINCE Isolate began join it - the watermark onIsolate()
+    // recorded (see there for why). Joined into the set itself, not merely
+    // let through the filter, so a transform commit that replaces the one
+    // isolated body (new id, old id pruned above) carries the isolation
+    // forward instead of emptying the set and silently ending the mode.
+    if (!myIsolatedIds.empty()) {
+        for (const DocumentModel::Solid& solid : myDocument.solids()) {
+            if (solid.id > myIsolateWatermark) myIsolatedIds.insert(solid.id);
+        }
     }
     const bool active = isolateActive();
 

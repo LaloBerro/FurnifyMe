@@ -283,8 +283,18 @@ void ItemsPanel::refresh()
         layout->setSpacing(8);
 
         auto* name = new QLabel(itemName, row);
+        // The name reads MUTED when the item is not actually on screen -
+        // hidden by its own eye, or (a body only) by Isolate's session
+        // filter, which the eye's checked state deliberately does not
+        // reflect (the eye is the document's persisted choice; the filter
+        // is the session's). Asked of the view, the one place the composed
+        // answer lives, so the row cannot disagree with the viewport
+        // (Milestone 5 feedback: "the items list is not displaying well
+        // when an item is isolated or turned off").
+        const bool onScreen =
+            visible && (isOutline || !myView || myView->isSolidVisible(id));
         name->setStyleSheet(QStringLiteral("background: transparent; color: %1;")
-                                .arg(Theme::text().name()));
+                                .arg((onScreen ? Theme::text() : Theme::textMuted()).name()));
         // Mouse-TRANSPARENT - Task 5's own fix, the same trap CLAUDE.md
         // documents for InitCardWidget: Qt delivers a click to the DEEPEST
         // widget under the cursor, not to an ancestor whose eventFilter
@@ -317,9 +327,16 @@ void ItemsPanel::refresh()
             // save reads back exactly what the eye buttons show rather than
             // a copy that only ever lived in the viewport.
             if (myDocument) myDocument->setVisible(id, show);
-            if (!myView) return;
-            if (isOutline) myView->setOutlineVisible(id, show);
-            else myView->setSolidVisible(id, show);
+            if (myView) {
+                if (isOutline) myView->setOutlineVisible(id, show);
+                else myView->setSolidVisible(id, show);
+            }
+            // Announced so MainWindow can compose this write with the
+            // session filter (Isolate) at its one visibility writer - the
+            // direct write above used to be the ONLY consequence, and with
+            // Isolate active it showed a non-isolated body straight through
+            // the filter (the branch review's finding).
+            emit visibilityToggled();
         });
         layout->addWidget(eye);
 

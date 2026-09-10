@@ -1410,6 +1410,9 @@ private:
     // onIsolate()/applyIsolation() - session-only, cleared on every document
     // swap, pruned of dead ids on every application.
     std::set<int> myIsolatedIds;
+    // The highest body id alive when Isolate began - anything above it was
+    // created while isolated and joins the isolation (see applyIsolation()).
+    int myIsolateWatermark = 0;
     // F2, and (like Delete) two meanings decided in ONE place - updateActions().
     // Unlike Delete, the two meanings never fall back on each other: renaming
     // is a single-item gesture (InlineRename edits one name), so this is
