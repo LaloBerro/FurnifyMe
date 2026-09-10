@@ -234,12 +234,24 @@ void GridRenderer::rebuild(double minorStep, double centerU, double centerV,
     // averaging across the whole line.
     const double fadeEnd = std::min(cameraDistance * 2.4, extent);
     const double fadeStart = std::min(cameraDistance * 0.8, fadeEnd * 0.4);
-    auto fadeAt = [&](double du, double dv) {
+    // Brighter families dissolve at proportionally SMALLER radii (feedback
+    // round five's finding, read off the diagnostic snapshots): every line
+    // fades over the same band, but the majors START brighter than the
+    // minors and the axes brighter still, so the minors crossed the
+    // invisibility threshold first and left a sparse majors-only ring
+    // standing past the faded pool - the user's "fade ends and then there
+    // is another ring". Scaling the whole band per family lands all three
+    // at the background together.
+    auto fadeAt = [&](double du, double dv, double bandScale) {
         const double d = std::hypot(du - fadeCU, dv - fadeCV);
-        const double f =
-            std::clamp((d - fadeStart) / std::max(fadeEnd - fadeStart, 1.0), 0.0, 1.0);
+        const double start = fadeStart * bandScale;
+        const double end = fadeEnd * bandScale;
+        const double f = std::clamp((d - start) / std::max(end - start, 1.0), 0.0, 1.0);
         return f * f * (3.0 - 2.0 * f);   // smoothstep
     };
+    constexpr double kMinorBand = 1.0;
+    constexpr double kMajorBand = 0.85;
+    constexpr double kAxisBand = 0.75;
 
     Handle(GridObject) grid = new GridObject();
 
@@ -283,18 +295,19 @@ void GridRenderer::rebuild(double minorStep, double centerU, double centerV,
     // - the accumulated near-miss drew broad dark bands across the ground.
     // Beyond the rim nothing may be DRAWN at all; inside it, per-vertex
     // fade at 96-chunk sampling keeps the dissolve smooth.
-    auto addLine = [&](const QColor& base, double offset, std::vector<Vertex>& out) {
+    auto addLine = [&](const QColor& base, double offset, double band,
+                       std::vector<Vertex>& out) {
         for (int i = 0; i < kChunks; ++i) {
             const double a0 = -extent + i * chunk;
             const double a1 = -extent + (i + 1) * chunk;
-            const double fv0 = fadeAt(offset, a0), fv1 = fadeAt(offset, a1);
+            const double fv0 = fadeAt(offset, a0, band), fv1 = fadeAt(offset, a1, band);
             if (fv0 < 1.0 || fv1 < 1.0) {
                 out.push_back({at(centerU + offset, centerV + a0),
                                toOcct(lerp(base, background, fv0))});
                 out.push_back({at(centerU + offset, centerV + a1),
                                toOcct(lerp(base, background, fv1))});
             }
-            const double fu0 = fadeAt(a0, offset), fu1 = fadeAt(a1, offset);
+            const double fu0 = fadeAt(a0, offset, band), fu1 = fadeAt(a1, offset, band);
             if (fu0 < 1.0 || fu1 < 1.0) {
                 out.push_back({at(centerU + a0, centerV + offset),
                                toOcct(lerp(base, background, fu0))});
@@ -314,6 +327,7 @@ void GridRenderer::rebuild(double minorStep, double centerU, double centerV,
         const bool isMajor =
             std::fmod(std::fabs(offset) + minorStep * 0.25, major) < minorStep * 0.5;
         addLine(isMajor ? Theme::gridMajor() : Theme::gridMinor(), offset,
+                isMajor ? kMajorBand : kMinorBand,
                 isMajor ? majorVerts : minorVerts);
     }
     build(minorVerts, Theme::gridMinor(), 1.0);
@@ -332,10 +346,15 @@ void GridRenderer::rebuild(double minorStep, double centerU, double centerV,
                 const double a0 = -extent + i * chunk;
                 const double a1 = -extent + (i + 1) * chunk;
                 // The axis runs through the PLANE's origin, not the grid's
-                // centre, so its cross-distance from the fade centre is the
-                // centre coordinate itself.
-                const double f0 = isU ? fadeAt(a0, centerV) : fadeAt(centerU, a0);
-                const double f1 = isU ? fadeAt(a1, centerV) : fadeAt(centerU, a1);
+                // centre, so its offset from the build centre is MINUS the
+                // centre coordinate - the sign mattered the moment the fade
+                // centre stopped being the build centre (fadeCU/fadeCV), and
+                // the old +centerV spelling evaluated the axis's fade at a
+                // point mirrored across the pool.
+                const double f0 =
+                    isU ? fadeAt(a0, -centerV, kAxisBand) : fadeAt(-centerU, a0, kAxisBand);
+                const double f1 =
+                    isU ? fadeAt(a1, -centerV, kAxisBand) : fadeAt(-centerU, a1, kAxisBand);
                 if (f0 >= 1.0 && f1 >= 1.0) continue;
                 if (isU) {
                     verts.push_back({at(centerU + a0, 0.0),
