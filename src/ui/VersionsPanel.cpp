@@ -20,6 +20,7 @@
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QTimer>
+#include <QScrollArea>
 #include <QVBoxLayout>
 
 #include <algorithm>
@@ -147,10 +148,30 @@ VersionsPanel::VersionsPanel(MainWindow* window, OcctViewWidget* view, QWidget* 
 
     myOuter->addWidget(header);
 
-    myRowsLayout = new QVBoxLayout();
+    // The rows live in a scroll area (Milestone 5 feedback: "the versions
+    // screen is missing a scroll") - AdjustToContents keeps the drawer at
+    // its natural height for a few versions, and past the cap the rows
+    // scroll instead of running the card off the viewport's bottom edge.
+    // AppearancePanel's transparent-scroll idiom, viewport rule included -
+    // QStyleSheetStyle paints a scroll viewport opaque without it.
+    auto* rowScroll = new QScrollArea(this);
+    rowScroll->setWidgetResizable(true);
+    rowScroll->setFrameShape(QFrame::NoFrame);
+    rowScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    rowScroll->setSizeAdjustPolicy(QAbstractScrollArea::AdjustToContents);
+    rowScroll->setAttribute(Qt::WA_NoSystemBackground);
+    rowScroll->viewport()->setAttribute(Qt::WA_NoSystemBackground);
+    rowScroll->setStyleSheet(QStringLiteral("background: transparent;"));
+    rowScroll->viewport()->setStyleSheet(QStringLiteral("background: transparent;"));
+    rowScroll->setMaximumHeight(Theme::wholeDevicePixels(384));
+    auto* rowsHost = new QWidget(rowScroll);
+    rowsHost->setAttribute(Qt::WA_NoSystemBackground);
+    rowsHost->setStyleSheet(QStringLiteral("background: transparent;"));
+    myRowsLayout = new QVBoxLayout(rowsHost);
     myRowsLayout->setContentsMargins(0, 0, 0, 0);
     myRowsLayout->setSpacing(10);
-    myOuter->addLayout(myRowsLayout);
+    rowScroll->setWidget(rowsHost);
+    myOuter->addWidget(rowScroll);
     myOuter->addStretch(1);
 
     // refresh() ends by calling applyTheme() itself - see its own comment -

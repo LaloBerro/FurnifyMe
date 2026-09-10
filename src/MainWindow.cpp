@@ -56,6 +56,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenuBar>
+#include <QMetaMethod>
 #include <QCloseEvent>
 #include <QPainter>
 #include <QPushButton>
@@ -1994,7 +1995,6 @@ void MainWindow::buildOverlay()
     // panel's, so the standalone hidden/anchored dance is gone with the
     // corner placement.
     myRenderSettingsPanel->setShutterAction(myScreenshotAction);
-    myRenderShutter = myRenderSettingsPanel->shutter();
 
     // Quality (Deep / Simple): the panel says which; the viewport stores it;
     // and the honest way to re-dress every tier-derived thing - lights,
@@ -2950,7 +2950,21 @@ void MainWindow::closeEvent(QCloseEvent* event)
         if (myAutosaveTimer && myAutosaveTimer->isActive()) myAutosaveTimer->stop();
         if (isFurnitureDirty() && !performSave(/*announce=*/false)) return;
     }
+    // A window nobody wired (no EditorSelectorHandoff - a standalone
+    // instance, a future embedding, a test block's own probe) must still be
+    // CLOSABLE: with the event ignored and quitRequested() heard by no one,
+    // the X did nothing at all, forever (the branch review's finding). The
+    // save-first above has already run either way; accepting here merely
+    // hides an unwired window, which is the most a class that owns no quit
+    // can honestly do.
+    if (!isSignalConnected(QMetaMethod::fromSignal(&MainWindow::quitRequested)))
+        event->accept();
     emit quitRequested();
+}
+
+RenderShutterButton* MainWindow::renderShutter() const
+{
+    return myRenderSettingsPanel ? myRenderSettingsPanel->shutter() : nullptr;
 }
 
 void MainWindow::showInitScreen()

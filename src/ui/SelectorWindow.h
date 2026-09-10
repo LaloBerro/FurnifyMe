@@ -202,6 +202,7 @@ private:
     QLabel* myTitle = nullptr;
     QPushButton* myNewButton = nullptr;
     QLineEdit* mySearch = nullptr;
+    QTimer* mySearchDebounce = nullptr;
     QPushButton* mySortRecent = nullptr;
     QPushButton* mySortName = nullptr;
     bool mySortByName = false;

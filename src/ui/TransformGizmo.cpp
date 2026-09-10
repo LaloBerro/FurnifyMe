@@ -559,11 +559,24 @@ void MoveTool::showGizmo()
 {
     if (!myWindow || !myView || myBodyId <= 0) return;
     myShownTool = static_cast<int>(myWindow->bodyTool());
-    gp_Pnt pivot;
     // The SAME bounding-box centre for every tool, through the one shared
     // implementation - see ModelingOps::boundingBoxCentre() for why Space
-    // must swap tools without the handle jumping a millimetre.
-    if (!ModelingOps::boundingBoxCentre(myWindow->document().shapeOf(myBodyId), pivot)) return;
+    // must swap tools without the handle jumping a millimetre. CACHED on
+    // (bodyId, document revision): reposition() re-enters here on every
+    // cameraChanged, and an orbit never edits geometry, so re-walking the
+    // body's whole triangulation per mouse-move was pure per-frame waste
+    // on the camera path CLAUDE.md budgets at fractions of a millisecond
+    // (the branch review's finding). An edit bumps revision(), which is
+    // exactly when the box can genuinely have moved.
+    const int revision = myWindow->document().revision();
+    if (myBodyId != myPivotBodyId || revision != myPivotRevision) {
+        if (!ModelingOps::boundingBoxCentre(myWindow->document().shapeOf(myBodyId),
+                                            myPivotCache))
+            return;
+        myPivotBodyId = myBodyId;
+        myPivotRevision = revision;
+    }
+    gp_Pnt pivot = myPivotCache;
     // WHICH gizmo is the active tool's to say - each show clears the other
     // two inside the viewport, so exactly one is ever up.
     switch (myWindow->bodyTool()) {

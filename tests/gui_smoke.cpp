@@ -2726,7 +2726,7 @@ int main(int argc, char* argv[])
         check(search != nullptr, "the header carries a search field");
         if (search) {
             search->setText(QStringLiteral("zebra"));
-            settle(60);
+            settle(300);   // outlasts the search field's 150 ms debounce
         }
         check(gridSelector.visibleCardCount() == 1,
               QStringLiteral("searching \"zebra\" leaves one card on screen (%1)")
@@ -2742,7 +2742,7 @@ int main(int argc, char* argv[])
               "the surviving card is Zebra Table itself");
         if (search) {
             search->clear();
-            settle(60);
+            settle(300);   // outlasts the debounce, as above
         }
         check(gridSelector.visibleCardCount() == 5, "clearing the search brings all five back");
 

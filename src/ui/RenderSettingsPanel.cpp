@@ -8,12 +8,15 @@
 #include <QColorDialog>
 #include <QGridLayout>
 #include <QHBoxLayout>
+#include <QImageReader>
 #include <QLabel>
 #include <QLinearGradient>
 #include <QPainter>
 #include <QPainterPath>
 #include <QRadialGradient>
+#include <QScrollArea>
 #include <QSlider>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 
@@ -184,11 +187,30 @@ public:
         Theme::makeSurfaceTransparent(this);
         setFixedSize(kTileWidth, kTileHeight);
         setToolTip(name);
-        const QImage image(filePath);
+        // Decoded AT thumbnail size through QImageReader - libjpeg's own
+        // DCT scaling decodes a 4K texture at ~2x tile size directly,
+        // where `QImage image(filePath)` decoded every texture at native
+        // resolution on the main thread at startup (hundreds of ms and
+        // tens of MB per multi-megapixel file - the branch review's
+        // measurement). The 2x is for crispness on scaled displays and is
+        // DECLARED via setDevicePixelRatio, which is also what fixes the
+        // review's other finding here: drawn with a 1x source rect, the
+        // undeclared 2x pixmap showed a zoomed-in centre QUARTER of the
+        // texture instead of the texture.
+        QImageReader reader(filePath);
+        reader.setAutoTransform(true);
+        const QSize native = reader.size();
+        if (native.isValid()) {
+            QSize target(kTileWidth * 2, kTileHeight * 2);
+            const QSize expanded =
+                native.scaled(target, Qt::KeepAspectRatioByExpanding);
+            reader.setScaledSize(expanded);
+        }
+        const QImage image = reader.read();
         if (!image.isNull()) {
-            myThumb = QPixmap::fromImage(image.scaled(
-                kTileWidth * 2, kTileHeight * 2, Qt::KeepAspectRatioByExpanding,
-                Qt::SmoothTransformation));
+            QPixmap thumb = QPixmap::fromImage(image);
+            thumb.setDevicePixelRatio(2.0);
+            myThumb = thumb;
         }
     }
 
@@ -219,7 +241,12 @@ protected:
         painter.setClipPath(clip);
 
         // The studio in miniature: warm backdrop over a slightly deeper
-        // floor band - the same flat-grey world render mode dresses.
+        // floor band - the same flat-grey world render mode dresses. The
+        // literals are MATERIAL DEPICTION, not shell chrome: they mimic
+        // the render backdrop (itself calibrated against sampled pixels,
+        // not a Theme token) the way the OCCT body materials do, and fall
+        // under the same "remaining untokenised colours, by scope ruling"
+        // line CLAUDE.md already draws for those.
         painter.fillRect(rect(), QColor(0xc6, 0xc3, 0xbe));
         painter.fillRect(QRect(0, int(height() * 0.66), width(), height()),
                          QColor(0xb7, 0xb4, 0xae));
@@ -230,9 +257,15 @@ protected:
         if (myWood && !myThumb.isNull()) {
             // The user's own image is the thumbnail - what the tile promises
             // is literally the file the click applies.
-            painter.drawPixmap(rect(), myThumb,
-                               QRect((myThumb.width() - width()) / 2,
-                                     (myThumb.height() - height()) / 2, width(), height()));
+            // The pixmap carries devicePixelRatio 2, so a plain draw at the
+            // tile's own rect shows the WHOLE texture at 2x crispness -
+            // the source-rect arithmetic this replaces mixed device and
+            // logical units and blitted a quarter of the image.
+            const QSizeF logical = QSizeF(myThumb.size()) / myThumb.devicePixelRatio();
+            const QPointF at((width() - logical.width()) / 2.0,
+                             (height() - logical.height()) / 2.0);
+            painter.drawPixmap(QRectF(at, logical), myThumb,
+                               QRectF(QPointF(0, 0), QSizeF(myThumb.size())));
             const QRect texStrip(0, height() - 13, width(), 13);
             painter.fillRect(texStrip, QColor(0, 0, 0, 150));
             painter.setPen(myCurrent ? QColor(Qt::white) : Theme::textMuted());
@@ -442,12 +475,34 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
     Theme::makeSurfaceTransparent(this);
     setFixedWidth(Theme::wholeDevicePixels(kWidth));
 
-    auto* outer = new QVBoxLayout(this);
-    outer->setContentsMargins(kPad, kPad, kPad, kPad);
-    outer->setSpacing(kRowSpacing);
+    auto* shell = new QVBoxLayout(this);
+    shell->setContentsMargins(kPad, kPad, kPad, kPad);
+    shell->setSpacing(kRowSpacing);
 
     myTitle = new QLabel(tr("Render settings"), this);
-    outer->addWidget(myTitle);
+    shell->addWidget(myTitle);
+
+    // The SECTIONS scroll; the footer below stays pinned. ViewportOverlay's
+    // RightEdge anchor stretches this panel to the viewport's height but
+    // never clamps it DOWN, and this panel had no scroll area (unlike the
+    // Appearance card sharing that edge) - so a short window, or a
+    // materials folder full of tiles, pushed the Quality switch and the
+    // shutter below the viewport's bottom edge, unreachable (the branch
+    // review's finding). AppearancePanel's own transparent-scroll idiom.
+    auto* sectionScroll = new QScrollArea(this);
+    sectionScroll->setWidgetResizable(true);
+    sectionScroll->setFrameShape(QFrame::NoFrame);
+    sectionScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    makeTransparent(sectionScroll, QStringLiteral("renderSettingsScroll"));
+    makeTransparent(sectionScroll->viewport(),
+                    QStringLiteral("renderSettingsScrollViewport"));
+    auto* sectionContent = new QWidget(sectionScroll);
+    makeTransparent(sectionContent, QStringLiteral("renderSettingsContent"));
+    auto* outer = new QVBoxLayout(sectionContent);
+    outer->setContentsMargins(0, 0, 0, 0);
+    outer->setSpacing(kRowSpacing);
+    sectionScroll->setWidget(sectionContent);
+    shell->addWidget(sectionScroll, 1);
 
     // A section header - smaller and more muted than a row label, the studio
     // panel's own grouping device (mockup A). Collected for applyTheme() and
@@ -604,16 +659,36 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
     // They shape the TEXTURED materials - the gloss/metal presets ignore
     // them - but they stay visible either way: two rows that appear and
     // vanish with the active tile would bounce the whole section.
+    // DEBOUNCED, unlike every other slider here: these two rebuild every
+    // body's textured overlay mesh - and on the ray-traced tiers pay the
+    // rasterize-and-back round trip plus a path-tracing accumulation
+    // restart - per value, and a QSlider fires per mouse-move pixel, so a
+    // raw connect made one drag across the range hundreds of full scene
+    // rebuilds (the branch review's finding). A short trailing timer keeps
+    // the preview live at ~8 updates a second; the release flushes
+    // immediately so the final value never waits.
+    auto debouncedDial = [this](QSlider* slider, auto emitValue) {
+        auto* debounce = new QTimer(this);
+        debounce->setSingleShot(true);
+        debounce->setInterval(120);
+        connect(debounce, &QTimer::timeout, this,
+                [slider, emitValue] { emitValue(slider->value()); });
+        connect(slider, &QSlider::valueChanged, this, [this, debounce](int) {
+            if (mySyncing) return;
+            debounce->start();
+        });
+        connect(slider, &QSlider::sliderReleased, this, [this, slider, debounce, emitValue] {
+            if (mySyncing) return;
+            debounce->stop();
+            emitValue(slider->value());
+        });
+    };
     myWoodTileSlider = addRow(QStringLiteral("woodTile"), tr("Grain size"), 50, 1000, 300);
-    connect(myWoodTileSlider, &QSlider::valueChanged, this, [this](int v) {
-        if (mySyncing) return;
-        emit woodTileChanged(static_cast<double>(v));
-    });
+    debouncedDial(myWoodTileSlider,
+                  [this](int v) { emit woodTileChanged(static_cast<double>(v)); });
     myWoodAngleSlider = addRow(QStringLiteral("woodAngle"), tr("Grain angle"), 0, 359, 0);
-    connect(myWoodAngleSlider, &QSlider::valueChanged, this, [this](int v) {
-        if (mySyncing) return;
-        emit woodAngleChanged(static_cast<double>(v));
-    });
+    debouncedDial(myWoodAngleSlider,
+                  [this](int v) { emit woodAngleChanged(static_cast<double>(v)); });
 
     // The muted note under those two rows - shown only while the active
     // tier does not read them (see setMaterialRowsApply()). Word-wrapped
@@ -631,7 +706,10 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
     addRule();
 
     // --- Scene ----------------------------------------------------------
-    addSection(tr("Scene"));
+    // "Studio", not "Scene": scene is the vocabulary table's Never-word
+    // for the 3D area, and this section dresses the studio - backdrop,
+    // floor, shadows - which is exactly what the render-mode docs call it.
+    addSection(tr("Studio"));
     {
         auto* row = new QWidget(this);
         makeTransparent(row, QStringLiteral("renderSettingsBackgroundRow"));
@@ -695,16 +773,18 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
     setQuick(false);
 
     // --- footer: the live tier, the polish bar, the shutter ---------------
-    // Pushed to the panel's bottom edge - this panel is a full-height
-    // RightEdge spine, so the stretch is what separates the sections above
-    // from the footer below.
+    // OUTSIDE the scroll, pinned to the panel's bottom edge: whatever the
+    // window's height and however many material tiles the folder grew, the
+    // shutter stays reachable - the sections above are what give, through
+    // their own scrollbar. The stretch inside the scroll content pushes
+    // short content to the top the way the old full-height stretch did.
     outer->addStretch(1);
     myTierLabel = new QLabel(this);
     makeTransparent(myTierLabel, QStringLiteral("renderSettingsTierLabel"));
-    outer->addWidget(myTierLabel);
+    shell->addWidget(myTierLabel);
     myProgress = new ProgressLine(this);
     myProgress->hide();
-    outer->addWidget(myProgress);
+    shell->addWidget(myProgress);
 
     syncValueLabels();
     syncPresetTiles();
@@ -918,17 +998,30 @@ void RenderSettingsPanel::addTextureMaterials(
 
 void RenderSettingsPanel::setTierStatus(const QString& tierName, double progress01)
 {
-    if (myTierLabel) myTierLabel->setText(tierName);
+    // Equality-guarded: a 500 ms ticker drives this, QLabel::setText() does
+    // not early-out on equal text, and under the texture-widget repaint law
+    // one dirty raster child recomposites EVERY visible overlay - so an
+    // unchanged status was repainting the whole tree at 2 Hz for the length
+    // of a render session (the branch review's measurement-backed finding).
+    if (myTierLabel && myTierLabel->text() != tierName) myTierLabel->setText(tierName);
     if (myProgress) {
         const bool show = progress01 >= 0.0;
-        myProgress->setVisible(show);
+        if (myProgress->isVisible() != show) myProgress->setVisible(show);
         if (show) myProgress->setFraction(progress01);
     }
 }
 
 void RenderSettingsPanel::setShutterAction(QAction* action)
 {
-    if (myShutter || !action) return;
+    // Loud, not silent: a null action here means a construction-order
+    // regression upstream (the branch review's note), and returning quietly
+    // shipped a render mode with no shutter and handed callers a null.
+    if (!action) {
+        qWarning("RenderSettingsPanel::setShutterAction: null action - the "
+                 "shutter will be missing");
+        return;
+    }
+    if (myShutter) return;
     myShutter = new RenderShutterButton(action, this, /*wide=*/true);
     // Straight into the outer layout's tail, after the footer status pair.
     if (auto* outer = qobject_cast<QVBoxLayout*>(layout())) outer->addWidget(myShutter);

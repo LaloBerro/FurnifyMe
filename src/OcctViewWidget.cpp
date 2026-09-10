@@ -115,6 +115,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <functional>
 #include <limits>
 
@@ -2216,7 +2217,15 @@ void OcctViewWidget::collectMagnetCandidates(int axis)
 bool OcctViewWidget::magnetSnap(double raw, double& value, gp_Pnt& guideA, gp_Pnt& guideB) const
 {
     if (!myMagnetEnabled || myMoveMagnetCandidates.empty()) return false;
-    const double tolerance = kMagnetSnapPx * worldPerPixel();
+    // At the DRAGGED BODY's depth, not the camera target's - the same
+    // correction the gizmo's own sizing rides on (worldPerPixelAt): in
+    // perspective, a body nearer than the target made the 8 px promise
+    // reach ~16, and one beyond it refuse alignments genuinely inside
+    // reach (the branch review's finding). The Move gizmo stands on the
+    // dragged body, so its pivot is the honest depth to convert at.
+    const double tolerance =
+        kMagnetSnapPx * (myMoveGizmo.isShowing() ? worldPerPixelAt(myMoveGizmo.pivot())
+                                                 : worldPerPixel());
 
     const MagnetCandidate* best = nullptr;
     double bestDistance = tolerance;
@@ -4579,14 +4588,16 @@ void OcctViewWidget::ensureWoodTexture()
             const QImage rgb = file.convertToFormat(QImage::Format_RGB888);
             Handle(Image_PixMap) filePix = new Image_PixMap();
             if (filePix->InitTrash(Image_Format_RGB, rgb.width(), rgb.height())) {
+                // ROW COPIES, not per-pixel: both sides are packed 3-byte
+                // RGB, and the SetPixelColor loop this replaces ran ~4.2M
+                // QColor round-trips for a 2048-square image - hundreds of
+                // blocked-UI milliseconds per material pick (the branch
+                // review's measurement). Row-by-row rather than one block
+                // because each side pads its rows to its OWN alignment.
+                const int rowBytes = rgb.width() * 3;
                 for (int y = 0; y < rgb.height(); ++y) {
-                    for (int x = 0; x < rgb.width(); ++x) {
-                        const QColor c = rgb.pixelColor(x, y);
-                        filePix->SetPixelColor(x, y,
-                                              Quantity_ColorRGBA(float(c.redF()),
-                                                                 float(c.greenF()),
-                                                                 float(c.blueF()), 1.0f));
-                    }
+                    std::memcpy(filePix->ChangeRow(y), rgb.constScanLine(y),
+                                size_t(rowBytes));
                 }
                 Handle(Graphic3d_Texture2D) fileTexture = new Graphic3d_Texture2D(filePix);
                 fileTexture->GetParams()->SetModulate(Standard_True);

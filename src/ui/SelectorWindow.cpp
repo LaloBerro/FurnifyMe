@@ -427,7 +427,18 @@ SelectorWindow::SelectorWindow(FurnitureStore& store, QWidget* parent)
     mySearch->setPlaceholderText(tr("Search"));
     mySearch->setClearButtonEnabled(true);
     mySearch->setFixedSize(Theme::wholeDevicePixels(QSize(180, 28)));
-    connect(mySearch, &QLineEdit::textChanged, this, [this] { relayoutCards(); });
+    // Debounced: relayoutCards() tears the grid layout down and re-sorts
+    // on every call, and a keystroke per call re-did all of it once per
+    // character (the branch review's finding). 150 ms trails the typing;
+    // clearing via the field's own clear button still lands through the
+    // same route.
+    mySearchDebounce = new QTimer(this);
+    mySearchDebounce->setSingleShot(true);
+    mySearchDebounce->setInterval(150);
+    connect(mySearchDebounce, &QTimer::timeout, this,
+            [this] { relayoutCards(); });
+    connect(mySearch, &QLineEdit::textChanged, this,
+            [this] { mySearchDebounce->start(); });
     headerLayout->addWidget(mySearch);
 
     mySortRecent = new QPushButton(tr("Recent"), header);

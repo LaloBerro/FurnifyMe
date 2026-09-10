@@ -545,7 +545,12 @@ public:
     RenderSettingsPanel* renderSettingsPanel() const { return myRenderSettingsPanel; }
     // The wide footer shutter - owned by the panel since the Milestone 5
     // rework; kept as an accessor so the suite's wiring pins hold.
-    RenderShutterButton* renderShutter() const { return myRenderShutter; }
+    // Derived from the panel that OWNS it, never cached: a stored pointer
+    // to another widget's child is the stored-cursor drift this repo's own
+    // law bans (the branch review's finding).
+    RenderShutterButton* renderShutter() const;   // defined in the .cpp -
+                                                  // the panel is only
+                                                  // forward-declared here
     // The floating pill (Milestone 5, item 3) - the window's own menu strip
     // before this task, a ViewportOverlay::Anchor::TopLeft card now. Exposed
     // the same way every other overlay card is, rather than making a caller
@@ -1531,7 +1536,6 @@ private:
     // the appStateChanged-driven visibility lambda can reach them.
     RenderSettingsPanel* myRenderSettingsPanel = nullptr;
     class QTimer* myRenderTierTicker = nullptr;
-    RenderShutterButton* myRenderShutter = nullptr;
     class ShortcutSheet* myShortcutSheet = nullptr;
     ToastHost* myToasts = nullptr;
     ExtrudePreview* myExtrudePreview = nullptr;

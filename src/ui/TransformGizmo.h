@@ -412,4 +412,9 @@ private:
     // showBodyGizmo()). Not a stored cursor: purely a change detector, and
     // the shown gizmo itself is still re-derived on every refresh.
     int myShownTool = -1;
+    // showGizmo()'s pivot cache - see its comment. Keyed on the body and
+    // the document revision, so it can never outlive an edit.
+    gp_Pnt myPivotCache;
+    int myPivotBodyId = 0;
+    int myPivotRevision = -1;
 };
