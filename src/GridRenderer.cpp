@@ -192,25 +192,35 @@ void GridRenderer::rebuild(double minorStep, double centerU, double centerV,
     // this class's plane support - the fade maths never sees a world axis.
     auto at = [&plane](double u, double v) { return ElSLib::Value(u, v, plane); };
 
-    // One continuous edge fade, per VERTEX, in place of the three flat-colour
+    // One continuous fade, per VERTEX, in place of the three flat-colour
     // rings this function used to draw. The rings blended toward the
     // background in two steps, and both steps - plus the outer cutoff, which
     // stopped at 0.85 rather than 1.0 - were visible as concentric seams.
     // With Graphic3d_ArrayFlags_VertexColor the GPU interpolates colour along
-    // each segment, so the grid can dissolve into the background instead:
-    // full grid colour out to 40% of the extent, then a smoothstep to EXACTLY
-    // the background colour at the edge, so there is no boundary left to see.
+    // each segment, so the grid dissolves into the background instead, with
+    // no boundary left to see.
     //
-    // Chebyshev distance (max of |du|, |dv|), not Euclidean: the grid is a
-    // square, so a square fade keeps the dissolve the same visual width along
-    // an edge as at a corner. And because colour only interpolates linearly
-    // between a segment's own two endpoints, each full-length line is cut
-    // into chunks so the falloff bends where the function does rather than
-    // averaging across the whole line.
-    constexpr double kFadeStart = 0.40;
+    // RADIAL, and tight (Milestone 5 feedback, the user's reference shot):
+    // the grid reads as a POOL of light around the point the camera looks
+    // at, dissolving well inside the built square, the way Blender's and
+    // Shapr3D's floors do - not a sheet that runs to a distant edge. The
+    // old fade was Chebyshev over the full extent (full ink to 40%, gone at
+    // 100%), which put the whole dissolve at 2.4x-6x the camera distance:
+    // off-screen at any working framing, so on screen the grid looked
+    // uniform. Now Euclidean - a pool is round - starting at 0.10 of the
+    // extent (0.6x the camera distance, holding full ink under and around
+    // the furniture) and gone by 0.45 (2.7x the distance). The corners of
+    // the built square fade out entirely before their geometry ends, which
+    // wastes a few segments and shows nothing - the acceptable cost of a
+    // round pool on a square carpet. Colour only interpolates linearly
+    // between a segment's own two endpoints, so each full-length line is
+    // cut into chunks and the falloff bends where the function does rather
+    // than averaging across the whole line.
+    constexpr double kFadeStart = 0.10;
+    constexpr double kFadeEnd = 0.45;
     auto fadeAt = [&](double du, double dv) {
-        const double d = std::max(std::fabs(du), std::fabs(dv)) / extent;
-        const double f = std::clamp((d - kFadeStart) / (1.0 - kFadeStart), 0.0, 1.0);
+        const double d = std::hypot(du, dv) / extent;
+        const double f = std::clamp((d - kFadeStart) / (kFadeEnd - kFadeStart), 0.0, 1.0);
         return f * f * (3.0 - 2.0 * f);   // smoothstep
     };
 
