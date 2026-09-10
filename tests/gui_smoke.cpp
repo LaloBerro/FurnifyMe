@@ -638,8 +638,13 @@ void skipByEnvironment(int checks, const QString& why)
 // manipulator block, the card-parity pins and the tolerance stand-down sweep
 // were deleted with the machinery they measured, taking a few hundred checks
 // with them by design, and their replacements assert fewer, sharper things.
-// Re-ratchet to the measured total on the next official (filter-less) run.
-constexpr int kCheckFloor = 3100;
+// RE-RATCHETED (2026-09-10): the first official run after the rewrite - plus
+// the Gallery selector, the custom window chrome, and this run's own four
+// suite fixes (the gallery block registered, the gizmo scan reading the real
+// axis tokens, the Magnet anchor built off-grid, the cross-body probe's
+// bodies built on confirmed-empty ground) - measured 3498 checks + 1
+// environment skip. The floor is that accounted total, exactly.
+constexpr int kCheckFloor = 3499;
 
 void check(bool condition, const QString& what)
 {
@@ -700,6 +705,7 @@ constexpr BlockInfo kBlocks[] = {
     { "a-seeded-library-cards-opening-the-volume-they-carry", true, true },
     { "delete-hover-reveals-it-two-clicks-confirm-it", true, true },
     { "selectorwindow-the-type-scale-and-the-opaque-paint", true, false },
+    { "the-gallery-grid-three-columns-search-and-sort", false, true },
     { "the-gallery-s-two-now-three-refusals-are-never", true, true },
     { "a-hand-corrupted-shapes-bin-the-failure-toast-is", true, true },
     { "save-the-dirty-star-autosave-and-close-furniture", true, true },
@@ -10999,12 +11005,84 @@ int main(int argc, char* argv[])
             // axis-aligned rectangle again.
             trigger(window, QStringLiteral("Top"));
             settle(150);
-            check(buildBody(window, 0.10, 0.10, 0.25, 0.25, 40.0),
+            // ...and on EMPTY ground, found rather than assumed: fixed
+            // fractions (0.10-0.25 / 0.60-0.75) built the first body
+            // underneath a pre-existing scene body once the gizmo-era
+            // rewrites left the shared scene arranged differently - a
+            // sketch at a screen fraction lands on the GROUND PLANE
+            // regardless of what stands over that pixel, so the "clean"
+            // body was buried inside an old one and every one of its edges
+            // clicked through to the occupier from every eye (the first
+            // official run's instrumented finding). The stray-click probe's
+            // own idiom, one level up: project every existing body's bbox,
+            // take two build rectangles OUTSIDE the union, zooming out when
+            // the scene fills the frame.
+            double buildFx[2] = {0.10, 0.60}, buildFy[2] = {0.10, 0.60};
+            constexpr double kBuildFrac = 0.15;
+            {
+                auto occupiedRectNow = [&]() {
+                    QRect occ;
+                    for (const DocumentModel::Solid& solid : window.document().solids()) {
+                        Bnd_Box box;
+                        BRepBndLib::Add(solid.shape, box);
+                        Standard_Real bx0, by0, bz0, bx1, by1, bz1;
+                        box.Get(bx0, by0, bz0, bx1, by1, bz1);
+                        const gp_Pnt corners[8] = {{bx0, by0, bz0}, {bx1, by0, bz0},
+                                                   {bx0, by1, bz0}, {bx1, by1, bz0},
+                                                   {bx0, by0, bz1}, {bx1, by0, bz1},
+                                                   {bx0, by1, bz1}, {bx1, by1, bz1}};
+                        for (const gp_Pnt& corner : corners) {
+                            QPoint at;
+                            if (view->projectToScreen(corner, at))
+                                occ = occ.isNull() ? QRect(at, QSize(1, 1))
+                                                   : occ.united(QRect(at, QSize(1, 1)));
+                        }
+                    }
+                    return occ;
+                };
+                bool spotsFound = false;
+                for (int attempt = 0; attempt < 8 && !spotsFound; ++attempt) {
+                    const QRect occ = occupiedRectNow().adjusted(-30, -30, 30, 30);
+                    const int w = view->width(), h = view->height();
+                    const int bw = int(w * kBuildFrac), bh = int(h * kBuildFrac);
+                    std::vector<QRect> spots;
+                    for (int y = 40; y + bh < h - 40 && spots.size() < 2; y += bh / 2) {
+                        for (int x = 40; x + bw < w - 40 && spots.size() < 2; x += bw / 2) {
+                            const QRect cand(x, y, bw, bh);
+                            if (cand.intersects(occ)) continue;
+                            if (!spots.empty() &&
+                                spots.front().adjusted(-25, -25, 25, 25).intersects(cand))
+                                continue;
+                            spots.push_back(cand);
+                        }
+                    }
+                    if (spots.size() == 2) {
+                        for (int i = 0; i < 2; ++i) {
+                            buildFx[i] = spots[i].x() / double(w);
+                            buildFy[i] = spots[i].y() / double(h);
+                        }
+                        spotsFound = true;
+                        break;
+                    }
+                    QWheelEvent zoomOut(
+                        QPointF(w / 2.0, h / 2.0),
+                        view->mapToGlobal(QPointF(w / 2.0, h / 2.0)), QPoint(0, 0),
+                        QPoint(0, -120), Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase,
+                        false);
+                    QCoreApplication::sendEvent(view, &zoomOut);
+                    settle(80);
+                }
+                check(spotsFound,
+                      "two empty ground regions found for the cross-body probe's bodies");
+            }
+            check(buildBody(window, buildFx[0], buildFy[0], buildFx[0] + kBuildFrac,
+                            buildFy[0] + kBuildFrac, 40.0),
                   "a first, CLEAN body for the cross-body probe");
             const int firstId = window.document().solids().empty()
                                     ? -1
                                     : window.document().solids().back().id;
-            check(buildBody(window, 0.60, 0.60, 0.75, 0.75, 30.0),
+            check(buildBody(window, buildFx[1], buildFy[1], buildFx[1] + kBuildFrac,
+                            buildFy[1] + kBuildFrac, 30.0),
                   "a second, CLEAN body, well clear of the first");
             const int secondId = window.document().solids().empty()
                                      ? -1
@@ -11013,6 +11091,43 @@ int main(int argc, char* argv[])
             settle(150);
             view->fitAll();
             settle(250);
+
+            // Zoom toward the two probe bodies until both are big enough to
+            // CLICK. fitAll frames the WHOLE shared scene, and how much else
+            // stands in it depends on which blocks ran before this one - the
+            // first official run after the 3D-gizmo rewrite found this
+            // probe's edge hunt failing in the full sweep and passing
+            // filtered. The camera then HOLDS still through the hunts and
+            // the clicks below, because the hunted pixels are reused.
+            auto frameProbeBodies = [&] {
+                auto projectedDiag = [&](int id, double& diag, QPoint& centrePx) {
+                    Bnd_Box diagBox;
+                    BRepBndLib::Add(window.document().shapeOf(id), diagBox);
+                    double x0, y0, z0, x1, y1, z1;
+                    diagBox.Get(x0, y0, z0, x1, y1, z1);
+                    QPoint a, b;
+                    if (!view->projectToScreen(gp_Pnt(x0, y0, z0), a) ||
+                        !view->projectToScreen(gp_Pnt(x1, y1, z1), b))
+                        return false;
+                    diag = std::hypot(double(a.x() - b.x()), double(a.y() - b.y()));
+                    centrePx = QPoint((a.x() + b.x()) / 2, (a.y() + b.y()) / 2);
+                    return true;
+                };
+                for (int i = 0; i < 10; ++i) {
+                    double d1 = 0.0, d2 = 0.0;
+                    QPoint c1, c2;
+                    if (!projectedDiag(firstId, d1, c1) || !projectedDiag(secondId, d2, c2))
+                        break;
+                    if (std::min(d1, d2) > 90.0) break;
+                    const QPointF aim((c1.x() + c2.x()) / 2.0, (c1.y() + c2.y()) / 2.0);
+                    QWheelEvent zoomIn(aim, view->mapToGlobal(aim), QPoint(0, 0),
+                                       QPoint(0, 120), Qt::NoButton, Qt::NoModifier,
+                                       Qt::NoScrollPhase, false);
+                    QCoreApplication::sendEvent(view, &zoomIn);
+                    settle(60);
+                }
+            };
+            frameProbeBodies();
 
             auto edgeBelongsTo = [&window](int id, const TopoDS_Edge& edge) {
                 if (edge.IsNull() || id <= 0) return false;
@@ -11038,38 +11153,117 @@ int main(int argc, char* argv[])
             // clicking, the same rule the probe above uses, because an edge
             // behind a body projects to a perfectly reachable pixel and picks
             // something else entirely.
+            // huntLog records WHY candidates were rejected - the first
+            // official run after the 3D rewrite failed this hunt with no
+            // way to tell which filter ate every edge, and the failure did
+            // not reproduce filtered (shared-state framing differs), so the
+            // full run itself has to carry the diagnosis.
+            QString huntLog;
             auto findEdgeOn = [&](int id, TopoDS_Edge& edgeOut, QPoint& at) {
                 const TopoDS_Shape shape = window.document().shapeOf(id);
+                int cBevel = 0, cZ = 0, cProj = 0, cInset = 0, cClick = 0;
+                QString firstMiss;
                 for (TopExp_Explorer it(shape, TopAbs_EDGE); it.More(); it.Next()) {
                     const TopoDS_Edge candidate = TopoDS::Edge(it.Current());
                     gp_Pnt centre;
                     gp_Dir outward;
-                    if (!ModelingOps::bevelAxis(shape, candidate, centre, outward)) continue;
-                    if (outward.Z() < 0.3) continue;
-                    QPoint pixel;
-                    if (!view->projectToScreen(centre, pixel)) continue;
-                    if (!view->rect().adjusted(40, 40, -40, -40).contains(pixel)) continue;
-                    view->clearSelection();
-                    settle(60);
-                    clickAt(view, QPointF(pixel));
-                    settle(120);
-                    if (view->selectedEdge().IsNull() ||
-                        !view->selectedEdge().IsSame(candidate))
+                    if (!ModelingOps::bevelAxis(shape, candidate, centre, outward)) {
+                        ++cBevel;
                         continue;
-                    edgeOut = candidate;
-                    at = pixel;
-                    return true;
+                    }
+                    if (outward.Z() < 0.3) {
+                        ++cZ;
+                        continue;
+                    }
+                    // SEVERAL points along the edge, not only its midpoint:
+                    // the instrumented official run showed every top edge of
+                    // one probe body clicking through to "a face" - another
+                    // body in the full-suite scene stood between the fixed
+                    // axonometric eye and the MIDPOINTS specifically, while
+                    // other spans of the same edges were clear.
+                    TopoDS_Vertex sv1, sv2;
+                    TopExp::Vertices(candidate, sv1, sv2);
+                    if (sv1.IsNull() || sv2.IsNull()) {
+                        ++cBevel;
+                        continue;
+                    }
+                    const gp_Pnt p1 = BRep_Tool::Pnt(sv1);
+                    const gp_Pnt p2 = BRep_Tool::Pnt(sv2);
+                    bool taken = false;
+                    for (const double t : {0.5, 0.25, 0.75}) {
+                        const gp_Pnt sample(p1.X() + t * (p2.X() - p1.X()),
+                                            p1.Y() + t * (p2.Y() - p1.Y()),
+                                            p1.Z() + t * (p2.Z() - p1.Z()));
+                        QPoint pixel;
+                        if (!view->projectToScreen(sample, pixel)) {
+                            ++cProj;
+                            continue;
+                        }
+                        if (!view->rect().adjusted(40, 40, -40, -40).contains(pixel)) {
+                            ++cInset;
+                            continue;
+                        }
+                        view->clearSelection();
+                        settle(60);
+                        clickAt(view, QPointF(pixel));
+                        settle(120);
+                        if (view->selectedEdge().IsNull() ||
+                            !view->selectedEdge().IsSame(candidate)) {
+                            ++cClick;
+                            if (firstMiss.isEmpty()) {
+                                firstMiss = QStringLiteral(" first miss at %1,%2 got %3")
+                                                .arg(pixel.x())
+                                                .arg(pixel.y())
+                                                .arg(view->selectedEdge().IsNull()
+                                                         ? (view->selectedFace().IsNull()
+                                                                ? QStringLiteral("nothing")
+                                                                : QStringLiteral("a face"))
+                                                         : QStringLiteral("another edge"));
+                            }
+                            continue;
+                        }
+                        edgeOut = candidate;
+                        at = pixel;
+                        taken = true;
+                        break;
+                    }
+                    if (taken) return true;
                 }
+                huntLog += QStringLiteral("[body %1: bevelAxis %2, tilt %3, project %4, "
+                                          "inset %5, clickmiss %6;%7]")
+                               .arg(id)
+                               .arg(cBevel)
+                               .arg(cZ)
+                               .arg(cProj)
+                               .arg(cInset)
+                               .arg(cClick)
+                               .arg(firstMiss);
                 return false;
             };
 
             TopoDS_Edge edgeOnFirst, edgeOnSecond;
             QPoint onFirst, onSecond;
-            const bool bothFound = findEdgeOn(firstId, edgeOnFirst, onFirst) &&
-                                    findEdgeOn(secondId, edgeOnSecond, onSecond);
+            bool bothFound = findEdgeOn(firstId, edgeOnFirst, onFirst) &&
+                             findEdgeOn(secondId, edgeOnSecond, onSecond);
+            // Straight down as the fallback eye: nothing on a ground-plane
+            // scene can stand between a Top camera and a body's own upward
+            // edges unless it overlaps the body's footprint outright. The
+            // camera then holds still through the clicks below, exactly as
+            // the axonometric one would have.
+            if (!bothFound) {
+                huntLog += QStringLiteral(" | Top-view retry:");
+                trigger(window, QStringLiteral("Top"));
+                settle(200);
+                view->fitAll();
+                settle(200);
+                frameProbeBodies();
+                bothFound = findEdgeOn(firstId, edgeOnFirst, onFirst) &&
+                            findEdgeOn(secondId, edgeOnSecond, onSecond);
+            }
             check(bothFound,
-                  "one clickable edge found on each of the two bodies, so what follows "
-                  "cannot vanish quietly");
+                  QStringLiteral("one clickable edge found on each of the two bodies, so "
+                                 "what follows cannot vanish quietly%1")
+                      .arg(huntLog));
             if (bothFound) {
                 view->clearSelection();
                 settle(80);
@@ -11194,6 +11388,11 @@ int main(int argc, char* argv[])
                   "and the cross-body probe takes both its own fresh bodies away again");
             view->clearSelection();
             settle(150);
+            // Hand the NEXT probe the canonical fitAll framing rather than
+            // wherever the zoom-in loop above left the camera - its bodies
+            // are built in screen fractions of whatever is on screen here.
+            view->fitAll();
+            settle(200);
         }
 
         // --- all-or-nothing ACROSS bodies: one body's own refusal refuses ---
@@ -16463,15 +16662,33 @@ int main(int argc, char* argv[])
                 const QPointF centre(centreLogical.x() * pxPerLogical,
                                      centreLogical.y() * pxPerLogical);
 
+                // The gizmo is found by ITS OWN TOKENS, not an idealized
+                // primary-hue rule: the arms draw UNLIT, so a rendered pixel
+                // IS Theme::gizmoAxisX/Y/Z exactly (the design's own claim,
+                // which the unlit-tokens block pins per-tip) - and the
+                // shipped defaults (#e0564a/#7fc84e/#4a80e0) all carry
+                // secondary channels far above the <70 cutoff the first
+                // version of this scan assumed, so it counted ZERO pixels of
+                // a gizmo that was genuinely on screen (this suite's first
+                // official run after the 3D rewrite). The tolerance covers
+                // antialiased edge pixels; the hub's neutral grey, the
+                // selected body's orange and the grid's muted tints are all
+                // far outside it.
+                const QColor axisTokens[3] = {Theme::gizmoAxisX(), Theme::gizmoAxisY(),
+                                              Theme::gizmoAxisZ()};
+                auto isAxisInk = [&axisTokens](const QColor& c) {
+                    for (const QColor& t : axisTokens) {
+                        if (std::abs(c.red() - t.red()) < 28 &&
+                            std::abs(c.green() - t.green()) < 28 &&
+                            std::abs(c.blue() - t.blue()) < 28)
+                            return true;
+                    }
+                    return false;
+                };
                 double worst = 0.0;
                 for (int y = 0; y < dump.height(); ++y) {
                     for (int x = 0; x < dump.width(); ++x) {
-                        const QColor c = dump.pixelColor(x, y);
-                        const bool axisHue =
-                            (c.red() > 100 && c.green() < 70 && c.blue() < 70) ||
-                            (c.green() > 100 && c.red() < 70 && c.blue() < 70) ||
-                            (c.blue() > 100 && c.red() < 70 && c.green() < 70);
-                        if (!axisHue) continue;
+                        if (!isAxisInk(dump.pixelColor(x, y))) continue;
                         ++litPixels;
                         worst = std::max(worst, std::hypot(x - centre.x(), y - centre.y()));
                     }
@@ -26364,7 +26581,24 @@ int main(int argc, char* argv[])
 
         check(buildBody(probe, 0.28, 0.30, 0.42, 0.44, 40.0),
               "a body to drag for the Magnet probe");
-        check(buildBody(probe, 0.57, 0.30, 0.73, 0.44, 40.0), "and one to stick to");
+        // The anchor is built with Snap to Grid OFF, deliberately: with snap
+        // on, buildBody's sketch clicks land every face on a 10 mm multiple,
+        // so the flush alignment this probe aims for sat EXACTLY on a grid
+        // step and the non-vacuity check below refused the whole oracle
+        // (the first official run's finding - Magnet's landing and the
+        // grid's were indistinguishable by construction). Raw unprojected
+        // clicks put the anchor's faces at screen-fraction-derived
+        // millimetres no 10 mm grid visits; snap comes back on before the
+        // drag, which is the state the probe's claim is about.
+        if (magnetSnapAction) magnetSnapAction->trigger();
+        settle(100);
+        check(magnetSnapAction && !magnetSnapAction->isChecked(),
+              "Snap to Grid is off for the anchor build");
+        check(buildBody(probe, 0.573, 0.30, 0.731, 0.44, 40.0), "and one to stick to");
+        if (magnetSnapAction) magnetSnapAction->trigger();
+        settle(100);
+        check(magnetSnapAction && magnetSnapAction->isChecked(),
+              "...and back on for the drag itself");
         const auto& magSolids = probe.document().solids();
         const int dragId = magSolids.size() >= 2 ? magSolids[magSolids.size() - 2].id : -1;
         const int anchorId = magSolids.size() >= 2 ? magSolids.back().id : -1;
