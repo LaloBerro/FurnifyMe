@@ -377,10 +377,14 @@ private:
     QString labelText() const;
     QString valueText() const;
     QString hintText() const;
-    void onDragged(int axis, double millimetres);
-    void onRotateDragged(int axis, double degrees);
-    void onScaleDragged(int axis, double factor);
+    // ONE slot for all three tools' drags - the value is millimetres for
+    // Move, degrees for Rotate, a factor for Scale, stored into the field
+    // dragTransform()'s own switch reads for the live tool. Three identical
+    // slots differing only in the assigned field were the branch review's
+    // finding, alongside the reset triple this replaces with resetDrag().
+    void onToolDragged(int axis, double value);
     void onReleased(bool dragged);
+    void resetDrag();
     // The delta the live drag has produced, as one gp_Trsf about the body's
     // own pivot - the ONE derivation updatePreview() and commit() both read,
     // switched on the active tool, so the ghost and the checkpoint can never
@@ -400,4 +404,12 @@ private:
     double myDistance = 0.0;
     double myFactor = 1.0;
     bool myHasPreview = false;
+    // The tool whose gizmo showGizmo() last showed, as an int so this header
+    // needs no MainWindow include (-1 = none yet) - refresh() compares it
+    // against the live bodyTool() so a tool switch LANDING MID-DRAG cancels
+    // the drag before the new tool can reinterpret its value (the Space-
+    // mid-drag finding; the viewport holds the same line in
+    // showBodyGizmo()). Not a stored cursor: purely a change detector, and
+    // the shown gizmo itself is still re-derived on every refresh.
+    int myShownTool = -1;
 };

@@ -466,13 +466,13 @@ MoveTool::MoveTool(MainWindow* window, OcctViewWidget* view)
         // the chip belongs on screen and how big the arms have to be drawn to
         // keep their pixel size.
         connect(myView, &OcctViewWidget::cameraChanged, this, &MoveTool::reposition);
-        connect(myView, &OcctViewWidget::moveDragged, this, &MoveTool::onDragged);
+        connect(myView, &OcctViewWidget::moveDragged, this, &MoveTool::onToolDragged);
         connect(myView, &OcctViewWidget::moveReleased, this, &MoveTool::onReleased);
         // Phase 2: the same chip serves Rotate and Scale. Their releases end
         // exactly as Move's does - one implementation of the commit tail.
-        connect(myView, &OcctViewWidget::rotateDragged, this, &MoveTool::onRotateDragged);
+        connect(myView, &OcctViewWidget::rotateDragged, this, &MoveTool::onToolDragged);
         connect(myView, &OcctViewWidget::rotateReleased, this, &MoveTool::onReleased);
-        connect(myView, &OcctViewWidget::scaleDragged, this, &MoveTool::onScaleDragged);
+        connect(myView, &OcctViewWidget::scaleDragged, this, &MoveTool::onToolDragged);
         connect(myView, &OcctViewWidget::scaleReleased, this, &MoveTool::onReleased);
     }
 }
@@ -502,6 +502,19 @@ void MoveTool::refresh()
         return;
     }
 
+    // The tool changed under a LIVE drag (Space mid-hold): the accumulated
+    // value belongs to the tool that measured it, and dragTransform() reads
+    // the live tool - so the drag is cancelled, chip and ghost included,
+    // before the new tool's gizmo shows. The viewport has already killed
+    // its own half at the switch (MainWindow::setBodyTool() /
+    // showBodyGizmo()); this is the chip's own state, which only this class
+    // can retire.
+    if (myShownTool >= 0 && myShownTool != static_cast<int>(myWindow->bodyTool()) &&
+        myAxis >= 0) {
+        cancel();
+        return;   // cancel() re-shows the new tool's gizmo itself
+    }
+
     // Already up on this body. Re-derive where it stands (a commit replaces
     // the body, and the replacement's bounding box is what the handle belongs
     // on now) and repaint - the chip's value follows the display unit, so a
@@ -510,12 +523,17 @@ void MoveTool::refresh()
     update();
 }
 
-void MoveTool::begin(int bodyId)
+void MoveTool::resetDrag()
 {
-    myBodyId = bodyId;
     myAxis = -1;
     myDistance = 0.0;
     myFactor = 1.0;
+}
+
+void MoveTool::begin(int bodyId)
+{
+    myBodyId = bodyId;
+    resetDrag();
     if (myHasPreview) {
         myView->clearModelingPreview();
         myHasPreview = false;
@@ -532,15 +550,15 @@ void MoveTool::end()
     }
     myHasPreview = false;
     myBodyId = 0;
-    myAxis = -1;
-    myDistance = 0.0;
-    myFactor = 1.0;
+    myShownTool = -1;
+    resetDrag();
     updateVisibility();
 }
 
 void MoveTool::showGizmo()
 {
     if (!myWindow || !myView || myBodyId <= 0) return;
+    myShownTool = static_cast<int>(myWindow->bodyTool());
     gp_Pnt pivot;
     // The SAME bounding-box centre for every tool, through the one shared
     // implementation - see ModelingOps::boundingBoxCentre() for why Space
@@ -575,9 +593,7 @@ void MoveTool::cancel()
     myView->cancelBodyGizmoDrag();
     if (myHasPreview) myView->clearModelingPreview();
     myHasPreview = false;
-    myAxis = -1;
-    myDistance = 0.0;
-    myFactor = 1.0;
+    resetDrag();
     updateVisibility();
     // The selection is deliberately untouched: the body is still selected,
     // the predicate still holds, and the user can simply drag again without
@@ -586,33 +602,18 @@ void MoveTool::cancel()
     showGizmo();
 }
 
-void MoveTool::onDragged(int axis, double millimetres)
+void MoveTool::onToolDragged(int axis, double value)
 {
     if (myBodyId <= 0) return;
     myAxis = axis;
-    myDistance = millimetres;
-    updatePreview();
-    updateVisibility();
-    reposition();
-    update();
-}
-
-void MoveTool::onRotateDragged(int axis, double degrees)
-{
-    if (myBodyId <= 0) return;
-    myAxis = axis;
-    myDistance = degrees;
-    updatePreview();
-    updateVisibility();
-    reposition();
-    update();
-}
-
-void MoveTool::onScaleDragged(int axis, double factor)
-{
-    if (myBodyId <= 0) return;
-    myAxis = axis;
-    myFactor = factor;
+    // The value's meaning is the live tool's - millimetres, degrees, or a
+    // factor - stored into the field dragTransform()'s own switch reads, so
+    // there is exactly one interpretation site rather than three slots
+    // repeating one body.
+    if (myWindow && myWindow->bodyTool() == MainWindow::BodyTool::Scale)
+        myFactor = value;
+    else
+        myDistance = value;
     updatePreview();
     updateVisibility();
     reposition();
@@ -635,9 +636,7 @@ void MoveTool::onReleased(bool dragged)
     if (myHasPreview) myView->clearModelingPreview();
     myHasPreview = false;
     if (committing) commit();
-    myAxis = -1;
-    myDistance = 0.0;
-    myFactor = 1.0;
+    resetDrag();
     updateVisibility();
     // Re-derive where the gizmo stands. After a commit the bounding box IS
     // the dragged position, so this is where it already sat; a drag released

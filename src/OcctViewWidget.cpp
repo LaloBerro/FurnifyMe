@@ -1736,17 +1736,32 @@ bool OcctViewWidget::bevelArrowHead(gp_Pnt& out) const
     return true;
 }
 
-void OcctViewWidget::showMoveGizmo(const gp_Pnt& pivot)
+void OcctViewWidget::showBodyGizmo(GizmoRenderer& which, const gp_Pnt& pivot)
 {
     initializeViewer();
     if (myView.IsNull()) return;
-    // One body gizmo at a time - the same clear showRotateGizmo() and
-    // showScaleGizmo() open with. Its absence HERE was the Space-cycle bug:
-    // the two Phase 2 shows cleared their siblings, cycling back to Move
-    // cleared nothing, and the fourth press wore Move's arrows over Scale's
-    // cubes.
-    bool cleared = myRotateGizmo.clear();
-    cleared = myScaleGizmo.clear() || cleared;
+    // One body gizmo at a time - enforced HERE, in the ONE implementation
+    // all three tools now share. It used to be three hand-kept copies, and
+    // the copy that lacked the sibling clear was the fourth-Space bug; the
+    // fix that pasted the clear back in left the copies standing, so the
+    // branch review retired them.
+    //
+    // A LIVE DRAG on a sibling dies WITH that sibling. Space cycles tools
+    // without ending the press, and a Move drag surviving its own gizmo's
+    // clear kept feeding the accumulated millimetres to whatever tool the
+    // release found - dragTransform() reads the live tool, so the commit
+    // read them as degrees (the branch review's highest finding). Each
+    // cancel keeps cancelMoveDrag()'s release-swallowing contract, and
+    // MainWindow::setBodyTool() holds the same line at the tool switch
+    // itself.
+    if (&which != &myMoveGizmo) cancelMoveDrag();
+    if (&which != &myRotateGizmo) cancelRotateDrag();
+    if (&which != &myScaleGizmo) cancelScaleDrag();
+    bool changed = false;
+    GizmoRenderer* all[] = {&myMoveGizmo, &myRotateGizmo, &myScaleGizmo};
+    for (GizmoRenderer* renderer : all) {
+        if (renderer != &which) changed = renderer->clear() || changed;
+    }
     // The renderer draws; THIS asks for the frame - and only when the gizmo
     // actually moved, which is its own equal-guard's answer. Skipped under
     // myApplyingCamera because applyCameraState()'s own redraw is already
@@ -1763,8 +1778,13 @@ void OcctViewWidget::showMoveGizmo(const gp_Pnt& pivot)
     pose.view = myCamera.viewDirection();
     pose.worldPerPixel = worldPerPixelAt(pivot);
     pose.pixelRatio = devicePixelRatioF();
-    const bool changed = myMoveGizmo.show(pose) || cleared;
+    changed = which.show(pose) || changed;
     if (changed && !myApplyingCamera) scheduleRedraw();
+}
+
+void OcctViewWidget::showMoveGizmo(const gp_Pnt& pivot)
+{
+    showBodyGizmo(myMoveGizmo, pivot);
 }
 
 void OcctViewWidget::clearMoveGizmo()
@@ -1835,38 +1855,12 @@ double OcctViewWidget::worldPerPixelAt(const gp_Pnt& at) const
 
 void OcctViewWidget::showRotateGizmo(const gp_Pnt& pivot)
 {
-    initializeViewer();
-    if (myView.IsNull()) return;
-    // One body gizmo at a time - the split design's law, enforced where the
-    // showing happens rather than trusted to every caller.
-    bool changed = myMoveGizmo.clear();
-    changed = myScaleGizmo.clear() || changed;
-    GizmoPose pose;
-    pose.pivot = pivot;
-    pose.right = myCamera.rightVector();
-    pose.up = myCamera.upVector();
-    pose.view = myCamera.viewDirection();
-    pose.worldPerPixel = worldPerPixelAt(pivot);
-    pose.pixelRatio = devicePixelRatioF();
-    changed = myRotateGizmo.show(pose) || changed;
-    if (changed && !myApplyingCamera) scheduleRedraw();
+    showBodyGizmo(myRotateGizmo, pivot);
 }
 
 void OcctViewWidget::showScaleGizmo(const gp_Pnt& pivot)
 {
-    initializeViewer();
-    if (myView.IsNull()) return;
-    bool changed = myMoveGizmo.clear();
-    changed = myRotateGizmo.clear() || changed;
-    GizmoPose pose;
-    pose.pivot = pivot;
-    pose.right = myCamera.rightVector();
-    pose.up = myCamera.upVector();
-    pose.view = myCamera.viewDirection();
-    pose.worldPerPixel = worldPerPixelAt(pivot);
-    pose.pixelRatio = devicePixelRatioF();
-    changed = myScaleGizmo.show(pose) || changed;
-    if (changed && !myApplyingCamera) scheduleRedraw();
+    showBodyGizmo(myScaleGizmo, pivot);
 }
 
 void OcctViewWidget::clearBodyGizmos()
@@ -1948,21 +1942,37 @@ bool OcctViewWidget::scaleGizmoHandleTip(int axis, gp_Pnt& out) const
     return true;
 }
 
+void OcctViewWidget::cancelRotateDrag()
+{
+    if (!myRotateDrag.active) return;
+    myRotateDrag.active = false;
+    myRotateDrag.moved = false;
+    // cancelMoveDrag()'s own release-swallowing contract: the button is
+    // still down and the coming release belongs to the cancelled gesture.
+    myMoveDragCancelled = true;
+}
+
+void OcctViewWidget::cancelScaleDrag()
+{
+    if (!myScaleDrag.active) return;
+    myScaleDrag.active = false;
+    myScaleDrag.moved = false;
+    myMoveDragCancelled = true;
+}
+
 void OcctViewWidget::cancelBodyGizmoDrag()
 {
     cancelMoveDrag();
-    if (myRotateDrag.active) {
-        myRotateDrag.active = false;
-        myRotateDrag.moved = false;
-        // cancelMoveDrag()'s own release-swallowing contract: the button is
-        // still down and the coming release belongs to the cancelled gesture.
-        myMoveDragCancelled = true;
-    }
-    if (myScaleDrag.active) {
-        myScaleDrag.active = false;
-        myScaleDrag.moved = false;
-        myMoveDragCancelled = true;
-    }
+    cancelRotateDrag();
+    cancelScaleDrag();
+}
+
+bool OcctViewWidget::bodyGizmoHandleAt(const QPoint& logical) const
+{
+    if (myMoveGizmo.isShowing() && moveGizmoAxisAt(logical) >= 0) return true;
+    if (myRotateGizmo.isShowing() && rotateGizmoAxisAt(logical) >= 0) return true;
+    if (myScaleGizmo.isShowing() && scaleGizmoAxisAt(logical) >= 0) return true;
+    return false;
 }
 
 void OcctViewWidget::updateBodyGizmoHover(const QPoint& logical)
@@ -6469,18 +6479,31 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
         // to the picker, so MoveTo below can never light one - this is the
         // screen-space counterpart, and it only rebuilds on enter/leave.
         updateBodyGizmoHover(pos);
-        // Hover highlight. Suppressed while sketching so the in-progress wire
-        // does not fight the highlighter for attention. Suppressed
-        // altogether in viewer-only mode - see the header: no picking means
-        // no hover highlight either.
-        const QPoint device = toDevicePixels(pos);
-        myContext->MoveTo(device.x(), device.y(), myView, Standard_True);
+        // A pixel a gizmo handle claims must not GLOW as anything else: the
+        // press there starts a drag (mousePressEvent's claim), so a face or
+        // edge highlighting under the arm promised a pick that could never
+        // happen - "a click takes exactly what glows", the branch review's
+        // finding. The handle's own brightening (above) is the only hover
+        // truth at that pixel; OCCT's detection is cleared rather than
+        // merely skipped, so an owner lit BEFORE the cursor slid onto the
+        // arm goes out too.
+        if (bodyGizmoHandleAt(pos)) {
+            if (myContext->HasDetected()) myContext->ClearDetected(Standard_False);
+        } else {
+            // Hover highlight. Suppressed while sketching so the in-progress
+            // wire does not fight the highlighter for attention. Suppressed
+            // altogether in viewer-only mode - see the header: no picking
+            // means no hover highlight either.
+            const QPoint device = toDevicePixels(pos);
+            myContext->MoveTo(device.x(), device.y(), myView, Standard_True);
 
-        // Auto's edge-over-face preference, applied BEFORE the owner
-        // comparison below so the repaint is asked for against the owner that
-        // will actually be glowing - and applied on this path and the click's
-        // in exactly the same place, which is what makes the two agree.
-        preferDetectedEdge(pos);
+            // Auto's edge-over-face preference, applied BEFORE the owner
+            // comparison below so the repaint is asked for against the owner
+            // that will actually be glowing - and applied on this path and
+            // the click's in exactly the same place, which is what makes the
+            // two agree.
+            preferDetectedEdge(pos);
+        }
 
         // MoveTo(...,Standard_True) asks OCCT for its own immediate redraw,
         // but that is a hardware-dependent shortcut, not a guarantee: on
@@ -6546,6 +6569,22 @@ void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
     if (myMirrorPlacement.active) return;
 
     const QPoint pos = event->position().toPoint();
+
+    // A double-click on a body-gizmo handle is two GRABS, not a pick: each
+    // press/release pair was already claimed by the handle (the press starts
+    // a drag there, the release ends it). What arrives here is Qt's
+    // synthesized third event, and letting it fall through to the ordinary
+    // pick below ran an EMPTY replace-pick whenever the arm crossed bare
+    // background - deselecting the body out from under its own gizmo, mid-
+    // interaction (the branch review's finding). The trailing release is
+    // swallowed exactly as a landed pick's is. Shift is exempt, preserving
+    // the pinned gesture: a Shift+double-click over an arm still adds the
+    // body underneath.
+    if (!(event->modifiers() & Qt::ShiftModifier) && bodyGizmoHandleAt(pos)) {
+        myAutoBodyPickTaken = true;
+        return;
+    }
+
     const bool onArrow = arrowHit(myPullArrow, pos) || arrowHit(myBevelArrow, pos);
 
     // A second click on either arrow belongs to the arrow, not to whatever the

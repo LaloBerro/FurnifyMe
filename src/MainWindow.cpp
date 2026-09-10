@@ -5363,6 +5363,14 @@ int MainWindow::moveToolBodyId() const
 void MainWindow::setBodyTool(BodyTool tool)
 {
     if (myBodyTool == tool) return;
+    // A LIVE drag dies with the tool that owns its meaning (the branch
+    // review's finding: Space stays enabled mid-drag, dragTransform() reads
+    // the CURRENT tool, so a Move drag's millimetres would be committed as
+    // the new tool's degrees on release). Cancelled at the one choke every
+    // route into a tool change goes through; the viewport's cancel carries
+    // its release-swallowing contract, and OcctViewWidget::showBodyGizmo()
+    // holds the same line from its own side.
+    if (myView && myView->bodyGizmoDragActive()) myView->cancelBodyGizmoDrag();
     myBodyTool = tool;
     // updateActions() ends by emitting appStateChanged(), which is what moves
     // the gizmo: MoveTool::refresh() shows the new tool's renderer and

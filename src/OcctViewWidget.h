@@ -2375,6 +2375,18 @@ private:
     // body-gizmo drags: at most one can be live, so one flag serves.
     bool myMoveDragCancelled = false;
 
+    // The ONE implementation behind showMoveGizmo/showRotateGizmo/
+    // showScaleGizmo: cancels any sibling's live drag (a drag dies with the
+    // tool that owns its meaning - the Space-mid-drag finding), clears the
+    // two siblings, builds the one shared GizmoPose and shows `which`.
+    void showBodyGizmo(GizmoRenderer& which, const gp_Pnt& pivot);
+    // cancelMoveDrag()'s contract for the other two tools - all three are
+    // what cancelBodyGizmoDrag() and showBodyGizmo() compose.
+    void cancelRotateDrag();
+    void cancelScaleDrag();
+    // Whether ANY showing body gizmo's handle claims this pixel - the shared
+    // question the double-click guard and the hover-truth rule both ask.
+    bool bodyGizmoHandleAt(const QPoint& logical) const;
     // The hover half of the gizmo hit tests: which handle the resting cursor
     // is over, pushed into whichever gizmo is showing so it can draw that
     // handle brighter. Runs on the ordinary hover path only - a live drag
