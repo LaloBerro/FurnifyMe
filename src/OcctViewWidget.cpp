@@ -837,7 +837,8 @@ void OcctViewWidget::initializeViewer()
         if (myViewer->InsertLayerAfter(layer, settings, Graphic3d_ZLayerId_Topmost))
             myGizmoLayer = layer;
     }
-    myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane(),
+    myGridRenderer.update(myCamera.state().distance, myCamera.state().target,
+                          myCamera.eyePosition(), gridPlane(),
                           Theme::gridDensity());
     // None of these three are ever driven for a viewer-only widget - nothing
     // calls showPullArrow()/showBevelArrow()/updateEdgeDimension() on one
@@ -3092,7 +3093,8 @@ void OcctViewWidget::setWorkPlane(const gp_Pln& plane)
     // than on the next camera move: locking a face and seeing the grid still
     // lying on the ground is the whole failure this call exists to prevent.
     if (myView.IsNull()) return;
-    myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane(),
+    myGridRenderer.update(myCamera.state().distance, myCamera.state().target,
+                          myCamera.eyePosition(), gridPlane(),
                           Theme::gridDensity());
     scheduleRedraw();
 }
@@ -3839,7 +3841,8 @@ void OcctViewWidget::applyCameraState()
         cam->SetProjectionType(Graphic3d_Camera::Projection_Perspective);
     }
 
-    myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane(),
+    myGridRenderer.update(myCamera.state().distance, myCamera.state().target,
+                          myCamera.eyePosition(), gridPlane(),
                           Theme::gridDensity());
     // Screen-sized things follow the zoom here, before the redraw below
     // carries them. (The body gizmos need no call of their own: MoveTool
@@ -4112,7 +4115,8 @@ void OcctViewWidget::applyTheme()
     // initializeViewer() this runs before attach(), where update() is a no-op
     // and the attach that follows does the first real build.
     myGridRenderer.invalidate();
-    myGridRenderer.update(myCamera.state().distance, myCamera.state().target, gridPlane(),
+    myGridRenderer.update(myCamera.state().distance, myCamera.state().target,
+                          myCamera.eyePosition(), gridPlane(),
                           Theme::gridDensity());
 
     // Milestone 5, item 6: the body boundary lines' width is a live token

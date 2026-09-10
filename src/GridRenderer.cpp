@@ -9,6 +9,7 @@
 #include <Graphic3d_ZLayerSettings.hxx>
 #include <Prs3d_Presentation.hxx>
 #include <PrsMgr_PresentationManager.hxx>
+#include <NCollection_Vec4.hxx>
 #include <Quantity_Color.hxx>
 #include <SelectMgr_Selection.hxx>
 #include <V3d_Viewer.hxx>
@@ -35,13 +36,6 @@ bool sameFrame(const gp_Pln& a, const gp_Pln& b)
            a.Location().Distance(b.Location()) < 1.0e-9;
 }
 
-QColor lerp(const QColor& a, const QColor& b, double t)
-{
-    return QColor::fromRgbF(a.redF() + (b.redF() - a.redF()) * t,
-                            a.greenF() + (b.greenF() - a.greenF()) * t,
-                            a.blueF() + (b.blueF() - a.blueF()) * t);
-}
-
 // A minimal interactive object whose whole presentation is provided by the
 // renderer through a callback-free rebuild: GridRenderer computes the segment
 // arrays and this object draws them.
@@ -63,6 +57,9 @@ public:
             Handle(Graphic3d_Group) group = presentation->NewGroup();
             Handle(Graphic3d_AspectLine3d) aspect =
                 new Graphic3d_AspectLine3d(band.colour, Aspect_TOL_SOLID, band.width);
+            // The vertex colours carry the fade in their ALPHA - blend, or
+            // the alpha is ignored and the rim is a hard edge again.
+            aspect->SetAlphaMode(Graphic3d_AlphaMode_Blend);
             group->SetGroupPrimitivesAspect(aspect);
             group->AddPrimitiveArray(band.segments);
         }
@@ -143,7 +140,7 @@ void GridRenderer::invalidate()
 }
 
 bool GridRenderer::update(double cameraDistance, const gp_Pnt& cameraTarget,
-                          const gp_Pln& plane, double density)
+                          const gp_Pnt& cameraEye, const gp_Pln& plane, double density)
 {
     if (myContext.IsNull()) return false;
 
@@ -182,26 +179,47 @@ bool GridRenderer::update(double cameraDistance, const gp_Pnt& cameraTarget,
                             cameraDistance > myBuiltDistance * 0.8;
     const bool fadeCentred =
         fadeCentre.Distance(myBuiltFadeCentre) < cameraDistance * 0.3;
-    if (sameLevel && samePlane && centered && sized && zoomSteady && fadeCentred)
+    // The grazing fade (below) depends on where the EYE stands over the
+    // plane, so an orbit that walks the eye far enough sideways - or tips
+    // it enough to change its height materially - rebuilds too. The
+    // threshold is generous (an eye-height's worth of travel) so an orbit
+    // rebuilds a handful of times per sweep, not per tick.
+    const bool eyeSteady = myBuiltDistance > 0.0 &&
+                           cameraEye.Distance(myBuiltEye) <
+                               std::max(std::fabs(plane.Distance(cameraEye)),
+                                        cameraDistance * 0.1);
+    if (sameLevel && samePlane && centered && sized && zoomSteady && fadeCentred &&
+        eyeSteady)
         return false;
 
+    Standard_Real eyeU = 0.0, eyeV = 0.0;
+    ElSLib::Parameters(plane, cameraEye, eyeU, eyeV);
     rebuild(step, centerU, centerV, extent, plane, u - centerU, v - centerV,
-            cameraDistance);
+            cameraDistance, eyeU - centerU, eyeV - centerV,
+            std::fabs(plane.Distance(cameraEye)));
     myBuiltStep = step;
     myBuiltCenter = center;
     myBuiltExtent = extent;
     myBuiltPlane = plane;
     myBuiltDistance = cameraDistance;
     myBuiltFadeCentre = fadeCentre;
+    myBuiltEye = cameraEye;
     return true;
 }
 
 void GridRenderer::rebuild(double minorStep, double centerU, double centerV,
                            double extent, const gp_Pln& plane, double fadeCU,
-                           double fadeCV, double cameraDistance)
+                           double fadeCV, double cameraDistance, double eyeU,
+                           double eyeV, double eyeHeight)
 {
     const double major = minorStep * 10.0;
-    const QColor background = Theme::viewport();
+    // No background constant anywhere any more (feedback round six): the
+    // fade is ALPHA now, blended by the GPU against whatever is genuinely
+    // behind each pixel. Fading toward a colour could never be exact -
+    // OCCT's colour pipeline lands "background-coloured" ink slightly off
+    // the true background, and five rounds of rim artifacts (chevrons,
+    // accumulation bands, the majors-only ring, near-rim tails) were all
+    // that one mismatch wearing different clothes.
 
     // Everything below is laid out in the plane's own (u, v) coordinates and
     // mapped into the world here. That single indirection is the whole of
@@ -242,16 +260,46 @@ void GridRenderer::rebuild(double minorStep, double centerU, double centerV,
     // standing past the faded pool - the user's "fade ends and then there
     // is another ring". Scaling the whole band per family lands all three
     // at the background together.
+    // The GRAZING fade, composed with the pool: near the horizon dozens of
+    // faint segments overlap per pixel and their alphas compound back into
+    // visible ink (measured on the diagnostic snapshots - the comb at the
+    // rim), so the grid also dies with distance from the point the EYE
+    // stands over, scaled by the eye's own height. A shallow view loses
+    // the far carpet before it can pile up - which is also how the
+    // reference apps' floors behave - while a steep view's cutoff sits far
+    // outside the pool and changes nothing.
+    const double grazeStart = eyeHeight * 5.0;
+    const double grazeEnd = eyeHeight * 9.0;
     auto fadeAt = [&](double du, double dv, double bandScale) {
         const double d = std::hypot(du - fadeCU, dv - fadeCV);
         const double start = fadeStart * bandScale;
         const double end = fadeEnd * bandScale;
-        const double f = std::clamp((d - start) / std::max(end - start, 1.0), 0.0, 1.0);
+        const double fPool =
+            std::clamp((d - start) / std::max(end - start, 1.0), 0.0, 1.0);
+        const double dEye = std::hypot(du - eyeU, dv - eyeV);
+        const double fGraze = std::clamp(
+            (dEye - grazeStart) / std::max(grazeEnd - grazeStart, 1.0), 0.0, 1.0);
+        const double f = std::max(fPool, fGraze);
         return f * f * (3.0 - 2.0 * f);   // smoothstep
     };
     constexpr double kMinorBand = 1.0;
     constexpr double kMajorBand = 0.85;
     constexpr double kAxisBand = 0.75;
+    // RGBA bytes in LINEAR space: OCCT reads vertex-colour bytes as linear
+    // (raw sRGB bytes exploded the dark greys to near-white - measured on
+    // the diagnostic snapshot), so the token goes through toOcct()'s
+    // sRGB-to-linear conversion first and the bytes carry the linear
+    // values. The RGB is constant per family - only the ALPHA ramps, which
+    // is the whole point: the GPU blends the fade against whatever is
+    // genuinely behind each pixel, exactly.
+    auto faded = [](const QColor& base, double f) {
+        const Quantity_Color linear = toOcct(base);
+        return NCollection_Vec4<uint8_t>(
+            static_cast<uint8_t>(std::lround(linear.Red() * 255.0)),
+            static_cast<uint8_t>(std::lround(linear.Green() * 255.0)),
+            static_cast<uint8_t>(std::lround(linear.Blue() * 255.0)),
+            static_cast<uint8_t>(std::lround((1.0 - f) * 255.0)));
+    };
 
     Handle(GridObject) grid = new GridObject();
 
@@ -266,7 +314,7 @@ void GridRenderer::rebuild(double minorStep, double centerU, double centerV,
     constexpr int kChunks = 96;
     const double chunk = 2.0 * extent / kChunks;
 
-    struct Vertex { gp_Pnt p; Quantity_Color c; };
+    struct Vertex { gp_Pnt p; NCollection_Vec4<uint8_t> c; };
 
     auto build = [&](const std::vector<Vertex>& verts, const QColor& aspect, double width) {
         if (verts.empty()) return;
@@ -302,17 +350,13 @@ void GridRenderer::rebuild(double minorStep, double centerU, double centerV,
             const double a1 = -extent + (i + 1) * chunk;
             const double fv0 = fadeAt(offset, a0, band), fv1 = fadeAt(offset, a1, band);
             if (fv0 < 1.0 || fv1 < 1.0) {
-                out.push_back({at(centerU + offset, centerV + a0),
-                               toOcct(lerp(base, background, fv0))});
-                out.push_back({at(centerU + offset, centerV + a1),
-                               toOcct(lerp(base, background, fv1))});
+                out.push_back({at(centerU + offset, centerV + a0), faded(base, fv0)});
+                out.push_back({at(centerU + offset, centerV + a1), faded(base, fv1)});
             }
             const double fu0 = fadeAt(a0, offset, band), fu1 = fadeAt(a1, offset, band);
             if (fu0 < 1.0 || fu1 < 1.0) {
-                out.push_back({at(centerU + a0, centerV + offset),
-                               toOcct(lerp(base, background, fu0))});
-                out.push_back({at(centerU + a1, centerV + offset),
-                               toOcct(lerp(base, background, fu1))});
+                out.push_back({at(centerU + a0, centerV + offset), faded(base, fu0)});
+                out.push_back({at(centerU + a1, centerV + offset), faded(base, fu1)});
             }
         }
     };
@@ -357,15 +401,11 @@ void GridRenderer::rebuild(double minorStep, double centerU, double centerV,
                     isU ? fadeAt(a1, -centerV, kAxisBand) : fadeAt(-centerU, a1, kAxisBand);
                 if (f0 >= 1.0 && f1 >= 1.0) continue;
                 if (isU) {
-                    verts.push_back({at(centerU + a0, 0.0),
-                                     toOcct(lerp(colour, background, f0))});
-                    verts.push_back({at(centerU + a1, 0.0),
-                                     toOcct(lerp(colour, background, f1))});
+                    verts.push_back({at(centerU + a0, 0.0), faded(colour, f0)});
+                    verts.push_back({at(centerU + a1, 0.0), faded(colour, f1)});
                 } else {
-                    verts.push_back({at(0.0, centerV + a0),
-                                     toOcct(lerp(colour, background, f0))});
-                    verts.push_back({at(0.0, centerV + a1),
-                                     toOcct(lerp(colour, background, f1))});
+                    verts.push_back({at(0.0, centerV + a0), faded(colour, f0)});
+                    verts.push_back({at(0.0, centerV + a1), faded(colour, f1)});
                 }
             }
             build(verts, colour, 1.8);

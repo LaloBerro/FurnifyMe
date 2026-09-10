@@ -38,8 +38,8 @@ public:
     // migration, so a synchronous UpdateCurrentViewer() from an ordinary Qt
     // slot would draw into Qt's framebuffer with no Qt context current and
     // nothing to composite it - see OcctViewWidget::scheduleRedraw().
-    bool update(double cameraDistance, const gp_Pnt& cameraTarget, const gp_Pln& plane,
-                double density);
+    bool update(double cameraDistance, const gp_Pnt& cameraTarget, const gp_Pnt& cameraEye,
+                const gp_Pln& plane, double density);
 
     // Render mode (Milestone 3, item 5) hides the grid outright rather than
     // merely not rebuilding it - the viewport is meant to be the furniture
@@ -134,6 +134,7 @@ private:
     double myBuiltStep = 0.0;
     double myBuiltDistance = 0.0;
     gp_Pnt myBuiltFadeCentre{0.0, 0.0, 0.0};
+    gp_Pnt myBuiltEye{0.0, 0.0, 0.0};
     gp_Pnt myBuiltCenter{0.0, 0.0, 0.0};
     double myBuiltExtent = 0.0;
     // Built in the plane's frame, so a change of plane must force a rebuild
@@ -143,5 +144,5 @@ private:
     // `center` is in `plane`'s own (u, v) coordinates, not in world space.
     void rebuild(double minorStep, double centerU, double centerV, double extent,
                  const gp_Pln& plane, double fadeCU, double fadeCV,
-                 double cameraDistance);
+                 double cameraDistance, double eyeU, double eyeV, double eyeHeight);
 };
