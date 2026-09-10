@@ -5,6 +5,7 @@
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
 #include "SketchController.h"
+#include "KeyClaim.h"
 #include "Theme.h"
 
 #include <QCoreApplication>
@@ -518,58 +519,19 @@ void ExtrudePreview::resizeEvent(QResizeEvent* event)
 
 bool ExtrudePreview::eventFilter(QObject* watched, QEvent* event)
 {
-    // This panel owns Enter and Escape for as long as it is VISIBLE,
-    // regardless of what holds focus - which is the whole fix here. Both
-    // used to arrive only through a filter on this panel's own QLineEdit,
-    // and the field loses focus to the first press anywhere else:
-    // OcctViewWidget is Qt::StrongFocus and every ToolChip became focusable
-    // too. So an RMB orbit - the entire reason a LIVE preview exists, since
-    // the user opens one specifically to judge the shape from another angle
-    // - moved focus off the field, and from that moment Enter and Escape
-    // reached nothing at all. Nor did anything else consume Escape: Cancel
-    // Sketch's own Escape binding is disabled while a preview can be open
-    // (mySketching is false). The panel has no buttons, so the user was left
-    // with a preview shape and no route to either commit or cancel it.
-    //
-    // An application-wide filter, installed while visible and removed when
-    // hidden, is the shape ShortcutSheet already uses for the same reason -
-    // a key press goes to the focus widget, which is emphatically not this
-    // panel. ShortcutOverride is claimed too, so QShortcutMap cannot resolve
-    // a window-context binding (Finish Sketch is on Return, Cancel Sketch on
-    // Escape) before the press ever reaches a widget; both of those happen
-    // to be disabled whenever this panel can be open, but relying on that
-    // accident of enabled-state is exactly what broke once already.
-    if (!isVisible()) return QWidget::eventFilter(watched, event);
-
-    const QEvent::Type type = event->type();
-    if (type != QEvent::ShortcutOverride && type != QEvent::KeyPress)
-        return QWidget::eventFilter(watched, event);
-
-    // Application-wide means every window in this process - gui_smoke builds
-    // several at once - so the panel must only claim keys headed for its own.
-    auto* widget = qobject_cast<QWidget*>(watched);
-    if (!widget || widget->window() != window())
-        return QWidget::eventFilter(watched, event);
-
-    auto* keyEvent = static_cast<QKeyEvent*>(event);
-    // KeypadModifier is what the numeric keypad's own Enter carries; it is
-    // the same key to the user, so it is the same key here.
-    const Qt::KeyboardModifiers mods = keyEvent->modifiers() & ~Qt::KeypadModifier;
-    if (mods != Qt::NoModifier) return QWidget::eventFilter(watched, event);
-
-    const int key = keyEvent->key();
-    const bool commits = key == Qt::Key_Return || key == Qt::Key_Enter;
-    const bool cancels = key == Qt::Key_Escape;
-    if (!commits && !cancels) return QWidget::eventFilter(watched, event);
-
-    if (type == QEvent::ShortcutOverride) {
-        event->accept();   // claims the key back from QShortcutMap
+    // Enter and Escape belong to this chip for as long as it is VISIBLE,
+    // whatever holds focus - the application-wide claim all four gesture
+    // chips share, in its ONE implementation now (KeyClaim.h; the branch
+    // review retired the four hand-kept copies). What the keys DO stays
+    // here: Enter commits, Escape cancels.
+    int key = 0;
+    if (KeyClaim::claim(this, watched, event, /*wantEnter=*/true,
+                        /*exemptLineEdits=*/false, &key)) {
+        if (key == Qt::Key_Escape)
+            cancel();
+        else if (key != 0)
+            commit();
         return true;
     }
-
-    if (commits)
-        commit();
-    else
-        cancel();
-    return true;
+    return QWidget::eventFilter(watched, event);
 }

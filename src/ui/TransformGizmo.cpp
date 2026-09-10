@@ -4,6 +4,8 @@
 #include "Measure.h"
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
+#include "KeyClaim.h"
+#include "GestureChip.h"
 #include "Theme.h"
 
 #include <AIS_DisplayMode.hxx>
@@ -43,14 +45,14 @@
 namespace {
 
 // --- the chip's own card metrics (PullArrow's, one gizmo over) --------------
-constexpr int kPad = 10;
+constexpr int kPad = GestureChip::kPad;
 constexpr int kMinWidth = 128;
-constexpr int kLabelHeight = 18;
+constexpr int kLabelHeight = GestureChip::kLabelHeight;
 constexpr int kValueHeight = 22;
-constexpr int kHintGap = 4;
+constexpr int kHintGap = GestureChip::kHintGap;
 constexpr int kHintHeight = 14;
-constexpr int kChipGap = 18;
-constexpr int kEdgeInset = 8;
+constexpr int kChipGap = GestureChip::kChipGap;
+constexpr int kEdgeInset = GestureChip::kEdgeInset;
 
 // --- the gizmo's own size and proportions, in SCREEN pixels ----------------
 //
@@ -767,20 +769,10 @@ void MoveTool::reposition()
     // clamped when that would run off the right edge - PullArrow's own layout,
     // for the same reason: a value chip that walks away from the handle it
     // labels stops labelling it.
-    int x = at.x() + kChipGap;
-    if (x + width() > myView->width() - kEdgeInset) x = at.x() - kChipGap - width();
-    x = std::clamp(x, kEdgeInset, std::max(kEdgeInset, myView->width() - width() - kEdgeInset));
-    int y = at.y() - height() / 2;
-    y = std::clamp(y, kEdgeInset, std::max(kEdgeInset, myView->height() - height() - kEdgeInset));
-
-    // Whole DEVICE pixels, Theme's position rule - PullArrow's own closing
-    // lines, and for the same reason: a card placed at whatever pixel a
-    // projection returned lands on a fractional device row half the time.
-    const QPoint origin = myView->mapTo(myView->window(), QPoint(0, 0));
-    const double dpr = devicePixelRatioF();
-    x = Theme::snapToDevicePixels(x, origin.x(), dpr);
-    y = Theme::snapToDevicePixels(y, origin.y(), dpr);
-    move(x, y);
+    // Beside the anchor, flipped/clamped/snapped - the ONE
+    // implementation now (GestureChip::placeBeside(); the branch
+    // review retired the three verbatim copies of this block).
+    move(GestureChip::placeBeside(this, myView, at));
 }
 
 void MoveTool::replace()
@@ -862,15 +854,8 @@ void MoveTool::paintEvent(QPaintEvent* /*event*/)
 {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
-
-    const int margin = Theme::surfaceShadowMargin();
-    const QRect body = rect().adjusted(margin, margin, -margin, -margin);
-    Theme::paintSurface(painter, body, 8);
-
-    painter.setFont(Theme::labelFont());
-    painter.setPen(Theme::text());
-    painter.drawText(QRect(body.left() + kPad, body.top(), body.width() - kPad * 2, kLabelHeight),
-                     Qt::AlignVCenter | Qt::AlignLeft, labelText());
+    const QRect body = GestureChip::paintFrame(painter, this);
+    GestureChip::paintLabel(painter, body, labelText());
 
     painter.setFont(Theme::bodyFont());
     painter.setPen(Theme::accent());
@@ -903,36 +888,15 @@ void MoveTool::hideEvent(QHideEvent* event)
 
 bool MoveTool::eventFilter(QObject* watched, QEvent* event)
 {
-    // Escape belongs to this chip for as long as it is VISIBLE, whatever holds
-    // focus - PullArrow::eventFilter()'s own reasoning, and it is not
-    // optional: the press that started this drag went to the viewport, so the
-    // viewport holds focus and a filter on this widget alone would never see
-    // the key.
-    if (!isVisible()) return QWidget::eventFilter(watched, event);
-
-    const QEvent::Type type = event->type();
-    if (type != QEvent::ShortcutOverride && type != QEvent::KeyPress)
-        return QWidget::eventFilter(watched, event);
-
-    // Application-wide means every window in this process - gui_smoke builds
-    // several at once - so only keys headed for this chip's own window count.
-    auto* widget = qobject_cast<QWidget*>(watched);
-    if (!widget || widget->window() != window())
-        return QWidget::eventFilter(watched, event);
-    // Never steal a keystroke out of a focused text field - the mirror chip's
-    // own structural backstop, one gesture over. Escape in a rename field
-    // means "abandon the rename", and this claim must not outrank it.
-    if (qobject_cast<QLineEdit*>(widget)) return QWidget::eventFilter(watched, event);
-
-    auto* keyEvent = static_cast<QKeyEvent*>(event);
-    const Qt::KeyboardModifiers mods = keyEvent->modifiers() & ~Qt::KeypadModifier;
-    if (mods != Qt::NoModifier) return QWidget::eventFilter(watched, event);
-    if (keyEvent->key() != Qt::Key_Escape) return QWidget::eventFilter(watched, event);
-
-    if (type == QEvent::ShortcutOverride) {
-        event->accept();   // claims the key back from QShortcutMap
+    // Escape belongs to this chip while it is VISIBLE, whatever holds focus
+    // - the shared claim (KeyClaim.h), Escape-only since this chip has no
+    // field half, and exempting focused text fields: Escape in a rename
+    // field means "abandon the rename", and this claim must not outrank it.
+    int key = 0;
+    if (KeyClaim::claim(this, watched, event, /*wantEnter=*/false,
+                        /*exemptLineEdits=*/true, &key)) {
+        if (key != 0) cancel();
         return true;
     }
-    cancel();
-    return true;
+    return QWidget::eventFilter(watched, event);
 }

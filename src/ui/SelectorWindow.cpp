@@ -446,25 +446,26 @@ SelectorWindow::SelectorWindow(FurnitureStore& store, QWidget* parent)
             [this] { mySearchDebounce->start(); });
     headerLayout->addWidget(mySearch);
 
+    // CHECKABLE and AUTO-EXCLUSIVE: the active-sort state lives in the
+    // buttons' own checked pair (Qt's radio mechanism), never in a second
+    // bool this window keeps in step - sortedByName() derives from it, the
+    // toggled handler only repaints and re-lays. The branch review's
+    // stored-state finding here, closed with the platform's own idiom.
     mySortRecent = new QPushButton(tr("Recent"), header);
     mySortName = new QPushButton(tr("Name"), header);
     for (QPushButton* chip : {mySortRecent, mySortName}) {
         chip->setFixedHeight(Theme::wholeDevicePixels(28));
         chip->setCursor(Qt::PointingHandCursor);
+        chip->setCheckable(true);
+        chip->setAutoExclusive(true);
         headerLayout->addWidget(chip);
+        connect(chip, &QPushButton::toggled, this, [this](bool on) {
+            if (!on) return;   // the pair fires both halves; one relayout
+            applyTheme();
+            relayoutCards();
+        });
     }
-    connect(mySortRecent, &QPushButton::clicked, this, [this] {
-        if (!mySortByName) return;
-        mySortByName = false;
-        applyTheme();
-        relayoutCards();
-    });
-    connect(mySortName, &QPushButton::clicked, this, [this] {
-        if (mySortByName) return;
-        mySortByName = true;
-        applyTheme();
-        relayoutCards();
-    });
+    mySortRecent->setChecked(true);
 
     outer->addWidget(header);
 
@@ -655,7 +656,7 @@ void SelectorWindow::relayoutCards()
     for (const Card& c : myCards) {
         if (c.widget) ordered.push_back(&c);
     }
-    if (mySortByName) {
+    if (sortedByName()) {
         std::sort(ordered.begin(), ordered.end(), [](const Card* a, const Card* b) {
             const int byName = QString::compare(a->name, b->name, Qt::CaseInsensitive);
             return byName != 0 ? byName < 0 : a->id < b->id;
@@ -744,6 +745,11 @@ QString SelectorWindow::currentFailureText() const
 bool SelectorWindow::failureVisible() const
 {
     return myFailureBanner && myFailureBanner->isVisible();
+}
+
+bool SelectorWindow::sortedByName() const
+{
+    return mySortName && mySortName->isChecked();
 }
 
 int SelectorWindow::visibleCardCount() const
@@ -861,8 +867,8 @@ void SelectorWindow::applyTheme()
             .arg(on ? QStringLiteral(" font-weight: 600;") : QString(),
                  Theme::chipHover().name());
     };
-    if (mySortRecent) mySortRecent->setStyleSheet(chipCss(!mySortByName));
-    if (mySortName) mySortName->setStyleSheet(chipCss(mySortByName));
+    if (mySortRecent) mySortRecent->setStyleSheet(chipCss(!sortedByName()));
+    if (mySortName) mySortName->setStyleSheet(chipCss(sortedByName()));
     for (const Card& c : myCards) {
         if (auto* card = static_cast<SelectorCardWidget*>(c.widget)) card->restyle();
     }

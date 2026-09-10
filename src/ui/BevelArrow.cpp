@@ -4,6 +4,8 @@
 #include "Measure.h"
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
+#include "KeyClaim.h"
+#include "GestureChip.h"
 #include "Theme.h"
 
 #include <TopoDS_Face.hxx>
@@ -28,11 +30,11 @@
 
 namespace {
 
-constexpr int kPad = 10;
+constexpr int kPad = GestureChip::kPad;
 constexpr int kMinWidth = 176;
-constexpr int kLabelHeight = 18;
+constexpr int kLabelHeight = GestureChip::kLabelHeight;
 constexpr int kFieldHeight = 24;
-constexpr int kHintGap = 4;
+constexpr int kHintGap = GestureChip::kHintGap;
 constexpr int kHintHeight = 13;
 constexpr int kHintLineGap = 1;
 // The gap the kind name keeps from the value read out beside it, and the
@@ -41,8 +43,8 @@ constexpr int kHintLineGap = 1;
 constexpr int kKindGap = 12;
 // How far the chip stands off the arrow's projected head, and how far it is
 // kept inside the viewport's own edges.
-constexpr int kChipGap = 18;
-constexpr int kEdgeInset = 8;
+constexpr int kChipGap = GestureChip::kChipGap;
+constexpr int kEdgeInset = GestureChip::kEdgeInset;
 
 }   // namespace
 
@@ -532,31 +534,10 @@ void BevelArrow::reposition()
     // with the arrow it labels. Same honest limit as PullArrow: this does not
     // step around the rail or the drawer, because a value chip that walks away
     // from its arrow stops labelling it.
-    int x = at.x() + kChipGap;
-    if (x + QWidget::width() > myView->width() - kEdgeInset)
-        x = at.x() - kChipGap - QWidget::width();
-    x = std::clamp(x, kEdgeInset,
-                   std::max(kEdgeInset, myView->width() - QWidget::width() - kEdgeInset));
-
-    int y = at.y() - QWidget::height() / 2;
-    y = std::clamp(y, kEdgeInset,
-                   std::max(kEdgeInset, myView->height() - QWidget::height() - kEdgeInset));
-
-    // Whole DEVICE pixels, in the window's own coordinates - the position half
-    // of Theme's rule (the size half is at the constructor). A card placed at
-    // whatever pixel a projection returned lands on a fractional device row
-    // half the time, and the row Qt flushes but the widget's logical clip
-    // cannot reach is black over the GL surface. Snapped last, after the
-    // clamps, and always downward, so it cannot push the card back outside the
-    // viewport edges the clamps just brought it inside.
-    {
-        const QPoint origin = myView->mapTo(myView->window(), QPoint(0, 0));
-        const double dpr = devicePixelRatioF();
-        x = Theme::snapToDevicePixels(x, origin.x(), dpr);
-        y = Theme::snapToDevicePixels(y, origin.y(), dpr);
-    }
-
-    move(x, y);
+    // Beside the anchor, flipped/clamped/snapped - the ONE
+    // implementation now (GestureChip::placeBeside(); the branch
+    // review retired the three verbatim copies of this block).
+    move(GestureChip::placeBeside(this, myView, at));
 }
 
 void BevelArrow::replace()
@@ -592,18 +573,10 @@ void BevelArrow::paintEvent(QPaintEvent* /*event*/)
 {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
-
-    const int margin = Theme::surfaceShadowMargin();
-    const QRect body = rect().adjusted(margin, margin, -margin, -margin);
-    Theme::paintSurface(painter, body, 8);
-
-    if (myInvalid) {
-        QPainterPath outline;
-        outline.addRoundedRect(body, 8, 8);
-        painter.setPen(QPen(Theme::danger(), 1.0));
-        painter.setBrush(Qt::NoBrush);
-        painter.drawPath(outline);
-    }
+    const QRect body = GestureChip::paintFrame(painter, this, myInvalid);
+    // The label ROW stays this card's own (GestureChip::paintLabel() sits at
+    // the body's very top; this card insets its title by kPad and shares the
+    // row with the value) - the frame is the shared half here.
 
     // The kind in words on the left, the value it would build on the right.
     // Both on one row, because they are one statement: "Fillet ... R 20 mm".
@@ -652,40 +625,19 @@ void BevelArrow::resizeEvent(QResizeEvent* event)
 bool BevelArrow::eventFilter(QObject* watched, QEvent* event)
 {
     // Enter and Escape belong to this chip for as long as it is VISIBLE,
-    // whatever holds focus. The whole reason a live preview exists is that the
-    // user orbits to judge the shape before committing - and an orbit is a
-    // press in the viewport, which takes focus off the field. See
-    // ExtrudePreview::eventFilter() for the full account.
-    if (!isVisible()) return QWidget::eventFilter(watched, event);
-
-    const QEvent::Type type = event->type();
-    if (type != QEvent::ShortcutOverride && type != QEvent::KeyPress)
-        return QWidget::eventFilter(watched, event);
-
-    // Application-wide means every window in this process - gui_smoke builds
-    // several at once - so only keys headed for this chip's own window count.
-    auto* widget = qobject_cast<QWidget*>(watched);
-    if (!widget || widget->window() != window())
-        return QWidget::eventFilter(watched, event);
-
-    auto* keyEvent = static_cast<QKeyEvent*>(event);
-    const Qt::KeyboardModifiers mods = keyEvent->modifiers() & ~Qt::KeypadModifier;
-    if (mods != Qt::NoModifier) return QWidget::eventFilter(watched, event);
-
-    const int key = keyEvent->key();
-    const bool commits = key == Qt::Key_Return || key == Qt::Key_Enter;
-    const bool cancels = key == Qt::Key_Escape;
-    if (!commits && !cancels) return QWidget::eventFilter(watched, event);
-
-    if (type == QEvent::ShortcutOverride) {
-        event->accept();   // claims the key back from QShortcutMap
+    // whatever holds focus - the application-wide claim all four gesture
+    // chips share, in its ONE implementation now (KeyClaim.h; the branch
+    // review retired the four hand-kept copies). What the keys DO stays
+    // here: Enter commits, Escape cancels.
+    int key = 0;
+    if (KeyClaim::claim(this, watched, event, /*wantEnter=*/true,
+                        /*exemptLineEdits=*/false, &key)) {
+        if (key == Qt::Key_Escape)
+            cancel();
+        else if (key != 0)
+            commit();
         return true;
     }
-
-    if (commits)
-        commit();
-    else
-        cancel();
-    return true;
+    return QWidget::eventFilter(watched, event);
 }
 

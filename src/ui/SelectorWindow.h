@@ -99,7 +99,10 @@ public:
     QLineEdit* searchField() const { return mySearch; }
     QPushButton* sortRecentButton() const { return mySortRecent; }
     QPushButton* sortNameButton() const { return mySortName; }
-    bool sortedByName() const { return mySortByName; }
+    // DERIVED from the chips' own checked state - the pair is checkable and
+    // auto-exclusive, Qt's own radio mechanism, so there is no second flag
+    // to keep in step (the branch review's stored-state finding here).
+    bool sortedByName() const;
     // How many furniture cards the live search leaves on screen. The New
     // card is not counted - creating is never filtered away.
     int visibleCardCount() const;
@@ -205,7 +208,6 @@ private:
     QTimer* mySearchDebounce = nullptr;
     QPushButton* mySortRecent = nullptr;
     QPushButton* mySortName = nullptr;
-    bool mySortByName = false;
     QLabel* myFailureBanner = nullptr;   // built lazily, see showFailure()
     QTimer* myFailureTimer = nullptr;
     QStringList myShownFailures;         // every message shown this run - see paintedTexts()
