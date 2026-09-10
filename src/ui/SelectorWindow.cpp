@@ -638,6 +638,11 @@ void SelectorWindow::rebuildCards()
 
 void SelectorWindow::relayoutCards()
 {
+    // Guarded against construction order: the sort chips' initial
+    // setChecked() fires toggled -> here from the ctor's HEADER section,
+    // before the grid below it exists (the refactor wave's own segfault,
+    // caught by the merge gate).
+    if (!myGrid) return;
     auto* grid = qobject_cast<QGridLayout*>(myGrid->layout());
     if (!grid) return;
 
