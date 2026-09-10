@@ -745,6 +745,7 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
             settings.value(QStringLiteral("renderMode/fov"), myStartRenderFov).toDouble();
         myStartRenderQuick =
             settings.value(QStringLiteral("renderMode/quick"), false).toBool();
+        myStartGridOn = settings.value(QStringLiteral("view/gridOn"), true).toBool();
         myStartRenderWood =
             settings.value(QStringLiteral("renderMode/wood"), false).toBool();
         myStartRenderWoodName =
@@ -1480,6 +1481,18 @@ void MainWindow::buildActions()
     connect(myDisplayModeAction, &QAction::toggled, this,
             [this](bool on) { myView->setWireframe(on); });
 
+    // View -> Grid (Milestone 5 feedback): the user's own switch for the
+    // work-plane grid, beside Wireframe on the identical checkable
+    // action-drives-the-view contract. Persisted with the other view
+    // settings; render mode's own hide composes underneath it (see
+    // OcctViewWidget::setGridEnabled()).
+    myGridAction = new QAction(tr("&Grid"), this);
+    myGridAction->setCheckable(true);
+    myGridAction->setChecked(true);
+    myGridAction->setToolTip(tr("Show or hide the work-plane grid"));
+    connect(myGridAction, &QAction::toggled, this,
+            [this](bool on) { myView->setGridEnabled(on); });
+
     myFitAction = new QAction(tr("&Fit All"), this);
     myFitAction->setShortcut(QKeySequence(Qt::Key_F));
     myFitAction->setToolTip(tr("Frame every body in the viewport (F)"));
@@ -1640,6 +1653,7 @@ QMenuBar* MainWindow::buildMenus()
     // looking at" - but below the separator, because it changes how the scene
     // is drawn rather than where the camera stands.
     viewMenu->addAction(myOrthographicAction);
+    viewMenu->addAction(myGridAction);
     viewMenu->addSeparator();
     viewMenu->addAction(mySnapAction);
     viewMenu->addAction(myMagnetAction);
@@ -2047,6 +2061,10 @@ void MainWindow::buildOverlay()
     // entry path they have always taken, so a flip re-enters render mode.
     myView->setRenderQuick(myStartRenderQuick);
     myRenderSettingsPanel->setQuick(myStartRenderQuick);
+    // The persisted Grid choice, through the action so the menu check, the
+    // view and the saved value can never disagree - toggled() carries it
+    // into OcctViewWidget::setGridEnabled().
+    if (myGridAction) myGridAction->setChecked(myStartGridOn);
     // The materials folder: one tile per image dropped into
     // <library root>/materials - the same injected root the furniture
     // library itself lives under, so the suite's temp roots simply hold
@@ -2957,6 +2975,8 @@ void MainWindow::writeRenderSettingsNow()
     settings.setValue(QStringLiteral("renderMode/woodPath"), myView->renderTextureFile());
     settings.setValue(QStringLiteral("renderMode/woodTile"), myView->renderWoodTileMm());
     settings.setValue(QStringLiteral("renderMode/woodAngle"), myView->renderWoodAngleDeg());
+    settings.setValue(QStringLiteral("view/gridOn"),
+                      myGridAction ? myGridAction->isChecked() : true);
 }
 
 void MainWindow::closeEvent(QCloseEvent* event)

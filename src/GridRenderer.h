@@ -132,6 +132,8 @@ private:
     // (render mode) asks otherwise.
     bool myVisible = true;
     double myBuiltStep = 0.0;
+    double myBuiltDistance = 0.0;
+    gp_Pnt myBuiltFadeCentre{0.0, 0.0, 0.0};
     gp_Pnt myBuiltCenter{0.0, 0.0, 0.0};
     double myBuiltExtent = 0.0;
     // Built in the plane's frame, so a change of plane must force a rebuild
@@ -140,5 +142,6 @@ private:
 
     // `center` is in `plane`'s own (u, v) coordinates, not in world space.
     void rebuild(double minorStep, double centerU, double centerV, double extent,
-                 const gp_Pln& plane);
+                 const gp_Pln& plane, double fadeCU, double fadeCV,
+                 double cameraDistance);
 };

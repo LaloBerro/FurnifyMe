@@ -504,6 +504,12 @@ public:
     // cancel keeps cancelMoveDrag()'s own release-swallowing contract.
     void cancelBodyGizmoDrag();
 
+    // View -> Grid (Milestone 5 feedback): the user's own switch for the
+    // work-plane grid, composed with render mode's hide - the one writer
+    // stays GridRenderer::setVisible(), reached from exactly two places.
+    void setGridEnabled(bool on);
+    bool gridEnabled() const { return myGridEnabled; }
+
     // TOMBSTONE (custom gizmo, Phase 2 cleanup, 2026-09-08): AIS_Manipulator
     // is deleted from the app. Its API lived here - attachManipulator(),
     // ManipulatorRole, manipulatorFrame(), the active-mode probes,
@@ -2374,6 +2380,8 @@ private:
     // Whether ANY showing body gizmo's handle claims this pixel - the shared
     // question the double-click guard and the hover-truth rule both ask.
     bool bodyGizmoHandleAt(const QPoint& logical) const;
+    bool myGridEnabled = true;   // View -> Grid; see setGridEnabled()
+
     // The hover half of the gizmo hit tests: which handle the resting cursor
     // is over, pushed into whichever gizmo is showing so it can draw that
     // handle brighter. Runs on the ordinary hover path only - a live drag

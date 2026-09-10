@@ -165,24 +165,40 @@ bool GridRenderer::update(double cameraDistance, const gp_Pnt& cameraTarget,
 
     // Rebuild only when something visible changes: level, the plane itself,
     // the camera leaving the middle half of the built area, or extent
-    // changing by >2x.
+    // changing by >2x - PLUS the two terms the pool fade added (user
+    // feedback round two): the fade circle is sized by the CAMERA DISTANCE
+    // and centred on the exact look point, so a zoom that moves the
+    // distance past ~25% or a pan that walks the look point a third of the
+    // distance away has visibly moved the circle and must rebuild, where
+    // the coarse extent/centre terms alone let it lag by up to 2x.
+    const gp_Pnt fadeCentre = ElSLib::Value(u, v, plane);
     const bool sameLevel = (step == myBuiltStep);
     const bool samePlane = sameFrame(myBuiltPlane, plane);
     const bool centered = center.Distance(myBuiltCenter) < myBuiltExtent * 0.25;
     const bool sized = myBuiltExtent > 0.0 &&
                        extent < myBuiltExtent * 2.0 && extent > myBuiltExtent * 0.5;
-    if (sameLevel && samePlane && centered && sized) return false;
+    const bool zoomSteady = myBuiltDistance > 0.0 &&
+                            cameraDistance < myBuiltDistance * 1.25 &&
+                            cameraDistance > myBuiltDistance * 0.8;
+    const bool fadeCentred =
+        fadeCentre.Distance(myBuiltFadeCentre) < cameraDistance * 0.3;
+    if (sameLevel && samePlane && centered && sized && zoomSteady && fadeCentred)
+        return false;
 
-    rebuild(step, centerU, centerV, extent, plane);
+    rebuild(step, centerU, centerV, extent, plane, u - centerU, v - centerV,
+            cameraDistance);
     myBuiltStep = step;
     myBuiltCenter = center;
     myBuiltExtent = extent;
     myBuiltPlane = plane;
+    myBuiltDistance = cameraDistance;
+    myBuiltFadeCentre = fadeCentre;
     return true;
 }
 
 void GridRenderer::rebuild(double minorStep, double centerU, double centerV,
-                           double extent, const gp_Pln& plane)
+                           double extent, const gp_Pln& plane, double fadeCU,
+                           double fadeCV, double cameraDistance)
 {
     const double major = minorStep * 10.0;
     const QColor background = Theme::viewport();
@@ -200,33 +216,40 @@ void GridRenderer::rebuild(double minorStep, double centerU, double centerV,
     // each segment, so the grid dissolves into the background instead, with
     // no boundary left to see.
     //
-    // RADIAL, and tight (Milestone 5 feedback, the user's reference shot):
-    // the grid reads as a POOL of light around the point the camera looks
-    // at, dissolving well inside the built square, the way Blender's and
-    // Shapr3D's floors do - not a sheet that runs to a distant edge. The
-    // old fade was Chebyshev over the full extent (full ink to 40%, gone at
-    // 100%), which put the whole dissolve at 2.4x-6x the camera distance:
-    // off-screen at any working framing, so on screen the grid looked
-    // uniform. Now Euclidean - a pool is round - starting at 0.10 of the
-    // extent (0.6x the camera distance, holding full ink under and around
-    // the furniture) and gone by 0.45 (2.7x the distance). The corners of
-    // the built square fade out entirely before their geometry ends, which
-    // wastes a few segments and shows nothing - the acceptable cost of a
-    // round pool on a square carpet. Colour only interpolates linearly
-    // between a segment's own two endpoints, so each full-length line is
-    // cut into chunks and the falloff bends where the function does rather
-    // than averaging across the whole line.
-    constexpr double kFadeStart = 0.10;
-    constexpr double kFadeEnd = 0.45;
+    // A CIRCLE FROM THE CAMERA (user feedback round two - "a circle, where
+    // a radius from the camera, then start fading"): the pool's radii are
+    // the CAMERA DISTANCE's own multiples, not the built extent's - the
+    // extent is clamped and quantized, so radii tied to it drifted off
+    // proportion at the clamp ends - and the circle is centred on the EXACT
+    // look point (fadeCU/fadeCV, the true target's offset from the snapped
+    // build centre), so it sits precisely under the camera rather than up
+    // to half a major step aside. Full ink to 0.8x the distance, dissolved
+    // by 2.4x, capped inside the built square so the fade always completes
+    // before the geometry ends (a fade that outran the carpet would be the
+    // hard edge all over again). The corners of the built square fade out
+    // entirely before their geometry ends - the acceptable cost of a round
+    // pool on a square carpet. Colour only interpolates linearly between a
+    // segment's own two endpoints, so each full-length line is cut into
+    // chunks and the falloff bends where the function does rather than
+    // averaging across the whole line.
+    const double fadeEnd = std::min(cameraDistance * 2.4, extent);
+    const double fadeStart = std::min(cameraDistance * 0.8, fadeEnd * 0.4);
     auto fadeAt = [&](double du, double dv) {
-        const double d = std::hypot(du, dv) / extent;
-        const double f = std::clamp((d - kFadeStart) / (kFadeEnd - kFadeStart), 0.0, 1.0);
+        const double d = std::hypot(du - fadeCU, dv - fadeCV);
+        const double f =
+            std::clamp((d - fadeStart) / std::max(fadeEnd - fadeStart, 1.0), 0.0, 1.0);
         return f * f * (3.0 - 2.0 * f);   // smoothstep
     };
 
     Handle(GridObject) grid = new GridObject();
 
-    constexpr int kChunks = 12;
+    // 48, up from 12 (the same feedback round): the fade band spans about a
+    // quarter of the built extent, and 12 chunks put only two or three
+    // vertices across it - colour interpolates linearly between a chunk's
+    // endpoints, so the circle read as a polygon. Four times the chunks put
+    // ~10 vertices across the band; the vertex count is still trivial and a
+    // rebuild is occasional by the staleness guard above.
+    constexpr int kChunks = 48;
     const double chunk = 2.0 * extent / kChunks;
 
     struct Vertex { gp_Pnt p; Quantity_Color c; };

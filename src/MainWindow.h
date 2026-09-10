@@ -1525,6 +1525,8 @@ private:
 
     AppBar* myAppBar = nullptr;
     QAction* myAddShapeAction = nullptr;
+    QAction* myGridAction = nullptr;
+    bool myStartGridOn = true;   // view/gridOn, applied once actions exist
     class ShapeFlyout* myShapeFlyout = nullptr;
     // The window controls (Milestone 5, custom title bar): min/max/close as
     // a Card-look row floating at the viewport's top-right, the native

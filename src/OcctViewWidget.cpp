@@ -1803,6 +1803,15 @@ bool OcctViewWidget::moveGizmoArmTip(int axis, gp_Pnt& out) const
     return true;
 }
 
+void OcctViewWidget::setGridEnabled(bool on)
+{
+    if (myGridEnabled == on) return;
+    myGridEnabled = on;
+    // Render mode's own hide owns the presentation while it is active; the
+    // flag is honoured on exit (see setRenderMode()'s restore).
+    if (!myRenderModeActive && myGridRenderer.setVisible(on)) scheduleRedraw();
+}
+
 void OcctViewWidget::cancelMoveDrag()
 {
     if (!myMoveDrag.active) return;
@@ -5851,7 +5860,9 @@ void OcctViewWidget::setRenderMode(bool on)
             myContext->SetDisplayMode(entry.second, mode, Standard_False);
             myContext->Redisplay(entry.second, Standard_False);
         }
-        myGridRenderer.setVisible(true);
+        // The USER's own toggle survives render mode: View -> Grid off
+        // before entering must still be off on the way out.
+        myGridRenderer.setVisible(myGridEnabled);
         // Restored from the one piece of state that says whether it should
         // be up at all (mySymmetryIndicatorOn) - derived, not a remembered
         // "it was showing" flag. Forcing the half-span guard to miss is what
