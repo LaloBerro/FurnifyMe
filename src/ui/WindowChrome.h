@@ -42,6 +42,15 @@ enum class Hit {
     MaxButton,   // the maximize chip - HTMAXBUTTON, so snap layouts appear
 };
 
+// The hit-test both windows actually want, built once: the buttons'
+// maximize chip answers MaxButton; a point inside `dragWidget` whose
+// deepest child is nothing answers Caption (painted marks and wordmarks
+// are mouse-transparent, so childAt() skips them - that is the contract);
+// everything else is Client. All three widgets are QPointer-guarded.
+std::function<Hit(const QPoint&)> captionHitTest(QWidget* topLevel,
+                                                 QWidget* dragWidget,
+                                                 WindowButtons* buttons);
+
 // `hitTest` answers in the top-level widget's own LOGICAL coordinates (a
 // top-level QWidget covers its client area exactly, so widget coords ARE
 // client coords). It is consulted on every WM_NCHITTEST that lands inside

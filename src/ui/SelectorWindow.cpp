@@ -560,18 +560,9 @@ SelectorWindow::SelectorWindow(FurnitureStore& store, QWidget* parent)
     // the window; the maximize chip answers MaxButton so Windows 11's snap
     // layouts appear over it; everything else - the three window controls
     // included - is ordinary client content. See WindowChrome.h.
-    WindowChrome::attach(
-        this,
-        [this](const QPoint& p) -> WindowChrome::Hit {
-            if (myWindowButtons && myWindowButtons->isVisible() &&
-                myWindowButtons->maxChipRectIn(this).contains(p))
-                return WindowChrome::Hit::MaxButton;
-            if (myTitleBar && myTitleBar->geometry().contains(p) &&
-                !myTitleBar->childAt(myTitleBar->mapFrom(this, p)))
-                return WindowChrome::Hit::Caption;
-            return WindowChrome::Hit::Client;
-        },
-        myWindowButtons);
+    WindowChrome::attach(this,
+                         WindowChrome::captionHitTest(this, myTitleBar, myWindowButtons),
+                         myWindowButtons);
 }
 
 QWidget* SelectorWindow::buildCard(const QString& id, const QString& name,

@@ -1,5 +1,6 @@
 #include "WindowChrome.h"
 
+#include "IconSet.h"
 #include "Theme.h"
 
 #include <QCoreApplication>
@@ -47,6 +48,11 @@ ButtonMetrics metricsFor(WindowButtons::Look look)
 WindowButtons::WindowButtons(Look look, QWidget* parent) : QWidget(parent), myLook(look)
 {
     setAttribute(Qt::WA_NoSystemBackground);
+    // Every sibling control over the viewport carries this - CLAUDE.md's
+    // press-must-own-its-release law. Without it, a press on the Card
+    // look's padding (between and around the chips) fell through to the
+    // viewport underneath and re-picked (the branch review's finding).
+    setAttribute(Qt::WA_NoMousePropagation);
     Theme::makeSurfaceTransparent(this);
     setMouseTracking(true);
     const ButtonMetrics m = metricsFor(myLook);
@@ -111,38 +117,31 @@ void WindowButtons::paintEvent(QPaintEvent*)
             painter.fillPath(path, fill);
         }
 
+        // The glyphs live in IconSet - the module for QPainter-drawn
+        // monochrome icons - drawn here through paintGlyph() because their
+        // ink is state-dependent. White over Close's danger fill by the
+        // same ruling the selector's accent-filled button recorded: white
+        // reads against every shipped danger/accent hue, none pastel.
         QColor ink = hovered || pressed ? Theme::text() : Theme::textMuted();
-        if (i == 2 && (hovered || pressed)) ink = QColor(255, 255, 255);
-        QPen pen(ink, 1.2);
-        painter.setPen(pen);
-        painter.setBrush(Qt::NoBrush);
+        if (i == 2 && (hovered || pressed)) ink = QColor(Qt::white);
 
+        const IconSet::Glyph glyph =
+            i == 0 ? IconSet::Glyph::Minimize
+                   : (i == 2 ? IconSet::Glyph::Close
+                             : (window() && window()->isMaximized()
+                                    ? IconSet::Glyph::Restore
+                                    : IconSet::Glyph::Maximize));
+        // A 12x12 box centred in the chip: the 24-grid glyph scaled by 0.5,
+        // pen width pre-compensated so the stroke stays ~1.2 px on screen.
+        const double scale = 0.5;
+        painter.save();
         const QPointF c = QRectF(chip).center();
-        const double g = 4.5;   // glyph half-extent
-        switch (i) {
-            case 0:   // minimize
-                painter.drawLine(QPointF(c.x() - g, c.y()), QPointF(c.x() + g, c.y()));
-                break;
-            case 1:   // maximize / restore
-                if (window() && window()->isMaximized()) {
-                    const QRectF back(c.x() - g + 2.0, c.y() - g, 2.0 * g - 2.0,
-                                      2.0 * g - 2.0);
-                    const QRectF front(c.x() - g, c.y() - g + 2.0, 2.0 * g - 2.0,
-                                       2.0 * g - 2.0);
-                    painter.drawLine(QPointF(back.left(), back.top()),
-                                     QPointF(back.right(), back.top()));
-                    painter.drawLine(QPointF(back.right(), back.top()),
-                                     QPointF(back.right(), back.bottom()));
-                    painter.drawRect(front);
-                } else {
-                    painter.drawRect(QRectF(c.x() - g, c.y() - g, 2.0 * g, 2.0 * g));
-                }
-                break;
-            case 2:   // close
-                painter.drawLine(QPointF(c.x() - g, c.y() - g), QPointF(c.x() + g, c.y() + g));
-                painter.drawLine(QPointF(c.x() - g, c.y() + g), QPointF(c.x() + g, c.y() - g));
-                break;
-        }
+        painter.translate(c.x() - 12.0 * scale, c.y() - 12.0 * scale);
+        painter.scale(scale, scale);
+        painter.setPen(QPen(ink, 1.2 / scale));
+        painter.setBrush(Qt::NoBrush);
+        IconSet::paintGlyph(painter, glyph);
+        painter.restore();
     }
 }
 
@@ -213,6 +212,25 @@ bool WindowButtons::eventFilter(QObject* watched, QEvent* event)
 {
     if (watched == myWatchedWindow && event->type() == QEvent::WindowStateChange) update();
     return QWidget::eventFilter(watched, event);
+}
+
+std::function<WindowChrome::Hit(const QPoint&)> WindowChrome::captionHitTest(
+    QWidget* topLevel, QWidget* dragWidget, WindowButtons* buttons)
+{
+    QPointer<QWidget> top(topLevel);
+    QPointer<QWidget> drag(dragWidget);
+    QPointer<WindowButtons> chips(buttons);
+    return [top, drag, chips](const QPoint& p) -> WindowChrome::Hit {
+        if (!top) return WindowChrome::Hit::Client;
+        if (chips && chips->isVisible() && chips->maxChipRectIn(top).contains(p))
+            return WindowChrome::Hit::MaxButton;
+        if (drag && drag->isVisible()) {
+            const QPoint inDrag = drag->mapFrom(top, p);
+            if (drag->rect().contains(inDrag) && !drag->childAt(inDrag))
+                return WindowChrome::Hit::Caption;
+        }
+        return WindowChrome::Hit::Client;
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -320,10 +338,28 @@ public:
                 // side/bottom borders DefWindowProc still owns correctly.
                 if (pt.x < 0 || pt.y < 0 || pt.x >= client.right || pt.y >= client.bottom)
                     return false;
+                // The window's own answer FIRST - qRound, not a floor: a
+                // truncated division biased every test up-left by up to one
+                // logical pixel at fractional scales, turning a menu bar's
+                // topmost row into pill ground (a drag) and a chip's edge
+                // pixel into its neighbour.
+                const double dpr = w->devicePixelRatioF();
+                const QPoint logical(qRound(pt.x / dpr), qRound(pt.y / dpr));
+                const WindowChrome::Hit hit = entry->hitTest
+                                                  ? entry->hitTest(logical)
+                                                  : WindowChrome::Hit::Client;
                 // The top resize strip, ours to answer now that the caption
                 // is gone (DefWindowProc would call this whole band a
-                // caption from the styles alone).
-                if (!IsZoomed(msg->hwnd) && pt.y < frameYFor(msg->hwnd)) {
+                // caption from the styles alone). CONTROLS OUTRANK IT: the
+                // selector's Flat buttons sit flush at the top edge, and
+                // answering HTTOP first turned the top quarter of Close into
+                // a resize grip (the branch review's finding) - native
+                // Windows 11 caption buttons keep their full height too,
+                // the resize sliver surviving only over inert caption
+                // ground.
+                if (!IsZoomed(msg->hwnd) && pt.y < frameYFor(msg->hwnd) &&
+                    hit != WindowChrome::Hit::Client &&
+                    hit != WindowChrome::Hit::MaxButton) {
                     const int fx = frameXFor(msg->hwnd);
                     if (pt.x < fx)
                         *result = HTTOPLEFT;
@@ -333,11 +369,7 @@ public:
                         *result = HTTOP;
                     return true;
                 }
-                const double dpr = w->devicePixelRatioF();
-                const QPoint logical(static_cast<int>(pt.x / dpr),
-                                     static_cast<int>(pt.y / dpr));
-                switch (entry->hitTest ? entry->hitTest(logical)
-                                       : WindowChrome::Hit::Client) {
+                switch (hit) {
                     case WindowChrome::Hit::Caption: *result = HTCAPTION; return true;
                     case WindowChrome::Hit::MaxButton: *result = HTMAXBUTTON; return true;
                     case WindowChrome::Hit::Client: break;
@@ -396,16 +428,28 @@ public:
 
             case WM_NCRBUTTONUP:
                 // The caption's right-click system menu - one more native
-                // behaviour the custom bar keeps.
+                // behaviour the custom bar keeps. DEFERRED, never run here:
+                // TrackPopupMenu spins a nested modal message loop, and the
+                // maximize chip already taught this file (twice) that
+                // running anything with its own dispatch inside this filter
+                // frame is how it crashes - the filter only records and
+                // posts; every action runs after it returns.
                 if (msg->wParam == HTCAPTION) {
-                    HMENU menu = GetSystemMenu(msg->hwnd, FALSE);
-                    if (menu) {
-                        const int cmd = TrackPopupMenu(
-                            menu, TPM_RETURNCMD | TPM_RIGHTBUTTON,
-                            GET_X_LPARAM(msg->lParam), GET_Y_LPARAM(msg->lParam), 0,
-                            msg->hwnd, nullptr);
-                        if (cmd) PostMessageW(msg->hwnd, WM_SYSCOMMAND, cmd, 0);
-                    }
+                    const HWND hwnd = msg->hwnd;
+                    const int px = GET_X_LPARAM(msg->lParam);
+                    const int py = GET_Y_LPARAM(msg->lParam);
+                    QMetaObject::invokeMethod(
+                        w,
+                        [hwnd, px, py] {
+                            if (!IsWindow(hwnd)) return;
+                            HMENU menu = GetSystemMenu(hwnd, FALSE);
+                            if (!menu) return;
+                            const int cmd =
+                                TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, px,
+                                               py, 0, hwnd, nullptr);
+                            if (cmd) PostMessageW(hwnd, WM_SYSCOMMAND, cmd, 0);
+                        },
+                        Qt::QueuedConnection);
                     *result = 0;
                     return true;
                 }

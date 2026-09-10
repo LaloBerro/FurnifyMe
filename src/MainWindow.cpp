@@ -883,20 +883,9 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // wordmark, the pill's own empty ground - the menu bar is a real child
     // and stays clickable) answers Caption, which buys native drag,
     // double-click-to-maximize and the right-click system menu in one word.
-    WindowChrome::attach(
-        this,
-        [this](const QPoint& p) -> WindowChrome::Hit {
-            if (myWindowButtons && myWindowButtons->isVisible() &&
-                myWindowButtons->maxChipRectIn(this).contains(p))
-                return WindowChrome::Hit::MaxButton;
-            if (myAppBar && myAppBar->isVisible()) {
-                const QPoint inBar = myAppBar->mapFrom(this, p);
-                if (myAppBar->rect().contains(inBar) && !myAppBar->childAt(inBar))
-                    return WindowChrome::Hit::Caption;
-            }
-            return WindowChrome::Hit::Client;
-        },
-        myWindowButtons);
+    WindowChrome::attach(this,
+                         WindowChrome::captionHitTest(this, myAppBar, myWindowButtons),
+                         myWindowButtons);
 
     myShortcutSheet = new ShortcutSheet(this);
     connect(myShortcutsAction, &QAction::triggered, myShortcutSheet, &ShortcutSheet::showSheet);

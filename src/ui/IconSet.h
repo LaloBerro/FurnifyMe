@@ -50,10 +50,24 @@ enum class Glyph {
     Wireframe,   // half-shaded circle - "edges only, see through the rest"
     FitAll,      // frame corners - "frame everything"
     Projection,  // a perspective frustum - "how depth is drawn"
+    // The custom title bar's window controls (Milestone 5) - drawn by
+    // WindowButtons through paintGlyph() below rather than through icon(),
+    // because their ink is STATE-dependent (muted at rest, bright on hover,
+    // white over Close's danger fill) where a QIcon bakes two fixed modes.
+    Minimize,    // a single baseline
+    Maximize,    // an empty frame
+    Restore,     // two offset frames
+    Close,       // the X
 };
 
 // Returns an icon with Normal and Disabled modes already filled in.
 QIcon icon(Glyph glyph);
+
+// Draws `glyph` on its 24x24 design grid with the painter's CURRENT pen -
+// the caller owns colour, width and transform. This is icon()'s own
+// engine, exposed for the one consumer whose ink is state-dependent
+// (WindowButtons); everything else goes through icon().
+void paintGlyph(QPainter& p, Glyph glyph);
 
 // The APPLICATION icon: the wordmark's accent mark on a rounded Graphite tile.
 // The window's title bar and the taskbar show appIcon(); the committed

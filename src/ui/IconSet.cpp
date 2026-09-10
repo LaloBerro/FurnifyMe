@@ -8,9 +8,10 @@
 #include <QPixmapCache>
 
 namespace IconSet {
-namespace {
 
 // All glyphs are drawn on a 24x24 grid and scaled by the pixmap size.
+// Outside the anonymous namespace since Milestone 5's window controls -
+// see the header: it draws with the caller's current pen.
 void paintGlyph(QPainter& p, Glyph glyph)
 {
     switch (glyph) {
@@ -103,8 +104,25 @@ void paintGlyph(QPainter& p, Glyph glyph)
             p.drawLine(20, 19, 4, 19);
             p.drawLine(4, 19, 8, 6);
             break;
+        case Glyph::Minimize:                     // a single baseline
+            p.drawLine(5, 12, 19, 12);
+            break;
+        case Glyph::Maximize:                     // an empty frame
+            p.drawRect(5, 5, 14, 14);
+            break;
+        case Glyph::Restore:                      // two offset frames
+            p.drawLine(8, 5, 19, 5);
+            p.drawLine(19, 5, 19, 16);
+            p.drawRect(5, 8, 11, 11);
+            break;
+        case Glyph::Close:                        // the X
+            p.drawLine(5, 5, 19, 19);
+            p.drawLine(5, 19, 19, 5);
+            break;
     }
 }
+
+namespace {
 
 QPixmap render(Glyph glyph, const QColor& colour, int size)
 {
