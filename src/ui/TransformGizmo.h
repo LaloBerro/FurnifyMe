@@ -140,6 +140,14 @@ protected:
     // zoom (worldPerPixel) and the pivot are the only things that can move it.
     virtual bool viewDependent() const { return true; }
 
+    // The one sizing formula every tool draws from: kArmPixels x the user's
+    // Gizmo size token, converted to world units at the pose's own zoom.
+    // Was re-derived in all three buildStrokes() until the branch review.
+    double armLength() const;
+    // The neutral pivot sphere Move and Scale both wear - one builder, so
+    // the hub cannot drift between tools.
+    void addHub(double armLength);
+
     // One shaded 3D solid, drawn UNLIT in exactly `colour` - Unity's own gizmo
     // look: a flat solid-colour arrow whose 3D-ness shows through perspective
     // and self-occlusion, not through lighting. Unlit also keeps the token
@@ -191,11 +199,45 @@ private:
 //
 // The DRAG is untouched by any of this: an arm drags along its TRUE world
 // axis through armAxis(), and the hit band follows the drawn segment from
-// grab-start to cone tip. Only the three positive handles exist (the negative
-// stub-and-ball handles were removed by the same user ruling); the [axis][1]
-// slots stay in the cache arrays so the shared accessors keep their shape,
-// permanently marked not-drawn.
-class MoveGizmoRenderer : public GizmoRenderer {
+// grab-start to cone tip. Only three handles exist, one per axis - the
+// negative stub-and-ball handles died by user ruling on 2026-09-08, and the
+// branch review retired the [axis][2] arrays, the bool-positive parameters
+// and the six-handle loops that had outlived them as dead plumbing.
+
+// The arm-handle cache Move and Scale share - where the last build actually
+// PUT each handle, so the hit test asks about the drawing on screen rather
+// than about a pose that has moved on since. An intermediate base rather
+// than two verbatim member sets (the review's other finding here): one
+// bounds-checked implementation, and OcctViewWidget's hit test can take
+// either renderer through it.
+class ArmHandleGizmoRenderer : public GizmoRenderer {
+public:
+    // A handle's outer point AS DRAWN - cone tip or cube centre, in world
+    // coordinates. Where the value chip goes, and where the hit test's span
+    // ends.
+    gp_Pnt handleTip(int axis) const;
+    // Where a handle's GRABBABLE span starts, as a fraction of the drawn
+    // arm. The inner third is excluded on purpose: the handles meet at the
+    // hub, so near it the nearest-handle-wins rule would be decided by
+    // sub-pixel noise and the user would get an axis at random.
+    static constexpr double kGrabStartFraction = 0.3;
+    gp_Pnt handleGrabStart(int axis) const;
+    // A handle that is not drawn must not grab - moveGizmoAxisAt() and
+    // scaleGizmoAxisAt() read this as their gate.
+    bool handleDrawn(int axis) const;
+
+protected:
+    // buildStrokes() records what it drew through these.
+    void recordHandle(int axis, const gp_Pnt& grabStart, const gp_Pnt& tip);
+    void clearHandles();
+
+private:
+    gp_Pnt myTip[3];
+    gp_Pnt myGrabStart[3];
+    bool myHandleDrawn[3] = {false, false, false};
+};
+
+class MoveGizmoRenderer : public ArmHandleGizmoRenderer {
 public:
     // World +X / +Y / +Z. The one place the axis-index -> gp_Dir mapping
     // lives, so the drawing, the hit test and the drag cannot each carry a
@@ -210,35 +252,13 @@ public:
     // arm's drag with the other sign, and one line is what makes that true.
     gp_Lin armAxis(int axis) const;
 
-    // A handle's outer point AS DRAWN - the cone's tip, in world coordinates.
-    // Where the value chip goes, and where the hit test's span ends.
-    gp_Pnt handleTip(int axis, bool positive) const;
-    // Where a handle's GRABBABLE span starts, as a fraction of the drawn arm.
-    // The inner third is excluded on purpose: all six handles meet at the hub,
-    // so near it the nearest-handle-wins rule would be decided by sub-pixel
-    // noise and the user would get an axis at random.
-    static constexpr double kGrabStartFraction = 0.3;
-    gp_Pnt handleGrabStart(int axis, bool positive) const;
-    // TRUE for the three positive handles, FALSE always for the negative
-    // slots, which no longer draw anything - and a handle that is not drawn
-    // must not grab (moveGizmoAxisAt() reads this as its gate).
-    bool handleDrawn(int axis, bool positive) const;
-
-    // The positive spellings, kept because most callers only ever mean +axis.
-    gp_Pnt armTip(int axis) const { return handleTip(axis, true); }
-    gp_Pnt armGrabStart(int axis) const { return handleGrabStart(axis, true); }
+    // Convenience spellings some callers read better by.
+    gp_Pnt armTip(int axis) const { return handleTip(axis); }
+    gp_Pnt armGrabStart(int axis) const { return handleGrabStart(axis); }
 
 protected:
     void buildStrokes() override;
     bool viewDependent() const override { return false; }
-
-private:
-    // Where the last build actually PUT each handle, indexed
-    // [axis][positive ? 0 : 1]. Cached so the hit test asks about the drawing
-    // that is on screen rather than about a pose that has moved on since.
-    gp_Pnt myTip[3][2];
-    gp_Pnt myGrabStart[3][2];
-    bool myDrawn[3][2] = {{false, false}, {false, false}, {false, false}};
 };
 
 // The ROTATE tool's presentation (custom gizmo, Phase 2): three unlit tori,
@@ -272,22 +292,11 @@ private:
 // dragging ANY cube scales the whole body uniformly; three handles rather
 // than one centre cube because a handle out on an arm gives the drag a line
 // to be measured along, which a centre grab cannot.
-class ScaleGizmoRenderer : public GizmoRenderer {
+class ScaleGizmoRenderer : public ArmHandleGizmoRenderer {
 public:
-    // The same handle accessors MoveGizmoRenderer exposes, so
-    // OcctViewWidget's one screen-space hit test serves both gizmos.
-    gp_Pnt handleTip(int axis, bool positive) const;
-    gp_Pnt handleGrabStart(int axis, bool positive) const;
-    bool handleDrawn(int axis, bool positive) const;
-
 protected:
     void buildStrokes() override;
     bool viewDependent() const override { return false; }
-
-private:
-    gp_Pnt myTip[3][2];
-    gp_Pnt myGrabStart[3][2];
-    bool myDrawn[3][2] = {{false, false}, {false, false}, {false, false}};
 };
 
 // The Qt half of ALL THREE body-tool gestures since Phase 2 - the value chip,

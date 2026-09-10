@@ -333,14 +333,19 @@ protected:
     {
         QPainter painter(this);
         painter.setRenderHint(QPainter::Antialiasing, true);
-        QPainterPath path;
-        path.addRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5), kCardRadius,
-                            kCardRadius);
-        if (underMouse() || isDown()) painter.fillPath(path, Theme::chipHover());
-        QPen pen(underMouse() ? Theme::accent() : Theme::border(), 1.0);
-        pen.setStyle(Qt::DashLine);
-        painter.setPen(pen);
-        painter.drawPath(path);
+        if (underMouse() || isDown()) {
+            QPainterPath path;
+            path.addRoundedRect(QRectF(rect()).adjusted(0.5, 0.5, -0.5, -0.5),
+                                kCardRadius, kCardRadius);
+            painter.fillPath(path, Theme::chipHover());
+        }
+        // Through drawCrispBorder - the ONE half-pixel-alignment idiom (its
+        // own header records the three local copies it retired; this card
+        // briefly grew a fourth, the branch review's find) - with the
+        // dashed style the accent outline wants.
+        Theme::drawCrispBorder(painter, QRectF(rect()),
+                               underMouse() ? Theme::accent() : Theme::border(),
+                               kCardRadius, 1.0, Qt::DashLine);
         painter.setPen(Theme::accent());
         painter.setFont(Theme::bodyFont());
         painter.drawText(rect(), Qt::AlignCenter, text());

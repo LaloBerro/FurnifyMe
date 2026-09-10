@@ -472,7 +472,7 @@ QEasingCurve motionCurve() { return QEasingCurve(QEasingCurve::OutCubic); }
 int surfaceShadowMargin() { return 0; }
 
 void drawCrispBorder(QPainter& p, const QRectF& rect, const QColor& colour,
-                     double radius, double width)
+                     double radius, double width, Qt::PenStyle style)
 {
     // Half the pen width inward, so the stroke's OUTER edge lands on the
     // outer edge of `rect` and the stroke itself covers whole pixels. The
@@ -486,7 +486,7 @@ void drawCrispBorder(QPainter& p, const QRectF& rect, const QColor& colour,
 
     p.save();
     p.setRenderHint(QPainter::Antialiasing, true);
-    p.setPen(QPen(colour, width));
+    p.setPen(QPen(colour, width, style));
     p.setBrush(Qt::NoBrush);
     p.drawPath(path);
     p.restore();

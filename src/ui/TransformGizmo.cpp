@@ -280,22 +280,51 @@ gp_Lin MoveGizmoRenderer::armAxis(int axis) const
     return gp_Lin(pivot(), armDirection(axis));
 }
 
-gp_Pnt MoveGizmoRenderer::handleTip(int axis, bool positive) const
+double GizmoRenderer::armLength() const
 {
-    if (axis < 0 || axis > 2) return pivot();
-    return myTip[axis][positive ? 0 : 1];
+    return std::max(kArmPixels * Theme::gizmoScale() * worldPerPixel(), 1.0e-9);
 }
 
-gp_Pnt MoveGizmoRenderer::handleGrabStart(int axis, bool positive) const
+void GizmoRenderer::addHub(double armLength)
 {
-    if (axis < 0 || axis > 2) return pivot();
-    return myGrabStart[axis][positive ? 0 : 1];
+    TopoDS_Shape hub =
+        BRepPrimAPI_MakeSphere(pivot(), armLength * (kHubSpherePx / kArmPixels)).Shape();
+    BRepMesh_IncrementalMesh(hub, armLength * kMeshDeflection, Standard_False,
+                             kMeshAngleRad, Standard_True);
+    addSolid(hub, kHubColour);
 }
 
-bool MoveGizmoRenderer::handleDrawn(int axis, bool positive) const
+// --- the shared arm-handle cache --------------------------------------------
+
+gp_Pnt ArmHandleGizmoRenderer::handleTip(int axis) const
+{
+    if (axis < 0 || axis > 2) return pivot();
+    return myTip[axis];
+}
+
+gp_Pnt ArmHandleGizmoRenderer::handleGrabStart(int axis) const
+{
+    if (axis < 0 || axis > 2) return pivot();
+    return myGrabStart[axis];
+}
+
+bool ArmHandleGizmoRenderer::handleDrawn(int axis) const
 {
     if (axis < 0 || axis > 2) return false;
-    return myDrawn[axis][positive ? 0 : 1];
+    return myHandleDrawn[axis];
+}
+
+void ArmHandleGizmoRenderer::recordHandle(int axis, const gp_Pnt& grabStart, const gp_Pnt& tip)
+{
+    if (axis < 0 || axis > 2) return;
+    myGrabStart[axis] = grabStart;
+    myTip[axis] = tip;
+    myHandleDrawn[axis] = true;
+}
+
+void ArmHandleGizmoRenderer::clearHandles()
+{
+    for (bool& drawn : myHandleDrawn) drawn = false;
 }
 
 void MoveGizmoRenderer::buildStrokes()
@@ -307,36 +336,23 @@ void MoveGizmoRenderer::buildStrokes()
     // live gizmo through reapplyTheme()'s forced rebuild. No device-pixel
     // term anywhere: everything here is 3D geometry, and geometry is sized in
     // logical pixels like every other screen-sized thing in the scene.
-    const double armLength =
-        std::max(kArmPixels * Theme::gizmoScale() * worldPerPixel(), 1.0e-9);
+    const double arm = armLength();
+    clearHandles();
 
     for (int axis = 0; axis < 3; ++axis) {
         const gp_Dir dir = armDirection(axis);
         const gp_Vec along(dir);
-
-        // The handle caches, in WORLD coordinates - the hit test projects
-        // them to the screen itself. Only the positive handles exist (user
-        // ruling, 2026-09-08); a handle that is not drawn must not grab, and
-        // handleDrawn() is the one gate moveGizmoAxisAt() reads.
-        myTip[axis][0] = pivot().Translated(along * armLength);
-        myGrabStart[axis][0] =
-            pivot().Translated(along * (armLength * kGrabStartFraction));
-        myDrawn[axis][0] = true;
-        myTip[axis][1] = pivot();
-        myGrabStart[axis][1] = pivot();
-        myDrawn[axis][1] = false;
-
-        addSolid(makeArrow(pivot(), dir, armLength), axisColour(axis, hoveredAxis()));
+        // The handle cache, in WORLD coordinates - the hit test projects
+        // them to the screen itself.
+        recordHandle(axis, pivot().Translated(along * (arm * kGrabStartFraction)),
+                     pivot().Translated(along * arm));
+        addSolid(makeArrow(pivot(), dir, arm), axisColour(axis, hoveredAxis()));
     }
 
     // The pivot sphere - Blender's own centre handle, and the reason there is
     // no flat disc left to crop: a sphere is a perfect circle from every
-    // angle. Meshed here because makeArrow() only meshes what it builds.
-    TopoDS_Shape hub =
-        BRepPrimAPI_MakeSphere(pivot(), armLength * (kHubSpherePx / kArmPixels)).Shape();
-    BRepMesh_IncrementalMesh(hub, armLength * kMeshDeflection, Standard_False, kMeshAngleRad,
-                             Standard_True);
-    addSolid(hub, kHubColour);
+    // angle.
+    addHub(arm);
 }
 
 // --- the Rotate tool's presentation -----------------------------------------
@@ -355,17 +371,16 @@ gp_Pnt RotateGizmoRenderer::ringPoint(int axis, double angleRad) const
 
 void RotateGizmoRenderer::buildStrokes()
 {
-    const double armLength =
-        std::max(kArmPixels * Theme::gizmoScale() * worldPerPixel(), 1.0e-9);
-    myRadius = armLength;
-    const double tube = armLength * (kRingTubePx / kArmPixels);
+    const double arm = armLength();
+    myRadius = arm;
+    const double tube = arm * (kRingTubePx / kArmPixels);
 
     for (int axis = 0; axis < 3; ++axis) {
         TopoDS_Shape ring =
             BRepPrimAPI_MakeTorus(gp_Ax2(pivot(), MoveGizmoRenderer::armDirection(axis)),
                                   myRadius, tube)
                 .Shape();
-        BRepMesh_IncrementalMesh(ring, armLength * kMeshDeflection, Standard_False,
+        BRepMesh_IncrementalMesh(ring, arm * kMeshDeflection, Standard_False,
                                  kMeshAngleRad, Standard_True);
         addSolid(ring, axisColour(axis, hoveredAxis()));
     }
@@ -373,70 +388,42 @@ void RotateGizmoRenderer::buildStrokes()
 
 // --- the Scale tool's presentation ------------------------------------------
 
-gp_Pnt ScaleGizmoRenderer::handleTip(int axis, bool positive) const
-{
-    if (axis < 0 || axis > 2) return pivot();
-    return myTip[axis][positive ? 0 : 1];
-}
-
-gp_Pnt ScaleGizmoRenderer::handleGrabStart(int axis, bool positive) const
-{
-    if (axis < 0 || axis > 2) return pivot();
-    return myGrabStart[axis][positive ? 0 : 1];
-}
-
-bool ScaleGizmoRenderer::handleDrawn(int axis, bool positive) const
-{
-    if (axis < 0 || axis > 2) return false;
-    return myDrawn[axis][positive ? 0 : 1];
-}
-
 void ScaleGizmoRenderer::buildStrokes()
 {
-    const double armLength =
-        std::max(kArmPixels * Theme::gizmoScale() * worldPerPixel(), 1.0e-9);
-    const double cubeHalf = armLength * (kCubeHalfPx / kArmPixels);
-    const double shaftRadius = armLength * (kShaftRadiusPx / kArmPixels);
+    const double arm = armLength();
+    const double cubeHalf = arm * (kCubeHalfPx / kArmPixels);
+    const double shaftRadius = arm * (kShaftRadiusPx / kArmPixels);
+    clearHandles();
 
     for (int axis = 0; axis < 3; ++axis) {
         const gp_Dir dir = MoveGizmoRenderer::armDirection(axis);
         const gp_Vec along(dir);
 
-        // The cube's CENTRE is the handle tip, so the chip stands on the cube
-        // rather than past it. Same positive-only handle set as the Move
-        // gizmo, same caches, same hit-test gate.
-        const gp_Pnt tip = pivot().Translated(along * armLength);
-        myTip[axis][0] = tip;
-        myGrabStart[axis][0] =
-            pivot().Translated(along * (armLength * MoveGizmoRenderer::kGrabStartFraction));
-        myDrawn[axis][0] = true;
-        myTip[axis][1] = pivot();
-        myGrabStart[axis][1] = pivot();
-        myDrawn[axis][1] = false;
+        // The cube's CENTRE is the handle tip, so the chip stands on the
+        // cube rather than past it. Same cache, same hit-test gate as Move.
+        const gp_Pnt tip = pivot().Translated(along * arm);
+        recordHandle(axis, pivot().Translated(along * (arm * kGrabStartFraction)), tip);
 
         BRep_Builder builder;
-        TopoDS_Compound arm;
-        builder.MakeCompound(arm);
-        builder.Add(arm, BRepPrimAPI_MakeCylinder(gp_Ax2(pivot(), dir), shaftRadius,
-                                                  std::max(armLength - cubeHalf, 1.0e-9))
-                             .Shape());
+        TopoDS_Compound armShape;
+        builder.MakeCompound(armShape);
+        builder.Add(armShape, BRepPrimAPI_MakeCylinder(gp_Ax2(pivot(), dir), shaftRadius,
+                                                       std::max(arm - cubeHalf, 1.0e-9))
+                                  .Shape());
         // Axis-aligned is arm-aligned here: the arms run along the world
         // axes, so a world-aligned box reads as a cube square on its arm -
         // Unity's own scale tip.
-        builder.Add(arm, BRepPrimAPI_MakeBox(gp_Pnt(tip.X() - cubeHalf, tip.Y() - cubeHalf,
-                                                    tip.Z() - cubeHalf),
-                                             2.0 * cubeHalf, 2.0 * cubeHalf, 2.0 * cubeHalf)
-                             .Shape());
-        BRepMesh_IncrementalMesh(arm, armLength * kMeshDeflection, Standard_False,
+        builder.Add(armShape,
+                    BRepPrimAPI_MakeBox(gp_Pnt(tip.X() - cubeHalf, tip.Y() - cubeHalf,
+                                               tip.Z() - cubeHalf),
+                                        2.0 * cubeHalf, 2.0 * cubeHalf, 2.0 * cubeHalf)
+                        .Shape());
+        BRepMesh_IncrementalMesh(armShape, arm * kMeshDeflection, Standard_False,
                                  kMeshAngleRad, Standard_True);
-        addSolid(arm, axisColour(axis, hoveredAxis()));
+        addSolid(armShape, axisColour(axis, hoveredAxis()));
     }
 
-    TopoDS_Shape hub =
-        BRepPrimAPI_MakeSphere(pivot(), armLength * (kHubSpherePx / kArmPixels)).Shape();
-    BRepMesh_IncrementalMesh(hub, armLength * kMeshDeflection, Standard_False, kMeshAngleRad,
-                             Standard_True);
-    addSolid(hub, kHubColour);
+    addHub(arm);
 }
 
 // --- the value chip ---------------------------------------------------------
@@ -771,7 +758,7 @@ void MoveTool::reposition()
             haveAnchor = myView->scaleGizmoHandleTip(myAxis, tip);
             break;
         default:
-            haveAnchor = myView->moveGizmoHandleTip(myAxis, myView->moveDragPositive(), tip);
+            haveAnchor = myView->moveGizmoArmTip(myAxis, tip);
             break;
     }
     if (!haveAnchor || !myView->projectToScreen(tip, at)) return;

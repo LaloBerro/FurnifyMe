@@ -1798,18 +1798,8 @@ void OcctViewWidget::clearMoveGizmo()
 
 bool OcctViewWidget::moveGizmoArmTip(int axis, gp_Pnt& out) const
 {
-    return moveGizmoHandleTip(axis, true, out);
-}
-
-bool OcctViewWidget::moveGizmoHandleDrawn(int axis, bool positive) const
-{
-    return myMoveGizmo.isShowing() && myMoveGizmo.handleDrawn(axis, positive);
-}
-
-bool OcctViewWidget::moveGizmoHandleTip(int axis, bool positive, gp_Pnt& out) const
-{
     if (!myMoveGizmo.isShowing() || axis < 0 || axis > 2) return false;
-    out = myMoveGizmo.handleTip(axis, positive);
+    out = myMoveGizmo.handleTip(axis);
     return true;
 }
 
@@ -1919,9 +1909,9 @@ int OcctViewWidget::scaleGizmoAxisAt(const QPoint& point) const
     int best = -1;
     double bestDistance = kHandleGrabPx;
     for (int axis = 0; axis < 3; ++axis) {
-        if (!myScaleGizmo.handleDrawn(axis, true)) continue;
-        const double distance = segmentPixelDistance(myScaleGizmo.handleGrabStart(axis, true),
-                                                     myScaleGizmo.handleTip(axis, true), point);
+        if (!myScaleGizmo.handleDrawn(axis)) continue;
+        const double distance = segmentPixelDistance(myScaleGizmo.handleGrabStart(axis),
+                                                     myScaleGizmo.handleTip(axis), point);
         if (distance < 0.0 || distance > bestDistance) continue;
         best = axis;
         bestDistance = distance;
@@ -1939,7 +1929,7 @@ bool OcctViewWidget::rotateDragAnchor(gp_Pnt& out) const
 bool OcctViewWidget::scaleGizmoHandleTip(int axis, gp_Pnt& out) const
 {
     if (!myScaleGizmo.isShowing() || axis < 0 || axis > 2) return false;
-    out = myScaleGizmo.handleTip(axis, true);
+    out = myScaleGizmo.handleTip(axis);
     return true;
 }
 
@@ -2042,48 +2032,38 @@ bool OcctViewWidget::arrowHit(const PullArrowRenderer& arrow, const QPoint& poin
     return distance >= 0.0 && distance <= kHandleGrabPx;
 }
 
-int OcctViewWidget::moveGizmoAxisAt(const QPoint& point, bool* positive) const
+int OcctViewWidget::moveGizmoAxisAt(const QPoint& point) const
 {
-    if (positive) *positive = true;
     if (!myMoveGizmo.isShowing()) return -1;
 
-    // SIX handles, not three: the drawing puts a cone on each positive tip and
-    // a hollow ball on each negative one, and a ball a user can see and cannot
-    // grab is a control that lies about itself. Both ends of an arm resolve to
-    // the same axis and the same world line - only the sign of the resulting
-    // distance differs - so this stays one span per direction rather than a
-    // second gesture.
+    // THREE handles, one per axis - the negative stub-and-ball handles died
+    // by user ruling (2026-09-08), and the six-handle loop, its bool-
+    // positive out-parameter and the stored drag sign all outlived them as
+    // dead plumbing until the branch review retired them.
     //
-    // NEAREST handle wins, not the first one within tolerance: all six meet at
-    // the hub, so on any camera several of them cross near the middle of the
-    // screen and a first-match rule would hand the user whichever happens to
-    // be checked first.
+    // NEAREST handle wins, not the first one within tolerance: the arms
+    // meet at the hub, so on any camera several cross near the middle of
+    // the screen and a first-match rule would hand the user whichever
+    // happens to be checked first.
     //
-    // The tested span starts a third of the way out (handleGrabStart()) for the
-    // other half of the same problem: close to the hub every handle is within
-    // tolerance of every pixel, and "nearest" there is decided by sub-pixel
-    // noise. The inner third is dead, which is what makes the answer stable.
+    // The tested span starts a third of the way out (handleGrabStart()) for
+    // the other half of the same problem: close to the hub every handle is
+    // within tolerance of every pixel, and "nearest" there is decided by
+    // sub-pixel noise. The inner third is dead, which is what makes the
+    // answer stable.
     int best = -1;
-    bool bestPositive = true;
     double bestDistance = kHandleGrabPx;
     for (int axis = 0; axis < 3; ++axis) {
-        for (int side = 0; side < 2; ++side) {
-            const bool plus = side == 0;
-            // A handle whose tip falls inside the hub is not drawn and is not
-            // grabbable - see MoveGizmoRenderer::handleDrawn(). Without this
-            // an axis pointing at the eye collapses onto the hub and all six
-            // handles claim every press on it.
-            if (!myMoveGizmo.handleDrawn(axis, plus)) continue;
-            const double distance =
-                segmentPixelDistance(myMoveGizmo.handleGrabStart(axis, plus),
-                                     myMoveGizmo.handleTip(axis, plus), point);
-            if (distance < 0.0 || distance > bestDistance) continue;
-            best = axis;
-            bestPositive = plus;
-            bestDistance = distance;
-        }
+        // A handle whose tip falls inside the hub is not drawn and is not
+        // grabbable. Without this an axis pointing at the eye collapses
+        // onto the hub and every handle claims every press on it.
+        if (!myMoveGizmo.handleDrawn(axis)) continue;
+        const double distance = segmentPixelDistance(myMoveGizmo.handleGrabStart(axis),
+                                                     myMoveGizmo.handleTip(axis), point);
+        if (distance < 0.0 || distance > bestDistance) continue;
+        best = axis;
+        bestDistance = distance;
     }
-    if (positive) *positive = bestPositive;
     return best;
 }
 
@@ -6073,11 +6053,9 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
     // exactly where a user aims to lock one.
     if (event->button() == Qt::LeftButton && !mySketchMode && !additivePress && !lockGesture &&
         myMoveGizmo.isShowing()) {
-        bool positive = true;
-        const int axis = moveGizmoAxisAt(myLastPos, &positive);
+        const int axis = moveGizmoAxisAt(myLastPos);
         if (axis >= 0) {
             myMoveDragAxis = axis;
-            myMoveDragPositive = positive;
             myMoveDragCancelled = false;
             // ONE line for both ends of an arm, FROZEN here - the gizmo
             // follows the drag, so its live armAxis() moves with it and
@@ -6141,7 +6119,7 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
             myScaleDrag.line =
                 gp_Lin(myScaleGizmo.pivot(), MoveGizmoRenderer::armDirection(axis));
             myScaleDrag.baseLength = std::max(
-                myScaleGizmo.pivot().Distance(myScaleGizmo.handleTip(axis, true)), 1.0e-9);
+                myScaleGizmo.pivot().Distance(myScaleGizmo.handleTip(axis)), 1.0e-9);
             myMoveDragCancelled = false;
             gp_Lin ray;
             myScaleDrag.hasPressParam =

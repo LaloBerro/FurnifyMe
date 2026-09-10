@@ -326,7 +326,8 @@ QEasingCurve motionCurve();   // OutCubic
 // Each was being fixed with a different local idiom. Offsetting the path
 // inward by half the pen width is the whole rule, and it lives here now.
 void drawCrispBorder(QPainter& p, const QRectF& rect, const QColor& colour,
-                     double radius, double width = 1.0);
+                     double radius, double width = 1.0,
+                     Qt::PenStyle style = Qt::SolidLine);
 
 // The same rule for a straight 1px line: whichever coordinate is constant is
 // snapped to a half-integer so the line fills exactly one row or column.

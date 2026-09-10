@@ -26373,11 +26373,13 @@ int main(int argc, char* argv[])
 
         // --- the negative handles are gone, drawing and hit test alike -----
         {
-            for (int axis = 0; axis < 3; ++axis)
-                check(!gv->moveGizmoHandleDrawn(axis, false),
-                      QStringLiteral("no negative handle is drawn on axis %1 - the "
-                                     "stub-and-ball half died with the card copy")
-                          .arg(axis));
+            // The per-axis "is the negative handle drawn?" probe died with
+            // the API it asked: the branch review flattened the [axis][2]
+            // cache, the bool-positive parameters and the stored drag sign
+            // away, so a negative handle has no representation left to even
+            // lie from - retirement by construction, which is stronger than
+            // the flag this used to read. The BEHAVIOUR stays pinned below:
+            // a press on the negative side must grab nothing.
             gp_Pnt tip;
             QPoint negAt;
             const gp_Pnt pivot = gv->moveGizmoPivot();
