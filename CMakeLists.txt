@@ -124,6 +124,7 @@ if(FURNIFYME_BUILD_APP)
       src/ui/ToolCluster.cpp
       src/ui/ViewportOverlay.cpp
       src/ui/ItemsPanel.cpp
+      src/ui/ShapeFlyout.cpp
       src/ui/ShortcutSheet.cpp
       src/ui/WalkthroughPanel.cpp
       src/ui/HintBalloon.cpp

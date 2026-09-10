@@ -29,7 +29,11 @@
 #include <BRepGProp.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepPrimAPI_MakeCone.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
 #include <BRepPrimAPI_MakePrism.hxx>
+#include <BRepPrimAPI_MakeSphere.hxx>
+#include <BRepPrimAPI_MakeWedge.hxx>
 #include <GProp_GProps.hxx>
 #include <GeomAPI_ProjectPointOnSurf.hxx>
 #include <GeomAbs_CurveType.hxx>
@@ -888,6 +892,45 @@ bool boundingBoxStraddlesPlane(const TopoDS_Shape& shape, const gp_Pln& plane, d
         }
     }
     return minDist < -tolerance && maxDist > tolerance;
+}
+
+TopoDS_Shape makePrimitive(PrimitiveKind kind, const gp_Pnt& base)
+{
+    // Every builder gets an axis frame whose origin is the shape's own
+    // ground-contact point (or, for the sphere, its centre lifted by one
+    // radius), so "standing on z = base.Z(), centred on base" holds by
+    // construction for all six - the header's contract, asserted by the
+    // headless test per kind.
+    switch (kind) {
+        case PrimitiveKind::Box:
+            return BRepPrimAPI_MakeBox(gp_Pnt(base.X() - 200.0, base.Y() - 200.0, base.Z()),
+                                       400.0, 400.0, 400.0)
+                .Shape();
+        case PrimitiveKind::Cylinder:
+            return BRepPrimAPI_MakeCylinder(gp_Ax2(base, gp_Dir(0.0, 0.0, 1.0)), 150.0,
+                                            400.0)
+                .Shape();
+        case PrimitiveKind::Sphere:
+            return BRepPrimAPI_MakeSphere(
+                       gp_Pnt(base.X(), base.Y(), base.Z() + 150.0), 150.0)
+                .Shape();
+        case PrimitiveKind::Cone:
+            return BRepPrimAPI_MakeCone(gp_Ax2(base, gp_Dir(0.0, 0.0, 1.0)), 150.0, 0.0,
+                                        400.0)
+                .Shape();
+        case PrimitiveKind::Wedge:
+            // ltx = 0: the top edge collapses to the back, a clean ramp.
+            return BRepPrimAPI_MakeWedge(
+                       gp_Ax2(gp_Pnt(base.X() - 200.0, base.Y() - 200.0, base.Z()),
+                              gp_Dir(0.0, 0.0, 1.0), gp_Dir(1.0, 0.0, 0.0)),
+                       400.0, 400.0, 400.0, 0.0)
+                .Shape();
+        case PrimitiveKind::Plank:
+            return BRepPrimAPI_MakeBox(gp_Pnt(base.X() - 400.0, base.Y() - 200.0, base.Z()),
+                                       800.0, 400.0, 18.0)
+                .Shape();
+    }
+    return TopoDS_Shape();
 }
 
 void tessellate(const TopoDS_Shape& shape, double linearDeflection)

@@ -50,6 +50,7 @@
 #include "PullArrow.h"
 #include "RenderSettingsPanel.h"
 #include "SelectorWindow.h"
+#include "ShapeFlyout.h"
 #include "SketchController.h"
 #include "AppBar.h"
 #include "AxisGizmo.h"
@@ -649,7 +650,11 @@ void skipByEnvironment(int checks, const QString& why)
 // [axis][2] cache and bool-positive plumbing are deleted, so the question
 // cannot be asked, which is stronger than the flag it read. The official
 // run after the wave measured 3495 + 1 environment skip.
-constexpr int kCheckFloor = 3497;
+// RE-RATCHETED (2026-09-10, Add shape): the flyout block, its vocabulary
+// sweep and the rail's eleventh-chip pins landed +96 checks; the official
+// run measured 3592 + 1 environment skip. The floor is that accounted
+// total, exactly.
+constexpr int kCheckFloor = 3593;
 
 void check(bool condition, const QString& what)
 {
@@ -822,6 +827,7 @@ constexpr BlockInfo kBlocks[] = {
     { "auto-selection-phase-1-the-kind-lock", false, true },
     { "the-3d-gizmos-unlit-tokens-hover-and-handles", false, true },
     { "view-isolate-holds-chosen-bodies-alone-on-screen", false, true },
+    { "add-shape-the-rail-flyout-places-a-ready-made-body", false, true },
     { "magnet-a-move-drag-sticks-to-another-body-s-alignments", false, true },
 };
 
@@ -4634,6 +4640,7 @@ int main(int argc, char* argv[])
             const QVector<QString> wanted = {
                 QStringLiteral("Items"),
                 QStringLiteral("Start Sketch"),  QStringLiteral("Extrude..."),
+                QStringLiteral("Add shape"),
                 QStringLiteral("Union"),         QStringLiteral("Subtract"),
                 QStringLiteral("Intersect"),     QStringLiteral("Delete Selected"),
                 QStringLiteral("Snap to Grid"),
@@ -4658,7 +4665,7 @@ int main(int argc, char* argv[])
             check(wrong.isEmpty(),
                   QStringLiteral("and they are the window's own actions in the "
                                  "designed order (%1)")
-                      .arg(wrong.isEmpty() ? QStringLiteral("all ten match")
+                      .arg(wrong.isEmpty() ? QStringLiteral("all eleven match")
                                            : wrong.join(QStringLiteral("; "))));
 
             // ...and the three that are GONE are gone from the WINDOW, not
@@ -4719,9 +4726,9 @@ int main(int argc, char* argv[])
             // Deliberately two chips inside one GROUP (Union and Subtract),
             // not a pair with a separator between them: the separator's own
             // band is a different measurement.
-            if (chips.size() >= 6) {
-                ToolChip* first = chips[3];    // Union
-                ToolChip* second = chips[4];   // Subtract
+            if (chips.size() >= 7) {
+                ToolChip* first = chips[4];    // Union (index moved by the
+                ToolChip* second = chips[5];   // Add shape chip before it)
                 const QImage railImg = renderExact(rail);
                 const int column = first->x() + first->width() / 2;
                 int background = 0;
@@ -26502,6 +26509,104 @@ int main(int argc, char* argv[])
     // never a checkpoint, never persisted, and the eye buttons' own
     // DocumentModel::isVisible() choice is untouched throughout - the two
     // visibilities compose in MainWindow::applyIsolation(), the one writer.
+    // --- Add shape: the rail flyout places a ready-made body (pick A) --------
+    // Milestone 5, "add primitive shapes": the Shapes chip opens a flyout of
+    // six; a pick places the shape STANDING on the ground at the camera's
+    // focus, selected with the Move gizmo up, in ONE undoable checkpoint,
+    // and the flyout closes. Escape and an outside click close it too - the
+    // outside click's release swallowed, ShortcutSheet's own law.
+    if (blockEnabled("add-shape-the-rail-flyout-places-a-ready-made-body")) {
+        RequiredTempDir shapeDir;
+        MainWindow shapeProbe(nullptr, /*persistProgress=*/false, shapeDir.path());
+        shapeProbe.setAttribute(Qt::WA_ShowWithoutActivating);
+        shapeProbe.resize(1100, 800);
+        shapeProbe.show();
+        settle(300);
+        OcctViewWidget* sv = shapeProbe.view();
+        sv->setAnimationsEnabled(false);
+        enterFreshFurniture(shapeProbe);
+
+        QAction* addShape = action(shapeProbe, QStringLiteral("Add shape"));
+        check(addShape != nullptr && addShape->isEnabled(),
+              "the Add shape action exists and is enabled with a furniture open");
+        ShapeFlyout* flyout = shapeProbe.shapeFlyout();
+        check(flyout != nullptr && !flyout->isVisible(), "the flyout starts hidden");
+        if (flyout) {
+            for (const QString& text : flyout->paintedTexts()) {
+                for (const QString& word : bannedWords()) {
+                    check(!usesBannedWord(text, word),
+                          QStringLiteral("flyout copy \"%1\" avoids the banned word "
+                                         "\"%2\"")
+                              .arg(text, word));
+                }
+            }
+        }
+
+        trigger(shapeProbe, QStringLiteral("Add shape"));
+        settle(150);
+        check(flyout != nullptr && flyout->isVisible(),
+              "triggering the chip's action opens the flyout");
+        QWidget* boxTile =
+            flyout ? flyout->tileFor(ModelingOps::PrimitiveKind::Box) : nullptr;
+        check(boxTile != nullptr && boxTile->isVisible(), "the Box tile is up");
+        if (boxTile) {
+            const QPoint centre(boxTile->width() / 2, boxTile->height() / 2);
+            check(sv->childAt(boxTile->mapTo(sv, centre)) == boxTile,
+                  "childAt() at the Box tile's centre finds the tile itself");
+            clickAt(boxTile, QPointF(centre));
+            settle(300);
+        }
+        check(flyout != nullptr && !flyout->isVisible(), "a pick closes the flyout");
+        check(shapeProbe.document().count() == 1, "and places exactly one body");
+        if (shapeProbe.document().count() == 1) {
+            const TopoDS_Shape placed = shapeProbe.document().solids().front().shape;
+            const int placedId = shapeProbe.document().solids().front().id;
+            check(std::fabs(ModelingOps::volume(placed) - 400.0 * 400.0 * 400.0) < 1.0,
+                  "the body is the Box at its promised size");
+            Bnd_Box box;
+            BRepBndLib::Add(placed, box);
+            Standard_Real bx0, by0, bz0, bx1, by1, bz1;
+            box.Get(bx0, by0, bz0, bx1, by1, bz1);
+            check(std::fabs(bz0) < 1.0e-3, "STANDING on the ground plane");
+            const gp_Pnt target = sv->camera().state().target;
+            check(std::fabs((bx0 + bx1) / 2.0 - target.X()) < 1.0e-3 &&
+                      std::fabs((by0 + by1) / 2.0 - target.Y()) < 1.0e-3,
+                  "centred where the camera looks");
+            const std::vector<int> sel = sv->selectedSolidIds();
+            check(sel.size() == 1 && sel.front() == placedId,
+                  "the new body is selected...");
+            check(sv->hasMoveGizmo(), "...with the Move gizmo standing on it");
+            ToastHost* shapeToasts = shapeProbe.findChild<ToastHost*>();
+            check(shapeToasts != nullptr &&
+                      shapeToasts->currentText().contains(QStringLiteral("created")),
+                  QStringLiteral("and the toast names the creation (\"%1\")")
+                      .arg(shapeToasts ? shapeToasts->currentText() : QString()));
+        }
+        trigger(shapeProbe, QStringLiteral("Undo"));
+        settle(200);
+        check(shapeProbe.document().count() == 0,
+              "ONE undo takes the shape back - a single checkpoint placed it");
+
+        // --- Escape closes -------------------------------------------------
+        trigger(shapeProbe, QStringLiteral("Add shape"));
+        settle(120);
+        check(flyout != nullptr && flyout->isVisible(), "the flyout reopens");
+        sendKeyTo(sv, Qt::Key_Escape);
+        settle(120);
+        check(flyout != nullptr && !flyout->isVisible(), "Escape closes it");
+
+        // --- an outside click closes, and its release is swallowed ----------
+        trigger(shapeProbe, QStringLiteral("Add shape"));
+        settle(120);
+        check(flyout != nullptr && flyout->isVisible(), "the flyout reopens again");
+        const QPointF outside(sv->width() * 0.75, sv->height() * 0.75);
+        clickAt(sv, outside);
+        settle(150);
+        check(flyout != nullptr && !flyout->isVisible(), "a click outside closes it");
+        check(shapeProbe.document().count() == 0 && sv->selectedSolidIds().empty(),
+              "...and the swallowed release picked nothing behind it");
+    }
+
     if (blockEnabled("view-isolate-holds-chosen-bodies-alone-on-screen")) {
         RequiredTempDir isolateDir;
         MainWindow probe(nullptr, /*persistProgress=*/false, isolateDir.path());

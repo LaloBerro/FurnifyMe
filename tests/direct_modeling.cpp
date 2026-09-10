@@ -1150,6 +1150,49 @@ int main()
               "the origin over it");
     }
 
+    // --- the six ready-made shapes (Milestone 5, pick A) --------------------
+    // Volume closed-form per kind, base ON the asked plane, centred on the
+    // asked point - the same numbers the flyout places, asserted where no
+    // GPU is needed.
+    {
+        const gp_Pnt at(120.0, -80.0, 0.0);
+        struct Prim {
+            PrimitiveKind kind;
+            const char* name;
+            double expectedVolume;
+            double topZ;
+        };
+        const double pi = 3.14159265358979323846;
+        const Prim prims[] = {
+            {PrimitiveKind::Box, "Box", 400.0 * 400.0 * 400.0, 400.0},
+            {PrimitiveKind::Cylinder, "Cylinder", pi * 150.0 * 150.0 * 400.0, 400.0},
+            {PrimitiveKind::Sphere, "Sphere", 4.0 / 3.0 * pi * 150.0 * 150.0 * 150.0,
+             300.0},
+            {PrimitiveKind::Cone, "Cone", pi * 150.0 * 150.0 * 400.0 / 3.0, 400.0},
+            {PrimitiveKind::Wedge, "Wedge", 400.0 * 400.0 * 400.0 / 2.0, 400.0},
+            {PrimitiveKind::Plank, "Plank", 800.0 * 400.0 * 18.0, 18.0},
+        };
+        for (const Prim& prim : prims) {
+            const TopoDS_Shape built = makePrimitive(prim.kind, at);
+            check(!built.IsNull(), std::string(prim.name) + " builds");
+            if (built.IsNull()) continue;
+            checkNear(volume(built), prim.expectedVolume, prim.expectedVolume * 1.0e-4,
+                      std::string(prim.name) + "'s volume is its closed form");
+            Bnd_Box primBox;
+            BRepBndLib::Add(built, primBox);
+            Standard_Real px0, py0, pz0, px1, py1, pz1;
+            primBox.Get(px0, py0, pz0, px1, py1, pz1);
+            checkNear(pz0, 0.0, 1.0e-3,
+                      std::string(prim.name) + " STANDS on the asked plane");
+            checkNear(pz1, prim.topZ, 1.0e-3,
+                      std::string(prim.name) + " rises to its own height");
+            checkNear((px0 + px1) / 2.0, at.X(), 1.0e-3,
+                      std::string(prim.name) + " is centred on the asked X");
+            checkNear((py0 + py1) / 2.0, at.Y(), 1.0e-3,
+                      std::string(prim.name) + " is centred on the asked Y");
+        }
+    }
+
     std::printf("\n%s (%d failure%s)\n",
                 g_failures == 0 ? "PASS" : "FAIL",
                 g_failures, g_failures == 1 ? "" : "s");

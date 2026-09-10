@@ -104,6 +104,65 @@ void paintGlyph(QPainter& p, Glyph glyph)
             p.drawLine(20, 19, 4, 19);
             p.drawLine(4, 19, 8, 6);
             break;
+        case Glyph::Shapes:                       // cube + a small plus
+            p.drawLine(3, 8, 10, 4);
+            p.drawLine(10, 4, 17, 8);
+            p.drawLine(17, 8, 17, 15);
+            p.drawLine(17, 15, 10, 19);
+            p.drawLine(10, 19, 3, 15);
+            p.drawLine(3, 15, 3, 8);
+            p.drawLine(3, 8, 10, 12);
+            p.drawLine(10, 12, 17, 8);
+            p.drawLine(10, 12, 10, 19);
+            p.drawLine(20, 15, 20, 21);
+            p.drawLine(17, 18, 23, 18);
+            break;
+        case Glyph::ShapeBox:                     // the primitive cube
+            p.drawLine(4, 8, 12, 4);
+            p.drawLine(12, 4, 20, 8);
+            p.drawLine(20, 8, 20, 16);
+            p.drawLine(20, 16, 12, 20);
+            p.drawLine(12, 20, 4, 16);
+            p.drawLine(4, 16, 4, 8);
+            p.drawLine(4, 8, 12, 12);
+            p.drawLine(12, 12, 20, 8);
+            p.drawLine(12, 12, 12, 20);
+            break;
+        case Glyph::ShapeCylinder: {
+            p.drawEllipse(QRectF(5.0, 3.0, 14.0, 6.0));
+            p.drawLine(5, 6, 5, 18);
+            p.drawLine(19, 6, 19, 18);
+            p.drawArc(QRectF(5.0, 15.0, 14.0, 6.0), 180 * 16, 180 * 16);
+            break;
+        }
+        case Glyph::ShapeSphere:
+            p.drawEllipse(QRectF(4.0, 4.0, 16.0, 16.0));
+            p.drawArc(QRectF(4.0, 9.0, 16.0, 6.0), 180 * 16, 180 * 16);
+            break;
+        case Glyph::ShapeCone:
+            p.drawLine(12, 4, 19, 17);
+            p.drawLine(12, 4, 5, 17);
+            p.drawArc(QRectF(5.0, 14.0, 14.0, 6.0), 180 * 16, 180 * 16);
+            break;
+        case Glyph::ShapeWedge:                   // the ramp
+            p.drawLine(4, 18, 20, 18);
+            p.drawLine(4, 18, 4, 7);
+            p.drawLine(4, 7, 20, 18);
+            p.drawLine(4, 7, 9, 5);
+            p.drawLine(9, 5, 22, 15);
+            p.drawLine(22, 15, 20, 18);
+            break;
+        case Glyph::ShapePlank:                   // a thin board
+            p.drawLine(3, 13, 12, 9);
+            p.drawLine(12, 9, 21, 13);
+            p.drawLine(21, 13, 12, 17);
+            p.drawLine(12, 17, 3, 13);
+            p.drawLine(3, 13, 3, 15);
+            p.drawLine(3, 15, 12, 19);
+            p.drawLine(12, 19, 21, 15);
+            p.drawLine(21, 15, 21, 13);
+            p.drawLine(12, 17, 12, 19);
+            break;
         case Glyph::Minimize:                     // a single baseline
             p.drawLine(5, 12, 19, 12);
             break;

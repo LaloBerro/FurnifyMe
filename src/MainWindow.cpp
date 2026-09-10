@@ -14,6 +14,7 @@
 #include "IconSet.h"
 #include "ItemsPanel.h"
 #include "PullArrow.h"
+#include "ShapeFlyout.h"
 #include "ShortcutSheet.h"
 #include "Theme.h"
 #include "Toast.h"
@@ -1121,6 +1122,14 @@ void MainWindow::buildActions()
     myExtrudeAction->setShortcut(QKeySequence(Qt::Key_E));
     connect(myExtrudeAction, &QAction::triggered, this, &MainWindow::onExtrude);
 
+    // No shortcut and no menu entry: the rail chip's flyout is its one
+    // surface (the pick's own scope), and ShortcutSheet's catch-all group
+    // still lists it because the sheet enumerates the window's actions.
+    myAddShapeAction = new QAction(tr("Add shape"), this);
+    myAddShapeAction->setToolTip(tr("Add a ready-made shape — it lands standing where "
+                                    "the camera looks, ready to move"));
+    // The trigger is wired in buildOverlay(), beside the flyout it toggles.
+
     myUnionAction = new QAction(tr("&Union"), this);
     connect(myUnionAction, &QAction::triggered, this, &MainWindow::onUnion);
 
@@ -1778,6 +1787,7 @@ void MainWindow::buildOverlay()
     rail->addSeparator();
     tool(myStartSketchAction, IconSet::Glyph::Sketch);
     tool(myExtrudeAction,     IconSet::Glyph::Extrude);
+    tool(myAddShapeAction,    IconSet::Glyph::Shapes);
     rail->addSeparator();
     tool(myUnionAction,       IconSet::Glyph::Fuse);
     tool(mySubtractAction,    IconSet::Glyph::Cut);
@@ -1816,6 +1826,41 @@ void MainWindow::buildOverlay()
         rail->sizeHint().height() + 2 * ViewportOverlay::kEdgeMargin);
 
     myOverlay->addWidget(rail, ViewportOverlay::Anchor::LeftEdge);
+
+    // The Add-shape flyout (Milestone 5, pick A): built hidden beside the
+    // rail; the chip's action toggles it, a pick places and closes, and the
+    // flyout's own filter handles Escape and the outside click. Closed on
+    // any appStateChanged that disables the action (a sketch starting,
+    // render mode, the handoff), so it cannot survive into a state where a
+    // pick would be refused.
+    myShapeFlyout = new ShapeFlyout(myView);
+    connect(myShapeFlyout, &ShapeFlyout::shapePicked, this,
+            [this](ModelingOps::PrimitiveKind kind) {
+                myShapeFlyout->closeFlyout();
+                addPrimitiveShape(kind);
+            });
+    connect(myAddShapeAction, &QAction::triggered, this, [this, rail] {
+        if (myShapeFlyout->isVisible()) {
+            myShapeFlyout->closeFlyout();
+            return;
+        }
+        // Beside the chip itself when it can be found, beside the rail's
+        // top otherwise - the chip is addressed through its own action, the
+        // way every control in this shell is.
+        QPoint at(rail->geometry().right() + ViewportOverlay::kStackGap,
+                  rail->geometry().top());
+        for (ToolChip* chip : rail->findChildren<ToolChip*>()) {
+            if (chip->action() == myAddShapeAction) {
+                at.setY(chip->mapTo(myView, QPoint(0, 0)).y());
+                break;
+            }
+        }
+        myShapeFlyout->openAt(at);
+    });
+    connect(this, &MainWindow::appStateChanged, myShapeFlyout, [this] {
+        if (myShapeFlyout->isVisible() && !myAddShapeAction->isEnabled())
+            myShapeFlyout->closeFlyout();
+    });
 
     // The items drawer, beside the rail rather than under it - see
     // ViewportOverlay's Anchor comment for why that is the layout's business
@@ -2293,6 +2338,12 @@ void MainWindow::updateActions()
     myCancelSketchAction->setEnabled(mySketching);
 
     myExtrudeAction->setEnabled(!mySketching && !atInit && hasPendingFace());
+    // Add shape wants a furniture open and no sketch in progress - a
+    // waiting outline does NOT gate it (booleans and Delete are not gated
+    // either; placing a shape consumes nothing the outline owns). Render
+    // mode hides the rail, and the belt here keeps the flyout's own
+    // appStateChanged close honest.
+    myAddShapeAction->setEnabled(!mySketching && !atInit && !myRenderModeOn);
 
     // Exactly one face, and a flat one: an outline needs a single plane to
     // live on, and a cylinder's side has no such plane. Both halves are
@@ -4652,6 +4703,63 @@ void MainWindow::onFinishSketch()
         tr("%1 created — %2")
             .arg(QString::fromStdString(myDocument.outlineNameOf(id)),
                  QString::fromStdString(Measure::formatFaceExtents(face, mySketch.plane())));
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+}
+
+void MainWindow::addPrimitiveShape(ModelingOps::PrimitiveKind kind)
+{
+    if (myShowingInitScreen || mySketching || !myView) return;
+
+    // Standing where the camera LOOKS: the orbit target's XY on the ground
+    // plane - deterministic, no ray needed, and exactly the point the user
+    // is working around.
+    const gp_Pnt target = myView->camera().state().target;
+    const TopoDS_Shape shape =
+        ModelingOps::makePrimitive(kind, gp_Pnt(target.X(), target.Y(), 0.0));
+    if (shape.IsNull()) return;
+    ModelingOps::tessellate(shape);
+
+    const bool wasEmpty = myDocument.count() == 0;
+    // ONE checkpoint for the shape AND its mirror twin - the same single-
+    // undo contract extrudePendingFace() keeps for a conversion.
+    checkpointDocument();
+    const int id = myDocument.addSolid(shape);
+    myView->displaySolid(id, shape);
+
+    // Creation pairs under Mirror, the extrude path's own rule verbatim: a
+    // shape straddling the plane stays unpaired.
+    int twinId = 0;
+    if (id > 0 && myDocument.symmetryOn() &&
+        !ModelingOps::boundingBoxStraddlesPlane(shape, myDocument.symmetryPlane())) {
+        const ModelingOps::BooleanResult mirrored =
+            ModelingOps::mirrorShape(shape, myDocument.symmetryPlane());
+        if (mirrored.ok) {
+            twinId = myDocument.addSolid(mirrored.shape);
+            if (twinId > 0) {
+                myDocument.pairBodies(id, twinId);
+                myView->displaySolid(twinId, mirrored.shape);
+            }
+        } else {
+            qWarning("Add shape: creation-pair mirror failed: %s",
+                     mirrored.error.c_str());
+        }
+    }
+    if (wasEmpty) myView->fitAll();
+
+    // Selected, so the Move gizmo stands on it and the very next gesture is
+    // positioning - the flyout's whole promise.
+    myView->setSelectedSolids({id});
+
+    updateActions();
+    emit documentChanged();
+    const QString message =
+        twinId > 0 ? tr("%1 and %2 created")
+                         .arg(QString::fromStdString(myDocument.nameOf(id)),
+                              QString::fromStdString(myDocument.nameOf(twinId)))
+                   : tr("%1 created — %2")
+                         .arg(QString::fromStdString(myDocument.nameOf(id)),
+                              QString::fromStdString(Measure::formatDimensions(shape)));
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
 }

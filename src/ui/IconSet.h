@@ -50,6 +50,17 @@ enum class Glyph {
     Wireframe,   // half-shaded circle - "edges only, see through the rest"
     FitAll,      // frame corners - "frame everything"
     Projection,  // a perspective frustum - "how depth is drawn"
+    // The Add-shape flyout (Milestone 5, pick A): the rail chip's own
+    // glyph, and the six ready-made shapes the flyout offers - the tiles
+    // draw them through paintGlyph() with hover-dependent ink,
+    // WindowButtons' own route.
+    Shapes,          // a cube with a small plus - "add a ready-made shape"
+    ShapeBox,
+    ShapeCylinder,
+    ShapeSphere,
+    ShapeCone,
+    ShapeWedge,
+    ShapePlank,
     // The custom title bar's window controls (Milestone 5) - drawn by
     // WindowButtons through paintGlyph() below rather than through icon(),
     // because their ink is STATE-dependent (muted at rest, bright on hover,

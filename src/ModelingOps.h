@@ -303,6 +303,17 @@ BooleanResult mirrorShape(const TopoDS_Shape& shape, const gp_Pln& plane);
 bool boundingBoxStraddlesPlane(const TopoDS_Shape& shape, const gp_Pln& plane,
                                double tolerance = 1.0e-7);
 
+// The six ready-made shapes (Milestone 5, "add primitive shapes", pick A).
+// Each is built STANDING on the plane z = base.Z(), centred on base in XY -
+// the "placed on the ground where the camera looks" contract the flyout
+// promises - at a fixed furniture-sensible size in millimetres: a 400 box,
+// a 300-diameter cylinder/sphere/cone (400 tall where a height exists), a
+// 400 ramp wedge, an 800 x 400 x 18 plank. Sizes live HERE, not at the UI
+// call site, so the headless test asserts the same numbers the app places
+// and the two cannot drift.
+enum class PrimitiveKind { Box, Cylinder, Sphere, Cone, Wedge, Plank };
+TopoDS_Shape makePrimitive(PrimitiveKind kind, const gp_Pnt& base);
+
 // Must run before display or STL export, or curved faces render faceted / not at all.
 void tessellate(const TopoDS_Shape& shape, double linearDeflection = 0.1);
 

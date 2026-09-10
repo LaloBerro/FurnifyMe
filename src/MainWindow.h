@@ -6,6 +6,8 @@
 #include <gp_Pnt.hxx>
 #include <gp_Trsf.hxx>
 
+#include "ModelingOps.h"
+
 #include <QMainWindow>
 
 #include <set>
@@ -556,6 +558,14 @@ public:
     // the same way every other overlay card is, rather than making a caller
     // find it by class through findChild<>().
     AppBar* appBar() const { return myAppBar; }
+    // The Add-shape flyout (Milestone 5, pick A) - gui_smoke's seam.
+    class ShapeFlyout* shapeFlyout() const { return myShapeFlyout; }
+    // Places one ready-made shape: standing on the ground at the point the
+    // camera looks at, selected with the gizmo up, ONE undoable checkpoint,
+    // a mirror twin when Mirror is on - extrudePendingFace()'s own creation
+    // discipline, applied to a shape that needs no outline first. Public as
+    // the flyout's one consumer and the suite's direct seam.
+    void addPrimitiveShape(ModelingOps::PrimitiveKind kind);
     // The four view controls (Persp/Ortho, the unit chip, Wireframe, Fit
     // All) that used to live as bar buttons - an icon-only ToolCluster
     // anchored TopRight, stacked under the axis gizmo card. Distinct from
@@ -1514,6 +1524,8 @@ private:
     double myStartRenderFov = 45.0;
 
     AppBar* myAppBar = nullptr;
+    QAction* myAddShapeAction = nullptr;
+    class ShapeFlyout* myShapeFlyout = nullptr;
     // The window controls (Milestone 5, custom title bar): min/max/close as
     // a Card-look row floating at the viewport's top-right, the native
     // caption having been eaten by WindowChrome - see buildOverlay() and
