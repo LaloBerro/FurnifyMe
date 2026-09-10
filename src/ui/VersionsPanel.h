@@ -97,6 +97,13 @@ public:
     // hit-test it with childAt() rather than merely
     // asserting it exists.
     QWidget* cardAt(int index) const;
+    // Scrolls the drawer so cardAt(index) is fully in view - the rows live
+    // in a scroll area since Milestone 5's feedback round, so a row past
+    // the cap is genuinely off screen until scrolled to. The rename flow
+    // and gui_smoke's childAt-identity probes both need the row they are
+    // about to touch actually visible, exactly as a user would scroll to
+    // it first.
+    void ensureRowVisible(int index);
     // The thumbnail's own rect, in cardAt(index)'s LOCAL coordinates - what
     // a renderExact(cardAt(index)) capture's pixels line up against.
     // Rendering the card rather than the thumbnail label alone is
@@ -261,6 +268,7 @@ private:
     QPushButton* myAddButton = nullptr;
     QVBoxLayout* myOuter = nullptr;
     QVBoxLayout* myRowsLayout = nullptr;
+    class QScrollArea* myRowScroll = nullptr;
     // The in-progress create gesture's own card, or null when none is open.
     // Lives OUTSIDE myRowsLayout (inserted straight into myOuter, above it)
     // so refresh()'s ordinary row-rebuild - which tears down and replaces

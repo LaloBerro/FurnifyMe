@@ -644,7 +644,12 @@ void skipByEnvironment(int checks, const QString& why)
 // axis tokens, the Magnet anchor built off-grid, the cross-body probe's
 // bodies built on confirmed-empty ground) - measured 3498 checks + 1
 // environment skip. The floor is that accounted total, exactly.
-constexpr int kCheckFloor = 3499;
+// ADJUSTED (2026-09-10, review-fix wave): the flag-shaped negative-handle
+// probe (3 checks) was retired BY CONSTRUCTION with the API it asked - the
+// [axis][2] cache and bool-positive plumbing are deleted, so the question
+// cannot be asked, which is stronger than the flag it read. The official
+// run after the wave measured 3495 + 1 environment skip.
+constexpr int kCheckFloor = 3497;
 
 void check(bool condition, const QString& what)
 {
@@ -5709,8 +5714,23 @@ int main(int argc, char* argv[])
                 if (row->isVisible()) { deadRow = row; break; }
             check(deadRow != nullptr && deadRow->isVisible(),
                   "a live row is visible before the rebuild that replaces it");
-            drawer->refresh();
-            settle(60);
+            // The rebuild is driven through a REAL change now, not a bare
+            // refresh(): the eye's visibilityToggled() chain (the branch
+            // review's one-writer fix) already rebuilt the rows on the
+            // clicks above, so a refresh() with nothing changed hits the
+            // signature early-out and legitimately keeps its rows - which
+            // is itself the behaviour that early-out's comment documents.
+            // Clicking the live row's own eye changes the signature for
+            // real (window.document() is const from here - the probe
+            // cannot rename its way to a change), and the chain rebuilds.
+            QPushButton* rebuildEye =
+                deadRow ? deadRow->findChild<QPushButton*>() : nullptr;
+            check(rebuildEye != nullptr,
+                  "the live row carries the eye that drives the rebuild");
+            if (rebuildEye)
+                clickAt(rebuildEye, QPointF(rebuildEye->width() / 2.0,
+                                            rebuildEye->height() / 2.0));
+            settle(100);
             check(deadRow.isNull() || !deadRow->isVisible(),
                   QStringLiteral("and the row a rebuild replaced is hidden the instant it "
                                  "is replaced, not merely on its way to deleteLater() "
@@ -5719,6 +5739,18 @@ int main(int argc, char* argv[])
                                             : QStringLiteral("still alive, hidden")));
             check(drawer->rowCount() == static_cast<int>(window.document().solids().size()),
                   "and the rebuild left exactly one row per body");
+            // The eye click above hid a body - put it back through the NEW
+            // row's own eye, so the blocks that follow inherit the scene
+            // they always had.
+            for (QWidget* row : drawer->findChildren<QWidget*>(QStringLiteral("itemsRow"))) {
+                if (!row->isVisible()) continue;
+                if (QPushButton* eye = row->findChild<QPushButton*>()) {
+                    if (!eye->isChecked())
+                        clickAt(eye, QPointF(eye->width() / 2.0, eye->height() / 2.0));
+                }
+                break;
+            }
+            settle(100);
         }
 
         // Content unchanged: the row still carries name and dimensions.
@@ -18631,6 +18663,11 @@ int main(int argc, char* argv[])
               "...and the same is true of Restore");
         check(buttonTextReadsAgainstGround(deleteBtnRow0), "...and of Delete");
 
+        // The rows scroll since Milestone 5's feedback round, so the card
+        // must actually be IN VIEW for a childAt-identity probe to mean
+        // anything - the same scroll a real user would perform.
+        panel->ensureRowVisible(0);
+        settle(80);
         check(compareBtn != nullptr &&
                   panel->childAt(compareBtn->mapTo(panel, compareBtn->rect().center())) ==
                       compareBtn,

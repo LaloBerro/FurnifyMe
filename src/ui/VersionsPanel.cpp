@@ -154,7 +154,8 @@ VersionsPanel::VersionsPanel(MainWindow* window, OcctViewWidget* view, QWidget* 
     // scroll instead of running the card off the viewport's bottom edge.
     // AppearancePanel's transparent-scroll idiom, viewport rule included -
     // QStyleSheetStyle paints a scroll viewport opaque without it.
-    auto* rowScroll = new QScrollArea(this);
+    myRowScroll = new QScrollArea(this);
+    auto* rowScroll = myRowScroll;
     rowScroll->setWidgetResizable(true);
     rowScroll->setFrameShape(QFrame::NoFrame);
     rowScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -167,9 +168,21 @@ VersionsPanel::VersionsPanel(MainWindow* window, OcctViewWidget* view, QWidget* 
     auto* rowsHost = new QWidget(rowScroll);
     rowsHost->setAttribute(Qt::WA_NoSystemBackground);
     rowsHost->setStyleSheet(QStringLiteral("background: transparent;"));
-    myRowsLayout = new QVBoxLayout(rowsHost);
+    // The rows layout NESTS inside the host's own, with the slack going to
+    // a trailing stretch the rebuild never touches - widgetResizable grows
+    // the host to the viewport's height when content is short, and without
+    // the stretch that spare height stretched the CARDS themselves (the
+    // first run after this scroll landed measured the bottom border swept
+    // clean off a stretched card). refresh() clears myRowsLayout alone, so
+    // the stretch survives every rebuild.
+    auto* hostLayout = new QVBoxLayout(rowsHost);
+    hostLayout->setContentsMargins(0, 0, 0, 0);
+    hostLayout->setSpacing(0);
+    myRowsLayout = new QVBoxLayout();
     myRowsLayout->setContentsMargins(0, 0, 0, 0);
     myRowsLayout->setSpacing(10);
+    hostLayout->addLayout(myRowsLayout);
+    hostLayout->addStretch(1);
     rowScroll->setWidget(rowsHost);
     myOuter->addWidget(rowScroll);
     myOuter->addStretch(1);
@@ -343,6 +356,12 @@ QString VersionsPanel::rowNameAt(int index) const
                                                                  : QString();
 }
 
+void VersionsPanel::ensureRowVisible(int index)
+{
+    QWidget* card = cardAt(index);
+    if (card && myRowScroll) myRowScroll->ensureWidgetVisible(card, 0, 8);
+}
+
 QWidget* VersionsPanel::cardAt(int index) const
 {
     return index >= 0 && index < static_cast<int>(myRows.size()) ? myRows[index].widget
@@ -505,6 +524,20 @@ void VersionsPanel::refresh()
     // rebuilt row from painting Qt's own default button chrome instead of
     // this app's.
     applyTheme();
+
+    // The scroll's height is DERIVED from the rows it holds, capped, on
+    // every rebuild: QScrollArea's own sizeHint does not follow its
+    // content (AdjustToContents proved inert here - measured: the whole
+    // drawer collapsed to its 160 px minimum, squeezing every card to half
+    // height, the first run after the scroll landed). Below the cap the
+    // drawer sizes exactly as it did before the scroll existed; past it
+    // the scrollbar takes over - Milestone 5's "the versions screen is
+    // missing a scroll".
+    if (myRowScroll && myRowScroll->widget()) {
+        const int want = myRowScroll->widget()->sizeHint().height();
+        myRowScroll->setMinimumHeight(
+            std::min(want, Theme::wholeDevicePixels(384)));
+    }
 }
 
 void VersionsPanel::buildRealRow(const QString& name, const QDateTime& saved, bool enabled)

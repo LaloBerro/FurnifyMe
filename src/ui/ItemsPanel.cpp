@@ -232,6 +232,16 @@ void ItemsPanel::refresh()
                          QLatin1Char('\x1f') +
                          (myDocument->isVisible(solid.id) ? QLatin1Char('1')
                                                           : QLatin1Char('0')) +
+                         // The VIEW's composed answer too, not only the
+                         // document's flag: a row's name dims when the body
+                         // is off screen, and Isolate hides bodies through
+                         // the view alone - the Phase-5 lesson this comment
+                         // block already records, applied to the field the
+                         // dimming added ("a field a row shows but the
+                         // early-out does not compare is a field that stops
+                         // updating").
+                         ((myView && myView->isSolidVisible(solid.id)) ? QLatin1Char('1')
+                                                                       : QLatin1Char('0')) +
                          QLatin1Char('\x1e');
         }
     }
