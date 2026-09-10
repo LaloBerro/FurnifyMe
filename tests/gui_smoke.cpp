@@ -5366,20 +5366,73 @@ int main(int argc, char* argv[])
             // Qt's UNARY plus on QPoint - so this scanned a patch at the
             // dump's top-left corner, compiled without a murmur, and failed
             // at all three scales with "the mark cannot be found".
+            // The MARK'S OWN BLOB, not every pixel of its colour nearby.
+            // Three estimators were tried against real captures before this
+            // one: a mass centroid (the original) drifts when pixels are
+            // lost from one side - documented at the hollow-middle check,
+            // and already re-diagnosed once for a change that touched no
+            // marker-drawing code at all; a plain bounding box drifts when
+            // something ELSE of the same colour crosses the search box, and
+            // the dimension line runs right past the first sketch point in
+            // this very scene wearing the same accent; a median trades one
+            // for the other. What actually identifies a mark is that it is
+            // a compact blob that does not reach the edge of the search
+            // box, while a line passing through enters and leaves it - so
+            // components touching the box's border are dropped and the
+            // bounding box of what remains gives the centre. A ring cut
+            // into arcs by the live preview segment still yields its true
+            // centre, because the arcs' combined box is the ring's box.
             auto markCentre = [&](const QPoint& around, const QColor& colour, int half,
                                   QPoint& out) {
-                long long sumX = 0, sumY = 0;
-                int found = 0;
-                for (int dy = -half; dy <= half; ++dy) {
-                    for (int dx = -half; dx <= half; ++dx) {
-                        const QPoint p = around + QPoint(dx, dy);
+                const int side = half * 2 + 1;
+                std::vector<char> hit(std::size_t(side) * side, 0);
+                auto at = [&](int ix, int iy) -> char& {
+                    return hit[std::size_t(iy) * side + ix];
+                };
+                for (int iy = 0; iy < side; ++iy) {
+                    for (int ix = 0; ix < side; ++ix) {
+                        const QPoint p = around + QPoint(ix - half, iy - half);
                         if (!shot.rect().contains(p)) continue;
-                        if (colorDistance(shot.pixelColor(p), colour) > 42.0) continue;
-                        sumX += p.x(); sumY += p.y(); ++found;
+                        if (colorDistance(shot.pixelColor(p), colour) <= 42.0) at(ix, iy) = 1;
                     }
                 }
-                if (found < 4) return false;
-                out = QPoint(int(sumX / found), int(sumY / found));
+                int minX = side, minY = side, maxX = -1, maxY = -1, kept = 0;
+                std::vector<char> seen(std::size_t(side) * side, 0);
+                for (int iy = 0; iy < side; ++iy) {
+                    for (int ix = 0; ix < side; ++ix) {
+                        if (!at(ix, iy) || seen[std::size_t(iy) * side + ix]) continue;
+                        std::vector<QPoint> blob;
+                        std::vector<QPoint> stack{QPoint(ix, iy)};
+                        seen[std::size_t(iy) * side + ix] = 1;
+                        bool touchesEdge = false;
+                        while (!stack.empty()) {
+                            const QPoint c = stack.back();
+                            stack.pop_back();
+                            blob.push_back(c);
+                            if (c.x() == 0 || c.y() == 0 || c.x() == side - 1 ||
+                                c.y() == side - 1)
+                                touchesEdge = true;
+                            const QPoint steps[4] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+                            for (const QPoint& d : steps) {
+                                const int nx = c.x() + d.x(), ny = c.y() + d.y();
+                                if (nx < 0 || ny < 0 || nx >= side || ny >= side) continue;
+                                if (!at(nx, ny) || seen[std::size_t(ny) * side + nx]) continue;
+                                seen[std::size_t(ny) * side + nx] = 1;
+                                stack.push_back(QPoint(nx, ny));
+                            }
+                        }
+                        if (touchesEdge) continue;   // a line passing through
+                        for (const QPoint& c : blob) {
+                            minX = std::min(minX, c.x());
+                            maxX = std::max(maxX, c.x());
+                            minY = std::min(minY, c.y());
+                            maxY = std::max(maxY, c.y());
+                            ++kept;
+                        }
+                    }
+                }
+                if (kept < 4) return false;
+                out = around + QPoint((minX + maxX) / 2 - half, (minY + maxY) / 2 - half);
                 return true;
             };
 
@@ -5433,11 +5486,35 @@ int main(int argc, char* argv[])
                 check(colorDistance(middle, Theme::viewport()) > 25.0,
                       QStringLiteral("the first point's middle is painted, not bare ground "
                                      "showing through a ring (%1)").arg(middle.name()));
-                const int filled = ringAt(squareAt, Theme::accent(), 2);
-                check(filled >= 5,
+                // The mark's own 3x3 CORE, not a ring two pixels out. Measured
+                // on real captures, this mark renders an accent core about
+                // five pixels across, so radius 2 samples its ANTIALIASED
+                // RIM - and grid ink beneath that rim blends a pixel or two
+                // out of tolerance, which moved this count between 2 and 5
+                // across builds whose marker pixels were otherwise identical
+                // (17 accent pixels, same bounding box, compared pixel by
+                // pixel against the previous build's own capture). That is
+                // compositing, not a fill regression. The core states the
+                // same claim far off the noise floor, with both sides of it
+                // MEASURED: this filled patch reads 7 of 9 (the mark is
+                // small enough that its own antialiased corners cost two),
+                // while the cursor RING's identical 3x3 probe a few checks
+                // below reads at most 1 of 9 through its hole. A threshold
+                // of 6 sits in the middle of that gap with margin on both
+                // sides, where the old radius-2 ring sample had none.
+                int filled = 0;
+                for (int dy = -1; dy <= 1; ++dy) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        const QPoint p = squareAt + QPoint(dx, dy);
+                        if (!shot.rect().contains(p)) continue;
+                        if (colorDistance(shot.pixelColor(p), Theme::accent()) <= 42.0)
+                            ++filled;
+                    }
+                }
+                check(filled >= 6,
                       QStringLiteral("and it is FILLED with the accent right up to its "
-                                     "middle - %1 of the 8 pixels two out are accent, "
-                                     "where a ring would have none").arg(filled));
+                                     "middle - %1 of the 9 core pixels are accent, "
+                                     "where a ring would have its hole").arg(filled));
                 check(hits >= 12,
                       QStringLiteral("the first point is a filled accent patch, not an "
                                      "outline (%1 accent px)").arg(hits));
@@ -12290,7 +12367,13 @@ int main(int argc, char* argv[])
         // many-lines-thick substitution grids this same helper also checks
         // do not need the stride to find them, so removing it costs nothing
         // there and closes the one case it does matter for.
-        auto gridRowSpan = [&](const QString& path) -> int {
+        // `mayBeEmpty` is for ONE pose and is not a general escape hatch: a
+        // grid seen exactly edge-on has no projected area since the grid
+        // became a surface, so zero ink there is the correct answer rather
+        // than a probe that silently stopped measuring. Every other caller
+        // keeps the non-vacuity guard, which is what stops a broken grid
+        // from passing a span test by drawing nothing at all.
+        auto gridRowSpan = [&](const QString& path, bool mayBeEmpty = false) -> int {
             check(pview->saveSnapshot(path),
                   QStringLiteral("a snapshot is captured (%1)").arg(path));
             const QImage shot(path);
@@ -12305,7 +12388,7 @@ int main(int argc, char* argv[])
                     }
                 }
             }
-            check(samples > 20,
+            check(samples > 20 || (mayBeEmpty && samples == 0),
                   QStringLiteral("a non-vacuous number of grid pixels were sampled (%1) in %2")
                       .arg(samples)
                       .arg(path));
@@ -12403,12 +12486,31 @@ int main(int argc, char* argv[])
                 // the face, and reusing that framing here is exactly the bug
                 // this helper exists to avoid (see snapTo()'s own comment).
                 snapTo(0.0, 0.0);
-                const int lockedFrontSpan =
-                    gridRowSpan(outDir + QStringLiteral("/grid-front-ortho-locked.png"));
-                check(lockedFrontSpan >= 0 && lockedFrontSpan < pview->height() / 3,
-                      QStringLiteral("Front ortho with the (horizontal) top face locked: the "
-                                     "grid stays on that face - a near edge-on line, not the "
-                                     "wide XZ substitution - span %1 of %2px")
+                // The grid is a SURFACE since the per-pixel rewrite, and a
+                // surface seen exactly edge-on has no projected area, so
+                // this pose legitimately draws NOTHING where edge-on lines
+                // drew a thin line (span -1). The reference apps' floors do
+                // the same in an axis-aligned orthographic look. The check's
+                // whole discriminating power survives: the substitution bug
+                // this exists to catch renders the XZ plane FACE-ON from
+                // Front, filling the frame - which is neither -1 nor small -
+                // and the priority itself is now pinned directly, on the
+                // plane the grid actually built from, rather than inferred
+                // from a line's thickness.
+                const gp_Pln lockedDrawn = pview->drawnGridPlane();
+                BRepAdaptor_Surface lockedSurf(topFace);
+                const gp_Pln lockedFacePlane = lockedSurf.Plane();
+                check(std::fabs(std::fabs(lockedDrawn.Axis().Direction().Dot(
+                                    lockedFacePlane.Axis().Direction())) -
+                                1.0) < 1.0e-6,
+                      "Front ortho with the (horizontal) top face locked: the grid is "
+                      "built on THAT face's plane, not the vertical XZ substitution");
+                const int lockedFrontSpan = gridRowSpan(
+                    outDir + QStringLiteral("/grid-front-ortho-locked.png"),
+                    /*mayBeEmpty=*/true);
+                check(lockedFrontSpan < pview->height() / 3,
+                      QStringLiteral("...and draws no wide pattern with it - a surface seen "
+                                     "edge-on covers nothing (span %1 of %2px)")
                           .arg(lockedFrontSpan)
                           .arg(pview->height()));
 

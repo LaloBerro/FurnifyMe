@@ -13,6 +13,7 @@
 // unchanged by that - only the frame they are built in moves.
 #include <AIS_InteractiveContext.hxx>
 #include <AIS_InteractiveObject.hxx>
+#include <Graphic3d_ShaderProgram.hxx>
 #include <Graphic3d_ZLayerId.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
@@ -131,10 +132,9 @@ private:
     // See setVisible(). True by default - the grid is on until something
     // (render mode) asks otherwise.
     bool myVisible = true;
-    double myBuiltStep = 0.0;
-    double myBuiltDistance = 0.0;
-    gp_Pnt myBuiltFadeCentre{0.0, 0.0, 0.0};
-    gp_Pnt myBuiltEye{0.0, 0.0, 0.0};
+    // The grid's shader program - built once, its uniforms refreshed on
+    // every update() (see the .cpp's per-pixel architecture note).
+    Handle(Graphic3d_ShaderProgram) myProgram;
     gp_Pnt myBuiltCenter{0.0, 0.0, 0.0};
     double myBuiltExtent = 0.0;
     // Built in the plane's frame, so a change of plane must force a rebuild
@@ -142,7 +142,5 @@ private:
     gp_Pln myBuiltPlane{gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0)};
 
     // `center` is in `plane`'s own (u, v) coordinates, not in world space.
-    void rebuild(double minorStep, double centerU, double centerV, double extent,
-                 const gp_Pln& plane, double fadeCU, double fadeCV,
-                 double cameraDistance, double eyeU, double eyeV, double eyeHeight);
+    void rebuild(double centerU, double centerV, double extent, const gp_Pln& plane);
 };
