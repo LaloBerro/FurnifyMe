@@ -749,6 +749,117 @@ int main()
         }
     }
 
+    // --- laying fasteners out along the contact -----------------------
+    {
+        Joinery::Contact c;
+        c.type = Joinery::Contact::Type::Face;
+        c.frame = gp_Ax3(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
+        c.uMin = 0.0; c.uMax = 300.0;    // along the joint
+        c.vMin = 0.0; c.vMax = 18.0;     // across the board's thickness
+        c.thicknessAMm = 18.0;
+        c.thicknessBMm = 18.0;
+
+        Joinery::Parameters p = Joinery::defaultsFor(Joinery::Kind::Dowel, 18.0);
+        p.count = 3;
+        p.endMarginMm = 40.0;
+        p.insetMm = 9.0;
+
+        const std::vector<Joinery::Item> items =
+            Joinery::layout(Joinery::Kind::Dowel, p, c, {});
+        check(items.size() == 3, "three dowels means three items");
+        if (items.size() == 3) {
+            // 40 mm in from each end, the rest evenly between.
+            checkNear(items[0].u, 40.0, 1.0e-6, "the first sits at the end margin");
+            checkNear(items[2].u, 260.0, 1.0e-6, "the last mirrors it at the far end");
+            checkNear(items[1].u, 150.0, 1.0e-6, "and the middle one is centred");
+            checkNear(items[1].v, 9.0, 1.0e-6, "all of them inset 9 mm across");
+            checkNear(items[0].sizeMm, p.sizeMm, 1.0e-9, "each carries its own size");
+            checkNear(items[0].centre.X(), 40.0, 1.0e-6,
+                      "and a world position derived from the contact frame");
+        }
+
+        // One item is centred rather than jammed against the margin.
+        Joinery::Parameters single = p;
+        single.count = 1;
+        const std::vector<Joinery::Item> one =
+            Joinery::layout(Joinery::Kind::Dowel, single, c, {});
+        check(one.size() == 1 && std::fabs(one[0].u - 150.0) < 1.0e-6,
+              "a single fastener is centred on the joint");
+
+        // A margin wider than the joint cannot push items past each other.
+        Joinery::Parameters silly = p;
+        silly.endMarginMm = 400.0;
+        const std::vector<Joinery::Item> squashed =
+            Joinery::layout(Joinery::Kind::Dowel, silly, c, {});
+        check(squashed.size() == 3, "an over-wide margin still lays out its items");
+        check(squashed[0].u >= c.uMin - 1.0e-9 && squashed[2].u <= c.uMax + 1.0e-9,
+              "and keeps every one of them inside the joint");
+
+        // An adjustment moves ONE item, in the contact's own coordinates.
+        const std::vector<Joinery::Adjustment> moved = {{1, 12.0, 0.0}};
+        const std::vector<Joinery::Item> nudged =
+            Joinery::layout(Joinery::Kind::Dowel, p, c, moved);
+        checkNear(nudged[1].u, 162.0, 1.0e-6, "an adjusted item moves by its own delta");
+        checkNear(nudged[0].u, 40.0, 1.0e-6, "and its neighbours do not move with it");
+
+        // --- an OBLIQUE frame: the layout arithmetic must not care -----
+        // Tilt the whole frame about its own U axis - which is NOT the
+        // frame's normal - so the plane itself tips out of the world XY
+        // plane and the rectangle spanned by (X, Y) is genuinely oblique in
+        // 3D, not merely spun about its own normal (the mistake three
+        // separate Task 2 reviews caught: rotating about the normal alone
+        // leaves the plane's orientation untouched and proves nothing about
+        // a frame used in the wrong space).
+        const gp_Ax3 flatFrame(gp_Pnt(5.0, -3.0, 2.0), gp_Dir(0.0, 0.0, 1.0),
+                               gp_Dir(1.0, 0.0, 0.0));
+        const double tiltAngle = 37.0 * (4.0 * std::atan(1.0)) / 180.0;  // not a multiple of 45/90
+        gp_Trsf tilt;
+        tilt.SetRotation(gp_Ax1(flatFrame.Location(), flatFrame.XDirection()), tiltAngle);
+        const gp_Ax3 obliqueFrame = flatFrame.Transformed(tilt);
+        // The rotation axis is the frame's own X (in-plane), not its Z
+        // (normal) - so this genuinely exercises "not the frame's own
+        // normal" rather than merely renaming the same rotation.
+        check(std::fabs(flatFrame.XDirection().Dot(flatFrame.Direction())) < 1.0e-9,
+              "sanity: the tilt axis really is in-plane, not the normal");
+        check(obliqueFrame.Direction().Dot(gp_Dir(0.0, 0.0, 1.0)) < 1.0 - 1.0e-6,
+              "the tilt genuinely moves the plane's own normal off world Z");
+
+        Joinery::Contact oblique = c;
+        oblique.frame = obliqueFrame;
+        const std::vector<Joinery::Item> obliqueItems =
+            Joinery::layout(Joinery::Kind::Dowel, p, oblique, {});
+        check(obliqueItems.size() == 3, "the oblique contact still lays out three items");
+        if (obliqueItems.size() == 3) {
+            // The LOCAL (u, v) arithmetic must be identical to the
+            // axis-aligned case - proving layout() never reads the frame's
+            // orientation to decide where along the run an item sits.
+            checkNear(obliqueItems[0].u, items[0].u, 1.0e-9,
+                      "the oblique frame's first item sits at the same u as the flat one");
+            checkNear(obliqueItems[1].u, items[1].u, 1.0e-9,
+                      "and the middle one too - local layout does not see the frame");
+            checkNear(obliqueItems[2].u, items[2].u, 1.0e-9, "and the last");
+            checkNear(obliqueItems[1].v, items[1].v, 1.0e-9,
+                      "the inset across the joint is unchanged too");
+
+            // The DERIVED world position must be correct for the tilted
+            // frame - computed here from the frame's own raw components,
+            // independently of Contact::at(), so a layout() bug that calls
+            // at() with the wrong u/v (or skips deriving centre at all)
+            // cannot hide behind at()'s own already-tested arithmetic.
+            const gp_XYZ expectedMid = obliqueFrame.Location().XYZ() +
+                                       obliqueFrame.XDirection().XYZ() * obliqueItems[1].u +
+                                       obliqueFrame.YDirection().XYZ() * obliqueItems[1].v;
+            checkPnt(obliqueItems[1].centre, gp_Pnt(expectedMid), 1.0e-6,
+                     "the middle item's world position matches the tilted frame");
+            // And it must differ from the flat frame's answer at the same
+            // (u, v) - otherwise the frame was never actually consulted.
+            check(obliqueItems[1].centre.Distance(items[1].centre) > 1.0,
+                  "and it is genuinely a different point than the flat frame gave");
+            checkDir(obliqueItems[1].axis, obliqueFrame.Direction(),
+                     "the item's axis follows the tilted contact normal");
+        }
+    }
+
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;

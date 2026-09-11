@@ -794,4 +794,81 @@ ContactResult findContact(const TopoDS_Shape& a, const TopoDS_Shape& b,
     return result;
 }
 
+namespace {
+
+// The row a family of fasteners runs along, in contact coordinates: the
+// long axis carries the items, the short one carries the inset.
+//
+// Works entirely in (u, v) and never reads `contact.frame` - which is what
+// makes this arithmetic frame-independent: the same joint tilted into an
+// oblique frame lays out at the identical u/v positions, because nothing
+// here has an opinion about where the frame points in the world. See
+// `layout()`'s own comment (and `Contact`'s) for the bounding-rectangle
+// caveat this inherits: `runMin`/`acrossMin` come straight from the
+// contact's bounding rectangle, so an item this places can land off a
+// non-rectangular region.
+void fastenerRow(const Contact& contact, const Parameters& params,
+                 std::vector<Item>& out)
+{
+    const bool alongU = contact.runsAlongU();
+    const double runMin = alongU ? contact.uMin : contact.vMin;
+    const double runLen = contact.runLength();
+    const double acrossMin = alongU ? contact.vMin : contact.uMin;
+    const double acrossLen = alongU ? contact.vLength() : contact.uLength();
+
+    const int count = std::max(1, params.count);
+    // A margin wider than the joint would put the first item past the last;
+    // clamped so every item stays inside the contact whatever is typed.
+    const double margin = std::min(params.endMarginMm, runLen / 2.0 * 0.9);
+    const double first = runMin + margin;
+    const double span = std::max(runLen - 2.0 * margin, 0.0);
+    const double step = count > 1 ? span / double(count - 1) : 0.0;
+    const double across =
+        acrossMin + std::clamp(params.insetMm, 0.0, std::max(acrossLen, 0.0));
+
+    for (int i = 0; i < count; ++i) {
+        const double along = count > 1 ? first + step * double(i) : runMin + runLen / 2.0;
+        Item item;
+        item.u = alongU ? along : across;
+        item.v = alongU ? across : along;
+        item.sizeMm = params.sizeMm;
+        item.depthAMm = params.depthAMm;
+        item.depthBMm = params.depthBMm;
+        out.push_back(item);
+    }
+}
+
+}  // namespace
+
+std::vector<Item> layout(Kind kind, const Parameters& params, const Contact& contact,
+                         const std::vector<Adjustment>& adjustments)
+{
+    std::vector<Item> items;
+    switch (familyOf(kind)) {
+        case Family::Fasteners:
+            fastenerRow(contact, params, items);
+            break;
+        case Family::Housing:
+        case Family::Interlock:
+            // Task 4.
+            break;
+    }
+
+    // Adjustments are applied in the contact's own coordinates, which is
+    // what lets a hand-placed dowel keep its intent when the pieces move.
+    for (const Adjustment& adj : adjustments) {
+        if (adj.index < 0 || adj.index >= static_cast<int>(items.size())) continue;
+        items[static_cast<std::size_t>(adj.index)].u += adj.du;
+        items[static_cast<std::size_t>(adj.index)].v += adj.dv;
+    }
+
+    // The world position is DERIVED from the contact frame, last, so an
+    // adjustment cannot leave the two disagreeing.
+    for (Item& item : items) {
+        item.centre = contact.at(item.u, item.v);
+        item.axis = contact.frame.Direction();
+    }
+    return items;
+}
+
 }  // namespace Joinery

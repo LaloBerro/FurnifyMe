@@ -215,4 +215,48 @@ struct ContactResult {
 ContactResult findContact(const TopoDS_Shape& a, const TopoDS_Shape& b,
                           double toleranceMm = 0.1);
 
+// One placed piece of the joint - a dowel, a screw, a whole channel, a
+// tenon. `u`/`v` are its position in the contact's own coordinates (what
+// an adjustment moves, and what the readout measures); `centre` is that
+// same point in the world, derived.
+struct Item {
+    double u = 0.0;
+    double v = 0.0;
+    gp_Pnt centre;
+    gp_Dir axis{0.0, 0.0, 1.0};   // into the wood, from A toward B
+    double sizeMm = 0.0;
+    double depthAMm = 0.0;
+    double depthBMm = 0.0;
+    // Housings and interlocks are regions rather than points; a fastener
+    // leaves these zero.
+    double spanUMm = 0.0;
+    double spanVMm = 0.0;
+};
+
+// A per-item override, stored in the CONTACT's coordinates so it survives
+// the pieces moving - the whole reason adjustments are not world points.
+struct Adjustment {
+    int index = 0;
+    double du = 0.0;
+    double dv = 0.0;
+};
+
+// Where this joint's items fall. Pure: same inputs, same answer, no state.
+//
+// PLACES ITEMS WITHIN THE CONTACT'S BOUNDING RECTANGLE - it cannot do
+// otherwise, because that rectangle is all `Contact` describes (see the
+// long comment on `Contact` above). For a non-rectangular region - an
+// L-shaped or C-shaped contact, a round one - part of that rectangle is
+// NOT in contact at all, so a row laid out across the span can place an
+// item where there is no wood; `at(0, 0)` itself is not guaranteed to sit
+// on the region for a shape like that. This function has no way to know
+// which of its returned items, if any, landed off the wood - doing so
+// would mean inventing a containment test `Contact` does not carry, which
+// is deliberately out of scope here. Deciding what to do about an
+// off-region item - refuse it, flag it, nudge it - belongs to the validity
+// rules a later task owns; nothing below should be read as a guarantee
+// that every `Item` this returns is actually on material.
+std::vector<Item> layout(Kind kind, const Parameters& params, const Contact& contact,
+                         const std::vector<Adjustment>& adjustments);
+
 }  // namespace Joinery
