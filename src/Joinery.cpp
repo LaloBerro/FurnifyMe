@@ -952,4 +952,69 @@ std::vector<Item> layout(Kind kind, const Parameters& params, const Contact& con
     return items;
 }
 
+namespace {
+
+// A candidate axis has to swamp the other two before its word is trusted.
+// The reader measures from this word with a pencil and a square, so a
+// confidently wrong name is worse here than anywhere else in this feature -
+// on a board the transform gizmo has spun 40 degrees, no face is honestly
+// "front" any more.
+//
+// The threshold sits at cos(25 degrees) ~ 0.9063, deliberately chosen
+// between the two cases that settle it: a direction 0.95 along an axis
+// (about 18 degrees off it) still reads as that axis's word, while one
+// split evenly between two axes (0.7071/0.7071 each - a board tilted
+// diagonally, or a frame genuinely tipped in 3D) clears neither candidate
+// and must not be decided by whichever component happens to edge out.
+// 0.9063 sits roughly in the middle of that band, not against either edge
+// of it.
+constexpr double kDominantAxisCos = 0.9063;
+
+// Not one of the six named edges, on purpose - a caller checking for a real
+// edge word will not mistake this for one, and a reader marking wood sees a
+// sentence explaining why no single edge will do, rather than a word that
+// merely happens to be wrong. "no single edge" is the substring every
+// reader of this code (and the suite) can search for.
+const char* const kNoDominantEdge =
+    "no single edge - the piece is angled across more than one face";
+
+// A world direction as a word a person can find on the actual board, or the
+// honest sentence above when no face is clearly "the" one. ONE function -
+// every surface that names a reference edge (today: readout() below; any
+// later one) calls this rather than re-deriving the mapping, so the word in
+// a drawer and the word anywhere else can never disagree.
+std::string edgeName(const gp_Dir& dir)
+{
+    const double x = dir.X(), y = dir.Y(), z = dir.Z();
+    const double ax = std::fabs(x), ay = std::fabs(y), az = std::fabs(z);
+    if (std::max({ax, ay, az}) < kDominantAxisCos) return kNoDominantEdge;
+    if (az >= ax && az >= ay) return z >= 0.0 ? "top" : "bottom";
+    if (ay >= ax) return y >= 0.0 ? "back" : "front";
+    return x >= 0.0 ? "right" : "left";
+}
+
+}  // namespace
+
+Readout readout(Kind kind, const Parameters& params, const Contact& contact,
+                const std::vector<Item>& items)
+{
+    Readout out;
+    const bool alongU = contact.runsAlongU();
+    const double runMin = alongU ? contact.uMin : contact.vMin;
+    const gp_Dir runDir = alongU ? contact.frame.XDirection() : contact.frame.YDirection();
+    // Measured from the LOW end of the run, so the named edge is the one
+    // the numbers grow away from.
+    out.referenceEdgeA = edgeName(gp_Dir(runDir.Reversed()));
+    out.referenceEdgeB = out.referenceEdgeA;
+
+    for (const Item& item : items) {
+        out.alongMm.push_back((alongU ? item.u : item.v) - runMin);
+    }
+    out.insetMm = params.insetMm;
+    out.depthAMm = params.depthAMm;
+    out.depthBMm = familyOf(kind) == Family::Fasteners ? params.depthBMm : 0.0;
+    out.widthMm = familyOf(kind) == Family::Housing ? params.widthMm : params.thicknessMm;
+    return out;
+}
+
 }  // namespace Joinery

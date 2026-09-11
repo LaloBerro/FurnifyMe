@@ -1192,6 +1192,237 @@ int main()
         }
     }
 
+    // --- the readout: what you write on the wood ----------------------
+    {
+        Joinery::Contact c;
+        c.type = Joinery::Contact::Type::Face;
+        // A contact whose long axis runs along world +Y ("from the front").
+        c.frame = gp_Ax3(gp_Pnt(0.0, 0.0, 400.0), gp_Dir(1.0, 0.0, 0.0),
+                         gp_Dir(0.0, 1.0, 0.0));
+        c.uMin = 0.0; c.uMax = 300.0;
+        c.vMin = 0.0; c.vMax = 18.0;
+        c.thicknessAMm = 18.0;
+        c.thicknessBMm = 18.0;
+
+        Joinery::Parameters p = Joinery::defaultsFor(Joinery::Kind::Dowel, 18.0);
+        p.count = 3;
+        p.endMarginMm = 40.0;
+        p.insetMm = 9.0;
+        const std::vector<Joinery::Item> items =
+            Joinery::layout(Joinery::Kind::Dowel, p, c, {});
+        const Joinery::Readout r = Joinery::readout(Joinery::Kind::Dowel, p, c, items);
+
+        check(r.alongMm.size() == 3, "one distance per item");
+        // Guarded, not indexed on faith: an unguarded r.alongMm[0] here would
+        // turn a layout regression into a silent SIGSEGV rather than a
+        // reported failure - exactly the Task 4 trap CLAUDE.md warns against.
+        if (r.alongMm.size() == 3) {
+            checkNear(r.alongMm[0], 40.0, 1.0e-6, "measured from the reference edge");
+            checkNear(r.alongMm[1], 150.0, 1.0e-6, "the second at the middle");
+            checkNear(r.alongMm[2], 260.0, 1.0e-6, "the third at the far margin");
+        }
+        checkNear(r.insetMm, 9.0, 1.0e-6, "with the inset across the face");
+        checkNear(r.depthAMm, p.depthAMm, 1.0e-9, "and the drill depth for each side");
+        check(!r.referenceEdgeA.empty(), "the edge you measure from is NAMED");
+        check(r.referenceEdgeA == "front" || r.referenceEdgeA == "back" ||
+                  r.referenceEdgeA == "left" || r.referenceEdgeA == "right" ||
+                  r.referenceEdgeA == "top" || r.referenceEdgeA == "bottom",
+              "by a word a person can find on the wood (" + r.referenceEdgeA + ")");
+        check(r.referenceEdgeB == r.referenceEdgeA,
+              "and bodyB's own reference edge is carried too, not left empty");
+    }
+
+    // --- the readout distinguishes families: depthB and width -----------
+    // The block above only exercises a Fastener kind, where depthBMm passes
+    // params.depthBMm through and widthMm falls back to thicknessMm - both
+    // branches of readout()'s two ternaries untested by that block alone,
+    // since a Housing kind takes the OTHER branch of each. 24 mm shares no
+    // field value with Parameters' struct defaults, so a mutation that
+    // swapped either ternary's branches cannot hide behind a coincidental
+    // default matching what the mutation happens to produce anyway.
+    {
+        Joinery::Contact c;
+        c.type = Joinery::Contact::Type::Face;
+        c.frame = gp_Ax3(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0),
+                         gp_Dir(1.0, 0.0, 0.0));
+        c.uMin = 0.0; c.uMax = 300.0;
+        c.vMin = 0.0; c.vMax = 40.0;
+        c.thicknessAMm = 24.0;
+        c.thicknessBMm = 24.0;
+
+        const Joinery::Parameters dowel24 = Joinery::defaultsFor(Joinery::Kind::Dowel, 24.0);
+        const std::vector<Joinery::Item> dowelItems =
+            Joinery::layout(Joinery::Kind::Dowel, dowel24, c, {});
+        const Joinery::Readout dowelReadout =
+            Joinery::readout(Joinery::Kind::Dowel, dowel24, c, dowelItems);
+        checkNear(dowelReadout.depthBMm, dowel24.depthBMm, 1.0e-9,
+                  "a fastener's readout carries the far-side drill depth too");
+        checkNear(dowelReadout.widthMm, dowel24.thicknessMm, 1.0e-9,
+                  "and a fastener's width falls back to the interlock/fastener "
+                  "thickness field, not the housing width");
+
+        // A stray, deliberately non-zero depthBMm left sitting in a Housing's
+        // own params - defaultsFor() never sets one, but readout() must not
+        // simply pass depthBMm through regardless of family. A Housing kind
+        // whose own depthBMm happened to be 0.0 already (the ordinary case)
+        // could not catch a mutation that deleted the family check outright;
+        // this stray 99.0 is what actually proves the check runs rather than
+        // reading a coincidentally-zero field.
+        Joinery::Parameters dado24 = Joinery::defaultsFor(Joinery::Kind::Dado, 24.0);
+        dado24.depthBMm = 99.0;
+        const std::vector<Joinery::Item> dadoItems =
+            Joinery::layout(Joinery::Kind::Dado, dado24, c, {});
+        const Joinery::Readout dadoReadout =
+            Joinery::readout(Joinery::Kind::Dado, dado24, c, dadoItems);
+        checkNear(dadoReadout.depthBMm, 0.0, 1.0e-9,
+                  "a housing's readout has no second depth, even if one is left "
+                  "sitting in params");
+        checkNear(dadoReadout.widthMm, dado24.widthMm, 1.0e-9,
+                  "and a housing's width is its own channel width, not the "
+                  "fastener/interlock thickness field");
+    }
+
+    // --- reference-edge naming: a dominant axis wins, an ambiguous one is
+    // named honestly instead of guessed -----------------------------------
+    // On a rotated board no face is honestly "front" any more, and a
+    // confidently wrong name here is worse than anywhere else in this
+    // feature - the reader measures from this word with a pencil and a
+    // square. The rule: a direction 0.95 along an axis (about 18 degrees off
+    // it) still reads as that axis's word; one split evenly between two axes
+    // (0.7071/0.7071 each - a board tilted diagonally) does not, and reports
+    // an honest phrase instead of a coin-flip name.
+    {
+        Joinery::Contact c;
+        c.type = Joinery::Contact::Type::Face;
+        c.uMin = 0.0; c.uMax = 300.0;   // the run - u dominates so runsAlongU()
+        c.vMin = 0.0; c.vMax = 18.0;
+        c.thicknessAMm = 18.0;
+        c.thicknessBMm = 18.0;
+        const Joinery::Parameters p = Joinery::defaultsFor(Joinery::Kind::Dowel, 18.0);
+
+        // 0.95 along Y, the remainder along Z - clearly one axis's word.
+        const double rem95 = std::sqrt(1.0 - 0.95 * 0.95);
+        c.frame = gp_Ax3(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0),
+                         gp_Dir(0.0, 0.95, -rem95));
+        const std::vector<Joinery::Item> items95 =
+            Joinery::layout(Joinery::Kind::Dowel, p, c, {});
+        const Joinery::Readout r95 = Joinery::readout(Joinery::Kind::Dowel, p, c, items95);
+        check(r95.referenceEdgeA == "front",
+              "0.95 along an axis still names that axis's edge (" +
+                  r95.referenceEdgeA + ")");
+
+        // Exactly 45 degrees between two axes - neither wins, and the
+        // readout must say so rather than pick one.
+        const double half = std::sqrt(0.5);
+        c.frame = gp_Ax3(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(1.0, 0.0, 0.0),
+                         gp_Dir(0.0, half, -half));
+        const std::vector<Joinery::Item> items45 =
+            Joinery::layout(Joinery::Kind::Dowel, p, c, {});
+        const Joinery::Readout r45 = Joinery::readout(Joinery::Kind::Dowel, p, c, items45);
+        check(r45.referenceEdgeA != "front" && r45.referenceEdgeA != "back" &&
+                  r45.referenceEdgeA != "left" && r45.referenceEdgeA != "right" &&
+                  r45.referenceEdgeA != "top" && r45.referenceEdgeA != "bottom",
+              "at 45 degrees between two axes, no single named edge is honest (" +
+                  r45.referenceEdgeA + ")");
+        check(!r45.referenceEdgeA.empty(),
+              "the ambiguous case still says SOMETHING, not an empty string");
+    }
+
+    // --- the readout on an OBLIQUE frame: distances don't move, the edge
+    // name tells the truth -------------------------------------------------
+    // Same requirement as every earlier oblique-frame test in this file, and
+    // it matters more here: edgeName() reads a direction taken straight from
+    // the contact frame, so a frame tilted in 3D is not a formality for the
+    // readout, it is the exact case the naming logic has to survive. Tilts
+    // about the frame's own X - IN-PLANE, not the normal - so the rectangle
+    // itself tips out of the world plane (rotating about the normal alone
+    // leaves the region's edges exactly where gp_Ax3 already put them and
+    // proves nothing, per the Task 2 reviews recorded earlier in this file).
+    {
+        Joinery::Contact flat;
+        flat.type = Joinery::Contact::Type::Face;
+        flat.frame = gp_Ax3(gp_Pnt(5.0, -3.0, 2.0), gp_Dir(0.0, 0.0, 1.0),
+                            gp_Dir(1.0, 0.0, 0.0));
+        // The run is along V here, not U - V is the axis a tilt about the
+        // frame's own X (in-plane, orthogonal to V) actually rotates. A run
+        // along U would stay put under this exact tilt (X IS the rotation
+        // axis), and the naming half of this test would exercise nothing.
+        flat.uMin = 0.0; flat.uMax = 18.0;
+        flat.vMin = 0.0; flat.vMax = 300.0;
+        flat.thicknessAMm = 18.0;
+        flat.thicknessBMm = 18.0;
+
+        Joinery::Parameters p = Joinery::defaultsFor(Joinery::Kind::Dowel, 18.0);
+        p.count = 3;
+        p.endMarginMm = 40.0;
+        p.insetMm = 9.0;
+
+        const std::vector<Joinery::Item> flatItems =
+            Joinery::layout(Joinery::Kind::Dowel, p, flat, {});
+        const Joinery::Readout flatReadout =
+            Joinery::readout(Joinery::Kind::Dowel, p, flat, flatItems);
+        check(flatReadout.referenceEdgeA == "front",
+              "on the flat frame the run's low end is honestly the front edge (" +
+                  flatReadout.referenceEdgeA + ")");
+        // Pinned against the real expected numbers, not merely "whatever the
+        // flat frame produced" - a mutation reading the wrong local
+        // coordinate (item.u where the run is along v) would still agree
+        // with itself on both the flat and tilted frame (neither depends on
+        // the frame's orientation), so a flat-vs-oblique comparison ALONE
+        // cannot catch it. Caught by mutation: deleting the alongU ternary
+        // in favour of a bare item.u passed the whole suite until this
+        // absolute check was added, because this contact runs along v.
+        check(flatReadout.alongMm.size() == 3, "three dowels means three distances");
+        if (flatReadout.alongMm.size() == 3) {
+            checkNear(flatReadout.alongMm[0], 40.0, 1.0e-6,
+                      "the flat frame's own first distance is the real 40 mm margin");
+            checkNear(flatReadout.alongMm[1], 150.0, 1.0e-6,
+                      "and its middle one the real 150 mm centre");
+            checkNear(flatReadout.alongMm[2], 260.0, 1.0e-6,
+                      "and its last the real 260 mm far margin");
+        }
+
+        const double tiltAngle = 37.0 * (4.0 * std::atan(1.0)) / 180.0;  // not 45/90
+        gp_Trsf tilt;
+        tilt.SetRotation(gp_Ax1(flat.frame.Location(), flat.frame.XDirection()), tiltAngle);
+        const gp_Ax3 obliqueFrame = flat.frame.Transformed(tilt);
+        check(std::fabs(flat.frame.XDirection().Dot(flat.frame.Direction())) < 1.0e-9,
+              "sanity: the readout's own tilt axis is in-plane, not the normal");
+        check(obliqueFrame.Direction().Dot(gp_Dir(0.0, 0.0, 1.0)) < 1.0 - 1.0e-6,
+              "and it genuinely moves the plane's own normal off world Z");
+
+        Joinery::Contact oblique = flat;
+        oblique.frame = obliqueFrame;
+        const std::vector<Joinery::Item> obliqueItems =
+            Joinery::layout(Joinery::Kind::Dowel, p, oblique, {});
+        const Joinery::Readout obliqueReadout =
+            Joinery::readout(Joinery::Kind::Dowel, p, oblique, obliqueItems);
+
+        check(obliqueReadout.alongMm.size() == flatReadout.alongMm.size(),
+              "the tilted frame still reports one distance per item");
+        if (obliqueReadout.alongMm.size() == flatReadout.alongMm.size() &&
+            !flatReadout.alongMm.empty()) {
+            for (std::size_t i = 0; i < flatReadout.alongMm.size(); ++i) {
+                checkNear(obliqueReadout.alongMm[i], flatReadout.alongMm[i], 1.0e-9,
+                          "along-the-run distance " + std::to_string(i) +
+                              " is unchanged by a 3D tilt of the frame");
+            }
+        }
+        checkNear(obliqueReadout.insetMm, flatReadout.insetMm, 1.0e-9,
+                  "and the inset across the face is unchanged too");
+
+        // This tilt rotates the run direction (V, orthogonal to the X
+        // rotation axis) to (0, cos37, sin37) - dominant component ~0.799,
+        // which clears neither this project's 45-degree ambiguous case nor
+        // its 0.95 confident one. The readout must say so rather than pick
+        // "front" or "top" by whichever narrowly edges out.
+        check(obliqueReadout.referenceEdgeA.find("no single edge") != std::string::npos,
+              "a genuinely tilted board gets an honest answer, not a guessed edge (" +
+                  obliqueReadout.referenceEdgeA + ")");
+        check(obliqueReadout.referenceEdgeA != flatReadout.referenceEdgeA,
+              "and it is not silently reusing the flat frame's own answer");
+    }
+
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;

@@ -259,4 +259,27 @@ struct Adjustment {
 std::vector<Item> layout(Kind kind, const Parameters& params, const Contact& contact,
                          const std::vector<Adjustment>& adjustments);
 
+// The numbers a pencil and a square need. Distances are measured from a
+// NAMED edge - "from the front edge: 60, 150, 240" - because an
+// unlabelled number is not a measurement you can transfer to wood.
+struct Readout {
+    std::string referenceEdgeA;   // the edge of bodyA these are measured from
+    std::string referenceEdgeB;
+    std::vector<double> alongMm;  // one per item, from the reference edge
+    double insetMm = 0.0;         // across the face
+    double depthAMm = 0.0;
+    double depthBMm = 0.0;
+    double widthMm = 0.0;         // housings and interlocks
+};
+
+// referenceEdgeA/B name the edge the numbers are measured from - one of
+// "front"/"back"/"left"/"right"/"top"/"bottom" when the run genuinely lines
+// up with a world axis, or an honest sentence saying no single edge applies
+// when it does not (a board the transform gizmo has spun 40 degrees has no
+// face that is honestly "front"). See edgeName() in the .cpp for the
+// dominance threshold this is derived from - ONE place, so the word painted
+// in a drawer and the word any other surface reads can never disagree.
+Readout readout(Kind kind, const Parameters& params, const Contact& contact,
+                const std::vector<Item>& items);
+
 }  // namespace Joinery
