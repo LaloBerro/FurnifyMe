@@ -29,6 +29,7 @@ add_library(furnify_geometry STATIC
   src/Measure.cpp
   src/UserProgress.cpp
   src/FurnifySerial.cpp
+  src/Joinery.cpp
 )
 target_include_directories(furnify_geometry PUBLIC
   src ${OpenCASCADE_INCLUDE_DIR})
@@ -73,6 +74,10 @@ add_test(NAME headless_direct_modeling COMMAND headless_direct_modeling)
 add_executable(headless_furnify_serial tests/furnify_serial.cpp)
 target_link_libraries(headless_furnify_serial PRIVATE furnify_geometry)
 add_test(NAME headless_furnify_serial COMMAND headless_furnify_serial)
+
+add_executable(headless_joinery tests/joinery.cpp)
+target_link_libraries(headless_joinery PRIVATE furnify_geometry)
+add_test(NAME headless_joinery COMMAND headless_joinery)
 
 # ---------------------------------------------------------------------------
 # Application (Qt + OCCT visualization)
