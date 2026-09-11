@@ -3,6 +3,10 @@
 // every function under test is a pure function of shapes and numbers.
 #include "Joinery.h"
 
+#include <BRepBuilderAPI_Transform.hxx>
+#include <BRepPrimAPI_MakeBox.hxx>
+#include <gp_Trsf.hxx>
+
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -96,6 +100,68 @@ int main()
     checkNear(tenon24.thicknessMm, 8.0, 1.0e-9, "a tenon is a third of the stile");
     checkNear(tenon24.lengthMm, 36.0, 1.0e-9, "a tenon is one and a half times as long as it is thick");
     checkNear(tenon24.depthAMm, 38.0, 1.0e-9, "the mortise is a hair deeper than the tenon");
+
+    // --- the contact: where two boards actually meet ------------------
+    {
+        // A 600x300x18 shelf whose END lands flat on the FACE of an
+        // 800x18x400 upright. They touch over 300 x 18.
+        const TopoDS_Shape panel =
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 18.0, 300.0, 800.0).Shape();
+        const TopoDS_Shape shelf =
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 400.0), 600.0, 300.0, 18.0).Shape();
+
+        const Joinery::ContactResult found = Joinery::findContact(panel, shelf);
+        check(found.ok, "a shelf resting against a panel has a contact");
+        check(found.error.empty(), "and a successful find carries no error");
+        if (found.ok) {
+            const double along = found.contact.uMax - found.contact.uMin;
+            const double across = found.contact.vMax - found.contact.vMin;
+            const double longSide = std::max(along, across);
+            const double shortSide = std::min(along, across);
+            checkNear(longSide, 300.0, 1.0e-6, "the contact is as long as the shelf is deep");
+            checkNear(shortSide, 18.0, 1.0e-6, "and as wide as the shelf is thick");
+            checkNear(found.contact.thicknessBMm, 18.0, 1.0e-6,
+                      "the shelf's own thickness is measured for the defaults");
+        }
+
+        // Pull the shelf 2 mm away: no contact, and it says so.
+        gp_Trsf gap;
+        gap.SetTranslation(gp_Vec(2.0, 0.0, 0.0));
+        const TopoDS_Shape floating =
+            BRepBuilderAPI_Transform(shelf, gap, Standard_True).Shape();
+        const Joinery::ContactResult apart = Joinery::findContact(panel, floating);
+        check(!apart.ok, "two pieces 2 mm apart have no contact");
+        check(!apart.error.empty(), "and the refusal says why");
+
+        // Within tolerance is still a contact - a model is never perfect.
+        gp_Trsf hair;
+        hair.SetTranslation(gp_Vec(0.05, 0.0, 0.0));
+        const TopoDS_Shape nearly =
+            BRepBuilderAPI_Transform(shelf, hair, Standard_True).Shape();
+        check(Joinery::findContact(panel, nearly).ok,
+              "a 0.05 mm gap is still a contact - within tolerance");
+
+        // Two boards that merely share an edge are not a joint surface.
+        const TopoDS_Shape edgeOnly =
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 300.0, 800.0), 600.0, 300.0, 18.0).Shape();
+        check(!Joinery::findContact(panel, edgeOnly).ok,
+              "two boards touching only at an edge have no contact face");
+    }
+
+    // --- overlap: two pieces crossing, for a half-lap -----------------
+    {
+        const TopoDS_Shape railA =
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 400.0, 60.0, 20.0).Shape();
+        const TopoDS_Shape railB =
+            BRepPrimAPI_MakeBox(gp_Pnt(150.0, -100.0, 0.0), 60.0, 300.0, 20.0).Shape();
+        const Joinery::ContactResult crossed = Joinery::findContact(railA, railB);
+        check(crossed.ok && crossed.contact.type == Joinery::Contact::Type::Overlap,
+              "two crossing rails report an OVERLAP, not a face contact");
+        if (crossed.ok) {
+            checkNear(crossed.contact.uMax - crossed.contact.uMin, 60.0, 1.0e-6,
+                      "the overlap is as wide as the crossing rail");
+        }
+    }
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures,
                 g_failures == 1 ? "" : "s");

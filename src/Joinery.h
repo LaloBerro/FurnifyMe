@@ -12,10 +12,12 @@
 // Millimetres throughout. Measure is the only place a unit is ever
 // converted for display, and it is a Qt-free header this one does not need.
 #include <TopoDS_Shape.hxx>
+#include <gp_Ax3.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Pnt.hxx>
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -77,5 +79,55 @@ struct Parameters {
 // the thinner of the two pieces at the joint. Dowels land on real drill
 // sizes rather than an arbitrary third of a millimetre.
 Parameters defaultsFor(Kind kind, double thinnerThicknessMm);
+
+// Where two pieces meet, in the contact's OWN frame - the one coordinate
+// system every derived position is expressed in, so nothing downstream
+// needs to know a world axis. A joint stores no world position; this is
+// recomputed from the live shapes on every read, which is what makes a
+// joint follow its pieces.
+struct Contact {
+    enum class Type {
+        Face,      // two faces meet - the ordinary case
+        Overlap,   // the solids intersect - what a half-lap is cut from
+    };
+
+    Type type = Type::Face;
+    // The contact plane and its in-plane axes. `frame`'s X and Y are the
+    // (u, v) the extents below are measured in; its Z is the contact
+    // normal, pointing from bodyA into bodyB.
+    gp_Ax3 frame;
+    double uMin = 0.0, uMax = 0.0;
+    double vMin = 0.0, vMax = 0.0;
+    // Each piece's own thickness at the joint, for defaultsFor().
+    double thicknessAMm = 0.0;
+    double thicknessBMm = 0.0;
+
+    double uLength() const { return uMax - uMin; }
+    double vLength() const { return vMax - vMin; }
+    // The longer in-plane direction - the line a row of fasteners runs
+    // along, and the length a housing is cut across.
+    bool runsAlongU() const { return uLength() >= vLength(); }
+    double runLength() const { return std::max(uLength(), vLength()); }
+    // A point in the contact's own coordinates, in the world.
+    gp_Pnt at(double u, double v) const;
+};
+
+// ok == false ALWAYS carries an empty contact and a non-empty error - the
+// BooleanResult contract, so a refusal can never be read as a success.
+struct ContactResult {
+    bool ok = false;
+    Contact contact;
+    std::string error;
+};
+
+// The largest place `a` and `b` meet. A face contact wins over an overlap
+// when both exist (two boards can touch AND intersect slightly); an
+// overlap is reported only when there is no face contact, which is the
+// crossing-rails case a half-lap is cut from.
+//
+// `toleranceMm` is how far apart two faces may be and still count as
+// touching - a model is never perfect, and 0.1 mm of slop is not a gap.
+ContactResult findContact(const TopoDS_Shape& a, const TopoDS_Shape& b,
+                          double toleranceMm = 0.1);
 
 }  // namespace Joinery
