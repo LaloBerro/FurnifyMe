@@ -463,6 +463,12 @@ std::vector<Item> layout(Kind kind, const Parameters& params, const Contact& con
 struct Readout {
     std::string referenceEdgeA;   // the edge of bodyA these are measured from
     std::string referenceEdgeB;
+    // True when referenceEdgeA/B is one of the six edge WORDS; false when it is
+    // the honest no-single-edge sentence. Decided in the one place the word is
+    // (edgeName() in the .cpp), so a caller branching on it - the drawer puts
+    // the named edge at a ruler's zero, and writes numbers when there is none -
+    // never keeps a second copy of the word list.
+    bool referenceEdgeNamed = false;
     std::vector<double> alongMm;  // one per item, from the reference edge
     double insetMm = 0.0;         // across the face
     double depthAMm = 0.0;        // into A: a drill depth, a channel, a mortise, A's lap

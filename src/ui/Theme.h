@@ -56,6 +56,11 @@ struct Spec {
     // already follow for their own former OCCT constants).
     QColor outlineLineColour;
     QColor danger;
+    // A caution: something true about a joint the user should know, and not a
+    // failure - the joints drawer's region-shortfall glyph. Its own token, so
+    // editing the focus ring (the amber it was borrowed from) cannot recolour
+    // every caution in the app. The default IS that amber, so no pixel moved.
+    QColor caution;
     QColor focusRing;
     QColor focusRingMuted;
     // The GIZMO's three axis hues - Milestone 3, Task 5. Deliberately NOT
@@ -262,6 +267,7 @@ QColor danger();        // invalid input, failure accents - NOT the same
                         // concept as axisX(), which is a grid-axis tint that
                         // happens to be red; this is the semantic "something
                         // is wrong" colour
+QColor caution();       // a caution, not a failure - see Spec::caution
 QColor focusRing();     // visible keyboard focus outline
 QColor focusRingMuted(); // same outline, dimmed - a focused widget in a
                         // window that is not the OS-active one (the user has

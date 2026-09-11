@@ -160,6 +160,9 @@ QString AppearancePanel::nameForToken(const QString& id)
         // happened - a Failure toast's stripe and an unparseable field's
         // outline - and the app has nothing it would call a warning.
         {QStringLiteral("danger"), QObject::tr("Failures")},
+        // A caution is not a failure: a fact worth seeing beside a joint - its
+        // contact is not a plain rectangle - that refuses nothing.
+        {QStringLiteral("caution"), QObject::tr("Caution")},
         {QStringLiteral("focusRing"), QObject::tr("Keyboard focus ring")},
         {QStringLiteral("focusRingMuted"), QObject::tr("Focus ring — window inactive")},
     };

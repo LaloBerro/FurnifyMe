@@ -17,8 +17,10 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QShowEvent>
 #include <QStaticText>
 #include <QVBoxLayout>
 
@@ -69,10 +71,22 @@ QString numberOnly(double mm)
     return text;
 }
 
-bool isNamedEdge(const std::string& edge)
+// The PAINTED form of a string: a number never wraps away from its unit
+// ("9 mm"), "inset" never wraps away from its number, and a "W × D" pair stays
+// one piece. Non-breaking spaces, in the prepared QStaticText only - the raw
+// string every reader compares against keeps plain spaces.
+QString bindUnits(const QString& raw)
 {
-    return edge == "front" || edge == "back" || edge == "left" || edge == "right" ||
-           edge == "top" || edge == "bottom";
+    static const QRegularExpression unitAfterNumber(QStringLiteral("(\\d) (mm|cm)\\b"));
+    static const QRegularExpression insetBeforeNumber(QStringLiteral("\\binset (?=\\d)"));
+    static const QRegularExpression timesBetweenNumbers(QStringLiteral("(\\d) × (?=\\d)"));
+    const QString nbsp(QChar(0x00A0));
+    QString painted = raw;
+    painted.replace(unitAfterNumber, QStringLiteral("\\1") + nbsp + QStringLiteral("\\2"));
+    painted.replace(insetBeforeNumber, QStringLiteral("inset") + nbsp);
+    painted.replace(timesBetweenNumbers,
+                    QStringLiteral("\\1") + nbsp + QStringLiteral("×") + nbsp);
+    return painted;
 }
 
 QString number(double value) { return QString::number(value, 'g', 10); }
@@ -86,6 +100,45 @@ QString emptyText()
 {
     return JointsPanel::tr("No joints yet.\n\nSelect two pieces that meet and press J to "
                            "plan one.");
+}
+
+QString titleCss()
+{
+    return QStringLiteral("background: transparent; color: %1; font-weight: 600; font-size: %2pt;")
+        .arg(Theme::text().name())
+        .arg(Theme::titleFont().pointSizeF());
+}
+
+QString countCss()
+{
+    return QStringLiteral("background: transparent; color: %1; font-size: %2pt;")
+        .arg(Theme::textMuted().name())
+        .arg(Theme::labelFont().pointSizeF());
+}
+
+QString emptyCss()
+{
+    return QStringLiteral("background: transparent; color: %1; font-size: %2pt;")
+        .arg(Theme::textMuted().name())
+        .arg(Theme::bodyFont().pointSizeF());
+}
+
+QString deleteCss()
+{
+    return QStringLiteral("QPushButton { background: transparent; border: none; "
+                          "border-radius: 4px; padding: 0px; } "
+                          "QPushButton:hover { background-color: %1; } "
+                          "QPushButton:disabled { background: transparent; }")
+        .arg(Theme::chipHover().name());
+}
+
+// What the prepared rows depend on besides their content: the four fonts and
+// the card's width. A Theme broadcast that leaves this alone moved only colours.
+QString layoutKey(int cardWidth)
+{
+    return Theme::bodyFont().toString() + QLatin1Char('|') + Theme::labelFont().toString() +
+           QLatin1Char('|') + Theme::badgeFont().toString() + QLatin1Char('|') +
+           Theme::titleFont().toString() + QLatin1Char('|') + QString::number(cardWidth);
 }
 
 // A derivation's refusal, as the row says it. Joinery's own reasons are written
@@ -125,12 +178,16 @@ struct JointsPanel::RowModel {
         QRectF bar;
         QRectF band;
         std::vector<double> ticks;
-        std::vector<Painted> labels;   // [0] is the edge word
+        std::vector<Painted> labels;   // tick labels only, left to right
+        Painted edge;                  // the edge word, when edgeLine >= 0
+        int edgeLine = -1;
+        bool staggered = false;
         QString depthText;
     };
 
     // --- content --------------------------------------------------------------
     int jointId = 0;
+    int kind = 0;
     bool broken = false;
     bool selected = false;
     bool expanded = false;
@@ -142,13 +199,16 @@ struct JointsPanel::RowModel {
     bool edgeNamed = false;
     double run = 0.0;
     double inset = 0.0;
+    double depthA = 0.0;
+    double depthB = 0.0;
+    double width = 0.0;
+    QString unit;
     std::vector<Piece> pieces;
     QString readoutText;
-    QString signature;
 
     // --- layout ---------------------------------------------------------------
     QFont fonts[FontRoleCount];
-    int width = 0;
+    int rowWidth = 0;
     int height = 0;
     std::vector<Painted> painted;
     QRectF nameARect;
@@ -173,7 +233,7 @@ RowModel::Painted prepared(const RowModel& m, const QString& raw, RowModel::Font
     p.font = font;
     p.ink = ink;
     p.text.setTextFormat(Qt::PlainText);   // a name like "<b>Top" is text, not markup
-    p.text.setText(raw);
+    p.text.setText(bindUnits(raw));
     if (wrapWidth > 0.0) p.text.setTextWidth(wrapWidth);
     p.text.setPerformanceHint(QStaticText::AggressiveCaching);
     p.text.prepare(QTransform(), m.fonts[font]);
@@ -183,39 +243,36 @@ RowModel::Painted prepared(const RowModel& m, const QString& raw, RowModel::Font
 
 std::shared_ptr<RowModel> contentFor(const DocumentModel& doc, const DocumentModel::Joint& joint,
                                      const Joinery::Derivation& d, int selectedJoint,
-                                     const QSet<int>& expanded)
+                                     bool expanded)
 {
     auto m = std::make_shared<RowModel>();
     m->jointId = joint.id;
+    m->kind = static_cast<int>(joint.kind);
     m->broken = !d.ok;
     m->selected = joint.id == selectedJoint;
-    m->expanded = expanded.contains(joint.id);
+    m->expanded = expanded;
     const Joinery::Family family = Joinery::familyOf(joint.kind);
     m->fastener = family == Joinery::Family::Fasteners;
     m->nameA = QString::fromStdString(doc.nameOf(joint.bodyA));
     m->nameB = QString::fromStdString(doc.nameOf(joint.bodyB));
+    m->unit = QString::fromStdString(Measure::unitSuffix());
     const QString kind = QString::fromStdString(Joinery::kindName(joint.kind));
-    const QString unit = QString::fromStdString(Measure::unitSuffix());
-
-    const QChar sep(0x1f);
-    m->signature = number(joint.id) + sep + number(static_cast<int>(joint.kind)) + sep + m->nameA +
-                   sep + m->nameB + sep + (m->broken ? QStringLiteral("B") : QStringLiteral("b")) +
-                   (m->selected ? QStringLiteral("S") : QStringLiteral("s")) +
-                   (m->expanded ? QStringLiteral("E") : QStringLiteral("e")) + sep;
 
     if (!d.ok) {
         // No readout, no numbers, no caveat - a derivation that refused carries
         // none of them, and nothing here reaches back for the last good one.
         m->kindLine = JointsPanel::tr("Broken — %1").arg(reasonText(d.error));
-        m->signature += m->kindLine;
         return m;
     }
 
     const Joinery::Readout& r = d.readout;
     m->run = d.contact.runLength();
     m->inset = r.insetMm;
+    m->depthA = r.depthAMm;
+    m->depthB = r.depthBMm;
+    m->width = r.widthMm;
     m->edge = QString::fromStdString(r.referenceEdgeA);
-    m->edgeNamed = isNamedEdge(r.referenceEdgeA);
+    m->edgeNamed = r.referenceEdgeNamed;
     m->caveat = QString::fromStdString(Joinery::regionShortfallCaveat(d.contact));
 
     if (m->fastener) {
@@ -265,30 +322,41 @@ std::shared_ptr<RowModel> contentFor(const DocumentModel& doc, const DocumentMod
         } else {
             QStringList parts;
             for (double mark : piece.marks) parts << numberOnly(mark);
-            readout << parts.join(QStringLiteral(" · ")) + QLatin1Char(' ') + unit;
+            readout << parts.join(QStringLiteral(" · ")) + QLatin1Char(' ') + m->unit;
         }
     }
     readout << m->edge;
     if (m->fastener) readout << JointsPanel::tr("inset %1 from the face").arg(lengthText(m->inset));
     m->readoutText = readout.join(QLatin1Char('\n'));
-
-    m->signature += m->kindLine + sep + m->caveat + sep + m->edge + sep + number(m->run) + sep +
-                    number(m->inset) + sep + unit + sep + number(r.depthAMm) + sep +
-                    number(r.depthBMm) + sep + number(r.widthMm) + sep;
-    for (const RowModel::Piece& piece : m->pieces) {
-        m->signature += piece.name + sep + piece.depthText + sep + number(piece.bandStart) + sep +
-                        number(piece.bandEnd) + sep;
-        for (double mark : piece.marks) m->signature += number(mark) + QLatin1Char(',');
-        m->signature += sep;
-    }
     return m;
 }
 
-// One piece's ruler. False when its labels cannot be kept apart on two lines
-// at the font they are painted in - the caller then writes the numbers instead.
+// The early-out signature of one row: EVERY field the row displays, and only
+// those. A field shown but missing here stops updating - the suite pins the
+// names, the selected state and the caveat by name for that reason.
+QString signatureOf(const RowModel& m)
+{
+    const QChar sep(0x1f);
+    QString s = number(m.jointId) + sep + number(m.kind) + sep + m.nameA + sep + m.nameB + sep +
+                (m.broken ? QStringLiteral("B") : QStringLiteral("b")) +
+                (m.selected ? QStringLiteral("S") : QStringLiteral("s")) +
+                (m.expanded ? QStringLiteral("E") : QStringLiteral("e")) + sep + m.kindLine + sep +
+                m.caveat + sep + m.edge + sep + (m.edgeNamed ? QStringLiteral("N") : QStringLiteral("n")) +
+                sep + number(m.run) + sep + number(m.inset) + sep + m.unit + sep + number(m.depthA) +
+                sep + number(m.depthB) + sep + number(m.width) + sep;
+    for (const RowModel::Piece& piece : m.pieces) {
+        s += piece.name + sep + piece.depthText + sep + (piece.band ? QStringLiteral("1") : QStringLiteral("0")) +
+             sep + number(piece.bandStart) + sep + number(piece.bandEnd) + sep;
+        for (double mark : piece.marks) s += number(mark) + QLatin1Char(',');
+        s += sep;
+    }
+    return s;
+}
+
+// One piece's ruler. False when its tick labels cannot be kept apart on two
+// lines at the font they are painted in - the caller then writes the numbers.
 bool layoutStrip(const RowModel& m, const RowModel::Piece& piece, double x0, double x1,
-                 double& y, RowModel::Strip& out, std::vector<RowModel::Painted>& texts,
-                 bool& staggered)
+                 double& y, RowModel::Strip& out, std::vector<RowModel::Painted>& texts)
 {
     y += kStripGap;
     RowModel::Painted depth = prepared(m, piece.depthText, RowModel::Label, RowModel::InkMuted, 0.0, y);
@@ -314,22 +382,20 @@ bool layoutStrip(const RowModel& m, const RowModel::Piece& piece, double x0, dou
     struct Candidate {
         QString text;
         double anchor;
-        bool leftAligned;
     };
     std::vector<Candidate> candidates;
-    candidates.push_back({m.edge, x0, true});
     std::vector<double> ticks;
     if (piece.band) {
         ticks = {xAt(piece.bandStart), xAt(piece.bandEnd)};
-        candidates.push_back({numberOnly(piece.bandStart), ticks[0], false});
-        candidates.push_back({numberOnly(piece.bandEnd), ticks[1], false});
+        candidates.push_back({numberOnly(piece.bandStart), ticks[0]});
+        candidates.push_back({numberOnly(piece.bandEnd), ticks[1]});
     } else {
         for (double mark : piece.marks) {
             ticks.push_back(xAt(mark));
-            candidates.push_back({numberOnly(mark), ticks.back(), false});
+            candidates.push_back({numberOnly(mark), ticks.back()});
         }
     }
-    std::stable_sort(candidates.begin() + 1, candidates.end(),
+    std::stable_sort(candidates.begin(), candidates.end(),
                      [](const Candidate& a, const Candidate& b) { return a.anchor < b.anchor; });
 
     const double labelHeight = QFontMetricsF(m.fonts[RowModel::Badge]).height();
@@ -338,19 +404,19 @@ bool layoutStrip(const RowModel& m, const RowModel::Piece& piece, double x0, dou
     const double barBottom = barTop + kBarHeight;
     const double lineTop1 = barBottom + kZeroOverhang + 1.0;
 
-    // Greedy, left to right: a label takes the line above the bar when it
-    // clears the last label there, the line below when it clears the last one
-    // THERE, and otherwise the ruler cannot be drawn honestly at all.
+    // TICK LABELS FIRST, and above their ticks - the picked design. Greedy,
+    // left to right: a label takes the line above the bar when it clears the
+    // last label there, the line below when it clears the last one THERE, and
+    // otherwise the ruler cannot be drawn honestly at all.
     double lastRight[2] = {-1.0e9, -1.0e9};
-    bool stripStaggered = false;
+    double firstLeft[2] = {1.0e9, 1.0e9};
+    bool staggered = false;
     std::vector<RowModel::Painted> labels;
-    for (std::size_t i = 0; i < candidates.size(); ++i) {
-        const Candidate& c = candidates[i];
-        RowModel::Painted label = prepared(m, c.text, RowModel::Badge,
-                                           i == 0 ? RowModel::InkMuted : RowModel::InkText, 0.0, 0.0);
+    for (const Candidate& c : candidates) {
+        RowModel::Painted label =
+            prepared(m, c.text, RowModel::Badge, RowModel::InkText, 0.0, 0.0);
         const double w = label.rect.width();
-        double left = c.leftAligned ? c.anchor : c.anchor - w / 2.0;
-        left = std::clamp(left, x0, std::max(x0, x1 - w));
+        const double left = std::clamp(c.anchor - w / 2.0, x0, std::max(x0, x1 - w));
         int line = -1;
         if (left >= lastRight[0] + kLabelGap) {
             line = 0;
@@ -359,20 +425,37 @@ bool layoutStrip(const RowModel& m, const RowModel::Piece& piece, double x0, dou
         } else {
             return false;
         }
+        firstLeft[line] = std::min(firstLeft[line], left);
         lastRight[line] = left + w;
-        if (line == 1) stripStaggered = true;
+        if (line == 1) staggered = true;
         label.rect.moveTopLeft(QPointF(left, line == 0 ? lineTop0 : lineTop1));
         labels.push_back(label);
     }
 
+    // THEN the edge word, where it is genuinely clear: at zero above the bar
+    // when it ends before the first label there, under zero below the bar when
+    // it ends before the first label on THAT line, and otherwise not on the
+    // ruler at all - the shared line already names the edge, so nothing is lost.
+    RowModel::Painted edge = prepared(m, m.edge, RowModel::Badge, RowModel::InkMuted, 0.0, 0.0);
+    int edgeLine = -1;
+    if (x0 + edge.rect.width() + kLabelGap <= firstLeft[0]) {
+        edgeLine = 0;
+    } else if (x0 + edge.rect.width() + kLabelGap <= firstLeft[1]) {
+        edgeLine = 1;
+    }
+    if (edgeLine >= 0) edge.rect.moveTopLeft(QPointF(x0, edgeLine == 0 ? lineTop0 : lineTop1));
+
     out.bar = QRectF(barLeft, barTop, barSpan, kBarHeight);
     out.ticks = ticks;
     out.labels = labels;
+    out.edge = edge;
+    out.edgeLine = edgeLine;
+    out.staggered = staggered;
     out.depthText = piece.depthText;
     if (piece.band && ticks.size() == 2)
         out.band = QRectF(QPointF(ticks[0], barTop), QPointF(ticks[1], barBottom));
-    y = stripStaggered ? lineTop1 + labelHeight : barBottom + kZeroOverhang;
-    if (stripStaggered) staggered = true;
+    const bool usesLineBelow = staggered || edgeLine == 1;
+    y = usesLineBelow ? lineTop1 + labelHeight : barBottom + kZeroOverhang;
     return true;
 }
 
@@ -385,7 +468,7 @@ void layoutRow(RowModel& m, double width)
     m.fonts[RowModel::LabelBold] = bold;
     m.fonts[RowModel::Badge] = Theme::badgeFont();
 
-    m.width = static_cast<int>(width);
+    m.rowWidth = static_cast<int>(width);
     m.painted.clear();
     m.strips.clear();
     m.appCopy.clear();
@@ -396,7 +479,6 @@ void layoutRow(RowModel& m, double width)
     const double x0 = kRowPadL;
     const double x1 = width - kRowPadR;
     double y = kRowPadT;
-    const QString unit = QString::fromStdString(Measure::unitSuffix());
 
     // --- "<A> ↔ <B>", names elided to share the line -------------------------
     const double reserve = m.expanded ? kDeleteSize + 16.0 : 0.0;
@@ -461,28 +543,39 @@ void layoutRow(RowModel& m, double width)
         double rulerY = y;
         std::vector<RowModel::Strip> strips;
         std::vector<RowModel::Painted> stripTexts;
-        bool staggered = false;
         for (std::size_t i = 0; drawn && i < m.pieces.size(); ++i) {
             RowModel::Strip strip;
-            drawn = layoutStrip(m, m.pieces[i], x0, x1, rulerY, strip, stripTexts, staggered);
+            drawn = layoutStrip(m, m.pieces[i], x0, x1, rulerY, strip, stripTexts);
             if (drawn) strips.push_back(strip);
         }
 
         if (drawn) {
             y = rulerY;
             m.strips = strips;
-            m.staggered = staggered;
+            for (const RowModel::Strip& strip : m.strips) m.staggered = m.staggered || strip.staggered;
             for (const RowModel::Painted& t : stripTexts) {
                 m.painted.push_back(t);
                 // The bold name is the piece's own (user) name; the depth is ours.
                 if (t.font != RowModel::LabelBold) m.appCopy << t.raw;
             }
-            for (const RowModel::Strip& strip : m.strips)
+            for (const RowModel::Strip& strip : m.strips) {
                 for (const RowModel::Painted& label : strip.labels) m.appCopy << label.raw;
+                if (strip.edgeLine >= 0) m.appCopy << strip.edge.raw;
+            }
         } else {
             // WRITTEN, not drawn: no single edge to put at zero, or labels that
             // collide even on two lines. An unreadable ruler is not a ruler.
             m.fellBack = true;
+            // No single edge: the sentence saying so comes FIRST, so every
+            // number below it is read already knowing why no edge is named.
+            if (!m.edgeNamed) {
+                y += 5.0;
+                RowModel::Painted why =
+                    prepared(m, m.edge, RowModel::Label, RowModel::InkMuted, x0, y, x1 - x0);
+                m.painted.push_back(why);
+                m.appCopy << m.edge;
+                y += why.rect.height();
+            }
             for (const RowModel::Piece& piece : m.pieces) {
                 y += kStripGap;
                 RowModel::Painted depth =
@@ -506,7 +599,7 @@ void layoutRow(RowModel& m, double width)
                 } else {
                     QStringList parts;
                     for (double mark : piece.marks) parts << numberOnly(mark);
-                    numbers = parts.join(QStringLiteral(" · ")) + QLatin1Char(' ') + unit;
+                    numbers = parts.join(QStringLiteral(" · ")) + QLatin1Char(' ') + m.unit;
                 }
                 const QString line =
                     m.edgeNamed ? JointsPanel::tr("from the %1 edge: %2").arg(m.edge, numbers)
@@ -524,12 +617,12 @@ void layoutRow(RowModel& m, double width)
         QString shared;
         if (!m.fellBack) {
             shared = m.fastener
-                         ? JointsPanel::tr("%1 from the %2 edge · %3").arg(unit, m.edge, inset)
-                         : JointsPanel::tr("%1 from the %2 edge").arg(unit, m.edge);
-        } else if (m.edgeNamed) {
-            shared = m.fastener ? inset : QString();
+                         ? JointsPanel::tr("%1 from the %2 edge · %3").arg(m.unit, m.edge, inset)
+                         : JointsPanel::tr("%1 from the %2 edge").arg(m.unit, m.edge);
         } else {
-            shared = m.fastener ? JointsPanel::tr("%1 · %2").arg(m.edge, inset) : m.edge;
+            // Written: the edge is already named on every numbers line, or its
+            // absence already explained above them - only the inset is left.
+            shared = m.fastener ? inset : QString();
         }
         if (!shared.isEmpty()) {
             y += 5.0;
@@ -556,7 +649,8 @@ QColor inkColour(RowModel::Ink ink)
 }
 
 // One row. Paints its model and nothing else: every rectangle and every
-// prepared string was decided in refresh().
+// prepared string was decided in refresh(). Colours are read HERE, at paint
+// time, which is what lets a colour edit repaint a row without rebuilding it.
 class JointRowWidget : public QWidget {
 public:
     JointRowWidget(JointsPanel* panel, std::shared_ptr<const RowModel> model, QWidget* parent)
@@ -600,10 +694,10 @@ protected:
             triangle.lineTo(g.right(), g.bottom());
             triangle.lineTo(g.left(), g.bottom());
             triangle.closeSubpath();
-            QPen amber(Theme::focusRing(), 1.4);
-            amber.setJoinStyle(Qt::RoundJoin);
-            amber.setCapStyle(Qt::RoundCap);
-            p.setPen(amber);
+            QPen caution(Theme::caution(), 1.4);
+            caution.setJoinStyle(Qt::RoundJoin);
+            caution.setCapStyle(Qt::RoundCap);
+            p.setPen(caution);
             p.setBrush(Qt::NoBrush);
             p.drawPath(triangle);
             p.drawLine(QPointF(g.center().x(), g.top() + g.height() * 0.40),
@@ -632,6 +726,11 @@ protected:
                 p.setFont(m.fonts[label.font]);
                 p.setPen(inkColour(label.ink));
                 p.drawStaticText(label.rect.topLeft(), label.text);
+            }
+            if (strip.edgeLine >= 0) {
+                p.setFont(m.fonts[strip.edge.font]);
+                p.setPen(inkColour(strip.edge.ink));
+                p.drawStaticText(strip.edge.rect.topLeft(), strip.edge.text);
             }
         }
 
@@ -662,6 +761,14 @@ protected:
             return;
         }
         event->accept();
+        // The trailing release of a double-click belongs to the double-click,
+        // whose first press/release pair has already toggled the row - see
+        // mouseDoubleClickEvent(). The gesture that started owns the release
+        // that ends it.
+        if (mySwallowNextRelease) {
+            mySwallowNextRelease = false;
+            return;
+        }
         if (!rect().contains(event->position().toPoint())) return;
         // Copied out before the call: activateRow() can rebuild every row, this
         // one included (deleteLater - so this frame survives), and nothing below
@@ -671,21 +778,21 @@ protected:
         if (panel) panel->activateRow(jointId);
     }
 
-    void mouseDoubleClickEvent(QMouseEvent* event) override { event->accept(); }
+    void mouseDoubleClickEvent(QMouseEvent* event) override
+    {
+        event->accept();
+        // Qt delivers a double-click as press, release, DblClick, release. The
+        // first pair toggled the row - often REBUILDING it, so this may be the
+        // new row that now sits under the cursor - and the release still to
+        // come is this double-click's own, not a second click.
+        if (event->button() == Qt::LeftButton) mySwallowNextRelease = true;
+    }
 
 private:
     QPointer<JointsPanel> myPanel;
     std::shared_ptr<const RowModel> myModel;
+    bool mySwallowNextRelease = false;
 };
-
-QString deleteCss()
-{
-    return QStringLiteral("QPushButton { background: transparent; border: none; "
-                          "border-radius: 4px; padding: 0px; } "
-                          "QPushButton:hover { background-color: %1; } "
-                          "QPushButton:disabled { background: transparent; }")
-        .arg(Theme::chipHover().name());
-}
 }  // namespace
 
 JointsPanel::JointsPanel(MainWindow* window, OcctViewWidget* view, QWidget* parent)
@@ -709,9 +816,11 @@ JointsPanel::JointsPanel(MainWindow* window, OcctViewWidget* view, QWidget* pare
     headerLayout->setContentsMargins(kHeaderSide, 0, kHeaderSide, 8);
     headerLayout->setSpacing(8);
     myTitle = new QLabel(tr("Joints"), header);
+    myTitle->setStyleSheet(titleCss());
     headerLayout->addWidget(myTitle, 1);
     myCount = new QLabel(header);
     myCount->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    myCount->setStyleSheet(countCss());
     headerLayout->addWidget(myCount);
     myOuter->addWidget(header);
 
@@ -743,7 +852,9 @@ JointsPanel::JointsPanel(MainWindow* window, OcctViewWidget* view, QWidget* pare
     myOuter->addWidget(myRowScroll);
     myOuter->addStretch(1);
 
-    applyTheme();   // styles the header and builds the rows
+    // Constructed hidden (MainWindow hides it before anchoring), so this only
+    // marks the theme pending; the first show settles it and builds the rows.
+    applyTheme();
     connect(Theme::notifier(), &Theme::Notifier::changed, this, &JointsPanel::applyTheme);
 }
 
@@ -760,18 +871,59 @@ int JointsPanel::cardWidth()
 
 void JointsPanel::applyTheme()
 {
-    myTitle->setStyleSheet(QStringLiteral("background: transparent; color: %1; "
-                                          "font-weight: 600; font-size: %2pt;")
-                               .arg(Theme::text().name())
-                               .arg(Theme::titleFont().pointSizeF()));
-    myCount->setStyleSheet(QStringLiteral("background: transparent; color: %1; font-size: %2pt;")
-                               .arg(Theme::textMuted().name())
-                               .arg(Theme::labelFont().pointSizeF()));
-    setFixedWidth(cardWidth());
-    // Fonts and metrics are baked into every prepared string, so a theme edit
-    // is a rebuild, not a repaint.
-    myRowsBuilt = false;
-    refresh();
+    // A Theme broadcast fires per mouse move of an Appearance colour drag. A
+    // hidden drawer answers it with one flag, and showEvent() settles it.
+    if (!isVisible()) {
+        myThemePending = true;
+        return;
+    }
+    myThemePending = false;
+
+    const auto restyle = [](QWidget* widget, const QString& css) {
+        if (widget != nullptr && widget->styleSheet() != css) widget->setStyleSheet(css);
+    };
+    restyle(myTitle, titleCss());
+    restyle(myCount, countCss());
+    restyle(myEmpty, emptyCss());
+    const int width = cardWidth();
+    if (minimumWidth() != width || maximumWidth() != width) setFixedWidth(width);
+
+    // Fonts and metrics are baked into every prepared string, so a TYPE change
+    // is a rebuild. A colour is read at paint time, so a colour edit restyles
+    // the delete controls only if their own colours moved, and repaints.
+    const QString key = layoutKey(width);
+    if (key != myLayoutKey) {
+        myLayoutKey = key;
+        myRowsBuilt = false;
+        refresh();
+        return;
+    }
+    const QString css = deleteCss();
+    const QString iconKey = Theme::text().name() + Theme::textDisabled().name();
+    const bool restyleButtons = css != myDeleteCss;
+    const bool reicon = iconKey != myIconKey;
+    if (reicon) {
+        myDeleteIcon = IconSet::icon(IconSet::Glyph::Delete);
+        myIconKey = iconKey;
+    }
+    myDeleteCss = css;
+    for (const Row& row : myRows) {
+        if (row.remove && restyleButtons) row.remove->setStyleSheet(css);
+        if (row.remove && reicon) row.remove->setIcon(myDeleteIcon);
+        if (row.widget) row.widget->update();
+    }
+    update();
+}
+
+void JointsPanel::showEvent(QShowEvent* event)
+{
+    QWidget::showEvent(event);
+    // Everything that happened while hidden is caught up here, so an opened
+    // drawer is always current.
+    if (myThemePending)
+        applyTheme();
+    else
+        refresh();
 }
 
 QSize JointsPanel::sizeHint() const
@@ -789,8 +941,20 @@ void JointsPanel::paintEvent(QPaintEvent* /*event*/)
     Theme::paintSurface(painter, rect(), kRadius);
 }
 
+QString JointsPanel::rowSignature(const DocumentModel& document, const DocumentModel::Joint& joint,
+                                  const Joinery::Derivation& derivation, int selectedJointId,
+                                  bool expanded)
+{
+    return signatureOf(*contentFor(document, joint, derivation, selectedJointId, expanded));
+}
+
 void JointsPanel::refresh()
 {
+    // A hidden drawer does NO work on a state change - showEvent() refreshes on
+    // the way back, so nothing it would have shown is lost by skipping.
+    if (!isVisible()) return;
+    ++myContentPasses;
+
     std::vector<std::shared_ptr<RowModel>> models;
     const bool live = myWindow != nullptr && !myWindow->isShowingInitScreen();
     if (live) {
@@ -804,7 +968,8 @@ void JointsPanel::refresh()
         QSet<int> alive;
         for (std::size_t i = 0; i < count; ++i) {
             alive.insert(joints[i].id);
-            models.push_back(contentFor(doc, joints[i], derivations[i], selected, myExpanded));
+            models.push_back(contentFor(doc, joints[i], derivations[i], selected,
+                                        myExpanded.contains(joints[i].id)));
         }
         myExpanded.intersect(alive);
     } else {
@@ -818,8 +983,12 @@ void JointsPanel::refresh()
         live && !myWindow->isSketching() && !myWindow->renderModeEnabled();
     myCount->setText(QString::number(models.size()));
 
-    QString signature = QString::number(models.size()) + QLatin1Char('\x1e');
-    for (const auto& m : models) signature += m->signature + QLatin1Char('\x1e');
+    // Whether a furniture is open is displayed too - the empty state says so -
+    // so it is in the signature: the library's empty list and an empty
+    // furniture's are both "0 rows" and must not early-out into each other.
+    QString signature = (live ? QStringLiteral("L") : QStringLiteral("l")) +
+                        QString::number(models.size()) + QLatin1Char('\x1e');
+    for (const auto& m : models) signature += signatureOf(*m) + QLatin1Char('\x1e');
 
     if (myRowsBuilt && signature == myRowSignature) {
         for (const Row& row : myRows)
@@ -828,6 +997,7 @@ void JointsPanel::refresh()
     }
     myRowSignature = signature;
     myRowsBuilt = true;
+    ++myRowBuilds;
 
     const int scrolledTo = myRowScroll->verticalScrollBar()->value();
     while (QLayoutItem* item = myRowsLayout->takeAt(0)) {
@@ -862,19 +1032,23 @@ void JointsPanel::refresh()
     myRowScroll->setVerticalScrollBarPolicy(overflow ? Qt::ScrollBarAlwaysOn
                                                      : Qt::ScrollBarAlwaysOff);
 
-    const QIcon deleteIcon = IconSet::icon(IconSet::Glyph::Delete);
-    const QString css = deleteCss();
+    const QString iconKey = Theme::text().name() + Theme::textDisabled().name();
+    if (iconKey != myIconKey || myDeleteIcon.isNull()) {
+        myDeleteIcon = IconSet::icon(IconSet::Glyph::Delete);
+        myIconKey = iconKey;
+    }
+    myDeleteCss = deleteCss();
     QWidget* host = myRowScroll->widget();
     for (const auto& m : models) {
         auto* widget = new JointRowWidget(this, m, host);
-        widget->setFixedSize(m->width, m->height);
+        widget->setFixedSize(m->rowWidth, m->height);
         auto* remove = new QPushButton(widget);
         remove->setFixedSize(Theme::wholeDevicePixels(QSize(kDeleteSize, kDeleteSize)));
         remove->move(m->deleteAt);
-        remove->setIcon(deleteIcon);
+        remove->setIcon(myDeleteIcon);
         remove->setIconSize(QSize(14, 14));
         remove->setToolTip(deleteTooltip());
-        remove->setStyleSheet(css);
+        remove->setStyleSheet(myDeleteCss);
         remove->setEnabled(enabled);
         remove->setVisible(m->expanded);   // an OPEN row offers it, as mocked
         const int jointId = m->jointId;
@@ -892,9 +1066,7 @@ void JointsPanel::refresh()
         myEmpty = new QLabel(emptyText(), host);
         myEmpty->setWordWrap(true);
         myEmpty->setContentsMargins(kHeaderSide, 4, kHeaderSide, 4);
-        myEmpty->setStyleSheet(QStringLiteral("background: transparent; color: %1; font-size: %2pt;")
-                                   .arg(Theme::textMuted().name())
-                                   .arg(Theme::bodyFont().pointSizeF()));
+        myEmpty->setStyleSheet(emptyCss());
         myRowsLayout->addWidget(myEmpty);
         myEmpty->show();
     }
@@ -998,6 +1170,27 @@ QStringList JointsPanel::rowAppCopyAt(int index) const
     return row ? row->model->appCopy : QStringList();
 }
 
+QStringList JointsPanel::paintedStringsAt(int index) const
+{
+    const Row* row = rowAt(index);
+    if (!row) return {};
+    std::vector<std::pair<QPointF, QString>> placed;
+    for (const RowModel::Painted& t : row->model->painted)
+        placed.emplace_back(t.rect.topLeft(), t.text.text());
+    for (const RowModel::Strip& strip : row->model->strips) {
+        for (const RowModel::Painted& label : strip.labels)
+            placed.emplace_back(label.rect.topLeft(), label.text.text());
+        if (strip.edgeLine >= 0) placed.emplace_back(strip.edge.rect.topLeft(), strip.edge.text.text());
+    }
+    std::stable_sort(placed.begin(), placed.end(), [](const auto& a, const auto& b) {
+        if (std::fabs(a.first.y() - b.first.y()) > 0.5) return a.first.y() < b.first.y();
+        return a.first.x() < b.first.x();
+    });
+    QStringList strings;
+    for (const auto& entry : placed) strings << entry.second;
+    return strings;
+}
+
 QWidget* JointsPanel::rowWidgetAt(int index) const
 {
     const Row* row = rowAt(index);
@@ -1028,34 +1221,42 @@ int JointsPanel::stripCountAt(int index) const
     return row ? static_cast<int>(row->model->strips.size()) : 0;
 }
 
+namespace {
+const RowModel::Strip* stripOf(const std::shared_ptr<const RowModel>& model, int strip)
+{
+    if (!model || strip < 0 || strip >= static_cast<int>(model->strips.size())) return nullptr;
+    return &model->strips[static_cast<std::size_t>(strip)];
+}
+}  // namespace
+
 QRectF JointsPanel::rulerBarAt(int index, int strip) const
 {
     const Row* row = rowAt(index);
-    if (!row || strip < 0 || strip >= static_cast<int>(row->model->strips.size())) return QRectF();
-    return row->model->strips[strip].bar;
+    const RowModel::Strip* s = row ? stripOf(row->model, strip) : nullptr;
+    return s ? s->bar : QRectF();
 }
 
 std::vector<double> JointsPanel::tickXAt(int index, int strip) const
 {
     const Row* row = rowAt(index);
-    if (!row || strip < 0 || strip >= static_cast<int>(row->model->strips.size())) return {};
-    return row->model->strips[strip].ticks;
+    const RowModel::Strip* s = row ? stripOf(row->model, strip) : nullptr;
+    return s ? s->ticks : std::vector<double>();
 }
 
 QRectF JointsPanel::bandAt(int index, int strip) const
 {
     const Row* row = rowAt(index);
-    if (!row || strip < 0 || strip >= static_cast<int>(row->model->strips.size())) return QRectF();
-    return row->model->strips[strip].band;
+    const RowModel::Strip* s = row ? stripOf(row->model, strip) : nullptr;
+    return s ? s->band : QRectF();
 }
 
 std::vector<QRectF> JointsPanel::labelRectsAt(int index, int strip) const
 {
     std::vector<QRectF> rects;
     const Row* row = rowAt(index);
-    if (!row || strip < 0 || strip >= static_cast<int>(row->model->strips.size())) return rects;
-    for (const RowModel::Painted& label : row->model->strips[strip].labels)
-        rects.push_back(label.rect);
+    const RowModel::Strip* s = row ? stripOf(row->model, strip) : nullptr;
+    if (s)
+        for (const RowModel::Painted& label : s->labels) rects.push_back(label.rect);
     return rects;
 }
 
@@ -1063,16 +1264,38 @@ QStringList JointsPanel::labelTextsAt(int index, int strip) const
 {
     QStringList texts;
     const Row* row = rowAt(index);
-    if (!row || strip < 0 || strip >= static_cast<int>(row->model->strips.size())) return texts;
-    for (const RowModel::Painted& label : row->model->strips[strip].labels) texts << label.raw;
+    const RowModel::Strip* s = row ? stripOf(row->model, strip) : nullptr;
+    if (s)
+        for (const RowModel::Painted& label : s->labels) texts << label.raw;
     return texts;
+}
+
+QString JointsPanel::edgeWordAt(int index, int strip) const
+{
+    const Row* row = rowAt(index);
+    const RowModel::Strip* s = row ? stripOf(row->model, strip) : nullptr;
+    return s && s->edgeLine >= 0 ? s->edge.raw : QString();
+}
+
+QRectF JointsPanel::edgeWordRectAt(int index, int strip) const
+{
+    const Row* row = rowAt(index);
+    const RowModel::Strip* s = row ? stripOf(row->model, strip) : nullptr;
+    return s && s->edgeLine >= 0 ? s->edge.rect : QRectF();
+}
+
+int JointsPanel::edgeWordLineAt(int index, int strip) const
+{
+    const Row* row = rowAt(index);
+    const RowModel::Strip* s = row ? stripOf(row->model, strip) : nullptr;
+    return s ? s->edgeLine : -1;
 }
 
 QString JointsPanel::depthTextAt(int index, int strip) const
 {
     const Row* row = rowAt(index);
-    if (!row || strip < 0 || strip >= static_cast<int>(row->model->strips.size())) return QString();
-    return row->model->strips[strip].depthText;
+    const RowModel::Strip* s = row ? stripOf(row->model, strip) : nullptr;
+    return s ? s->depthText : QString();
 }
 
 bool JointsPanel::isStaggeredAt(int index) const
@@ -1085,6 +1308,17 @@ QRectF JointsPanel::nameRectAt(int index) const
 {
     const Row* row = rowAt(index);
     return row ? row->model->nameARect : QRectF();
+}
+
+QRectF JointsPanel::caveatGlyphRectAt(int index) const
+{
+    const Row* row = rowAt(index);
+    return row && row->model->hasCaveatGlyph ? row->model->caveatGlyph : QRectF();
+}
+
+bool JointsPanel::emptyStateShown() const
+{
+    return myEmpty != nullptr && myEmpty->isVisible();
 }
 
 QStringList JointsPanel::paintedTexts() const

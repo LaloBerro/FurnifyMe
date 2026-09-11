@@ -850,7 +850,14 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // one event nobody drives. setRenderModeEnabled() is a no-op when the mode
     // was already off, so the ordinary loss costs one resync and nothing else.
     connect(myView, &OcctViewWidget::glResourcesReleased, this, [this] {
+        // resyncView() drops the selected joint, which is right for the swaps
+        // it usually serves - a new document restarts joint ids - and wrong
+        // here: a context loss changed no document, so the joint the user
+        // selected is still exactly that joint, and with the drawer closed it
+        // is the only thing that brings its hardware back below.
+        const int keptJoint = mySelectedJointId;
         resyncView();
+        mySelectedJointId = keptJoint;
         setRenderModeEnabled(false);
         // The joints' hardware went with the context too (releaseGlResources()
         // detaches the renderer and forgets what it drew), and nothing about

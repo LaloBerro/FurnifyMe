@@ -1169,11 +1169,13 @@ const char* const kNoDominantEdge =
 // every surface that names a reference edge (today: readout() below; any
 // later one) calls this rather than re-deriving the mapping, so the word in
 // a drawer and the word anywhere else can never disagree.
-std::string edgeName(const gp_Dir& dir)
+std::string edgeName(const gp_Dir& dir, bool& named)
 {
     const double x = dir.X(), y = dir.Y(), z = dir.Z();
     const double ax = std::fabs(x), ay = std::fabs(y), az = std::fabs(z);
+    named = false;
     if (std::max({ax, ay, az}) < kDominantAxisCos) return kNoDominantEdge;
+    named = true;
     if (az >= ax && az >= ay) return z >= 0.0 ? "top" : "bottom";
     if (ay >= ax) return y >= 0.0 ? "back" : "front";
     return x >= 0.0 ? "right" : "left";
@@ -1190,7 +1192,7 @@ Readout readout(Kind kind, const Parameters& params, const Contact& contact,
     const gp_Dir runDir = alongU ? contact.frame.XDirection() : contact.frame.YDirection();
     // Measured from the LOW end of the run, so the named edge is the one
     // the numbers grow away from.
-    out.referenceEdgeA = edgeName(gp_Dir(runDir.Reversed()));
+    out.referenceEdgeA = edgeName(gp_Dir(runDir.Reversed()), out.referenceEdgeNamed);
     out.referenceEdgeB = out.referenceEdgeA;
 
     for (const Item& item : items) {

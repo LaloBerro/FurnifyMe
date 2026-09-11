@@ -77,6 +77,7 @@ Spec graphite()
     // OCCT constant it replaces, so nothing on screen moves until edited.
     s.outlineLineColour = QColor("#ffff00");
     s.danger            = QColor("#e0564a");   // invalid input, failures
+    s.caution           = QColor("#ffca4a");   // a caution - the amber it used to borrow
     s.focusRing         = QColor("#ffca4a");   // amber - distinct from
                                                // accent(), which already marks
                                                // the checked state
@@ -252,6 +253,7 @@ const QVector<ColourToken>& colourTokens()
         {QStringLiteral("textDisabled"), &Spec::textDisabled},
         {QStringLiteral("accent"), &Spec::accent},
         {QStringLiteral("danger"), &Spec::danger},
+        {QStringLiteral("caution"), &Spec::caution},
         {QStringLiteral("focusRing"), &Spec::focusRing},
         {QStringLiteral("focusRingMuted"), &Spec::focusRingMuted},
     };
@@ -443,6 +445,7 @@ QColor gizmoAxisZ()   { return spec().gizmoAxisZ; }
 QColor sketchPointMarker() { return spec().sketchPointMarker; }
 QColor outlineLineColour() { return spec().outlineLineColour; }
 QColor danger()       { return spec().danger; }
+QColor caution()      { return spec().caution; }
 QColor focusRing()    { return spec().focusRing; }
 QColor focusRingMuted() { return spec().focusRingMuted; }
 QColor highlightHover()    { return spec().highlightHover; }

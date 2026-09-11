@@ -1921,6 +1921,8 @@ int main()
         check(r95.referenceEdgeA == "front",
               "0.95 along an axis still names that axis's edge (" +
                   r95.referenceEdgeA + ")");
+        check(r95.referenceEdgeNamed,
+              "and the readout flags it as a NAMED edge - the drawer's ruler zero");
 
         // Exactly 45 degrees between two axes - neither wins, and the
         // readout must say so rather than pick one.
@@ -1937,6 +1939,8 @@ int main()
                   r45.referenceEdgeA + ")");
         check(!r45.referenceEdgeA.empty(),
               "the ambiguous case still says SOMETHING, not an empty string");
+        check(!r45.referenceEdgeNamed,
+              "and the readout flags it as NOT a named edge, so nothing puts it at a ruler's zero");
     }
 
     // --- the readout on an OBLIQUE frame: distances don't move, the edge
@@ -2038,6 +2042,8 @@ int main()
                   obliqueReadout.referenceEdgeA + ")");
         check(obliqueReadout.referenceEdgeA != flatReadout.referenceEdgeA,
               "and it is not silently reusing the flat frame's own answer");
+        check(flatReadout.referenceEdgeNamed && !obliqueReadout.referenceEdgeNamed,
+              "the named-edge flag follows the word: set on the flat frame, clear on the tilted one");
     }
 
     // --- joints live in the document, and die with their pieces -------
