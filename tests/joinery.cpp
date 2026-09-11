@@ -762,7 +762,12 @@ int main()
         Joinery::Parameters p = Joinery::defaultsFor(Joinery::Kind::Dowel, 18.0);
         p.count = 3;
         p.endMarginMm = 40.0;
-        p.insetMm = 9.0;
+        // 7.5, deliberately NOT Parameters' own 9.0 default (which is also
+        // what defaultsFor gives an 18 mm board): an expected value equal to
+        // the struct default cannot tell a real passthrough from a silent
+        // substitution of the default, which is the trap that cost Task 1 two
+        // fix rounds.
+        p.insetMm = 7.5;
 
         const std::vector<Joinery::Item> items =
             Joinery::layout(Joinery::Kind::Dowel, p, c, {});
@@ -772,7 +777,7 @@ int main()
             checkNear(items[0].u, 40.0, 1.0e-6, "the first sits at the end margin");
             checkNear(items[2].u, 260.0, 1.0e-6, "the last mirrors it at the far end");
             checkNear(items[1].u, 150.0, 1.0e-6, "and the middle one is centred");
-            checkNear(items[1].v, 9.0, 1.0e-6, "all of them inset 9 mm across");
+            checkNear(items[1].v, 7.5, 1.0e-6, "all of them inset 7.5 mm across");
             checkNear(items[0].sizeMm, p.sizeMm, 1.0e-9, "each carries its own size");
             checkNear(items[0].centre.X(), 40.0, 1.0e-6,
                       "and a world position derived from the contact frame");
@@ -1207,7 +1212,7 @@ int main()
         Joinery::Parameters p = Joinery::defaultsFor(Joinery::Kind::Dowel, 18.0);
         p.count = 3;
         p.endMarginMm = 40.0;
-        p.insetMm = 9.0;
+        p.insetMm = 7.5;   // not the 9.0 struct default - see the layout block
         const std::vector<Joinery::Item> items =
             Joinery::layout(Joinery::Kind::Dowel, p, c, {});
         const Joinery::Readout r = Joinery::readout(Joinery::Kind::Dowel, p, c, items);
@@ -1221,7 +1226,7 @@ int main()
             checkNear(r.alongMm[1], 150.0, 1.0e-6, "the second at the middle");
             checkNear(r.alongMm[2], 260.0, 1.0e-6, "the third at the far margin");
         }
-        checkNear(r.insetMm, 9.0, 1.0e-6, "with the inset across the face");
+        checkNear(r.insetMm, 7.5, 1.0e-6, "with the inset across the face");
         checkNear(r.depthAMm, p.depthAMm, 1.0e-9, "and the drill depth for each side");
         check(!r.referenceEdgeA.empty(), "the edge you measure from is NAMED");
         check(r.referenceEdgeA == "front" || r.referenceEdgeA == "back" ||
