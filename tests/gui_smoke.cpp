@@ -815,6 +815,7 @@ constexpr BlockInfo kBlocks[] = {
     { "furniturestore-the-furnify-library-injected-into-a", false, false },
     { "atomic-saves-a-failed-write-must-never-corrupt-what", false, false },
     { "saveversion-a-failed-manifest-write-leaves-no", false, false },
+    { "joints-round-trip-through-the-furniture-file", false, true },
     { "milestone-3-item-4-named-versions-and-the-side-by", false, true },
     { "milestone-3-item-3-live-symmetry-via-mirror-twins", false, true },
     { "milestone-4-phase-3-the-mirror-plane-placement", false, true },
@@ -18399,6 +18400,196 @@ int main(int argc, char* argv[])
         check(orphanStore.saveVersion(orphanId, QStringLiteral("V1"), orphanDoc),
               "orphan-blob probe: after restoring write access, saveVersion succeeds normally");
         check(orphanStore.versions(orphanId).size() == 1, "and exactly one version is now listed");
+    }
+
+    // --- Task 9: joints persist in the furniture file, by position -------
+    // Ids are session-only handles (DocumentModel's own header note), so
+    // the manifest stores each joint's two bodies as POSITIONS in the
+    // serialized body list - the same rule symmetryPairs and linkGroups
+    // already follow. This is the Qt-side layer alone: DocumentModel's own
+    // toSerialized()/fromSerialized() round trip (every field, every
+    // refusal) is pinned headless in tests/joinery.cpp, where it costs
+    // milliseconds instead of the seconds a QApplication-backed probe
+    // needs. What belongs here instead is what only FurnitureStore's own
+    // QJsonObject layer can prove: the actual "joints" manifest key,
+    // saveFurniture() never touching the undo stack, and - the brief's own
+    // gap, found by reading its code against saveVersion()/loadVersion() -
+    // that the SEPARATE version path carries joints too, not only the
+    // current-document path.
+    if (blockEnabled("joints-round-trip-through-the-furniture-file")) {
+        RequiredTempDir jointDir;
+        FurnitureStore jointStore(jointDir.path());
+        const QString furnitureId = jointStore.createFurniture(QStringLiteral("Joint Test"));
+        check(!furnitureId.isEmpty(), "a furniture to save joints into");
+
+        // Every Parameters field set to a value equal to NO struct default
+        // (see Joinery::Parameters in src/Joinery.h), so a loader that
+        // dropped any one of them - or a jointsToJson()/jsonToJoints() bug
+        // that wrote/read one field under the wrong JSON key - reads as a
+        // struct default here rather than passing by coincidence. Kind is
+        // HalfLap, the LAST enum value (index 9): a boundary bug in the
+        // kind-range refusal (say, "> 8" instead of "> Kind::HalfLap")
+        // would wrongly refuse exactly this joint, so a passing test here
+        // also pins that boundary.
+        Joinery::Parameters params;
+        params.count = 4;
+        params.sizeMm = 8.5;
+        params.depthAMm = 12.25;
+        params.depthBMm = 13.75;
+        params.insetMm = 11.5;
+        params.endMarginMm = 35.0;
+        params.angleDeg = 15.0;
+        params.widthMm = 22.0;
+        params.stopped = true;
+        params.stopMm = 7.5;
+        params.thicknessMm = 9.5;
+        params.lengthMm = 28.0;
+        params.haunched = true;
+
+        int savedCount = 0;
+        {
+            DocumentModel doc;
+            const int panel = doc.addSolid(
+                ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 18.0, 300.0, 800.0));
+            const int shelf = doc.addSolid(
+                ModelingOps::makeBox(gp_Pnt(18.0, 0.0, 400.0), 600.0, 300.0, 18.0));
+            const int jointId = doc.addJoint(Joinery::Kind::HalfLap, panel, shelf, params);
+            check(jointId > 0, "a joint is created before saving");
+            check(doc.setJointAdjustments(jointId, {Joinery::Adjustment{2, 3.25, -4.5}}),
+                  "and carries an adjustment");
+            savedCount = static_cast<int>(doc.joints().size());
+
+            // Save is never a checkpoint (CLAUDE.md) - unaffected by
+            // joints existing in the document.
+            const bool couldUndoBeforeSave = doc.canUndo();
+            const std::size_t undoDepthBeforeSave = doc.undoDepth();
+            check(jointStore.saveFurniture(furnitureId, doc, QImage()),
+                  "and the furniture saves");
+            check(doc.canUndo() == couldUndoBeforeSave && doc.undoDepth() == undoDepthBeforeSave,
+                  "saveFurniture with joints in the document touches neither canUndo() nor "
+                  "undoDepth()");
+        }
+
+        DocumentModel loaded;
+        QString error;
+        check(jointStore.loadFurniture(furnitureId, loaded, &error),
+              QStringLiteral("the furniture loads back (%1)").arg(error));
+        check(static_cast<int>(loaded.joints().size()) == savedCount,
+              "with its joints intact");
+        if (!loaded.joints().empty()) {
+            const DocumentModel::Joint& j = loaded.joints().front();
+            check(j.kind == Joinery::Kind::HalfLap, "the kind round-trips");
+            check(loaded.contains(j.bodyA) && loaded.contains(j.bodyB),
+                  "and both pieces resolve to real bodies in the loaded document");
+            check(j.bodyA != j.bodyB, "still two different pieces");
+
+            const Joinery::Parameters& p = j.params;
+            check(p.count == 4, "count round-trips");
+            check(std::fabs(p.sizeMm - 8.5) < 1.0e-9, "sizeMm round-trips");
+            check(std::fabs(p.depthAMm - 12.25) < 1.0e-9, "depthAMm round-trips");
+            check(std::fabs(p.depthBMm - 13.75) < 1.0e-9,
+                  "depthBMm round-trips, distinct from depthAMm");
+            check(std::fabs(p.insetMm - 11.5) < 1.0e-9, "insetMm round-trips");
+            check(std::fabs(p.endMarginMm - 35.0) < 1.0e-9, "endMarginMm round-trips");
+            check(std::fabs(p.angleDeg - 15.0) < 1.0e-9, "angleDeg round-trips");
+            check(std::fabs(p.widthMm - 22.0) < 1.0e-9, "widthMm round-trips");
+            check(p.stopped == true, "stopped round-trips");
+            check(std::fabs(p.stopMm - 7.5) < 1.0e-9, "stopMm round-trips");
+            check(std::fabs(p.thicknessMm - 9.5) < 1.0e-9, "thicknessMm round-trips");
+            check(std::fabs(p.lengthMm - 28.0) < 1.0e-9, "lengthMm round-trips");
+            check(p.haunched == true, "haunched round-trips");
+
+            check(j.adjustments.size() == 1, "the adjustment round-trips too");
+            if (j.adjustments.size() == 1) {
+                check(j.adjustments.front().index == 2 &&
+                          std::fabs(j.adjustments.front().du - 3.25) < 1.0e-9 &&
+                          std::fabs(j.adjustments.front().dv - (-4.5)) < 1.0e-9,
+                      "with its exact index/du/dv");
+            }
+        }
+
+        // An older-format manifest has no "joints" key at all - absent
+        // means none, the same forward-compatible rule symmetry and
+        // linkGroups already follow. Simulated by reading the manifest
+        // raw, dropping the key, and confirming the store still loads
+        // clean rather than refusing.
+        {
+            QString furnitureDirPath;
+            for (const FurnitureStore::FurnitureInfo& info : jointStore.listFurniture()) {
+                if (info.id == furnitureId) furnitureDirPath = info.filePath;
+            }
+            check(!furnitureDirPath.isEmpty(), "the furniture's own directory is found");
+            const QString manifestFilePath = furnitureDirPath + QStringLiteral("/manifest.json");
+
+            QJsonObject manifestObj;
+            {
+                QFile manifestFile(manifestFilePath);
+                check(manifestFile.open(QIODevice::ReadOnly), "reading the raw manifest");
+                manifestObj = QJsonDocument::fromJson(manifestFile.readAll()).object();
+            }
+            check(manifestObj.contains(QStringLiteral("joints")),
+                  "sanity: the manifest genuinely carries a joints key to remove");
+            manifestObj.remove(QStringLiteral("joints"));
+            {
+                QFile rewritten(manifestFilePath);
+                check(rewritten.open(QIODevice::WriteOnly | QIODevice::Truncate),
+                      "rewriting the manifest without its joints key");
+                rewritten.write(QJsonDocument(manifestObj).toJson());
+            }
+
+            DocumentModel olderLoaded;
+            QString olderError;
+            check(jointStore.loadFurniture(furnitureId, olderLoaded, &olderError),
+                  QStringLiteral("a manifest with no joints key still loads (%1)").arg(olderError));
+            check(olderLoaded.joints().empty(), "...decoding to no joints at all, not a refusal");
+        }
+
+        // --- the version path: saveVersion()/loadVersion() carry joints
+        // too - the brief wired toSerialized/fromSerialized and the
+        // current-document save/load path, but saveVersion()/loadVersion()
+        // write/read their OWN "symmetry"/"linkGroups" keys into their own
+        // version entry, and a version is documented (CLAUDE.md) as a
+        // snapshot of the WHOLE document, so dropping joints there would be
+        // exactly the silent half-restore that law forbids.
+        {
+            DocumentModel current;
+            const int panel = current.addSolid(
+                ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 18.0, 300.0, 800.0));
+            const int shelf = current.addSolid(
+                ModelingOps::makeBox(gp_Pnt(18.0, 0.0, 400.0), 600.0, 300.0, 18.0));
+            const int jointId =
+                current.addJoint(Joinery::Kind::MortiseTenon, panel, shelf,
+                                  Joinery::defaultsFor(Joinery::Kind::MortiseTenon, 18.0));
+            check(jointId > 0, "a joint for the version probe");
+
+            check(jointStore.saveVersion(furnitureId, QStringLiteral("With A Joint"), current),
+                  "saveVersion succeeds with a joint in the document");
+
+            DocumentModel versionLoaded;
+            check(jointStore.loadVersion(furnitureId, QStringLiteral("With A Joint"), versionLoaded),
+                  "loadVersion succeeds");
+            check(versionLoaded.joints().size() == 1,
+                  "loadVersion carries the joint back - the version path, not just the "
+                  "current-document path");
+            if (versionLoaded.joints().size() == 1) {
+                const DocumentModel::Joint& vj = versionLoaded.joints().front();
+                check(vj.kind == Joinery::Kind::MortiseTenon, "the loaded version's joint kind");
+                check(versionLoaded.contains(vj.bodyA) && versionLoaded.contains(vj.bodyB) &&
+                          vj.bodyA != vj.bodyB,
+                      "and both pieces resolve to real, distinct bodies");
+            }
+
+            // Restore replaces the CURRENT document through one undoable
+            // checkpoint (CLAUDE.md) - a live document with no joints that
+            // restores a version WITH one must come back with it.
+            DocumentModel restoreTarget;
+            restoreTarget.checkpoint();
+            restoreTarget.restoreFrom(versionLoaded);
+            check(restoreTarget.joints().size() == 1,
+                  "restoring the version installs its joint into the live document");
+            check(restoreTarget.canUndo(),
+                  "...behind the one checkpoint the caller took, same as every other restore");
+        }
     }
 
     // --- Milestone 3, item 4: named versions and the side-by-side compare ---

@@ -450,6 +450,24 @@ public:
             std::vector<std::array<double, 12>> placements;
         };
         std::vector<LinkGroupRecord> linkGroups;
+
+        // Joints (Task 9), POSITION-based for exactly the reason
+        // symmetryPairs and linkGroups are: ids are session-only handles
+        // that cannot be persisted directly (see the header note at the
+        // top of this file). `bodyAPosition`/`bodyBPosition` index into
+        // `serial.bodies`, the same array symmetryPairs and linkGroups
+        // already index. Always empty when nothing is jointed, the same
+        // "absent means none" rule those two fields follow, so an
+        // OLDER file with no "joints" key round-trips as "no joints" for
+        // free (FurnitureStore::jsonToJoints()'s own forward-compat rule).
+        struct JointRecord {
+            int kindIndex = 0;
+            int bodyAPosition = 0;
+            int bodyBPosition = 0;
+            Joinery::Parameters params;
+            std::vector<Joinery::Adjustment> adjustments;
+        };
+        std::vector<JointRecord> joints;
     };
 
     // Walks mySolids/myOutlines in order, building the kernel-side shapes
@@ -478,7 +496,16 @@ public:
     // cannot load simultaneously mirror-paired and linked, and guessing
     // which membership to keep would be the exact silent data loss the
     // rest of this function's validate-before-mutate discipline exists to
-    // prevent.
+    // prevent - or (Task 9) a `JointRecord` whose `bodyAPosition`/
+    // `bodyBPosition` does not index a real body, whose two positions are
+    // equal, or whose `kindIndex` falls outside `Joinery::Kind`'s own
+    // range. A record missing its "kind"/"a"/"b" JSON key decodes (see
+    // FurnitureStore::jsonToJoints()) to -1 rather than a plausible-looking
+    // 0, so a missing identity field is refused by this SAME range check
+    // rather than a third mechanism. Every joint is validated before any
+    // of them mutates `this`, exactly like the mirror/link check above -
+    // one corrupt joint refuses the WHOLE load rather than silently
+    // dropping just that one.
     bool fromSerialized(const FurnifySerial::SerializedDocument& serial, const DocumentMeta& meta);
 
     // Replaces the whole document's content - bodies, outlines, names,

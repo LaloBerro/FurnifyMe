@@ -2183,6 +2183,162 @@ int main()
               "a joint created after the restore never collides with the restored one's id");
     }
 
+    // --- persistence (Task 9): a DocumentMeta round trip carries EVERY
+    // joint field, not merely a couple - every Parameters field below is
+    // set to a value equal to NO struct default (see Joinery::Parameters in
+    // src/Joinery.h), and the joint carries an adjustment too, so a loader
+    // silently dropping any one field reads as a coincidental struct
+    // default here rather than a passing test. This exercises
+    // DocumentModel::toSerialized()/fromSerialized() alone - the
+    // FurnitureStore/QJsonObject layer (jointsToJson/jsonToJoints) is
+    // Qt-side and pinned in gui_smoke instead. -------------------------
+    {
+        DocumentModel doc;
+        const int panel = doc.addSolid(
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 18.0, 300.0, 800.0).Shape());
+        const int shelf = doc.addSolid(
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 400.0), 600.0, 300.0, 18.0).Shape());
+        // A third body, unrelated to the joint - proves the position
+        // translation isn't fooled by a body that isn't part of it, the
+        // same guard the link-group serialization test (sketch_document.cpp)
+        // already runs.
+        doc.addSolid(BRepPrimAPI_MakeBox(gp_Pnt(200.0, 0.0, 0.0), 3.0, 3.0, 3.0).Shape());
+
+        Joinery::Parameters params;
+        params.count = 7;
+        params.sizeMm = 10.5;
+        params.depthAMm = 11.25;
+        params.depthBMm = 16.75;
+        params.insetMm = 5.5;
+        params.endMarginMm = 33.0;
+        params.angleDeg = 12.0;
+        params.widthMm = 25.0;
+        params.stopped = true;
+        params.stopMm = 6.25;
+        params.thicknessMm = 8.5;
+        params.lengthMm = 21.0;
+        params.haunched = true;
+
+        const int jointId = doc.addJoint(Joinery::Kind::Rabbet, panel, shelf, params);
+        check(jointId > 0, "setup: a joint with every parameter field non-default");
+        const std::vector<Joinery::Adjustment> adj = {Joinery::Adjustment{1, 4.5, -2.75}};
+        check(doc.setJointAdjustments(jointId, adj), "setup: carrying one adjustment");
+
+        DocumentModel::DocumentMeta meta;
+        const FurnifySerial::SerializedDocument serial = doc.toSerialized(meta);
+        check(meta.joints.size() == 1, "toSerialized carries exactly the one joint");
+
+        DocumentModel loaded;
+        check(loaded.fromSerialized(serial, meta), "the round trip loads cleanly");
+        check(loaded.count() == 3, "all three bodies are back");
+        check(loaded.joints().size() == 1, "and the one joint too");
+        if (loaded.joints().size() == 1) {
+            const DocumentModel::Joint& j = loaded.joints().front();
+            check(j.kind == Joinery::Kind::Rabbet, "the kind round-trips");
+            check(loaded.contains(j.bodyA) && loaded.contains(j.bodyB) && j.bodyA != j.bodyB,
+                  "both pieces resolve to real, distinct bodies");
+
+            const Joinery::Parameters& p = j.params;
+            check(p.count == 7, "count round-trips");
+            checkNear(p.sizeMm, 10.5, 1.0e-9, "sizeMm round-trips");
+            checkNear(p.depthAMm, 11.25, 1.0e-9, "depthAMm round-trips");
+            checkNear(p.depthBMm, 16.75, 1.0e-9, "depthBMm round-trips, distinct from depthAMm");
+            checkNear(p.insetMm, 5.5, 1.0e-9, "insetMm round-trips");
+            checkNear(p.endMarginMm, 33.0, 1.0e-9, "endMarginMm round-trips");
+            checkNear(p.angleDeg, 12.0, 1.0e-9, "angleDeg round-trips");
+            checkNear(p.widthMm, 25.0, 1.0e-9, "widthMm round-trips");
+            check(p.stopped == true, "stopped round-trips");
+            checkNear(p.stopMm, 6.25, 1.0e-9, "stopMm round-trips");
+            checkNear(p.thicknessMm, 8.5, 1.0e-9, "thicknessMm round-trips");
+            checkNear(p.lengthMm, 21.0, 1.0e-9, "lengthMm round-trips");
+            check(p.haunched == true, "haunched round-trips");
+
+            check(j.adjustments.size() == 1, "the adjustment round-trips");
+            if (j.adjustments.size() == 1) {
+                check(j.adjustments.front().index == 1, "adjustment index round-trips");
+                checkNear(j.adjustments.front().du, 4.5, 1.0e-9, "adjustment du round-trips");
+                checkNear(j.adjustments.front().dv, -2.75, 1.0e-9, "adjustment dv round-trips");
+            }
+        }
+
+        // Forward-compatible absent key: an EMPTY meta.joints (an older
+        // save, or one that never had any) loads as "no joints", not a
+        // refusal - the same rule the link-group serialization test pins
+        // for its own key.
+        DocumentModel::DocumentMeta oldMeta = meta;
+        oldMeta.joints.clear();
+        DocumentModel oldLoaded;
+        check(oldLoaded.fromSerialized(serial, oldMeta), "a meta with no joints key loads fine");
+        check(oldLoaded.joints().empty(), "...and simply has no joints");
+    }
+
+    // --- persistence (Task 9): fromSerialized refuses a corrupt joint
+    // record OUTRIGHT - never a half-restored document - and each refusal
+    // is pinned by WHICH check actually fired, leaving the target document
+    // completely untouched (validate-before-mutate). -------------------
+    {
+        // Every fixture below shares the SAME clean two-body serialized
+        // document; only meta.joints changes per probe.
+        DocumentModel doc;
+        doc.addSolid(BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 10.0, 10.0, 10.0).Shape());
+        doc.addSolid(BRepPrimAPI_MakeBox(gp_Pnt(50.0, 0.0, 0.0), 10.0, 10.0, 10.0).Shape());
+        DocumentModel::DocumentMeta cleanMeta;
+        const FurnifySerial::SerializedDocument serial = doc.toSerialized(cleanMeta);
+        check(cleanMeta.joints.empty(), "setup: a clean two-body document starts with no joints");
+
+        const auto refusalProbe = [&](const DocumentModel::DocumentMeta::JointRecord& record,
+                                      const std::string& label) {
+            DocumentModel::DocumentMeta meta = cleanMeta;
+            meta.joints.push_back(record);
+
+            // The target already holds a body of its own, so a load that
+            // mutates anyway (rather than genuinely refusing) has something
+            // to corrupt - an empty target refusing would prove nothing
+            // (the same reasoning the mirror/link conflict test in
+            // sketch_document.cpp already applies).
+            DocumentModel target;
+            const int preexistingId = target.addSolid(
+                BRepPrimAPI_MakeBox(gp_Pnt(999.0, 0.0, 0.0), 1.0, 1.0, 1.0).Shape());
+            check(target.count() == 1, "setup (" + label + "): target already holds its own body");
+
+            check(!target.fromSerialized(serial, meta), "fromSerialized refuses: " + label);
+            check(target.count() == 1 && target.contains(preexistingId) && target.joints().empty(),
+                  "...and the target document is completely untouched (" + label + ")");
+        };
+
+        DocumentModel::DocumentMeta::JointRecord base;
+        base.kindIndex = static_cast<int>(Joinery::Kind::Dowel);
+        base.bodyAPosition = 0;
+        base.bodyBPosition = 1;
+
+        {
+            DocumentModel::DocumentMeta::JointRecord r = base;
+            r.bodyAPosition = 2;  // only positions 0 and 1 exist
+            refusalProbe(r, "a body position past the end");
+        }
+        {
+            DocumentModel::DocumentMeta::JointRecord r = base;
+            r.bodyBPosition = r.bodyAPosition;  // the same body named on both sides
+            refusalProbe(r, "the same body named twice");
+        }
+        {
+            DocumentModel::DocumentMeta::JointRecord r = base;
+            r.kindIndex = 99;  // no such Joinery::Kind
+            refusalProbe(r, "a kind index outside the enum's range");
+        }
+        {
+            // What FurnitureStore::jsonToJoints() actually produces for a
+            // record whose "kind"/"a"/"b" JSON key was absent (Override 4
+            // of the task brief): -1, never a plausible-looking 0 - so a
+            // missing identity field is refused by the SAME range check as
+            // a position past the end or a kind out of range, not a third
+            // mechanism.
+            DocumentModel::DocumentMeta::JointRecord r = base;
+            r.bodyAPosition = -1;
+            refusalProbe(r, "a missing identity field (decodes as -1)");
+        }
+    }
+
     // --- derive: the whole chain, and the loud break -------------------
     {
         const TopoDS_Shape panel =

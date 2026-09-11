@@ -211,6 +211,106 @@ void jsonToLinkGroups(const QJsonObject& obj, DocumentModel::DocumentMeta& meta)
     }
 }
 
+// The "joints" manifest key (Task 9, joinery persistence). Position-based,
+// like the two blocks above and for the same reason - ids are session-only
+// handles that cannot be persisted directly. Shape:
+// {"list": [{"kind":.., "a":.., "b":.., "count":.., "size":.., "depthA":..,
+// "depthB":.., "inset":.., "endMargin":.., "angle":.., "width":..,
+// "stopped":.., "stop":.., "thickness":.., "length":.., "haunched":..,
+// "adjustments": [{"i":.., "du":.., "dv":..}, ...]}, ...]}
+QJsonObject jointsToJson(const DocumentModel::DocumentMeta& meta)
+{
+    QJsonArray list;
+    for (const DocumentModel::DocumentMeta::JointRecord& record : meta.joints) {
+        QJsonObject obj;
+        obj[QStringLiteral("kind")] = record.kindIndex;
+        obj[QStringLiteral("a")] = record.bodyAPosition;
+        obj[QStringLiteral("b")] = record.bodyBPosition;
+        obj[QStringLiteral("count")] = record.params.count;
+        obj[QStringLiteral("size")] = record.params.sizeMm;
+        obj[QStringLiteral("depthA")] = record.params.depthAMm;
+        obj[QStringLiteral("depthB")] = record.params.depthBMm;
+        obj[QStringLiteral("inset")] = record.params.insetMm;
+        obj[QStringLiteral("endMargin")] = record.params.endMarginMm;
+        obj[QStringLiteral("angle")] = record.params.angleDeg;
+        obj[QStringLiteral("width")] = record.params.widthMm;
+        obj[QStringLiteral("stopped")] = record.params.stopped;
+        obj[QStringLiteral("stop")] = record.params.stopMm;
+        obj[QStringLiteral("thickness")] = record.params.thicknessMm;
+        obj[QStringLiteral("length")] = record.params.lengthMm;
+        obj[QStringLiteral("haunched")] = record.params.haunched;
+        QJsonArray adjustments;
+        for (const Joinery::Adjustment& adj : record.adjustments) {
+            QJsonObject a;
+            a[QStringLiteral("i")] = adj.index;
+            a[QStringLiteral("du")] = adj.du;
+            a[QStringLiteral("dv")] = adj.dv;
+            adjustments.append(a);
+        }
+        obj[QStringLiteral("adjustments")] = adjustments;
+        list.append(obj);
+    }
+    QJsonObject out;
+    out[QStringLiteral("list")] = list;
+    return out;
+}
+
+// The inverse. Absent entirely - every furniture and version saved before
+// this task - decodes to "nothing jointed", `meta.joints` left exactly as
+// it default-constructs (empty), the same forward-compatibility rule
+// jsonToSymmetry()/jsonToLinkGroups() follow for their own keys.
+//
+// kind/a/b are a joint's IDENTITY, not a tunable, so a record missing any
+// of them is corruption rather than a legitimate older file (an older file
+// carries no "joints" key AT ALL, and this function never iterates into a
+// missing "list"). They fall back to -1 - never a plausible-looking 0 -
+// when the JSON key is absent, so a missing identity field decodes as an
+// out-of-range position/kind. This function does not itself refuse
+// anything: DocumentModel::fromSerialized()'s own validate-before-mutate
+// range check (a position outside [0, bodyCount), the two positions equal,
+// or a kind outside Joinery::Kind's range) is what actually refuses the
+// load, catching "missing identity field" the same way it catches a
+// corrupted one - one mechanism, not two. Every OTHER field is a genuine
+// tunable a future version could legitimately omit, so each falls back to
+// `Joinery::Parameters`' own struct default - never a second, hand-typed
+// copy of the same number that could drift from it.
+void jsonToJoints(const QJsonObject& obj, DocumentModel::DocumentMeta& meta)
+{
+    meta.joints.clear();
+    const Joinery::Parameters defaults;
+    for (const QJsonValue& value : obj.value(QStringLiteral("list")).toArray()) {
+        const QJsonObject o = value.toObject();
+        DocumentModel::DocumentMeta::JointRecord record;
+        record.kindIndex = o.value(QStringLiteral("kind")).toInt(-1);
+        record.bodyAPosition = o.value(QStringLiteral("a")).toInt(-1);
+        record.bodyBPosition = o.value(QStringLiteral("b")).toInt(-1);
+        record.params.count = o.value(QStringLiteral("count")).toInt(defaults.count);
+        record.params.sizeMm = o.value(QStringLiteral("size")).toDouble(defaults.sizeMm);
+        record.params.depthAMm = o.value(QStringLiteral("depthA")).toDouble(defaults.depthAMm);
+        record.params.depthBMm = o.value(QStringLiteral("depthB")).toDouble(defaults.depthBMm);
+        record.params.insetMm = o.value(QStringLiteral("inset")).toDouble(defaults.insetMm);
+        record.params.endMarginMm =
+            o.value(QStringLiteral("endMargin")).toDouble(defaults.endMarginMm);
+        record.params.angleDeg = o.value(QStringLiteral("angle")).toDouble(defaults.angleDeg);
+        record.params.widthMm = o.value(QStringLiteral("width")).toDouble(defaults.widthMm);
+        record.params.stopped = o.value(QStringLiteral("stopped")).toBool(defaults.stopped);
+        record.params.stopMm = o.value(QStringLiteral("stop")).toDouble(defaults.stopMm);
+        record.params.thicknessMm =
+            o.value(QStringLiteral("thickness")).toDouble(defaults.thicknessMm);
+        record.params.lengthMm = o.value(QStringLiteral("length")).toDouble(defaults.lengthMm);
+        record.params.haunched = o.value(QStringLiteral("haunched")).toBool(defaults.haunched);
+        for (const QJsonValue& av : o.value(QStringLiteral("adjustments")).toArray()) {
+            const QJsonObject a = av.toObject();
+            Joinery::Adjustment adj;
+            adj.index = a.value(QStringLiteral("i")).toInt();
+            adj.du = a.value(QStringLiteral("du")).toDouble();
+            adj.dv = a.value(QStringLiteral("dv")).toDouble();
+            record.adjustments.push_back(adj);
+        }
+        meta.joints.push_back(record);
+    }
+}
+
 }  // namespace
 
 FurnitureStore::FurnitureStore(const QString& rootDir) : myRootDir(rootDir) {}
@@ -374,6 +474,9 @@ QString FurnitureStore::createFurniture(const QString& name)
     // Same story for link groups (Milestone 4, Task 4.2's own key): a fresh
     // furniture starts with nothing linked.
     manifest[QStringLiteral("linkGroups")] = linkGroupsToJson(DocumentModel::DocumentMeta{});
+    // Same story again for joints (Task 9): a fresh furniture starts with
+    // nothing jointed.
+    manifest[QStringLiteral("joints")] = jointsToJson(DocumentModel::DocumentMeta{});
 
     if (!writeManifestObject(id, manifest)) return QString();
 
@@ -404,6 +507,7 @@ bool FurnitureStore::saveFurniture(const QString& id, const DocumentModel& doc, 
     manifest[QStringLiteral("outlines")] = itemMetaToJson(meta.outlineNames, meta.outlineVisible);
     manifest[QStringLiteral("symmetry")] = symmetryToJson(meta);
     manifest[QStringLiteral("linkGroups")] = linkGroupsToJson(meta);
+    manifest[QStringLiteral("joints")] = jointsToJson(meta);
     if (!writeManifestObject(id, manifest)) return false;
 
     // A null/empty thumbnail is not a failure - the caller may not have
@@ -453,6 +557,10 @@ bool FurnitureStore::loadFurniture(const QString& id, DocumentModel& doc, QStrin
     jsonToSymmetry(manifest.value(QStringLiteral("symmetry")).toObject(), meta);
     // Same forward-compatibility rule for link groups (Milestone 4).
     jsonToLinkGroups(manifest.value(QStringLiteral("linkGroups")).toObject(), meta);
+    // Same forward-compatibility rule for joints (Task 9). A malformed
+    // record's actual refusal happens below, in fromSerialized() - this
+    // call only decodes the JSON into meta.joints.
+    jsonToJoints(manifest.value(QStringLiteral("joints")).toObject(), meta);
 
     // Scratch, then swap - never half-load, per the standing contract.
     DocumentModel scratch;
@@ -555,6 +663,11 @@ bool FurnitureStore::saveVersion(const QString& id, const QString& name, const D
     // edited a member expecting its copies to follow.
     entry[QStringLiteral("symmetry")] = symmetryToJson(meta);
     entry[QStringLiteral("linkGroups")] = linkGroupsToJson(meta);
+    // Joints (Task 9) follow the identical reasoning: a version is a
+    // snapshot of the WHOLE document (see CLAUDE.md, "Files, versions and
+    // the library"), and a restore that silently dropped planned joints
+    // would be exactly the half-restored document that law forbids.
+    entry[QStringLiteral("joints")] = jointsToJson(meta);
     versionsArr.append(entry);
     manifest[QStringLiteral("versions")] = versionsArr;
     if (!writeManifestObject(id, manifest)) {
@@ -614,6 +727,10 @@ bool FurnitureStore::loadVersion(const QString& id, const QString& name, Documen
         // read above.
         jsonToSymmetry(entry.value(QStringLiteral("symmetry")).toObject(), meta);
         jsonToLinkGroups(entry.value(QStringLiteral("linkGroups")).toObject(), meta);
+        // Same forward-compatibility rule for joints (Task 9) - absent for
+        // a version saved before this task existed, which decodes to no
+        // joints rather than a refusal.
+        jsonToJoints(entry.value(QStringLiteral("joints")).toObject(), meta);
 
         DocumentModel scratch;
         if (!scratch.fromSerialized(serial, meta)) return false;

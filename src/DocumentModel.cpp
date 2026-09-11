@@ -843,6 +843,24 @@ FurnifySerial::SerializedDocument DocumentModel::toSerialized(DocumentMeta& meta
         if (record.memberPositions.size() >= 2) meta.linkGroups.push_back(std::move(record));
     }
 
+    // Joints (Task 9), by position - see DocumentMeta::JointRecord. Reuses
+    // the SAME positionOfId map symmetry pairs and link groups just built
+    // above, rather than a second copy of the body ordering - position-
+    // based records are only correct when every block indexes the same
+    // order.
+    for (const Joint& joint : myJoints) {
+        const auto posA = positionOfId.find(joint.bodyA);
+        const auto posB = positionOfId.find(joint.bodyB);
+        if (posA == positionOfId.end() || posB == positionOfId.end()) continue;  // defensive
+        DocumentMeta::JointRecord record;
+        record.kindIndex = static_cast<int>(joint.kind);
+        record.bodyAPosition = static_cast<int>(posA->second);
+        record.bodyBPosition = static_cast<int>(posB->second);
+        record.params = joint.params;
+        record.adjustments = joint.adjustments;
+        meta.joints.push_back(record);
+    }
+
     return serial;
 }
 
@@ -891,6 +909,29 @@ bool DocumentModel::fromSerialized(const FurnifySerial::SerializedDocument& seri
         }
     }
 
+    // Task 9: every joint's two positions must index a real body, must
+    // differ from each other, and its kind must be a real Joinery::Kind -
+    // refused OUTRIGHT (not skipped) like the mirror/link conflict just
+    // above, because a partially-loaded joint set is worse than none. A
+    // record whose "kind"/"a"/"b" JSON key was absent decodes (see
+    // FurnitureStore::jsonToJoints()) to -1 rather than a plausible-looking
+    // 0, so "missing identity field" is caught by this SAME range check -
+    // not a third mechanism. Checked against serial.bodies.size(), not
+    // bodyIds (not built yet - this runs before any mutation, the whole
+    // point of validating first).
+    {
+        const int bodyCount = static_cast<int>(serial.bodies.size());
+        for (const DocumentMeta::JointRecord& record : meta.joints) {
+            if (record.bodyAPosition < 0 || record.bodyAPosition >= bodyCount) return false;
+            if (record.bodyBPosition < 0 || record.bodyBPosition >= bodyCount) return false;
+            if (record.bodyAPosition == record.bodyBPosition) return false;
+            if (record.kindIndex < static_cast<int>(Joinery::Kind::Dowel) ||
+                record.kindIndex > static_cast<int>(Joinery::Kind::HalfLap)) {
+                return false;
+            }
+        }
+    }
+
     mySolids.clear();
     myOutlines.clear();
     myUndo.clear();
@@ -910,12 +951,12 @@ bool DocumentModel::fromSerialized(const FurnifySerial::SerializedDocument& seri
     // Same reasoning for link groups (Milestone 4) - a second load onto the
     // same instance must not carry the OLD document's groups forward.
     myLinkGroups.clear();
-    // Same reasoning again for joints (Task 7) - joinery is not yet part of
-    // the serialized format this function reads, so `meta` never repopulates
-    // this, but a second load onto the same instance still must not leave a
-    // stale joint pointing at an id the OLD document owned - exactly the
-    // "ids restart at 1 in every document" hazard a live mirror placement
-    // already hit once (see CLAUDE.md).
+    // Same reasoning again for joints - a second load onto the same
+    // instance must not leave a stale joint pointing at an id the OLD
+    // document owned - exactly the "ids restart at 1 in every document"
+    // hazard a live mirror placement already hit once (see CLAUDE.md).
+    // `meta.joints` (Task 9) repopulates this below, positionally, the same
+    // way symmetryPairs and linkGroups already do.
     myJoints.clear();
     ++myRevision;
 
@@ -987,6 +1028,22 @@ bool DocumentModel::fromSerialized(const FurnifySerial::SerializedDocument& seri
         for (const auto& kv : placement) myLinkGroups[kv.first] = group;
     }
 
+    // Joints (Task 9): translate meta's position-based records back into
+    // the ids addSolid() just assigned. Every record was already validated
+    // - position range, distinct bodies, kind range - in the pre-mutation
+    // block above, so this loop can trust it outright rather than skipping
+    // anything here.
+    for (const DocumentMeta::JointRecord& record : meta.joints) {
+        Joint joint;
+        joint.id = myNextJointId++;
+        joint.kind = static_cast<Joinery::Kind>(record.kindIndex);
+        joint.bodyA = bodyIds[static_cast<std::size_t>(record.bodyAPosition)];
+        joint.bodyB = bodyIds[static_cast<std::size_t>(record.bodyBPosition)];
+        joint.params = record.params;
+        joint.adjustments = record.adjustments;
+        myJoints.push_back(joint);
+    }
+
     return true;
 }
 
@@ -1005,15 +1062,15 @@ void DocumentModel::restoreFrom(const DocumentModel& snapshot)
     // Link groups travel the same way symmetry pairing does - `snapshot`'s
     // ids are copied in verbatim, so no position translation is needed.
     myLinkGroups = snapshot.myLinkGroups;
-    // Joints travel the same verbatim way (Task 7 fix round 1): a version
-    // snapshot carries no joints today (joinery is not yet in the persisted
-    // format), so this clears myJoints on every restore - coherent, since
-    // `this`'s old joints may reference a body the snapshot no longer has,
-    // and leaving one behind would be a joint pointing at whatever OTHER
-    // real body later reuses that id (ids restart at 1 per document; see
-    // the header note). Once a later task adds joints to the manifest, this
-    // same line brings a version's own joints back - copying is correct in
-    // both states, so this does not special-case either one.
+    // Joints travel the same verbatim way (Task 7 fix round 1) - `snapshot`'s
+    // ids are copied in verbatim, so `this`'s old joints (which may
+    // reference a body the snapshot no longer has - a joint pointing at
+    // whatever OTHER real body later reuses that id, since ids restart at 1
+    // per document; see the header note) are replaced outright rather than
+    // merged. Since Task 9 wired joints into the manifest, `snapshot` is
+    // typically a version freshly loaded through FurnitureStore::loadVersion,
+    // so this is what actually brings a version's own joints back into the
+    // live document on Restore.
     myJoints = snapshot.myJoints;
     // Never shrink: `this`'s own counters may already be ahead of
     // `snapshot`'s (this document had more history before the restore than
