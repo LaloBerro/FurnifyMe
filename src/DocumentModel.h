@@ -24,6 +24,7 @@
 #include <gp_Trsf.hxx>
 
 #include "FurnifySerial.h"
+#include "Joinery.h"
 
 class DocumentModel {
 public:
@@ -284,6 +285,35 @@ public:
     // it is duplicated per member rather than looked up through the anchor.
     bool linkGroupOf(int id, LinkGroup& out) const;
 
+    // --- joinery (Task 7: the Joint record) ---------------------------------
+    //
+    // A planned wood joint between two pieces (spec:
+    // docs/superpowers/specs/2026-09-10-joinery-design.md). It records the
+    // RELATIONSHIP and never a world position - where its dowels fall is
+    // re-derived from the live bodies every time it is read, which is what
+    // makes a joint follow its pieces and break loudly when they part.
+    struct Joint {
+        int id = 0;
+        Joinery::Kind kind = Joinery::Kind::Dowel;
+        int bodyA = 0;
+        int bodyB = 0;
+        Joinery::Parameters params;
+        std::vector<Joinery::Adjustment> adjustments;
+    };
+
+    // Returns the new joint's id, or 0 when refused: either body unknown,
+    // or the two the same piece. Takes NO checkpoint - the caller owns the
+    // gesture's one checkpoint, the same contract every other mutator here
+    // keeps.
+    int addJoint(Joinery::Kind kind, int bodyA, int bodyB,
+                 const Joinery::Parameters& params);
+    bool removeJoint(int jointId);
+    bool updateJointParameters(int jointId, const Joinery::Parameters& params);
+    bool setJointAdjustments(int jointId, const std::vector<Joinery::Adjustment>& adj);
+    const std::vector<Joint>& joints() const { return myJoints; }
+    // Every joint touching `bodyId`, from either side.
+    std::vector<Joint> jointsOn(int bodyId) const;
+
     // Renames whichever kind of item `id` belongs to - a body or an
     // outline, since the two share one id space. Milestone 3 introduces
     // user-editable names (Task 5 wires the drawer's rename gesture); this
@@ -504,6 +534,11 @@ private:
         // inside checkpointed commits, so undoing one must restore group
         // membership and every placement exactly as they stood.
         std::map<int, LinkGroup> linkGroups;
+        // Joints ride in State for the reason the pairing map and the link
+        // groups do: they are created, edited and destroyed exclusively
+        // inside checkpointed commits, so an undo must restore them exactly
+        // as they stood - including the joints a deleted body took with it.
+        std::vector<Joint> joints;
     };
 
     // Drops `id`'s existing pairing, both directions, if it has one. The one
@@ -531,7 +566,21 @@ private:
     // other end of a pair), so "which group is X in, and where does every
     // member sit" is one lookup regardless of which member id is in hand.
     std::map<int, LinkGroup> myLinkGroups;
+    // Live joints, mirroring the myTwin/myLinkGroups idiom: this is the
+    // working set every accessor and mutator reads and writes, and State's
+    // own `joints` field is only ever a snapshot taken of it (checkpoint())
+    // or written back into it (undo()/redo()).
+    std::vector<Joint> myJoints;
     int myNextId = 1;
+    // Its own counter, never rolled back by undo - the same rule myNextId
+    // itself follows (see the header note at the top of this file): a
+    // stale joint id must never resolve to a different joint. Kept
+    // separate from myNextId (bodies/outlines) because a joint is not an
+    // item in that id space - it never appears in the Items drawer and
+    // never collides with a body or outline id, but nothing requires the
+    // two counters to share a sequence either, and keeping them apart means
+    // a change to one can never silently perturb the other.
+    int myNextJointId = 1;
     int myRevision = 0;   // see revision() - monotonic, never rolled back
     // Like ids, never rolled back by undo: a name reappearing on a different
     // solid would be confusing in the Items panel.

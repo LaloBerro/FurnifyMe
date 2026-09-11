@@ -2,6 +2,7 @@
 // docs/superpowers/specs/2026-09-10-joinery-design.md). No Qt, no GPU -
 // every function under test is a pure function of shapes and numbers.
 #include "Joinery.h"
+#include "DocumentModel.h"
 
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
@@ -1847,6 +1848,112 @@ int main()
                   obliqueReadout.referenceEdgeA + ")");
         check(obliqueReadout.referenceEdgeA != flatReadout.referenceEdgeA,
               "and it is not silently reusing the flat frame's own answer");
+    }
+
+    // --- joints live in the document, and die with their pieces -------
+    {
+        DocumentModel doc;
+        const int panel = doc.addSolid(
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 18.0, 300.0, 800.0).Shape());
+        const int shelf = doc.addSolid(
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 400.0), 600.0, 300.0, 18.0).Shape());
+        check(panel > 0 && shelf > 0, "two bodies for the joint probe");
+
+        const Joinery::Parameters params =
+            Joinery::defaultsFor(Joinery::Kind::Dowel, 18.0);
+        const int jointId =
+            doc.addJoint(Joinery::Kind::Dowel, panel, shelf, params);
+        check(jointId > 0, "a joint between two real bodies is created");
+        check(doc.joints().size() == 1, "and listed once");
+        check(doc.addJoint(Joinery::Kind::Dowel, panel, 9999, params) == 0,
+              "a joint to a body that does not exist is refused");
+        check(doc.addJoint(Joinery::Kind::Dowel, panel, panel, params) == 0,
+              "and so is a joint from a piece to itself");
+
+        // Editing parameters is one call, and it sticks.
+        Joinery::Parameters five = params;
+        five.count = 5;
+        check(doc.updateJointParameters(jointId, five), "parameters can be updated");
+        check(doc.joints().front().params.count == 5, "and the new value is stored");
+
+        // jointsOn() answers for either side.
+        check(doc.jointsOn(panel).size() == 1 && doc.jointsOn(shelf).size() == 1,
+              "a joint is found from either of its pieces");
+
+        // A joint dies with either piece - and comes back with undo.
+        doc.checkpoint();
+        doc.removeSolid(shelf);
+        check(doc.joints().empty(), "removing a piece takes its joints with it");
+        doc.undo();
+        check(doc.joints().size() == 1, "and one undo brings both back");
+        check(doc.jointsOn(shelf).size() == 1, "still attached to the same pieces");
+    }
+
+    // --- undo/redo restore a joint's CONTENT, not merely its existence,
+    // and a joint is never resurrected by an undo that reaches past its
+    // own creation -----------------------------------------------------
+    {
+        DocumentModel doc;
+        const int a = doc.addSolid(
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 18.0, 300.0, 800.0).Shape());
+        check(doc.joints().empty(), "no joints exist before either body is placed");
+
+        doc.checkpoint();   // captures: {a}, no b, no joints
+        const int b = doc.addSolid(
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 400.0), 600.0, 300.0, 18.0).Shape());
+        check(a > 0 && b > 0, "two bodies for the undo-content probe");
+
+        doc.checkpoint();   // captures: {a, b}, no joints
+        Joinery::Parameters params = Joinery::defaultsFor(Joinery::Kind::Dowel, 18.0);
+        // A non-default value on purpose (the default count is 3) - an
+        // assertion that only reaches a struct default proves nothing about
+        // whether undo actually restored anything.
+        params.count = 7;
+        const int jointId = doc.addJoint(Joinery::Kind::Dowel, a, b, params);
+        check(jointId > 0, "the joint under test is created");
+        const std::vector<Joinery::Adjustment> adjustments = {
+            Joinery::Adjustment{0, 12.5, -3.0}, Joinery::Adjustment{1, -6.0, 4.25}};
+        check(doc.setJointAdjustments(jointId, adjustments),
+              "adjustments can be attached to the joint");
+
+        doc.checkpoint();   // captures: {a, b}, one joint (count=7, 2 adjustments)
+        doc.removeSolid(b);
+        check(doc.joints().empty(), "deleting b takes the joint with it, again");
+
+        // One undo: back to "{a, b}, one joint" - content must match exactly,
+        // not merely "a joint exists".
+        check(doc.undo(), "first undo succeeds");
+        check(doc.joints().size() == 1, "the joint is back after one undo");
+        check(doc.jointsOn(b).size() == 1, "still attached to body b specifically");
+        if (doc.joints().size() == 1) {
+            const DocumentModel::Joint& restored = doc.joints().front();
+            check(restored.params.count == 7,
+                  "undo restores the joint's PARAMETERS, not a fresh default");
+            check(restored.adjustments.size() == 2,
+                  "undo restores the joint's ADJUSTMENTS too");
+            if (restored.adjustments.size() == 2) {
+                check(restored.adjustments[0].du == 12.5 && restored.adjustments[0].dv == -3.0,
+                      "adjustment 0 came back exactly");
+                check(restored.adjustments[1].du == -6.0 && restored.adjustments[1].dv == 4.25,
+                      "adjustment 1 came back exactly");
+            }
+        }
+
+        // Redo replays the deletion: the joint must die again along with b.
+        check(doc.redo(), "redo succeeds");
+        check(doc.joints().empty(), "redo restores the deletion - joint and body b both gone");
+        check(!doc.contains(b), "b itself is gone again after redo");
+
+        // Undo back to the joint, then PAST the checkpoint that created it -
+        // the joint must not survive an undo that reaches behind its own
+        // creation.
+        check(doc.undo(), "undo back past the redo");
+        check(doc.joints().size() == 1, "the joint is present at its own checkpoint");
+        check(doc.undo(), "undo again, past the joint's own creation");
+        check(doc.joints().empty(),
+              "the joint is NOT resurrected by an undo landing before it existed");
+        check(doc.contains(a) && doc.contains(b),
+              "both bodies still exist at this earlier point - only the joint is gone");
     }
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures,

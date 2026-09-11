@@ -95,6 +95,15 @@ bool DocumentModel::removeSolid(int id)
     // document owns, and a removed ANCHOR needs the same promotion rule
     // unlink() uses.
     unlinkGroupInternal(id);
+    // A joint cannot outlive either of its pieces - it is a relationship,
+    // and half a relationship is not a plan. This runs INSIDE the caller's
+    // own checkpoint (checkpoint() then removeSolid(), the contract every
+    // commit path in this file keeps), so one undo restores the body AND
+    // its joints together.
+    myJoints.erase(
+        std::remove_if(myJoints.begin(), myJoints.end(),
+                       [id](const Joint& j) { return j.bodyA == id || j.bodyB == id; }),
+        myJoints.end());
     ++myRevision;
     return true;
 }
@@ -105,6 +114,11 @@ void DocumentModel::clear()
     myOutlines.clear();
     myTwin.clear();
     myLinkGroups.clear();
+    // A joint referencing a body from before clear() is exactly the
+    // "outlive the document" hazard CLAUDE.md's id-lifecycle note warns
+    // about (ids restart at 1) - clear() wipes every id space, so it wipes
+    // this one too, the same as myTwin/myLinkGroups just above.
+    myJoints.clear();
     ++myRevision;
     // Ids are not reused: a stale id must never silently resolve to a new solid.
 }
@@ -505,6 +519,70 @@ bool DocumentModel::propagateLinkedEdit(int editedMemberId, const TopoDS_Shape& 
     return true;
 }
 
+// --- joinery (Task 7: the Joint record) -------------------------------------
+
+int DocumentModel::addJoint(Joinery::Kind kind, int bodyA, int bodyB,
+                            const Joinery::Parameters& params)
+{
+    // Refuse before mutating, same as every other checkpointed mutator in
+    // this file: a joint between a piece and itself, or to a body that does
+    // not exist, writes nothing.
+    if (bodyA == bodyB) return 0;
+    if (!contains(bodyA) || !contains(bodyB)) return 0;
+
+    Joint joint;
+    joint.id = myNextJointId++;
+    joint.kind = kind;
+    joint.bodyA = bodyA;
+    joint.bodyB = bodyB;
+    joint.params = params;
+    myJoints.push_back(joint);
+    ++myRevision;
+    return joint.id;
+}
+
+bool DocumentModel::removeJoint(int jointId)
+{
+    const auto it = std::find_if(myJoints.begin(), myJoints.end(),
+                                 [jointId](const Joint& j) { return j.id == jointId; });
+    if (it == myJoints.end()) return false;
+    myJoints.erase(it);
+    ++myRevision;
+    return true;
+}
+
+bool DocumentModel::updateJointParameters(int jointId, const Joinery::Parameters& params)
+{
+    for (Joint& joint : myJoints) {
+        if (joint.id != jointId) continue;
+        joint.params = params;
+        ++myRevision;
+        return true;
+    }
+    return false;
+}
+
+bool DocumentModel::setJointAdjustments(int jointId,
+                                        const std::vector<Joinery::Adjustment>& adj)
+{
+    for (Joint& joint : myJoints) {
+        if (joint.id != jointId) continue;
+        joint.adjustments = adj;
+        ++myRevision;
+        return true;
+    }
+    return false;
+}
+
+std::vector<DocumentModel::Joint> DocumentModel::jointsOn(int bodyId) const
+{
+    std::vector<Joint> found;
+    for (const Joint& joint : myJoints) {
+        if (joint.bodyA == bodyId || joint.bodyB == bodyId) found.push_back(joint);
+    }
+    return found;
+}
+
 int DocumentModel::addOutline(const TopoDS_Face& face, const gp_Pln& plane)
 {
     if (face.IsNull()) return 0;
@@ -596,7 +674,7 @@ bool DocumentModel::contains(int id) const
 
 void DocumentModel::checkpoint()
 {
-    myUndo.push_back(State{mySolids, myOutlines, myTwin, myLinkGroups});
+    myUndo.push_back(State{mySolids, myOutlines, myTwin, myLinkGroups, myJoints});
     if (myUndo.size() > kMaxHistory) myUndo.erase(myUndo.begin());
 
     // Anything redoable described a future that no longer follows from here.
@@ -607,13 +685,15 @@ bool DocumentModel::undo()
 {
     if (myUndo.empty()) return false;
 
-    myRedo.push_back(State{mySolids, myOutlines, myTwin, myLinkGroups});
+    myRedo.push_back(State{mySolids, myOutlines, myTwin, myLinkGroups, myJoints});
     mySolids = myUndo.back().solids;
     myOutlines = myUndo.back().outlines;
     // symmetryOn/symmetryPlane are NOT part of State - see its own comment.
-    // Only the pairing map and the link groups move with undo/redo.
+    // Only the pairing map, the link groups and the joints move with
+    // undo/redo.
     myTwin = myUndo.back().twin;
     myLinkGroups = myUndo.back().linkGroups;
+    myJoints = myUndo.back().joints;
     myUndo.pop_back();
     ++myRevision;
     return true;
@@ -623,11 +703,12 @@ bool DocumentModel::redo()
 {
     if (myRedo.empty()) return false;
 
-    myUndo.push_back(State{mySolids, myOutlines, myTwin, myLinkGroups});
+    myUndo.push_back(State{mySolids, myOutlines, myTwin, myLinkGroups, myJoints});
     mySolids = myRedo.back().solids;
     myOutlines = myRedo.back().outlines;
     myTwin = myRedo.back().twin;
     myLinkGroups = myRedo.back().linkGroups;
+    myJoints = myRedo.back().joints;
     myRedo.pop_back();
     ++myRevision;
     return true;
@@ -829,6 +910,13 @@ bool DocumentModel::fromSerialized(const FurnifySerial::SerializedDocument& seri
     // Same reasoning for link groups (Milestone 4) - a second load onto the
     // same instance must not carry the OLD document's groups forward.
     myLinkGroups.clear();
+    // Same reasoning again for joints (Task 7) - joinery is not yet part of
+    // the serialized format this function reads, so `meta` never repopulates
+    // this, but a second load onto the same instance still must not leave a
+    // stale joint pointing at an id the OLD document owned - exactly the
+    // "ids restart at 1 in every document" hazard a live mirror placement
+    // already hit once (see CLAUDE.md).
+    myJoints.clear();
     ++myRevision;
 
     std::vector<int> bodyIds;
