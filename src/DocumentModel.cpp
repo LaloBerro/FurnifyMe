@@ -1005,6 +1005,16 @@ void DocumentModel::restoreFrom(const DocumentModel& snapshot)
     // Link groups travel the same way symmetry pairing does - `snapshot`'s
     // ids are copied in verbatim, so no position translation is needed.
     myLinkGroups = snapshot.myLinkGroups;
+    // Joints travel the same verbatim way (Task 7 fix round 1): a version
+    // snapshot carries no joints today (joinery is not yet in the persisted
+    // format), so this clears myJoints on every restore - coherent, since
+    // `this`'s old joints may reference a body the snapshot no longer has,
+    // and leaving one behind would be a joint pointing at whatever OTHER
+    // real body later reuses that id (ids restart at 1 per document; see
+    // the header note). Once a later task adds joints to the manifest, this
+    // same line brings a version's own joints back - copying is correct in
+    // both states, so this does not special-case either one.
+    myJoints = snapshot.myJoints;
     // Never shrink: `this`'s own counters may already be ahead of
     // `snapshot`'s (this document had more history before the restore than
     // the version ever saw), and `snapshot`'s may be ahead of `this`'s (the
@@ -1013,6 +1023,10 @@ void DocumentModel::restoreFrom(const DocumentModel& snapshot)
     myNextId = std::max(myNextId, snapshot.myNextId);
     myNextName = std::max(myNextName, snapshot.myNextName);
     myNextOutlineName = std::max(myNextOutlineName, snapshot.myNextOutlineName);
+    // Same rule for the joint id counter (Task 7 fix round 1): a later
+    // addJoint() must never mint an id colliding with one restoreFrom() just
+    // installed.
+    myNextJointId = std::max(myNextJointId, snapshot.myNextJointId);
     // Undo/redo are deliberately untouched - the caller's own checkpoint()
     // is what this mutation sits behind.
     ++myRevision;

@@ -1956,6 +1956,110 @@ int main()
               "both bodies still exist at this earlier point - only the joint is gone");
     }
 
+    // --- restoreFrom() carries joints - Task 7 fix round 1 -------------
+    // The reviewer's reproduction: checkpoint() then restoreFrom(snapshot)
+    // used to leave myJoints untouched while mySolids was replaced wholesale,
+    // so a joint could survive pointing at an id the snapshot never had, or
+    // - worse, since ids restart at 1 in every fresh DocumentModel - at an id
+    // that now names a completely different, real body in the restored
+    // document.
+    {
+        DocumentModel doc;
+        const int oldA = doc.addSolid(
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 18.0, 300.0, 800.0).Shape());
+        const int oldB = doc.addSolid(
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 400.0), 600.0, 300.0, 18.0).Shape());
+        check(oldA > 0 && oldB > 0, "two bodies in the document about to be restored over");
+
+        const Joinery::Parameters oldParams = Joinery::defaultsFor(Joinery::Kind::Dowel, 18.0);
+        const int oldJoint = doc.addJoint(Joinery::Kind::Dowel, oldA, oldB, oldParams);
+        check(oldJoint > 0, "a joint exists before the restore");
+        check(doc.joints().size() == 1, "listed once before the restore");
+
+        // A "version" snapshot with NO joints of its own, and (since a fresh
+        // DocumentModel's ids count again from 1, same as `doc`'s did) a body
+        // whose id genuinely COLLIDES with oldA's - the sharper case the
+        // review named: pre-fix, doc.contains(oldA) would read true again
+        // after the restore, but against an unrelated real body, not oldA.
+        DocumentModel version;
+        const int freshId = version.addSolid(
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 1.0, 1.0, 1.0).Shape());
+        check(freshId == oldA,
+              "sanity: the snapshot's own first id collides with the pre-restore body's id "
+              "- the exact setup the id-collision hazard needs");
+        check(version.joints().empty(), "the snapshot itself carries no joints");
+
+        doc.checkpoint();   // the caller's own checkpoint - restoreFrom() takes none of its own
+        doc.restoreFrom(version);
+
+        check(doc.joints().empty(),
+              "restoreFrom() clears joints when the snapshot carries none - no joint can "
+              "outlive the document state it described");
+        // Defensive invariant, not merely "empty": even if this ever carried
+        // a joint, every one of them must reference bodies that genuinely
+        // exist post-restore - guarded on size, never a blind index.
+        for (const DocumentModel::Joint& j : doc.joints()) {
+            check(doc.contains(j.bodyA) && doc.contains(j.bodyB),
+                  "no surviving joint references a body where contains() is false");
+        }
+
+        // One undo restores the pre-restore document AND its joint together
+        // - restoreFrom() sits behind the caller's own checkpoint, exactly
+        // like every other commit path here.
+        check(doc.undo(), "the checkpoint taken before restoreFrom is still on the stack");
+        check(doc.joints().size() == 1, "undo brings the pre-restore joint back");
+        check(doc.jointsOn(oldB).size() == 1, "still attached to the same two bodies");
+    }
+
+    // --- restoreFrom() installs exactly the snapshot's OWN joints -------
+    {
+        DocumentModel doc;
+        const int stub = doc.addSolid(
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 5.0, 5.0, 5.0).Shape());
+        check(stub > 0 && doc.joints().empty(),
+              "a fresh document has one body and no joints");
+
+        DocumentModel version;
+        const int vA = version.addSolid(
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 18.0, 300.0, 800.0).Shape());
+        const int vB = version.addSolid(
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 400.0), 600.0, 300.0, 18.0).Shape());
+        Joinery::Parameters vParams = Joinery::defaultsFor(Joinery::Kind::Domino, 18.0);
+        // Non-default on purpose (Joinery::Parameters::count defaults to 3) -
+        // an assertion that only reaches the struct default proves nothing.
+        vParams.count = 9;
+        const int vJoint = version.addJoint(Joinery::Kind::Domino, vA, vB, vParams);
+        check(vJoint > 0, "the version's own joint is created");
+        const std::vector<Joinery::Adjustment> vAdj = {Joinery::Adjustment{0, 2.0, -1.5}};
+        check(version.setJointAdjustments(vJoint, vAdj), "and carries an adjustment");
+
+        doc.checkpoint();
+        doc.restoreFrom(version);
+
+        check(doc.joints().size() == 1,
+              "restoreFrom() installs exactly the snapshot's one joint");
+        if (doc.joints().size() == 1) {
+            const DocumentModel::Joint& installed = doc.joints().front();
+            check(installed.kind == Joinery::Kind::Domino, "the same kind");
+            check(installed.bodyA == vA && installed.bodyB == vB,
+                  "the same body ids - copied VERBATIM, like the pairing map and link groups");
+            check(installed.params.count == 9,
+                  "the same (non-default) parameters, not a fresh default block");
+            check(installed.adjustments.size() == 1, "and the same adjustment count");
+            if (installed.adjustments.size() == 1) {
+                check(installed.adjustments[0].du == 2.0 && installed.adjustments[0].dv == -1.5,
+                      "with the exact same values");
+            }
+        }
+
+        // The joint id counter must not collide with what was just
+        // installed - a later addJoint() gets a genuinely fresh id.
+        const int freshJoint = doc.addJoint(Joinery::Kind::Dowel, vA, vB,
+                                            Joinery::defaultsFor(Joinery::Kind::Dowel, 18.0));
+        check(freshJoint > 0 && freshJoint != vJoint,
+              "a joint created after the restore never collides with the restored one's id");
+    }
+
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;
