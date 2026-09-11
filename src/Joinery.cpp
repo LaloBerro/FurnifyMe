@@ -74,7 +74,9 @@ Parameters defaultsFor(Kind kind, double thinnerThicknessMm)
             // board's own thickness on the end-grain side.
             p.depthAMm = std::max(t * 0.75, 10.0);
             p.depthBMm = std::max(t * 0.75, 10.0);
-            p.endMarginMm = 40.0;
+            // endMarginMm is left at the struct default (40 mm) - fasteners
+            // have no board-derived reason to move it, and housings and
+            // interlocks never read the field.
             p.angleDeg = kind == Kind::PocketScrew ? 15.0 : 0.0;
             break;
         }

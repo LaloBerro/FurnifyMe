@@ -77,7 +77,8 @@ int main()
     checkNear(dowel24.depthAMm, 18.0, 1.0e-9, "depth A is three quarters of 24 mm");
     checkNear(dowel24.depthBMm, 18.0, 1.0e-9, "depth B matches depth A for a dowel");
     checkNear(dowel24.insetMm, 12.0, 1.0e-9, "inset is half the board thickness");
-    checkNear(dowel24.endMarginMm, 40.0, 1.0e-9, "end margin stays the fixed 40 mm");
+    checkNear(dowel24.endMarginMm, 40.0, 1.0e-9,
+               "and the first and last sit 40 mm from the ends");
     checkNear(dowel24.angleDeg, 0.0, 1.0e-9, "a dowel is not driven at an angle");
 
     const Joinery::Parameters pocketScrew24 =

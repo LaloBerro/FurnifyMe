@@ -59,7 +59,8 @@ struct Parameters {
     double depthBMm = 15.0;    // into bodyB
     double insetMm = 9.0;      // in from the reference face
     double endMarginMm = 40.0; // first and last item's distance from the ends
-    double angleDeg = 15.0;    // pocket screws only
+    double angleDeg = 0.0;     // an angle belongs to the kinds that drill at
+                                // one (pocket screws) - defaultsFor() sets it
 
     // Housings.
     double widthMm = 18.0;     // channel width, defaults to the housed piece
