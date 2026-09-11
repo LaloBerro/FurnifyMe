@@ -365,4 +365,33 @@ struct Readout {
 Readout readout(Kind kind, const Parameters& params, const Contact& contact,
                 const std::vector<Item>& items);
 
+// Everything a joint is, right now, derived from the live shapes: where it
+// sits, where its items fall, and the numbers to mark. ok == false carries
+// NO items and NO readout - the contract that keeps a broken joint from ever
+// showing a stale measurement. Holds no state of its own: a joint stores its
+// kind, its two bodies and its parameters (see DocumentModel::Joint), and
+// this is what turns those into a Derivation on demand, so a joint follows
+// its pieces rather than remembering where they used to be.
+struct Derivation {
+    bool ok = false;
+    Contact contact;
+    std::vector<Item> items;
+    Readout readout;
+    std::string error;
+};
+
+// The whole chain, end to end: find where `a` and `b` meet, confirm `kind`
+// can actually exist on that contact, lay out its items, and read the
+// numbers off them - or refuse, loudly, the moment either step cannot
+// honestly proceed. Two distinct refusals, both carrying a non-empty reason
+// and both leaving `items` and `readout` empty: `findContact` failing (the
+// pieces no longer meet, or meet in a way that cannot be measured) and
+// `validityOf` refusing (they meet, but not in a way `kind` can use - a
+// half-lap asked of two pieces that only touch, say). World position is
+// produced exactly once anywhere in this chain, inside `layout()`'s shared
+// tail through `Contact::at()`; nothing here derives one any other way.
+Derivation derive(Kind kind, const Parameters& params,
+                  const std::vector<Adjustment>& adjustments,
+                  const TopoDS_Shape& a, const TopoDS_Shape& b);
+
 }  // namespace Joinery

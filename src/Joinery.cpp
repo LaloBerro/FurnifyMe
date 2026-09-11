@@ -1112,4 +1112,26 @@ Readout readout(Kind kind, const Parameters& params, const Contact& contact,
     return out;
 }
 
+Derivation derive(Kind kind, const Parameters& params,
+                  const std::vector<Adjustment>& adjustments,
+                  const TopoDS_Shape& a, const TopoDS_Shape& b)
+{
+    Derivation out;
+    const ContactResult contact = findContact(a, b);
+    if (!contact.ok) {
+        out.error = contact.error;
+        return out;
+    }
+    const std::string why = validityOf(kind, contact.contact);
+    if (!why.empty()) {
+        out.error = why;
+        return out;
+    }
+    out.contact = contact.contact;
+    out.items = layout(kind, params, out.contact, adjustments);
+    out.readout = readout(kind, params, out.contact, out.items);
+    out.ok = true;
+    return out;
+}
+
 }  // namespace Joinery

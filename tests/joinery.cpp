@@ -2060,6 +2060,201 @@ int main()
               "a joint created after the restore never collides with the restored one's id");
     }
 
+    // --- derive: the whole chain, and the loud break -------------------
+    {
+        const TopoDS_Shape panel =
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 18.0, 300.0, 800.0).Shape();
+        const TopoDS_Shape shelf =
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 400.0), 600.0, 300.0, 18.0).Shape();
+        const Joinery::Parameters p = Joinery::defaultsFor(Joinery::Kind::Dowel, 18.0);
+
+        const Joinery::Derivation d =
+            Joinery::derive(Joinery::Kind::Dowel, p, {}, panel, shelf);
+        check(d.ok, "a joint between touching pieces derives");
+        check(d.items.size() == static_cast<std::size_t>(p.count),
+              "with one item per fastener");
+        check(d.readout.alongMm.size() == d.items.size(),
+              "and a readout number for each");
+        check(d.error.empty(), "a successful derivation carries no error");
+
+        // Guarded, not indexed on faith - CLAUDE.md's own Task 4 lesson: an
+        // unguarded d.items[0] below would turn a derive() regression into a
+        // silent SIGSEGV rather than a reported failure. And an ABSOLUTE
+        // anchor, not merely a struct default or "matches some other run's
+        // own number": this fixture is the same 300 mm contact, 40 mm end
+        // margin and 3 dowels as the readout block earlier in this file, so
+        // the real mark-out numbers are known independently to be 40, 150
+        // and 260 mm.
+        check(d.items.size() >= 3 && d.readout.alongMm.size() >= 3,
+              "at least three items and three readout numbers to index below");
+        if (d.items.size() >= 3 && d.readout.alongMm.size() >= 3) {
+            checkNear(d.readout.alongMm[0], 40.0, 1.0e-6, "the first dowel sits 40 mm in");
+            checkNear(d.readout.alongMm[1], 150.0, 1.0e-6, "the second at the 150 mm middle");
+            checkNear(d.readout.alongMm[2], 260.0, 1.0e-6, "the third at the 260 mm far margin");
+        }
+
+        // MOVE the shelf: the numbers follow, without anything being stored.
+        gp_Trsf up;
+        up.SetTranslation(gp_Vec(0.0, 0.0, 120.0));
+        const TopoDS_Shape moved =
+            BRepBuilderAPI_Transform(shelf, up, Standard_True).Shape();
+        const Joinery::Derivation after =
+            Joinery::derive(Joinery::Kind::Dowel, p, {}, panel, moved);
+        check(after.ok, "the joint still derives after the shelf moves");
+        check(after.items.size() >= 3 && after.readout.alongMm.size() >= 3,
+              "the moved derivation still carries three items and three readout numbers");
+        if (after.items.size() >= 3 && d.items.size() >= 3) {
+            checkNear(std::fabs(after.items[0].centre.Z() - d.items[0].centre.Z()), 120.0,
+                      1.0e-6,
+                      "and its items moved with the piece - by exactly the 120 mm shift");
+        }
+        // Absolute, not only "matches d's own number" - the brief's own
+        // checkNear(after.readout.alongMm[0], d.readout.alongMm[0], ...) is
+        // relative-only, and both sides could be wrong identically and still
+        // pass, the exact vacuity a Task 5 implementer's own test caught.
+        if (after.readout.alongMm.size() >= 3) {
+            checkNear(after.readout.alongMm[0], 40.0, 1.0e-6,
+                      "the mark-out numbers are unchanged - same joint, new place - "
+                      "the real 40 mm, not merely d's own");
+            checkNear(after.readout.alongMm[1], 150.0, 1.0e-6, "the real 150 mm");
+            checkNear(after.readout.alongMm[2], 260.0, 1.0e-6, "the real 260 mm");
+        }
+
+        // PART them: broken, loudly, with no numbers at all.
+        // NOT named `far`: that is a Windows SDK macro defined to nothing,
+        // so the identifier silently vanishes and the expression quietly
+        // means something else - CLAUDE.md's own Pitfalls entry, and a name
+        // this feature has already had to rename twice over.
+        gp_Trsf farAway;
+        farAway.SetTranslation(gp_Vec(0.0, 0.0, 900.0));
+        const TopoDS_Shape partedShelf =
+            BRepBuilderAPI_Transform(shelf, farAway, Standard_True).Shape();
+        const Joinery::Derivation broken =
+            Joinery::derive(Joinery::Kind::Dowel, p, {}, panel, partedShelf);
+        check(!broken.ok, "pieces that no longer meet cannot derive");
+        check(!broken.error.empty(), "the break carries a reason");
+        check(broken.items.empty() && broken.readout.alongMm.empty(),
+              "and NO numbers - a stale measurement is worse than none");
+        // The reason is findContact's OWN reason, propagated verbatim - not
+        // merely non-empty. Caught by mutation: deleting derive()'s
+        // `if (!contact.ok) return out;` guard still left broken.ok false
+        // here (validityOf's independent 30 mm run floor happens to refuse
+        // an empty/default Contact too), so a check of emptiness ALONE could
+        // not tell the two refusal paths apart - this pins WHICH one fired.
+        check(broken.error == Joinery::findContact(panel, partedShelf).error,
+              "the break's error is findContact's own text, not a different "
+              "refusal's (" + broken.error + ")");
+
+        // The SECOND refusal branch: findContact succeeds - the pieces
+        // genuinely meet, face to face - but the kind cannot exist on that
+        // contact, a half-lap asked of two pieces that only touch, per
+        // Task 6's validityOf. The brief's own test only exercises the
+        // findContact refusal; deleting derive()'s validityOf branch would
+        // leave the whole rest of this suite green while a half-lap silently
+        // laid out a joint on a contact it has no business on.
+        const Joinery::Parameters hl = Joinery::defaultsFor(Joinery::Kind::HalfLap, 18.0);
+        const Joinery::Derivation invalidKind =
+            Joinery::derive(Joinery::Kind::HalfLap, hl, {}, panel, shelf);
+        check(!invalidKind.ok, "a half-lap on a plain face contact cannot derive");
+        check(invalidKind.error == "the pieces aren't crossing",
+              "and the reason is validityOf's OWN reason, spelled out exactly - not "
+              "merely non-empty, and not findContact's refusal text");
+        check(invalidKind.items.empty(), "no items are laid out for a refused kind");
+        check(invalidKind.readout.alongMm.empty(), "and no readout numbers either");
+        check(invalidKind.readout.referenceEdgeA.empty(),
+              "the readout struct itself is left at its default, untouched");
+    }
+
+    // --- derive under a genuinely 3D rotation: the whole chain, not just
+    // one piece of it, measured in the joint's own terms -----------------
+    // Task 2 spent four fix rounds on exactly one error: an oriented
+    // quantity measured in world-axis-aligned terms. Every earlier fix was
+    // verified piece by piece - findContact alone, layout alone, readout
+    // alone - but never as the one thing a user actually does: derive a
+    // joint on a body that has been rotated off every world axis at once.
+    // (1, 1, 1) is deliberately not a world axis and not even in a
+    // coordinate plane, and the angle is deliberately not a multiple of 90
+    // degrees, so nothing here can pass by accidentally landing back on an
+    // axis-aligned case.
+    {
+        const TopoDS_Shape panel =
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 18.0, 300.0, 800.0).Shape();
+        const TopoDS_Shape shelf =
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 400.0), 600.0, 300.0, 18.0).Shape();
+        const Joinery::Parameters p = Joinery::defaultsFor(Joinery::Kind::Dowel, 18.0);
+        const Joinery::Derivation flatDerivation =
+            Joinery::derive(Joinery::Kind::Dowel, p, {}, panel, shelf);
+        check(flatDerivation.ok, "sanity: the unrotated pair still derives");
+        check(flatDerivation.items.size() >= 1,
+              "sanity: with at least one item to compare a world centre against");
+
+        gp_Trsf spin3D;
+        const double angle = 53.0 * (4.0 * std::atan(1.0)) / 180.0;  // not a multiple of 90
+        spin3D.SetRotation(gp_Ax1(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(1.0, 1.0, 1.0)), angle);
+        const TopoDS_Shape panelSpun =
+            BRepBuilderAPI_Transform(panel, spin3D, Standard_True).Shape();
+        const TopoDS_Shape shelfSpun =
+            BRepBuilderAPI_Transform(shelf, spin3D, Standard_True).Shape();
+        // Both pieces move through the SAME rotation, so they still touch -
+        // this tests derive() end to end on a rotated joint, not whether two
+        // arbitrarily-rotated boxes happen to meet by luck.
+        const Joinery::ContactResult stillTouching =
+            Joinery::findContact(panelSpun, shelfSpun);
+        check(stillTouching.ok,
+              "sanity: rotating both pieces through the same transform leaves them touching");
+
+        const Joinery::Derivation spun =
+            Joinery::derive(Joinery::Kind::Dowel, p, {}, panelSpun, shelfSpun);
+        check(spun.ok,
+              "the joint derives under a genuinely 3D rotation - off every world axis");
+        check(spun.items.size() >= 3 && spun.readout.alongMm.size() >= 3,
+              "still three items and three readout numbers, rotated or not");
+        if (spun.items.size() >= 3 && spun.readout.alongMm.size() >= 3 &&
+            flatDerivation.items.size() >= 1) {
+            // The ABSOLUTE 40/150/260 mm, not merely "matches the unrotated
+            // run" - both could be wrong identically under a shared error in
+            // how an oriented quantity is measured, exactly the class of bug
+            // Task 2 paid four rounds to fix. The joint's own measurements -
+            // run length, margin, count - are unchanged by a rigid rotation,
+            // so the real numbers must still be 40, 150 and 260.
+            checkNear(spun.readout.alongMm[0], 40.0, 1.0e-6,
+                      "rotated: the first dowel is still the real 40 mm in");
+            checkNear(spun.readout.alongMm[1], 150.0, 1.0e-6,
+                      "rotated: the second is still the real 150 mm middle");
+            checkNear(spun.readout.alongMm[2], 260.0, 1.0e-6,
+                      "rotated: the third is still the real 260 mm far margin");
+
+            // The items' WORLD centres, by contrast, must genuinely differ -
+            // a rotation that failed to reach the world-position derivation
+            // at all (the bug class this whole block exists to catch from
+            // the other side) would leave them sitting at the unrotated
+            // coordinates while the readout above still happened to read
+            // right.
+            const double moved =
+                spun.items[0].centre.Distance(flatDerivation.items[0].centre);
+            check(moved > 50.0,
+                  "and the items' world centres genuinely moved with the rotated pieces "
+                  "(moved " + std::to_string(moved) + " mm)");
+        }
+
+        // Deliberately NOT asserting a compass word here (front/back/left/
+        // right/top/bottom) - Task 5 reports an honest "no single edge"
+        // sentence when a direction is not dominated by one axis, and a
+        // rotation about (1,1,1) is exactly that case. Asserting a specific
+        // word would pin an incidental property of this one angle rather
+        // than the invariant this block actually tests.
+        check(!spun.readout.referenceEdgeA.empty(),
+              "the rotated readout still names SOMETHING, not an empty string");
+        check(spun.readout.referenceEdgeA != "front" &&
+                  spun.readout.referenceEdgeA != "back" &&
+                  spun.readout.referenceEdgeA != "left" &&
+                  spun.readout.referenceEdgeA != "right" &&
+                  spun.readout.referenceEdgeA != "top" &&
+                  spun.readout.referenceEdgeA != "bottom",
+              "and at this angle no single compass word is honest (" +
+                  spun.readout.referenceEdgeA + ")");
+    }
+
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;
