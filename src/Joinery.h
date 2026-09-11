@@ -105,8 +105,8 @@ struct Contact {
     //   region's own size only when the region is a rectangle - which it is
     //   for every joint this app makes today. For a region that is not (a
     //   notched board's L-shaped end, a C), the rectangle COVERS AREA THAT IS
-    //   NOT IN CONTACT: measured, a 300 x 300 square with a 260 x 110 notch
-    //   taken out of it - 25,000 mm2 of a 90,000 mm2 rectangle - reports
+    //   NOT IN CONTACT: measured, a 300 x 300 square with a 280 x 200 notch
+    //   taken out of it - 34,000 mm2 of a 90,000 mm2 rectangle - reports
     //   u = 300, v = 300. A caller laying items out across that span has to
     //   accept that some of them may fall over the notch; nothing here can
     //   tell it which, because `Contact` describes a rectangle by design.
@@ -134,16 +134,37 @@ struct Contact {
     gp_Ax3 frame;
     double uMin = 0.0, uMax = 0.0;
     double vMin = 0.0, vMax = 0.0;
-    // Each piece's own MATERIAL thickness - the smallest side of that solid's
-    // own oriented bounding box, so a board the transform gizmo has rotated
-    // still measures 18 mm rather than the 224.86 mm its world bounding box
-    // would report, and a round leg measures its diameter.
+    // How much wood each piece has AT THIS JOINT, which is what defaultsFor()
+    // wants: a housing is a third as deep as the host is thick where the
+    // channel is cut, and a dowel is a third the diameter of the wood it is
+    // actually driven into.
     //
-    // The whole solid's, deliberately NOT "at the joint": a 36 mm panel
-    // rabbeted to 18 mm where the shelf lands reports 36. That is the number
-    // defaultsFor() wants - a dowel diameter is chosen for the board's
-    // material, not for a local step, and you do not fit a 6 mm dowel to a
-    // 36 mm panel because it happens to be thinner at one rabbet.
+    // Measured as the material depth along the contact normal, from inside the
+    // piece out to the first surface behind the joint (for an Overlap, through
+    // an interior point of the lap along the lap depth - each rail's own
+    // thickness), capped by the smallest side of that piece's own ORIENTED
+    // bounding box. Both halves earn their place:
+    //
+    //   the local depth is what makes a hollow carcase honest - 18 mm walls
+    //   around a 300 mm box is 300 mm as a solid and 18 mm of wood at every
+    //   joint on it, and the whole-solid answer would have had defaultsFor()
+    //   propose a 300 mm dado. A panel rabbeted to 18 mm reports 18 where the
+    //   shelf lands, not the 36 it is elsewhere;
+    //
+    //   the cap is what keeps a butt joint right - a shelf meeting a panel
+    //   END-ON has its whole 600 mm of length behind the joint, and it is an
+    //   18 mm board.
+    //
+    // Orientation-independent either way: a board the transform gizmo has spun
+    // 45 degrees still measures 18 mm, where a world bounding box would say
+    // 224.86.
+    //
+    // One shape defeats both halves and is worth knowing about: a board bent
+    // into an L or a U and joined on its END has its own length behind the
+    // joint AND a bounding box the size of the L, so an 18 mm L-section board
+    // reports the L's 300 mm. Getting that right needs the local minimum WIDTH
+    // of the material, which has no stable cheap measure (a chord through a
+    // sampled point collapses near any boundary).
     double thicknessAMm = 0.0;
     double thicknessBMm = 0.0;
 

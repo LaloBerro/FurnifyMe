@@ -278,9 +278,12 @@ int main()
                       18.0, 1.0e-6, "and as wide as the board is thick");
             checkDir(stepJoint.contact.frame.Direction(), gp_Dir(1.0, 0.0, 0.0),
                      "with the normal still running from the panel into the board");
-            checkNear(stepJoint.contact.thicknessAMm, 36.0, 1.0e-6,
-                      "the rabbeted panel's material thickness is the board's 36 mm, "
-                      "not the 18 it happens to be at the step");
+            // 18, not the 36 the panel is elsewhere: a housing cut here is a
+            // third as deep as the host is thick HERE, and a dowel driven here
+            // goes into 18 mm of wood. The whole-solid answer was 36.
+            checkNear(stepJoint.contact.thicknessAMm, 18.0, 1.0e-6,
+                      "the rabbeted panel is 18 mm of wood where the shelf lands, "
+                      "not the 36 it is elsewhere");
         }
 
         // Two pieces of DIFFERENT thickness, both ways round. Every other pair
@@ -308,6 +311,29 @@ int main()
                       "where thicknessA is now the 18 mm shelf");
             checkNear(unequalSwapped.contact.thicknessBMm, 36.0, 1.0e-6,
                       "and thicknessB the 36 mm panel - the two follow the arguments");
+        }
+
+        // A HOLLOW host: an 18 mm-walled 300 mm carcase with a shelf butting
+        // one wall. The carcase is 300 mm across as a solid and 18 mm of wood
+        // at every joint on it, so a whole-solid measure reported 300 - which
+        // defaultsFor() would turn into a 300 mm wide dado a third of 300 deep.
+        // Thickness is measured at the joint now, along the contact normal from
+        // inside the wall.
+        const TopoDS_Shape carcaseOuter =
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 300.0, 300.0, 300.0).Shape();
+        const TopoDS_Shape carcaseVoid =
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 18.0, 18.0), 264.0, 264.0, 264.0).Shape();
+        const TopoDS_Shape carcase =
+            BRepAlgoAPI_Cut(carcaseOuter, carcaseVoid).Shape();
+        const TopoDS_Shape onCarcase =
+            BRepPrimAPI_MakeBox(gp_Pnt(300.0, 40.0, 100.0), 400.0, 200.0, 18.0).Shape();
+        const Joinery::ContactResult hollow = Joinery::findContact(carcase, onCarcase);
+        check(hollow.ok, "a board butting a hollow carcase's wall has a contact");
+        if (hollow.ok) {
+            checkNear(hollow.contact.thicknessAMm, 18.0, 1.0e-6,
+                      "and the carcase is 18 mm of wood at that joint, not 300");
+            checkNear(hollow.contact.thicknessBMm, 18.0, 1.0e-6,
+                      "with the board's own 18 on the other side");
         }
 
         // A flat board on a ROUND leg's top touches along a line, not over a
@@ -415,10 +441,13 @@ int main()
             checkPnt(crossed.contact.at(crossed.contact.uMax, crossed.contact.vMax),
                      gp_Pnt(210.0, 40.0, 0.0), 1.0e-6,
                      "with (uMax, vMax) the diagonally opposite one");
-            checkPnt(crossed.contact.at(crossed.contact.uLength() / 2.0,
-                                        crossed.contact.vLength() / 2.0),
-                     gp_Pnt(180.0, 20.0, 0.0), 1.0e-6,
-                     "so the middle of (u, v) is the middle of the lap");
+            // Deliberately at(uMax, 0) rather than the midpoint: the midpoint
+            // is the affine average of the two corners above and so cannot
+            // fail on its own, while this one pins the u axis separately from
+            // v - it is what tells a u/v swap from a correct frame.
+            checkPnt(crossed.contact.at(crossed.contact.uMax, 0.0),
+                     gp_Pnt(210.0, 0.0, 0.0), 1.0e-6,
+                     "and (uMax, 0) is the corner along u alone");
             // The lap depth is the rails' 20 mm thickness, which here runs
             // along world Z. The frame's origin sits on the lap's own
             // minimum-depth face, so the lap spans [0, 20] from it.
@@ -427,6 +456,28 @@ int main()
             const double z = crossed.contact.frame.Location().Z();
             check(std::fabs(z) < 1.0e-6 || std::fabs(z - 20.0) < 1.0e-6,
                   "with the frame's plane on one of the lap's own two depth faces");
+        }
+
+        // A crossing where the two rails are NOT the same thickness. Both
+        // numbers here are what a half-lap splits in half, and the deeper rail
+        // is the one that tells the at-the-joint measurement from a whole-solid
+        // one: a 60 x 300 x 100 rail's smallest oriented-bounding-box side is
+        // its 60 mm WIDTH, while the material a lap cut in it has to halve is
+        // the 100 mm it carries along the lap depth.
+        const TopoDS_Shape deepRail =
+            BRepPrimAPI_MakeBox(gp_Pnt(150.0, -100.0, 0.0), 60.0, 300.0, 100.0).Shape();
+        const Joinery::ContactResult uneven = Joinery::findContact(railA, deepRail);
+        check(uneven.ok && uneven.contact.type == Joinery::Contact::Type::Overlap,
+              "a thin rail crossing a deep one is an overlap");
+        if (uneven.ok) {
+            checkNear(uneven.contact.uLength(), 60.0, 1.0e-6,
+                      "with the same 60 mm lap footprint one way");
+            checkNear(uneven.contact.vLength(), 40.0, 1.0e-6, "and 40 the other");
+            checkNear(uneven.contact.thicknessAMm, 20.0, 1.0e-6,
+                      "the thin rail carries 20 mm through the lap");
+            checkNear(uneven.contact.thicknessBMm, 100.0, 1.0e-6,
+                      "and the deep one 100 - not the 60 mm its bounding box is "
+                      "narrowest across");
         }
 
         // Spin the whole crossing 45 degrees about Z: the lap footprint is
@@ -657,10 +708,14 @@ int main()
         // "outside everything". Two offsets, not one: here the 5 mm gap is
         // wider than the 1 mm the wood allows, so a single shared offset
         // cannot reach bodyB at all.
-        gp_Trsf far;
-        far.SetTranslation(gp_Vec(5.0, 0.0, 0.0));
+        // NOT named `far`: that is a Windows SDK macro defined to nothing, so
+        // the identifier silently disappears and the expression quietly means
+        // something else - see CLAUDE.md's Pitfalls. It compiles here only
+        // because <windows.h> is not in this file's include chain today.
+        gp_Trsf fiveAway;
+        fiveAway.SetTranslation(gp_Vec(5.0, 0.0, 0.0));
         const TopoDS_Shape apart =
-            BRepBuilderAPI_Transform(shelf, far, Standard_True).Shape();
+            BRepBuilderAPI_Transform(shelf, fiveAway, Standard_True).Shape();
         check(!Joinery::findContact(panel, apart).ok,
               "a 5 mm gap is no contact at the default tolerance");
         const Joinery::ContactResult gappy = Joinery::findContact(panel, apart, 6.0);
@@ -673,18 +728,24 @@ int main()
         }
 
         // The same mechanism from the other end: a piece thinner than the
-        // probe offset was refused. 0.15 mm is not furniture, but the band it
-        // sits at the bottom of reaches a 6 mm back panel at tolerance 3.
+        // probe offset was refused. The thin direction has to be the one the
+        // probe TRAVELS - across the joint, along the contact normal - or the
+        // test cannot reproduce the defect it names: a 0.15 mm-deep strip whose
+        // thinness lies IN the contact plane passes with the old
+        // probe = 2 * tolerance too, because the probe never leaves the wood.
+        // So this veneer is 0.15 mm in x, the normal's own direction.
         const TopoDS_Shape veneer =
-            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 400.0), 600.0, 300.0, 0.15).Shape();
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 400.0), 0.15, 300.0, 18.0).Shape();
         const Joinery::ContactResult sliver = Joinery::findContact(panel, veneer);
-        check(sliver.ok, "and a 0.15 mm piece is found rather than refused for being thin");
+        check(sliver.ok, "and a 0.15 mm-deep piece is found rather than refused for "
+                         "being thinner than the probe");
         if (sliver.ok) {
             checkNear(sliver.contact.uLength(), 300.0, 1.0e-6, "300 mm along the joint");
-            checkNear(sliver.contact.vLength(), 0.15, 1.0e-9,
-                      "by its own 0.15 mm - the contact is as thin as the wood");
+            checkNear(sliver.contact.vLength(), 18.0, 1.0e-6, "by 18 mm across it");
             checkNear(sliver.contact.thicknessBMm, 0.15, 1.0e-9,
-                      "and that is its measured thickness too");
+                      "with 0.15 mm of wood behind the joint on the veneer's side");
+            checkNear(sliver.contact.thicknessAMm, 18.0, 1.0e-6,
+                      "and the panel's own 18 on the other");
         }
     }
 

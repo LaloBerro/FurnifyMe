@@ -10,8 +10,10 @@
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepGProp.hxx>
 #include <BRep_Tool.hxx>
+#include <Bnd_Box.hxx>
 #include <Bnd_OBB.hxx>
 #include <GProp_GProps.hxx>
+#include <IntCurvesFace_ShapeIntersector.hxx>
 #include <Standard_Failure.hxx>
 #include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
@@ -19,6 +21,7 @@
 #include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Vertex.hxx>
+#include <gp_Lin.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
 
@@ -266,6 +269,76 @@ double faceArea(const TopoDS_Shape& face)
     return props.Mass();
 }
 
+// How far a ray can travel through `shape` before it needs to stop looking -
+// twice the bounding box's diagonal, so no real exit surface is ever beyond
+// it. A search limit, not a measurement, which is why the world AABB is fine
+// here where it is wrong everywhere else in this file.
+double boundingReach(const TopoDS_Shape& shape)
+{
+    Bnd_Box box;
+    BRepBndLib::Add(shape, box);
+    if (box.IsVoid()) return 1.0;
+    Standard_Real x0, y0, z0, x1, y1, z1;
+    box.Get(x0, y0, z0, x1, y1, z1);
+    const double dx = x1 - x0, dy = y1 - y0, dz = z1 - z0;
+    return 2.0 * std::sqrt(dx * dx + dy * dy + dz * dz) + 1.0;
+}
+
+// The distance from `from` to the first surface of `solid` along `direction`.
+// False when the ray reaches nothing within `reachMm` - which for a point
+// genuinely inside a closed solid should not happen, so the caller treats it
+// as "do not trust this measurement" rather than as a zero.
+bool firstSurfaceAhead(const TopoDS_Shape& solid, const gp_Pnt& from,
+                       const gp_Dir& direction, double reachMm, double& out)
+{
+    IntCurvesFace_ShapeIntersector inter;
+    inter.Load(solid, 1.0e-7);
+    inter.Perform(gp_Lin(from, direction), 1.0e-9, reachMm);
+    if (inter.NbPnt() < 1) return false;
+    double nearest = std::numeric_limits<double>::max();
+    for (int i = 1; i <= inter.NbPnt(); ++i) {
+        nearest = std::min(nearest, static_cast<double>(inter.WParameter(i)));
+    }
+    if (nearest >= std::numeric_limits<double>::max()) return false;
+    out = nearest;
+    return true;
+}
+
+// How much wood is behind the joint on one side: the material depth measured
+// along the contact normal, from a point `insetMm` inside the piece, out to
+// the first surface the material ends at.
+//
+// This is the LOCAL question, and it is the one a consumer wants. A hollow
+// carcase with 18 mm walls is 300 mm across as a solid and 18 mm of wood at
+// any joint on it - the whole-solid measure reported 300, which defaultsFor()
+// would have turned into a 300 mm dado. A panel rabbeted to 18 mm where the
+// shelf lands is 18 there and 36 elsewhere, and the joint is cut where the
+// shelf lands.
+bool materialDepthBehind(const TopoDS_Shape& solid, const gp_Pnt& inside,
+                         const gp_Dir& away, double insetMm, double reachMm,
+                         double& out)
+{
+    double ahead = 0.0;
+    if (!firstSurfaceAhead(solid, inside, away, reachMm, ahead)) return false;
+    out = insetMm + ahead;
+    return true;
+}
+
+// The same question for an OVERLAP, where neither piece's face is on the lap
+// plane: the material each solid carries THROUGH an interior point of the lap,
+// along the lap depth, which for two crossing rails is each rail's own
+// thickness - the number a half-lap's defaults split in half.
+bool materialDepthThrough(const TopoDS_Shape& solid, const gp_Pnt& inside,
+                          const gp_Dir& axis, double reachMm, double& out)
+{
+    double ahead = 0.0, behind = 0.0;
+    if (!firstSurfaceAhead(solid, inside, axis, reachMm, ahead)) return false;
+    if (!firstSurfaceAhead(solid, inside, gp_Dir(axis.Reversed()), reachMm, behind))
+        return false;
+    out = ahead + behind;
+    return true;
+}
+
 // The shared region's own in-plane axis: the direction of its LONGEST
 // boundary edge, with any component along `normal` removed. This is what
 // makes the contact's frame the region's own frame rather than a world-
@@ -384,10 +457,17 @@ ContactResult findContact(const TopoDS_Shape& a, const TopoDS_Shape& b,
         return result;
     }
 
-    // Hoisted out of the O(Fa x Fb) candidate loop: neither depends on the
-    // candidate pair, and each builds a bounding box of a whole solid.
+    // Hoisted out of the O(Fa x Fb) candidate loop: none of these depends on
+    // the candidate pair. The two thicknesses here are WHOLE-SOLID measures -
+    // the smallest side of each piece's oriented bounding box - and they are
+    // not what lands in `Contact`: they size the probe offset, they cap the
+    // at-the-joint measurement below (so an END-grain contact reports the
+    // board's own thickness rather than its length), and they stand in if a
+    // ray cast ever fails to find a surface.
     const double thicknessA = thicknessOf(a);
     const double thicknessB = thicknessOf(b);
+    const double reachA = boundingReach(a);
+    const double reachB = boundingReach(b);
 
     // How far off the shared region the side-or-inside probes are placed.
     // Derived from the WOOD, never from the caller's `toleranceMm`, which is
@@ -516,10 +596,17 @@ ContactResult findContact(const TopoDS_Shape& a, const TopoDS_Shape& b,
                 const bool bBehind = occupies(insideB, onRegion.Translated(shift * -bProbeMm));
 
                 gp_Dir normal;
+                // Where b's own face sits, measured along `normal` from the
+                // region - which is `signedGap` or its negation depending on
+                // which way round `normal` came out, and is what the material
+                // measurement below has to start from.
+                double bFaceOffset = 0.0;
                 if (aBehind && bAhead && !aAhead && !bBehind) {
                     normal = pa.Axis().Direction();
+                    bFaceOffset = signedGap;
                 } else if (aAhead && bBehind && !aBehind && !bAhead) {
                     normal = gp_Dir(pa.Axis().Direction().Reversed());
+                    bFaceOffset = -signedGap;
                 } else {
                     // The two solids are on the SAME side here (two rails of
                     // equal thickness crossing at the same height share their
@@ -550,6 +637,29 @@ ContactResult findContact(const TopoDS_Shape& a, const TopoDS_Shape& b,
                                     measured.XDirection().XYZ() * u0 +
                                     measured.YDirection().XYZ() * v0);
 
+                // How much wood is behind the joint on each side, measured
+                // along the normal from inside each piece, and capped by that
+                // piece's own whole-solid thickness so a board meeting the
+                // joint END-ON reports its 18 mm rather than its 600 mm of
+                // length. The local measurement is what fixes a hollow carcase
+                // (300 mm as a solid, 18 mm of wood at every joint on it) and
+                // a rabbeted panel (36 mm as a solid, 18 mm where the shelf
+                // actually lands); the cap is what keeps a butt joint's own
+                // board thickness right.
+                const gp_Dir intoA(normal.Reversed());
+                double localA = thicknessA;
+                double localB = thicknessB;
+                double measuredDepth = 0.0;
+                if (materialDepthBehind(a, onRegion.Translated(gp_Vec(intoA) * probeMm),
+                                        intoA, probeMm, reachA, measuredDepth)) {
+                    localA = std::min(thicknessA, measuredDepth);
+                }
+                if (materialDepthBehind(
+                        b, onRegion.Translated(gp_Vec(normal) * bProbeMm), normal,
+                        bProbeMm - bFaceOffset, reachB, measuredDepth)) {
+                    localB = std::min(thicknessB, measuredDepth);
+                }
+
                 bestArea = area;
                 result.ok = true;
                 result.error.clear();
@@ -559,8 +669,8 @@ ContactResult findContact(const TopoDS_Shape& a, const TopoDS_Shape& b,
                 result.contact.uMax = u1 - u0;
                 result.contact.vMin = 0.0;
                 result.contact.vMax = v1 - v0;
-                result.contact.thicknessAMm = thicknessA;
-                result.contact.thicknessBMm = thicknessB;
+                result.contact.thicknessAMm = localA;
+                result.contact.thicknessBMm = localB;
             }
         }
         if (result.ok) return result;
@@ -627,6 +737,33 @@ ContactResult findContact(const TopoDS_Shape& a, const TopoDS_Shape& b,
                                             measured.YDirection().XYZ() * v0 +
                                             depth.XYZ() * (wLo - seedW));
 
+                        // The same at-the-joint measurement as the Face branch,
+                        // taken THROUGH an interior point of the lap along the
+                        // lap depth: for two crossing rails that is each rail's
+                        // own thickness, which is the number a half-lap's
+                        // defaults split in half. The centre of mass is inside
+                        // the lap for every crossing this app makes; where it
+                        // is not, the whole-solid measure stands rather than a
+                        // point off the geometry being trusted.
+                        //
+                        // NOT capped by the whole-solid thickness, unlike the
+                        // Face branch. The cap exists there to stop an END-grain
+                        // contact reporting a board's length; a lap has no end
+                        // grain - the depth direction IS the material a half-lap
+                        // splits - and capping it would report a 60 x 300 x 100
+                        // rail as 60 mm thick at a lap that has 100 mm to halve.
+                        double localA = thicknessA;
+                        double localB = thicknessB;
+                        BRepClass3d_SolidClassifier insideLap(lap);
+                        insideLap.Perform(seed, 1.0e-6);
+                        if (insideLap.State() == TopAbs_IN) {
+                            double through = 0.0;
+                            if (materialDepthThrough(a, seed, depth, reachA, through))
+                                localA = through;
+                            if (materialDepthThrough(b, seed, depth, reachB, through))
+                                localB = through;
+                        }
+
                         result.ok = true;
                         result.contact.type = Contact::Type::Overlap;
                         result.contact.frame = gp_Ax3(origin, depth, xDir);
@@ -634,8 +771,8 @@ ContactResult findContact(const TopoDS_Shape& a, const TopoDS_Shape& b,
                         result.contact.uMax = u1 - u0;
                         result.contact.vMin = 0.0;
                         result.contact.vMax = v1 - v0;
-                        result.contact.thicknessAMm = thicknessA;
-                        result.contact.thicknessBMm = thicknessB;
+                        result.contact.thicknessAMm = localA;
+                        result.contact.thicknessBMm = localB;
                         return result;
                     }
                 }
