@@ -43,6 +43,7 @@
 #include "HintBalloon.h"
 #include "IconSet.h"
 #include "ItemsPanel.h"
+#include "Joinery.h"
 #include "MainWindow.h"
 #include "Measure.h"
 #include "ModelingOps.h"
@@ -830,6 +831,7 @@ constexpr BlockInfo kBlocks[] = {
     { "the-studio-floor-survives-a-rebuild-under-wood", false, true },
     { "add-shape-the-rail-flyout-places-a-ready-made-body", false, true },
     { "magnet-a-move-drag-sticks-to-another-body-s-alignments", false, true },
+    { "joints-draw-as-ghosted-hardware-in-the-viewport", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -27055,6 +27057,304 @@ int main(int argc, char* argv[])
         }
 
         probe.close();
+        settle(150);
+    }
+
+    // --- joints draw as ghosted hardware, SEEN THROUGH THE WOOD (joinery) --
+    //
+    // A dowel sits entirely inside the two boards it joins, and the boards are
+    // opaque - so "the joint draws pixels" is not the claim worth testing. A
+    // whole-frame diff can be satisfied by pixels that are not the hardware at
+    // all (depth-fighting at the contact plane, an edge somewhere). The claim
+    // is that hardware HIDDEN BEHIND WOOD is visible, so every measurement
+    // below is taken at each dowel's own projected centre, over a small search
+    // box (projectToScreen answers in whole logical pixels), and counts only
+    // pixels that are INSIDE the bodies' screen footprint - proven by a dump
+    // with the bodies hidden, not assumed. Drawn in a layer that depth-tests
+    // against the bodies, this block fails.
+    //
+    // Two exact boards seeded straight to disk rather than sketched: the
+    // contact is then a known 300 x 18 mm face and every dowel is provably
+    // interior, instead of depending on where snapped clicks happened to land.
+    if (blockEnabled("joints-draw-as-ghosted-hardware-in-the-viewport")) {
+        RequiredTempDir drawDir;
+        constexpr double kBoardMm = 18.0;
+        QString furnitureId;
+        {
+            FurnitureStore seedStore(drawDir.path());
+            furnitureId = seedStore.createFurniture(QStringLiteral("Joint probe"));
+            DocumentModel seedDoc;
+            // An upright, and a shelf butted against its face at x = 18.
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), kBoardMm, 300.0, 400.0));
+            seedDoc.addSolid(
+                ModelingOps::makeBox(gp_Pnt(kBoardMm, 0.0, 200.0), 400.0, 300.0, kBoardMm));
+            check(!furnitureId.isEmpty() && seedStore.saveFurniture(furnitureId, seedDoc, QImage()),
+                  "joints: an upright and a shelf butted against it are seeded to disk");
+        }
+
+        MainWindow jw(nullptr, /*persistProgress=*/false, drawDir.path());
+        jw.setAttribute(Qt::WA_ShowWithoutActivating);
+        jw.resize(1000, 700);
+        jw.show();
+        settle(300);
+        OcctViewWidget* jv = jw.view();
+        jv->setAnimationsEnabled(false);
+        check(jw.openFurniture(furnitureId), "joints: the seeded furniture opens");
+        settle(250);
+
+        // --- the layer contract ----------------------------------------------
+        const Graphic3d_ZLayerId jointsLayer = jv->jointsZLayer();
+        check(jointsLayer != Graphic3d_ZLayerId_UNKNOWN,
+              "joints: the viewer gave the hardware a layer of its own");
+        check(jointsLayer != jv->gizmoZLayer() && jointsLayer != jv->sketchZLayer(),
+              "joints: that layer is shared with neither the transform gizmo nor sketch work");
+        {
+            const std::vector<Graphic3d_ZLayerId> order = jv->zLayerOrder();
+            auto indexOf = [&order](Graphic3d_ZLayerId id) {
+                const auto it = std::find(order.begin(), order.end(), id);
+                return it == order.end() ? -1 : static_cast<int>(it - order.begin());
+            };
+            const int atDefault = indexOf(Graphic3d_ZLayerId_Default);
+            const int atSketch = indexOf(jv->sketchZLayer());
+            const int atTopmost = indexOf(Graphic3d_ZLayerId_Topmost);
+            const int atJoints = indexOf(jointsLayer);
+            const int atGizmo = indexOf(jv->gizmoZLayer());
+            check(atDefault >= 0 && atSketch > atDefault && atTopmost >= 0 &&
+                      atJoints > atTopmost && atJoints > atSketch && atGizmo > atJoints,
+                  QStringLiteral("joints: the hardware draws after the bodies, sketch work and "
+                                 "Topmost, and BEFORE the gizmo, so a live gizmo stays on top "
+                                 "(default %1, sketch %2, topmost %3, joints %4, gizmo %5)")
+                      .arg(atDefault).arg(atSketch).arg(atTopmost).arg(atJoints).arg(atGizmo));
+            const Graphic3d_ZLayerSettings js = jv->zLayerSettings(jointsLayer);
+            check(js.IsImmediate(),
+                  "joints: the layer is Immediate - a non-immediate layer that clears depth "
+                  "wipes the Shadows tier's shadow map even when empty");
+            check(js.ToClearDepth() && js.ToEnableDepthTest(),
+                  "joints: it clears depth at its start (drawn through the wood) and still "
+                  "depth-tests within itself (one piece of hardware hides another)");
+        }
+
+        const auto& solids = jw.document().solids();
+        check(solids.size() == 2,
+              QStringLiteral("joints: exactly the two seeded boards are open (%1)").arg(solids.size()));
+        if (solids.size() == 2) {
+            const int boardA = solids[0].id;
+            const int boardB = solids[1].id;
+            jv->clearSelection();
+            jv->fitAll();
+            settle(250);
+
+            const Joinery::Derivation d = Joinery::derive(
+                Joinery::Kind::Dowel, Joinery::defaultsFor(Joinery::Kind::Dowel, kBoardMm), {},
+                jw.document().shapeOf(boardA), jw.document().shapeOf(boardB));
+            check(d.ok, QStringLiteral("joints: the two boards meet and take a dowel joint (%1)")
+                            .arg(QString::fromStdString(d.error)));
+            check(!d.items.empty(),
+                  QStringLiteral("joints: the joint has dowels to draw (%1)").arg(d.items.size()));
+
+            if (d.ok && !d.items.empty()) {
+                // The fixture has to be the HARD case, or the pixel check below
+                // proves nothing: both ends of every dowel are inside the wood.
+                auto insideWood = [&](const gp_Pnt& p) {
+                    for (const int id : {boardA, boardB}) {
+                        BRepClass3d_SolidClassifier classifier(jw.document().shapeOf(id), p, 1.0e-6);
+                        if (classifier.State() == TopAbs_IN) return true;
+                    }
+                    return false;
+                };
+                int interiorDowels = 0;
+                for (const Joinery::Item& item : d.items) {
+                    const gp_Vec along(item.axis);
+                    if (insideWood(item.centre.Translated(along * (-0.9 * item.depthAMm))) &&
+                        insideWood(item.centre.Translated(along * (0.9 * item.depthBMm))))
+                        ++interiorDowels;
+                }
+                check(interiorDowels == static_cast<int>(d.items.size()),
+                      QStringLiteral("joints: every dowel is wholly inside the boards (%1 of %2) - "
+                                     "hardware the wood would hide")
+                          .arg(interiorDowels).arg(d.items.size()));
+
+                // Bodies alone, and then no bodies at all: the pair that proves
+                // where the bodies' screen footprint IS.
+                const QString bodiesPath = outDir + QStringLiteral("/joints-bodies-only.png");
+                check(jv->saveSnapshot(bodiesPath), "joints: a dump of the bodies alone");
+                jv->setSolidVisible(boardA, false);
+                jv->setSolidVisible(boardB, false);
+                settle(150);
+                const QString barePath = outDir + QStringLiteral("/joints-no-bodies.png");
+                check(jv->saveSnapshot(barePath), "joints: a dump with both bodies hidden");
+                jv->setSolidVisible(boardA, true);
+                jv->setSolidVisible(boardB, true);
+                settle(150);
+
+                jv->showJoints({d}, {Joinery::Kind::Dowel});
+                settle(200);
+                check(jv->jointsShown() == 1,
+                      QStringLiteral("joints: the viewport reports one joint drawn (%1)")
+                          .arg(jv->jointsShown()));
+                check(jv->jointItemsShown() == static_cast<int>(d.items.size()),
+                      QStringLiteral("joints: one piece of hardware per dowel (%1 of %2)")
+                          .arg(jv->jointItemsShown()).arg(d.items.size()));
+                const QString withPath = outDir + QStringLiteral("/joints-drawn.png");
+                check(jv->saveSnapshot(withPath), "joints: a dump with the joint up");
+
+                const QImage bodiesShot(bodiesPath), bareShot(barePath), withShot(withPath);
+                const bool shotsUsable = !bodiesShot.isNull() && !bareShot.isNull() &&
+                                         !withShot.isNull() &&
+                                         bodiesShot.size() == bareShot.size() &&
+                                         bodiesShot.size() == withShot.size();
+                check(shotsUsable, "joints: the three dumps load back at one size");
+
+                // In LOGICAL pixels either side of the projected centre; scaled
+                // into dump pixels. A 6 mm dowel at this framing is several
+                // pixels across, so the box always straddles it.
+                constexpr int kSearchHalfLogicalPx = 6;
+                constexpr double kInkDistance = 16.0;
+                constexpr int kMinInkPx = 12;
+                struct FootprintInk {
+                    bool projected = false;
+                    int box = 0;       // pixels searched
+                    int covered = 0;   // of those, inside the bodies' footprint
+                    int ink = 0;       // of those, changed between `lit` and `unlit`
+                };
+                auto measureAt = [&](const QImage& lit, const QImage& unlit, const gp_Pnt& world) {
+                    FootprintInk m;
+                    QPoint logical;
+                    if (!shotsUsable || lit.size() != bodiesShot.size() ||
+                        unlit.size() != bodiesShot.size())
+                        return m;
+                    if (!jv->projectToScreen(world, logical) || !jv->rect().contains(logical))
+                        return m;
+                    m.projected = true;
+                    const double scale =
+                        double(bodiesShot.width()) / double(std::max(1, jv->width()));
+                    const int cx = static_cast<int>(std::lround(logical.x() * scale));
+                    const int cy = static_cast<int>(std::lround(logical.y() * scale));
+                    const int half = static_cast<int>(std::ceil(kSearchHalfLogicalPx * scale));
+                    for (int y = cy - half; y <= cy + half; ++y) {
+                        for (int x = cx - half; x <= cx + half; ++x) {
+                            if (!bodiesShot.rect().contains(x, y)) continue;
+                            ++m.box;
+                            if (colorDistance(bodiesShot.pixelColor(x, y),
+                                              bareShot.pixelColor(x, y)) <= kInkDistance)
+                                continue;
+                            ++m.covered;
+                            if (colorDistance(lit.pixelColor(x, y), unlit.pixelColor(x, y)) >
+                                kInkDistance)
+                                ++m.ink;
+                        }
+                    }
+                    return m;
+                };
+
+                for (std::size_t i = 0; i < d.items.size(); ++i) {
+                    const FootprintInk m = measureAt(withShot, bodiesShot, d.items[i].centre);
+                    std::printf("[info] joints: dowel %d - %d px searched, %d inside the bodies' "
+                                "footprint, %d of those carry hardware\n",
+                                static_cast<int>(i), m.box, m.covered, m.ink);
+                    check(m.projected,
+                          QStringLiteral("joints: dowel %1 projects into the viewport").arg(i));
+                    check(m.box > 0 && m.covered * 2 > m.box,
+                          QStringLiteral("joints: the search around dowel %1 is inside the bodies' "
+                                         "screen footprint (%2 of %3 px) - the wood is in front "
+                                         "of it from this camera")
+                              .arg(i).arg(m.covered).arg(m.box));
+                    check(m.ink >= kMinInkPx,
+                          QStringLiteral("joints: dowel %1 is SEEN THROUGH THE WOOD - %2 px inside "
+                                         "the bodies' footprint change when the joint is drawn "
+                                         "(at least %3)")
+                              .arg(i).arg(m.ink).arg(kMinInkPx));
+                }
+
+                // --- never pickable: a click on the hardware takes the wood -----
+                {
+                    QPoint dowelAt;
+                    check(jv->projectToScreen(d.items.front().centre, dowelAt),
+                          "joints: the first dowel projects for a click");
+                    clickAt(jv, QPointF(dowelAt));
+                    settle(150);
+                    const std::vector<int> picked = jv->selectedSolidIds();
+                    check(picked.size() == 1 && (picked.front() == boardA || picked.front() == boardB),
+                          QStringLiteral("joints: a click on a dowel picks the board in front of it, "
+                                         "never the hardware (%1 selected)")
+                              .arg(picked.size()));
+                    check(jv->jointsShown() == 1,
+                          "joints: and the click leaves the hardware drawn");
+                    jv->clearSelection();
+                    settle(150);
+                }
+
+                // --- a theme edit reaches live hardware -------------------------
+                {
+                    const QString beforeThemePath = outDir + QStringLiteral("/joints-theme-before.png");
+                    check(jv->saveSnapshot(beforeThemePath), "joints: a dump before a theme edit");
+                    const Theme::Spec savedSpec = Theme::spec();
+                    Theme::Spec recoloured = savedSpec;
+                    recoloured.accent = colorDistance(savedSpec.accent, QColor(0, 255, 0)) > 120.0
+                                            ? QColor(0, 255, 0)
+                                            : QColor(255, 0, 0);
+                    Theme::setSpec(recoloured);
+                    settle(250);
+                    const QString afterThemePath = outDir + QStringLiteral("/joints-theme-after.png");
+                    check(jv->saveSnapshot(afterThemePath), "joints: a dump after the theme edit");
+                    Theme::setSpec(savedSpec);
+                    settle(250);
+
+                    const QImage beforeTheme(beforeThemePath), afterTheme(afterThemePath);
+                    int recolouredPx = 0;
+                    for (const Joinery::Item& item : d.items)
+                        recolouredPx += measureAt(afterTheme, beforeTheme, item.centre).ink;
+                    check(recolouredPx >= kMinInkPx * static_cast<int>(d.items.size()),
+                          QStringLiteral("joints: an accent edit recolours the hardware already on "
+                                         "screen - %1 px inside the footprint change")
+                              .arg(recolouredPx));
+                }
+
+                // --- clearing takes it all away ---------------------------------
+                jv->clearJoints();
+                settle(200);
+                check(jv->jointsShown() == 0 && jv->jointItemsShown() == 0,
+                      "joints: clearing takes the hardware away");
+                const QString clearedPath = outDir + QStringLiteral("/joints-cleared.png");
+                check(jv->saveSnapshot(clearedPath), "joints: a dump with the joint cleared");
+                {
+                    const QImage clearedShot(clearedPath);
+                    int leftover = 0;
+                    for (const Joinery::Item& item : d.items)
+                        leftover += measureAt(clearedShot, bodiesShot, item.centre).ink;
+                    check(leftover <= 2,
+                          QStringLiteral("joints: and no hardware ink is left behind (%1 px)")
+                              .arg(leftover));
+                }
+
+                // --- render mode is the furniture alone, and STAYS so -----------
+                jv->showJoints({d}, {Joinery::Kind::Dowel});
+                settle(200);
+                check(jv->jointsShown() == 1, "joints: the hardware is back up before render mode");
+                jw.setRenderModeEnabled(true);
+                settle(400);
+                check(jv->renderModeActive(), "joints: render mode is on");
+                check(jv->jointsShown() == 0 && jv->jointItemsShown() == 0,
+                      "joints: entering render mode takes the hardware away");
+                jv->showJoints({d}, {Joinery::Kind::Dowel});
+                settle(200);
+                check(jv->jointsShown() == 0 && jv->jointItemsShown() == 0,
+                      QStringLiteral("joints: a showJoints() mid-render draws nothing - render mode "
+                                     "stays the furniture alone (%1 drawn)")
+                          .arg(jv->jointItemsShown()));
+                jw.setRenderModeEnabled(false);
+                settle(300);
+                check(!jv->renderModeActive(), "joints: render mode is off again");
+                jv->showJoints({d}, {Joinery::Kind::Dowel});
+                settle(200);
+                check(jv->jointsShown() == 1 &&
+                          jv->jointItemsShown() == static_cast<int>(d.items.size()),
+                      "joints: and out of render mode the hardware draws again");
+                jv->clearJoints();
+            }
+        }
+
+        jw.close();
         settle(150);
     }
 

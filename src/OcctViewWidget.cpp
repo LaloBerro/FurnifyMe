@@ -649,6 +649,7 @@ void OcctViewWidget::releaseGlResources()
     myMoveGizmo.detach();
     myRotateGizmo.detach();
     myScaleGizmo.detach();
+    myJointRenderer.detach();
 
     // OCCT's own order: remove every presentation, drop the context, destroy
     // the view, then the viewer.
@@ -686,6 +687,12 @@ void OcctViewWidget::releaseGlResources()
     myRenderSavedAmbients.clear();
     myRenderModeActive = false;
     mySketchLayer = Graphic3d_ZLayerId_UNKNOWN;
+    // The two Immediate layers too - ids in a viewer that no longer exists.
+    // The gizmo's matters to the joints': the joints layer is inserted BEFORE
+    // it, and a stale id would make that insertion look up a layer the fresh
+    // viewer never had.
+    myGizmoLayer = Graphic3d_ZLayerId_UNKNOWN;
+    myJointsLayer = Graphic3d_ZLayerId_UNKNOWN;
     // Pointed into the context that has just gone, same reasoning as every
     // other handle cleared above - a fresh viewer's first MoveTo() must
     // compare against nothing, not a stale owner from the torn-down one.
@@ -837,6 +844,45 @@ void OcctViewWidget::initializeViewer()
         if (myViewer->InsertLayerAfter(layer, settings, Graphic3d_ZLayerId_Topmost))
             myGizmoLayer = layer;
     }
+    // A FIFTH layer, for the joints' ghosted hardware (joinery) - and it has
+    // the gizmo's properties for the gizmo's reasons, one level down.
+    //
+    // A dowel spans from `centre - axis*depthA` to `centre + axis*depthB`, so
+    // it sits ENTIRELY INSIDE the two boards it joins. The sketch-work layer
+    // depth-tests against what the bodies wrote, and the bodies are opaque:
+    // hardware drawn there draws nothing at all, however transparent the
+    // hardware itself is. Seen THROUGH the wood is the spec's requirement, so
+    // the layer clears depth at its start. Depth TEST stays on inside it, so
+    // one piece of hardware still hides another correctly.
+    //
+    // IMMEDIATE, for the exact reason recorded on the gizmo layer above: a
+    // custom non-immediate layer that clears depth sits in the normal layer
+    // list the shadow-map pass walks, and wipes the Shadows tier's depth
+    // texture - even empty, with nothing logged. Render mode clears the joints
+    // outright regardless.
+    //
+    // And BELOW the gizmo: inserted before it, so a live transform gizmo
+    // standing on a joined body still draws over the hardware rather than
+    // competing with it at its own depth - which sharing the gizmo's layer
+    // would have meant. Created after the gizmo layer precisely so it can be
+    // positioned relative to it; if the viewer refused the gizmo layer, it
+    // goes straight after Topmost, where the gizmo falls back to drawing too.
+    {
+        Graphic3d_ZLayerSettings settings;
+        settings.SetName("FurnifyMe joints");
+        settings.SetClearDepth(Standard_True);
+        settings.SetEnableDepthTest(Standard_True);
+        settings.SetEnableDepthWrite(Standard_True);
+        settings.SetRaytracable(Standard_False);
+        settings.SetRenderInDepthPrepass(Standard_False);
+        settings.SetImmediate(Standard_True);
+        Graphic3d_ZLayerId layer = Graphic3d_ZLayerId_UNKNOWN;
+        const bool inserted =
+            myGizmoLayer != Graphic3d_ZLayerId_UNKNOWN
+                ? myViewer->InsertLayerBefore(layer, settings, myGizmoLayer)
+                : myViewer->InsertLayerAfter(layer, settings, Graphic3d_ZLayerId_Topmost);
+        if (inserted) myJointsLayer = layer;
+    }
     myGridRenderer.update(myCamera.state().distance, myCamera.state().target,
                           myCamera.eyePosition(), gridPlane(),
                           Theme::gridDensity());
@@ -858,6 +904,8 @@ void OcctViewWidget::initializeViewer()
         myRotateGizmo.setZLayer(myGizmoLayer);
         myScaleGizmo.attach(myContext);
         myScaleGizmo.setZLayer(myGizmoLayer);
+        myJointRenderer.attach(myContext);
+        myJointRenderer.setZLayer(myJointsLayer);
     }
 
     // The field of view is fixed at kFovyDeg for ordinary modeling; render
@@ -2334,6 +2382,43 @@ void OcctViewWidget::setSymmetryIndicator(bool on, const gp_Pln& plane)
     // has not.
     mySymmetryIndicatorBuiltHalfSpan = 0.0;
     updateSymmetryIndicator();
+}
+
+void OcctViewWidget::showJoints(const std::vector<Joinery::Derivation>& derivations,
+                                const std::vector<Joinery::Kind>& kinds)
+{
+    // Render mode: "the viewport is the furniture alone", and it has to STAY
+    // alone. setRenderMode() clears the hardware on entry, but a caller
+    // driving this from appStateChanged fires on changes that do not exit
+    // render mode - the hole the symmetry indicator had until it re-derived
+    // its visibility off myRenderModeActive (updateSymmetryIndicator()). A
+    // clear, not a bare return, so nothing can be left up either way.
+    if (myRenderModeActive) {
+        clearJoints();
+        return;
+    }
+
+    initializeViewer();
+    if (myView.IsNull()) return;
+
+    // Index for index. A derivation with no kind beside it is NOT drawn:
+    // falling back to some default kind would draw a housing as a dowel,
+    // which is hardware that is not the plan.
+    const std::size_t count = std::min(derivations.size(), kinds.size());
+    std::vector<JointRenderer::Drawing> drawings;
+    drawings.reserve(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        JointRenderer::Drawing drawing;
+        drawing.kind = kinds[i];
+        drawing.derivation = derivations[i];
+        drawings.push_back(std::move(drawing));
+    }
+    if (myJointRenderer.show(drawings)) scheduleRedraw();
+}
+
+void OcctViewWidget::clearJoints()
+{
+    if (myJointRenderer.clear()) scheduleRedraw();
 }
 
 void OcctViewWidget::updateSymmetryIndicator()
@@ -4168,6 +4253,9 @@ void OcctViewWidget::applyTheme()
     myMoveGizmo.reapplyTheme();
     myRotateGizmo.reapplyTheme();
     myScaleGizmo.reapplyTheme();
+    // And the joints' hardware, which bakes Theme::accent() the same way.
+    // A no-op when nothing is drawn - and nothing is while render mode is on.
+    myJointRenderer.reapplyTheme();
 
     scheduleRedraw();
 }
@@ -5728,6 +5816,11 @@ void OcctViewWidget::setRenderMode(bool on)
         cancelMirrorPlacement();
 
         myGridRenderer.setVisible(false);
+        // The joints' hardware, on the same terms - scene decoration, and a
+        // render is the furniture alone. This is the ENTRY edge only;
+        // showJoints() refuses to draw while render mode is on, which is what
+        // keeps it gone when appStateChanged re-shows joints mid-render.
+        clearJoints();
         // The symmetry plane indicator, on the same terms as the grid - it
         // may already be up (symmetry was on before render mode was
         // entered), and updateSymmetryIndicator()'s own new guard only stops

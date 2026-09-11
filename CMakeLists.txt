@@ -123,6 +123,7 @@ if(FURNIFYME_BUILD_APP)
       src/ui/AppearancePanel.cpp
       src/ui/AxisGizmo.cpp
       src/ui/DimensionRenderer.cpp
+      src/ui/JointRenderer.cpp
       src/ui/Theme.cpp
       src/ui/IconSet.cpp
       src/ui/ToolChip.cpp

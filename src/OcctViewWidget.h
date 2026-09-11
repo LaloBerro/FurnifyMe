@@ -28,6 +28,7 @@
 #include "CameraController.h"
 #include "DimensionRenderer.h"
 #include "GridRenderer.h"
+#include "JointRenderer.h"
 #include "PullArrow.h"
 #include "TransformGizmo.h"
 
@@ -776,6 +777,30 @@ public:
     // setRenderMode() reads to decide whether to bring it back on exit.
     bool symmetryIndicatorShown() const { return mySymmetryIndicatorOn && !myRenderModeActive; }
 
+    // --- the joints' ghosted hardware (joinery) ----------------------------
+    //
+    // Dowels and screws as cylinders, housings and tenons as blocks, drawn
+    // where each derivation's items fall - see src/ui/JointRenderer.h. Never
+    // pickable. Drawn in jointsZLayer(), which clears depth so the hardware
+    // shows THROUGH the wood it sits inside.
+    //
+    // `kinds[i]` is the kind of `derivations[i]`; a derivation with no kind
+    // beside it is not drawn rather than drawn as a guess. Replaces whatever
+    // was drawn before.
+    //
+    // Scene decoration, exactly like the grid and the symmetry indicator, so
+    // render mode hides it and KEEPS it hidden: this is a clear while
+    // renderModeActive(), not merely cleared once on entry, because the
+    // callers that re-show joints (appStateChanged) fire on changes that do
+    // not exit render mode.
+    void showJoints(const std::vector<Joinery::Derivation>& derivations,
+                    const std::vector<Joinery::Kind>& kinds);
+    void clearJoints();
+    // Joints drawn (a joint with at least one piece of hardware on screen),
+    // and the pieces of hardware themselves.
+    int jointsShown() const { return myJointRenderer.shown(); }
+    int jointItemsShown() const { return myJointRenderer.itemsShown(); }
+
     // --- Mirror plane placement (Milestone 4, Phase 3) ---------------------
     //
     // The RETROACTIVE half of live symmetry - pairing bodies that already
@@ -873,6 +898,9 @@ public:
     // Exposed so a check can say WHICH layer the gizmo is in rather than only
     // that it happens to be visible today.
     Graphic3d_ZLayerId gizmoZLayer() const { return myGizmoLayer; }
+    // The joints' hardware layer - Immediate, depth cleared, drawn after
+    // every normal layer and BEFORE gizmoZLayer(). See initializeViewer().
+    Graphic3d_ZLayerId jointsZLayer() const { return myJointsLayer; }
     // The grid's layer, forwarded so a test can assert the order of the three
     // without reaching through to the renderer.
     Graphic3d_ZLayerId gridZLayer() const { return myGridRenderer.zLayer(); }
@@ -2254,6 +2282,9 @@ private:
     // UNKNOWN if the viewer refused it, in which case the gizmo falls back to
     // Topmost, which is where it used to live.
     Graphic3d_ZLayerId myGizmoLayer = Graphic3d_ZLayerId_UNKNOWN;
+    // The joints' hardware layer - see jointsZLayer(). UNKNOWN if the viewer
+    // refused it, in which case JointRenderer falls back to Topmost.
+    Graphic3d_ZLayerId myJointsLayer = Graphic3d_ZLayerId_UNKNOWN;
     Handle(AIS_Shape) myPreview;
     // The direct-modeling channel, kept strictly apart from myPreview above.
     // Milestone 5's cross-body bevel is the reason these are vectors rather
@@ -2283,6 +2314,8 @@ private:
     PullArrowRenderer myPullArrow;
     // The same renderer class, a second instance - see PullArrow.h.
     PullArrowRenderer myBevelArrow;
+    // The joints' ghosted hardware - see showJoints().
+    JointRenderer myJointRenderer;
 
     std::map<int, Handle(AIS_Shape)> mySolids;
     // The outline items - see displayOutline(). Keyed by the same document id
