@@ -654,7 +654,7 @@ void skipByEnvironment(int checks, const QString& why)
 // sweep and the rail's eleventh-chip pins landed +96 checks; the official
 // run measured 3592 + 1 environment skip. The floor is that accounted
 // total, exactly.
-constexpr int kCheckFloor = 3593;
+constexpr int kCheckFloor = 3601;
 
 void check(bool condition, const QString& what)
 {
@@ -827,6 +827,7 @@ constexpr BlockInfo kBlocks[] = {
     { "auto-selection-phase-1-the-kind-lock", false, true },
     { "the-3d-gizmos-unlit-tokens-hover-and-handles", false, true },
     { "view-isolate-holds-chosen-bodies-alone-on-screen", false, true },
+    { "the-studio-floor-survives-a-rebuild-under-wood", false, true },
     { "add-shape-the-rail-flyout-places-a-ready-made-body", false, true },
     { "magnet-a-move-drag-sticks-to-another-body-s-alignments", false, true },
 };
@@ -26617,6 +26618,80 @@ int main(int argc, char* argv[])
     // focus, selected with the Move gizmo up, in ONE undoable checkpoint,
     // and the flyout closes. Escape and an outside click close it too - the
     // outside click's release swallowed, ShortcutSheet's own law.
+    // --- the studio floor survives a rebuild while Wood stands in --------
+    // The wood material ERASES each body's real presentation and shows a
+    // textured overlay in its place, and showRenderFloor() sizes the floor
+    // from what is displayed - so a rebuild after wood was applied measured
+    // nothing and removed the floor outright, taking the cast shadow with
+    // it. The floor is built on ENTRY, before wood, which is why this only
+    // bit when something rebuilt it later: a theme edit, or the background
+    // override applyBackgroundForMode() rebuilds through. Both were
+    // persisted in a real session, so it was every session (the user's own
+    // report). Driven end to end here - wood on, then a background change -
+    // and measured on the rendered pixels, because "the floor is there" is
+    // a claim about what was drawn.
+    if (blockEnabled("the-studio-floor-survives-a-rebuild-under-wood")) {
+        RequiredTempDir floorDir;
+        MainWindow fw(nullptr, /*persistProgress=*/false, floorDir.path());
+        fw.setAttribute(Qt::WA_ShowWithoutActivating);
+        fw.resize(900, 700);
+        fw.show();
+        settle(300);
+        OcctViewWidget* fv = fw.view();
+        fv->setAnimationsEnabled(false);
+        enterFreshFurniture(fw);
+        check(buildBody(fw, 0.34, 0.34, 0.66, 0.62, 120.0),
+              "a body to stand on the studio floor");
+        fv->fitAll();
+        settle(250);
+
+        QAction* renderMode = action(fw, QStringLiteral("Render mode"));
+        check(renderMode != nullptr, "the Render mode entry exists");
+        if (renderMode) {
+            renderMode->trigger();
+            settle(900);
+            fv->setRenderWood(true);
+            settle(900);
+            // THE REBUILD: a background override runs
+            // applyBackgroundForMode(), which re-makes the floor - the exact
+            // route that used to destroy it while wood stood in.
+            fv->setRenderBackgroundOverride(QColor(0xba, 0xba, 0xba));
+            settle(1200);
+
+            const QString floorShot = outDir + QStringLiteral("/render-floor-under-wood.png");
+            check(fv->saveSnapshot(floorShot), "the render is captured");
+            const QImage shot(floorShot);
+            check(!shot.isNull() && shot.width() > 200,
+                  "the capture is real, so the floor probe below is not vacuous");
+            if (!shot.isNull()) {
+                // A band well below the body reads the floor; with no floor
+                // at all every one of those pixels is the flat backdrop, and
+                // the body's cast shadow - which only a floor can receive -
+                // cannot darken any of them.
+                const int y = shot.height() * 3 / 4;
+                int darkest = 255, lit = 0, sampled = 0;
+                for (int x = shot.width() / 6; x < shot.width() * 5 / 6; ++x) {
+                    const QColor c = shot.pixelColor(x, y);
+                    const int v = (c.red() + c.green() + c.blue()) / 3;
+                    darkest = std::min(darkest, v);
+                    lit = std::max(lit, v);
+                    ++sampled;
+                }
+                check(sampled > 100,
+                      QStringLiteral("the floor band sampled real pixels (%1)").arg(sampled));
+                check(lit - darkest > 8,
+                      QStringLiteral("the studio floor is THERE under a wood-dressed body "
+                                     "and still receives the cast shadow - the band spans "
+                                     "%1 levels (lit %2, darkest %3); a missing floor is a "
+                                     "flat backdrop and spans none")
+                          .arg(lit - darkest).arg(lit).arg(darkest));
+            }
+            renderMode->trigger();
+            settle(400);
+        }
+        check(fw.findChild<QDialog*>() == nullptr, "and no modal appeared for any of it");
+    }
+
     if (blockEnabled("add-shape-the-rail-flyout-places-a-ready-made-body")) {
         RequiredTempDir shapeDir;
         MainWindow shapeProbe(nullptr, /*persistProgress=*/false, shapeDir.path());

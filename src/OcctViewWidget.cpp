@@ -4214,9 +4214,25 @@ void OcctViewWidget::showRenderFloor()
 
     // The floor stands under what is actually on screen - a hidden body must
     // not stretch it, and must not decide where "under" is.
+    //
+    // "On screen" includes a body the WOOD overlay is standing in for. The
+    // wood material erases each real presentation and displays a textured
+    // overlay in its place (refreshWoodOverlays()), so asking
+    // IsDisplayed() about the real one answers false for furniture the user
+    // is looking at - and this function returns early on a void box, which
+    // removed the floor outright. It survived until now only because the
+    // floor is built on render-mode ENTRY, before wood is applied; anything
+    // that REBUILT it afterwards - a theme edit, or the background-colour
+    // override applyBackgroundForMode() rebuilds through - destroyed it.
+    // With wood and a background override both persisted, that is every
+    // session (the user's own: "the floor in the render mode is no longer
+    // appearing... or is not projecting shadows").
     Bnd_Box box;
     for (const auto& entry : mySolids) {
-        if (!myContext->IsDisplayed(entry.second)) continue;
+        const bool woodStandsIn =
+            std::find(myWoodHiddenIds.begin(), myWoodHiddenIds.end(), entry.first) !=
+            myWoodHiddenIds.end();
+        if (!myContext->IsDisplayed(entry.second) && !woodStandsIn) continue;
         Bnd_Box b;
         BRepBndLib::Add(entry.second->Shape(), b);
         box.Add(b);
