@@ -112,6 +112,33 @@ Parameters defaultsForContact(Kind kind, const Contact& contact);
 // (see the field's own comment below).
 inline constexpr double kUnmeasuredRegionAreaMm2 = -1.0;
 
+// How far a piece's material has to run on behind a contact, as a multiple of
+// that piece's own thickness, before the piece counts as meeting the contact
+// END-ON (or edge-on) - see `Contact::endOn`. Strictly greater than.
+//
+// Why 2: a piece met on one of its broad faces has at most its own thickness
+// behind the joint (exactly 1x for a plain board, LESS for a rabbeted panel or
+// a hollow carcase, whose local wood is thinner than the solid). A piece met on
+// its end or edge has its width or length behind the joint instead, and
+// furniture stock is at least twice as wide as it is thick - an 18 mm board is
+// never narrower than 36, a 22 mm batten is 44. Between those two bands sit
+// the near-square sections a leg or a thick rail is made of: a 40 x 60 leg met
+// on its 40 mm face has 60 behind it, 1.5x, and is plainly the HOST, not an
+// end. So 2 sits above every face-met case including those, and at or below
+// every edge or end of real board stock.
+//
+// What it gets wrong, deliberately named, and both fall back to selection
+// order at placement:
+//   - a very SHORT stub - an 18 mm board only 30 mm long, met on its end - has
+//     1.67x behind it and reads as Neither;
+//   - a board bent into an L or a U and met on its END. "Its own thickness"
+//     is the whole solid's thinnest oriented side, and for an L-section that is
+//     the L's own size - the same limitation `Contact::thicknessAMm` documents -
+//     so a 600 mm L-section shelf 300 mm across the L measures 600 against 300
+//     and reads as Neither (measured). Such a piece would normally be modelled
+//     as two boards, which read correctly.
+inline constexpr double kEndOnDepthRatio = 2.0;
+
 // Where two pieces meet, in the contact's OWN frame - the one coordinate
 // system every derived position is expressed in, so nothing downstream
 // needs to know a world axis. A joint stores no world position; this is
@@ -199,6 +226,23 @@ struct Contact {
     // sampled point collapses near any boundary).
     double thicknessAMm = 0.0;
     double thicknessBMm = 0.0;
+
+    // Which piece meets this contact END-ON (or edge-on): a shelf standing on
+    // its end against a panel's face is end-on, the panel is not. That decides
+    // which piece is the HOST - the one a mortise or a housing is cut into,
+    // which layout() always puts on piece A - so placement orders its two
+    // pieces by this rather than by which one the user happened to click first.
+    //
+    // It has to be its own field: thicknessAMm/thicknessBMm cannot answer it,
+    // because the cap described above makes both read 18 mm for exactly the
+    // shelf-on-panel case this exists for. Set by findContact() from the
+    // UNCAPPED local depth behind the joint against the piece's own thickness
+    // (see kEndOnDepthRatio). Neither for two boards face to face, for two
+    // pieces that are BOTH end-on (a butt joint end to end has no host), for
+    // every Overlap contact (a lap has no end grain), and for a hand-built
+    // Contact - which reads as "no host known", never as a guess.
+    enum class EndOn { Neither, A, B };
+    EndOn endOn = EndOn::Neither;
 
     // The shared region's own REAL area, measured from the actual boolean
     // intersection - not derived from `uLength()`/`vLength()`, which is the

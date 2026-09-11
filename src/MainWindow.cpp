@@ -851,6 +851,13 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     connect(myView, &OcctViewWidget::glResourcesReleased, this, [this] {
         resyncView();
         setRenderModeEnabled(false);
+        // The joints' hardware went with the context too (releaseGlResources()
+        // detaches the renderer and forgets what it drew), and nothing about
+        // the document changed, so no revision moves to bring it back. Named
+        // here explicitly rather than left to ride the appStateChanged that
+        // updateActions() emits below: this handler is the recovery, and the
+        // recovery should not depend on which slots happen to be connected.
+        refreshJoints();
         updateActions();
     });
 
@@ -1008,6 +1015,16 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // long as the arrow's own value chip is up. Only reads state and moves AIS
     // objects, so it cannot recurse back into updateActions().
     connect(this, &MainWindow::appStateChanged, this, &MainWindow::refreshEdgeAnnotation);
+
+    // Joints follow every document change and every transform commit from the
+    // one signal every other derived surface already follows. Cheap on the
+    // changes that are not document changes (a selection click): the
+    // derivations are cached on DocumentModel::revision(), so this re-derives
+    // only when the document moved and otherwise just hands the viewport what
+    // it already has, which JointRenderer::show() answers with a compare. Only
+    // reads state and moves AIS objects, so it cannot recurse into
+    // updateActions().
+    connect(this, &MainWindow::appStateChanged, this, &MainWindow::refreshJoints);
 
     // Selection syncs both ways.
     connect(myItemsPanel, &ItemsPanel::solidActivated, this,
@@ -1239,6 +1256,14 @@ void MainWindow::buildActions()
 
     myUnlinkAction = new QAction(tr("&Unlink"), this);
     connect(myUnlinkAction, &QAction::triggered, this, [this] { unlinkSelectedBody(); });
+
+    // Joinery (Task 11): J plans a wood joint between the two selected pieces,
+    // placing the first kind that fits - see placeJointBetweenSelected(). J was
+    // checked free: no Qt::Key_J binding exists anywhere else in src/ or tests/.
+    myJointAction = new QAction(tr("&Joint"), this);
+    myJointAction->setShortcut(QKeySequence(Qt::Key_J));
+    myJointAction->setToolTip(tr("Plan a wood joint between two selected pieces (J)"));
+    connect(myJointAction, &QAction::triggered, this, [this] { placeJointBetweenSelected(); });
 
     myExportStepAction = new QAction(tr("Export &STEP..."), this);
     // Ctrl+S is Save's now - the platform standard key and a furniture SAVE
@@ -1622,6 +1647,10 @@ QMenuBar* MainWindow::buildMenus()
     modelMenu->addAction(myDuplicateLinkedAction);
     modelMenu->addAction(myLinkSelectedAction);
     modelMenu->addAction(myUnlinkAction);
+    modelMenu->addSeparator();
+    // Joinery (Task 11) - menu-only, no rail chip: every rail tool raises the
+    // viewport's minimum height, and the rail is already near its ceiling.
+    modelMenu->addAction(myJointAction);
 
     QMenu* viewMenu = bar->addMenu(tr("&View"));
     viewMenu->addAction(myFitAction);
@@ -2555,6 +2584,15 @@ void MainWindow::updateActions()
     // modeling gesture, taken before entering or after leaving.
     myIsolateAction->setEnabled(!mySketching && !atInit && !myRenderModeOn &&
                                 (isolateActive() || selectedCount > 0));
+    // Joint (J): two WHOLE bodies and nothing else - a joint joins pieces, and
+    // selectedSolidIds() reports the OWNING body of a selected face or edge, so
+    // the kind term is what keeps a two-face selection from reading as two
+    // pieces. placeJoint() asks the same two questions again for a caller
+    // that reaches it without the action.
+    const bool twoWholeBodies =
+        myView->selectionKind() == OcctViewWidget::PickKind::Body && selectedCount == 2;
+    myJointAction->setEnabled(!mySketching && !atInit && !myRenderModeOn && twoWholeBodies);
+
     myIsolateAction->setChecked(isolateActive());
     myIsolateAction->setToolTip(
         isolateActive()
@@ -4077,6 +4115,13 @@ void MainWindow::resyncView()
     // directly rather than through the signal, because resetPickGesture()
     // promises on its own header to emit nothing.
     onPickRefusalWithdrawn();
+    // The joint derivation cache is keyed on DocumentModel::revision(), and a
+    // revision is only monotonic WITHIN one document: a furniture opened here
+    // is a fresh DocumentModel whose count starts again, and can land on the
+    // very number the one it replaced was cached at - drawing the old
+    // furniture's hardware over the new one's boards. Dropped here, at the
+    // choke point every swap goes through, rather than at each assignment.
+    myJointCacheRevision = -1;
 
     myView->clearSolids();
     for (const DocumentModel::Solid& solid : myDocument.solids()) {
@@ -6519,6 +6564,162 @@ bool MainWindow::duplicateSelectedBody()
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
     return true;
+}
+
+// --- joinery: placing a joint (Task 11) -------------------------------------
+
+bool MainWindow::placeJointBetweenSelected()
+{
+    // `requested` is unread on this route - the contact chooses the kind.
+    return placeJoint(/*firstThatFits=*/true, Joinery::Kind::Dowel);
+}
+
+bool MainWindow::addJointBetweenSelected(Joinery::Kind kind)
+{
+    return placeJoint(/*firstThatFits=*/false, kind);
+}
+
+bool MainWindow::placeJoint(bool firstThatFits, Joinery::Kind requested)
+{
+    // The action's own gate, asked again for a caller that reaches this
+    // without it (the suite, a later chip). Quiet, like every other gesture
+    // whose disabled state already said why.
+    if (!myView || myShowingInitScreen || mySketching) return false;
+    if (myView->selectionKind() != OcctViewWidget::PickKind::Body) return false;
+    const std::vector<int> selected = myView->selectedSolidIds();
+    if (selected.size() != 2) return false;
+
+    // Every refusal is a Failure toast - never a modal, never silent.
+    const auto refuse = [this](const QString& message) {
+        statusBar()->showMessage(message);
+        myToasts->show(message, Toast::Kind::Failure, false);
+        return false;
+    };
+    const auto cannotTake = [&refuse, this](const std::string& why) {
+        return refuse(tr("These pieces can't take a joint — %1").arg(QString::fromStdString(why)));
+    };
+
+    // The HOST by geometry. Piece A is simply whichever shape is passed first -
+    // layout() cuts a mortise into it and defaultsForContact() caps the mortise
+    // and sizes the housing by it - so passing the selection straight through
+    // would put a mortise into the END GRAIN of a shelf picked before its panel.
+    // The drawing would still sit in the wood; the joint would be backwards.
+    // The piece that is NOT end-on is the host; with no end-on piece named (two
+    // boards face to face, crossing rails, a butt end to end) selection order
+    // stands. One rule for every kind: fasteners and the half-lap read both
+    // sides alike, so ordering them too costs nothing and keeps one path.
+    int hostId = selected[0];
+    int otherId = selected[1];
+    Joinery::ContactResult found =
+        Joinery::findContact(myDocument.shapeOf(hostId), myDocument.shapeOf(otherId));
+    if (!found.ok) return cannotTake(found.error);
+    if (found.contact.endOn == Joinery::Contact::EndOn::A) {
+        std::swap(hostId, otherId);
+        // Measured again in the new order rather than patched by hand: the
+        // frame's Z runs from A into B and each thickness belongs to a side,
+        // so the defaults below must read the contact the joint will derive.
+        found = Joinery::findContact(myDocument.shapeOf(hostId), myDocument.shapeOf(otherId));
+        if (!found.ok) return cannotTake(found.error);
+    }
+
+    Joinery::Kind kind = requested;
+    if (firstThatFits) {
+        // The user's pick from the kind-choice round: place the first kind that
+        // fits, now, and switch it afterwards. No chooser before placement.
+        const std::vector<Joinery::Kind> fits = Joinery::validKindsFor(found.contact);
+        if (fits.empty()) {
+            // Nothing fits. The reason given is the one the kind this contact's
+            // TYPE calls for would give - a face contact's first kind, a
+            // crossing's half-lap - because the other kinds' reason on it is
+            // only the type mismatch ("the pieces aren't crossing"), which is
+            // true and says nothing about why THIS contact refused.
+            const Joinery::Kind natural =
+                found.contact.type == Joinery::Contact::Type::Overlap ? Joinery::Kind::HalfLap
+                                                                      : Joinery::Kind::Dowel;
+            return cannotTake(Joinery::validityOf(natural, found.contact));
+        }
+        kind = fits.front();
+    } else {
+        const std::string why = Joinery::validityOf(kind, found.contact);
+        if (!why.empty()) {
+            return refuse(tr("A %1 doesn't fit here — %2")
+                              .arg(QString::fromStdString(Joinery::kindName(kind)).toLower(),
+                                   QString::fromStdString(why)));
+        }
+    }
+
+    // THE defaults function placement calls - it knows each piece's own
+    // thickness at the joint, where defaultsFor(kind, thinner) knows one number
+    // and cannot say "half of each piece" or "no deeper than the host".
+    const Joinery::Parameters params = Joinery::defaultsForContact(kind, found.contact);
+
+    checkpointDocument();
+    const int id = myDocument.addJoint(kind, hostId, otherId, params);
+    if (id == 0) return refuse(tr("That joint couldn't be created"));
+
+    updateActions();
+    emit documentChanged();
+    refreshJoints();
+
+    QString message = tr("%1 added between %2 and %3")
+                          .arg(QString::fromStdString(Joinery::kindName(kind)),
+                               QString::fromStdString(myDocument.nameOf(hostId)),
+                               QString::fromStdString(myDocument.nameOf(otherId)));
+    // A contact that is not a plain rectangle can put part of the joint where
+    // the pieces do not touch. That is a fact to show, never a veto - and this
+    // is the first moment a user places a joint, so it is said HERE or nowhere.
+    const std::string caveat = Joinery::regionShortfallCaveat(found.contact);
+    if (!caveat.empty()) message += tr(" — %1").arg(QString::fromStdString(caveat));
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    return true;
+}
+
+const std::vector<Joinery::Derivation>& MainWindow::jointDerivations() const
+{
+    // THE one place a joint is derived. The viewport reads this, the drawer
+    // will, and a number on screen and a number in the list can therefore never
+    // disagree - a broken joint is broken in both at once.
+    if (myJointCacheRevision != myDocument.revision()) {
+        myJointDerivationCache.clear();
+        myJointKindCache.clear();
+        myJointDerivationCache.reserve(myDocument.joints().size());
+        myJointKindCache.reserve(myDocument.joints().size());
+        for (const DocumentModel::Joint& joint : myDocument.joints()) {
+            myJointDerivationCache.push_back(
+                Joinery::derive(joint.kind, joint.params, joint.adjustments,
+                                myDocument.shapeOf(joint.bodyA), myDocument.shapeOf(joint.bodyB)));
+            myJointKindCache.push_back(joint.kind);
+            ++myJointDeriveCount;
+        }
+        myJointCacheRevision = myDocument.revision();
+    }
+    return myJointDerivationCache;
+}
+
+void MainWindow::refreshJoints()
+{
+    if (!myView) return;
+    const std::vector<Joinery::Derivation>& derivations = jointDerivations();
+
+    std::vector<Joinery::Derivation> drawn;
+    std::vector<Joinery::Kind> kinds;
+    drawn.reserve(derivations.size());
+    kinds.reserve(derivations.size());
+    for (std::size_t i = 0; i < derivations.size() && i < myJointKindCache.size(); ++i) {
+        // THE DRAWING DECISION, in one place. The spec draws a joint only while
+        // the joints drawer is open or that joint is selected; the drawer is
+        // Task 12's and joint selection Task 13's, so for now every joint is
+        // drawn - and those two tasks add their terms to THIS line, not to a
+        // second filter somewhere else.
+        const bool draw = true;
+        if (!draw) continue;
+        drawn.push_back(derivations[i]);
+        kinds.push_back(myJointKindCache[i]);
+    }
+    // Every call, cache warm or not: showJoints() is a compare when nothing
+    // changed, and it is the ONLY way hardware the viewport forgot comes back.
+    myView->showJoints(drawn, kinds);
 }
 
 // --- linked copies (Milestone 4, Task 4.2) ----------------------------------

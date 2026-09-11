@@ -836,6 +836,7 @@ constexpr BlockInfo kBlocks[] = {
     { "add-shape-the-rail-flyout-places-a-ready-made-body", false, true },
     { "magnet-a-move-drag-sticks-to-another-body-s-alignments", false, true },
     { "joints-draw-as-ghosted-hardware-in-the-viewport", false, true },
+    { "placing-a-joint-between-two-pieces", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -1291,10 +1292,12 @@ QStringList bannedWords()
     // Failure sentences saying "will only round some of them" / "will only
     // flatten some of them" - the Never column for Fillet and Chamfer,
     // shipped for a whole branch because the sweep could not see them. They
-    // are matched at a WORD BOUNDARY, not as substrings: the other seven are
-    // code words nothing legitimate contains, while "background", "ground"
-    // and "surround" are ordinary copy this app is entitled to use. See
-    // usesBannedWord().
+    // are matched at a WORD BOUNDARY, not as substrings, because "background",
+    // "ground" and "surround" are ordinary copy this app is entitled to use.
+    // The rest are matched as bare substrings - with ONE stem exception, since
+    // joinery made "Joint" this app's own word and it contains "Join": a
+    // "join" followed by "t" is not the banned verb, while "joined", "joining"
+    // and "joins" still are. See usesBannedWord() and isJointStem().
     return {QStringLiteral("Fuse"),  QStringLiteral("Solid"),
             QStringLiteral("OCCT"),  QStringLiteral("mm3"),
             QStringLiteral("(s)"),   QStringLiteral("Merge"),
@@ -1330,16 +1333,37 @@ bool bannedWordNeedsBoundary(const QString& word)
 // the "user-data exemption" check just below); wiring individual painted
 // surfaces to pass true for their user-typed strings is later work (item 1's
 // rename, item 4's version names).
+//
+// One stem exception, and only one (joinery, Task 11): "Joint" is this app's
+// own word for a planned wood joint - the spec says "'Joint' is the word,
+// everywhere" - and it CONTAINS the banned "Join", which is the Never column
+// for Union. So a "join" IMMEDIATELY followed by "t" is not the banned verb.
+// Deliberately that narrow: "joined", "joining" and "joins" mean Union just as
+// much as "join" does and all stay banned. A two-sided word boundary was the
+// alternative and was rejected for exactly that reason - it would unban all
+// three. Pinned in both directions in the vocabulary block.
+bool isJointStem(const QString& text, int at, const QString& word)
+{
+    if (word.compare(QStringLiteral("Join"), Qt::CaseInsensitive) != 0) return false;
+    const int after = at + word.size();
+    return after < text.size() && text.at(after).toLower() == QLatin1Char('t');
+}
+
 bool usesBannedWord(const QString& text, const QString& word, bool isUserData = false)
 {
     if (isUserData) return false;
-    if (!bannedWordNeedsBoundary(word)) return text.contains(word, Qt::CaseInsensitive);
+    const bool needsBoundary = bannedWordNeedsBoundary(word);
 
     // Hand-rolled rather than a QRegularExpression, because the boundary this
     // wants is one-sided (a preceding letter or digit disqualifies; a
-    // following one does not) and \b would need spelling out either way.
+    // following one does not) and \b would need spelling out either way. Every
+    // word walks its matches now, not only the boundary-matched ones, so the
+    // stem exception above is asked of each occurrence rather than of the
+    // string as a whole - "Joint the pieces, then Join them" still fails.
     for (int at = text.indexOf(word, 0, Qt::CaseInsensitive); at >= 0;
          at = text.indexOf(word, at + 1, Qt::CaseInsensitive)) {
+        if (isJointStem(text, at, word)) continue;
+        if (!needsBoundary) return true;
         if (at == 0) return true;
         const QChar before = text.at(at - 1);
         if (!before.isLetterOrNumber()) return true;
@@ -13078,6 +13102,37 @@ int main(int argc, char* argv[])
         check(usesBannedWord(QStringLiteral("the Fused result"), QStringLiteral("Fuse")) &&
                   usesBannedWord(QStringLiteral("1 body(s)"), QStringLiteral("(s)")),
               "while the code words it was already matching stay bare substrings");
+
+        // The joinery stem exception (Task 11), pinned in both directions in
+        // the same place as the boundary rule. "Joint" is this app's own word
+        // and contains the banned "Join"; the exception is "join" followed by
+        // "t" and nothing wider, so every other form of the verb - each of
+        // which means Union - still fails.
+        {
+            const QString join = QStringLiteral("Join");
+            QStringList wronglyBanned;
+            for (const QString& allowed : {QStringLiteral("Joint"), QStringLiteral("joints"),
+                                           QStringLiteral("Plan a wood joint")}) {
+                if (usesBannedWord(allowed, join)) wronglyBanned << allowed;
+            }
+            check(wronglyBanned.isEmpty(),
+                  QStringLiteral("\"Joint\" is the joinery word and passes the Join ban (%1)")
+                      .arg(wronglyBanned.isEmpty() ? QStringLiteral("all pass")
+                                                   : wronglyBanned.join(QStringLiteral(", "))));
+            QStringList slippedThrough;
+            for (const QString& banned : {QStringLiteral("Join"),
+                                          QStringLiteral("Join the two bodies"),
+                                          QStringLiteral("joined"), QStringLiteral("joining"),
+                                          QStringLiteral("joins"),
+                                          QStringLiteral("a joint, then Join them")}) {
+                if (!usesBannedWord(banned, join)) slippedThrough << banned;
+            }
+            check(slippedThrough.isEmpty(),
+                  QStringLiteral("while the verb itself, in every other form, still fails it - "
+                                 "including beside an allowed \"joint\" in the same sentence (%1)")
+                      .arg(slippedThrough.isEmpty() ? QStringLiteral("all fail")
+                                                    : slippedThrough.join(QStringLiteral(", "))));
+        }
 
         // The user-data exemption hook (Milestone 3): the SAME string, with
         // the SAME banned word, on either side of the flag - both directions
@@ -27279,9 +27334,28 @@ int main(int argc, char* argv[])
             furnitureId = seedStore.createFurniture(QStringLiteral("Joint probe"));
             DocumentModel seedDoc;
             // An upright, and a shelf butted against its face at x = 18.
-            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), kBoardMm, 300.0, 400.0));
-            seedDoc.addSolid(
+            const int seededUpright =
+                seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), kBoardMm, 300.0, 400.0));
+            const int seededShelf = seedDoc.addSolid(
                 ModelingOps::makeBox(gp_Pnt(kBoardMm, 0.0, 200.0), 400.0, 300.0, kBoardMm));
+            // The dowel joint this block draws is held by the DOCUMENT. Since
+            // Task 11 the window's own refreshJoints() owns what the viewport
+            // draws, and it runs on every appStateChanged - so hardware put up
+            // behind the window's back was replaced by the document's joints
+            // (none) on the next click or theme edit. Seeded with exactly what
+            // the block derives below - the same kind, the same pieces in the
+            // same order, the same contact-measured defaults - so the window's
+            // refresh draws `d` itself, which the renderer's change check
+            // answers without a rebuild.
+            const Joinery::ContactResult seededMeet = Joinery::findContact(
+                seedDoc.shapeOf(seededUpright), seedDoc.shapeOf(seededShelf));
+            const int seededJoint =
+                seededMeet.ok
+                    ? seedDoc.addJoint(Joinery::Kind::Dowel, seededUpright, seededShelf,
+                                       Joinery::defaultsForContact(Joinery::Kind::Dowel,
+                                                                   seededMeet.contact))
+                    : 0;
+            check(seededJoint > 0, "joints: the document holds the dowel joint the block draws");
             check(!furnitureId.isEmpty() && seedStore.saveFurniture(furnitureId, seedDoc, QImage()),
                   "joints: an upright and a shelf butted against it are seeded to disk");
         }
@@ -27377,6 +27451,18 @@ int main(int argc, char* argv[])
                       QStringLiteral("joints: every dowel is wholly inside the boards (%1 of %2) - "
                                      "hardware the wood would hide")
                           .arg(interiorDowels).arg(d.items.size()));
+
+                // The window has already drawn the document's own joint by now
+                // (see the seeding comment). The footprint dumps below must hold
+                // no hardware at all, so it comes down first - through the view
+                // directly, with nothing in between that runs updateActions().
+                check(jv->jointsShown() == 1,
+                      QStringLiteral("joints: the window drew the document's joint on opening (%1)")
+                          .arg(jv->jointsShown()));
+                jv->clearJoints();
+                settle(150);
+                check(jv->jointsShown() == 0 && jv->jointItemsShown() == 0,
+                      "joints: and it is cleared for the footprint dumps");
 
                 // Bodies alone, and then no bodies at all: the pair that proves
                 // where the bodies' screen footprint IS.
@@ -27862,10 +27948,18 @@ int main(int argc, char* argv[])
                                   .arg(jv->displayedSolidCount()));
 
                         // The hardware through the wood again, measured the same way,
-                        // against footprint dumps taken after the loss.
-                        jv->clearJoints();
+                        // against footprint dumps taken after the loss. The selection
+                        // is cleared FIRST: clearSelection() runs the window's
+                        // updateActions(), whose refreshJoints() puts the document's
+                        // joint straight back - clearing the hardware before it left
+                        // the joint drawn into every footprint dump, and the ink the
+                        // dumps measure came out 0.
                         jv->clearSelection();
+                        settle(150);
+                        jv->clearJoints();
                         settle(200);
+                        check(jv->jointsShown() == 0,
+                              "joints: the hardware is down for the post-loss footprint dumps");
                         const QString postBodiesPath = outDir + QStringLiteral("/joints-lost-bodies.png");
                         check(jv->saveSnapshot(postBodiesPath), "joints: a bodies dump after the loss");
                         jv->setSolidVisible(boardA, false);
@@ -27903,6 +27997,499 @@ int main(int argc, char* argv[])
         }
 
         jw.close();
+        settle(150);
+    }
+
+    // --- placing a joint: J between two selected pieces (joinery, Task 11) ----
+    // Self-contained. Exact boxes seeded through FurnitureStore and opened, not
+    // sketched: snapped sketch clicks do not guarantee two faces coincide under
+    // an oblique camera (the joints-draw block's own finding), and every check
+    // here needs pieces that provably meet - or provably do not.
+    if (blockEnabled("placing-a-joint-between-two-pieces")) {
+        RequiredTempDir placeDir;
+        constexpr double kBoardMm = 18.0;
+        QString mainId, dowelFurnitureId, dadoFurnitureId;
+        {
+            FurnitureStore seedStore(placeDir.path());
+
+            mainId = seedStore.createFurniture(QStringLiteral("Joint placement"));
+            DocumentModel seedDoc;
+            // The SHELF goes in first, deliberately: it is the end-on piece, so
+            // wherever the viewport's own selection order follows creation, the
+            // piece reported first is the one that must NOT become the host.
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(kBoardMm, 0.0, 200.0), 400.0, 300.0,
+                                                  kBoardMm));                                  // shelf
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), kBoardMm, 300.0,
+                                                  400.0));                                     // upright
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(1000.0, 1000.0, 0.0), 40.0, 40.0,
+                                                  40.0));                                      // block, clear
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(1040.0, 1000.0, 0.0), 20.0, 20.0,
+                                                  20.0));                                      // cube on it
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 800.0, 0.0), 400.0, 40.0,
+                                                  20.0));                                      // rail
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(150.0, 700.0, 0.0), 60.0, 300.0,
+                                                  20.0));                                      // crossing rail
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(2000.0, 0.0, 0.0), kBoardMm, 300.0,
+                                                  800.0));                                     // second upright
+            // An ordinary 18 mm shelf with a notch out of one corner of its END -
+            // half its thickness deep, 100 mm along it. Its end face is an L
+            // inside the 300 x 18 rectangle, so its contact with the second
+            // upright falls short of that rectangle: the region-shortfall case,
+            // on a board that is still honestly 18 mm thick. (A shelf with an
+            // UPSTAND along its end would be an L-SECTION piece, whose own
+            // thickness Contact measures as the L's size - the limitation
+            // kEndOnDepthRatio names - and the host could not be told.)
+            const ModelingOps::BooleanResult notched = ModelingOps::applyBoolean(
+                ModelingOps::BooleanKind::Cut,
+                ModelingOps::makeBox(gp_Pnt(2000.0 + kBoardMm, 0.0, 400.0), 400.0, 300.0, kBoardMm),
+                ModelingOps::makeBox(gp_Pnt(2000.0 + kBoardMm, 0.0, 400.0), 50.0, 100.0,
+                                     kBoardMm / 2.0));
+            check(notched.ok, QStringLiteral("placement: the notched shelf builds (%1)")
+                                  .arg(QString::fromStdString(notched.error)));
+            if (notched.ok) seedDoc.addSolid(notched.shape);
+            check(!mainId.isEmpty() && seedStore.saveFurniture(mainId, seedDoc, QImage()),
+                  "placement: the pieces are seeded to disk");
+
+            // Two furnitures with the SAME bodies and one joint each, of two
+            // different kinds - the probe for a derivation cache keyed on the
+            // revision alone, which a freshly opened document restarts.
+            const auto seedOneJoint = [&](const QString& name, Joinery::Kind kind) {
+                const QString id = seedStore.createFurniture(name);
+                DocumentModel doc;
+                const TopoDS_Shape upright =
+                    ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), kBoardMm, 300.0, 400.0);
+                const TopoDS_Shape shelf =
+                    ModelingOps::makeBox(gp_Pnt(kBoardMm, 0.0, 200.0), 400.0, 300.0, kBoardMm);
+                const int a = doc.addSolid(upright);
+                const int b = doc.addSolid(shelf);
+                const Joinery::ContactResult meet = Joinery::findContact(upright, shelf);
+                const int jointId =
+                    meet.ok ? doc.addJoint(kind, a, b, Joinery::defaultsForContact(kind, meet.contact))
+                            : 0;
+                check(!id.isEmpty() && jointId > 0 && seedStore.saveFurniture(id, doc, QImage()),
+                      QStringLiteral("placement: a furniture holding one %1 is seeded")
+                          .arg(QString::fromStdString(Joinery::kindName(kind))));
+                return id;
+            };
+            dowelFurnitureId = seedOneJoint(QStringLiteral("Dowel probe"), Joinery::Kind::Dowel);
+            dadoFurnitureId = seedOneJoint(QStringLiteral("Dado probe"), Joinery::Kind::Dado);
+        }
+
+        MainWindow pw(nullptr, /*persistProgress=*/false, placeDir.path());
+        pw.setAttribute(Qt::WA_ShowWithoutActivating);
+        pw.resize(1000, 700);
+        pw.show();
+        settle(300);
+        OcctViewWidget* pv = pw.view();
+        pv->setAnimationsEnabled(false);
+        ToastHost* toasts = pw.findChild<ToastHost*>();
+        check(toasts != nullptr, "placement: the window has its toast host");
+        const auto toastText = [&]() { return toasts ? toasts->currentText() : QString(); };
+        const auto nameOf = [&](int id) { return QString::fromStdString(pw.document().nameOf(id)); };
+
+        // --- the action: where it lives, and when it is available --------------
+        QAction* jointAction = action(pw, QStringLiteral("Joint"));
+        check(jointAction != nullptr, "placement: there is a Joint action");
+        check(jointAction != nullptr && jointAction->shortcut() == QKeySequence(Qt::Key_J),
+              "placement: bound to J");
+        check(jointAction != nullptr && !jointAction->isEnabled(),
+              "placement: at the library, with no furniture open, Joint is unavailable");
+        bool inModelMenu = false;
+        for (QMenu* menu : pw.findChildren<QMenu*>()) {
+            if (menu->title().remove(QLatin1Char('&')) == QStringLiteral("Model") &&
+                menu->actions().contains(jointAction))
+                inModelMenu = true;
+        }
+        check(jointAction != nullptr && inModelMenu, "placement: it is a Model-menu entry");
+        bool hasChip = false;
+        for (ToolChip* chip : pw.findChildren<ToolChip*>()) {
+            if (jointAction != nullptr && chip->action() == jointAction) hasChip = true;
+        }
+        check(jointAction != nullptr && !hasChip,
+              "placement: with no chip on the rail - every rail tool raises the viewport's floor");
+
+        // --- the derivation cache does not survive a document swap -------------
+        {
+            check(pw.openFurniture(dowelFurnitureId), "placement: the dowel furniture opens");
+            settle(250);
+            const int dowelRevision = pw.document().revision();
+            const std::vector<Joinery::Derivation>& dowels = pw.jointDerivations();
+            check(dowels.size() == 1 && dowels.front().ok && dowels.front().items.size() == 3 &&
+                      pv->jointItemsShown() == 3,
+                  QStringLiteral("placement: its joint derives as three dowels and draws three "
+                                 "pieces of hardware (%1 drawn)")
+                      .arg(pv->jointItemsShown()));
+            check(pw.openFurniture(dadoFurnitureId), "placement: the dado furniture opens next");
+            settle(250);
+            std::printf("[info] placement: revision %d after opening the dowel furniture, %d after "
+                        "the dado furniture\n",
+                        dowelRevision, pw.document().revision());
+            check(pw.document().revision() == dowelRevision,
+                  QStringLiteral("placement: both open at the SAME revision (%1, %2) - so a cache keyed "
+                                 "on the revision alone would hand the second the first's joints")
+                      .arg(dowelRevision).arg(pw.document().revision()));
+            const std::vector<Joinery::Derivation>& dados = pw.jointDerivations();
+            check(dados.size() == 1 && dados.front().ok && dados.front().items.size() == 1 &&
+                      dados.front().items.front().spanUMm > 0.0 && pv->jointItemsShown() == 1,
+                  QStringLiteral("placement: and it derives and draws ITS joint - one channel, not "
+                                 "the previous furniture's three dowels (%1 drawn)")
+                      .arg(pv->jointItemsShown()));
+        }
+
+        check(pw.openFurniture(mainId), "placement: the seeded furniture opens");
+        settle(250);
+        pv->clearSelection();
+        pv->fitAll();
+        settle(250);
+
+        const auto& solids = pw.document().solids();
+        const auto& joints = pw.document().joints();
+        check(solids.size() == 8,
+              QStringLiteral("placement: all eight seeded pieces are open (%1)").arg(solids.size()));
+        if (solids.size() == 8) {
+            const int shelf = solids[0].id;
+            const int upright = solids[1].id;
+            const int block = solids[2].id;
+            const int cube = solids[3].id;
+            const int railA = solids[4].id;
+            const int railB = solids[5].id;
+            const int upright2 = solids[6].id;
+            const int notchedShelf = solids[7].id;
+            const auto shapeOf = [&](int id) { return pw.document().shapeOf(id); };
+
+            const Joinery::ContactResult shelfFirstContact =
+                Joinery::findContact(shapeOf(shelf), shapeOf(upright));
+            check(shelfFirstContact.ok &&
+                      shelfFirstContact.contact.endOn == Joinery::Contact::EndOn::A,
+                  "placement: (with the shelf passed first, the contact names it as the end-on "
+                  "piece A - the backwards order this block has to correct)");
+
+            check(jointAction != nullptr && !jointAction->isEnabled(),
+                  "placement: with nothing selected Joint is unavailable - a joint needs two pieces");
+            pv->setSelectedSolids({upright});
+            settle(150);
+            check(jointAction != nullptr && !jointAction->isEnabled(),
+                  "placement: and one piece is not enough");
+            pv->setSelectedSolids({shelf, upright});
+            settle(200);
+            check(pv->selectionKind() == OcctViewWidget::PickKind::Body &&
+                      pv->selectedSolidIds().size() == 2,
+                  "placement: (two whole bodies are selected)");
+            check(jointAction != nullptr && jointAction->isEnabled(),
+                  "placement: two whole pieces make it available");
+
+            // --- J: the first kind that fits, hosted by geometry ----------------
+            const std::vector<int> reportedOrder = pv->selectedSolidIds();
+            std::printf("[info] placement: the viewport reports the selection as [%d, %d] "
+                        "(shelf %d, upright %d)\n",
+                        reportedOrder.size() > 0 ? reportedOrder[0] : -1,
+                        reportedOrder.size() > 1 ? reportedOrder[1] : -1, shelf, upright);
+            const std::size_t before = joints.size();
+            trigger(pw, QStringLiteral("Joint"));
+            settle(300);
+            check(joints.size() == before + 1,
+                  QStringLiteral("placement: J creates exactly one joint (%1 -> %2)")
+                      .arg(before).arg(joints.size()));
+            if (joints.size() == before + 1) {
+                const DocumentModel::Joint placed = joints.back();
+                check(placed.kind == Joinery::Kind::Dowel,
+                      QStringLiteral("placement: J placed the FIRST kind that fits a shelf against a "
+                                     "panel - a dowel (%1)")
+                          .arg(QString::fromStdString(Joinery::kindName(placed.kind))));
+                check(placed.bodyA == upright && placed.bodyB == shelf,
+                      QStringLiteral("placement: the panel is the host, piece A - taken from the "
+                                     "geometry, not from the pick order (bodyA %1, bodyB %2)")
+                          .arg(placed.bodyA).arg(placed.bodyB));
+                const Joinery::ContactResult hostFirst =
+                    Joinery::findContact(shapeOf(upright), shapeOf(shelf));
+                const Joinery::Parameters expected =
+                    Joinery::defaultsForContact(Joinery::Kind::Dowel, hostFirst.contact);
+                check(hostFirst.ok && placed.params.count == expected.count &&
+                          placed.params.sizeMm == expected.sizeMm &&
+                          placed.params.depthAMm == expected.depthAMm &&
+                          placed.params.depthBMm == expected.depthBMm &&
+                          placed.params.insetMm == expected.insetMm,
+                      "placement: with the defaults defaultsForContact() measures off the contact");
+                check(std::fabs(placed.params.depthAMm - 13.5) < 1.0e-9,
+                      QStringLiteral("placement: 13.5 mm deep - three quarters of the 18 mm board, "
+                                     "not the struct's untouched 15 (%1)")
+                          .arg(placed.params.depthAMm));
+                check(toastText() == QStringLiteral("Dowel added between %1 and %2")
+                                         .arg(nameOf(upright), nameOf(shelf)),
+                      QStringLiteral("placement: reported by name, host first (\"%1\")").arg(toastText()));
+            }
+            check(pv->jointsShown() == 1,
+                  QStringLiteral("placement: the joint is drawn (%1)").arg(pv->jointsShown()));
+            // Read about half a second after the trigger (the settles and the
+            // checks above), so the bound is the Note's own 4000 ms ceiling -
+            // a Failure's timer is armed at 8000 and cannot be under it yet.
+            check(toasts != nullptr && toasts->remainingMs() > 0 && toasts->remainingMs() <= 4000,
+                  QStringLiteral("placement: as a Note (%1 ms left of a Note's 4000)")
+                      .arg(toasts ? toasts->remainingMs() : -1));
+            check(toasts != nullptr && toasts->undoControl() != nullptr &&
+                      toasts->undoControl()->isVisible(),
+                  "placement: offering Undo");
+
+            trigger(pw, QStringLiteral("Undo"));
+            settle(250);
+            check(joints.size() == before,
+                  "placement: ONE undo takes the joint back - a single checkpoint placed it");
+            check(pv->jointsShown() == 0, "placement: and its hardware goes with it");
+
+            // --- refusals: each one names its own reason -------------------------
+            pv->setSelectedSolids({upright, block});
+            settle(200);
+            {
+                const std::size_t beforeRefusal = joints.size();
+                trigger(pw, QStringLiteral("Joint"));
+                settle(250);
+                check(joints.size() == beforeRefusal,
+                      "placement: two pieces that don't meet create no joint");
+                check(toastText() ==
+                          QStringLiteral("These pieces can't take a joint — these two pieces don't meet"),
+                      QStringLiteral("placement: and the refusal says they don't meet (\"%1\")")
+                          .arg(toastText()));
+                check(toasts != nullptr && toasts->remainingMs() > 7500,
+                      "placement: as a Failure toast");
+            }
+
+            pv->setSelectedSolids({block, cube});
+            settle(200);
+            {
+                const Joinery::ContactResult tiny = Joinery::findContact(shapeOf(block), shapeOf(cube));
+                check(tiny.ok && Joinery::validKindsFor(tiny.contact).empty(),
+                      "placement: (the block and the cube really do meet, on 20 x 20 - too small for "
+                      "every kind)");
+                const std::size_t beforeRefusal = joints.size();
+                trigger(pw, QStringLiteral("Joint"));
+                settle(250);
+                check(joints.size() == beforeRefusal,
+                      "placement: pieces that meet but take no joint create nothing");
+                check(toastText() == QStringLiteral(
+                                         "These pieces can't take a joint — the contact is too small for a joint"),
+                      QStringLiteral("placement: and the refusal gives the contact's own reason, not "
+                                     "\"don't meet\" (\"%1\")")
+                          .arg(toastText()));
+                check(toasts != nullptr && toasts->remainingMs() > 7500,
+                      "placement: again as a Failure toast");
+            }
+
+            // --- crossing rails: the half-lap is the kind that fits -------------
+            pv->setSelectedSolids({railA, railB});
+            settle(200);
+            {
+                const std::vector<int> railOrder = pv->selectedSolidIds();
+                const std::size_t beforeLap = joints.size();
+                trigger(pw, QStringLiteral("Joint"));
+                settle(300);
+                check(joints.size() == beforeLap + 1 && joints.back().kind == Joinery::Kind::HalfLap,
+                      QStringLiteral("placement: J on crossing rails places a half-lap - the only kind "
+                                     "that fits them, and no dowel refusal (\"%1\")")
+                          .arg(toastText()));
+                if (railOrder.size() == 2) {
+                    check(toastText() ==
+                              QStringLiteral("%1 added between %2 and %3")
+                                  .arg(QString::fromStdString(
+                                           Joinery::kindName(Joinery::Kind::HalfLap)),
+                                       nameOf(railOrder[0]), nameOf(railOrder[1])),
+                          QStringLiteral("placement: named in selection order - a lap has no host "
+                                         "(\"%1\")")
+                              .arg(toastText()));
+                }
+
+                const std::size_t beforeDowel = joints.size();
+                check(!pw.addJointBetweenSelected(Joinery::Kind::Dowel),
+                      "placement: asked for a dowel specifically, crossing rails refuse it");
+                settle(200);
+                check(joints.size() == beforeDowel, "placement: and nothing is created");
+                check(toastText() ==
+                          QStringLiteral("A dowel doesn't fit here — the pieces overlap rather than meet"),
+                      QStringLiteral("placement: naming the kind and the reason (\"%1\")").arg(toastText()));
+            }
+
+            // --- the host is the panel whichever piece is picked first ----------
+            {
+                bool shelfReportedFirst = false;
+                for (const Joinery::Kind hostKind :
+                     {Joinery::Kind::MortiseTenon, Joinery::Kind::Dado}) {
+                    for (const std::vector<int>& order :
+                         {std::vector<int>{shelf, upright}, std::vector<int>{upright, shelf}}) {
+                        pv->setSelectedSolids(order);
+                        settle(150);
+                        const std::vector<int> reported = pv->selectedSolidIds();
+                        if (!reported.empty() && reported.front() == shelf) shelfReportedFirst = true;
+                        const std::size_t n = joints.size();
+                        const bool placedOk = pw.addJointBetweenSelected(hostKind);
+                        settle(150);
+                        const bool added = placedOk && joints.size() == n + 1;
+                        check(added && joints.back().kind == hostKind &&
+                                  joints.back().bodyA == upright && joints.back().bodyB == shelf,
+                              QStringLiteral("placement: a %1 with the selection reported as [%2, %3] is "
+                                             "cut into the panel - bodyA is the panel (%4)")
+                                  .arg(QString::fromStdString(Joinery::kindName(hostKind)))
+                                  .arg(reported.size() > 0 ? reported[0] : -1)
+                                  .arg(reported.size() > 1 ? reported[1] : -1)
+                                  .arg(added ? joints.back().bodyA : -1));
+                    }
+                }
+                check(shelfReportedFirst,
+                      "placement: (the viewport really reported the shelf first at least once, so the "
+                      "orders above include the backwards one)");
+
+                // A mortise capped at the host's own thickness is what
+                // defaultsForContact() gives and defaultsFor(kind, thinner) cannot.
+                const Joinery::ContactResult hostFirst =
+                    Joinery::findContact(shapeOf(upright), shapeOf(shelf));
+                const double capped =
+                    Joinery::defaultsForContact(Joinery::Kind::MortiseTenon, hostFirst.contact).depthAMm;
+                const double uncapped =
+                    Joinery::defaultsFor(Joinery::Kind::MortiseTenon, kBoardMm).depthAMm;
+                int mortises = 0;
+                int mortisesCapped = 0;
+                for (const DocumentModel::Joint& joint : joints) {
+                    if (joint.kind != Joinery::Kind::MortiseTenon) continue;
+                    ++mortises;
+                    if (std::fabs(joint.params.depthAMm - capped) < 1.0e-9 &&
+                        joint.params.depthAMm <= kBoardMm + 1.0e-9)
+                        ++mortisesCapped;
+                }
+                check(uncapped > kBoardMm + 1.0 && mortises == 2 && mortisesCapped == 2,
+                      QStringLiteral("placement: both mortises are %1 mm deep, capped at the 18 mm "
+                                     "panel, not the %2 mm defaultsFor() would punch out the back "
+                                     "(%3 of %4)")
+                          .arg(capped).arg(uncapped).arg(mortisesCapped).arg(mortises));
+            }
+
+            // --- the region-shortfall caveat reaches the user -------------------
+            // Selected notched-shelf first, so the host ordering is exercised on
+            // this contact too: the expected message names the upright first.
+            pv->setSelectedSolids({notchedShelf, upright2});
+            settle(200);
+            {
+                const Joinery::ContactResult notchContact =
+                    Joinery::findContact(shapeOf(upright2), shapeOf(notchedShelf));
+                const std::string caveat = notchContact.ok
+                                               ? Joinery::regionShortfallCaveat(notchContact.contact)
+                                               : std::string();
+                const std::vector<Joinery::Kind> notchKinds =
+                    notchContact.ok ? Joinery::validKindsFor(notchContact.contact)
+                                    : std::vector<Joinery::Kind>();
+                check(!caveat.empty() && !notchKinds.empty() &&
+                          notchContact.contact.endOn == Joinery::Contact::EndOn::B,
+                      "placement: (the notched shelf's contact is short of its rectangle, still takes "
+                      "a joint, and names the shelf as the end-on piece)");
+                const std::size_t beforeNotch = joints.size();
+                trigger(pw, QStringLiteral("Joint"));
+                settle(300);
+                check(joints.size() == beforeNotch + 1,
+                      "placement: a notched contact still takes a joint - the caveat is not a veto");
+                if (!notchKinds.empty()) {
+                    const QString expected =
+                        QStringLiteral("%1 added between %2 and %3 — %4")
+                            .arg(QString::fromStdString(Joinery::kindName(notchKinds.front())),
+                                 nameOf(upright2), nameOf(notchedShelf),
+                                 QString::fromStdString(caveat));
+                    check(toastText() == expected,
+                          QStringLiteral("placement: and the placement message carries the caveat after "
+                                         "an em dash (\"%1\")")
+                              .arg(toastText()));
+                }
+            }
+
+            // --- deriving is cached on the revision; drawing is not -------------
+            {
+                const int jointCount = static_cast<int>(joints.size());
+                pw.refreshJoints();
+                const int derives = pw.jointDeriveCount();
+                const int shownBefore = pv->jointsShown();
+                pv->setSelectedSolids({block});
+                settle(150);
+                pv->clearSelection();
+                settle(150);
+                pv->setSelectedSolids({railA, railB});
+                settle(150);
+                check(pw.jointDeriveCount() == derives,
+                      QStringLiteral("placement: three selection changes derive nothing (%1 -> %2 "
+                                     "derivations, %3 joints)")
+                          .arg(derives).arg(pw.jointDeriveCount()).arg(jointCount));
+                check(shownBefore == jointCount && pv->jointsShown() == jointCount,
+                      QStringLiteral("placement: and every joint stays drawn (%1, then %2, of %3)")
+                          .arg(shownBefore).arg(pv->jointsShown()).arg(jointCount));
+
+                const int revisionBefore = pw.document().revision();
+                gp_Trsf nudge;
+                nudge.SetTranslation(gp_Vec(0.0, 0.0, 30.0));
+                check(pw.transformBody(cube, nudge), "placement: moving the cube is a real edit");
+                settle(250);
+                check(pw.document().revision() > revisionBefore, "placement: (the document moved)");
+                check(jointCount > 0 && pw.jointDeriveCount() == derives + jointCount,
+                      QStringLiteral("placement: and it derives every joint exactly once - one pass "
+                                     "(%1 -> %2 for %3 joints)")
+                          .arg(derives).arg(pw.jointDeriveCount()).arg(jointCount));
+            }
+
+            // --- a lost GL context brings the hardware back ---------------------
+            {
+                const int shownBefore = pv->jointsShown();
+                check(shownBefore > 0, "placement: joints are drawn before the context loss");
+                QOpenGLContext* glContext = pv->context();
+                check(glContext != nullptr, "placement: the viewport holds a live GL context to lose");
+                // The loss is taken with ONE body selected - the cube transformBody()
+                // just moved, which it leaves selected - so the transform gizmo is
+                // live on it. That is deliberate and it is a pin: with a gizmo up,
+                // the viewer rebuild inside this recovery used to recurse without
+                // bound (initializeViewer() pushed the camera before marking itself
+                // initialized, cameraChanged moved the gizmo, and the gizmo asked
+                // for a viewer that was still "not initialized") until the stack
+                // overflowed. Asserted, so the pin cannot quietly stop pinning.
+                check(pv->selectionKind() == OcctViewWidget::PickKind::Body &&
+                          pv->selectedSolidIds() == std::vector<int>{cube},
+                      QStringLiteral("placement: (the loss is taken with the moved cube selected, so "
+                                     "its transform gizmo is live - %1 selected)")
+                          .arg(pv->selectedSolidIds().size()));
+                if (glContext != nullptr) {
+                    const int releasesBefore = OcctViewWidget::glReleaseCount();
+                    emit glContext->aboutToBeDestroyed();
+                    settle(300);
+                    check(OcctViewWidget::glReleaseCount() == releasesBefore + 1,
+                          "placement: the loss really released the viewer");
+                    check(pv->jointsShown() == shownBefore,
+                          QStringLiteral("placement: and every joint is drawn again (%1 of %2)")
+                              .arg(pv->jointsShown()).arg(shownBefore));
+                }
+            }
+
+            // --- the joint's own copy passes the vocabulary law -----------------
+            {
+                QStringList texts;
+                if (jointAction) texts << jointAction->text().remove(QLatin1Char('&'))
+                                       << jointAction->toolTip();
+                if (toasts != nullptr && toasts->toast() != nullptr)
+                    texts << toasts->toast()->paintedTexts();
+                const bool sawJointWord =
+                    std::any_of(texts.begin(), texts.end(), [](const QString& t) {
+                        return t.contains(QStringLiteral("joint"), Qt::CaseInsensitive);
+                    });
+                check(texts.size() > 2 && sawJointWord,
+                      QStringLiteral("placement: (the sweep has %1 strings of joint copy to read)")
+                          .arg(texts.size()));
+                QStringList offenders;
+                for (const QString& text : texts) {
+                    for (const QString& word : bannedWords()) {
+                        if (usesBannedWord(text, word))
+                            offenders << (text.left(40) + QStringLiteral(" [") + word + QStringLiteral("]"));
+                    }
+                }
+                check(offenders.isEmpty(),
+                      QStringLiteral("placement: the action, its tooltip and every message it showed "
+                                     "use no banned word (%1)")
+                          .arg(offenders.isEmpty() ? QStringLiteral("none")
+                                                   : offenders.join(QStringLiteral(", "))));
+            }
+        }
+        check(pw.findChild<QDialog*>() == nullptr, "placement: no modal appeared for any of it");
+
+        pw.close();
         settle(150);
     }
 

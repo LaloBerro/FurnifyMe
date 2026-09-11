@@ -705,16 +705,38 @@ ContactResult findContact(const TopoDS_Shape& a, const TopoDS_Shape& b,
                 const gp_Dir intoA(normal.Reversed());
                 double localA = thicknessA;
                 double localB = thicknessB;
-                double measuredDepth = 0.0;
+                // The UNCAPPED depths, kept for endOn below: the cap is exactly
+                // what throws away the difference between a board met on its
+                // face (its thickness behind the joint) and one met on its end
+                // (its length behind it), and that difference is the only
+                // signal that says which piece is the host.
+                double rawDepthA = -1.0;
+                double rawDepthB = -1.0;
                 if (materialDepthBehind(a, onRegion.Translated(gp_Vec(intoA) * probeMm),
-                                        intoA, probeMm, reachA, measuredDepth)) {
-                    localA = std::min(thicknessA, measuredDepth);
+                                        intoA, probeMm, reachA, rawDepthA)) {
+                    localA = std::min(thicknessA, rawDepthA);
+                } else {
+                    rawDepthA = -1.0;
                 }
                 if (materialDepthBehind(
                         b, onRegion.Translated(gp_Vec(normal) * bProbeMm), normal,
-                        bProbeMm - bFaceOffset, reachB, measuredDepth)) {
-                    localB = std::min(thicknessB, measuredDepth);
+                        bProbeMm - bFaceOffset, reachB, rawDepthB)) {
+                    localB = std::min(thicknessB, rawDepthB);
+                } else {
+                    rawDepthB = -1.0;
                 }
+
+                // A piece whose material runs on well past its own thickness
+                // behind the joint meets it end-on - see kEndOnDepthRatio for
+                // the number and its limits. A depth the ray could not measure
+                // says nothing, so it never makes a piece end-on. Both end-on
+                // (two rails butted end to end) is Neither: there is no host.
+                const auto runsOnPast = [](double rawDepth, double thickness) {
+                    return rawDepth > 0.0 && thickness > 0.0 &&
+                           rawDepth > kEndOnDepthRatio * thickness;
+                };
+                const bool aEndOn = runsOnPast(rawDepthA, thicknessA);
+                const bool bEndOn = runsOnPast(rawDepthB, thicknessB);
 
                 bestArea = area;
                 result.ok = true;
@@ -727,6 +749,9 @@ ContactResult findContact(const TopoDS_Shape& a, const TopoDS_Shape& b,
                 result.contact.vMax = v1 - v0;
                 result.contact.thicknessAMm = localA;
                 result.contact.thicknessBMm = localB;
+                result.contact.endOn = aEndOn == bEndOn ? Contact::EndOn::Neither
+                                       : aEndOn         ? Contact::EndOn::A
+                                                        : Contact::EndOn::B;
                 // The exact planar area of THIS candidate region - already
                 // computed above to decide whether it beats the running
                 // best, not a new measurement. Written every time a new
@@ -835,6 +860,9 @@ ContactResult findContact(const TopoDS_Shape& a, const TopoDS_Shape& b,
                         result.contact.vMax = v1 - v0;
                         result.contact.thicknessAMm = localA;
                         result.contact.thicknessBMm = localB;
+                        // A lap has no end grain - both rails carry on past
+                        // it the same way - so there is no host to name.
+                        result.contact.endOn = Contact::EndOn::Neither;
                         // Left at the sentinel, EXPLICITLY rather than by
                         // omission: the only already-computed area-shaped
                         // quantity here is the lap SOLID's own volume

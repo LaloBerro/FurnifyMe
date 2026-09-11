@@ -2536,5 +2536,137 @@ int main()
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures,
                 g_failures == 1 ? "" : "s");
+    // --- which piece meets the contact END-ON (Task 11: the host) ----------
+    // Placement cuts a mortise or a housing into piece A, and nothing but the
+    // argument order decides which piece A is - so placement asks this field
+    // which piece is end-on and makes the OTHER one A. thicknessAMm and
+    // thicknessBMm cannot answer it: both read 18 for the shelf below, which
+    // is exactly why the field exists. Every pair is asked in BOTH argument
+    // orders, because a field that ignored where the pieces are and reported a
+    // fixed side would pass half of these.
+    {
+        using EndOn = Joinery::Contact::EndOn;
+        const auto endOnName = [](EndOn e) {
+            return std::string(e == EndOn::A ? "A" : e == EndOn::B ? "B" : "Neither");
+        };
+        const auto checkEndOn = [&](const Joinery::ContactResult& r, EndOn expected,
+                                    const std::string& what) {
+            const bool ok = r.ok && r.contact.endOn == expected;
+            check(ok, what + " (got " + (r.ok ? endOnName(r.contact.endOn) : r.error) +
+                          ", wanted " + endOnName(expected) + ")");
+        };
+
+        // The shelf standing on its END against the panel's face: 600 mm of
+        // shelf behind the joint against its own 18, and 18 of panel against
+        // its own 18.
+        const TopoDS_Shape panel =
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 18.0, 300.0, 800.0).Shape();
+        const TopoDS_Shape shelf =
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 400.0), 600.0, 300.0, 18.0).Shape();
+        const Joinery::ContactResult panelFirst = Joinery::findContact(panel, shelf);
+        checkEndOn(panelFirst, EndOn::B, "panel first: the shelf (piece B) meets the panel end-on");
+        if (panelFirst.ok) {
+            checkNear(panelFirst.contact.thicknessAMm, 18.0, 1.0e-6,
+                      "while both thickness fields still read 18 - they cannot tell the "
+                      "two apart, piece A's");
+            checkNear(panelFirst.contact.thicknessBMm, 18.0, 1.0e-6, "and piece B's");
+        }
+        const Joinery::ContactResult shelfFirst = Joinery::findContact(shelf, panel);
+        checkEndOn(shelfFirst, EndOn::A,
+                   "shelf first: the shelf is still the end-on piece, now as piece A");
+
+        // Two panels face to face: 18 mm behind the joint on both sides.
+        const TopoDS_Shape backer =
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 0.0), 18.0, 300.0, 800.0).Shape();
+        const Joinery::ContactResult faceToFace = Joinery::findContact(panel, backer);
+        check(faceToFace.ok && faceToFace.contact.type == Joinery::Contact::Type::Face,
+              "two panels laid face to face have a face contact");
+        checkEndOn(faceToFace, EndOn::Neither, "and neither of them is end-on");
+        checkEndOn(Joinery::findContact(backer, panel), EndOn::Neither,
+                   "the other way round too");
+
+        // Crossing rails: an overlap has no end grain.
+        const TopoDS_Shape railA =
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 400.0, 40.0, 20.0).Shape();
+        const TopoDS_Shape railB =
+            BRepPrimAPI_MakeBox(gp_Pnt(150.0, -100.0, 0.0), 60.0, 300.0, 20.0).Shape();
+        const Joinery::ContactResult crossing = Joinery::findContact(railA, railB);
+        check(crossing.ok && crossing.contact.type == Joinery::Contact::Type::Overlap,
+              "crossing rails are an overlap");
+        checkEndOn(crossing, EndOn::Neither, "and a lap names no end-on piece");
+        checkEndOn(Joinery::findContact(railB, railA), EndOn::Neither,
+                   "whichever rail is passed first");
+
+        // The comparison is against each piece's OWN thickness, not a fixed
+        // number: a 60 mm-deep leg met on its 40 mm face has 60 behind the
+        // joint - more than the shelf's panel ever does - and is still the
+        // host, while the 22 mm rail butting it end-on has 400.
+        const TopoDS_Shape leg =
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 60.0, 40.0, 700.0).Shape();
+        const TopoDS_Shape rail =
+            BRepPrimAPI_MakeBox(gp_Pnt(60.0, 5.0, 300.0), 400.0, 22.0, 70.0).Shape();
+        checkEndOn(Joinery::findContact(leg, rail), EndOn::B,
+                   "a rail butting a 40 x 60 leg is end-on, and the leg (60 behind a 40 mm "
+                   "section, 1.5x) is not");
+        checkEndOn(Joinery::findContact(rail, leg), EndOn::A, "with the rail passed first too");
+
+        // A rabbeted host is 18 mm of wood where the shelf lands inside a 36 mm
+        // solid - LESS than its own thickness behind the joint - so it must not
+        // read as end-on either, and the board on its step still does.
+        const TopoDS_Shape slab =
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 36.0, 300.0, 800.0).Shape();
+        const TopoDS_Shape rabbetCut =
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 0.0), 18.0, 300.0, 400.0).Shape();
+        const TopoDS_Shape stepped = BRepAlgoAPI_Cut(slab, rabbetCut).Shape();
+        const TopoDS_Shape onStep =
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 100.0), 600.0, 300.0, 18.0).Shape();
+        checkEndOn(Joinery::findContact(stepped, onStep), EndOn::B,
+                   "a board on a rabbeted step is end-on, the rabbeted host is not");
+
+        // The threshold itself, pinned from both sides with the same 18 mm
+        // board: 45 mm behind the joint (2.5x its thickness) is end-on, 27 mm
+        // (1.5x) is not. A ratio moved to 1 fails the first of these; a ratio
+        // moved to 3 fails the second.
+        const TopoDS_Shape stub45 =
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 400.0), 45.0, 300.0, 18.0).Shape();
+        checkEndOn(Joinery::findContact(panel, stub45), EndOn::B,
+                   "an 18 mm board 45 mm long, met on its end, is end-on (2.5x)");
+        const TopoDS_Shape stub27 =
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 400.0), 27.0, 300.0, 18.0).Shape();
+        checkEndOn(Joinery::findContact(panel, stub27), EndOn::Neither,
+                   "one only 27 mm long (1.5x) is not - the documented short-stub limit, "
+                   "where placement keeps selection order");
+
+        // Two rails butted END TO END: both are end-on, so there is no host.
+        const TopoDS_Shape butt =
+            BRepPrimAPI_MakeBox(gp_Pnt(400.0, 0.0, 0.0), 400.0, 40.0, 20.0).Shape();
+        checkEndOn(Joinery::findContact(railA, butt), EndOn::Neither,
+                   "two rails butted end to end are both end-on, which names neither");
+
+        // The documented L-section limit (see kEndOnDepthRatio): a shelf with an
+        // upstand along its end, 500 mm long, measures its "own thickness" as
+        // the L's 300 mm, so 500 behind the joint is only 1.67x and it reads as
+        // Neither - placement then keeps selection order. Pinned so a change to
+        // how thickness is measured shows up here as a deliberate decision
+        // rather than slipping by; 500 rather than 600 so the pin is not
+        // balanced on the threshold's own equality.
+        {
+            const TopoDS_Shape lShelf =
+                BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 400.0), 500.0, 300.0, 18.0).Shape();
+            const TopoDS_Shape lUpstand =
+                BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 418.0), 500.0, 18.0, 364.0).Shape();
+            ShapeUpgrade_UnifySameDomain unifyL(BRepAlgoAPI_Fuse(lShelf, lUpstand).Shape(),
+                                               Standard_True, Standard_True, Standard_True);
+            unifyL.Build();
+            checkEndOn(Joinery::findContact(panel, unifyL.Shape()), EndOn::Neither,
+                       "an L-section shelf met on its end reads as Neither - the documented "
+                       "limit, inherited from how a piece's own thickness is measured");
+        }
+
+        // A hand-built Contact says nothing.
+        check(Joinery::Contact().endOn == EndOn::Neither,
+              "a Contact nobody measured names no end-on piece");
+    }
+
     return g_failures == 0 ? 0 : 1;
 }

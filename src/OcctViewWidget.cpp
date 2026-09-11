@@ -917,10 +917,21 @@ void OcctViewWidget::initializeViewer()
     // turntable's distance, which is what lets one distance-based camera
     // model serve both projections.
     myView->Camera()->SetFOVy(effectiveFovyDeg());
-    applyCameraState();
 
+    // Marked initialized BEFORE the first camera push, never after it. By this
+    // line the viewer, the view, the context, the layers and every sub-renderer
+    // exist, and applyCameraState() below emits cameraChanged() - whose slots
+    // are free to call back into this widget. One of them does: a transform
+    // gizmo standing on a selected body rebuilds itself on every camera change,
+    // and that rebuild reaches initializeViewer(). With the flag still false it
+    // built ANOTHER viewer, pushed the camera again and fired the signal again,
+    // until the stack overflowed (0xC00000FD) - measured, the depth climbing
+    // past 40 on the GL-context-loss recovery with one body selected, which is
+    // the one route that rebuilds a viewer while a gizmo is up. The flag is read
+    // nowhere but this function's own early return, so moving it changes
+    // nothing else.
     myInitialized = true;
-
+    applyCameraState();
 }
 
 bool OcctViewWidget::attachGlWindow()

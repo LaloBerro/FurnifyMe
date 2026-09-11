@@ -484,6 +484,52 @@ public:
     int unlinkTargetId() const;
     bool canUnlink() const { return unlinkTargetId() > 0; }
 
+    // --- joinery: placing a joint (Task 11) ---------------------------------
+    //
+    // Model -> Joint (J). Exactly two WHOLE BODIES selected, no sketch in
+    // progress, a furniture open, not in render mode - updateActions() decides
+    // it, like every other action. Finds where the two pieces meet and places
+    // the FIRST kind that fits the contact straight away (Joinery::
+    // validKindsFor()'s first entry - a dowel on a shelf against a panel, a
+    // half-lap on crossing rails), with defaults measured off the wood by
+    // Joinery::defaultsForContact(). No chooser before placement: that is the
+    // user's own pick from the kind-choice mockup round, and the kind is
+    // switched afterwards from the joint's chip. One checkpoint, one Note
+    // toast with Undo, "<Kind> added between <A> and <B>" - with the region-
+    // shortfall caveat after an em dash when the contact is not a plain
+    // rectangle. Refuses with a Failure toast that says why when the pieces do
+    // not meet or no kind fits.
+    //
+    // THE HOST IS CHOSEN BY GEOMETRY, never by click order: a mortise or a
+    // housing is cut into piece A, so the piece that does NOT meet the contact
+    // end-on (Joinery::Contact::endOn) becomes bodyA. Selection order stands
+    // only when the contact names no end-on piece.
+    bool placeJointBetweenSelected();
+    // The same placement for one SPECIFIC kind - refused, with the kind named,
+    // when that kind cannot exist on the contact.
+    bool addJointBetweenSelected(Joinery::Kind kind);
+
+    // The derivation of every joint, in DocumentModel::joints() order. THE one
+    // place this window derives a joint, so the viewport and (Task 12) the
+    // drawer cannot disagree about a number or about which joints are broken.
+    //
+    // Cached on DocumentModel::revision(), and dropped by resyncView() - the
+    // choke point every document swap goes through, where a freshly opened
+    // furniture can land on the same revision number as the one it replaced.
+    // Deriving runs findContact() per joint (booleans, classifier probes, a ray
+    // cast) and appStateChanged fires on every selection click, so re-deriving
+    // there would put a kernel pass per joint on the app's hottest gesture.
+    const std::vector<Joinery::Derivation>& jointDerivations() const;
+    // Pushes the (cached) derivations to the viewport - EVERY call, even when
+    // nothing was re-derived: the cache saves deriving, never drawing, because
+    // a viewport that forgot its hardware (render mode, a lost GL context)
+    // changes no revision. Also the ONE place that decides which joints are
+    // drawn at all.
+    void refreshJoints();
+    // How many times derive() has run since this window was built - the
+    // suite's proof that a selection change derives nothing.
+    int jointDeriveCount() const { return myJointDeriveCount; }
+
     bool lockToFace(const TopoDS_Face& face);
     // Back to the ground plane. The ground plane is the default and is never
     // itself "locked", so this is not a toggle of the same state. Refused,
@@ -1212,6 +1258,10 @@ private:
     // Exits through setRenderModeEnabled(false), the single authority that
     // un-checks the action, before the checkpoint it guards ever lands.
     void checkpointDocument();
+    // The one implementation behind placeJointBetweenSelected() (J: the first
+    // kind that fits) and addJointBetweenSelected() (`requested`, exactly), so
+    // host ordering, defaults, the checkpoint and every refusal exist once.
+    bool placeJoint(bool firstThatFits, Joinery::Kind requested);
     // The one place "the camera was moved to a named direction" is recorded.
     // Every route to that - the four View menu entries and a click on the
     // axis gizmo - goes through here, so no route can record the event
@@ -1584,6 +1634,19 @@ private:
     // independently drift. setRenderModeEnabled() is the only writer.
     bool myRenderModeOn = false;
     QAction* myRenderModeAction = nullptr;
+
+    // --- joinery (Task 11) ---------------------------------------------------
+    // Model -> Joint (J) - menu-only, no rail chip (the rail-floor rule).
+    QAction* myJointAction = nullptr;
+    // jointDerivations()'s cache - see its own comment. Mutable because
+    // deriving on demand is a read of the document, not a change to this
+    // window. The kinds are cached beside the derivations in the SAME pass, so
+    // refreshJoints() can never pair a derivation with another joint's kind.
+    // -1 matches no revision, which is how resyncView() drops the cache.
+    mutable int myJointCacheRevision = -1;
+    mutable std::vector<Joinery::Derivation> myJointDerivationCache;
+    mutable std::vector<Joinery::Kind> myJointKindCache;
+    mutable int myJointDeriveCount = 0;
     // The rail and the axis gizmo card, kept here rather than found with
     // findChild<>() on demand - both are constructed as locals inside
     // buildOverlay() otherwise, and both need to be reached from the
