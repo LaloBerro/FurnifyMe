@@ -852,11 +852,28 @@ void housingRegion(const Contact& contact, const Parameters& params,
                    std::vector<Item>& out)
 {
     const bool alongU = contact.runsAlongU();
-    const double runLen = std::max(contact.runLength() -
-                                       (params.stopped ? params.stopMm : 0.0),
-                                   0.0);
-    const double width = std::clamp(params.widthMm, 0.0, std::max(contact.uLength(),
-                                                                  contact.vLength()));
+    // stopMm is clamped into [0, runLength] BEFORE the span arithmetic, not
+    // after: a negative stop must not lengthen the channel past the joint
+    // it crosses (measured: -10 mm used to yield a 310 mm span on a 300 mm
+    // contact), and a stop at or past the whole run must floor the span at
+    // zero rather than drive it negative before std::max catches it. When
+    // `stopped` is false, stopMm is ignored outright, unclamped and
+    // unread - a blind flag with a stray value in an unrelated field must
+    // never leak into a through housing.
+    const double stop = params.stopped
+                            ? std::clamp(params.stopMm, 0.0, contact.runLength())
+                            : 0.0;
+    const double runLen = std::max(contact.runLength() - stop, 0.0);
+    // The clamp bound is the ACROSS extent - the dimension a channel's width
+    // is measured against - not the run itself: mirrors interlockRegion's
+    // own thickness clamp three lines below rather than hardcoding uLength
+    // or vLength, so it stays right whichever way the contact runs.
+    // (Previously bounded against max(uLength, vLength), which is the ALONG
+    // dimension whenever the contact is longer than it is wide - measured,
+    // a 250 mm widthMm passed through uncapped on an 18 mm wide contact.)
+    const double width = std::clamp(
+        params.widthMm, 0.0,
+        std::max(alongU ? contact.vLength() : contact.uLength(), 0.0));
     Item item;
     item.u = alongU ? contact.uMin + runLen / 2.0
                     : contact.uMin + contact.uLength() / 2.0;

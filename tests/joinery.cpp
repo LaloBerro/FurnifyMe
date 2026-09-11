@@ -890,7 +890,10 @@ int main()
         stopped.stopMm = 10.0;
         const std::vector<Joinery::Item> blind =
             Joinery::layout(Joinery::Kind::Dado, stopped, c, {});
-        checkNear(blind[0].spanUMm, 290.0, 1.0e-6, "a stopped dado runs 10 mm short");
+        check(blind.size() == 1, "a stopped dado is still a single channel");
+        if (blind.size() == 1) {
+            checkNear(blind[0].spanUMm, 290.0, 1.0e-6, "a stopped dado runs 10 mm short");
+        }
 
         // A tenon: one block, its own thickness and length.
         Joinery::Parameters mt =
@@ -921,11 +924,17 @@ int main()
     // them - the same discipline the file's earlier "at 24 mm" blocks
     // already apply to defaultsFor() itself.
     {
+        // vMax is 40 mm, not 18 - deliberately wider than the 24 mm width
+        // this block reads, so a WIDTH assertion here is not entangled with
+        // fix round 1's width clamp (which now bounds width to the ACROSS
+        // extent): this block exists to pin that params.widthMm/thicknessMm
+        // are read at all, and the clamp itself has its own dedicated block
+        // below with a deliberately small across extent.
         Joinery::Contact c;
         c.type = Joinery::Contact::Type::Face;
         c.frame = gp_Ax3(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
         c.uMin = 0.0; c.uMax = 300.0;
-        c.vMin = 0.0; c.vMax = 18.0;
+        c.vMin = 0.0; c.vMax = 40.0;
         c.thicknessAMm = 24.0;
         c.thicknessBMm = 24.0;
 
@@ -944,8 +953,8 @@ int main()
             checkNear(channel24[0].depthBMm, 0.0, 1.0e-9, "a housing has no second depth");
             checkNear(channel24[0].u, 150.0, 1.0e-6,
                       "centred on the full run when unstopped");
-            checkNear(channel24[0].v, 9.0, 1.0e-6, "and centred across the joint");
-            checkPnt(channel24[0].centre, gp_Pnt(150.0, 9.0, 0.0), 1.0e-6,
+            checkNear(channel24[0].v, 20.0, 1.0e-6, "and centred across the joint");
+            checkPnt(channel24[0].centre, gp_Pnt(150.0, 20.0, 0.0), 1.0e-6,
                      "with a world centre derived from the contact frame");
         }
 
@@ -986,7 +995,7 @@ int main()
             checkNear(tenon24[0].u, 150.0, 1.0e-6,
                       "centred on the joint - unlike a stopped housing, an "
                       "interlock is never anchored to one end");
-            checkNear(tenon24[0].v, 9.0, 1.0e-6, "and across it too");
+            checkNear(tenon24[0].v, 20.0, 1.0e-6, "and across it too");
         }
 
         // A half-lap has NO shoulder at all - it fills the whole overlap
@@ -1002,6 +1011,86 @@ int main()
             checkNear(lap24[0].spanUMm, 300.0, 1.0e-6,
                       "a half-lap fills the whole run - no shoulder, unlike a tenon's 210");
             checkNear(lap24[0].spanVMm, 8.0, 1.0e-6, "as thick as its own parameter says");
+        }
+    }
+
+    // --- housing edge cases: width and stop must stay within the joint -----
+    // Fix round 1 findings: housingRegion's width clamp bounded the wrong
+    // dimension (the ALONG run rather than the ACROSS extent a channel's
+    // width is actually measured against), and stopMm had no clamp of its
+    // own at either end, so a negative stop inflated the span past the
+    // joint and an over-large one drove it negative before std::max ever
+    // saw it.
+    {
+        Joinery::Contact c;
+        c.type = Joinery::Contact::Type::Face;
+        c.frame = gp_Ax3(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
+        c.uMin = 0.0; c.uMax = 300.0;   // the run
+        c.vMin = 0.0; c.vMax = 18.0;    // the across extent - small on purpose
+        c.thicknessAMm = 18.0;
+        c.thicknessBMm = 18.0;
+
+        // An over-wide widthMm must be capped to the ACROSS extent (18 mm),
+        // not the ALONG run (300 mm). Measured before the fix: a 250 mm
+        // width passed through uncapped, describing a dado 13.9x wider than
+        // the joint it crosses.
+        Joinery::Parameters wide = Joinery::defaultsFor(Joinery::Kind::Dado, 18.0);
+        wide.widthMm = 250.0;
+        const std::vector<Joinery::Item> overWide =
+            Joinery::layout(Joinery::Kind::Dado, wide, c, {});
+        check(overWide.size() == 1, "an over-wide dado is still one channel");
+        if (overWide.size() == 1) {
+            checkNear(overWide[0].spanVMm, 18.0, 1.0e-6,
+                      "a 250 mm width is capped to the 18 mm the joint is actually "
+                      "across, not the 300 mm run");
+            checkNear(overWide[0].sizeMm, 18.0, 1.0e-6, "and sizeMm carries the same cap");
+        }
+
+        // A NEGATIVE stop must not lengthen the channel past the joint it
+        // crosses. Measured before the fix: -10 mm yielded a 310 mm span on
+        // this 300 mm contact.
+        Joinery::Parameters negStop = Joinery::defaultsFor(Joinery::Kind::Dado, 18.0);
+        negStop.stopped = true;
+        negStop.stopMm = -10.0;
+        const std::vector<Joinery::Item> negative =
+            Joinery::layout(Joinery::Kind::Dado, negStop, c, {});
+        check(negative.size() == 1, "a negative-stop dado is still one channel");
+        if (negative.size() == 1) {
+            checkNear(negative[0].spanUMm, 300.0, 1.0e-6,
+                      "a negative stop clamps to 0 - the span stays the full "
+                      "300 mm run, never 310");
+            check(negative[0].spanUMm <= c.runLength() + 1.0e-9,
+                  "and never exceeds the contact it is cut into");
+        }
+
+        // A stop AT OR PAST the whole run must floor the span at zero, not
+        // drive it negative.
+        Joinery::Parameters overStop = Joinery::defaultsFor(Joinery::Kind::Dado, 18.0);
+        overStop.stopped = true;
+        overStop.stopMm = 400.0;
+        const std::vector<Joinery::Item> overrun =
+            Joinery::layout(Joinery::Kind::Dado, overStop, c, {});
+        check(overrun.size() == 1, "an over-stopped dado is still one channel");
+        if (overrun.size() == 1) {
+            checkNear(overrun[0].spanUMm, 0.0, 1.0e-9,
+                      "a 400 mm stop on a 300 mm run floors the span at zero, "
+                      "not -100");
+            check(overrun[0].spanUMm >= 0.0, "and it is never negative");
+        }
+
+        // stopped == false must ignore stopMm entirely, however large or
+        // strange the value left in that field - a blind flag left off must
+        // not let a stray stopMm leak into a through housing.
+        Joinery::Parameters ignored = Joinery::defaultsFor(Joinery::Kind::Dado, 18.0);
+        ignored.stopped = false;
+        ignored.stopMm = 999.0;
+        const std::vector<Joinery::Item> through =
+            Joinery::layout(Joinery::Kind::Dado, ignored, c, {});
+        check(through.size() == 1, "an unstopped dado is still one channel");
+        if (through.size() == 1) {
+            checkNear(through[0].spanUMm, 300.0, 1.0e-6,
+                      "stopped == false ignores stopMm outright - still the full "
+                      "300 mm run");
         }
     }
 
