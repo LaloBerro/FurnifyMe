@@ -4,12 +4,16 @@
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepGProp.hxx>
 #include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
+#include <Standard_Failure.hxx>
+#include <TopExp.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
+#include <TopoDS_Edge.hxx>
 #include <TopoDS_Face.hxx>
 #include <TopoDS_Vertex.hxx>
 #include <gp_Trsf.hxx>
@@ -18,6 +22,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <vector>
 
 namespace Joinery {
 namespace {
@@ -124,16 +129,85 @@ gp_Pnt Contact::at(double u, double v) const
 
 namespace {
 
-// The smallest bounding-box extent of a shape - a board's own thickness,
-// which is what every default is measured against.
+// The [min, max] extent of a shape's OWN VERTICES projected onto `axis` -
+// deliberately not the world axis-aligned bounding box, whose eight corners
+// projected onto an oblique axis measure the BOX's diagonal rather than the
+// solid's own extent along that direction (a 600x18 board spun 45 degrees
+// about Z has a roughly 437x437 world AABB, which projected onto the board's
+// own thickness normal spans about 618 mm against a true 18 mm). Exact for
+// the planar-faced boards this app produces; on a curved body it can only
+// under-measure, never over-measure.
+void projectedRange(const TopoDS_Shape& shape, const gp_Dir& axis, double& lo, double& hi)
+{
+    lo = std::numeric_limits<double>::max();
+    hi = -std::numeric_limits<double>::max();
+    for (TopExp_Explorer iv(shape, TopAbs_VERTEX); iv.More(); iv.Next()) {
+        const gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(iv.Current()));
+        const double t = p.X() * axis.X() + p.Y() * axis.Y() + p.Z() * axis.Z();
+        lo = std::min(lo, t);
+        hi = std::max(hi, t);
+    }
+    if (lo > hi) {
+        lo = 0.0;
+        hi = 0.0;
+    }
+}
+
+// Every direction the shape's OWN planar faces face, with opposite senses
+// collapsed to one entry - the only set of directions along which a solid's
+// extent means anything about the solid rather than about the world.
+std::vector<gp_Dir> planeNormalsOf(const TopoDS_Shape& shape)
+{
+    std::vector<gp_Dir> dirs;
+    for (TopExp_Explorer it(shape, TopAbs_FACE); it.More(); it.Next()) {
+        BRepAdaptor_Surface surface(TopoDS::Face(it.Current()));
+        if (surface.GetType() != GeomAbs_Plane) continue;
+        const gp_Dir n = surface.Plane().Axis().Direction();
+        bool seen = false;
+        for (const gp_Dir& d : dirs) {
+            // IsParallel is true for 0 AND 180 degrees, which is what
+            // "the same pair of faces" means here - a box has six faces
+            // and three thicknesses.
+            if (d.IsParallel(n, 1.0e-6)) {
+                seen = true;
+                break;
+            }
+        }
+        if (!seen) dirs.push_back(n);
+    }
+    return dirs;
+}
+
+// A board's own thickness - the smallest extent over the solid's OWN face
+// normals, not over the world axes. For an axis-aligned box the two are the
+// same three directions and this reproduces the bounding box's answer
+// exactly; for a board the transform gizmo has rotated they are not, and the
+// world AABB reports (18+300)/sqrt(2) = 224.86 mm for an 18 mm panel spun 45
+// degrees - which defaultsFor() would then turn into a 224.86 mm wide dado
+// and a 12 mm dowel drilled 168 mm into an 18 mm board. One Rotate gesture
+// away, so it is measured in the solid's own frame.
+//
+// A shape with no planar face at all (a sphere) has no such frame to be
+// measured in and falls back to the bounding box, which is the best answer
+// available rather than a wrong one.
 double thicknessOf(const TopoDS_Shape& shape)
 {
-    Bnd_Box box;
-    BRepBndLib::Add(shape, box);
-    if (box.IsVoid()) return 0.0;
-    Standard_Real x0, y0, z0, x1, y1, z1;
-    box.Get(x0, y0, z0, x1, y1, z1);
-    return std::min({x1 - x0, y1 - y0, z1 - z0});
+    const std::vector<gp_Dir> dirs = planeNormalsOf(shape);
+    if (dirs.empty()) {
+        Bnd_Box box;
+        BRepBndLib::Add(shape, box);
+        if (box.IsVoid()) return 0.0;
+        Standard_Real x0, y0, z0, x1, y1, z1;
+        box.Get(x0, y0, z0, x1, y1, z1);
+        return std::min({x1 - x0, y1 - y0, z1 - z0});
+    }
+    double best = std::numeric_limits<double>::max();
+    for (const gp_Dir& d : dirs) {
+        double lo = 0.0, hi = 0.0;
+        projectedRange(shape, d, lo, hi);
+        best = std::min(best, hi - lo);
+    }
+    return best;
 }
 
 double faceArea(const TopoDS_Shape& face)
@@ -143,17 +217,67 @@ double faceArea(const TopoDS_Shape& face)
     return props.Mass();
 }
 
+// The shared region's own in-plane axis: the direction of its LONGEST
+// boundary edge, with any component along `normal` removed. This is what
+// makes the contact's frame the region's own frame rather than a world-
+// derived one - gp_Ax3(point, dir) picks its X and Y arbitrarily out of
+// world space, so the extents measured against it are the region's bounding
+// box IN A WORLD ORIENTATION: a true 300 x 18 contact measures 224.86 x
+// 224.86 at 45 degrees of in-plane rotation, right at 0 and 90 degrees and
+// nowhere in between. A contact region is a rectangle in practice, its
+// longest edge runs ALONG the joint, so taking that edge as u makes
+// runsAlongU() and runLength() mean exactly what their names say at every
+// orientation.
+//
+// False when no boundary edge has a straight in-plane extent at all - a
+// circle's single edge has both its vertices at the same point. That is a
+// curved contact boundary, and the caller refuses rather than reporting a
+// zero-size contact as a success.
+bool regionAxis(const TopoDS_Shape& region, const gp_Dir& normal, gp_Dir& out)
+{
+    const gp_Vec along(normal);
+    double bestLength = 0.0;
+    gp_Vec best;
+    for (TopExp_Explorer ie(region, TopAbs_EDGE); ie.More(); ie.Next()) {
+        TopoDS_Vertex v0, v1;
+        TopExp::Vertices(TopoDS::Edge(ie.Current()), v0, v1);
+        if (v0.IsNull() || v1.IsNull()) continue;
+        gp_Vec chord(BRep_Tool::Pnt(v0), BRep_Tool::Pnt(v1));
+        chord -= along * chord.Dot(along);
+        const double length = chord.Magnitude();
+        if (length > bestLength + 1.0e-9) {
+            bestLength = length;
+            best = chord;
+        }
+    }
+    if (bestLength <= 1.0e-9) return false;
+    out = gp_Dir(best);
+    return true;
+}
+
+// The shared region's own centroid, which is where every side-or-inside
+// question about this contact gets asked. False for a region with no
+// measurable area, whose centre of mass is meaningless.
+//
+// Note the one case this point is not inside the region: a region with a
+// hole through its middle, whose area-weighted centroid lands in the hole.
+// The caller's classifier probes then both come back "outside everything",
+// which it reads as "not a separating contact here" and skips - a safe
+// rejection rather than a wrong answer.
+bool regionCentroid(const TopoDS_Shape& region, gp_Pnt& out)
+{
+    GProp_GProps props;
+    BRepGProp::SurfaceProperties(region, props);
+    if (props.Mass() <= 1.0e-9) return false;
+    out = props.CentreOfMass();
+    return true;
+}
+
 // The [uMin,uMax] x [vMin,vMax] extent of `shape`'s own vertices in
 // `frame`'s (u, v) axes. NOT the world AABB's two diagonal corners: that
 // trick only recovers the right answer when `frame`'s X/Y directions
-// happen to be world-axis-aligned, which is true whenever the contact
-// plane's normal is a world axis but false the moment the whole joint is
-// rotated (a mitred corner, a body spun by the transform gizmo) - the
-// diagonal-corner shortcut then measures the WORLD AABB's diagonal along
-// an oblique axis, not the region's own footprint. Walking the actual
-// vertices and projecting each onto frame's own axes is exact regardless
-// of how the frame sits in world space, the same fix projectedRange()
-// needed for the same underlying reason.
+// happen to be world-axis-aligned. Exact in whatever frame it is handed -
+// which is why the frame has to be the region's own (see regionAxis).
 bool planeExtent(const TopoDS_Shape& shape, const gp_Ax3& frame,
                   double& uMin, double& uMax, double& vMin, double& vMax)
 {
@@ -174,44 +298,14 @@ bool planeExtent(const TopoDS_Shape& shape, const gp_Ax3& frame,
     return uMin <= uMax && vMin <= vMax;
 }
 
-// The [min, max] extent of a shape's OWN VERTICES projected onto `axis` -
-// deliberately not the world axis-aligned bounding box. A genuine touching
-// contact is a SEPARATING plane - each solid sits on its own side of it,
-// meeting only within tolerance - and that has to be measured along the
-// contact plane's own normal, which is arbitrary in world space (a mitred
-// frame corner's contact plane sits at 45 degrees). Projecting the WORLD
-// AABB's eight corners onto an oblique axis measures the box's diagonal,
-// not the solid's true thickness along that axis: a 600x18 board rotated
-// 45 degrees about Z has a roughly 437x437 world AABB, and that AABB
-// projected onto the board's own 45-degree thickness normal spans about
-// 618 mm against a true 18 mm thickness - enough to make every real
-// touching contact look like a 600 mm straddle and refuse a genuine joint.
-// Walking the shape's actual vertices is exact for the planar-faced boards
-// this app produces, and on a curved body it can only under-measure the
-// true extent, which errs permissive: it can keep a face contact the AABB
-// would have wrongly dropped, never invent one that isn't there. Two rails
-// of equal thickness crossing at the same height still share their top and
-// bottom planes exactly (both spans equal on this same measurement) without
-// either one actually separating anything there - both solids extend the
-// same distance past that plane on the SAME side. That is an
-// interpenetrating Overlap wearing a coincidentally-coplanar face, not a
-// face contact, and this is what tells the two apart: a real contact plane
-// straddles almost none of either solid's own extent past it.
-void projectedRange(const TopoDS_Shape& shape, const gp_Dir& axis, double& lo, double& hi)
-{
-    lo = std::numeric_limits<double>::max();
-    hi = -std::numeric_limits<double>::max();
-    for (TopExp_Explorer iv(shape, TopAbs_VERTEX); iv.More(); iv.Next()) {
-        const gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(iv.Current()));
-        const double t = p.X() * axis.X() + p.Y() * axis.Y() + p.Z() * axis.Z();
-        lo = std::min(lo, t);
-        hi = std::max(hi, t);
-    }
-    if (lo > hi) {
-        lo = 0.0;
-        hi = 0.0;
-    }
-}
+// The refusal for a contact region this cannot measure: a curved boundary,
+// whose extents collapse to a point. A flat board on a round leg genuinely
+// touches along a line rather than over an area, so refusing is the correct
+// answer and not a placeholder - reporting ok == true with uLength() == 0
+// would be a refusal surfacing as a success.
+const char* const kCurvedRegion =
+    "these two pieces meet on a curved region - only a straight-edged contact "
+    "can be measured";
 
 }  // namespace
 
@@ -224,113 +318,256 @@ ContactResult findContact(const TopoDS_Shape& a, const TopoDS_Shape& b,
         return result;
     }
 
-    // The best PLANAR face pair: parallel planes within tolerance whose
-    // faces genuinely share area. Projecting b's face onto a's plane before
-    // the common is what lets a 0.05 mm gap still count - a boolean between
-    // two faces in different planes shares nothing at all.
-    //
-    // The sentinel starts NEGATIVE, deliberately not 0.0: this field also
-    // decides which candidate wins, and a 0.0 start let "is this the best
-    // so far" silently double as the degeneracy guard below (any exact-zero
-    // area already failed `area <= bestArea`), which meant the explicit
-    // `area < 1.0e-6` check was never the thing actually rejecting a
-    // degenerate candidate in this suite. A negative sentinel means the
-    // FIRST candidate, area or not, must clear `1.0e-6` on its own.
-    double bestArea = -1.0;
-    for (TopExp_Explorer ia(a, TopAbs_FACE); ia.More(); ia.Next()) {
-        const TopoDS_Face fa = TopoDS::Face(ia.Current());
-        BRepAdaptor_Surface sa(fa);
-        if (sa.GetType() != GeomAbs_Plane) continue;
-        const gp_Pln pa = sa.Plane();
+    // Hoisted out of the O(Fa x Fb) candidate loop: neither depends on the
+    // candidate pair, and each is a full vertex walk of a whole solid.
+    const double thicknessA = thicknessOf(a);
+    const double thicknessB = thicknessOf(b);
 
-        for (TopExp_Explorer ib(b, TopAbs_FACE); ib.More(); ib.Next()) {
-            const TopoDS_Face fb = TopoDS::Face(ib.Current());
-            BRepAdaptor_Surface sb(fb);
-            if (sb.GetType() != GeomAbs_Plane) continue;
-            const gp_Pln pb = sb.Plane();
+    // How far off the shared region the side-or-inside probes are placed.
+    // Big enough to reach across `toleranceMm` of modelling slop - and past
+    // an interpenetration of the same order, which is exactly the "two boards
+    // can touch AND intersect slightly" case - and small enough to stay well
+    // inside an 18 mm board.
+    const double probeMm = std::max(2.0 * toleranceMm, 1.0e-3);
 
-            // Parallel, either way round - a contact has no preferred side.
-            if (std::fabs(std::fabs(pa.Axis().Direction().Dot(pb.Axis().Direction())) -
-                          1.0) > 1.0e-6)
-                continue;
-            const double gap = pa.Distance(pb.Location());
-            if (gap > toleranceMm) continue;
+    // Set when a candidate is a genuine, separating contact whose region
+    // cannot be measured (a curved boundary). Reported in place of the
+    // generic refusal, so the message says WHY rather than claiming the
+    // pieces do not meet when they demonstrably do.
+    std::string unmeasurable;
 
-            // Reject a coplanar pair that does not actually separate the
-            // two solids - see projectedRange()'s comment. Two boards that
-            // merely touch project to adjoining (or, within tolerance,
-            // barely overlapping) ranges along the plane's own normal;
-            // two solids that share this plane while both extending past
-            // it on the same side are interpenetrating, not touching.
-            double loA, hiA, loB, hiB;
-            projectedRange(a, pa.Axis().Direction(), loA, hiA);
-            projectedRange(b, pa.Axis().Direction(), loB, hiB);
-            const double straddle = std::min(hiA, hiB) - std::max(loA, loB);
-            if (straddle > toleranceMm) continue;
+    try {
+        // Built once and re-Performed: the classifier's setup walks the whole
+        // solid, and it is asked one question per candidate pair.
+        BRepClass3d_SolidClassifier insideA(a);
+        BRepClass3d_SolidClassifier insideB(b);
+        const auto occupies = [](BRepClass3d_SolidClassifier& classifier,
+                                 const gp_Pnt& point) {
+            classifier.Perform(point, 1.0e-6);
+            return classifier.State() == TopAbs_IN;
+        };
 
-            // Slide b's face onto a's plane, then intersect them.
-            gp_Trsf onto;
-            const gp_Vec shift(pa.Axis().Direction());
-            const double signedGap =
-                gp_Vec(pa.Location(), pb.Location()).Dot(shift);
-            onto.SetTranslation(shift * -signedGap);
-            const TopoDS_Shape moved = BRepBuilderAPI_Transform(fb, onto, Standard_True).Shape();
+        // The best PLANAR face pair: parallel planes within tolerance whose
+        // faces genuinely share area. Projecting b's face onto a's plane
+        // before the common is what lets a 0.05 mm gap still count - a
+        // boolean between two faces in different planes shares nothing.
+        //
+        // The sentinel starts NEGATIVE, deliberately not 0.0: this field also
+        // decides which candidate wins, and a 0.0 start let "is this the best
+        // so far" silently double as the degeneracy guard below (any
+        // exact-zero area already failed `area <= bestArea`). A negative
+        // sentinel means the FIRST candidate, area or not, must clear
+        // `1.0e-6` on its own.
+        double bestArea = -1.0;
+        for (TopExp_Explorer ia(a, TopAbs_FACE); ia.More(); ia.Next()) {
+            const TopoDS_Face fa = TopoDS::Face(ia.Current());
+            BRepAdaptor_Surface sa(fa);
+            if (sa.GetType() != GeomAbs_Plane) continue;
+            const gp_Pln pa = sa.Plane();
 
-            BRepAlgoAPI_Common common(fa, moved);
-            if (!common.IsDone()) continue;
-            const double area = faceArea(common.Shape());
-            if (area <= bestArea || area < 1.0e-6) continue;
+            for (TopExp_Explorer ib(b, TopAbs_FACE); ib.More(); ib.Next()) {
+                const TopoDS_Face fb = TopoDS::Face(ib.Current());
+                BRepAdaptor_Surface sb(fb);
+                if (sb.GetType() != GeomAbs_Plane) continue;
+                const gp_Pln pb = sb.Plane();
 
-            // The contact's own frame: origin at the shared region's corner,
-            // Z along a's face normal pointing toward b.
-            const gp_Dir normal =
-                signedGap >= 0.0 ? pa.Axis().Direction()
-                                 : gp_Dir(pa.Axis().Direction().Reversed());
-            gp_Ax3 frame(pa.Location(), normal);
-            double u0, u1, v0, v1;
-            if (!planeExtent(common.Shape(), frame, u0, u1, v0, v1)) continue;
+                // Parallel, either way round - a contact has no preferred
+                // side.
+                if (std::fabs(std::fabs(pa.Axis().Direction().Dot(
+                                  pb.Axis().Direction())) -
+                              1.0) > 1.0e-6)
+                    continue;
+                const double gap = pa.Distance(pb.Location());
+                if (gap > toleranceMm) continue;
 
-            bestArea = area;
-            result.ok = true;
-            result.error.clear();
-            result.contact.type = Contact::Type::Face;
-            result.contact.frame = frame;
-            result.contact.uMin = u0;
-            result.contact.uMax = u1;
-            result.contact.vMin = v0;
-            result.contact.vMax = v1;
-            result.contact.thicknessAMm = thicknessOf(a);
-            result.contact.thicknessBMm = thicknessOf(b);
+                // Slide b's face onto a's plane, then intersect them.
+                gp_Trsf onto;
+                const gp_Vec shift(pa.Axis().Direction());
+                const double signedGap =
+                    gp_Vec(pa.Location(), pb.Location()).Dot(shift);
+                onto.SetTranslation(shift * -signedGap);
+                const TopoDS_Shape moved =
+                    BRepBuilderAPI_Transform(fb, onto, Standard_True).Shape();
+
+                BRepAlgoAPI_Common common(fa, moved);
+                if (!common.IsDone()) continue;
+                const TopoDS_Shape region = common.Shape();
+                const double area = faceArea(region);
+                if (area <= bestArea || area < 1.0e-6) continue;
+
+                // Is this plane actually a separating surface, HERE? Asked
+                // with a point classification a hair either side of the
+                // shared region's own centroid, which answers "which side of
+                // this plane does each solid occupy at this contact" exactly.
+                //
+                // Two earlier criteria got this wrong in the same way, by
+                // asking a LOCAL question with a GLOBAL measurement. Comparing
+                // the two whole solids' extents along the normal is right for
+                // convex-against-convex and refuses a real joint the moment
+                // the host has a step in it - a board butting flat on a
+                // rabbet measured "these two pieces don't meet" because the
+                // step was 400 mm away from the contact. And the sign of the
+                // two PLANES' offset carries no information at all for a
+                // flush contact, where it is exactly 0.0, so the normal fell
+                // through to the plane's own geometric direction and came
+                // back the same for findContact(a, b) and findContact(b, a) -
+                // one of the two necessarily backwards against the documented
+                // "Z points from bodyA into bodyB".
+                //
+                // The precedent is ModelingOps::pullFace, which used to read
+                // TopAbs_Orientation to decide which side of a face is
+                // outward, got it wrong on mirrored bodies, and was fixed by
+                // replacing the flag reasoning with a classifier probe at a
+                // genuine on-face point. A classifier costs more than a
+                // projection; this runs once when a joint is created.
+                gp_Pnt centroid;
+                if (!regionCentroid(region, centroid)) continue;
+                const gp_Pnt ahead = centroid.Translated(shift * probeMm);
+                const gp_Pnt behind = centroid.Translated(shift * -probeMm);
+                const bool aAhead = occupies(insideA, ahead);
+                const bool aBehind = occupies(insideA, behind);
+                const bool bAhead = occupies(insideB, ahead);
+                const bool bBehind = occupies(insideB, behind);
+
+                gp_Dir normal;
+                if (aBehind && bAhead && !aAhead && !bBehind) {
+                    normal = pa.Axis().Direction();
+                } else if (aAhead && bBehind && !aBehind && !bAhead) {
+                    normal = gp_Dir(pa.Axis().Direction().Reversed());
+                } else {
+                    // The two solids are on the SAME side here (two rails of
+                    // equal thickness crossing at the same height share their
+                    // top and bottom planes exactly), or neither is - an
+                    // interpenetrating Overlap wearing a coincidentally
+                    // coplanar face, not a contact.
+                    continue;
+                }
+
+                // The frame's X comes from the REGION's own geometry, never
+                // from gp_Ax3's world-derived default pick.
+                gp_Dir xDir;
+                if (!regionAxis(region, normal, xDir)) {
+                    unmeasurable = kCurvedRegion;
+                    continue;
+                }
+                const gp_Ax3 measured(pa.Location(), normal, xDir);
+                double u0 = 0.0, u1 = 0.0, v0 = 0.0, v1 = 0.0;
+                if (!planeExtent(region, measured, u0, u1, v0, v1)) continue;
+                if (u1 - u0 <= 1.0e-6 || v1 - v0 <= 1.0e-6) {
+                    unmeasurable = kCurvedRegion;
+                    continue;
+                }
+
+                // ONE origin convention, honoured by both contact types: the
+                // region's own (uMin, vMin) corner, so uMin == vMin == 0.
+                const gp_Pnt origin(measured.Location().XYZ() +
+                                    measured.XDirection().XYZ() * u0 +
+                                    measured.YDirection().XYZ() * v0);
+
+                bestArea = area;
+                result.ok = true;
+                result.error.clear();
+                result.contact.type = Contact::Type::Face;
+                result.contact.frame = gp_Ax3(origin, normal, xDir);
+                result.contact.uMin = 0.0;
+                result.contact.uMax = u1 - u0;
+                result.contact.vMin = 0.0;
+                result.contact.vMax = v1 - v0;
+                result.contact.thicknessAMm = thicknessA;
+                result.contact.thicknessBMm = thicknessB;
+            }
         }
-    }
-    if (result.ok) return result;
+        if (result.ok) return result;
 
-    // No shared face: do the solids INTERSECT? That is the crossing-rails
-    // case, and it is what a half-lap is cut from.
-    BRepAlgoAPI_Common solids(a, b);
-    if (solids.IsDone()) {
-        GProp_GProps volProps;
-        BRepGProp::VolumeProperties(solids.Shape(), volProps);
-        if (volProps.Mass() > 1.0e-6) {
-            Bnd_Box box;
-            BRepBndLib::Add(solids.Shape(), box);
-            Standard_Real x0, y0, z0, x1, y1, z1;
-            box.Get(x0, y0, z0, x1, y1, z1);
-            gp_Ax3 frame(gp_Pnt(x0, y0, z1), gp_Dir(0.0, 0.0, 1.0));
-            result.ok = true;
-            result.contact.type = Contact::Type::Overlap;
-            result.contact.frame = frame;
-            result.contact.uMin = 0.0;
-            result.contact.uMax = x1 - x0;
-            result.contact.vMin = 0.0;
-            result.contact.vMax = y1 - y0;
-            result.contact.thicknessAMm = thicknessOf(a);
-            result.contact.thicknessBMm = thicknessOf(b);
-            return result;
+        // No shared face: do the solids INTERSECT? That is the crossing-rails
+        // case, and it is what a half-lap is cut from.
+        BRepAlgoAPI_Common solids(a, b);
+        if (solids.IsDone()) {
+            GProp_GProps volProps;
+            BRepGProp::VolumeProperties(solids.Shape(), volProps);
+            if (volProps.Mass() > 1.0e-6) {
+                const TopoDS_Shape lap = solids.Shape();
+
+                // The lap's frame comes from the LAP's own geometry. A
+                // hardcoded world +Z returns the top of the world bounding
+                // box and the rails' thickness as one extent the moment the
+                // rails are not lying flat, and a world AABB inflates a
+                // 60 x 60 footprint to 84.85 x 84.85 under in-plane rotation.
+                // The lap's THINNEST direction over its own face normals IS
+                // the lap depth, so that is the frame's Z.
+                const std::vector<gp_Dir> dirs = planeNormalsOf(lap);
+                double thinnest = std::numeric_limits<double>::max();
+                gp_Dir depth;
+                for (const gp_Dir& d : dirs) {
+                    double lo = 0.0, hi = 0.0;
+                    projectedRange(lap, d, lo, hi);
+                    if (hi - lo < thinnest) {
+                        thinnest = hi - lo;
+                        depth = d;
+                    }
+                }
+
+                gp_Dir xDir;
+                if (!dirs.empty() && regionAxis(lap, depth, xDir)) {
+                    // Z's sense: from a's own centre of mass toward b's, when
+                    // that is decisive. For a symmetric crossing it is not
+                    // (both centres sit at the same depth) and the lap's own
+                    // face normal stands, which is deterministic for a given
+                    // pair of shapes.
+                    GProp_GProps massA, massB;
+                    BRepGProp::VolumeProperties(a, massA);
+                    BRepGProp::VolumeProperties(b, massB);
+                    const gp_Vec aToB(massA.CentreOfMass(), massB.CentreOfMass());
+                    if (aToB.Dot(gp_Vec(depth)) < -1.0e-9) depth.Reverse();
+
+                    GProp_GProps lapProps;
+                    BRepGProp::VolumeProperties(lap, lapProps);
+                    const gp_Pnt seed = lapProps.CentreOfMass();
+                    const gp_Ax3 measured(seed, depth, xDir);
+                    double u0 = 0.0, u1 = 0.0, v0 = 0.0, v1 = 0.0;
+                    if (planeExtent(lap, measured, u0, u1, v0, v1) &&
+                        u1 - u0 > 1.0e-6 && v1 - v0 > 1.0e-6) {
+                        // Same origin convention as the Face branch, one
+                        // dimension richer: the lap's (uMin, vMin) corner on
+                        // its own minimum-depth face, so the lap region spans
+                        // [0, lap depth] along Z from the frame's plane.
+                        double wLo = 0.0, wHi = 0.0;
+                        projectedRange(lap, depth, wLo, wHi);
+                        const double seedW = seed.X() * depth.X() +
+                                             seed.Y() * depth.Y() +
+                                             seed.Z() * depth.Z();
+                        const gp_Pnt origin(measured.Location().XYZ() +
+                                            measured.XDirection().XYZ() * u0 +
+                                            measured.YDirection().XYZ() * v0 +
+                                            depth.XYZ() * (wLo - seedW));
+
+                        result.ok = true;
+                        result.contact.type = Contact::Type::Overlap;
+                        result.contact.frame = gp_Ax3(origin, depth, xDir);
+                        result.contact.uMin = 0.0;
+                        result.contact.uMax = u1 - u0;
+                        result.contact.vMin = 0.0;
+                        result.contact.vMax = v1 - v0;
+                        result.contact.thicknessAMm = thicknessA;
+                        result.contact.thicknessBMm = thicknessB;
+                        return result;
+                    }
+                }
+                unmeasurable = kCurvedRegion;
+            }
         }
+    } catch (const Standard_Failure& e) {
+        // OCCT booleans THROW on near-tangent geometry - the documented weak
+        // spot - and ModelingOps catches Standard_Failure at exactly this
+        // boundary for exactly this reason. A fresh result, so the refusal
+        // carries an empty contact as the contract demands.
+        ContactResult failed;
+        failed.error = std::string("contact: kernel exception - ") +
+                       (e.GetMessageString() ? e.GetMessageString() : "unknown");
+        return failed;
     }
 
-    result.error = "these two pieces don't meet";
+    result.error = unmeasurable.empty() ? "these two pieces don't meet" : unmeasurable;
     return result;
 }
 

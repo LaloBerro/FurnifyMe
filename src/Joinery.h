@@ -92,13 +92,42 @@ struct Contact {
     };
 
     Type type = Type::Face;
-    // The contact plane and its in-plane axes. `frame`'s X and Y are the
-    // (u, v) the extents below are measured in; its Z is the contact
-    // normal, pointing from bodyA into bodyB.
+
+    // The contact's own frame, and the ONE convention BOTH types honour -
+    // every position Tasks 3 onward derive is measured from this origin, so
+    // two conventions on one struct would be a trap rather than a detail:
+    //
+    //   ORIGIN is the region's own (uMin, vMin) corner. `uMin` and `vMin`
+    //   are therefore ALWAYS 0.0, `uMax`/`vMax` ARE the region's own size,
+    //   and at(0, 0) is a real corner of it.
+    //
+    //   X comes from the REGION'S OWN GEOMETRY - the direction of its
+    //   longest boundary edge - never from a world axis and never from
+    //   gp_Ax3(point, dir)'s arbitrary default pick, which measures the
+    //   region's bounding box in a WORLD orientation and reports a true
+    //   300 x 18 contact as 224.86 x 224.86 at 45 degrees of in-plane
+    //   rotation. So u runs ALONG the joint and v ACROSS it by
+    //   construction, which is what makes runsAlongU() and runLength()
+    //   mean what they say at every orientation. Y is Z x X, right-handed.
+    //
+    //   Z is the contact normal. For a Face contact it points FROM bodyA
+    //   INTO bodyB, settled by classifying a point a hair either side of the
+    //   region's centroid against each solid - not from a face's
+    //   orientation flag, which carries no such information, and not from
+    //   the two planes' signed offset, which is exactly 0.0 for a flush
+    //   contact and so answers the same for findContact(a, b) and
+    //   findContact(b, a). For an OVERLAP there is no "into" - neither piece
+    //   is on one side of a lap - so Z is the lap's own THINNEST direction
+    //   (the lap depth), oriented from a's centre of mass toward b's when
+    //   that is decisive, and the lap spans [0, lap depth] along it from the
+    //   frame's plane.
     gp_Ax3 frame;
     double uMin = 0.0, uMax = 0.0;
     double vMin = 0.0, vMax = 0.0;
-    // Each piece's own thickness at the joint, for defaultsFor().
+    // Each piece's own thickness at the joint, for defaultsFor() - the
+    // smallest extent over that solid's OWN face normals, so a board the
+    // transform gizmo has rotated still measures 18 mm rather than the
+    // 224.86 mm its world bounding box would report.
     double thicknessAMm = 0.0;
     double thicknessBMm = 0.0;
 
@@ -121,12 +150,20 @@ struct ContactResult {
 };
 
 // The largest place `a` and `b` meet. A face contact wins over an overlap
-// when both exist (two boards can touch AND intersect slightly); an
-// overlap is reported only when there is no face contact, which is the
+// when both exist (two boards can touch AND intersect slightly - the
+// separating test is asked LOCALLY, at the shared region, so slop of the
+// same order as `toleranceMm` does not suppress a real contact); an overlap
+// is reported only when there is no face contact, which is the
 // crossing-rails case a half-lap is cut from.
 //
 // `toleranceMm` is how far apart two faces may be and still count as
 // touching - a model is never perfect, and 0.1 mm of slop is not a gap.
+//
+// Refuses, with a reason, when the pieces do not meet, when a piece is
+// missing, when the kernel throws, and when they meet only on a CURVED
+// boundary whose rectangle cannot be measured - a flat board on a round leg
+// touches along a line, and ok == true with a zero-size contact would be a
+// refusal surfacing as a success.
 ContactResult findContact(const TopoDS_Shape& a, const TopoDS_Shape& b,
                           double toleranceMm = 0.1);
 
