@@ -28035,10 +28035,11 @@ int main(int argc, char* argv[])
             // half its thickness deep, 100 mm along it. Its end face is an L
             // inside the 300 x 18 rectangle, so its contact with the second
             // upright falls short of that rectangle: the region-shortfall case,
-            // on a board that is still honestly 18 mm thick. (A shelf with an
-            // UPSTAND along its end would be an L-SECTION piece, whose own
-            // thickness Contact measures as the L's size - the limitation
-            // kEndOnDepthRatio names - and the host could not be told.)
+            // on a board that is still honestly 18 mm thick. (Chosen in the first
+            // round, when the end-on rule measured depth against thickness and an
+            // L-SECTION shelf could not be told from its host. Face coverage - fix
+            // round 1 - reads an L-section correctly too, and tests/joinery.cpp
+            // pins that; the notch stays because it is the plainer fixture.)
             const ModelingOps::BooleanResult notched = ModelingOps::applyBoolean(
                 ModelingOps::BooleanKind::Cut,
                 ModelingOps::makeBox(gp_Pnt(2000.0 + kBoardMm, 0.0, 400.0), 400.0, 300.0, kBoardMm),
@@ -28047,6 +28048,15 @@ int main(int argc, char* argv[])
             check(notched.ok, QStringLiteral("placement: the notched shelf builds (%1)")
                                   .arg(QString::fromStdString(notched.error)));
             if (notched.ok) seedDoc.addSolid(notched.shape);
+            // A frame's mortise and tenon (fix round 1) - the joint the old
+            // depth-ratio end-on rule gave NO host: a 22 x 70 rail whose END meets
+            // a 22 x 70 stile's long EDGE. The RAIL goes in first, for the same
+            // reason the shelf does above: wherever the viewport's order follows
+            // creation, the piece reported first is the one that must not host.
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(3070.0, 0.0, 300.0), 400.0, 22.0,
+                                                  70.0));                                      // rail
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(3000.0, 0.0, 0.0), 70.0, 22.0,
+                                                  700.0));                                     // stile
             check(!mainId.isEmpty() && seedStore.saveFurniture(mainId, seedDoc, QImage()),
                   "placement: the pieces are seeded to disk");
 
@@ -28144,9 +28154,9 @@ int main(int argc, char* argv[])
 
         const auto& solids = pw.document().solids();
         const auto& joints = pw.document().joints();
-        check(solids.size() == 8,
-              QStringLiteral("placement: all eight seeded pieces are open (%1)").arg(solids.size()));
-        if (solids.size() == 8) {
+        check(solids.size() == 10,
+              QStringLiteral("placement: all ten seeded pieces are open (%1)").arg(solids.size()));
+        if (solids.size() == 10) {
             const int shelf = solids[0].id;
             const int upright = solids[1].id;
             const int block = solids[2].id;
@@ -28155,6 +28165,8 @@ int main(int argc, char* argv[])
             const int railB = solids[5].id;
             const int upright2 = solids[6].id;
             const int notchedShelf = solids[7].id;
+            const int frameRail = solids[8].id;
+            const int stile = solids[9].id;
             const auto shapeOf = [&](int id) { return pw.document().shapeOf(id); };
 
             const Joinery::ContactResult shelfFirstContact =
@@ -28360,6 +28372,40 @@ int main(int argc, char* argv[])
                           .arg(capped).arg(uncapped).arg(mortisesCapped).arg(mortises));
             }
 
+            // --- the frame's mortise and tenon: the stile hosts it (fix round 1) --
+            // The joint the old depth-ratio end-on rule named NO host for - the
+            // stile has its 70 mm width behind the rail's end, so both pieces read
+            // end-on - which left selection order to decide, and a rail picked
+            // first took the mortise in its own end grain. Face coverage names
+            // the rail: its end is the whole region, the stile's edge a tenth of it.
+            // Placed AFTER the capped-mortise count above, which pins the panel's two.
+            {
+                bool railReportedFirst = false;
+                for (const std::vector<int>& order :
+                     {std::vector<int>{frameRail, stile}, std::vector<int>{stile, frameRail}}) {
+                    pv->setSelectedSolids(order);
+                    settle(150);
+                    const std::vector<int> reported = pv->selectedSolidIds();
+                    if (!reported.empty() && reported.front() == frameRail) railReportedFirst = true;
+                    const std::size_t n = joints.size();
+                    const bool placedOk = pw.addJointBetweenSelected(Joinery::Kind::MortiseTenon);
+                    settle(150);
+                    const bool added = placedOk && joints.size() == n + 1;
+                    check(added && joints.back().kind == Joinery::Kind::MortiseTenon &&
+                              joints.back().bodyA == stile && joints.back().bodyB == frameRail,
+                          QStringLiteral("placement: a frame's mortise and tenon with the selection "
+                                         "reported as [%1, %2] is cut into the STILE, never the rail's "
+                                         "end grain - bodyA %3, the stile is %4")
+                              .arg(reported.size() > 0 ? reported[0] : -1)
+                              .arg(reported.size() > 1 ? reported[1] : -1)
+                              .arg(added ? joints.back().bodyA : -1)
+                              .arg(stile));
+                }
+                check(railReportedFirst,
+                      "placement: (the viewport really reported the rail first at least once, so the "
+                      "orders above include the one that used to put the mortise in the rail)");
+            }
+
             // --- the region-shortfall caveat reaches the user -------------------
             // Selected notched-shelf first, so the host ordering is exercised on
             // this contact too: the expected message names the upright first.
@@ -28394,6 +28440,33 @@ int main(int argc, char* argv[])
                                          "an em dash (\"%1\")")
                               .arg(toastText()));
                 }
+            }
+
+            // --- jointDerivations() hands out a copy, never the cache (fix round 1)
+            // The cache behind it is rebuilt IN PLACE whenever the document moves.
+            // A caller holding what it returned - a drawer, across a delete or a
+            // kind switch - must keep reading what it was given, not a vector that
+            // was destroyed, rebuilt and shortened underneath it. A reference into
+            // the cache fails this silently (the capacity survives, so it reads
+            // plausible stale data), which is why it is asserted rather than trusted.
+            {
+                const std::vector<Joinery::Derivation>& held = pw.jointDerivations();
+                const std::size_t heldCount = held.size();
+                check(heldCount > 0 && heldCount == joints.size(),
+                      QStringLiteral("placement: (a derivation list is held - %1 derivations for %2 "
+                                     "joints)")
+                          .arg(heldCount).arg(joints.size()));
+                trigger(pw, QStringLiteral("Undo"));
+                settle(250);
+                check(joints.size() + 1 == heldCount,
+                      "placement: (one undo took one joint back, and the window re-derived)");
+                check(held.size() == heldCount,
+                      QStringLiteral("placement: the list the caller still holds is its own copy - "
+                                     "%1 derivations, not the %2 the rebuilt cache now has")
+                          .arg(held.size()).arg(joints.size()));
+                trigger(pw, QStringLiteral("Redo"));
+                settle(250);
+                check(joints.size() == heldCount, "placement: (redo put the joint back)");
             }
 
             // --- deriving is cached on the revision; drawing is not -------------

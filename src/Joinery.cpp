@@ -705,38 +705,36 @@ ContactResult findContact(const TopoDS_Shape& a, const TopoDS_Shape& b,
                 const gp_Dir intoA(normal.Reversed());
                 double localA = thicknessA;
                 double localB = thicknessB;
-                // The UNCAPPED depths, kept for endOn below: the cap is exactly
-                // what throws away the difference between a board met on its
-                // face (its thickness behind the joint) and one met on its end
-                // (its length behind it), and that difference is the only
-                // signal that says which piece is the host.
-                double rawDepthA = -1.0;
-                double rawDepthB = -1.0;
+                double measuredDepth = 0.0;
                 if (materialDepthBehind(a, onRegion.Translated(gp_Vec(intoA) * probeMm),
-                                        intoA, probeMm, reachA, rawDepthA)) {
-                    localA = std::min(thicknessA, rawDepthA);
-                } else {
-                    rawDepthA = -1.0;
+                                        intoA, probeMm, reachA, measuredDepth)) {
+                    localA = std::min(thicknessA, measuredDepth);
                 }
                 if (materialDepthBehind(
                         b, onRegion.Translated(gp_Vec(normal) * bProbeMm), normal,
-                        bProbeMm - bFaceOffset, reachB, rawDepthB)) {
-                    localB = std::min(thicknessB, rawDepthB);
-                } else {
-                    rawDepthB = -1.0;
+                        bProbeMm - bFaceOffset, reachB, measuredDepth)) {
+                    localB = std::min(thicknessB, measuredDepth);
                 }
 
-                // A piece whose material runs on well past its own thickness
-                // behind the joint meets it end-on - see kEndOnDepthRatio for
-                // the number and its limits. A depth the ray could not measure
-                // says nothing, so it never makes a piece end-on. Both end-on
-                // (two rails butted end to end) is Neither: there is no host.
-                const auto runsOnPast = [](double rawDepth, double thickness) {
-                    return rawDepth > 0.0 && thickness > 0.0 &&
-                           rawDepth > kEndOnDepthRatio * thickness;
-                };
-                const bool aEndOn = runsOnPast(rawDepthA, thicknessA);
-                const bool bEndOn = runsOnPast(rawDepthB, thicknessB);
+                // Which piece meets the contact end-on, from FACE COVERAGE: how
+                // much of each piece's own contacting face the region covers. A
+                // rail's end face IS the region; a stile's edge or a panel's face
+                // is far larger than it. See kEndOnCoverageRatio for the rule,
+                // why it is relative, and its one named limit. Everything it
+                // reads is already here - the winning pair's own two faces and
+                // the region's real area - so this is a ratio, not a measurement.
+                // Clamped to 1: the region can exceed a face by the boolean's
+                // own tolerance, never by a real amount.
+                const double faceAreaA = faceArea(fa);
+                const double faceAreaB = faceArea(fb);
+                const double coverageA =
+                    faceAreaA > 1.0e-12 ? std::min(1.0, area / faceAreaA) : 0.0;
+                const double coverageB =
+                    faceAreaB > 1.0e-12 ? std::min(1.0, area / faceAreaB) : 0.0;
+                const bool aEndOn = coverageA > kEndOnMinCoverage &&
+                                    coverageA > kEndOnCoverageRatio * coverageB;
+                const bool bEndOn = coverageB > kEndOnMinCoverage &&
+                                    coverageB > kEndOnCoverageRatio * coverageA;
 
                 bestArea = area;
                 result.ok = true;
@@ -752,6 +750,8 @@ ContactResult findContact(const TopoDS_Shape& a, const TopoDS_Shape& b,
                 result.contact.endOn = aEndOn == bEndOn ? Contact::EndOn::Neither
                                        : aEndOn         ? Contact::EndOn::A
                                                         : Contact::EndOn::B;
+                result.contact.coverageA = coverageA;
+                result.contact.coverageB = coverageB;
                 // The exact planar area of THIS candidate region - already
                 // computed above to decide whether it beats the running
                 // best, not a new measurement. Written every time a new

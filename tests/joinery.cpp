@@ -2534,31 +2534,50 @@ int main()
                   spun.readout.referenceEdgeA + ")");
     }
 
-    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures,
-                g_failures == 1 ? "" : "s");
     // --- which piece meets the contact END-ON (Task 11: the host) ----------
     // Placement cuts a mortise or a housing into piece A, and nothing but the
     // argument order decides which piece A is - so placement asks this field
     // which piece is end-on and makes the OTHER one A. thicknessAMm and
-    // thicknessBMm cannot answer it: both read 18 for the shelf below, which
-    // is exactly why the field exists. Every pair is asked in BOTH argument
-    // orders, because a field that ignored where the pieces are and reported a
-    // fixed side would pass half of these.
+    // thicknessBMm cannot answer it: both read 18 for the shelf below.
+    //
+    // Fix round 1: read off FACE COVERAGE (see kEndOnCoverageRatio), replacing
+    // the depth-against-thickness rule, which gave the frame mortise and tenon
+    // and the leg-and-apron no host. Every pair is asked in BOTH argument orders,
+    // and each check prints both pieces' coverage, because a field that ignored
+    // where the pieces are and reported a fixed side would pass half of these.
     {
         using EndOn = Joinery::Contact::EndOn;
         const auto endOnName = [](EndOn e) {
             return std::string(e == EndOn::A ? "A" : e == EndOn::B ? "B" : "Neither");
         };
+        const auto coverageText = [](const Joinery::ContactResult& r) {
+            char buffer[96];
+            std::snprintf(buffer, sizeof buffer, "coverage A %.4f, B %.4f",
+                          r.contact.coverageA, r.contact.coverageB);
+            return std::string(buffer);
+        };
         const auto checkEndOn = [&](const Joinery::ContactResult& r, EndOn expected,
                                     const std::string& what) {
             const bool ok = r.ok && r.contact.endOn == expected;
             check(ok, what + " (got " + (r.ok ? endOnName(r.contact.endOn) : r.error) +
-                          ", wanted " + endOnName(expected) + ")");
+                          ", wanted " + endOnName(expected) +
+                          (r.ok ? "; " + coverageText(r) : std::string()) + ")");
+        };
+        // One pair, both orders: `endOnFirst` is what findContact(first, second)
+        // names; the swap must name the same PIECE, so A <-> B.
+        const auto checkBothOrders = [&](const TopoDS_Shape& first, const TopoDS_Shape& second,
+                                         EndOn endOnFirst, const std::string& what) {
+            const EndOn swapped = endOnFirst == EndOn::A   ? EndOn::B
+                                  : endOnFirst == EndOn::B ? EndOn::A
+                                                           : EndOn::Neither;
+            checkEndOn(Joinery::findContact(first, second), endOnFirst, what);
+            checkEndOn(Joinery::findContact(second, first), swapped,
+                       what + " - arguments swapped");
         };
 
-        // The shelf standing on its END against the panel's face: 600 mm of
-        // shelf behind the joint against its own 18, and 18 of panel against
-        // its own 18.
+        // The shelf standing on its END against the panel's face: the shelf's
+        // 300 x 18 end is the region (coverage 1), the panel's 300 x 800 face is
+        // covered 2.25%.
         const TopoDS_Shape panel =
             BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 18.0, 300.0, 800.0).Shape();
         const TopoDS_Shape shelf =
@@ -2570,86 +2589,114 @@ int main()
                       "while both thickness fields still read 18 - they cannot tell the "
                       "two apart, piece A's");
             checkNear(panelFirst.contact.thicknessBMm, 18.0, 1.0e-6, "and piece B's");
+            checkNear(panelFirst.contact.coverageA, 5400.0 / 240000.0, 1.0e-6,
+                      "the panel's face is covered 2.25% - 300 x 18 of 300 x 800");
+            checkNear(panelFirst.contact.coverageB, 1.0, 1.0e-6,
+                      "and the shelf's end is covered whole");
         }
         const Joinery::ContactResult shelfFirst = Joinery::findContact(shelf, panel);
         checkEndOn(shelfFirst, EndOn::A,
                    "shelf first: the shelf is still the end-on piece, now as piece A");
+        if (shelfFirst.ok) {
+            checkNear(shelfFirst.contact.coverageA, 1.0, 1.0e-6,
+                      "and the coverages follow the pieces, not the argument slots - A's");
+            checkNear(shelfFirst.contact.coverageB, 5400.0 / 240000.0, 1.0e-6, "and B's");
+        }
 
-        // Two panels face to face: 18 mm behind the joint on both sides.
+        // THE CASE THE DEPTH RULE LOST: a frame's rail END into a 22 x 70 stile's
+        // long EDGE. The stile has its 70 mm width behind the joint, 3.2x its
+        // thickness, so the old rule called it end-on too and named no host.
+        // Coverage: the rail's 22 x 70 end is the region (1), the stile's
+        // 22 x 700 edge is covered 10%.
+        {
+            const TopoDS_Shape stile =
+                BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 70.0, 22.0, 700.0).Shape();
+            const TopoDS_Shape frameRail =
+                BRepPrimAPI_MakeBox(gp_Pnt(70.0, 0.0, 300.0), 400.0, 22.0, 70.0).Shape();
+            checkBothOrders(stile, frameRail, EndOn::B,
+                            "a rail's end into a 22 x 70 stile's edge: the rail is end-on, the "
+                            "stile is the host");
+            const Joinery::ContactResult frame = Joinery::findContact(stile, frameRail);
+            if (frame.ok) {
+                checkNear(frame.contact.coverageA, 0.1, 1.0e-6,
+                          "the stile's 22 x 700 edge is covered 10%");
+                checkNear(frame.contact.coverageB, 1.0, 1.0e-6, "the rail's end whole");
+            }
+        }
+
+        // AND THE OTHER: leg and apron on a wide post. A 22 x 150 apron end on a
+        // 45 x 95 post's 45 mm narrow face - the post has 95 behind a 45 section
+        // (2.1x), which the old rule also called end-on.
+        {
+            const TopoDS_Shape post =
+                BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 95.0, 45.0, 720.0).Shape();
+            const TopoDS_Shape apron =
+                BRepPrimAPI_MakeBox(gp_Pnt(95.0, 11.5, 300.0), 400.0, 22.0, 150.0).Shape();
+            checkBothOrders(post, apron, EndOn::B,
+                            "an apron's end on a 45 x 95 post's narrow face: the apron is "
+                            "end-on, the post is the host");
+            const Joinery::ContactResult legApron = Joinery::findContact(post, apron);
+            if (legApron.ok) {
+                checkNear(legApron.contact.coverageA, 3300.0 / 32400.0, 1.0e-6,
+                          "the post's 45 x 720 face is covered 10.2%");
+                checkNear(legApron.contact.coverageB, 1.0, 1.0e-6, "the apron's end whole");
+            }
+        }
+
+        // WHY RELATIVE: a 300 mm deep shelf standing on a panel only 280 deep
+        // covers 93.3% of its own end - an absolute "fully covered" rule would
+        // call it Neither - and 2.25% of the panel's face.
+        {
+            const TopoDS_Shape shallowPanel =
+                BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 18.0, 280.0, 800.0).Shape();
+            checkBothOrders(shallowPanel, shelf, EndOn::B,
+                            "a 300 mm shelf overhanging a 280 mm panel's edge is still end-on, "
+                            "the panel the host");
+            const Joinery::ContactResult overhang = Joinery::findContact(shallowPanel, shelf);
+            if (overhang.ok) {
+                checkNear(overhang.contact.coverageB, 280.0 / 300.0, 1.0e-6,
+                          "the shelf's end is covered 93.3%, not whole");
+                checkNear(overhang.contact.coverageA, 5040.0 / 224000.0, 1.0e-6,
+                          "and the panel's face 2.25%");
+            }
+        }
+
+        // Two equal faces butted: two 40 x 20 rails end to end, both ends whole.
+        const TopoDS_Shape railA =
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 400.0, 40.0, 20.0).Shape();
+        const TopoDS_Shape butt =
+            BRepPrimAPI_MakeBox(gp_Pnt(400.0, 0.0, 0.0), 400.0, 40.0, 20.0).Shape();
+        checkBothOrders(railA, butt, EndOn::Neither,
+                        "two rails butted end to end cover each other's end whole - neither");
+
+        // Two boards face to face, the same size: both faces whole.
         const TopoDS_Shape backer =
             BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 0.0), 18.0, 300.0, 800.0).Shape();
         const Joinery::ContactResult faceToFace = Joinery::findContact(panel, backer);
         check(faceToFace.ok && faceToFace.contact.type == Joinery::Contact::Type::Face,
               "two panels laid face to face have a face contact");
-        checkEndOn(faceToFace, EndOn::Neither, "and neither of them is end-on");
-        checkEndOn(Joinery::findContact(backer, panel), EndOn::Neither,
-                   "the other way round too");
+        checkBothOrders(panel, backer, EndOn::Neither,
+                        "two equal panels face to face - neither is end-on");
 
-        // Crossing rails: an overlap has no end grain.
-        const TopoDS_Shape railA =
-            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 400.0, 40.0, 20.0).Shape();
+        // Crossing rails: an overlap has no end grain, and no coverage.
         const TopoDS_Shape railB =
             BRepPrimAPI_MakeBox(gp_Pnt(150.0, -100.0, 0.0), 60.0, 300.0, 20.0).Shape();
         const Joinery::ContactResult crossing = Joinery::findContact(railA, railB);
         check(crossing.ok && crossing.contact.type == Joinery::Contact::Type::Overlap,
               "crossing rails are an overlap");
-        checkEndOn(crossing, EndOn::Neither, "and a lap names no end-on piece");
-        checkEndOn(Joinery::findContact(railB, railA), EndOn::Neither,
-                   "whichever rail is passed first");
+        checkBothOrders(railA, railB, EndOn::Neither, "a lap names no end-on piece");
+        check(crossing.ok && crossing.contact.coverageA < 0.0 && crossing.contact.coverageB < 0.0,
+              "and carries no coverage - the sentinel, not a measurement");
 
-        // The comparison is against each piece's OWN thickness, not a fixed
-        // number: a 60 mm-deep leg met on its 40 mm face has 60 behind the
-        // joint - more than the shelf's panel ever does - and is still the
-        // host, while the 22 mm rail butting it end-on has 400.
-        const TopoDS_Shape leg =
-            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 60.0, 40.0, 700.0).Shape();
-        const TopoDS_Shape rail =
-            BRepPrimAPI_MakeBox(gp_Pnt(60.0, 5.0, 300.0), 400.0, 22.0, 70.0).Shape();
-        checkEndOn(Joinery::findContact(leg, rail), EndOn::B,
-                   "a rail butting a 40 x 60 leg is end-on, and the leg (60 behind a 40 mm "
-                   "section, 1.5x) is not");
-        checkEndOn(Joinery::findContact(rail, leg), EndOn::A, "with the rail passed first too");
-
-        // A rabbeted host is 18 mm of wood where the shelf lands inside a 36 mm
-        // solid - LESS than its own thickness behind the joint - so it must not
-        // read as end-on either, and the board on its step still does.
-        const TopoDS_Shape slab =
-            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 36.0, 300.0, 800.0).Shape();
-        const TopoDS_Shape rabbetCut =
-            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 0.0), 18.0, 300.0, 400.0).Shape();
-        const TopoDS_Shape stepped = BRepAlgoAPI_Cut(slab, rabbetCut).Shape();
-        const TopoDS_Shape onStep =
-            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 100.0), 600.0, 300.0, 18.0).Shape();
-        checkEndOn(Joinery::findContact(stepped, onStep), EndOn::B,
-                   "a board on a rabbeted step is end-on, the rabbeted host is not");
-
-        // The threshold itself, pinned from both sides with the same 18 mm
-        // board: 45 mm behind the joint (2.5x its thickness) is end-on, 27 mm
-        // (1.5x) is not. A ratio moved to 1 fails the first of these; a ratio
-        // moved to 3 fails the second.
-        const TopoDS_Shape stub45 =
-            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 400.0), 45.0, 300.0, 18.0).Shape();
-        checkEndOn(Joinery::findContact(panel, stub45), EndOn::B,
-                   "an 18 mm board 45 mm long, met on its end, is end-on (2.5x)");
+        // CHANGED in fix round 1 - these two used to pin Neither as documented
+        // limits of the depth rule. Coverage reads them correctly.
+        //
+        // A very short stub, 27 mm long: its whole end is still the region.
         const TopoDS_Shape stub27 =
             BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 400.0), 27.0, 300.0, 18.0).Shape();
-        checkEndOn(Joinery::findContact(panel, stub27), EndOn::Neither,
-                   "one only 27 mm long (1.5x) is not - the documented short-stub limit, "
-                   "where placement keeps selection order");
-
-        // Two rails butted END TO END: both are end-on, so there is no host.
-        const TopoDS_Shape butt =
-            BRepPrimAPI_MakeBox(gp_Pnt(400.0, 0.0, 0.0), 400.0, 40.0, 20.0).Shape();
-        checkEndOn(Joinery::findContact(railA, butt), EndOn::Neither,
-                   "two rails butted end to end are both end-on, which names neither");
-
-        // The documented L-section limit (see kEndOnDepthRatio): a shelf with an
-        // upstand along its end, 500 mm long, measures its "own thickness" as
-        // the L's 300 mm, so 500 behind the joint is only 1.67x and it reads as
-        // Neither - placement then keeps selection order. Pinned so a change to
-        // how thickness is measured shows up here as a deliberate decision
-        // rather than slipping by; 500 rather than 600 so the pin is not
-        // balanced on the threshold's own equality.
+        checkBothOrders(panel, stub27, EndOn::B,
+                        "a 27 mm stub met on its end is end-on, the panel the host");
+        // An L-section shelf met on its end: its whole L-shaped end is the region.
         {
             const TopoDS_Shape lShelf =
                 BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 400.0), 500.0, 300.0, 18.0).Shape();
@@ -2658,15 +2705,84 @@ int main()
             ShapeUpgrade_UnifySameDomain unifyL(BRepAlgoAPI_Fuse(lShelf, lUpstand).Shape(),
                                                Standard_True, Standard_True, Standard_True);
             unifyL.Build();
-            checkEndOn(Joinery::findContact(panel, unifyL.Shape()), EndOn::Neither,
-                       "an L-section shelf met on its end reads as Neither - the documented "
-                       "limit, inherited from how a piece's own thickness is measured");
+            checkBothOrders(panel, unifyL.Shape(), EndOn::B,
+                            "an L-section shelf met on its end is end-on, the panel the host");
+        }
+
+        // Still right, kept from the depth rule's block: a 40 x 60 leg met on its
+        // 40 mm face by a rail's end, and a board on a rabbeted step.
+        const TopoDS_Shape leg =
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 60.0, 40.0, 700.0).Shape();
+        const TopoDS_Shape rail =
+            BRepPrimAPI_MakeBox(gp_Pnt(60.0, 5.0, 300.0), 400.0, 22.0, 70.0).Shape();
+        checkBothOrders(leg, rail, EndOn::B, "a rail butting a 40 x 60 leg is end-on");
+        const TopoDS_Shape slab =
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 36.0, 300.0, 800.0).Shape();
+        const TopoDS_Shape rabbetCut =
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 0.0), 18.0, 300.0, 400.0).Shape();
+        const TopoDS_Shape stepped = BRepAlgoAPI_Cut(slab, rabbetCut).Shape();
+        const TopoDS_Shape onStep =
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 100.0), 600.0, 300.0, 18.0).Shape();
+        checkBothOrders(stepped, onStep, EndOn::B,
+                        "a board on a rabbeted step is end-on, the rabbeted host is not");
+
+        // THE RULE'S OWN TWO BOUNDARIES, a case either side of each, far from the
+        // line itself.
+        //
+        // The ratio (2): boards face to face, a 300-wide board on a 900-tall one.
+        // 600 tall: 1.0 against 0.667, 1.5x - Neither. 300 tall: 1.0 against
+        // 0.333, 3x - the smaller board reads end-on.
+        {
+            const TopoDS_Shape tall =
+                BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 18.0, 300.0, 900.0).Shape();
+            const TopoDS_Shape twoThirds =
+                BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 0.0), 18.0, 300.0, 600.0).Shape();
+            const TopoDS_Shape oneThird =
+                BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 0.0), 18.0, 300.0, 300.0).Shape();
+            checkBothOrders(tall, twoThirds, EndOn::Neither,
+                            "a board face to face on one 1.5x its area is below the ratio - "
+                            "neither");
+            checkBothOrders(tall, oneThird, EndOn::B,
+                            "a board face to face on one 3x its area is above it - the smaller "
+                            "board is the housed piece");
+        }
+        // The floor (0.5): a shelf's 300 mm end on a panel that catches only part
+        // of it. 120 deep: 40% of the end - Neither. 180 deep: 60% - end-on.
+        {
+            const TopoDS_Shape catches120 =
+                BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 18.0, 120.0, 800.0).Shape();
+            const TopoDS_Shape catches180 =
+                BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 18.0, 180.0, 800.0).Shape();
+            checkBothOrders(catches120, shelf, EndOn::Neither,
+                            "a shelf end only 40% supported is below the floor - neither");
+            checkBothOrders(catches180, shelf, EndOn::B,
+                            "a shelf end 60% supported is above it - end-on");
+        }
+
+        // The named limit (see kEndOnCoverageRatio), pinned so a change to it is a
+        // decision: a 6 mm back panel on an 18 x 300 side's back edge reads the SIDE
+        // as end-on, so the BACK becomes the host - though a rabbet belongs in the
+        // side. The joint's chip is where the user overrides it.
+        {
+            const TopoDS_Shape side =
+                BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 18.0, 300.0, 800.0).Shape();
+            const TopoDS_Shape back =
+                BRepPrimAPI_MakeBox(gp_Pnt(-100.0, 300.0, 0.0), 400.0, 6.0, 800.0).Shape();
+            checkBothOrders(side, back, EndOn::A,
+                            "the named limit: a back panel on a side's back edge makes the side "
+                            "end-on and the back the host");
         }
 
         // A hand-built Contact says nothing.
         check(Joinery::Contact().endOn == EndOn::Neither,
               "a Contact nobody measured names no end-on piece");
+        check(Joinery::Contact().coverageA < 0.0 && Joinery::Contact().coverageB < 0.0,
+              "and carries no coverage");
     }
 
+    // The summary goes LAST - above every check in this file - so a red check can
+    // never print under a "PASS" banner.
+    std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures,
+                g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;
 }

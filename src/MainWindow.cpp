@@ -6675,11 +6675,19 @@ bool MainWindow::placeJoint(bool firstThatFits, Joinery::Kind requested)
     return true;
 }
 
-const std::vector<Joinery::Derivation>& MainWindow::jointDerivations() const
+std::vector<Joinery::Derivation> MainWindow::jointDerivations() const
+{
+    // A copy of the cache - see the header for why a reference into it is a trap.
+    return cachedJointDerivations();
+}
+
+const std::vector<Joinery::Derivation>& MainWindow::cachedJointDerivations() const
 {
     // THE one place a joint is derived. The viewport reads this, the drawer
     // will, and a number on screen and a number in the list can therefore never
-    // disagree - a broken joint is broken in both at once.
+    // disagree - a broken joint is broken in both at once. The reference is only
+    // ever read within one call by this window's own refreshJoints(); nothing
+    // outside this class sees it.
     if (myJointCacheRevision != myDocument.revision()) {
         myJointDerivationCache.clear();
         myJointKindCache.clear();
@@ -6700,25 +6708,38 @@ const std::vector<Joinery::Derivation>& MainWindow::jointDerivations() const
 void MainWindow::refreshJoints()
 {
     if (!myView) return;
-    const std::vector<Joinery::Derivation>& derivations = jointDerivations();
+    // Read in place, never through jointDerivations(): that returns a copy,
+    // and this runs on every appStateChanged.
+    const std::vector<Joinery::Derivation>& derivations = cachedJointDerivations();
+    const std::size_t count = std::min(derivations.size(), myJointKindCache.size());
 
+    // THE DRAWING DECISION, in one place. The spec draws a joint only while
+    // the joints drawer is open or that joint is selected; the drawer is
+    // Task 12's and joint selection Task 13's, so for now every joint is drawn -
+    // and those two tasks add their terms to THIS predicate, not to a second
+    // filter somewhere else.
+    const auto drawJoint = [](std::size_t /*index*/) { return true; };
+
+    // Every call, cache warm or not: showJoints() is a compare when nothing
+    // changed, and it is the ONLY way hardware the viewport forgot comes back.
+    //
+    // When every joint is drawn - today always, and on every selection click -
+    // the cache goes straight through by reference, so the one copy on this
+    // path is the one showJoints() makes into its own drawings. Only a set the
+    // predicate genuinely filters is copied here.
+    bool drawsAll = derivations.size() == myJointKindCache.size();
+    for (std::size_t i = 0; drawsAll && i < count; ++i) drawsAll = drawJoint(i);
+    if (drawsAll) {
+        myView->showJoints(derivations, myJointKindCache);
+        return;
+    }
     std::vector<Joinery::Derivation> drawn;
     std::vector<Joinery::Kind> kinds;
-    drawn.reserve(derivations.size());
-    kinds.reserve(derivations.size());
-    for (std::size_t i = 0; i < derivations.size() && i < myJointKindCache.size(); ++i) {
-        // THE DRAWING DECISION, in one place. The spec draws a joint only while
-        // the joints drawer is open or that joint is selected; the drawer is
-        // Task 12's and joint selection Task 13's, so for now every joint is
-        // drawn - and those two tasks add their terms to THIS line, not to a
-        // second filter somewhere else.
-        const bool draw = true;
-        if (!draw) continue;
+    for (std::size_t i = 0; i < count; ++i) {
+        if (!drawJoint(i)) continue;
         drawn.push_back(derivations[i]);
         kinds.push_back(myJointKindCache[i]);
     }
-    // Every call, cache warm or not: showJoints() is a compare when nothing
-    // changed, and it is the ONLY way hardware the viewport forgot comes back.
     myView->showJoints(drawn, kinds);
 }
 

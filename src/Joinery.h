@@ -112,32 +112,57 @@ Parameters defaultsForContact(Kind kind, const Contact& contact);
 // (see the field's own comment below).
 inline constexpr double kUnmeasuredRegionAreaMm2 = -1.0;
 
-// How far a piece's material has to run on behind a contact, as a multiple of
-// that piece's own thickness, before the piece counts as meeting the contact
-// END-ON (or edge-on) - see `Contact::endOn`. Strictly greater than.
+// Which piece meets a contact END-ON (or edge-on) - `Contact::endOn` - is read
+// off FACE COVERAGE: how much of each piece's own contacting face the shared
+// region covers (`Contact::coverageA`/`coverageB`). A piece meeting a contact
+// end-on brings a face the region covers almost whole - a rail's end face IS
+// the region. The host brings a face much larger than the region - a stile's
+// long edge, a panel's face. The rule is RELATIVE:
 //
-// Why 2: a piece met on one of its broad faces has at most its own thickness
-// behind the joint (exactly 1x for a plain board, LESS for a rabbeted panel or
-// a hollow carcase, whose local wood is thinner than the solid). A piece met on
-// its end or edge has its width or length behind the joint instead, and
-// furniture stock is at least twice as wide as it is thick - an 18 mm board is
-// never narrower than 36, a 22 mm batten is 44. Between those two bands sit
-// the near-square sections a leg or a thick rail is made of: a 40 x 60 leg met
-// on its 40 mm face has 60 behind it, 1.5x, and is plainly the HOST, not an
-// end. So 2 sits above every face-met case including those, and at or below
-// every edge or end of real board stock.
+//   piece X is end-on  iff  coverage(X) > kEndOnMinCoverage
+//                      and  coverage(X) > kEndOnCoverageRatio * coverage(other)
 //
-// What it gets wrong, deliberately named, and both fall back to selection
-// order at placement:
-//   - a very SHORT stub - an 18 mm board only 30 mm long, met on its end - has
-//     1.67x behind it and reads as Neither;
-//   - a board bent into an L or a U and met on its END. "Its own thickness"
-//     is the whole solid's thinnest oriented side, and for an L-section that is
-//     the L's own size - the same limitation `Contact::thicknessAMm` documents -
-//     so a 600 mm L-section shelf 300 mm across the L measures 600 against 300
-//     and reads as Neither (measured). Such a piece would normally be modelled
-//     as two boards, which read correctly.
-inline constexpr double kEndOnDepthRatio = 2.0;
+// and the contact names Neither when no piece qualifies (with these numbers two
+// pieces cannot both qualify).
+//
+// Why RELATIVE, never an absolute "fully covered": a 300 mm deep shelf standing
+// on a 280 mm deep panel covers only 93% of its own end while covering 2% of the
+// panel's face, and it is as end-on as any shelf. A near-1.0 cut-off would call
+// it Neither.
+//
+// Why a floor of 0.5: the end-on piece's face has to be MOSTLY covered. Without
+// it, two boards laid face to face that overlap only at a corner - a 300 x 800
+// face touching a 600 x 1600 one over 100 x 100, 4.2% against 1.0% - would name
+// a host, when neither meets the other end-on at all.
+//
+// Why a ratio of 2: coverage(X) / coverage(Y) is exactly faceArea(Y) /
+// faceArea(X), so this reads "the host's contacting face is more than twice the
+// end's". Real end-on joints sit far above it - a shelf on a panel face 44x, a
+// frame rail into a 700 mm stile's edge 10x, an apron into a leg 10x - and the
+// shortest, a 50 mm rail into a 150 mm drawer-front stile, is 3x. Two equal
+// faces butted, and boards laid face to face, sit at 1x. What lies between is
+// lamination of unequal boards, where either reading is harmless: a board glued
+// face to face on a larger one takes fasteners, not a mortise.
+//
+// Both lines are ratios of AREA between two different pieces' faces, never a
+// ratio inside one piece's cross-section, so no standard stock sits on them -
+// unlike the depth-against-thickness rule this replaced (fix round 1), whose 2x
+// line fell exactly on 19 x 38 batten and which gave the frame mortise and tenon
+// no host at all: a stile has its WIDTH behind a rail's end, 3.2x its thickness,
+// so both pieces read end-on and collapsed to Neither. The one exact case left,
+// a board face-glued centred on one exactly twice its size, sits on the ratio's
+// line and may read either way; both readings are harmless there.
+//
+// One named limit. A 6 mm back panel laid on a carcase side's back EDGE reads
+// the SIDE as end-on - its edge is covered whole, the panel's broad face barely -
+// and so makes the back panel the host, though a rabbet or a groove for a back
+// belongs in the side. The spec lists "which piece is host and which is housed"
+// as a setting the user chooses, and the joint's chip carries that choice.
+//
+// An Overlap contact (crossing rails) always names Neither - a lap has no end
+// grain - and carries no coverage.
+inline constexpr double kEndOnMinCoverage = 0.5;
+inline constexpr double kEndOnCoverageRatio = 2.0;
 
 // Where two pieces meet, in the contact's OWN frame - the one coordinate
 // system every derived position is expressed in, so nothing downstream
@@ -228,21 +253,32 @@ struct Contact {
     double thicknessBMm = 0.0;
 
     // Which piece meets this contact END-ON (or edge-on): a shelf standing on
-    // its end against a panel's face is end-on, the panel is not. That decides
-    // which piece is the HOST - the one a mortise or a housing is cut into,
-    // which layout() always puts on piece A - so placement orders its two
+    // its end against a panel's face is end-on and the panel is not; so is a
+    // frame rail's end against a stile's edge, and the stile is not. That
+    // decides which piece is the HOST - the one a mortise or a housing is cut
+    // into, which layout() always puts on piece A - so placement orders its two
     // pieces by this rather than by which one the user happened to click first.
     //
     // It has to be its own field: thicknessAMm/thicknessBMm cannot answer it,
     // because the cap described above makes both read 18 mm for exactly the
-    // shelf-on-panel case this exists for. Set by findContact() from the
-    // UNCAPPED local depth behind the joint against the piece's own thickness
-    // (see kEndOnDepthRatio). Neither for two boards face to face, for two
-    // pieces that are BOTH end-on (a butt joint end to end has no host), for
-    // every Overlap contact (a lap has no end grain), and for a hand-built
-    // Contact - which reads as "no host known", never as a guess.
+    // shelf-on-panel case this exists for. Set by findContact() from FACE
+    // COVERAGE (coverageA/coverageB below; the rule, why it is relative, and
+    // its one named limit are on kEndOnCoverageRatio). Neither for two equal
+    // faces butted or laid face to face, for a region too small a part of
+    // either face, for every Overlap contact (a lap has no end grain), and for
+    // a hand-built Contact - which reads as "no host known", never as a guess.
     enum class EndOn { Neither, A, B };
     EndOn endOn = EndOn::Neither;
+
+    // How much of each piece's OWN contacting face the region covers, 0..1:
+    // the region's real area over the area of that piece's face in the winning
+    // pair. A rail's end face reads 1; the stile edge it lands on reads 0.1.
+    // What endOn is decided from, exposed so the decision can be read and
+    // pinned rather than trusted. -1 - no real coverage is negative - for an
+    // Overlap contact, which has no contacting faces, and for a hand-built
+    // Contact.
+    double coverageA = -1.0;
+    double coverageB = -1.0;
 
     // The shared region's own REAL area, measured from the actual boolean
     // intersection - not derived from `uLength()`/`vLength()`, which is the

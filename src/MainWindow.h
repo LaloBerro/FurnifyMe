@@ -519,7 +519,14 @@ public:
     // Deriving runs findContact() per joint (booleans, classifier probes, a ray
     // cast) and appStateChanged fires on every selection click, so re-deriving
     // there would put a kernel pass per joint on the app's hottest gesture.
-    const std::vector<Joinery::Derivation>& jointDerivations() const;
+    //
+    // BY VALUE, deliberately (fix round 1). The cache behind it is rebuilt IN
+    // PLACE the next time anything reaches it after the document moves, and
+    // every appStateChanged does - so a reference held across a delete or a
+    // kind switch would read destroyed-and-rebuilt, possibly shorter data, and
+    // never crash doing it. A copy cannot go stale. refreshJoints() reads the
+    // cache itself and does not pay for this copy.
+    std::vector<Joinery::Derivation> jointDerivations() const;
     // Pushes the (cached) derivations to the viewport - EVERY call, even when
     // nothing was re-derived: the cache saves deriving, never drawing, because
     // a viewport that forgot its hardware (render mode, a lost GL context)
@@ -1647,6 +1654,10 @@ private:
     mutable std::vector<Joinery::Derivation> myJointDerivationCache;
     mutable std::vector<Joinery::Kind> myJointKindCache;
     mutable int myJointDeriveCount = 0;
+    // The cache itself, filled on demand. jointDerivations() copies it out for
+    // callers; refreshJoints() reads it in place, within one call, and holds
+    // the reference no longer than that.
+    const std::vector<Joinery::Derivation>& cachedJointDerivations() const;
     // The rail and the axis gizmo card, kept here rather than found with
     // findChild<>() on demand - both are constructed as locals inside
     // buildOverlay() otherwise, and both need to be reached from the
