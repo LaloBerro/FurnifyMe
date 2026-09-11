@@ -215,6 +215,34 @@ struct ContactResult {
 ContactResult findContact(const TopoDS_Shape& a, const TopoDS_Shape& b,
                           double toleranceMm = 0.1);
 
+// Which joints a contact can actually take, and the reason when one cannot.
+
+// Empty when `kind` can exist on `contact`; otherwise the reason, in one
+// clause, ready to show beside a greyed-out choice. A joint that cannot
+// exist is never offered, so it can never be created.
+//
+// KNOWN GAP, left open rather than closed with an invented geometry
+// pipeline: `Contact` describes a BOUNDING RECTANGLE (see the long comment
+// on the struct above), and for an L-shaped, C-shaped or rounded contact
+// region, part of that rectangle is not actually in contact - a row laid
+// out across the full span can land an item where there is no wood, and
+// `at(0, 0)` itself is not guaranteed to sit on the region. This function
+// cannot catch that: it is handed the same four numbers (`uMin`/`uMax`/
+// `vMin`/`vMax`) a genuinely rectangular contact would report, and nothing
+// on `Contact` distinguishes the two cases - no area, no boundary, no flag.
+// Closing this honestly needs one more fact traveling from `findContact()`
+// into `Contact` - which already measures the region's real area for a Face
+// contact (`faceArea(region)` in the .cpp, computed and then discarded) -
+// such as a `regionAreaMm2` field this function could compare against
+// `uLength() * vLength()` and refuse or flag on a wide mismatch. That is a
+// change to `Contact` itself, ruled out of this task; it belongs to
+// whichever later task is willing to make it, and Task 11 - which shows
+// this reason to the user - is the one that most wants it.
+std::string validityOf(Kind kind, const Contact& contact);
+
+// Every kind this contact can take, in menu order.
+std::vector<Kind> validKindsFor(const Contact& contact);
+
 // One placed piece of the joint - a dowel, a screw, a whole channel, a
 // tenon. `u`/`v` are its position in the contact's own coordinates (what
 // an adjustment moves, and what the readout measures); `centre` is that

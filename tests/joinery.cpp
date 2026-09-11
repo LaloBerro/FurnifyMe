@@ -13,6 +13,7 @@
 #include <gp_Ax2.hxx>
 #include <gp_Trsf.hxx>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -747,6 +748,225 @@ int main()
             checkNear(sliver.contact.thicknessAMm, 18.0, 1.0e-6,
                       "and the panel's own 18 on the other");
         }
+    }
+
+    // --- what a given contact can actually take -----------------------
+    {
+        // A face contact: fasteners always; housings and mortises too,
+        // because an end lands on a face here.
+        Joinery::Contact face;
+        face.type = Joinery::Contact::Type::Face;
+        face.frame = gp_Ax3(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
+        face.uMin = 0.0; face.uMax = 300.0;
+        face.vMin = 0.0; face.vMax = 18.0;
+        face.thicknessAMm = 18.0;
+        face.thicknessBMm = 18.0;
+
+        check(Joinery::validityOf(Joinery::Kind::Dowel, face).empty(),
+              "a face contact takes dowels");
+        check(Joinery::validityOf(Joinery::Kind::Dado, face).empty(),
+              "and a dado");
+        check(!Joinery::validityOf(Joinery::Kind::HalfLap, face).empty(),
+              "but NOT a half-lap - the pieces are not crossing");
+
+        // An overlap: half-laps yes, dowels no.
+        Joinery::Contact cross = face;
+        cross.type = Joinery::Contact::Type::Overlap;
+        check(Joinery::validityOf(Joinery::Kind::HalfLap, cross).empty(),
+              "crossing pieces take a half-lap");
+        check(!Joinery::validityOf(Joinery::Kind::Dowel, cross).empty(),
+              "and not a row of dowels");
+
+        // A contact too small for the joint refuses with a reason.
+        Joinery::Contact tiny = face;
+        tiny.uMax = 12.0;
+        const std::string why = Joinery::validityOf(Joinery::Kind::Dowel, tiny);
+        check(!why.empty(), "a contact smaller than the joint refuses");
+        check(why.find("small") != std::string::npos ||
+                  why.find("narrow") != std::string::npos,
+              "and says it is too small (" + why + ")");
+
+        const std::vector<Joinery::Kind> offered = Joinery::validKindsFor(face);
+        check(!offered.empty(), "a real contact offers at least one kind");
+        check(std::find(offered.begin(), offered.end(), Joinery::Kind::HalfLap) ==
+                  offered.end(),
+              "and never offers one that cannot exist there");
+
+        // A refusal names WHICH refusal, not merely that one exists - so a
+        // mutation that always returns the same generic reason (or the wrong
+        // one) still turns red. Every one of the brief's four documented
+        // reasons is exercised here by exact string, not merely emptiness.
+        check(Joinery::validityOf(Joinery::Kind::HalfLap, face) ==
+                  "the pieces aren't crossing",
+              "a half-lap on a face contact names the crossing reason exactly");
+        check(Joinery::validityOf(Joinery::Kind::Dowel, cross) ==
+                  "the pieces overlap rather than meet",
+              "a dowel on a crossing names the overlap reason exactly");
+        check(Joinery::validityOf(Joinery::Kind::Dowel, tiny) ==
+                  "the contact is too small for a joint",
+              "a too-short contact names the small reason exactly, not the "
+              "narrow one");
+
+        // The three narrow-family reasons: each family has its own sentence,
+        // so a mutation that shared one string across all three (or shuffled
+        // which family got which) would still leave every "is it empty"
+        // check above green.
+        Joinery::Contact narrow = face;
+        narrow.vMax = 3.0;  // across is 3 mm - clears the 30 mm run floor, so
+                            // only the per-family narrow check can fire
+        check(Joinery::validityOf(Joinery::Kind::Dowel, narrow) ==
+                  "the contact is too narrow for fasteners",
+              "a narrow contact refuses a fastener by name");
+        check(Joinery::validityOf(Joinery::Kind::Dado, narrow) ==
+                  "the contact is too narrow to house a piece",
+              "and a housing by its own name, not the fastener one");
+        Joinery::Contact narrowCross = narrow;
+        narrowCross.type = Joinery::Contact::Type::Overlap;
+        check(Joinery::validityOf(Joinery::Kind::HalfLap, narrowCross) ==
+                  "the contact is too narrow for an interlock",
+              "and an interlock by its own name too");
+
+        // The 6 mm / 9 mm thresholds themselves, not merely which side of
+        // some unstated line 3 mm sits on: a fastener and a housing tolerate
+        // exactly 6 mm across, an interlock needs 9. Boundary-exact, so a
+        // mutation sliding either threshold by so much as a millimetre turns
+        // this red without touching the 3 mm case above at all.
+        Joinery::Contact sixAcross = face;
+        sixAcross.vMax = 6.0;
+        check(Joinery::validityOf(Joinery::Kind::Dowel, sixAcross).empty(),
+              "6 mm across is enough for a fastener - the floor is inclusive");
+        Joinery::Contact justUnderSix = face;
+        justUnderSix.vMax = 5.9;
+        check(!Joinery::validityOf(Joinery::Kind::Dowel, justUnderSix).empty(),
+              "5.9 mm is not - one tenth of a millimetre either side of the "
+              "same floor");
+        Joinery::Contact nineAcross = face;
+        nineAcross.vMax = 9.0;
+        Joinery::Contact nineAcrossCross = nineAcross;
+        nineAcrossCross.type = Joinery::Contact::Type::Overlap;
+        check(Joinery::validityOf(Joinery::Kind::HalfLap, nineAcrossCross).empty(),
+              "9 mm across is enough for an interlock - the floor is "
+              "inclusive there too");
+        Joinery::Contact justUnderNine = nineAcrossCross;
+        justUnderNine.vMax = 8.9;
+        check(!Joinery::validityOf(Joinery::Kind::HalfLap, justUnderNine).empty(),
+              "8.9 mm is not, on the interlock's own higher floor");
+
+        // The 30 mm run floor is independent of the across-extent checks: a
+        // contact can be plenty wide and still too short to run a joint
+        // along, and that has to be caught before familyOf() is even asked.
+        Joinery::Contact tooShort = face;
+        tooShort.uMax = 29.0;  // across (v) stays 18 mm - plenty wide
+        check(Joinery::validityOf(Joinery::Kind::Dowel, tooShort) ==
+                  "the contact is too small for a joint",
+              "a 29 mm run refuses regardless of how wide the contact is");
+        Joinery::Contact justEnough = face;
+        justEnough.uMax = 30.0;
+        check(Joinery::validityOf(Joinery::Kind::Dowel, justEnough).empty(),
+              "and exactly 30 mm is enough - the run floor is inclusive too");
+
+        // validKindsFor in full: every kind the brief promises a plain
+        // rectangular face contact offers, and the one it must not -
+        // guarded by size so an implementation returning the wrong COUNT
+        // (dropping one silently, or offering a duplicate) is caught before
+        // any index is read, rather than skipped over quietly. Only HalfLap
+        // is gated on crossing (the `if (kind == Kind::HalfLap)` branch);
+        // every other kind, mortise and tenon included, is judged on size
+        // alone here - matching the brief's own comment that "housings and
+        // mortises too" land on a face, because an end can land flat on one.
+        check(offered.size() == 9,
+              "a face contact offers every kind except the half-lap - all "
+              "five fasteners, all three housings, and the mortise and tenon");
+        if (offered.size() == 9) {
+            for (const Joinery::Kind k :
+                 {Joinery::Kind::Dowel, Joinery::Kind::PocketScrew, Joinery::Kind::Biscuit,
+                  Joinery::Kind::Domino, Joinery::Kind::Screw, Joinery::Kind::Dado,
+                  Joinery::Kind::Rabbet, Joinery::Kind::Groove,
+                  Joinery::Kind::MortiseTenon}) {
+                check(std::find(offered.begin(), offered.end(), k) != offered.end(),
+                      Joinery::kindName(k) + " is among the kinds a face contact offers");
+            }
+        }
+        const std::vector<Joinery::Kind> offeredCross = Joinery::validKindsFor(cross);
+        check(offeredCross.size() == 1 && offeredCross[0] == Joinery::Kind::HalfLap,
+              "a crossing offers exactly one kind - the half-lap, and nothing else "
+              "(every other kind refuses with \"overlap rather than meet\")");
+    }
+
+    // --- validity on an OBLIQUE frame: unchanged by how the furniture is
+    // rotated ------------------------------------------------------------
+    // Every task in this feature carries one of these, and it is not a
+    // formality: a Task 3 review mutated a world-axis derivation and only
+    // the oblique block went red, every axis-aligned test staying green.
+    // validityOf reads only contact.type/uLength()/vLength()/runLength(), so
+    // this tilts the FRAME while leaving those four numbers untouched - which
+    // is exactly what proves the function answers from the joint's own
+    // measurements and never from where the joint happens to point in the
+    // world. Tilts about the frame's own X (in-plane), not its Z (normal) -
+    // rotating about the normal alone leaves the region's edges lined up
+    // with whatever axes gp_Ax3 already picked and proves nothing, the exact
+    // mistake three separate Task 2 reviews caught.
+    {
+        Joinery::Contact flat;
+        flat.type = Joinery::Contact::Type::Face;
+        flat.frame = gp_Ax3(gp_Pnt(5.0, -3.0, 2.0), gp_Dir(0.0, 0.0, 1.0),
+                            gp_Dir(1.0, 0.0, 0.0));
+        flat.uMin = 0.0; flat.uMax = 300.0;
+        flat.vMin = 0.0; flat.vMax = 18.0;
+        flat.thicknessAMm = 18.0;
+        flat.thicknessBMm = 18.0;
+
+        const double tiltAngle = 37.0 * (4.0 * std::atan(1.0)) / 180.0;  // not 45/90
+        gp_Trsf tilt;
+        tilt.SetRotation(gp_Ax1(flat.frame.Location(), flat.frame.XDirection()), tiltAngle);
+        const gp_Ax3 obliqueFrame = flat.frame.Transformed(tilt);
+        check(std::fabs(flat.frame.XDirection().Dot(flat.frame.Direction())) < 1.0e-9,
+              "sanity: the validity tilt axis is in-plane, not the normal");
+        check(obliqueFrame.Direction().Dot(gp_Dir(0.0, 0.0, 1.0)) < 1.0 - 1.0e-6,
+              "and it genuinely moves the plane's own normal off world Z");
+
+        Joinery::Contact oblique = flat;
+        oblique.frame = obliqueFrame;
+
+        check(Joinery::validityOf(Joinery::Kind::Dowel, oblique).empty(),
+              "a dowel is still valid on the tilted contact");
+        check(Joinery::validityOf(Joinery::Kind::Dado, oblique).empty(),
+              "so is a dado");
+        check(!Joinery::validityOf(Joinery::Kind::HalfLap, oblique).empty(),
+              "and a half-lap is still refused - crossing has nothing to do "
+              "with which way the joint is tilted");
+        check(Joinery::validityOf(Joinery::Kind::HalfLap, oblique) ==
+                  Joinery::validityOf(Joinery::Kind::HalfLap, flat),
+              "and the refusal reads exactly the same on both frames, not "
+              "merely both non-empty");
+
+        Joinery::Contact obliqueCross = oblique;
+        obliqueCross.type = Joinery::Contact::Type::Overlap;
+        check(Joinery::validityOf(Joinery::Kind::HalfLap, obliqueCross).empty(),
+              "a tilted crossing still takes a half-lap");
+        check(!Joinery::validityOf(Joinery::Kind::Dowel, obliqueCross).empty(),
+              "and still refuses a row of dowels");
+
+        // A too-small contact on the same tilted frame refuses for the same
+        // reason as on the flat one - the size check has to survive the tilt
+        // too, not only the ordinary-size case above.
+        Joinery::Contact obliqueTiny = oblique;
+        obliqueTiny.uMax = 12.0;
+        check(Joinery::validityOf(Joinery::Kind::Dowel, obliqueTiny) ==
+                  "the contact is too small for a joint",
+              "and a too-small tilted contact still names the small reason");
+
+        // The whole offered set, not merely a handful of spot checks: a joint
+        // that is possible must not become impossible because the furniture
+        // was rotated, and this is the assertion that would catch a mutation
+        // reading contact.frame anywhere in validityOf or validKindsFor.
+        const std::vector<Joinery::Kind> offeredFlat = Joinery::validKindsFor(flat);
+        const std::vector<Joinery::Kind> offeredOblique = Joinery::validKindsFor(oblique);
+        check(offeredFlat.size() == offeredOblique.size() && !offeredFlat.empty(),
+              "the same number of kinds are offered whichever way the joint "
+              "is tilted, and it is a real, non-empty set");
+        check(offeredFlat == offeredOblique,
+              "and it is the identical set of kinds, in the identical order");
     }
 
     // --- laying fasteners out along the contact -----------------------

@@ -794,6 +794,49 @@ ContactResult findContact(const TopoDS_Shape& a, const TopoDS_Shape& b,
     return result;
 }
 
+std::string validityOf(Kind kind, const Contact& contact)
+{
+    const bool crossing = contact.type == Contact::Type::Overlap;
+    if (kind == Kind::HalfLap) {
+        if (!crossing) return "the pieces aren't crossing";
+    } else if (crossing) {
+        return "the pieces overlap rather than meet";
+    }
+
+    // Enough room for the joint at all: a run shorter than three sizes has
+    // nowhere to put a row, and a contact narrower than the joint's own
+    // thickness cannot hold it.
+    const double run = contact.runLength();
+    const double across =
+        contact.runsAlongU() ? contact.vLength() : contact.uLength();
+    if (run < 30.0) return "the contact is too small for a joint";
+    switch (familyOf(kind)) {
+        case Family::Fasteners:
+            if (across < 6.0) return "the contact is too narrow for fasteners";
+            break;
+        case Family::Housing:
+            if (across < 6.0) return "the contact is too narrow to house a piece";
+            break;
+        case Family::Interlock:
+            if (across < 9.0) return "the contact is too narrow for an interlock";
+            break;
+    }
+    return std::string();
+}
+
+std::vector<Kind> validKindsFor(const Contact& contact)
+{
+    static const Kind kAll[] = {Kind::Dowel,  Kind::PocketScrew,  Kind::Biscuit,
+                                Kind::Domino, Kind::Screw,        Kind::Dado,
+                                Kind::Rabbet, Kind::Groove,       Kind::MortiseTenon,
+                                Kind::HalfLap};
+    std::vector<Kind> offered;
+    for (const Kind kind : kAll) {
+        if (validityOf(kind, contact).empty()) offered.push_back(kind);
+    }
+    return offered;
+}
+
 namespace {
 
 // The row a family of fasteners runs along, in contact coordinates: the
