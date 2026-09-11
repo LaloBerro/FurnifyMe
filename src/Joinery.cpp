@@ -117,12 +117,68 @@ Parameters defaultsFor(Kind kind, double thinnerThicknessMm)
             break;
         }
         case Family::Interlock: {
-            p.thicknessMm = t / 3.0;
-            p.lengthMm = std::max(t * 1.5, 25.0);
-            p.depthAMm = p.lengthMm + 2.0;   // mortise a hair deeper than the tenon
+            if (kind == Kind::HalfLap) {
+                // A half-lap removes half of each piece where they cross -
+                // the spec's own default - and nothing about it is a tenon:
+                // the tenon numbers this branch used to share proposed a
+                // 29 mm deep lap in an 18 mm rail. One number can only say
+                // "half of it"; defaultsForContact() says half of EACH.
+                p.depthAMm = t / 2.0;
+                p.depthBMm = t / 2.0;
+                p.thicknessMm = t / 2.0;   // the lap depth, the field's own reading
+            } else {
+                p.thicknessMm = t / 3.0;
+                p.lengthMm = std::max(t * 1.5, 25.0);
+                p.depthAMm = p.lengthMm + 2.0;   // mortise a hair deeper than the tenon
+            }
             p.haunched = false;
             break;
         }
+    }
+    return p;
+}
+
+Parameters defaultsForContact(Kind kind, const Contact& contact)
+{
+    const double pieceA = contact.thicknessAMm;
+    const double pieceB = contact.thicknessBMm;
+    const bool measuredA = pieceA > 1.0e-6;
+    const bool measuredB = pieceB > 1.0e-6;
+    // The thinner MEASURED piece; 0 when neither was, which defaultsFor()
+    // already reads as "assume an 18 mm board".
+    double thinner = 0.0;
+    if (measuredA && measuredB) {
+        thinner = std::min(pieceA, pieceB);
+    } else if (measuredA) {
+        thinner = pieceA;
+    } else if (measuredB) {
+        thinner = pieceB;
+    }
+    Parameters p = defaultsFor(kind, thinner);
+
+    switch (familyOf(kind)) {
+        case Family::Fasteners:
+            // The thinner piece IS the rule for a fastener - a dowel a third
+            // of the wood it is driven into - so there is nothing to refine.
+            break;
+        case Family::Housing:
+            // The channel is cut in A (housingRegion() puts depthAMm there),
+            // a third of the HOST deep; it is as wide as B, the housed piece.
+            if (measuredA) p.depthAMm = pieceA / 3.0;
+            if (measuredB) p.widthMm = pieceB;
+            break;
+        case Family::Interlock:
+            if (kind == Kind::HalfLap) {
+                if (measuredA) p.depthAMm = pieceA / 2.0;
+                if (measuredB) p.depthBMm = pieceB / 2.0;
+            } else if (measuredA && p.depthAMm > pieceA) {
+                // interlockRegion() puts the mortise depth on A's side of the
+                // contact and the tenon's length on B's, so A is the host: a
+                // through mortise at most, and the tenon a hair shorter.
+                p.depthAMm = pieceA;
+                p.lengthMm = pieceA - std::min(2.0, pieceA * 0.5);
+            }
+            break;
     }
     return p;
 }
@@ -929,6 +985,7 @@ void fastenerRow(const Contact& contact, const Parameters& params,
         item.sizeMm = params.sizeMm;
         item.depthAMm = params.depthAMm;
         item.depthBMm = params.depthBMm;
+        item.angleDeg = params.angleDeg;
         out.push_back(item);
     }
 }
@@ -993,13 +1050,14 @@ void interlockRegion(Kind kind, const Contact& contact, const Parameters& params
 {
     const bool alongU = contact.runsAlongU();
     const double runLen = contact.runLength();
+    const bool lap = kind == Kind::HalfLap;
     // A tenon is inset from both ends by a shoulder; a half-lap fills its
-    // overlap outright.
-    const double shoulder = kind == Kind::HalfLap ? 0.0 : runLen * 0.15;
+    // overlap outright - along the run AND across it, since a lap removes
+    // material over the whole crossing, not over a tenon-thick strip of it.
+    const double shoulder = lap ? 0.0 : runLen * 0.15;
     const double span = std::max(runLen - 2.0 * shoulder, 0.0);
-    const double thickness =
-        std::clamp(params.thicknessMm, 0.0,
-                   std::max(alongU ? contact.vLength() : contact.uLength(), 0.0));
+    const double acrossLen = std::max(alongU ? contact.vLength() : contact.uLength(), 0.0);
+    const double thickness = lap ? acrossLen : std::clamp(params.thicknessMm, 0.0, acrossLen);
 
     Item item;
     item.u = contact.uMin + contact.uLength() / 2.0;
@@ -1008,7 +1066,9 @@ void interlockRegion(Kind kind, const Contact& contact, const Parameters& params
     item.spanVMm = alongU ? thickness : span;
     item.sizeMm = thickness;
     item.depthAMm = params.depthAMm;
-    item.depthBMm = params.lengthMm;
+    // A tenon's second depth is its length into B; a half-lap's is the half
+    // it removes from B.
+    item.depthBMm = lap ? params.depthBMm : params.lengthMm;
     out.push_back(item);
 }
 

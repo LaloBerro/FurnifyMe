@@ -112,6 +112,8 @@
 
 #include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
+#include <BRepAlgoAPI_Common.hxx>
+#include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
@@ -135,6 +137,7 @@
 #include <gp_Ax1.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
+#include <gp_Cylinder.hxx>
 #include <gp_Dir.hxx>
 #include <gp_Pln.hxx>
 #include <gp_Trsf.hxx>
@@ -27144,9 +27147,19 @@ int main(int argc, char* argv[])
             jv->fitAll();
             settle(250);
 
-            const Joinery::Derivation d = Joinery::derive(
-                Joinery::Kind::Dowel, Joinery::defaultsFor(Joinery::Kind::Dowel, kBoardMm), {},
-                jw.document().shapeOf(boardA), jw.document().shapeOf(boardB));
+            const TopoDS_Shape woodA = jw.document().shapeOf(boardA);
+            const TopoDS_Shape woodB = jw.document().shapeOf(boardB);
+            const Joinery::ContactResult boardsMeet = Joinery::findContact(woodA, woodB);
+            check(boardsMeet.ok,
+                  QStringLiteral("joints: the two boards meet (%1)")
+                      .arg(QString::fromStdString(boardsMeet.error)));
+            // Placed the way J places a joint: the defaults come from the
+            // contact itself, each piece's own thickness, not one number.
+            auto deriveOnBoards = [&](Joinery::Kind kind) {
+                return Joinery::derive(kind, Joinery::defaultsForContact(kind, boardsMeet.contact),
+                                       {}, woodA, woodB);
+            };
+            const Joinery::Derivation d = deriveOnBoards(Joinery::Kind::Dowel);
             check(d.ok, QStringLiteral("joints: the two boards meet and take a dowel joint (%1)")
                             .arg(QString::fromStdString(d.error)));
             check(!d.items.empty(),
@@ -27217,26 +27230,31 @@ int main(int argc, char* argv[])
                     int covered = 0;   // of those, inside the bodies' footprint
                     int ink = 0;       // of those, changed between `lit` and `unlit`
                 };
-                auto measureAt = [&](const QImage& lit, const QImage& unlit, const gp_Pnt& world) {
+                // `bodies`/`bare` define the footprint; `lit`/`unlit` are the
+                // pair whose difference is counted inside it. Taken as
+                // parameters so a later camera-identical set of dumps (after
+                // the context loss below) measures with its OWN footprint.
+                auto measureWith = [&](const QImage& bodies, const QImage& bare, const QImage& lit,
+                                       const QImage& unlit, const gp_Pnt& world) {
                     FootprintInk m;
                     QPoint logical;
-                    if (!shotsUsable || lit.size() != bodiesShot.size() ||
-                        unlit.size() != bodiesShot.size())
+                    if (bodies.isNull() || bare.size() != bodies.size() ||
+                        lit.size() != bodies.size() || unlit.size() != bodies.size())
                         return m;
                     if (!jv->projectToScreen(world, logical) || !jv->rect().contains(logical))
                         return m;
                     m.projected = true;
                     const double scale =
-                        double(bodiesShot.width()) / double(std::max(1, jv->width()));
+                        double(bodies.width()) / double(std::max(1, jv->width()));
                     const int cx = static_cast<int>(std::lround(logical.x() * scale));
                     const int cy = static_cast<int>(std::lround(logical.y() * scale));
                     const int half = static_cast<int>(std::ceil(kSearchHalfLogicalPx * scale));
                     for (int y = cy - half; y <= cy + half; ++y) {
                         for (int x = cx - half; x <= cx + half; ++x) {
-                            if (!bodiesShot.rect().contains(x, y)) continue;
+                            if (!bodies.rect().contains(x, y)) continue;
                             ++m.box;
-                            if (colorDistance(bodiesShot.pixelColor(x, y),
-                                              bareShot.pixelColor(x, y)) <= kInkDistance)
+                            if (colorDistance(bodies.pixelColor(x, y),
+                                              bare.pixelColor(x, y)) <= kInkDistance)
                                 continue;
                             ++m.covered;
                             if (colorDistance(lit.pixelColor(x, y), unlit.pixelColor(x, y)) >
@@ -27245,6 +27263,10 @@ int main(int argc, char* argv[])
                         }
                     }
                     return m;
+                };
+                auto measureAt = [&](const QImage& lit, const QImage& unlit, const gp_Pnt& world) {
+                    if (!shotsUsable) return FootprintInk();
+                    return measureWith(bodiesShot, bareShot, lit, unlit, world);
                 };
 
                 for (std::size_t i = 0; i < d.items.size(); ++i) {
@@ -27284,10 +27306,26 @@ int main(int argc, char* argv[])
                     settle(150);
                 }
 
+                // --- re-showing the same joint builds nothing ---------------------
+                // The callers that re-show joints do it on every state change; a
+                // rebuild re-meshes every piece. Identical pixels cannot tell a
+                // rebuild from none, so the build count is what is asserted.
+                {
+                    const int buildsBefore = jv->jointBuildCount();
+                    jv->showJoints({d}, {Joinery::Kind::Dowel});
+                    settle(100);
+                    check(jv->jointBuildCount() == buildsBefore && jv->jointsShown() == 1 &&
+                              jv->jointItemsShown() == static_cast<int>(d.items.size()),
+                          QStringLiteral("joints: re-showing the unchanged joint rebuilds nothing "
+                                         "(%1 builds before, %2 after) and leaves it drawn")
+                              .arg(buildsBefore).arg(jv->jointBuildCount()));
+                }
+
                 // --- a theme edit reaches live hardware -------------------------
                 {
                     const QString beforeThemePath = outDir + QStringLiteral("/joints-theme-before.png");
                     check(jv->saveSnapshot(beforeThemePath), "joints: a dump before a theme edit");
+                    const int buildsBeforeTheme = jv->jointBuildCount();
                     const Theme::Spec savedSpec = Theme::spec();
                     Theme::Spec recoloured = savedSpec;
                     recoloured.accent = colorDistance(savedSpec.accent, QColor(0, 255, 0)) > 120.0
@@ -27299,6 +27337,12 @@ int main(int argc, char* argv[])
                     check(jv->saveSnapshot(afterThemePath), "joints: a dump after the theme edit");
                     Theme::setSpec(savedSpec);
                     settle(250);
+                    // An Appearance colour-wheel drag broadcasts per mouse move:
+                    // a recolour must not rebuild or re-mesh anything.
+                    check(jv->jointBuildCount() == buildsBeforeTheme && jv->jointsShown() == 1,
+                          QStringLiteral("joints: two theme edits recolour the hardware in place - "
+                                         "no rebuild (%1 builds before, %2 after)")
+                              .arg(buildsBeforeTheme).arg(jv->jointBuildCount()));
 
                     const QImage beforeTheme(beforeThemePath), afterTheme(afterThemePath);
                     int recolouredPx = 0;
@@ -27327,6 +27371,236 @@ int main(int argc, char* argv[])
                               .arg(leftover));
                 }
 
+                // --- every family's hardware stays in the wood --------------------
+                // The review's per-family measurement, committed. Each kind is
+                // placed as J places it - defaultsForContact() on its natural
+                // fixture - and the DRAWN solids (the displayed objects' own
+                // shapes, not a second build of them) are measured against the
+                // wood with a boolean. Before this, a half-lap drew as a
+                // tenon-sized fin 67.7% outside the wood covering 17% of its lap,
+                // and a default mortise came 11 mm out of the back of an 18 mm
+                // upright (19.6% outside).
+                {
+                    auto volumeOf = [](const TopoDS_Shape& shape) {
+                        GProp_GProps props;
+                        BRepGProp::VolumeProperties(shape, props);
+                        return props.Mass();
+                    };
+                    struct Extents {
+                        bool measured = false;
+                        double drawn = 0.0;    // volume of the drawn hardware
+                        double inside = 0.0;   // of that, inside `solid`
+                    };
+                    auto extentsIn = [&](const std::vector<TopoDS_Shape>& pieces,
+                                         const TopoDS_Shape& solid) {
+                        Extents e;
+                        e.measured = !pieces.empty() && !solid.IsNull();
+                        for (const TopoDS_Shape& piece : pieces) {
+                            e.drawn += volumeOf(piece);
+                            BRepAlgoAPI_Common common(piece, solid);
+                            if (!common.IsDone()) {
+                                e.measured = false;
+                                continue;
+                            }
+                            e.inside += volumeOf(common.Shape());
+                        }
+                        return e;
+                    };
+                    auto outsidePercent = [](const Extents& e) {
+                        return e.drawn > 0.0 ? 100.0 * (e.drawn - e.inside) / e.drawn : 100.0;
+                    };
+                    constexpr double kOutsideTolerancePercent = 0.01;
+
+                    BRepAlgoAPI_Fuse boardsFused(woodA, woodB);
+                    check(boardsFused.IsDone(),
+                          "joints: the two boards fuse into one piece of wood to measure against");
+                    const TopoDS_Shape wood =
+                        boardsFused.IsDone() ? boardsFused.Shape() : TopoDS_Shape();
+
+                    // The angle a drawn pin actually makes with the contact
+                    // normal, read off its own cylindrical face.
+                    auto pinAngleDeg = [&](const TopoDS_Shape& pin, bool& found) {
+                        found = false;
+                        for (TopExp_Explorer it(pin, TopAbs_FACE); it.More(); it.Next()) {
+                            BRepAdaptor_Surface surface(TopoDS::Face(it.Current()));
+                            if (surface.GetType() != GeomAbs_Cylinder) continue;
+                            found = true;
+                            const double cosine = std::fabs(surface.Cylinder().Axis().Direction().Dot(
+                                boardsMeet.contact.frame.Direction()));
+                            return std::acos(std::min(1.0, cosine)) * 180.0 / 3.14159265358979323846;
+                        }
+                        return -1.0;
+                    };
+
+                    // Accent-coloured pixels: the outline is the accent at full
+                    // strength, while the ghost fill is the accent blended with
+                    // whatever is behind it, so only an outline lands this close.
+                    // Counted only where a NO-hardware dump of the same scene is
+                    // not already accent: the viewport's own accent feedback
+                    // (the edge dimension the pick above leaves on the hovered
+                    // edge) is in every dump alike, and must not be scored as an
+                    // outline - it was 63 of the dowel's pixels before this.
+                    constexpr double kOutlineDistance = 40.0;
+                    const QString noHardwarePath = outDir + QStringLiteral("/joints-family-none.png");
+                    check(jv->jointItemsShown() == 0 && jv->saveSnapshot(noHardwarePath),
+                          "joints: a dump with no hardware up, the outline baseline");
+                    const QImage noHardware(noHardwarePath);
+                    auto accentPixels = [&](const QString& path) {
+                        const QImage shot(path);
+                        if (shot.isNull() || noHardware.size() != shot.size()) return -1;
+                        const QColor accent = Theme::accent();
+                        int count = 0;
+                        for (int y = 0; y < shot.height(); ++y) {
+                            for (int x = 0; x < shot.width(); ++x) {
+                                if (colorDistance(shot.pixelColor(x, y), accent) < kOutlineDistance &&
+                                    colorDistance(noHardware.pixelColor(x, y), accent) >=
+                                        kOutlineDistance)
+                                    ++count;
+                            }
+                        }
+                        return count;
+                    };
+                    int dowelAccent = -1, dadoAccent = -1, tenonAccent = -1;
+
+                    const std::vector<std::pair<Joinery::Kind, QString>> onBoards = {
+                        {Joinery::Kind::Dowel, QStringLiteral("dowel")},
+                        {Joinery::Kind::PocketScrew, QStringLiteral("pocket screw")},
+                        {Joinery::Kind::Screw, QStringLiteral("screw")},
+                        {Joinery::Kind::Dado, QStringLiteral("dado")},
+                        {Joinery::Kind::MortiseTenon, QStringLiteral("mortise and tenon")},
+                    };
+                    for (const auto& family : onBoards) {
+                        const Joinery::Kind kind = family.first;
+                        const QString& name = family.second;
+                        const Joinery::Parameters placed =
+                            Joinery::defaultsForContact(kind, boardsMeet.contact);
+                        const Joinery::Derivation fd = deriveOnBoards(kind);
+                        check(fd.ok, QStringLiteral("joints: a %1 fits the boards (%2)")
+                                         .arg(name, QString::fromStdString(fd.error)));
+                        if (!fd.ok) continue;
+
+                        const int buildsBefore = jv->jointBuildCount();
+                        jv->showJoints({fd}, {kind});
+                        settle(150);
+                        check(jv->jointBuildCount() == buildsBefore + 1,
+                              QStringLiteral("joints: a different joint (%1) is built, once").arg(name));
+                        const std::vector<TopoDS_Shape> drawn = jv->jointShapesShown();
+                        check(!drawn.empty(),
+                              QStringLiteral("joints: the %1 has hardware to measure (%2 pieces)")
+                                  .arg(name).arg(drawn.size()));
+                        const Extents e = extentsIn(drawn, wood);
+                        std::printf("[info] joints: %s - depthA %.2f (piece A %.2f), depthB %.2f, "
+                                    "length %.2f; %.1f of %.1f cubic mm inside the wood, "
+                                    "%.4f%% outside\n",
+                                    qPrintable(name), placed.depthAMm,
+                                    boardsMeet.contact.thicknessAMm, placed.depthBMm,
+                                    placed.lengthMm, e.inside, e.drawn, outsidePercent(e));
+                        check(e.measured && e.drawn > 0.0 &&
+                                  outsidePercent(e) <= kOutsideTolerancePercent,
+                              QStringLiteral("joints: the %1 placed from the contact's own defaults "
+                                             "is 0% outside the wood (%2% outside)")
+                                  .arg(name).arg(outsidePercent(e), 0, 'f', 4));
+
+                        if (Joinery::familyOf(kind) == Joinery::Family::Fasteners) {
+                            int straightOrTrue = 0;
+                            for (const TopoDS_Shape& pin : drawn) {
+                                bool found = false;
+                                const double angle = pinAngleDeg(pin, found);
+                                if (found && std::fabs(angle - placed.angleDeg) < 0.01) ++straightOrTrue;
+                            }
+                            check(straightOrTrue == static_cast<int>(drawn.size()),
+                                  QStringLiteral("joints: every drawn %1 leans at its own %2 degrees "
+                                                 "(%3 of %4 pins)")
+                                      .arg(name).arg(placed.angleDeg).arg(straightOrTrue)
+                                      .arg(drawn.size()));
+                        }
+
+                        if (kind == Joinery::Kind::Dowel || kind == Joinery::Kind::Dado ||
+                            kind == Joinery::Kind::MortiseTenon) {
+                            const QString path =
+                                outDir + QStringLiteral("/joints-family-%1.png")
+                                             .arg(static_cast<int>(kind));
+                            check(jv->saveSnapshot(path),
+                                  QStringLiteral("joints: a dump of the %1").arg(name));
+                            const int ink = accentPixels(path);
+                            if (kind == Joinery::Kind::Dowel) dowelAccent = ink;
+                            if (kind == Joinery::Kind::Dado) dadoAccent = ink;
+                            if (kind == Joinery::Kind::MortiseTenon) tenonAccent = ink;
+                        }
+                    }
+                    check(Joinery::defaultsForContact(Joinery::Kind::PocketScrew,
+                                                      boardsMeet.contact).angleDeg > 1.0,
+                          "joints: the pocket screw's lean above is a real angle, not a vacuous 0");
+
+                    std::printf("[info] joints: accent-coloured outline pixels - dowel %d, dado %d, "
+                                "mortise and tenon %d\n",
+                                dowelAccent, dadoAccent, tenonAccent);
+                    check(dadoAccent >= 60 && tenonAccent >= 60,
+                          QStringLiteral("joints: the dado and the tenon block are OUTLINED - %1 and %2 "
+                                         "full-accent pixels")
+                              .arg(dadoAccent).arg(tenonAccent));
+                    check(dowelAccent >= 0 && dowelAccent * 4 < std::min(dadoAccent, tenonAccent),
+                          QStringLiteral("joints: while dowels stay unoutlined (%1 full-accent pixels)")
+                              .arg(dowelAccent));
+
+                    // The half-lap, on the crossing rails the headless suite
+                    // measures (off to one side; they need not be in the document
+                    // for their hardware to be drawn and measured).
+                    const TopoDS_Shape railA =
+                        ModelingOps::makeBox(gp_Pnt(600.0, 0.0, 0.0), 400.0, 40.0, 20.0);
+                    const TopoDS_Shape railB =
+                        ModelingOps::makeBox(gp_Pnt(750.0, -100.0, 0.0), 60.0, 300.0, 20.0);
+                    const Joinery::ContactResult crossing = Joinery::findContact(railA, railB);
+                    check(crossing.ok && crossing.contact.type == Joinery::Contact::Type::Overlap,
+                          "joints: the crossing rails overlap");
+                    const std::vector<Joinery::Kind> offered =
+                        crossing.ok ? Joinery::validKindsFor(crossing.contact)
+                                    : std::vector<Joinery::Kind>();
+                    check(!offered.empty() && offered.front() == Joinery::Kind::HalfLap,
+                          "joints: and the first kind that fits them is the half-lap - exactly "
+                          "what J places");
+                    if (crossing.ok) {
+                        const Joinery::Derivation lapJoint = Joinery::derive(
+                            Joinery::Kind::HalfLap,
+                            Joinery::defaultsForContact(Joinery::Kind::HalfLap, crossing.contact),
+                            {}, railA, railB);
+                        check(lapJoint.ok, QStringLiteral("joints: the rails take a half-lap (%1)")
+                                               .arg(QString::fromStdString(lapJoint.error)));
+                        BRepAlgoAPI_Fuse railsFused(railA, railB);
+                        BRepAlgoAPI_Common lapSolid(railA, railB);
+                        check(railsFused.IsDone() && lapSolid.IsDone(),
+                              "joints: the rails fuse, and their lap is found, to measure against");
+                        if (lapJoint.ok && railsFused.IsDone() && lapSolid.IsDone()) {
+                            jv->showJoints({lapJoint}, {Joinery::Kind::HalfLap});
+                            settle(150);
+                            const std::vector<TopoDS_Shape> drawn = jv->jointShapesShown();
+                            const Extents inWood = extentsIn(drawn, railsFused.Shape());
+                            const Extents onLap = extentsIn(drawn, lapSolid.Shape());
+                            const double lapVolume = volumeOf(lapSolid.Shape());
+                            const double coveredPercent =
+                                lapVolume > 0.0 ? 100.0 * onLap.inside / lapVolume : 0.0;
+                            std::printf("[info] joints: half-lap - %d pieces, %.1f of %.1f cubic mm "
+                                        "inside the wood (%.4f%% outside), covering %.1f of the "
+                                        "lap's %.1f (%.2f%%)\n",
+                                        static_cast<int>(drawn.size()), inWood.inside, inWood.drawn,
+                                        outsidePercent(inWood), onLap.inside, lapVolume,
+                                        coveredPercent);
+                            check(inWood.measured && inWood.drawn > 0.0 &&
+                                      outsidePercent(inWood) <= kOutsideTolerancePercent,
+                                  QStringLiteral("joints: the half-lap placed from the contact's own "
+                                                 "defaults is 0% outside the wood (%1% outside)")
+                                      .arg(outsidePercent(inWood), 0, 'f', 4));
+                            check(onLap.measured && coveredPercent >= 100.0 - kOutsideTolerancePercent,
+                                  QStringLiteral("joints: and it covers the lap it is cut from "
+                                                 "(%1% of the lap)")
+                                      .arg(coveredPercent, 0, 'f', 2));
+                        }
+                    }
+
+                    jv->clearJoints();
+                    settle(150);
+                }
+
                 // --- render mode is the furniture alone, and STAYS so -----------
                 jv->showJoints({d}, {Joinery::Kind::Dowel});
                 settle(200);
@@ -27350,6 +27624,89 @@ int main(int argc, char* argv[])
                 check(jv->jointsShown() == 1 &&
                           jv->jointItemsShown() == static_cast<int>(d.items.size()),
                       "joints: and out of render mode the hardware draws again");
+
+                // --- a REAL context loss: both layers come back, in order -------
+                // releaseGlResources() resets the joints AND gizmo layer ids,
+                // and initializeViewer() inserts the joints layer BEFORE the
+                // gizmo's - so a stale or missing id would lose the hardware's
+                // place, or its layer, silently. Driven for real: the context's
+                // own aboutToBeDestroyed runs the widget's release, and
+                // MainWindow's glResourcesReleased handler resyncs inside the
+                // same emission.
+                {
+                    QOpenGLContext* glContext = jv->context();
+                    check(glContext != nullptr, "joints: the viewport holds a live GL context to lose");
+                    if (glContext != nullptr) {
+                        const int releasesBefore = OcctViewWidget::glReleaseCount();
+                        emit glContext->aboutToBeDestroyed();
+                        settle(300);
+                        check(OcctViewWidget::glReleaseCount() == releasesBefore + 1,
+                              QStringLiteral("joints: the loss really released the viewer (%1 -> %2 "
+                                             "releases)")
+                                  .arg(releasesBefore).arg(OcctViewWidget::glReleaseCount()));
+
+                        const std::vector<Graphic3d_ZLayerId> order = jv->zLayerOrder();
+                        auto indexOf = [&order](Graphic3d_ZLayerId id) {
+                            const auto it = std::find(order.begin(), order.end(), id);
+                            return it == order.end() ? -1 : static_cast<int>(it - order.begin());
+                        };
+                        const Graphic3d_ZLayerId rebuiltJoints = jv->jointsZLayer();
+                        const int atTopmost = indexOf(Graphic3d_ZLayerId_Topmost);
+                        const int atJoints = indexOf(rebuiltJoints);
+                        const int atGizmo = indexOf(jv->gizmoZLayer());
+                        check(rebuiltJoints != Graphic3d_ZLayerId_UNKNOWN &&
+                                  jv->gizmoZLayer() != Graphic3d_ZLayerId_UNKNOWN,
+                              "joints: after the loss both Immediate layers exist again");
+                        check(atTopmost >= 0 && atJoints > atTopmost && atGizmo > atJoints,
+                              QStringLiteral("joints: in the same order - Topmost, joints, gizmo "
+                                             "(%1, %2, %3)")
+                                  .arg(atTopmost).arg(atJoints).arg(atGizmo));
+                        const Graphic3d_ZLayerSettings rebuilt = jv->zLayerSettings(rebuiltJoints);
+                        check(rebuilt.IsImmediate() && rebuilt.ToClearDepth() &&
+                                  rebuilt.ToEnableDepthTest(),
+                              "joints: and the rebuilt joints layer is still Immediate, depth-cleared "
+                              "and depth-tested");
+                        check(jv->displayedSolidCount() == 2,
+                              QStringLiteral("joints: the boards are back on screen (%1)")
+                                  .arg(jv->displayedSolidCount()));
+
+                        // The hardware through the wood again, measured the same way,
+                        // against footprint dumps taken after the loss.
+                        jv->clearJoints();
+                        jv->clearSelection();
+                        settle(200);
+                        const QString postBodiesPath = outDir + QStringLiteral("/joints-lost-bodies.png");
+                        check(jv->saveSnapshot(postBodiesPath), "joints: a bodies dump after the loss");
+                        jv->setSolidVisible(boardA, false);
+                        jv->setSolidVisible(boardB, false);
+                        settle(150);
+                        const QString postBarePath = outDir + QStringLiteral("/joints-lost-bare.png");
+                        check(jv->saveSnapshot(postBarePath), "joints: a no-bodies dump after the loss");
+                        jv->setSolidVisible(boardA, true);
+                        jv->setSolidVisible(boardB, true);
+                        settle(150);
+                        jv->showJoints({d}, {Joinery::Kind::Dowel});
+                        settle(200);
+                        check(jv->jointsShown() == 1 &&
+                                  jv->jointItemsShown() == static_cast<int>(d.items.size()),
+                              "joints: the hardware draws again after the loss");
+                        const QString postWithPath = outDir + QStringLiteral("/joints-lost-drawn.png");
+                        check(jv->saveSnapshot(postWithPath), "joints: a dump with it up after the loss");
+                        const QImage postBodies(postBodiesPath), postBare(postBarePath),
+                                     postWith(postWithPath);
+                        for (std::size_t i = 0; i < d.items.size(); ++i) {
+                            const FootprintInk m = measureWith(postBodies, postBare, postWith,
+                                                               postBodies, d.items[i].centre);
+                            std::printf("[info] joints: after the loss, dowel %d - %d px searched, "
+                                        "%d inside the footprint, %d carry hardware\n",
+                                        static_cast<int>(i), m.box, m.covered, m.ink);
+                            check(m.box > 0 && m.covered * 2 > m.box && m.ink >= kMinInkPx,
+                                  QStringLiteral("joints: after the loss dowel %1 is still seen through "
+                                                 "the wood (%2 px inside a %3 px footprint)")
+                                      .arg(i).arg(m.ink).arg(m.covered));
+                        }
+                    }
+                }
                 jv->clearJoints();
             }
         }

@@ -800,6 +800,12 @@ public:
     // and the pieces of hardware themselves.
     int jointsShown() const { return myJointRenderer.shown(); }
     int jointItemsShown() const { return myJointRenderer.itemsShown(); }
+    // The hardware solids actually displayed - for measuring where the drawn
+    // hardware IS against the wood, rather than rebuilding it a second way.
+    std::vector<TopoDS_Shape> jointShapesShown() const { return myJointRenderer.shapes(); }
+    // How many times the hardware has been built - see JointRenderer::show()
+    // and reapplyTheme() for the two paths that must NOT rebuild.
+    int jointBuildCount() const { return myJointRenderer.buildCount(); }
 
     // --- Mirror plane placement (Milestone 4, Phase 3) ---------------------
     //

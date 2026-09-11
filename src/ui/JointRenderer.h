@@ -1,7 +1,9 @@
 #pragma once
 // The joints' own presentation: ghosted hardware drawn where a joint's items
-// fall (spec: docs/superpowers/specs/2026-09-10-joinery-design.md). Dowels and
-// screws are cylinders, housings and tenons are blocks.
+// fall (spec: docs/superpowers/specs/2026-09-10-joinery-design.md) - "dowels
+// as cylinders, screws as angled pins, housings as an outlined channel,
+// tenons as an outlined block". A half-lap is an outlined block too, over the
+// whole crossing: the half removed from each piece, stacked.
 //
 // GHOSTED because a joint is a PLAN, not material - the wood is not cut, and
 // hardware drawn solid would read as something that is there. And SEEN
@@ -21,7 +23,7 @@
 #include "Joinery.h"
 
 #include <AIS_InteractiveContext.hxx>
-#include <AIS_InteractiveObject.hxx>
+#include <AIS_Shape.hxx>
 #include <Graphic3d_ZLayerId.hxx>
 #include <TopoDS_Shape.hxx>
 
@@ -35,6 +37,25 @@ public:
         Joinery::Kind kind = Joinery::Kind::Dowel;
         Joinery::Derivation derivation;
     };
+
+    // One piece of hardware as a B-rep solid, and whether it wears an outline.
+    struct Piece {
+        TopoDS_Shape shape;
+        bool outlined = false;
+    };
+    // The hardware a drawing is made of - the ONE builder, which show()
+    // displays. A refused derivation, or an item the kernel will not build,
+    // contributes nothing.
+    //   - a fastener is a pin from `centre - axis'*depthA` to
+    //     `centre + axis'*depthB`, where axis' is the item's axis tilted by its
+    //     angleDeg about the run (a pocket screw leans across the joint);
+    //   - a housing or tenon is one outlined block over the item's span,
+    //     [-depthA, +depthB] along the axis about the contact plane;
+    //   - a half-lap (an Overlap contact) is two outlined blocks over the whole
+    //     overlap footprint: [0, depthA] and [depthA, depthA + depthB] from the
+    //     frame plane, which sits on the lap's own minimum-depth face - the
+    //     convention Contact documents. The lap is not centred on that plane.
+    static std::vector<Piece> piecesFor(const Drawing& drawing);
 
     void attach(const Handle(AIS_InteractiveContext)& context);
     // Drops the context and everything built against it, WITHOUT touching the
@@ -50,14 +71,20 @@ public:
 
     // Replaces whatever was drawn. TRUE when the screen actually changed - the
     // caller owns the frame, GridRenderer's own contract.
+    //
+    // A no-op returning FALSE when `drawings` equal what is already drawn,
+    // compared on everything the pieces are built from (kind, the contact's
+    // type and frame, every item's position, axis, sizes, depths and angle).
+    // The callers that re-show joints do so on every state change, and a
+    // rebuild re-meshes every piece; an unchanged joint must cost a compare.
     bool show(const std::vector<Drawing>& drawings);
     // TRUE when something was actually removed - show()'s own contract.
     bool clear();
-    // Rebuilds what is on screen from the drawings it was built with. The
-    // accent is baked into the AIS objects at build time, so without this a
-    // theme edit would leave live hardware wearing the old colour until
-    // something happened to call show() again. A no-op when nothing is drawn,
-    // so it cannot make hardware appear. TRUE when it rebuilt something.
+    // Recolours what is on screen IN PLACE - fill and outline - without
+    // rebuilding or re-meshing anything. An Appearance colour-wheel drag
+    // broadcasts a theme change on every mouse move. A no-op when nothing is
+    // drawn, so it cannot make hardware appear. TRUE when it recoloured
+    // something.
     bool reapplyTheme();
 
     // How many JOINTS are drawn - a joint that produced at least one piece of
@@ -65,16 +92,24 @@ public:
     // joint, and itemsShown() says three.
     int shown() const { return myJointsDrawn; }
     int itemsShown() const { return static_cast<int>(myObjects.size()); }
+    // The solids actually displayed, in display order - what a measurement of
+    // "where is the hardware" has to read, rather than a second build of it.
+    std::vector<TopoDS_Shape> shapes() const;
+    // How many times the pieces have been built. The change checks above are
+    // otherwise invisible from outside: a rebuild of identical pieces looks
+    // exactly like no rebuild in every pixel.
+    int buildCount() const { return myBuildCount; }
 
 private:
     // Builds myDrawings into myObjects. Reads Theme::accent() fresh on every
     // call - nothing here caches a colour across a themeChanged broadcast.
     void build();
-    void addSolid(const TopoDS_Shape& shape, const QColor& colour);
+    void addPiece(const Piece& piece, const QColor& colour);
 
     Handle(AIS_InteractiveContext) myContext;
-    std::vector<Handle(AIS_InteractiveObject)> myObjects;
+    std::vector<Handle(AIS_Shape)> myObjects;
     std::vector<Drawing> myDrawings;
     int myJointsDrawn = 0;
+    int myBuildCount = 0;
     Graphic3d_ZLayerId myLayer = Graphic3d_ZLayerId_UNKNOWN;
 };

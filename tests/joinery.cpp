@@ -133,6 +133,15 @@ int main()
     checkNear(tenon24.lengthMm, 36.0, 1.0e-9, "a tenon is one and a half times as long as it is thick");
     checkNear(tenon24.depthAMm, 38.0, 1.0e-9, "the mortise is a hair deeper than the tenon");
 
+    // A half-lap from one number: half of it, for both pieces - never the
+    // tenon numbers the interlock branch used to hand it (on 26 mm those were
+    // a 41 mm "lap" in a 26 mm rail). 26 collides with no struct default.
+    const Joinery::Parameters lap26 = Joinery::defaultsFor(Joinery::Kind::HalfLap, 26.0);
+    checkNear(lap26.depthAMm, 13.0, 1.0e-9, "a half-lap removes half of a 26 mm piece A");
+    checkNear(lap26.depthBMm, 13.0, 1.0e-9, "and half of piece B");
+    check(lap26.depthAMm < 26.0 && lap26.depthBMm < 26.0,
+          "so neither half is deeper than the board it is cut in");
+
     // --- the contact: where two boards actually meet ------------------
     {
         // A 600x300x18 shelf whose END lands flat on the FACE of an
@@ -1437,8 +1446,122 @@ int main()
         if (lap24.size() == 1) {
             checkNear(lap24[0].spanUMm, 300.0, 1.0e-6,
                       "a half-lap fills the whole run - no shoulder, unlike a tenon's 210");
-            checkNear(lap24[0].spanVMm, 8.0, 1.0e-6, "as thick as its own parameter says");
+            checkNear(lap24[0].spanVMm, 40.0, 1.0e-6,
+                      "and the whole overlap ACROSS it too - a half-lap is cut over its full "
+                      "footprint, not a tenon-thick 8 mm strip");
+            checkNear(lap24[0].depthAMm, 12.0, 1.0e-6,
+                      "removing half of a 24 mm piece A - not a tenon's 38 mm mortise");
+            checkNear(lap24[0].depthBMm, 12.0, 1.0e-6,
+                      "and half of piece B - not a tenon's 36 mm length");
         }
+    }
+
+    // --- defaultsForContact: each piece's OWN thickness at the joint --------
+    // THE defaults placement calls. defaultsFor() only ever sees the thinner
+    // piece, so it cannot say "half of EACH" or "no deeper than the host";
+    // every thickness below collides with no struct default and differs from
+    // its partner, so the thinner-piece answer and the per-piece one cannot
+    // coincide.
+    {
+        // Unequal rails crossing - real geometry, so the thicknesses are what
+        // findContact() measures through the lap, not numbers typed in.
+        const TopoDS_Shape thinRail =
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 400.0, 40.0, 22.0).Shape();
+        const TopoDS_Shape deepRail =
+            BRepPrimAPI_MakeBox(gp_Pnt(150.0, -100.0, 0.0), 60.0, 300.0, 70.0).Shape();
+        const Joinery::ContactResult lapContact = Joinery::findContact(thinRail, deepRail);
+        check(lapContact.ok && lapContact.contact.type == Joinery::Contact::Type::Overlap,
+              "a 22 mm rail crossing a 70 mm one is an overlap");
+        if (lapContact.ok) {
+            checkNear(lapContact.contact.thicknessAMm, 22.0, 1.0e-6,
+                      "the thin rail carries 22 mm through the lap");
+            checkNear(lapContact.contact.thicknessBMm, 70.0, 1.0e-6, "and the deep one 70");
+            const Joinery::Parameters lap =
+                Joinery::defaultsForContact(Joinery::Kind::HalfLap, lapContact.contact);
+            checkNear(lap.depthAMm, 11.0, 1.0e-9, "a half-lap removes half of the thin rail's 22 mm");
+            checkNear(lap.depthBMm, 35.0, 1.0e-9,
+                      "and half of the deep rail's OWN 70 mm - not half of the thinner (11)");
+            const std::vector<Joinery::Item> lapItems =
+                Joinery::layout(Joinery::Kind::HalfLap, lap, lapContact.contact, {});
+            check(lapItems.size() == 1, "the placed half-lap is one item");
+            if (lapItems.size() == 1) {
+                checkNear(lapItems[0].depthAMm, 11.0, 1.0e-9, "and the item carries A's half");
+                checkNear(lapItems[0].depthBMm, 35.0, 1.0e-9, "and B's");
+                checkNear(lapItems[0].spanUMm * lapItems[0].spanVMm,
+                          lapContact.contact.uLength() * lapContact.contact.vLength(), 1.0e-6,
+                          "over the whole 60 x 40 overlap footprint");
+            }
+        }
+
+        // A mortise and tenon: the mortise is cut in A, the host. A 14 mm host
+        // against a 50 mm tenon piece - the uncapped rule proposes a 27 mm
+        // mortise, which comes 13 mm out of the back of the host.
+        Joinery::Contact thinHost;
+        thinHost.type = Joinery::Contact::Type::Face;
+        thinHost.frame = gp_Ax3(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
+        thinHost.uMin = 0.0; thinHost.uMax = 300.0;
+        thinHost.vMin = 0.0; thinHost.vMax = 50.0;
+        thinHost.thicknessAMm = 14.0;
+        thinHost.thicknessBMm = 50.0;
+        const Joinery::Parameters capped =
+            Joinery::defaultsForContact(Joinery::Kind::MortiseTenon, thinHost);
+        checkNear(capped.depthAMm, 14.0, 1.0e-9,
+                  "a mortise is at most a through mortise - capped at the 14 mm host, "
+                  "not the 27 mm the uncapped rule proposes");
+        checkNear(capped.lengthMm, 12.0, 1.0e-9, "and the tenon stays a hair shorter than it");
+        const std::vector<Joinery::Item> cappedItems =
+            Joinery::layout(Joinery::Kind::MortiseTenon, capped, thinHost, {});
+        check(cappedItems.size() == 1 && cappedItems[0].depthAMm <= thinHost.thicknessAMm,
+              "so the placed mortise is no deeper than its host");
+
+        // A host deeper than the rule's mortise is left alone: 64 mm against a
+        // 22 mm tenon piece keeps the 35 mm mortise and 33 mm tenon.
+        Joinery::Contact thickHost = thinHost;
+        thickHost.thicknessAMm = 64.0;
+        thickHost.thicknessBMm = 22.0;
+        const Joinery::Parameters uncapped =
+            Joinery::defaultsForContact(Joinery::Kind::MortiseTenon, thickHost);
+        checkNear(uncapped.depthAMm, 35.0, 1.0e-9, "a host thick enough keeps the rule's mortise");
+        checkNear(uncapped.lengthMm, 33.0, 1.0e-9, "and its tenon");
+
+        // A housing: a third of the HOST deep, as wide as the HOUSED piece.
+        // Two contacts, because one cannot tell both apart from "the thinner":
+        // a thick host shows the depth, a thick housed piece shows the width.
+        Joinery::Contact deepHost = thinHost;
+        deepHost.thicknessAMm = 42.0;
+        deepHost.thicknessBMm = 16.0;
+        const Joinery::Parameters deepDado =
+            Joinery::defaultsForContact(Joinery::Kind::Dado, deepHost);
+        checkNear(deepDado.depthAMm, 14.0, 1.0e-9,
+                  "a dado is a third of its 42 mm host deep - not a third of the thinner 16");
+        Joinery::Contact wideHoused = thinHost;
+        wideHoused.thicknessAMm = 16.0;
+        wideHoused.thicknessBMm = 42.0;
+        const Joinery::Parameters wideDado =
+            Joinery::defaultsForContact(Joinery::Kind::Dado, wideHoused);
+        checkNear(wideDado.widthMm, 42.0, 1.0e-9,
+                  "and as wide as the 42 mm piece it houses - not the thinner host's 16");
+
+        // A fastener's angle rides on its items, so what draws it never has
+        // to reach back for the parameters. 22 degrees collides with nothing.
+        Joinery::Parameters leaning =
+            Joinery::defaultsForContact(Joinery::Kind::PocketScrew, thinHost);
+        checkNear(leaning.angleDeg, 15.0, 1.0e-9, "a pocket screw still defaults to 15 degrees");
+        leaning.angleDeg = 22.0;
+        const std::vector<Joinery::Item> pins =
+            Joinery::layout(Joinery::Kind::PocketScrew, leaning, thinHost, {});
+        check(!pins.empty() && std::all_of(pins.begin(), pins.end(), [](const Joinery::Item& pin) {
+                  return std::fabs(pin.angleDeg - 22.0) < 1.0e-9;
+              }),
+              "and every placed pocket screw carries the parameters' own 22 degrees");
+        const std::vector<Joinery::Item> straight = Joinery::layout(
+            Joinery::Kind::Dowel, Joinery::defaultsForContact(Joinery::Kind::Dowel, thinHost),
+            thinHost, {});
+        check(!straight.empty() && std::all_of(straight.begin(), straight.end(),
+                                               [](const Joinery::Item& pin) {
+                                                   return pin.angleDeg == 0.0;
+                                               }),
+              "while a dowel is driven straight");
     }
 
     // --- housing edge cases: width and stop must stay within the joint -----

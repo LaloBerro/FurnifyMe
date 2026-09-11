@@ -80,6 +80,30 @@ struct Parameters {
 // sizes rather than an arbitrary third of a millimetre.
 Parameters defaultsFor(Kind kind, double thinnerThicknessMm);
 
+struct Contact;
+
+// THE defaults function placement and kind-switching call - the first kind
+// that fits when J places a joint, and every later change of kind on a live
+// one. defaultsFor() above answers from ONE number, the thinner piece, and so
+// cannot express "half of EACH piece" or "no deeper than the host"; this
+// starts from defaultsFor(kind, thinner) and refines it with each piece's own
+// at-the-joint thickness from `contact` (thicknessAMm, thicknessBMm - see
+// Contact below):
+//
+//   - a HALF-LAP removes half of each piece where they cross:
+//     depthAMm = thicknessAMm / 2, depthBMm = thicknessBMm / 2;
+//   - a MORTISE is cut in piece A - layout() puts depthAMm on A's side of the
+//     contact and the tenon's length on B's - so A is the host, and the mortise
+//     is capped at A's thickness (a through mortise at most), with the tenon
+//     kept a hair shorter than its mortise. A default that punches out of the
+//     back of the host is not a sane proposal;
+//   - a HOUSING is cut in A too: a third of A deep, as wide as B, the piece
+//     it houses.
+//
+// A thickness the contact did not measure (0, as on a hand-built Contact)
+// leaves that refinement to defaultsFor()'s own rule.
+Parameters defaultsForContact(Kind kind, const Contact& contact);
+
 // Sentinel for `Contact::regionAreaMm2`: no real area is ever negative, so
 // this cannot be mistaken for a measurement - a `Contact` built by hand (as
 // several test fixtures are) reads as "not measured" rather than silently
@@ -314,6 +338,11 @@ struct Item {
     // leaves these zero.
     double spanUMm = 0.0;
     double spanVMm = 0.0;
+    // The angle a fastener is driven at, tilted ACROSS the joint about the run
+    // it lies along - a pocket screw's 15 degrees, 0 for anything driven
+    // straight. Copied from the parameters by layout(), so whatever draws or
+    // reads an item never has to reach back for them.
+    double angleDeg = 0.0;
 };
 
 // A per-item override, stored in the CONTACT's coordinates so it survives
