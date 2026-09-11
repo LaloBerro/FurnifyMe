@@ -23,6 +23,7 @@ class AppearancePanel;
 class AxisGizmo;
 class BevelArrow;
 class ExtrudePreview;
+class JointChip;
 class OcctViewWidget;
 class PullArrow;
 class QAction;
@@ -564,6 +565,64 @@ public:
     // which appStateChanged slot happened to run first.
     bool jointsDrawerOpen() const;
     class JointsPanel* jointsPanel() const { return myJointsPanel; }
+
+    // --- joinery: the joint's chip (Task 13) --------------------------------
+    //
+    // THE chip's visibility predicate, in one place - the joint whose card is
+    // up, or 0. `selectedJointId()` plus two things it does not carry:
+    //
+    //   the ENVIRONMENT (jointEditEnvironmentOk() below), and
+    //
+    //   the SELECTION CONTENT - the joint's own two pieces, whole, as the body
+    //   selection. That term is what keeps this card disjoint from every other
+    //   gesture BY CONSTRUCTION rather than by three predicates kept in step:
+    //   the face pull needs selectionKind() == Face, the bevel arrow Edge, and
+    //   the transform gizmo Body with EXACTLY ONE body, while this needs Body
+    //   with exactly its two. setSelectedJoint() is what puts that selection
+    //   there, so picking a joint - from the drawer or by placing one - raises
+    //   the card and nothing else.
+    int jointChipJointId() const;
+    // A copy of one joint, by id. False (and `out` untouched) when no joint has
+    // that id.
+    bool jointOf(int jointId, DocumentModel::Joint& out) const;
+    // One joint's derivation out of the same cache refreshJoints() reads, so
+    // the card and the hardware can never disagree about a number.
+    bool jointDerivationOf(int jointId, Joinery::Derivation& out) const;
+    // Where the card stands: the joint's first item, or - for a BROKEN joint,
+    // which still has a kind to switch - the centre of its two pieces together.
+    bool jointAnchor(int jointId, gp_Pnt& out) const;
+    // The joint's live contact, measured now, in its own (bodyA, bodyB) order -
+    // what the kind menu asks which kinds this contact can take. False, with
+    // `out` carrying the refusal, when the pieces cannot be measured.
+    bool jointContact(int jointId, Joinery::ContactResult& out) const;
+
+    // Switches a joint's kind: ONE checkpoint, the parameters re-defaulted from
+    // the live contact by Joinery::defaultsForContact() and the adjustments
+    // cleared (DocumentModel::setJointKind()'s own contract), a Note toast with
+    // Undo. Refused - Failure toast, nothing written - when the pieces cannot
+    // be measured or the contact will not take that kind, in the same words
+    // placement refuses it. True and nothing written when it is already that
+    // kind: not a change, so not a checkpoint.
+    bool setJointKind(int jointId, Joinery::Kind kind);
+    // "Cut into": makes `hostBodyId` the piece the joint is cut into, swapping
+    // bodyA and bodyB through ONE checkpoint with the parameters re-defaulted
+    // from the SWAPPED contact. Only housings and mortise-and-tenons have a
+    // host to choose - a fastener cuts neither piece and a half-lap cuts both -
+    // so anything else is refused quietly, and so is a body that is not one of
+    // the joint's two. True, nothing written, when it is already the host.
+    bool setJointHost(int jointId, int hostBodyId);
+    // Every changed number at once: ONE checkpoint, a Note toast with Undo.
+    // Refused - Failure toast, nothing written - for a count below 1 (which
+    // Joinery::layout() would silently clamp to a single invented fastener, so
+    // it is refused where it is WRITTEN rather than where it is drawn), for a
+    // count past what a joint can carry, and for a size or depth of zero. True
+    // and nothing written when nothing actually changed.
+    bool editJointParameters(int jointId, const Joinery::Parameters& params);
+    // The chip's own refusals - a parse it could not make sense of - said the
+    // way every other refusal in this app is: the status bar and a Failure
+    // toast, never a modal and never silence.
+    void refuseJointEdit(const QString& why);
+    JointChip* jointChip() const { return myJointChip; }
 
     bool lockToFace(const TopoDS_Face& face);
     // Back to the ground plane. The ground plane is the default and is never
@@ -1694,6 +1753,16 @@ private:
     // See selectedJointId(). 0 = none.
     int mySelectedJointId = 0;
     bool jointExists(int jointId) const;
+    // --- joinery (Task 13) ---------------------------------------------------
+    // The joint's chip. Like the two arrows it parents itself to the viewport
+    // and derives its own visibility; this window keeps the pointer for the
+    // laidOut() re-place every self-placing panel gets, and for the suite.
+    JointChip* myJointChip = nullptr;
+    // The terms a joint edit shares with every other gesture's environment -
+    // canPullSelectedFace()'s own three, plus the library and a compare pane
+    // (linkGestureEnvironmentOk()'s two) and a live Mirror placement, whose
+    // application-wide key claim this card must never sit beside.
+    bool jointEditEnvironmentOk() const;
     // The rail and the axis gizmo card, kept here rather than found with
     // findChild<>() on demand - both are constructed as locals inside
     // buildOverlay() otherwise, and both need to be reached from the

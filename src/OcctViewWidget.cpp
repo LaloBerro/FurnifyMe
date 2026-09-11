@@ -2396,7 +2396,7 @@ void OcctViewWidget::setSymmetryIndicator(bool on, const gp_Pln& plane)
 }
 
 void OcctViewWidget::showJoints(const std::vector<Joinery::Derivation>& derivations,
-                                const std::vector<Joinery::Kind>& kinds)
+                                const std::vector<Joinery::Kind>& kinds, int selectedIndex)
 {
     // Render mode: "the viewport is the furniture alone", and it has to STAY
     // alone. setRenderMode() clears the hardware on entry, but a caller
@@ -2422,6 +2422,7 @@ void OcctViewWidget::showJoints(const std::vector<Joinery::Derivation>& derivati
         JointRenderer::Drawing drawing;
         drawing.kind = kinds[i];
         drawing.derivation = derivations[i];
+        drawing.selected = static_cast<int>(i) == selectedIndex;
         drawings.push_back(std::move(drawing));
     }
     if (myJointRenderer.show(drawings)) scheduleRedraw();
@@ -3244,9 +3245,20 @@ gp_Dir OcctViewWidget::liveCameraUp() const
     return myView->Camera()->Up();
 }
 
+bool OcctViewWidget::viewReady() const
+{
+    return !myView.IsNull() && !myView->Window().IsNull();
+}
+
 bool OcctViewWidget::projectToScreen(const gp_Pnt& world, QPoint& out) const
 {
-    if (myView.IsNull()) return false;
+    // NOT merely IsNull(): a view that exists but has no window yet cannot
+    // Convert() - see viewReady() on the header for the window this closes and
+    // how it is reached. Measured, not assumed: with a probe on this branch the
+    // refusal fires exactly once per recovery, at the first displaySolid() of
+    // resyncView(), reporting a NON-null view - which is the whole point, since
+    // the IsNull() half alone let that call through into a crash.
+    if (!viewReady()) return false;
 
     Standard_Integer px = 0, py = 0;
     myView->Convert(world.X(), world.Y(), world.Z(), px, py);

@@ -24,6 +24,11 @@ namespace {
 // Ghosted: a plan, not material. Transparent enough to read the wood through,
 // solid enough to see the hardware's shape.
 constexpr double kGhostTransparency = 0.55;
+// The SELECTED joint (Task 13), at full strength against the ghosts - still
+// transparent enough to read the wood behind it, far enough from 0.55 to be
+// unmistakable. See JointRenderer::Drawing::selected for why the difference is
+// strength rather than a second colour.
+constexpr double kSelectedTransparency = 0.15;
 // The smallest dimension any piece of hardware is drawn at, so a zero-depth
 // or zero-width item still shows up as something rather than a degenerate
 // primitive the kernel refuses.
@@ -141,7 +146,11 @@ bool sameContact(const Joinery::Contact& a, const Joinery::Contact& b)
 
 bool sameDrawing(const JointRenderer::Drawing& a, const JointRenderer::Drawing& b)
 {
-    if (a.kind != b.kind || a.derivation.ok != b.derivation.ok) return false;
+    // `selected` decides a drawn pixel, so it belongs in the change check: a
+    // joint that has just become the selected one must be REBUILT, not skipped
+    // as unchanged.
+    if (a.kind != b.kind || a.derivation.ok != b.derivation.ok || a.selected != b.selected)
+        return false;
     if (!a.derivation.ok) return true;   // a broken joint draws nothing either way
     if (!sameContact(a.derivation.contact, b.derivation.contact)) return false;
     if (a.derivation.items.size() != b.derivation.items.size()) return false;
@@ -202,6 +211,7 @@ void JointRenderer::detach()
     myObjects.clear();
     myDrawings.clear();
     myJointsDrawn = 0;
+    myJointsHighlighted = 0;
     myContext.Nullify();
 }
 
@@ -221,6 +231,7 @@ bool JointRenderer::clear()
     myObjects.clear();
     myDrawings.clear();
     myJointsDrawn = 0;
+    myJointsHighlighted = 0;
     return had;
 }
 
@@ -251,7 +262,7 @@ std::vector<TopoDS_Shape> JointRenderer::shapes() const
     return out;
 }
 
-void JointRenderer::addPiece(const Piece& piece, const QColor& colour)
+void JointRenderer::addPiece(const Piece& piece, const QColor& colour, bool selected)
 {
     if (myContext.IsNull() || piece.shape.IsNull()) return;
     BRepMesh_IncrementalMesh(piece.shape, kMeshDeflectionMm, Standard_False, kMeshAngleRad,
@@ -259,7 +270,7 @@ void JointRenderer::addPiece(const Piece& piece, const QColor& colour)
     Handle(AIS_Shape) object = new AIS_Shape(piece.shape);
     object->SetDisplayMode(AIS_Shaded);
     object->SetColor(toOcct(colour));
-    object->SetTransparency(kGhostTransparency);
+    object->SetTransparency(selected ? kSelectedTransparency : kGhostTransparency);
     // A housing, tenon or lap reads as an outlined channel or block over its
     // ghost fill - the spec's own picture; a pin is hardware, not a drawing of
     // it. The outline gets a line aspect of its OWN, set after SetColor, so
@@ -283,14 +294,18 @@ void JointRenderer::build()
 {
     ++myBuildCount;
     myJointsDrawn = 0;
+    myJointsHighlighted = 0;
     if (myContext.IsNull()) return;
 
     // Fresh on every build - never cached across a themeChanged broadcast.
     const QColor colour = Theme::accent();
     for (const Drawing& drawing : myDrawings) {
         const std::size_t before = myObjects.size();
-        for (const Piece& piece : piecesFor(drawing)) addPiece(piece, colour);
-        if (myObjects.size() > before) ++myJointsDrawn;
+        for (const Piece& piece : piecesFor(drawing)) addPiece(piece, colour, drawing.selected);
+        if (myObjects.size() > before) {
+            ++myJointsDrawn;
+            if (drawing.selected) ++myJointsHighlighted;
+        }
     }
 }
 

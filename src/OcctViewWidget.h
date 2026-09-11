@@ -793,13 +793,21 @@ public:
     // renderModeActive(), not merely cleared once on entry, because the
     // callers that re-show joints (appStateChanged) fire on changes that do
     // not exit render mode.
+    //
+    // `selectedIndex` is the entry drawn as the SELECTED joint (Task 13) - an
+    // index into `derivations`, or -1 for none. An index rather than a joint
+    // id, because this widget knows nothing about document ids and the caller
+    // (MainWindow::refreshJoints(), the one place that decides what is drawn)
+    // already has both lists in hand.
     void showJoints(const std::vector<Joinery::Derivation>& derivations,
-                    const std::vector<Joinery::Kind>& kinds);
+                    const std::vector<Joinery::Kind>& kinds, int selectedIndex = -1);
     void clearJoints();
     // Joints drawn (a joint with at least one piece of hardware on screen),
     // and the pieces of hardware themselves.
     int jointsShown() const { return myJointRenderer.shown(); }
     int jointItemsShown() const { return myJointRenderer.itemsShown(); }
+    // Of those, how many are drawn as the selected joint - 0 or 1.
+    int jointsHighlighted() const { return myJointRenderer.highlightedShown(); }
     // The hardware solids actually displayed - for measuring where the drawn
     // hardware IS against the wood, rather than rebuilding it a second way.
     std::vector<TopoDS_Shape> jointShapesShown() const { return myJointRenderer.shapes(); }
@@ -959,6 +967,25 @@ public:
     // the pixel it clicks is a test that silently stops hitting what it meant
     // to the moment the camera or the model changes.
     bool projectToScreen(const gp_Pnt& world, QPoint& out) const;
+
+    // Whether the view can be PROJECTED THROUGH right now - which is not the
+    // same question as whether it exists, and the difference is a crash.
+    //
+    // initializeViewer() creates the V3d_View with no window at all; it is
+    // initializeGL(), Qt's own callback, that hands it one. A view in that gap
+    // is non-null and cannot Convert(): the conversion goes through the window
+    // it has not been given yet. `myView.IsNull()` is the half that was already
+    // asked; this is the half that was missing.
+    //
+    // The gap is REACHABLE, and not rarely: a GL-context-loss recovery calls
+    // MainWindow::resyncView(), which re-displays every solid, and the
+    // initializeViewer() inside that rebuild pushes the camera - so the
+    // cameraChanged it emits reaches every overlay that follows a projected
+    // point WHILE the view is still windowless. Found by JointChip, which is
+    // the first overlay able to be alive there (the joint selection survives a
+    // context loss by Task 12's rule, while a face, edge or body selection does
+    // not), but nothing about that is particular to the chip.
+    bool viewReady() const;
 
     // Snapping applies to points reported while sketching, not to the camera.
     void setSnap(bool enabled, double step);

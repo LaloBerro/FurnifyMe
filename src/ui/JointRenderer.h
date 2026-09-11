@@ -36,6 +36,21 @@ public:
     struct Drawing {
         Joinery::Kind kind = Joinery::Kind::Dowel;
         Joinery::Derivation derivation;
+        // The joint the user has picked (joinery, Task 13) - drawn at full
+        // strength where every other joint is ghosted, so the chip beside it
+        // visibly belongs to something.
+        //
+        // The DIFFERENCE is the strength, not the colour, and that is a
+        // measured choice rather than a preference: a selected joint's two
+        // pieces are themselves selected, and the viewport paints a selected
+        // body OPAQUE in Theme::highlightSelected() (see
+        // OcctViewWidget::applyTheme(), which sets that style's transparency to
+        // 0). Hardware drawn in the same token, inside those pieces, in a layer
+        // that clears depth, would be orange ghosted over orange - invisible
+        // exactly when it matters. Theme::accent() is the app's selected-and-
+        // checked colour everywhere a joint is listed (the drawer's selected
+        // row wears it), and it reads against the selection tint.
+        bool selected = false;
     };
 
     // One piece of hardware as a B-rep solid, and whether it wears an outline.
@@ -92,6 +107,8 @@ public:
     // joint, and itemsShown() says three.
     int shown() const { return myJointsDrawn; }
     int itemsShown() const { return static_cast<int>(myObjects.size()); }
+    // How many of those are drawn as the SELECTED joint - see Drawing::selected.
+    int highlightedShown() const { return myJointsHighlighted; }
     // The solids actually displayed, in display order - what a measurement of
     // "where is the hardware" has to read, rather than a second build of it.
     std::vector<TopoDS_Shape> shapes() const;
@@ -104,12 +121,13 @@ private:
     // Builds myDrawings into myObjects. Reads Theme::accent() fresh on every
     // call - nothing here caches a colour across a themeChanged broadcast.
     void build();
-    void addPiece(const Piece& piece, const QColor& colour);
+    void addPiece(const Piece& piece, const QColor& colour, bool selected);
 
     Handle(AIS_InteractiveContext) myContext;
     std::vector<Handle(AIS_Shape)> myObjects;
     std::vector<Drawing> myDrawings;
     int myJointsDrawn = 0;
+    int myJointsHighlighted = 0;
     int myBuildCount = 0;
     Graphic3d_ZLayerId myLayer = Graphic3d_ZLayerId_UNKNOWN;
 };

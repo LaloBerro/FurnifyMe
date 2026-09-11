@@ -44,6 +44,7 @@
 #include "IconSet.h"
 #include "ItemsPanel.h"
 #include "Joinery.h"
+#include "JointChip.h"
 #include "JointsPanel.h"
 #include "MainWindow.h"
 #include "Measure.h"
@@ -840,6 +841,7 @@ constexpr BlockInfo kBlocks[] = {
     { "joints-draw-as-ghosted-hardware-in-the-viewport", false, true },
     { "placing-a-joint-between-two-pieces", false, true },
     { "the-joints-drawer-lists-rows-and-mark-out-numbers", false, true },
+    { "the-joint-chip-edits-a-joint-through-one-checkpoint", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -24015,6 +24017,18 @@ int main(int argc, char* argv[])
         JointsPanel* lagDrawer = probe.jointsPanel();
         if (lagDrawer != nullptr && lagDrawer->rowCount() > 0) lagDrawer->expandRow(0);
         settle(250);
+        // (joinery Task 13) And the joint's own chip, which is one more overlay
+        // charged to every orbit frame - measured in its heaviest state, More
+        // open, with its kind menu closed (a menu is transient; a card that
+        // stands beside a selected joint is not).
+        if (!probe.document().joints().empty())
+            probe.setSelectedJoint(probe.document().joints().front().id);
+        settle(200);
+        JointChip* lagChip = probe.jointChip();
+        if (lagChip != nullptr && lagChip->isVisible()) lagChip->setMoreOpen(true);
+        settle(200);
+        check(lagChip != nullptr && lagChip->isVisible() && lagChip->moreOpen(),
+              "orbit pacing: measured with the joint's chip up and its More fields open");
         check(lagDrawer != nullptr && lagDrawer->isVisible() && lagDrawer->rowCount() == 1 &&
                   lagDrawer->isExpandedAt(0) && lagDrawer->stripCountAt(0) > 0,
               QStringLiteral("orbit pacing: measured with the joints drawer open and its row opened "
@@ -24174,6 +24188,19 @@ int main(int argc, char* argv[])
             return paintClock.nsecsElapsed() / 1.0e6 / kPasses;
         };
 
+        // Render mode CLEARS the selection on entry (OcctViewWidget::setRenderMode()),
+        // which ends the joint selection and takes the chip down with it - so the joint
+        // is picked again here, before any card is priced. Without this the chip is
+        // hidden and priceCard() reports it as "nothing to price", which is a budget
+        // check quietly measuring nothing.
+        if (!probe.document().joints().empty())
+            probe.setSelectedJoint(probe.document().joints().front().id);
+        settle(200);
+        if (lagChip != nullptr && lagChip->isVisible()) lagChip->setMoreOpen(true);
+        settle(200);
+        check(lagChip != nullptr && lagChip->isVisible() && lagChip->moreOpen(),
+              "orbit pacing: the joint's chip is up again, More open, for the per-card pricing");
+
         double treeMs = 0.0;
         QString priceLine;
         // A COPY of the child list, never the live one. The first render()
@@ -24235,6 +24262,17 @@ int main(int argc, char* argv[])
               QStringLiteral("one joints-drawer repaint, a row open to its rulers, fits inside half "
                              "a 60 Hz frame (%1 ms) - it too is charged to every orbit frame")
                   .arg(drawerMs, 0, 'f', 3));
+        // The joint's chip priced by name on the same terms (Task 13): every
+        // string it paints is prepared in relayout(), so a repaint is prepared
+        // text, two rects and a line.
+        const double chipMs = priceCard(lagChip);
+        std::printf("[orbit-pacing] joint chip (More open) = %.3f ms\n", chipMs);
+        check(chipMs >= 0.0 && chipMs < 8.0,
+              QStringLiteral("one joint-chip repaint, More open, fits inside half a 60 Hz frame "
+                             "(%1 ms) - it is charged to every orbit frame too")
+                  .arg(chipMs, 0, 'f', 3));
+        check(lagChip != nullptr && pricedCards.contains(lagChip),
+              "and the overlay-tree sweep priced the joint chip as well");
 
         // And the structural half, which needs no clock at all: the app mark
         // is rasterized ONCE and handed out from a cache. A QPixmap built
@@ -29921,6 +29959,830 @@ int main(int argc, char* argv[])
         check(dw.findChild<QDialog*>() == nullptr, "drawer: no modal appeared for any of it");
 
         dw.close();
+        settle(150);
+    }
+
+    // --- the joint's chip: kind, numbers, and which piece is cut (Task 13) ---
+    // Self-contained. Three joints on ONE pair of pieces - a dowel, a dado and
+    // a pocket screw - because every check below is about the CARD rather than
+    // about the geometry, and one contact that provably takes all three keeps
+    // the fixture honest without seeding a furniture per kind. A half-lap does
+    // NOT fit that contact, which is exactly what the kind menu has to grey.
+    if (blockEnabled("the-joint-chip-edits-a-joint-through-one-checkpoint")) {
+        RequiredTempDir chipDir;
+        constexpr double kBoardMm = 18.0;
+        QString chipFurnitureId;
+        {
+            FurnitureStore seedStore(chipDir.path());
+            chipFurnitureId = seedStore.createFurniture(QStringLiteral("Joint chip"));
+            DocumentModel seedDoc;
+            const TopoDS_Shape panelShape =
+                ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), kBoardMm, 300.0, 400.0);
+            const TopoDS_Shape shelfShape =
+                ModelingOps::makeBox(gp_Pnt(kBoardMm, 0.0, 200.0), 400.0, 300.0, kBoardMm);
+            const int panelId = seedDoc.addSolid(panelShape);
+            const int shelfId = seedDoc.addSolid(shelfShape);
+            // A name spelled with a banned word: the chip's sweep has to exempt
+            // the user's own words and nothing else.
+            check(seedDoc.renameSolid(panelId, "Fuse panel"),
+                  "chip: the host piece carries a user name with a banned word in it");
+            const Joinery::ContactResult meet = Joinery::findContact(panelShape, shelfShape);
+            check(meet.ok, QStringLiteral("chip: the two pieces meet (%1)")
+                               .arg(QString::fromStdString(meet.error)));
+            Joinery::Parameters dowel = Joinery::defaultsForContact(Joinery::Kind::Dowel, meet.contact);
+            const int dowelJoint = seedDoc.addJoint(Joinery::Kind::Dowel, panelId, shelfId, dowel);
+            // An adjustment, so "a kind switch clears the adjustments" has
+            // something to clear - and a non-default one, so its return after an
+            // undo is a real restoration rather than a struct default.
+            check(seedDoc.setJointAdjustments(dowelJoint, {Joinery::Adjustment{1, 7.5, -2.25}}),
+                  "chip: the dowel joint carries an adjustment");
+            const int dadoJoint = seedDoc.addJoint(
+                Joinery::Kind::Dado, panelId, shelfId,
+                Joinery::defaultsForContact(Joinery::Kind::Dado, meet.contact));
+            const int pocketJoint = seedDoc.addJoint(
+                Joinery::Kind::PocketScrew, panelId, shelfId,
+                Joinery::defaultsForContact(Joinery::Kind::PocketScrew, meet.contact));
+            check(dowelJoint > 0 && dadoJoint > 0 && pocketJoint > 0 &&
+                      !chipFurnitureId.isEmpty() &&
+                      seedStore.saveFurniture(chipFurnitureId, seedDoc, QImage()),
+                  "chip: two pieces and three joints are seeded to disk");
+        }
+
+        MainWindow cw(nullptr, /*persistProgress=*/false, chipDir.path());
+        cw.setAttribute(Qt::WA_ShowWithoutActivating);
+        cw.resize(1180, 820);
+        cw.show();
+        settle(300);
+        OcctViewWidget* cv = cw.view();
+        cv->setAnimationsEnabled(false);
+        check(cw.openFurniture(chipFurnitureId), "chip: the seeded furniture opens");
+        settle(300);
+        cv->fitAll();
+        settle(250);
+        ToastHost* toasts = cw.findChild<ToastHost*>();
+        const auto toastText = [&]() { return toasts ? toasts->currentText() : QString(); };
+
+        JointChip* chip = cw.jointChip();
+        check(chip != nullptr && chip == cw.findChild<JointChip*>(),
+              "chip: the window builds one joint chip, parented to the viewport");
+        check(chip != nullptr && !chip->isVisible(),
+              "chip: with no joint selected it is not on screen");
+
+        const std::vector<DocumentModel::Solid>& solids = cw.document().solids();
+        const std::vector<DocumentModel::Joint>& joints = cw.document().joints();
+        check(solids.size() == 2 && joints.size() == 3,
+              QStringLiteral("chip: two pieces and three joints are open (%1, %2)")
+                  .arg(solids.size()).arg(joints.size()));
+        if (chip != nullptr && solids.size() == 2 && joints.size() == 3) {
+            const int panel = solids[0].id;
+            const int shelf = solids[1].id;
+            const int jDowel = joints[0].id;
+            const int jDado = joints[1].id;
+            const int jPocket = joints[2].id;
+            const auto jointById = [&](int id) {
+                DocumentModel::Joint joint;
+                cw.jointOf(id, joint);
+                return joint;
+            };
+            const auto derivationOf = [&](int id) {
+                Joinery::Derivation derivation;
+                cw.jointDerivationOf(id, derivation);
+                return derivation;
+            };
+            const auto sendKeyTo = [&](QWidget* target, int key) {
+                QKeyEvent press(QEvent::KeyPress, key, Qt::NoModifier);
+                QCoreApplication::sendEvent(target, &press);
+                settle(250);
+            };
+            // Every widget that installs an application-wide Enter/Escape claim
+            // (KeyClaim, plus the mirror gesture's own chip, which is a local
+            // class and so is counted through the state that shows it).
+            // CLAUDE.md allows at most ONE at a time.
+            const auto claimants = [&]() {
+                int live = 0;
+                if (ExtrudePreview* preview = cw.findChild<ExtrudePreview*>())
+                    live += preview->isVisible() ? 1 : 0;
+                if (PullArrow* pull = cw.findChild<PullArrow*>()) live += pull->isVisible() ? 1 : 0;
+                if (BevelArrow* bevel = cw.findChild<BevelArrow*>())
+                    live += bevel->isVisible() ? 1 : 0;
+                if (MoveTool* move = cw.findChild<MoveTool*>()) live += move->isVisible() ? 1 : 0;
+                live += chip->isVisible() ? 1 : 0;
+                live += cv->mirrorPlacementActive() ? 1 : 0;
+                return live;
+            };
+            // AN UNDO ENDS THE JOINT SELECTION - resyncView() clears it, which
+            // is Task 12's own rule (joint ids restart per document, and an undo
+            // is the other thing that ends one) and is pinned by the drawer
+            // block. So the card goes down with every Undo below, and a check
+            // that wants it back asks for the joint again rather than assuming
+            // it survived.
+            const auto reselect = [&](int jointId, bool openMore) {
+                cw.setSelectedJoint(jointId);
+                settle(250);
+                if (openMore && chip->hasMore()) chip->setMoreOpen(true);
+                settle(200);
+                return chip->isVisible();
+            };
+            // Never dereferenced on faith: a card that does not carry the field
+            // a check is about must fail that check, not take the suite down
+            // with it.
+            const auto fieldOf = [&](JointChip::Slot slot) -> QLineEdit* {
+                QLineEdit* edit = chip->fieldFor(slot);
+                if (edit == nullptr)
+                    check(false, "chip: (the card carries the field this check is about)");
+                return edit;
+            };
+
+            // --- selecting a joint raises the card, small ---------------------
+            cw.setSelectedJoint(jDowel);
+            settle(250);
+            std::vector<int> selected = cv->selectedSolidIds();
+            std::sort(selected.begin(), selected.end());
+            std::vector<int> pieces = {panel, shelf};
+            std::sort(pieces.begin(), pieces.end());
+            check(cw.selectedJointId() == jDowel && chip->isVisible() &&
+                      chip->jointId() == jDowel && cw.jointChipJointId() == jDowel,
+                  "chip: selecting a joint puts its card on screen");
+            check(selected == pieces && cv->selectionKind() == OcctViewWidget::PickKind::Body,
+                  QStringLiteral("chip: and selects the joint's own two pieces, whole (%1 of 2)")
+                      .arg(selected.size()));
+            check(chip->labelText() == QStringLiteral("Dowel") &&
+                      chip->hintText() == QStringLiteral("Enter applies, Esc cancels"),
+                  QStringLiteral("chip: it names the kind and both keys (\"%1\", \"%2\")")
+                      .arg(chip->labelText(), chip->hintText()));
+            QLineEdit* countField = chip->fieldFor(JointChip::Slot::Count);
+            check(countField != nullptr && countField->isVisible() &&
+                      countField->text() == QStringLiteral("3"),
+                  QStringLiteral("chip: carrying the fastener family's own number, the count (\"%1\")")
+                      .arg(countField ? countField->text() : QString()));
+            check(!chip->moreOpen() && chip->fieldFor(JointChip::Slot::Size) != nullptr &&
+                      !chip->fieldFor(JointChip::Slot::Size)->isVisible() &&
+                      !chip->fieldFor(JointChip::Slot::Inset)->isVisible(),
+                  "chip: and it opens SMALL - size, inset and the drill depths are behind More");
+            check(chip->width() % 4 == 0 && chip->height() % 4 == 0,
+                  QStringLiteral("chip: its size covers whole device pixels at every quarter-step "
+                                 "scale (%1x%2)")
+                      .arg(chip->width()).arg(chip->height()));
+
+            const QImage smallShot = printWindowCapture(
+                &cw, outDir + QStringLiteral("/joint-chip-small.png"));
+            checkNoBlackLine(smallShot, QStringLiteral("joint chip (small)"));
+
+            // --- the SELECTED joint is drawn differently from an unselected one
+            // Both dumps are taken with the two pieces selected and the drawer
+            // OPEN, so the only difference between them is which joint is the
+            // selected one - the body selection's own orange tint is in both.
+            {
+                QAction* drawerAction = action(cw, QStringLiteral("Joints"));
+                if (drawerAction != nullptr && !drawerAction->isChecked()) drawerAction->trigger();
+                settle(250);
+                check(cw.jointsDrawerOpen() && cv->jointsShown() == 3,
+                      QStringLiteral("chip: (the drawer is open, so all three joints are drawn - %1)")
+                          .arg(cv->jointsShown()));
+                check(cv->jointsHighlighted() == 1,
+                      QStringLiteral("chip: exactly one of them is drawn as the selected joint (%1)")
+                          .arg(cv->jointsHighlighted()));
+                const QString selectedPath = outDir + QStringLiteral("/joint-chip-selected.png");
+                const QString twicePath = outDir + QStringLiteral("/joint-chip-selected-again.png");
+                const QString plainPath = outDir + QStringLiteral("/joint-chip-unselected.png");
+                const bool selectedDumped = cv->saveSnapshot(selectedPath);
+                // The SAME state dumped twice: the noise floor this scene has,
+                // measured rather than assumed, so the count below is compared
+                // against something instead of against a number picked by feel.
+                const bool twiceDumped = cv->saveSnapshot(twicePath);
+                // The same scene with NO joint selected: the pieces stay
+                // selected (setSelectedSolids keeps the tint) so the only pixels
+                // that can move are the hardware's own.
+                cw.setSelectedJoint(0);
+                cv->setSelectedSolids({panel, shelf});
+                settle(250);
+                const bool plainDumped = cv->saveSnapshot(plainPath);
+                check(cw.selectedJointId() == 0 && cv->jointsShown() == 3 &&
+                          cv->jointsHighlighted() == 0,
+                      QStringLiteral("chip: with none selected all three are drawn ghosted (%1 "
+                                     "highlighted)")
+                          .arg(cv->jointsHighlighted()));
+                const QImage selectedShot(selectedPath);
+                const QImage twiceShot(twicePath);
+                const QImage plainShot(plainPath);
+                const auto pixelsApart = [](const QImage& a, const QImage& b) {
+                    if (a.isNull() || b.isNull() || a.size() != b.size()) return -1;
+                    int count = 0;
+                    for (int y = 0; y < a.height(); ++y) {
+                        for (int x = 0; x < a.width(); ++x) {
+                            if (colorDistance(a.pixelColor(x, y), b.pixelColor(x, y)) > 24.0)
+                                ++count;
+                        }
+                    }
+                    return count;
+                };
+                const int noise = pixelsApart(selectedShot, twiceShot);
+                const int moved = pixelsApart(selectedShot, plainShot);
+                std::printf("[info] chip: the same scene dumped twice differs in %d pixels; "
+                            "selected against unselected, %d\n",
+                            noise, moved);
+                check(selectedDumped && twiceDumped && noise == 0,
+                      QStringLiteral("chip: (the scene is stable - two dumps of it are identical, "
+                                     "%1 pixels apart)")
+                          .arg(noise));
+                check(plainDumped && moved > 40 && moved > noise * 10,
+                      QStringLiteral("chip: and the selected joint's own pixels differ from an "
+                                     "unselected one's - %1 pixels, against a noise floor of %2")
+                          .arg(moved).arg(noise));
+                if (drawerAction != nullptr && drawerAction->isChecked()) drawerAction->trigger();
+                settle(200);
+                cw.setSelectedJoint(jDowel);
+                settle(250);
+                check(chip->isVisible() && cv->jointsShown() == 1 && cv->jointsHighlighted() == 1,
+                      "chip: (back to the drawer closed, with the dowel joint selected alone)");
+            }
+
+            // --- Enter applies, as ONE checkpoint ------------------------------
+            {
+                const std::size_t undoBefore = cw.document().undoDepth();
+                const int itemsBefore = cv->jointItemsShown();
+                countField->setText(QStringLiteral("5"));
+                settle(150);
+                // Delivered to the VIEWPORT, not to the field: the claim is
+                // application-wide, which is the whole reason it exists - a drag
+                // or an orbit takes focus away from the card mid-edit.
+                sendKeyTo(cv, Qt::Key_Return);
+                check(jointById(jDowel).params.count == 5,
+                      QStringLiteral("chip: Enter applies the typed count (%1)")
+                          .arg(jointById(jDowel).params.count));
+                check(cw.document().undoDepth() == undoBefore + 1,
+                      QStringLiteral("chip: through exactly ONE checkpoint (%1 -> %2)")
+                          .arg(undoBefore).arg(cw.document().undoDepth()));
+                check(cv->jointItemsShown() == 5 && itemsBefore == 3,
+                      QStringLiteral("chip: and the viewport redrew it - %1 pieces of hardware, was %2")
+                          .arg(cv->jointItemsShown()).arg(itemsBefore));
+                check(toastText() == QStringLiteral("Updated the dowel between %1 and %2")
+                                         .arg(QString::fromStdString(cw.document().nameOf(panel)),
+                                              QString::fromStdString(cw.document().nameOf(shelf))),
+                      QStringLiteral("chip: reported by name (\"%1\")").arg(toastText()));
+                check(toasts != nullptr && toasts->remainingMs() > 0 &&
+                          toasts->remainingMs() <= 4000 && toasts->undoControl() != nullptr &&
+                          toasts->undoControl()->isVisible(),
+                      "chip: as a Note offering Undo");
+
+                trigger(cw, QStringLiteral("Undo"));
+                settle(300);
+                check(jointById(jDowel).params.count == 3,
+                      QStringLiteral("chip: and ONE undo takes it back (%1)")
+                          .arg(jointById(jDowel).params.count));
+                check(!chip->isVisible() && cw.selectedJointId() == 0,
+                      "chip: the undo ends the joint selection, and the card goes down with it");
+                check(reselect(jDowel, /*openMore=*/false) &&
+                          fieldOf(JointChip::Slot::Count) != nullptr &&
+                          fieldOf(JointChip::Slot::Count)->text() == QStringLiteral("3"),
+                      "chip: asking for the joint again brings the card back, seeded from what the "
+                      "undo restored");
+            }
+
+            // --- Escape leaves the joint untouched -----------------------------
+            {
+                const std::size_t undoBefore = cw.document().undoDepth();
+                countField = fieldOf(JointChip::Slot::Count);
+                if (countField) countField->setText(QStringLiteral("9"));
+                settle(150);
+                sendKeyTo(cv, Qt::Key_Escape);
+                check(jointById(jDowel).params.count == 3,
+                      QStringLiteral("chip: Escape leaves the joint exactly as it was (%1)")
+                          .arg(jointById(jDowel).params.count));
+                check(cw.document().undoDepth() == undoBefore,
+                      QStringLiteral("chip: taking no checkpoint at all (%1 -> %2)")
+                          .arg(undoBefore).arg(cw.document().undoDepth()));
+                check(chip->isVisible() && fieldOf(JointChip::Slot::Count) != nullptr &&
+                          fieldOf(JointChip::Slot::Count)->text() == QStringLiteral("3"),
+                      "chip: and puts the field back to the joint's own value");
+            }
+
+            // --- a count can never go below 1 ---------------------------------
+            {
+                const std::size_t undoBefore = cw.document().undoDepth();
+                countField = fieldOf(JointChip::Slot::Count);
+                if (countField) countField->setText(QStringLiteral("0"));
+                settle(150);
+                check(chip->isFieldInvalid(JointChip::Slot::Count),
+                      "chip: a count of 0 marks the field as it is typed");
+                sendKeyTo(cv, Qt::Key_Return);
+                check(jointById(jDowel).params.count == 3 &&
+                          cw.document().undoDepth() == undoBefore,
+                      QStringLiteral("chip: and Enter refuses it - the joint and the undo stack are "
+                                     "untouched (count %1)")
+                          .arg(jointById(jDowel).params.count));
+                check(toastText().contains(QStringLiteral("can't go below 1")),
+                      QStringLiteral("chip: saying why, as a Failure rather than in silence (\"%1\")")
+                          .arg(toastText()));
+                check(toasts != nullptr && toasts->remainingMs() > 7500,
+                      "chip: as a Failure toast");
+                sendKeyTo(cv, Qt::Key_Escape);
+                check(!chip->isFieldInvalid(JointChip::Slot::Count),
+                      "chip: (Escape clears the mark with the value)");
+            }
+
+            // --- More opens the rest inside the same card ----------------------
+            {
+                const int smallHeight = chip->height();
+                const int layoutsBefore = chip->layoutCount();
+                check(chip->hasMore() && chip->moreButton() != nullptr &&
+                          chip->moreButton()->isVisible(),
+                      "chip: a fastener has a More line");
+                if (QPushButton* more = chip->moreButton())
+                    clickAt(more, QPointF(more->width() / 2.0, more->height() / 2.0));
+                settle(250);
+                check(chip->moreOpen() && fieldOf(JointChip::Slot::Size) != nullptr &&
+                          fieldOf(JointChip::Slot::Size)->isVisible() &&
+                          fieldOf(JointChip::Slot::Inset)->isVisible() &&
+                          fieldOf(JointChip::Slot::DepthA)->isVisible() &&
+                          fieldOf(JointChip::Slot::DepthB)->isVisible(),
+                      "chip: More opens size, inset and a drill depth per piece, in the same card");
+                check(chip->height() > smallHeight && chip->height() % 4 == 0 &&
+                          chip->width() % 4 == 0,
+                      QStringLiteral("chip: the card is re-measured onto whole device pixels when "
+                                     "More opens (%1 -> %2 tall)")
+                          .arg(smallHeight).arg(chip->height()));
+                check(chip->layoutCount() > layoutsBefore,
+                      "chip: (which is a real re-layout, not a repaint)");
+
+                // Tab moves between the fields while More is open.
+                QLineEdit* size = fieldOf(JointChip::Slot::Size);
+                QLineEdit* count = fieldOf(JointChip::Slot::Count);
+                if (count != nullptr && size != nullptr) {
+                    count->setFocus();
+                    settle(100);
+                    QKeyEvent tab(QEvent::KeyPress, Qt::Key_Tab, Qt::NoModifier);
+                    QCoreApplication::sendEvent(count, &tab);
+                    settle(150);
+                    check(cw.focusWidget() == size,
+                          "chip: Tab moves from the count to the next field of the same card");
+                }
+
+                // The inset clamp is reachable now: the joint STORES what was
+                // typed, and layout() lands the row on the contact's own edge.
+                const std::size_t undoBefore = cw.document().undoDepth();
+                if (QLineEdit* inset = fieldOf(JointChip::Slot::Inset))
+                    inset->setText(QStringLiteral("500"));
+                settle(150);
+                sendKeyTo(cv, Qt::Key_Return);
+                const Joinery::Derivation clamped = derivationOf(jDowel);
+                check(std::fabs(jointById(jDowel).params.insetMm - 500.0) < 1.0e-9 &&
+                          cw.document().undoDepth() == undoBefore + 1,
+                      QStringLiteral("chip: an out-of-range inset is stored as typed (%1 mm)")
+                          .arg(jointById(jDowel).params.insetMm));
+                check(clamped.ok && !clamped.items.empty() &&
+                          std::fabs(clamped.items.front().v - kBoardMm) < 1.0e-6,
+                      QStringLiteral("chip: and layout() clamps the row onto the contact's own far "
+                                     "edge (v = %1 of %2)")
+                          .arg(clamped.items.empty() ? -1.0 : clamped.items.front().v)
+                          .arg(kBoardMm));
+                trigger(cw, QStringLiteral("Undo"));
+                settle(300);
+                check(reselect(jDowel, /*openMore=*/true) && chip->moreOpen(),
+                      "chip: (the card is back, with More open, for the capture and the unit checks)");
+
+                const QImage moreShot = printWindowCapture(
+                    &cw, outDir + QStringLiteral("/joint-chip-more.png"));
+                checkNoBlackLine(moreShot, QStringLiteral("joint chip (More open)"));
+            }
+
+            // --- what a typed length means follows the displayed unit ----------
+            {
+                trigger(cw, QStringLiteral("Centimetres"));
+                settle(250);
+                check(fieldOf(JointChip::Slot::Size) != nullptr &&
+                          fieldOf(JointChip::Slot::Size)->text() == QStringLiteral("0.6"),
+                      QStringLiteral("chip: switching to centimetres re-seeds the fields in cm "
+                                     "(\"%1\" for a 6 mm dowel)")
+                          .arg(fieldOf(JointChip::Slot::Size)
+                                   ? fieldOf(JointChip::Slot::Size)->text()
+                                   : QString()));
+                bool labelNamesUnit = false;
+                for (const QString& text : chip->paintedTexts())
+                    labelNamesUnit = labelNamesUnit || text.contains(QStringLiteral("(cm)"));
+                check(labelNamesUnit, "chip: and its labels name the unit they are read in");
+                if (QLineEdit* size = fieldOf(JointChip::Slot::Size))
+                    size->setText(QStringLiteral("1"));
+                settle(150);
+                sendKeyTo(cv, Qt::Key_Return);
+                check(std::fabs(jointById(jDowel).params.sizeMm - 10.0) < 1.0e-9,
+                      QStringLiteral("chip: typing 1 with centimetres showing means 10 mm (%1)")
+                          .arg(jointById(jDowel).params.sizeMm));
+                trigger(cw, QStringLiteral("Undo"));
+                settle(250);
+                trigger(cw, QStringLiteral("Millimetres"));
+                settle(250);
+                check(reselect(jDowel, /*openMore=*/false),
+                      "chip: (the card is back in millimetres for the kind menu below)");
+            }
+
+            // --- the kind menu: all ten, grouped, the refused one greyed -------
+            {
+                if (QPushButton* kindButton = chip->kindButton())
+                    clickAt(kindButton,
+                            QPointF(kindButton->width() / 2.0, kindButton->height() / 2.0));
+                settle(250);
+                check(chip->kindMenuOpen() && chip->kindMenu() != nullptr &&
+                          chip->kindMenu()->isVisible(),
+                      "chip: the kind button opens the kind menu");
+                int listed = 0;
+                for (const Joinery::Kind kind :
+                     {Joinery::Kind::Dowel, Joinery::Kind::PocketScrew, Joinery::Kind::Biscuit,
+                      Joinery::Kind::Domino, Joinery::Kind::Screw, Joinery::Kind::Dado,
+                      Joinery::Kind::Rabbet, Joinery::Kind::Groove, Joinery::Kind::MortiseTenon,
+                      Joinery::Kind::HalfLap}) {
+                    if (chip->kindMenuEntry(kind) != nullptr) ++listed;
+                }
+                check(listed == 10, QStringLiteral("chip: listing all ten kinds (%1)").arg(listed));
+                const QStringList menuCopy = chip->paintedTexts();
+                check(menuCopy.contains(QStringLiteral("Fasteners")) &&
+                          menuCopy.contains(QStringLiteral("Housings")) &&
+                          menuCopy.contains(QStringLiteral("Interlocks")),
+                      "chip: grouped as fasteners, housings and interlocks");
+                QAbstractButton* dowelEntry = chip->kindMenuEntry(Joinery::Kind::Dowel);
+                QAbstractButton* lapEntry = chip->kindMenuEntry(Joinery::Kind::HalfLap);
+                check(dowelEntry != nullptr && dowelEntry->isEnabled(),
+                      "chip: the kinds this contact takes are offered");
+                check(lapEntry != nullptr && !lapEntry->isEnabled(),
+                      "chip: a kind it cannot take is greyed");
+                check(chip->kindMenuReason(Joinery::Kind::HalfLap) ==
+                          QString::fromStdString(
+                              Joinery::validityOf(Joinery::Kind::HalfLap,
+                                                  derivationOf(jDowel).contact)),
+                      QStringLiteral("chip: with validityOf's own reason beneath it (\"%1\")")
+                          .arg(chip->kindMenuReason(Joinery::Kind::HalfLap)));
+                check(menuCopy.contains(chip->kindMenuReason(Joinery::Kind::HalfLap)),
+                      "chip: and that reason is genuinely painted, not merely reported");
+
+                const QImage menuShot = printWindowCapture(
+                    &cw, outDir + QStringLiteral("/joint-chip-kind-menu.png"));
+                checkNoBlackLine(menuShot, QStringLiteral("joint chip (kind menu)"));
+
+                // --- picking one: ONE checkpoint, id kept, adjustments cleared
+                const std::size_t undoBefore = cw.document().undoDepth();
+                const DocumentModel::Joint before = jointById(jDowel);
+                check(before.adjustments.size() == 1,
+                      "chip: (the joint about to be switched carries an adjustment)");
+                QAbstractButton* dadoEntry = chip->kindMenuEntry(Joinery::Kind::Dado);
+                check(dadoEntry != nullptr && dadoEntry->isEnabled(),
+                      "chip: (the dado this contact takes is there to pick)");
+                if (dadoEntry != nullptr)
+                    clickAt(dadoEntry, QPointF(dadoEntry->width() / 2.0, dadoEntry->height() / 2.0));
+                settle(300);
+                const DocumentModel::Joint after = jointById(jDowel);
+                check(!chip->kindMenuOpen(), "chip: picking a kind closes the menu");
+                check(after.id == jDowel && after.kind == Joinery::Kind::Dado,
+                      QStringLiteral("chip: the joint KEEPS its id and is now a dado (id %1)")
+                          .arg(after.id));
+                check(cw.document().undoDepth() == undoBefore + 1,
+                      QStringLiteral("chip: through exactly one checkpoint (%1 -> %2)")
+                          .arg(undoBefore).arg(cw.document().undoDepth()));
+                Joinery::ContactResult liveContact;
+                cw.jointContact(jDowel, liveContact);
+                const Joinery::Parameters expected =
+                    Joinery::defaultsForContact(Joinery::Kind::Dado, liveContact.contact);
+                check(liveContact.ok &&
+                          std::fabs(after.params.depthAMm - expected.depthAMm) < 1.0e-9 &&
+                          std::fabs(after.params.widthMm - expected.widthMm) < 1.0e-9,
+                      "chip: with the parameters re-defaulted from its live contact");
+                check(after.adjustments.empty(),
+                      QStringLiteral("chip: and its adjustments cleared - a new kind lays out a "
+                                     "different item set (%1 left)")
+                          .arg(after.adjustments.size()));
+                check(toastText() ==
+                          QStringLiteral("The joint between %1 and %2 is now a dado")
+                              .arg(QString::fromStdString(cw.document().nameOf(panel)),
+                                   QString::fromStdString(cw.document().nameOf(shelf))),
+                      QStringLiteral("chip: reported by name (\"%1\")").arg(toastText()));
+                check(chip->labelText() == QStringLiteral("Dado") &&
+                          chip->fieldFor(JointChip::Slot::DepthA) != nullptr &&
+                          chip->fieldFor(JointChip::Slot::DepthA)->isVisible() &&
+                          chip->fieldFor(JointChip::Slot::Count) == nullptr,
+                      "chip: and the card now carries a housing's own number, the depth");
+
+                trigger(cw, QStringLiteral("Undo"));
+                settle(300);
+                const DocumentModel::Joint restored = jointById(jDowel);
+                check(restored.id == jDowel && restored.kind == Joinery::Kind::Dowel &&
+                          restored.params.count == before.params.count &&
+                          restored.adjustments.size() == 1,
+                      "chip: ONE undo restores the kind, its parameters and its adjustments together");
+                if (restored.adjustments.size() == 1) {
+                    check(std::fabs(restored.adjustments.front().du - 7.5) < 1.0e-9 &&
+                              restored.adjustments.front().index == 1,
+                          "chip: the adjustment exactly as it was");
+                }
+            }
+
+            // --- "Cut into": the user chooses the host -------------------------
+            {
+                check(reselect(jDado, /*openMore=*/true),
+                      "chip: (the dado's own card is up for the host choice)");
+                const DocumentModel::Joint before = jointById(jDado);
+                check(chip->jointId() == jDado && before.kind == Joinery::Kind::Dado,
+                      "chip: the dado's card is up, with More open");
+                QPushButton* hostA = chip->hostButtonFor(before.bodyA);
+                QPushButton* hostB = chip->hostButtonFor(before.bodyB);
+                check(hostA != nullptr && hostB != nullptr && hostA != hostB,
+                      "chip: a housing offers both pieces as the one it is cut into");
+                check(hostA != nullptr && hostA->isChecked() && hostB != nullptr &&
+                          !hostB->isChecked(),
+                      "chip: with the host it has now marked");
+                const std::size_t undoBefore = cw.document().undoDepth();
+                if (hostB != nullptr)
+                    clickAt(hostB, QPointF(hostB->width() / 2.0, hostB->height() / 2.0));
+                settle(300);
+                const DocumentModel::Joint swapped = jointById(jDado);
+                check(swapped.id == jDado && swapped.bodyA == before.bodyB &&
+                          swapped.bodyB == before.bodyA,
+                      QStringLiteral("chip: picking the other piece swaps the host, id kept (%1)")
+                          .arg(swapped.id));
+                check(cw.document().undoDepth() == undoBefore + 1,
+                      QStringLiteral("chip: through one checkpoint (%1 -> %2)")
+                          .arg(undoBefore).arg(cw.document().undoDepth()));
+                const Joinery::ContactResult swappedContact = Joinery::findContact(
+                    cw.document().shapeOf(before.bodyB), cw.document().shapeOf(before.bodyA));
+                const Joinery::Parameters expected =
+                    Joinery::defaultsForContact(Joinery::Kind::Dado, swappedContact.contact);
+                check(swappedContact.ok &&
+                          std::fabs(swapped.params.depthAMm - expected.depthAMm) < 1.0e-9,
+                      QStringLiteral("chip: with the parameters re-defaulted from the SWAPPED "
+                                     "contact (%1 mm deep)")
+                          .arg(swapped.params.depthAMm));
+                check(toastText() ==
+                          QStringLiteral("The dado is now cut into %1")
+                              .arg(QString::fromStdString(cw.document().nameOf(swapped.bodyA))),
+                      QStringLiteral("chip: reported by name (\"%1\")").arg(toastText()));
+                trigger(cw, QStringLiteral("Undo"));
+                settle(300);
+                const DocumentModel::Joint back = jointById(jDado);
+                check(back.id == jDado && back.bodyA == before.bodyA && back.bodyB == before.bodyB &&
+                          std::fabs(back.params.depthAMm - before.params.depthAMm) < 1.0e-9,
+                      "chip: and one undo restores the original orientation and its parameters");
+            }
+
+            // --- "Drilled from": a pocket screw's own face ---------------------
+            {
+                check(reselect(jPocket, /*openMore=*/true),
+                      "chip: (the pocket screw's card is up, with More open)");
+                QPushButton* insetFace = chip->drilledFromButton(Joinery::DrilledFrom::InsetFace);
+                QPushButton* farFace = chip->drilledFromButton(Joinery::DrilledFrom::OppositeFace);
+                check(insetFace != nullptr && farFace != nullptr && insetFace->isChecked() &&
+                          !farFace->isChecked(),
+                      "chip: a pocket screw offers the two faces it can be drilled from");
+                check(chip->jointId() == jPocket &&
+                          jointById(jPocket).params.drilledFrom == Joinery::DrilledFrom::InsetFace,
+                      "chip: (starting from the default face)");
+
+                // Which way the drawn pin leans, measured off the hardware the
+                // viewport is actually showing - not a second build of it.
+                const auto drawnLean = [&]() {
+                    const Joinery::Derivation derivation = derivationOf(jPocket);
+                    double side = 0.0;
+                    if (!derivation.ok || derivation.items.empty()) return side;
+                    const gp_Dir across = derivation.contact.runsAlongU()
+                                              ? derivation.contact.frame.YDirection()
+                                              : derivation.contact.frame.XDirection();
+                    for (const TopoDS_Shape& pin : cv->jointShapesShown()) {
+                        for (TopExp_Explorer it(pin, TopAbs_FACE); it.More(); it.Next()) {
+                            BRepAdaptor_Surface surface(TopoDS::Face(it.Current()));
+                            if (surface.GetType() != GeomAbs_Cylinder) continue;
+                            const gp_Dir axis = surface.Cylinder().Axis().Direction();
+                            const double along = axis.Dot(derivation.contact.frame.Direction());
+                            // The pin's own axis, oriented from A toward B, and
+                            // how far it leans across the joint.
+                            side = (along < 0.0 ? -1.0 : 1.0) * axis.Dot(across);
+                            return side;
+                        }
+                    }
+                    return side;
+                };
+                const double leanBefore = drawnLean();
+                const std::size_t undoBefore = cw.document().undoDepth();
+                if (farFace != nullptr)
+                    clickAt(farFace, QPointF(farFace->width() / 2.0, farFace->height() / 2.0));
+                settle(200);
+                check(jointById(jPocket).params.drilledFrom == Joinery::DrilledFrom::InsetFace &&
+                          cw.document().undoDepth() == undoBefore,
+                      "chip: picking the other face is PENDING - it is a parameter, so Enter applies it");
+                sendKeyTo(cv, Qt::Key_Return);
+                check(jointById(jPocket).params.drilledFrom == Joinery::DrilledFrom::OppositeFace &&
+                          cw.document().undoDepth() == undoBefore + 1,
+                      "chip: Enter applies it through one checkpoint");
+                const double leanAfter = drawnLean();
+                std::printf("[info] chip: the drawn pocket screw leans %+.4f, then %+.4f\n",
+                            leanBefore, leanAfter);
+                check(std::fabs(leanBefore) > 0.05 && std::fabs(leanAfter) > 0.05 &&
+                          leanBefore * leanAfter < 0.0,
+                      QStringLiteral("chip: and the DRAWN pin leans the other way (%1 -> %2)")
+                          .arg(leanBefore, 0, 'f', 4).arg(leanAfter, 0, 'f', 4));
+                trigger(cw, QStringLiteral("Undo"));
+                settle(300);
+                check(jointById(jPocket).params.drilledFrom == Joinery::DrilledFrom::InsetFace,
+                      "chip: one undo puts the face back");
+            }
+
+            // --- More does not persist -----------------------------------------
+            {
+                cw.setSelectedJoint(jPocket);
+                settle(200);
+                chip->setMoreOpen(true);
+                settle(200);
+                check(chip->moreOpen(), "chip: (More is open on this joint)");
+                cv->clearSelection();
+                settle(250);
+                check(!chip->isVisible() && cw.selectedJointId() == 0,
+                      "chip: clearing the selection takes the card away with the joint selection");
+                cw.setSelectedJoint(jPocket);
+                settle(250);
+                check(chip->isVisible() && !chip->moreOpen(),
+                      "chip: and it comes back SMALL - More does not persist across a deselection");
+            }
+
+            // --- disjoint from every other gesture, one claim at a time ---------
+            {
+                cw.setSelectedJoint(jDowel);
+                settle(250);
+                check(chip->isVisible() && claimants() == 1,
+                      QStringLiteral("chip: with a joint selected the card is the only live "
+                                     "Enter/Escape claim (%1)")
+                          .arg(claimants()));
+
+                QPoint at;
+                TopoDS_Edge edge;
+                const bool pickedEdge = pickEdgeOf(cw, shelf, at, edge);
+                settle(250);
+                BevelArrow* bevel = cw.findChild<BevelArrow*>();
+                check(pickedEdge && bevel != nullptr && bevel->isVisible(),
+                      "chip: (an edge is picked, so the bevel arrow is up)");
+                check(!chip->isVisible() && cw.jointChipJointId() == 0,
+                      "chip: the joint chip and the bevel arrow are never both visible");
+                check(claimants() == 1,
+                      QStringLiteral("chip: still exactly one claim (%1)").arg(claimants()));
+
+                TopoDS_Face face;
+                const bool pickedFace = pickFaceOf(cw, shelf, at, face);
+                settle(250);
+                PullArrow* pull = cw.findChild<PullArrow*>();
+                check(pickedFace && pull != nullptr && pull->isVisible() && !chip->isVisible(),
+                      "chip: nor it and the face pull");
+                check(claimants() == 1,
+                      QStringLiteral("chip: still exactly one claim (%1)").arg(claimants()));
+
+                const bool pickedBody = pickBodyOf(cw, shelf);
+                settle(250);
+                check(pickedBody && cw.moveToolBodyId() == shelf && !chip->isVisible(),
+                      QStringLiteral("chip: nor it and the transform gizmo, which needs exactly one "
+                                     "body (gizmo on %1, shelf is %2)")
+                          .arg(cw.moveToolBodyId()).arg(shelf));
+                // MoveTool's own CARD only appears once a drag has a value to
+                // show (MoveTool::updateVisibility()), so with a gizmo merely
+                // standing on a body there is no key claim at all - and the
+                // joint chip must not be the one filling that gap.
+                check(claimants() == 0,
+                      QStringLiteral("chip: and no Enter/Escape claim is installed at all there (%1)")
+                          .arg(claimants()));
+
+                // ...and the card comes back when the joint is asked for again,
+                // even though the joint selection itself never changed.
+                cw.setSelectedJoint(jDowel);
+                settle(250);
+                check(chip->isVisible() && chip->jointId() == jDowel && claimants() == 1,
+                      "chip: asking for the same joint again re-selects its pieces and brings the "
+                      "card back");
+
+                // THE SELECTION-CONTENT TERM ITSELF, tested without clearing the
+                // selection. The three checks above cannot see it: pickEdgeOf(),
+                // pickFaceOf() and pickBodyOf() each CLEAR the selection before
+                // they pick, and an empty selection ends the joint selection on
+                // its own (onSelectionChanged()), so they would pass unchanged
+                // if jointChipJointId()'s "the selection is the joint's own two
+                // pieces" term were deleted outright - which a mutation proved.
+                //
+                // One piece of the pair, selected alone, is the case only the
+                // term can answer: the joint is still selected, the kind is
+                // still Body, and the card must still go down - which is also
+                // exactly the state the transform gizmo owns.
+                cv->setSelectedSolids({shelf});
+                settle(250);
+                check(cw.selectedJointId() == jDowel,
+                      "chip: (one piece of the pair alone - the joint selection itself survives it)");
+                check(cw.jointChipJointId() == 0 && !chip->isVisible(),
+                      "chip: and the card goes down, because the selection is no longer the joint's "
+                      "own two pieces");
+                check(cw.moveToolBodyId() == shelf && claimants() == 0,
+                      QStringLiteral("chip: leaving that body to the transform gizmo, with no key "
+                                     "claim of this card's (gizmo on %1, claims %2)")
+                          .arg(cw.moveToolBodyId()).arg(claimants()));
+                cw.setSelectedJoint(jDowel);
+                settle(250);
+                check(chip->isVisible(), "chip: (and the card is back for the checks below)");
+
+                // A live Mirror placement owns the keys instead.
+                trigger(cw, QStringLiteral("Mirror"));
+                settle(250);
+                check(cv->mirrorPlacementActive() && !chip->isVisible(),
+                      "chip: a live Mirror placement takes the card down");
+                check(claimants() == 1,
+                      QStringLiteral("chip: and is the only claim while it runs (%1)")
+                          .arg(claimants()));
+                sendKeyTo(cv, Qt::Key_Escape);
+                check(!cv->mirrorPlacementActive(),
+                      "chip: (Escape ends the placement - the chip did not swallow it)");
+
+                // An outline waiting to be extruded owns them too.
+                cw.setSelectedJoint(jDowel);
+                settle(200);
+                trigger(cw, QStringLiteral("Start Sketch"));
+                // BELOW the viewport's centre: this window's camera is fitted to
+                // a 400 mm scene, and a ground-plane click in the upper third of
+                // a perspective view is above the horizon, where the app refuses
+                // it outright (the "above-horizon clicks are rejected" block owns
+                // that rule). A quad drawn up there closes nothing, and the two
+                // checks below would then be reporting the fixture rather than
+                // the card.
+                sketchQuad(cw, 0.35, 0.55, 0.50, 0.72);
+                trigger(cw, QStringLiteral("Finish Sketch"));
+                settle(300);
+                ExtrudePreview* preview = cw.findChild<ExtrudePreview*>();
+                // Three separate checks, not one conjunction: a failure has to
+                // say WHICH half broke.
+                check(cw.hasPendingFace(),
+                      "chip: (an outline is closed and waiting to be extruded)");
+                check(!chip->isVisible() && cw.jointChipJointId() == 0,
+                      "chip: an outline waiting to be extruded takes the card down as well");
+                // ...and nothing else has taken the keys either: the extrude
+                // panel is raised by the Extrude action, not by the outline
+                // merely waiting, so at this moment there is NO claim at all.
+                check(claimants() == 0,
+                      QStringLiteral("chip: with no claim installed at all while it waits (%1)")
+                          .arg(claimants()));
+                trigger(cw, QStringLiteral("Extrude..."));
+                settle(300);
+                check(preview != nullptr && preview->isVisible() && !chip->isVisible(),
+                      "chip: and when the extrude panel is raised, IT owns the keys - never both");
+                check(claimants() == 1,
+                      QStringLiteral("chip: one claim there too (%1)").arg(claimants()));
+                sendKeyTo(cv, Qt::Key_Escape);
+                trigger(cw, QStringLiteral("Undo"));
+                settle(300);
+            }
+
+            // --- the vocabulary: app copy swept plainly, names exempted --------
+            {
+                cw.setSelectedJoint(jDowel);
+                settle(200);
+                chip->setMoreOpen(true);
+                chip->openKindMenu();
+                settle(250);
+                const QStringList copy = chip->paintedTexts();
+                const QStringList names = chip->paintedNames();
+                const auto has = [&copy](const QString& fragment) {
+                    return std::any_of(copy.begin(), copy.end(), [&](const QString& text) {
+                        return text.contains(fragment);
+                    });
+                };
+                check(copy.size() > 10 && has(QStringLiteral("Count")) &&
+                          has(QStringLiteral("Drill depth")) && has(QStringLiteral("Dowel")),
+                      QStringLiteral("chip: (the app-copy channel has %1 strings to sweep, the kind "
+                                     "menu's own included)")
+                          .arg(copy.size()));
+                QStringList offenders;
+                for (const QString& text : copy) {
+                    for (const QString& word : bannedWords()) {
+                        if (usesBannedWord(text, word))
+                            offenders << text.left(40) + QStringLiteral(" [") + word + QLatin1Char(']');
+                    }
+                }
+                check(offenders.isEmpty(),
+                      QStringLiteral("chip: this app's copy uses no banned word - swept WITHOUT the "
+                                     "user-data exemption (%1)")
+                          .arg(offenders.isEmpty() ? QStringLiteral("none")
+                                                   : offenders.join(QStringLiteral(", "))));
+                check(names.contains(QStringLiteral("Fuse panel")) &&
+                          usesBannedWord(QStringLiteral("Fuse panel"), QStringLiteral("Fuse")) &&
+                          !usesBannedWord(QStringLiteral("Fuse panel"), QStringLiteral("Fuse"),
+                                          /*isUserData=*/true),
+                      "chip: while the names channel carries the user's own \"Fuse panel\", which a "
+                      "plain sweep fails and the exempted one passes");
+                QStringList leaked;
+                for (const QString& name : names) {
+                    for (const QString& text : copy) {
+                        if (!name.isEmpty() && text.contains(name)) leaked << text;
+                    }
+                }
+                check(leaked.isEmpty(),
+                      QStringLiteral("chip: and no piece name leaks into the app-copy channel (%1)")
+                          .arg(leaked.isEmpty() ? QStringLiteral("none")
+                                                : leaked.join(QStringLiteral(", "))));
+                chip->closeKindMenu();
+                settle(150);
+            }
+
+            check(cw.findChild<QDialog*>() == nullptr, "chip: no modal appeared for any of it");
+        }
+
+        cw.close();
         settle(150);
     }
 

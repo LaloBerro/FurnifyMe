@@ -23,6 +23,7 @@
 #include "TransformGizmo.h"
 #include "ViewportOverlay.h"
 #include "VersionsPanel.h"
+#include "JointChip.h"
 #include "JointsPanel.h"
 #include "WalkthroughPanel.h"
 #include "WindowChrome.h"
@@ -858,6 +859,18 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         const int keptJoint = mySelectedJointId;
         resyncView();
         mySelectedJointId = keptJoint;
+        // THE BODY SELECTION IS NOT PUT BACK HERE, and that is deliberate.
+        // resyncView() clears it with the viewer, so a joint that survives the
+        // loss has no selection beside it and its chip (Task 13) stays down
+        // until the user picks the joint again - the hardware comes back, the
+        // card does not. Restoring it was tried and CRASHED the suite: this
+        // handler runs from inside QOpenGLContext::aboutToBeDestroyed, after
+        // releaseGlResources() has dropped the V3d_View, and
+        // setSelectedSolids() reaches that released view through its own
+        // redraw/annotation path. Rebuilding the view here to satisfy a card
+        // would be doing the migration's work in the one handler that must not
+        // touch a dying context - see OcctViewWidget's "context lifetime is
+        // OWNED" note.
         setRenderModeEnabled(false);
         // The joints' hardware went with the context too (releaseGlResources()
         // detaches the renderer and forgets what it drew), and nothing about
@@ -2335,6 +2348,13 @@ void MainWindow::buildOverlay()
     // appStateChanged. Nothing here shows or hides it.
     myBevelArrow = new BevelArrow(this, myView);
 
+    // The joint's chip (joinery, Task 13), on exactly the same terms as the two
+    // arrows: it parents itself to the viewport, places itself beside the
+    // joint's own anchor, and decides its own visibility from
+    // MainWindow::jointChipJointId() on every appStateChanged. Nothing here
+    // shows or hides it.
+    myJointChip = new JointChip(this, myView);
+
     // The Move tool (custom gizmo, Phase 1), on exactly the same terms as the
     // two arrows above: it parents itself to the viewport, places its chip
     // beside the arm being dragged, and decides both its own visibility and
@@ -2402,6 +2422,7 @@ void MainWindow::buildOverlay()
     connect(myOverlay, &ViewportOverlay::laidOut, myExtrudePreview, &ExtrudePreview::replace);
     connect(myOverlay, &ViewportOverlay::laidOut, myPullArrow, &PullArrow::replace);
     connect(myOverlay, &ViewportOverlay::laidOut, myBevelArrow, &BevelArrow::replace);
+    connect(myOverlay, &ViewportOverlay::laidOut, myJointChip, &JointChip::replace);
     connect(myOverlay, &ViewportOverlay::laidOut, myMoveTool, &MoveTool::replace);
     connect(myOverlay, &ViewportOverlay::laidOut, mirrorChip, &MirrorPlacementChip::replace);
 }
@@ -6797,20 +6818,31 @@ void MainWindow::refreshJoints()
     // through by reference, so the one copy on this path is the one
     // showJoints() makes into its own drawings. Only a set the predicate
     // genuinely filters is copied here.
+    // And WHICH of them is the selected one, as an index into the list actually
+    // handed over - the viewport draws that one at full strength (Task 13), so
+    // the chip beside it visibly belongs to a joint.
     bool drawsAll = derivations.size() == myJointKindCache.size();
     for (std::size_t i = 0; drawsAll && i < count; ++i) drawsAll = drawJoint(i);
     if (drawsAll) {
-        myView->showJoints(derivations, myJointKindCache);
+        int selectedIndex = -1;
+        for (std::size_t i = 0; i < count; ++i) {
+            if (selectedId > 0 && i < jointList.size() && jointList[i].id == selectedId)
+                selectedIndex = static_cast<int>(i);
+        }
+        myView->showJoints(derivations, myJointKindCache, selectedIndex);
         return;
     }
     std::vector<Joinery::Derivation> drawn;
     std::vector<Joinery::Kind> kinds;
+    int selectedIndex = -1;
     for (std::size_t i = 0; i < count; ++i) {
         if (!drawJoint(i)) continue;
+        if (selectedId > 0 && i < jointList.size() && jointList[i].id == selectedId)
+            selectedIndex = static_cast<int>(drawn.size());
         drawn.push_back(derivations[i]);
         kinds.push_back(myJointKindCache[i]);
     }
-    myView->showJoints(drawn, kinds);
+    myView->showJoints(drawn, kinds, selectedIndex);
 }
 
 // --- joinery: the drawer and a minimal joint selection (Task 12) -------------
@@ -6830,8 +6862,44 @@ int MainWindow::selectedJointId() const
 void MainWindow::setSelectedJoint(int jointId)
 {
     const int next = jointId > 0 && jointExists(jointId) ? jointId : 0;
-    if (next == mySelectedJointId) return;
+
+    // SELECTING A JOINT SELECTS ITS TWO PIECES (Task 13). Two reasons, and the
+    // second is the load-bearing one: it is what a user means by "this joint" -
+    // the pieces it holds together light up with it - and it is what makes the
+    // joint's chip disjoint from every other gesture BY CONSTRUCTION, since a
+    // face pull needs a face, a bevel an edge, and the transform gizmo exactly
+    // ONE whole body, while this is two (see jointChipJointId()).
+    //
+    // Only when both pieces are actually on screen: setSelectedSolids() refuses
+    // a hidden body, and a selection that came back EMPTY would run
+    // onSelectionChanged()'s own "the bodies are gone, so is the joint" rule
+    // and undo this call.
+    std::vector<int> pieces;
+    DocumentModel::Joint joint;
+    if (next > 0 && jointOf(next, joint) && myView->isSolidVisible(joint.bodyA) &&
+        myView->isSolidVisible(joint.bodyB)) {
+        pieces = {joint.bodyA, joint.bodyB};
+        std::sort(pieces.begin(), pieces.end());
+    }
+    std::vector<int> current = myView->selectedSolidIds();
+    std::sort(current.begin(), current.end());
+    const bool alreadySelected =
+        !pieces.empty() && current == pieces &&
+        myView->selectionKind() == OcctViewWidget::PickKind::Body;
+
+    // Note the second term: the SAME joint asked for again re-selects its
+    // pieces when something else has taken the selection since (a face picked,
+    // a body clicked), which is how a second click on its drawer row brings the
+    // card back.
+    if (next == mySelectedJointId && (pieces.empty() || alreadySelected)) return;
     mySelectedJointId = next;
+    if (!pieces.empty() && !alreadySelected) {
+        // setSelectedSolids() emits selectionChanged, whose handler ends in
+        // updateActions() - and the joint id is already set above, so the
+        // handler sees the selection and the joint it is FOR together.
+        myView->setSelectedSolids(pieces);
+        return;
+    }
     // updateActions() ends in appStateChanged, which re-runs refreshJoints()
     // (the gate) and the drawer's refresh (the row's highlight).
     updateActions();
@@ -6867,6 +6935,276 @@ bool MainWindow::deleteJoint(int jointId)
     updateActions();
     emit documentChanged();
     const QString message = tr("Deleted the %1 between %2 and %3").arg(kind, nameA, nameB);
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    return true;
+}
+
+// --- joinery: the joint's chip (Task 13) ------------------------------------
+
+bool MainWindow::jointEditEnvironmentOk() const
+{
+    // The same three terms canPullSelectedFace() opens with, for the same
+    // reasons, plus the two linkGestureEnvironmentOk() carries (a furniture
+    // has to be open, and a compare session is no place to commit to a
+    // document) and a live Mirror placement, whose own application-wide
+    // Enter/Escape claim this card must never sit beside.
+    if (!myView || myShowingInitScreen || mySketching) return false;
+    if (hasPendingFace() || myRenderModeOn) return false;
+    if (isCompareOpen()) return false;
+    if (myView->mirrorPlacementActive()) return false;
+    return true;
+}
+
+bool MainWindow::jointOf(int jointId, DocumentModel::Joint& out) const
+{
+    for (const DocumentModel::Joint& joint : myDocument.joints()) {
+        if (joint.id != jointId) continue;
+        out = joint;
+        return true;
+    }
+    return false;
+}
+
+int MainWindow::jointChipJointId() const
+{
+    const int id = selectedJointId();
+    if (id <= 0 || !jointEditEnvironmentOk()) return 0;
+    DocumentModel::Joint joint;
+    if (!jointOf(id, joint)) return 0;
+
+    // THE selection-content term - see the header. selectedSolidIds() reports
+    // the OWNING body of a selected face or edge too, so the KIND is asked as
+    // well as the ids: a face picked on one of the two pieces must not raise
+    // this card beside the pull arrow.
+    if (myView->selectionKind() != OcctViewWidget::PickKind::Body) return 0;
+    std::vector<int> selected = myView->selectedSolidIds();
+    std::vector<int> pieces = {joint.bodyA, joint.bodyB};
+    std::sort(selected.begin(), selected.end());
+    std::sort(pieces.begin(), pieces.end());
+    return selected == pieces ? id : 0;
+}
+
+bool MainWindow::jointDerivationOf(int jointId, Joinery::Derivation& out) const
+{
+    // The cache refreshJoints() reads, not a second derivation of the same
+    // joint: a number on the card and a piece of hardware in the viewport come
+    // from one pass or they can disagree.
+    const std::vector<Joinery::Derivation>& all = cachedJointDerivations();
+    const std::vector<DocumentModel::Joint>& list = myDocument.joints();
+    for (std::size_t i = 0; i < list.size() && i < all.size(); ++i) {
+        if (list[i].id != jointId) continue;
+        out = all[i];
+        return true;
+    }
+    return false;
+}
+
+bool MainWindow::jointAnchor(int jointId, gp_Pnt& out) const
+{
+    Joinery::Derivation derivation;
+    if (jointDerivationOf(jointId, derivation) && derivation.ok && !derivation.items.empty()) {
+        out = derivation.items.front().centre;
+        return true;
+    }
+    // A BROKEN joint has no items and still carries a card - its kind is
+    // exactly what the user may want to change - so it stands at the centre of
+    // its two pieces instead.
+    DocumentModel::Joint joint;
+    if (!jointOf(jointId, joint)) return false;
+    Bnd_Box box;
+    for (const int id : {joint.bodyA, joint.bodyB}) {
+        const TopoDS_Shape shape = myDocument.shapeOf(id);
+        if (!shape.IsNull()) BRepBndLib::Add(shape, box);
+    }
+    if (box.IsVoid()) return false;
+    double xMin = 0.0, yMin = 0.0, zMin = 0.0, xMax = 0.0, yMax = 0.0, zMax = 0.0;
+    box.Get(xMin, yMin, zMin, xMax, yMax, zMax);
+    out = gp_Pnt((xMin + xMax) / 2.0, (yMin + yMax) / 2.0, (zMin + zMax) / 2.0);
+    return true;
+}
+
+bool MainWindow::jointContact(int jointId, Joinery::ContactResult& out) const
+{
+    DocumentModel::Joint joint;
+    if (!jointOf(jointId, joint)) return false;
+    out = Joinery::findContact(myDocument.shapeOf(joint.bodyA), myDocument.shapeOf(joint.bodyB));
+    return out.ok;
+}
+
+void MainWindow::refuseJointEdit(const QString& why)
+{
+    statusBar()->showMessage(why);
+    myToasts->show(why, Toast::Kind::Failure, false);
+}
+
+bool MainWindow::setJointKind(int jointId, Joinery::Kind kind)
+{
+    if (!jointEditEnvironmentOk()) return false;
+    DocumentModel::Joint joint;
+    if (!jointOf(jointId, joint)) return false;
+    if (joint.kind == kind) return true;   // not a change, so not a checkpoint
+
+    Joinery::ContactResult contact;
+    if (!jointContact(jointId, contact)) {
+        refuseJointEdit(tr("This joint can't change kind — %1")
+                            .arg(QString::fromStdString(contact.error)));
+        return false;
+    }
+    const std::string why = Joinery::validityOf(kind, contact.contact);
+    if (!why.empty()) {
+        // Placement's own words for the same refusal - one sentence for one
+        // fact, wherever the user meets it.
+        refuseJointEdit(tr("A %1 doesn't fit here — %2")
+                            .arg(QString::fromStdString(Joinery::kindName(kind)).toLower(),
+                                 QString::fromStdString(why)));
+        return false;
+    }
+
+    // A kind is a different READING of one parameter block - a count for a
+    // fastener, a width for a housing, a thickness for an interlock - so the
+    // new kind starts from the contact's own defaults rather than from numbers
+    // that meant something else.
+    const Joinery::Parameters params = Joinery::defaultsForContact(kind, contact.contact);
+    checkpointDocument();
+    if (!myDocument.setJointKind(jointId, kind, params)) return false;
+
+    updateActions();
+    emit documentChanged();
+    refreshJoints();
+    const QString message =
+        tr("The joint between %1 and %2 is now a %3")
+            .arg(QString::fromStdString(myDocument.nameOf(joint.bodyA)),
+                 QString::fromStdString(myDocument.nameOf(joint.bodyB)),
+                 QString::fromStdString(Joinery::kindName(kind)).toLower());
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    return true;
+}
+
+bool MainWindow::setJointHost(int jointId, int hostBodyId)
+{
+    if (!jointEditEnvironmentOk()) return false;
+    DocumentModel::Joint joint;
+    if (!jointOf(jointId, joint)) return false;
+
+    // Only a joint with a host to choose. A fastener cuts neither piece, and a
+    // half-lap cuts BOTH - "which piece is housed" is not a question either one
+    // asks, so neither offers the choice (the chip does not draw it).
+    const Joinery::Family family = Joinery::familyOf(joint.kind);
+    const bool choosable = family == Joinery::Family::Housing ||
+                           (family == Joinery::Family::Interlock &&
+                            joint.kind != Joinery::Kind::HalfLap);
+    if (!choosable) return false;
+    if (hostBodyId == joint.bodyA) return true;   // already the host
+    if (hostBodyId != joint.bodyB) return false;
+
+    // Measured in the NEW order rather than patched by hand: the contact
+    // frame's Z runs from A into B and each thickness belongs to a side, so the
+    // defaults have to read the contact the SWAPPED joint will derive -
+    // placeJoint()'s own rule when it reorders two pieces.
+    const Joinery::ContactResult contact =
+        Joinery::findContact(myDocument.shapeOf(joint.bodyB), myDocument.shapeOf(joint.bodyA));
+    if (!contact.ok) {
+        refuseJointEdit(tr("This joint can't change which piece it is cut into — %1")
+                            .arg(QString::fromStdString(contact.error)));
+        return false;
+    }
+    const std::string why = Joinery::validityOf(joint.kind, contact.contact);
+    if (!why.empty()) {
+        refuseJointEdit(tr("A %1 doesn't fit that way round — %2")
+                            .arg(QString::fromStdString(Joinery::kindName(joint.kind)).toLower(),
+                                 QString::fromStdString(why)));
+        return false;
+    }
+
+    const Joinery::Parameters params = Joinery::defaultsForContact(joint.kind, contact.contact);
+    checkpointDocument();
+    if (!myDocument.swapJointPieces(jointId, params)) return false;
+
+    updateActions();
+    emit documentChanged();
+    refreshJoints();
+    const QString message =
+        tr("The %1 is now cut into %2")
+            .arg(QString::fromStdString(Joinery::kindName(joint.kind)).toLower(),
+                 QString::fromStdString(myDocument.nameOf(hostBodyId)));
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    return true;
+}
+
+bool MainWindow::editJointParameters(int jointId, const Joinery::Parameters& params)
+{
+    if (!jointEditEnvironmentOk()) return false;
+    DocumentModel::Joint joint;
+    if (!jointOf(jointId, joint)) return false;
+
+    // A COUNT CAN NEVER GO BELOW 1, refused where it is WRITTEN rather than
+    // where it is drawn: Joinery::layout() silently clamps 0 to one invented
+    // fastener, so a document carrying a count of 0 would show a joint nobody
+    // asked for and no surface would ever say why.
+    if (params.count < 1) {
+        refuseJointEdit(tr("A joint needs at least one item — the count can't go below 1"));
+        return false;
+    }
+    // ...and an upper bound, for the same reason from the other side: every
+    // item is a meshed solid, and a four-figure count typed by accident is a
+    // frozen window rather than a plan.
+    constexpr int kMaxItems = 100;
+    if (params.count > kMaxItems) {
+        refuseJointEdit(tr("A joint can carry at most %1 items").arg(kMaxItems));
+        return false;
+    }
+
+    // Only the numbers this KIND actually reads: a housing's depth into B is
+    // legitimately zero (the housed piece is not cut), so a blanket
+    // "everything must be positive" would refuse an honest edit.
+    const Joinery::Family family = Joinery::familyOf(joint.kind);
+    bool sane = true;
+    switch (family) {
+        case Joinery::Family::Fasteners:
+            sane = params.sizeMm > 0.0 && params.depthAMm > 0.0 && params.depthBMm > 0.0 &&
+                   params.insetMm >= 0.0;
+            break;
+        case Joinery::Family::Housing:
+            sane = params.depthAMm > 0.0 && params.widthMm > 0.0 && params.stopMm >= 0.0;
+            break;
+        case Joinery::Family::Interlock:
+            sane = joint.kind == Joinery::Kind::HalfLap
+                       ? params.depthAMm > 0.0 && params.depthBMm > 0.0
+                       : params.lengthMm > 0.0 && params.thicknessMm > 0.0;
+            break;
+    }
+    if (!sane) {
+        refuseJointEdit(tr("A joint's sizes and depths have to be more than 0"));
+        return false;
+    }
+
+    const Joinery::Parameters& was = joint.params;
+    const bool unchanged =
+        params.count == was.count && params.sizeMm == was.sizeMm &&
+        params.depthAMm == was.depthAMm && params.depthBMm == was.depthBMm &&
+        params.insetMm == was.insetMm && params.endMarginMm == was.endMarginMm &&
+        params.angleDeg == was.angleDeg && params.drilledFrom == was.drilledFrom &&
+        params.widthMm == was.widthMm && params.stopped == was.stopped &&
+        params.stopMm == was.stopMm && params.thicknessMm == was.thicknessMm &&
+        params.lengthMm == was.lengthMm && params.haunched == was.haunched;
+    if (unchanged) return true;   // nothing to apply is not a checkpoint
+
+    // ONE checkpoint for every field that moved - the chip's Enter is one
+    // gesture, so it is one entry on the undo stack and one toast.
+    checkpointDocument();
+    if (!myDocument.updateJointParameters(jointId, params)) return false;
+
+    updateActions();
+    emit documentChanged();
+    refreshJoints();
+    const QString message =
+        tr("Updated the %1 between %2 and %3")
+            .arg(QString::fromStdString(Joinery::kindName(joint.kind)).toLower(),
+                 QString::fromStdString(myDocument.nameOf(joint.bodyA)),
+                 QString::fromStdString(myDocument.nameOf(joint.bodyB)));
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
     return true;
