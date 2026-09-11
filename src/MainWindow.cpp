@@ -23,6 +23,7 @@
 #include "TransformGizmo.h"
 #include "ViewportOverlay.h"
 #include "VersionsPanel.h"
+#include "JointsPanel.h"
 #include "WalkthroughPanel.h"
 #include "WindowChrome.h"
 
@@ -920,6 +921,11 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // which has already run by this point in the constructor.
     if (myVersionsPanel)
         connect(this, &MainWindow::appStateChanged, myVersionsPanel, &VersionsPanel::refresh);
+    // The joints drawer, on the same terms. It reads and repaints only - its
+    // row clicks call setSelectedJoint()/deleteJoint() from a mouse event, never
+    // from this slot - so it cannot recurse into updateActions().
+    if (myJointsPanel)
+        connect(this, &MainWindow::appStateChanged, myJointsPanel, &JointsPanel::refresh);
 
     // Connected AFTER the refresh above, so it runs after it: a row added or
     // removed changes the drawer's height, and the drawer's rectangle is one
@@ -956,6 +962,8 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
             myAppearancePanel->setVisible(myAppearanceAction->isChecked() && !hiddenForRenderMode);
         if (myVersionsPanel)
             myVersionsPanel->setVisible(myVersionsPanelAction->isChecked() && !hiddenForRenderMode);
+        if (myJointsPanel)
+            myJointsPanel->setVisible(myJointsPanelAction->isChecked() && !hiddenForRenderMode);
         // The status bar's own shown state, on the same derived-not-stored
         // terms - View -> Show bottom bar's checked state IS the answer,
         // never a one-shot hide()/show() called from the toggle handler
@@ -1073,6 +1081,18 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     connect(myVersionsPanelAction, &QAction::toggled, this, [this](bool shown) {
         if (myVersionsPanel) myVersionsPanel->setVisible(shown);
         if (myOverlay) myOverlay->relayout();
+    });
+
+    // The joints drawer, on the same terms - and one more: opening or closing
+    // it moves the drawing gate's first term (see refreshJoints()), and a
+    // toggle runs no updateActions(), so the viewport is told here.
+    connect(myJointsPanelAction, &QAction::toggled, this, [this](bool shown) {
+        if (myJointsPanel) {
+            myJointsPanel->setVisible(shown && !myRenderModeOn);
+            myJointsPanel->refresh();
+        }
+        if (myOverlay) myOverlay->relayout();
+        refreshJoints();
     });
 
     // The Appearance card on the same terms - see the drawer's toggle above.
@@ -1409,6 +1429,16 @@ void MainWindow::buildActions()
     myVersionsPanelAction->setToolTip(tr("Show or hide this furniture's saved versions "
                                          "(Ctrl+Alt+V)"));
 
+    // View -> Joints (joinery, Task 12) - the joints drawer, on the versions
+    // drawer's terms: checkable, unchecked at start, and the drawer's
+    // visibility derived from it both ways. Menu only, by the rail-floor rule.
+    myJointsPanelAction = new QAction(tr("Joints"), this);
+    myJointsPanelAction->setCheckable(true);
+    myJointsPanelAction->setChecked(false);
+    myJointsPanelAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Alt+J")));
+    myJointsPanelAction->setToolTip(tr("Show or hide every joint in this furniture, with the "
+                                       "numbers to mark on the wood (Ctrl+Alt+J)"));
+
     // Menu only, and deliberately: the rail stays at thirteen tools. Choosing
     // colours is not a modelling tool and does not belong in the spine the
     // user's hand lives on. Checkable, because the panel's visibility is
@@ -1690,6 +1720,7 @@ QMenuBar* MainWindow::buildMenus()
     viewMenu->addAction(myIsolateAction);
     viewMenu->addAction(myItemsPanelAction);
     viewMenu->addAction(myVersionsPanelAction);
+    viewMenu->addAction(myJointsPanelAction);
     viewMenu->addAction(myNotificationsAction);
     viewMenu->addAction(myBottomBarAction);
     viewMenu->addAction(myRenderModeAction);
@@ -1922,6 +1953,13 @@ void MainWindow::buildOverlay()
     myVersionsPanel = new VersionsPanel(this, myView, myView);
     myVersionsPanel->hide();
     myOverlay->addWidget(myVersionsPanel, ViewportOverlay::Anchor::TopLeft);
+
+    // The joints drawer, same anchor, added after Versions so it stacks below
+    // Items and Versions. Hidden BEFORE addWidget() for the same reason: its
+    // visibility belongs to myJointsPanelAction alone.
+    myJointsPanel = new JointsPanel(this, myView, myView);
+    myJointsPanel->hide();
+    myOverlay->addWidget(myJointsPanel, ViewportOverlay::Anchor::TopLeft);
 
     // Wireframe and Fit All are buttons in the app bar, and Save Screenshot -
     // the least used of the three, and absent from the design's bar and rail
@@ -2376,6 +2414,11 @@ void MainWindow::updateActions()
     // coincide right now.
     const bool atInit = myShowingInitScreen;
 
+    // A selected joint that no longer exists - deleted, undone, taken with a
+    // body - is no selection. Pruned HERE, before appStateChanged, so every
+    // surface that follows it (the drawer, the drawing gate) sees one answer.
+    if (mySelectedJointId > 0 && !jointExists(mySelectedJointId)) mySelectedJointId = 0;
+
     const std::size_t selectedCount = myView->selectedSolidIds().size();
     const bool booleanReady = !mySketching && !atInit && selectedCount == 2;
 
@@ -2750,6 +2793,7 @@ void MainWindow::updateActions()
                      "the live one with Compare."));
     }
     if (myVersionsPanelAction) myVersionsPanelAction->setEnabled(!atInit);
+    if (myJointsPanelAction) myJointsPanelAction->setEnabled(!atInit);
 
     // Render mode (Milestone 3, item 5). "|| myRenderModeOn" is what keeps a
     // control whose entire subject is this mode from ever being outvoted by
@@ -4122,6 +4166,10 @@ void MainWindow::resyncView()
     // furniture's hardware over the new one's boards. Dropped here, at the
     // choke point every swap goes through, rather than at each assignment.
     myJointCacheRevision = -1;
+    // ...and so is the selected joint: joint ids restart per document exactly as
+    // body ids do, so an id kept across a swap could name a DIFFERENT furniture's
+    // joint - and an undo is the other thing that ends one.
+    mySelectedJointId = 0;
 
     myView->clearSolids();
     for (const DocumentModel::Solid& solid : myDocument.solids()) {
@@ -6656,6 +6704,11 @@ bool MainWindow::placeJoint(bool firstThatFits, Joinery::Kind requested)
     checkpointDocument();
     const int id = myDocument.addJoint(kind, hostId, otherId, params);
     if (id == 0) return refuse(tr("That joint couldn't be created"));
+    // Placing a joint SELECTS it (the user's own design): that is what keeps
+    // the joint just placed on screen with the drawer closed, under the
+    // drawing gate in refreshJoints(). Set before updateActions(), so the
+    // appStateChanged it emits already draws it.
+    mySelectedJointId = id;
 
     updateActions();
     emit documentChanged();
@@ -6714,19 +6767,29 @@ void MainWindow::refreshJoints()
     const std::size_t count = std::min(derivations.size(), myJointKindCache.size());
 
     // THE DRAWING DECISION, in one place. The spec draws a joint only while
-    // the joints drawer is open or that joint is selected; the drawer is
-    // Task 12's and joint selection Task 13's, so for now every joint is drawn -
-    // and those two tasks add their terms to THIS predicate, not to a second
-    // filter somewhere else.
-    const auto drawJoint = [](std::size_t /*index*/) { return true; };
+    // the joints drawer is open or that joint is selected, so the model is not
+    // permanently full of hardware: the drawer open draws EVERY joint, and
+    // otherwise only the selected one - which placement sets, so a joint just
+    // placed stays on screen with the drawer closed. A later task's terms go
+    // into THIS predicate, never into a second filter somewhere else.
+    //
+    // Indexed against myDocument.joints(): the cache was built from that list,
+    // in that order, at this revision (cachedJointDerivations() above).
+    const bool drawerOpen = jointsDrawerOpen();
+    const int selectedId = selectedJointId();
+    const std::vector<DocumentModel::Joint>& jointList = myDocument.joints();
+    const auto drawJoint = [&](std::size_t index) {
+        if (drawerOpen) return true;
+        return selectedId > 0 && index < jointList.size() && jointList[index].id == selectedId;
+    };
 
     // Every call, cache warm or not: showJoints() is a compare when nothing
     // changed, and it is the ONLY way hardware the viewport forgot comes back.
     //
-    // When every joint is drawn - today always, and on every selection click -
-    // the cache goes straight through by reference, so the one copy on this
-    // path is the one showJoints() makes into its own drawings. Only a set the
-    // predicate genuinely filters is copied here.
+    // When every joint is drawn - the drawer open - the cache goes straight
+    // through by reference, so the one copy on this path is the one
+    // showJoints() makes into its own drawings. Only a set the predicate
+    // genuinely filters is copied here.
     bool drawsAll = derivations.size() == myJointKindCache.size();
     for (std::size_t i = 0; drawsAll && i < count; ++i) drawsAll = drawJoint(i);
     if (drawsAll) {
@@ -6741,6 +6804,65 @@ void MainWindow::refreshJoints()
         kinds.push_back(myJointKindCache[i]);
     }
     myView->showJoints(drawn, kinds);
+}
+
+// --- joinery: the drawer and a minimal joint selection (Task 12) -------------
+
+bool MainWindow::jointExists(int jointId) const
+{
+    const std::vector<DocumentModel::Joint>& joints = myDocument.joints();
+    return std::any_of(joints.begin(), joints.end(),
+                       [jointId](const DocumentModel::Joint& j) { return j.id == jointId; });
+}
+
+int MainWindow::selectedJointId() const
+{
+    return mySelectedJointId > 0 && jointExists(mySelectedJointId) ? mySelectedJointId : 0;
+}
+
+void MainWindow::setSelectedJoint(int jointId)
+{
+    const int next = jointId > 0 && jointExists(jointId) ? jointId : 0;
+    if (next == mySelectedJointId) return;
+    mySelectedJointId = next;
+    // updateActions() ends in appStateChanged, which re-runs refreshJoints()
+    // (the gate) and the drawer's refresh (the row's highlight).
+    updateActions();
+}
+
+bool MainWindow::jointsDrawerOpen() const
+{
+    return myJointsPanelAction != nullptr && myJointsPanelAction->isChecked() &&
+           !myRenderModeOn && !myShowingInitScreen;
+}
+
+bool MainWindow::deleteJoint(int jointId)
+{
+    if (myShowingInitScreen || mySketching) return false;
+    const std::vector<DocumentModel::Joint>& joints = myDocument.joints();
+    const auto found = std::find_if(joints.begin(), joints.end(),
+                                    [jointId](const DocumentModel::Joint& j) { return j.id == jointId; });
+    if (found == joints.end()) return false;
+
+    // Read BEFORE the removal, deletePendingOutline()'s own reasoning: once the
+    // joint is gone its kind and pieces cannot be named.
+    const QString kind = QString::fromStdString(Joinery::kindName(found->kind)).toLower();
+    const QString nameA = QString::fromStdString(myDocument.nameOf(found->bodyA));
+    const QString nameB = QString::fromStdString(myDocument.nameOf(found->bodyB));
+
+    // ONE checkpoint: a joint is document content and rides the undo stack, so
+    // this is a Note with Undo - never the two-click confirm a version (file
+    // data) takes. CLAUDE.md's taxonomy, "Files, versions and the library".
+    checkpointDocument();
+    myDocument.removeJoint(jointId);
+    if (mySelectedJointId == jointId) mySelectedJointId = 0;
+
+    updateActions();
+    emit documentChanged();
+    const QString message = tr("Deleted the %1 between %2 and %3").arg(kind, nameA, nameB);
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    return true;
 }
 
 // --- linked copies (Milestone 4, Task 4.2) ----------------------------------
@@ -7011,6 +7133,11 @@ void MainWindow::onSelectionChanged()
          kind == OcctViewWidget::PickKind::Edge) &&
         !myProgress.hasLearned("subPick.used"))
         recordProgress("subPick.used");
+
+    // A selected joint ends with the body selection it sits beside: clearing
+    // the bodies (a click on empty viewport, Escape, an undo) puts the joint's
+    // hardware away too - see the drawing gate in refreshJoints().
+    if (myView->selectedSolidIds().empty()) mySelectedJointId = 0;
 
     updateActions();
 

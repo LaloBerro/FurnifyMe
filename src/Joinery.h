@@ -161,6 +161,12 @@ inline constexpr double kUnmeasuredRegionAreaMm2 = -1.0;
 //
 // An Overlap contact (crossing rails) always names Neither - a lap has no end
 // grain - and carries no coverage.
+//
+// A second named limit, of the measurement rather than the rule: a contacting
+// face split into DISJOINT coplanar strips (a slotted board, say) is compared
+// strip by strip, so it can read a definite - and wrong - host where the same
+// geometry unsplit reads Neither; the user's host override on the joint's chip
+// (a later task) is the answer there too.
 inline constexpr double kEndOnMinCoverage = 0.5;
 inline constexpr double kEndOnCoverageRatio = 2.0;
 
@@ -459,9 +465,14 @@ struct Readout {
     std::string referenceEdgeB;
     std::vector<double> alongMm;  // one per item, from the reference edge
     double insetMm = 0.0;         // across the face
-    double depthAMm = 0.0;
+    double depthAMm = 0.0;        // into A: a drill depth, a channel, a mortise, A's lap
+    // Into B: a fastener's far-side drill depth, a tenon's LENGTH, the depth a
+    // half-lap removes from B. 0 for a housing - B sits in the channel uncut.
     double depthBMm = 0.0;
-    double widthMm = 0.0;         // housings and interlocks
+    // A housing's channel width, a tenon's thickness, and for a HALF-LAP the
+    // lap's own span ACROSS the overlap (not the half-board thicknessMm, which
+    // describes nothing a person marks). A fastener carries thicknessMm here.
+    double widthMm = 0.0;
 };
 
 // referenceEdgeA/B name the edge the numbers are measured from - one of

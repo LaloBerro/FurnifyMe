@@ -537,6 +537,34 @@ public:
     // suite's proof that a selection change derives nothing.
     int jointDeriveCount() const { return myJointDeriveCount; }
 
+    // --- joinery: the drawer and a minimal joint selection (Task 12) --------
+    //
+    // The joint the user has picked, or 0. A plain stored id - the joint's own
+    // chip (a later task) builds on it - VALIDATED on every read, so an id whose
+    // joint is gone answers 0 even between the moments it is cleared. Cleared
+    // when that joint stops existing (a delete, an undo - pruned in
+    // updateActions(), the one place that decides what is available) and when
+    // the BODY selection is cleared (onSelectionChanged()). Session state, like
+    // the body selection: no checkpoint, no manifest.
+    //
+    // Set by placement - placing a joint selects it, which is what keeps a
+    // just-placed joint on screen with the drawer closed - and by a click on
+    // its drawer row. Ends in refreshJoints() and updateActions(), so the
+    // viewport and every surface follow it.
+    int selectedJointId() const;
+    void setSelectedJoint(int jointId);
+    // Removes one joint from its drawer row: ONE checkpoint, a Note toast with
+    // Undo. A joint is document content and rides the undo stack, so this is
+    // never the two-click confirm file data (a version) takes. False, and
+    // nothing written, for an unknown id, at the library, or mid-sketch.
+    bool deleteJoint(int jointId);
+    // View -> Joints is checked and nothing hides the drawer (render mode, the
+    // library) - the drawing gate's first term, read off the ACTION rather
+    // than the widget's isVisible(), which would make the gate depend on
+    // which appStateChanged slot happened to run first.
+    bool jointsDrawerOpen() const;
+    class JointsPanel* jointsPanel() const { return myJointsPanel; }
+
     bool lockToFace(const TopoDS_Face& face);
     // Back to the ground plane. The ground plane is the default and is never
     // itself "locked", so this is not a toggle of the same state. Refused,
@@ -1658,6 +1686,14 @@ private:
     // callers; refreshJoints() reads it in place, within one call, and holds
     // the reference no longer than that.
     const std::vector<Joinery::Derivation>& cachedJointDerivations() const;
+    // --- joinery (Task 12) ---------------------------------------------------
+    // View -> Joints (Ctrl+Alt+J) - the drawer's law, both directions, exactly
+    // as myVersionsPanelAction is the versions drawer's.
+    QAction* myJointsPanelAction = nullptr;
+    class JointsPanel* myJointsPanel = nullptr;
+    // See selectedJointId(). 0 = none.
+    int mySelectedJointId = 0;
+    bool jointExists(int jointId) const;
     // The rail and the axis gizmo card, kept here rather than found with
     // findChild<>() on demand - both are constructed as locals inside
     // buildOverlay() otherwise, and both need to be reached from the

@@ -1832,6 +1832,67 @@ int main()
                   "fastener/interlock thickness field");
     }
 
+    // --- a HALF-LAP's readout: each piece's own depth, and the lap's span ----
+    // (joinery Task 12, the drawer's first painted use of these numbers). A
+    // half-lap's thicknessMm is HALF A BOARD by default - 11 mm for the 22 mm
+    // rail below - and the readout used to carry it as the joint's width, a
+    // number that describes nothing a person marks. What the pencil needs is
+    // how much comes out of EACH piece and how wide the lap runs ACROSS the
+    // overlap. Real crossing geometry, unequal rails, so every expected value
+    // (40 across, 11 and 35 deep) collides with no struct default and no
+    // other field: the old 11-mm width and the old 0 far depth both fail here.
+    {
+        const TopoDS_Shape thinRail =
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 400.0, 40.0, 22.0).Shape();
+        const TopoDS_Shape deepRail =
+            BRepPrimAPI_MakeBox(gp_Pnt(150.0, -100.0, 0.0), 60.0, 300.0, 70.0).Shape();
+        const Joinery::Derivation lap = Joinery::derive(
+            Joinery::Kind::HalfLap,
+            Joinery::defaultsForContact(
+                Joinery::Kind::HalfLap,
+                Joinery::findContact(thinRail, deepRail).contact),
+            {}, thinRail, deepRail);
+        check(lap.ok, "the crossing rails derive as a half-lap (" + lap.error + ")");
+        if (lap.ok) {
+            const double across = lap.contact.runsAlongU() ? lap.contact.vLength()
+                                                           : lap.contact.uLength();
+            checkNear(across, 40.0, 1.0e-6,
+                      "sanity: the overlap is 40 mm across (the thin rail's width) and "
+                      "60 mm along");
+            checkNear(lap.readout.widthMm, 40.0, 1.0e-6,
+                      "a half-lap's readout width is the lap's span ACROSS the overlap - "
+                      "40 mm, not the 11 mm half-board thicknessMm it used to carry");
+            checkNear(lap.readout.depthAMm, 11.0, 1.0e-9,
+                      "and it removes 11 mm from the thin rail - half of ITS 22 mm");
+            checkNear(lap.readout.depthBMm, 35.0, 1.0e-9,
+                      "and 35 mm from the deep rail - half of ITS 70 mm, not the 0 "
+                      "every non-fastener used to report");
+            check(lap.readout.alongMm.size() == 1,
+                  "a half-lap reads as one region along the run");
+        }
+
+        // A mortise and tenon's second depth is the tenon's own LENGTH into B,
+        // and its width the tenon's thickness - the other interlock, pinned
+        // beside the lap so the two branches cannot swap unseen. 24 mm stock:
+        // lengthMm 36, thicknessMm 8, neither a struct default nor each other.
+        Joinery::Contact c;
+        c.type = Joinery::Contact::Type::Face;
+        c.frame = gp_Ax3(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0), gp_Dir(1.0, 0.0, 0.0));
+        c.uMin = 0.0; c.uMax = 300.0;
+        c.vMin = 0.0; c.vMax = 40.0;
+        const Joinery::Parameters mt = Joinery::defaultsFor(Joinery::Kind::MortiseTenon, 24.0);
+        const Joinery::Readout mtReadout = Joinery::readout(
+            Joinery::Kind::MortiseTenon, mt, c,
+            Joinery::layout(Joinery::Kind::MortiseTenon, mt, c, {}));
+        checkNear(mtReadout.depthBMm, mt.lengthMm, 1.0e-9,
+                  "a mortise and tenon's far depth is the tenon's length into B");
+        checkNear(mtReadout.widthMm, mt.thicknessMm, 1.0e-9,
+                  "and its width the tenon's thickness");
+        check(std::fabs(mt.lengthMm - mt.thicknessMm) > 1.0,
+              "sanity: length and thickness differ, so the two checks above cannot "
+              "pass by reading one field twice");
+    }
+
     // --- reference-edge naming: a dominant axis wins, an ambiguous one is
     // named honestly instead of guessed -----------------------------------
     // On a rotated board no face is honestly "front" any more, and a
@@ -1968,6 +2029,12 @@ int main()
         // "front" or "top" by whichever narrowly edges out.
         check(obliqueReadout.referenceEdgeA.find("no single edge") != std::string::npos,
               "a genuinely tilted board gets an honest answer, not a guessed edge (" +
+                  obliqueReadout.referenceEdgeA + ")");
+        // Painted by the joints drawer, so it follows the copy rule: clauses
+        // separated by an EM DASH, never a spaced hyphen.
+        check(obliqueReadout.referenceEdgeA ==
+                  "no single edge \xE2\x80\x94 the piece is angled across more than one face",
+              "and that sentence separates its clause with an em dash (" +
                   obliqueReadout.referenceEdgeA + ")");
         check(obliqueReadout.referenceEdgeA != flatReadout.referenceEdgeA,
               "and it is not silently reusing the flat frame's own answer");

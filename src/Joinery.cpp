@@ -1158,8 +1158,11 @@ constexpr double kDominantAxisCos = 0.9063;
 // sentence explaining why no single edge will do, rather than a word that
 // merely happens to be wrong. "no single edge" is the substring every
 // reader of this code (and the suite) can search for.
+// The clause is separated by an EM DASH, the app's copy rule (CLAUDE.md,
+// "Clauses are separated by an em dash") - the joints drawer is the first
+// surface that paints this sentence, so it has to read like the rest of it.
 const char* const kNoDominantEdge =
-    "no single edge - the piece is angled across more than one face";
+    "no single edge — the piece is angled across more than one face";
 
 // A world direction as a word a person can find on the actual board, or the
 // honest sentence above when no face is clearly "the" one. ONE function -
@@ -1195,8 +1198,35 @@ Readout readout(Kind kind, const Parameters& params, const Contact& contact,
     }
     out.insetMm = params.insetMm;
     out.depthAMm = params.depthAMm;
-    out.depthBMm = familyOf(kind) == Family::Fasteners ? params.depthBMm : 0.0;
-    out.widthMm = familyOf(kind) == Family::Housing ? params.widthMm : params.thicknessMm;
+    switch (familyOf(kind)) {
+        case Family::Fasteners:
+            out.depthBMm = params.depthBMm;
+            out.widthMm = params.thicknessMm;
+            break;
+        case Family::Housing:
+            // The channel is cut in A alone; B sits in it and is not cut.
+            out.depthBMm = 0.0;
+            out.widthMm = params.widthMm;
+            break;
+        case Family::Interlock:
+            if (kind == Kind::HalfLap) {
+                // A half-lap takes material out of BOTH pieces, each to its
+                // own depth, across the WHOLE overlap. Its thicknessMm is half
+                // a board by default - a number that describes nothing a
+                // person marks - so the width is the lap's own span across
+                // the overlap, read off the item layout() cut (interlockRegion
+                // gives a lap the full across extent), and the second depth is
+                // what comes out of B.
+                out.depthBMm = params.depthBMm;
+                out.widthMm = items.empty() ? 0.0 : items.front().sizeMm;
+            } else {
+                // A mortise and tenon: the tenon is thicknessMm thick, and the
+                // second depth is how far it reaches into B - its length.
+                out.depthBMm = params.lengthMm;
+                out.widthMm = params.thicknessMm;
+            }
+            break;
+    }
     return out;
 }
 

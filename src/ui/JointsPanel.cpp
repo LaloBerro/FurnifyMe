@@ -1,0 +1,1102 @@
+#include "JointsPanel.h"
+
+#include "DocumentModel.h"
+#include "IconSet.h"
+#include "Joinery.h"
+#include "MainWindow.h"
+#include "Measure.h"
+#include "OcctViewWidget.h"
+#include "Theme.h"
+
+#include <QFontMetrics>
+#include <QFontMetricsF>
+#include <QHBoxLayout>
+#include <QIcon>
+#include <QLabel>
+#include <QMouseEvent>
+#include <QPainter>
+#include <QPainterPath>
+#include <QPushButton>
+#include <QScrollArea>
+#include <QScrollBar>
+#include <QStaticText>
+#include <QVBoxLayout>
+
+#include <algorithm>
+#include <cmath>
+
+namespace {
+// The drawer's own width at the shipped type scale - the mockup's 240, the
+// same as Items and Versions beside it - grown only by what a larger base
+// size costs, measured against specimen text (VersionsPanel::cardWidth()'s
+// reasoning, unchanged).
+constexpr int kBaseWidth = 240;
+constexpr int kRadius = 10;
+constexpr int kHeaderSide = 11;
+constexpr int kPadTop = 10;
+constexpr int kPadBottom = 8;
+constexpr int kMinHeight = 60;
+constexpr int kScrollCap = 420;
+
+// A row, in its own coordinates. The row widget sits 1px inside the card's
+// border on each side, so these are the mockup's 14/12 less that pixel.
+constexpr double kRowPadL = 13.0;
+constexpr double kRowPadR = 11.0;
+constexpr double kRowPadT = 6.0;
+constexpr double kRowPadB = 7.0;
+
+// The ruler.
+constexpr double kStripGap = 6.0;      // above each piece's strip
+constexpr double kBarInset = 6.0;      // zero sits this far in from the text edge
+constexpr double kBarHeight = 8.0;
+constexpr double kTickOverhang = 2.0;  // an item tick past the bar, each side
+constexpr double kZeroOverhang = 3.0;  // the zero tick, a little longer
+constexpr double kLabelGap = 3.0;      // the least room between two labels on a line
+constexpr int kDeleteSize = 20;
+
+QString specimen() { return QStringLiteral("Mortise and tenon, 6 × 30 mm"); }
+
+QString lengthText(double mm) { return QString::fromStdString(Measure::formatLength(mm)); }
+
+// Measure's own number with its unit taken off - a tick label, whose unit the
+// shared line names once. Still Measure's rounding, separator and display unit:
+// this removes the suffix Measure appended, it formats nothing itself.
+QString numberOnly(double mm)
+{
+    QString text = lengthText(mm);
+    const QString suffix = QLatin1Char(' ') + QString::fromStdString(Measure::unitSuffix());
+    if (text.endsWith(suffix)) text.chop(suffix.size());
+    return text;
+}
+
+bool isNamedEdge(const std::string& edge)
+{
+    return edge == "front" || edge == "back" || edge == "left" || edge == "right" ||
+           edge == "top" || edge == "bottom";
+}
+
+QString number(double value) { return QString::number(value, 'g', 10); }
+
+QString deleteTooltip()
+{
+    return JointsPanel::tr("Delete this joint\nOne undo brings it back.");
+}
+
+QString emptyText()
+{
+    return JointsPanel::tr("No joints yet.\n\nSelect two pieces that meet and press J to "
+                           "plan one.");
+}
+
+// A derivation's refusal, as the row says it. Joinery's own reasons are written
+// for the user; a kernel exception's text is written for a log, and CLAUDE.md
+// never shows one - it gets the plain sentence instead.
+QString reasonText(const std::string& error)
+{
+    if (error.rfind("contact:", 0) == 0)
+        return JointsPanel::tr("these two pieces can't be measured");
+    return QString::fromStdString(error);
+}
+}  // namespace
+
+// Everything one row paints, decided in refresh() and never changed after:
+// the row widget holds it by shared_ptr-to-const and its paintEvent() only
+// draws what is in here.
+struct JointsPanel::RowModel {
+    enum FontRole { Body, Label, LabelBold, Badge, FontRoleCount };
+    enum Ink { InkText, InkMuted, InkDanger };
+
+    struct Painted {
+        QStaticText text;
+        QString raw;
+        QRectF rect;
+        FontRole font = Body;
+        Ink ink = InkText;
+    };
+    struct Piece {
+        QString name;          // user text
+        QString depthText;     // "drill 13.5 mm", "18 × 6 mm"
+        std::vector<double> marks;
+        bool band = false;
+        double bandStart = 0.0;
+        double bandEnd = 0.0;
+    };
+    struct Strip {
+        QRectF bar;
+        QRectF band;
+        std::vector<double> ticks;
+        std::vector<Painted> labels;   // [0] is the edge word
+        QString depthText;
+    };
+
+    // --- content --------------------------------------------------------------
+    int jointId = 0;
+    bool broken = false;
+    bool selected = false;
+    bool expanded = false;
+    bool fastener = true;
+    QString nameA, nameB;
+    QString kindLine;
+    QString caveat;
+    QString edge;
+    bool edgeNamed = false;
+    double run = 0.0;
+    double inset = 0.0;
+    std::vector<Piece> pieces;
+    QString readoutText;
+    QString signature;
+
+    // --- layout ---------------------------------------------------------------
+    QFont fonts[FontRoleCount];
+    int width = 0;
+    int height = 0;
+    std::vector<Painted> painted;
+    QRectF nameARect;
+    bool hasCaveatGlyph = false;
+    QRectF caveatGlyph;
+    std::vector<Strip> strips;
+    bool fellBack = false;
+    bool staggered = false;
+    QPointF chevron;
+    QPoint deleteAt;
+    QStringList appCopy;
+};
+
+namespace {
+using RowModel = JointsPanel::RowModel;
+
+RowModel::Painted prepared(const RowModel& m, const QString& raw, RowModel::FontRole font,
+                           RowModel::Ink ink, double x, double top, double wrapWidth = -1.0)
+{
+    RowModel::Painted p;
+    p.raw = raw;
+    p.font = font;
+    p.ink = ink;
+    p.text.setTextFormat(Qt::PlainText);   // a name like "<b>Top" is text, not markup
+    p.text.setText(raw);
+    if (wrapWidth > 0.0) p.text.setTextWidth(wrapWidth);
+    p.text.setPerformanceHint(QStaticText::AggressiveCaching);
+    p.text.prepare(QTransform(), m.fonts[font]);
+    p.rect = QRectF(QPointF(x, top), p.text.size());
+    return p;
+}
+
+std::shared_ptr<RowModel> contentFor(const DocumentModel& doc, const DocumentModel::Joint& joint,
+                                     const Joinery::Derivation& d, int selectedJoint,
+                                     const QSet<int>& expanded)
+{
+    auto m = std::make_shared<RowModel>();
+    m->jointId = joint.id;
+    m->broken = !d.ok;
+    m->selected = joint.id == selectedJoint;
+    m->expanded = expanded.contains(joint.id);
+    const Joinery::Family family = Joinery::familyOf(joint.kind);
+    m->fastener = family == Joinery::Family::Fasteners;
+    m->nameA = QString::fromStdString(doc.nameOf(joint.bodyA));
+    m->nameB = QString::fromStdString(doc.nameOf(joint.bodyB));
+    const QString kind = QString::fromStdString(Joinery::kindName(joint.kind));
+    const QString unit = QString::fromStdString(Measure::unitSuffix());
+
+    const QChar sep(0x1f);
+    m->signature = number(joint.id) + sep + number(static_cast<int>(joint.kind)) + sep + m->nameA +
+                   sep + m->nameB + sep + (m->broken ? QStringLiteral("B") : QStringLiteral("b")) +
+                   (m->selected ? QStringLiteral("S") : QStringLiteral("s")) +
+                   (m->expanded ? QStringLiteral("E") : QStringLiteral("e")) + sep;
+
+    if (!d.ok) {
+        // No readout, no numbers, no caveat - a derivation that refused carries
+        // none of them, and nothing here reaches back for the last good one.
+        m->kindLine = JointsPanel::tr("Broken — %1").arg(reasonText(d.error));
+        m->signature += m->kindLine;
+        return m;
+    }
+
+    const Joinery::Readout& r = d.readout;
+    m->run = d.contact.runLength();
+    m->inset = r.insetMm;
+    m->edge = QString::fromStdString(r.referenceEdgeA);
+    m->edgeNamed = isNamedEdge(r.referenceEdgeA);
+    m->caveat = QString::fromStdString(Joinery::regionShortfallCaveat(d.contact));
+
+    if (m->fastener) {
+        const double size = d.items.empty() ? joint.params.sizeMm : d.items.front().sizeMm;
+        m->kindLine = JointsPanel::tr("%1, %2 × %3")
+                          .arg(kind, QString::number(d.items.size()), lengthText(size));
+        // Both pieces are drilled; a piece with no depth has nothing to mark.
+        if (r.depthAMm > 0.0)
+            m->pieces.push_back({m->nameA, JointsPanel::tr("drill %1").arg(lengthText(r.depthAMm)),
+                                 r.alongMm, false, 0.0, 0.0});
+        if (r.depthBMm > 0.0)
+            m->pieces.push_back({m->nameB, JointsPanel::tr("drill %1").arg(lengthText(r.depthBMm)),
+                                 r.alongMm, false, 0.0, 0.0});
+    } else {
+        m->kindLine = JointsPanel::tr("%1, %2 × %3")
+                          .arg(kind, numberOnly(r.widthMm), lengthText(r.depthAMm));
+        // The band is the item's own span along the run: the channel for a
+        // housing, the tenon between its shoulders, the whole lap.
+        const bool alongU = d.contact.runsAlongU();
+        const double centre = r.alongMm.empty() ? m->run / 2.0 : r.alongMm.front();
+        const double span = d.items.empty()
+                                ? m->run
+                                : (alongU ? d.items.front().spanUMm : d.items.front().spanVMm);
+        const double start = centre - span / 2.0;
+        const double end = centre + span / 2.0;
+        if (r.depthAMm > 0.0)
+            m->pieces.push_back({m->nameA,
+                                 JointsPanel::tr("%1 × %2").arg(numberOnly(r.widthMm),
+                                                                lengthText(r.depthAMm)),
+                                 {}, true, start, end});
+        // A housing's housed piece is not cut (depthB 0) and gets no strip.
+        if (r.depthBMm > 0.0)
+            m->pieces.push_back({m->nameB,
+                                 JointsPanel::tr("%1 × %2").arg(numberOnly(r.widthMm),
+                                                                lengthText(r.depthBMm)),
+                                 {}, true, start, end});
+    }
+
+    // The numbers this row carries, whether or not it is open - the suite's
+    // "a broken joint has none" reads this, so it must not depend on a click.
+    QStringList readout;
+    for (const RowModel::Piece& piece : m->pieces) {
+        readout << piece.depthText;
+        if (piece.band) {
+            readout << JointsPanel::tr("%1 to %2").arg(numberOnly(piece.bandStart),
+                                                      lengthText(piece.bandEnd));
+        } else {
+            QStringList parts;
+            for (double mark : piece.marks) parts << numberOnly(mark);
+            readout << parts.join(QStringLiteral(" · ")) + QLatin1Char(' ') + unit;
+        }
+    }
+    readout << m->edge;
+    if (m->fastener) readout << JointsPanel::tr("inset %1 from the face").arg(lengthText(m->inset));
+    m->readoutText = readout.join(QLatin1Char('\n'));
+
+    m->signature += m->kindLine + sep + m->caveat + sep + m->edge + sep + number(m->run) + sep +
+                    number(m->inset) + sep + unit + sep + number(r.depthAMm) + sep +
+                    number(r.depthBMm) + sep + number(r.widthMm) + sep;
+    for (const RowModel::Piece& piece : m->pieces) {
+        m->signature += piece.name + sep + piece.depthText + sep + number(piece.bandStart) + sep +
+                        number(piece.bandEnd) + sep;
+        for (double mark : piece.marks) m->signature += number(mark) + QLatin1Char(',');
+        m->signature += sep;
+    }
+    return m;
+}
+
+// One piece's ruler. False when its labels cannot be kept apart on two lines
+// at the font they are painted in - the caller then writes the numbers instead.
+bool layoutStrip(const RowModel& m, const RowModel::Piece& piece, double x0, double x1,
+                 double& y, RowModel::Strip& out, std::vector<RowModel::Painted>& texts,
+                 bool& staggered)
+{
+    y += kStripGap;
+    RowModel::Painted depth = prepared(m, piece.depthText, RowModel::Label, RowModel::InkMuted, 0.0, y);
+    depth.rect.moveLeft(x1 - depth.rect.width());
+    const QFontMetricsF bold(m.fonts[RowModel::LabelBold]);
+    const QString name = bold.elidedText(piece.name, Qt::ElideRight,
+                                         std::max(12.0, depth.rect.left() - 8.0 - x0));
+    RowModel::Painted who = prepared(m, name, RowModel::LabelBold, RowModel::InkText, x0, y);
+    const double whoHeight = std::max(who.rect.height(), depth.rect.height());
+    texts.push_back(who);
+    texts.push_back(depth);
+    y += whoHeight + 1.0;
+
+    const double barLeft = x0 + kBarInset;
+    const double barRight = x1 - kBarInset;
+    const double barSpan = std::max(1.0, barRight - barLeft);
+    // TO SCALE: the named edge at zero, the joint's run as the bar's length.
+    const auto xAt = [&](double mm) {
+        if (m.run <= 0.0) return barLeft;
+        return barLeft + std::clamp(mm, 0.0, m.run) / m.run * barSpan;
+    };
+
+    struct Candidate {
+        QString text;
+        double anchor;
+        bool leftAligned;
+    };
+    std::vector<Candidate> candidates;
+    candidates.push_back({m.edge, x0, true});
+    std::vector<double> ticks;
+    if (piece.band) {
+        ticks = {xAt(piece.bandStart), xAt(piece.bandEnd)};
+        candidates.push_back({numberOnly(piece.bandStart), ticks[0], false});
+        candidates.push_back({numberOnly(piece.bandEnd), ticks[1], false});
+    } else {
+        for (double mark : piece.marks) {
+            ticks.push_back(xAt(mark));
+            candidates.push_back({numberOnly(mark), ticks.back(), false});
+        }
+    }
+    std::stable_sort(candidates.begin() + 1, candidates.end(),
+                     [](const Candidate& a, const Candidate& b) { return a.anchor < b.anchor; });
+
+    const double labelHeight = QFontMetricsF(m.fonts[RowModel::Badge]).height();
+    const double lineTop0 = y;
+    const double barTop = lineTop0 + labelHeight + 3.0;
+    const double barBottom = barTop + kBarHeight;
+    const double lineTop1 = barBottom + kZeroOverhang + 1.0;
+
+    // Greedy, left to right: a label takes the line above the bar when it
+    // clears the last label there, the line below when it clears the last one
+    // THERE, and otherwise the ruler cannot be drawn honestly at all.
+    double lastRight[2] = {-1.0e9, -1.0e9};
+    bool stripStaggered = false;
+    std::vector<RowModel::Painted> labels;
+    for (std::size_t i = 0; i < candidates.size(); ++i) {
+        const Candidate& c = candidates[i];
+        RowModel::Painted label = prepared(m, c.text, RowModel::Badge,
+                                           i == 0 ? RowModel::InkMuted : RowModel::InkText, 0.0, 0.0);
+        const double w = label.rect.width();
+        double left = c.leftAligned ? c.anchor : c.anchor - w / 2.0;
+        left = std::clamp(left, x0, std::max(x0, x1 - w));
+        int line = -1;
+        if (left >= lastRight[0] + kLabelGap) {
+            line = 0;
+        } else if (left >= lastRight[1] + kLabelGap) {
+            line = 1;
+        } else {
+            return false;
+        }
+        lastRight[line] = left + w;
+        if (line == 1) stripStaggered = true;
+        label.rect.moveTopLeft(QPointF(left, line == 0 ? lineTop0 : lineTop1));
+        labels.push_back(label);
+    }
+
+    out.bar = QRectF(barLeft, barTop, barSpan, kBarHeight);
+    out.ticks = ticks;
+    out.labels = labels;
+    out.depthText = piece.depthText;
+    if (piece.band && ticks.size() == 2)
+        out.band = QRectF(QPointF(ticks[0], barTop), QPointF(ticks[1], barBottom));
+    y = stripStaggered ? lineTop1 + labelHeight : barBottom + kZeroOverhang;
+    if (stripStaggered) staggered = true;
+    return true;
+}
+
+void layoutRow(RowModel& m, double width)
+{
+    m.fonts[RowModel::Body] = Theme::bodyFont();
+    m.fonts[RowModel::Label] = Theme::labelFont();
+    QFont bold = Theme::labelFont();
+    bold.setWeight(QFont::DemiBold);
+    m.fonts[RowModel::LabelBold] = bold;
+    m.fonts[RowModel::Badge] = Theme::badgeFont();
+
+    m.width = static_cast<int>(width);
+    m.painted.clear();
+    m.strips.clear();
+    m.appCopy.clear();
+    m.fellBack = false;
+    m.staggered = false;
+    m.hasCaveatGlyph = false;
+
+    const double x0 = kRowPadL;
+    const double x1 = width - kRowPadR;
+    double y = kRowPadT;
+    const QString unit = QString::fromStdString(Measure::unitSuffix());
+
+    // --- "<A> ↔ <B>", names elided to share the line -------------------------
+    const double reserve = m.expanded ? kDeleteSize + 16.0 : 0.0;
+    const QFontMetricsF body(m.fonts[RowModel::Body]);
+    const QString arrow = QStringLiteral(" ↔ ");
+    const double arrowWidth = body.horizontalAdvance(arrow);
+    const double available = std::max(24.0, x1 - x0 - reserve - arrowWidth);
+    double widthA = body.horizontalAdvance(m.nameA);
+    double widthB = body.horizontalAdvance(m.nameB);
+    if (widthA + widthB > available) {
+        const double half = available / 2.0;
+        if (widthA <= half) {
+            widthB = available - widthA;
+        } else if (widthB <= half) {
+            widthA = available - widthB;
+        } else {
+            widthA = half;
+            widthB = half;
+        }
+    }
+    const RowModel::Ink nameInk = m.broken ? RowModel::InkDanger : RowModel::InkText;
+    RowModel::Painted a = prepared(m, body.elidedText(m.nameA, Qt::ElideRight, widthA),
+                                   RowModel::Body, nameInk, x0, y);
+    RowModel::Painted mid = prepared(m, arrow, RowModel::Body, RowModel::InkMuted, a.rect.right(), y);
+    RowModel::Painted b = prepared(m, body.elidedText(m.nameB, Qt::ElideRight, widthB),
+                                   RowModel::Body, nameInk, mid.rect.right(), y);
+    const double pairHeight = std::max({a.rect.height(), mid.rect.height(), b.rect.height()});
+    m.nameARect = a.rect;
+    m.chevron = QPointF(x1 - kDeleteSize - 8.0, y + pairHeight / 2.0);
+    m.deleteAt = QPoint(static_cast<int>(width - kRowPadR - kDeleteSize + 6.0),
+                        static_cast<int>(kRowPadT - 3.0));
+    m.painted.push_back(a);
+    m.painted.push_back(mid);
+    m.painted.push_back(b);
+    m.appCopy << arrow.trimmed();
+    y += pairHeight + 1.0;
+
+    // --- the kind line, or the reason ----------------------------------------
+    RowModel::Painted kind = prepared(m, m.kindLine, RowModel::Label,
+                                      m.broken ? RowModel::InkText : RowModel::InkMuted, x0, y,
+                                      x1 - x0);
+    m.painted.push_back(kind);
+    m.appCopy << m.kindLine;
+    y += kind.rect.height();
+
+    // --- the caveat ------------------------------------------------------------
+    if (!m.caveat.isEmpty()) {
+        y += 4.0;
+        const double glyph = 12.0;
+        m.hasCaveatGlyph = true;
+        m.caveatGlyph = QRectF(x0, y + 1.0, glyph, glyph);
+        RowModel::Painted note = prepared(m, m.caveat, RowModel::Badge, RowModel::InkMuted,
+                                          x0 + glyph + 6.0, y, x1 - x0 - glyph - 6.0);
+        m.painted.push_back(note);
+        m.appCopy << m.caveat;
+        y += std::max(note.rect.height(), glyph + 1.0);
+    }
+
+    // --- open: the mark-out ----------------------------------------------------
+    if (m.expanded && !m.broken && !m.pieces.empty()) {
+        bool drawn = m.edgeNamed;
+        double rulerY = y;
+        std::vector<RowModel::Strip> strips;
+        std::vector<RowModel::Painted> stripTexts;
+        bool staggered = false;
+        for (std::size_t i = 0; drawn && i < m.pieces.size(); ++i) {
+            RowModel::Strip strip;
+            drawn = layoutStrip(m, m.pieces[i], x0, x1, rulerY, strip, stripTexts, staggered);
+            if (drawn) strips.push_back(strip);
+        }
+
+        if (drawn) {
+            y = rulerY;
+            m.strips = strips;
+            m.staggered = staggered;
+            for (const RowModel::Painted& t : stripTexts) {
+                m.painted.push_back(t);
+                // The bold name is the piece's own (user) name; the depth is ours.
+                if (t.font != RowModel::LabelBold) m.appCopy << t.raw;
+            }
+            for (const RowModel::Strip& strip : m.strips)
+                for (const RowModel::Painted& label : strip.labels) m.appCopy << label.raw;
+        } else {
+            // WRITTEN, not drawn: no single edge to put at zero, or labels that
+            // collide even on two lines. An unreadable ruler is not a ruler.
+            m.fellBack = true;
+            for (const RowModel::Piece& piece : m.pieces) {
+                y += kStripGap;
+                RowModel::Painted depth =
+                    prepared(m, piece.depthText, RowModel::Label, RowModel::InkMuted, 0.0, y);
+                depth.rect.moveLeft(x1 - depth.rect.width());
+                const QFontMetricsF boldMetrics(m.fonts[RowModel::LabelBold]);
+                RowModel::Painted who = prepared(
+                    m,
+                    boldMetrics.elidedText(piece.name, Qt::ElideRight,
+                                           std::max(12.0, depth.rect.left() - 8.0 - x0)),
+                    RowModel::LabelBold, RowModel::InkText, x0, y);
+                m.painted.push_back(who);
+                m.painted.push_back(depth);
+                m.appCopy << piece.depthText;
+                y += std::max(who.rect.height(), depth.rect.height()) + 1.0;
+
+                QString numbers;
+                if (piece.band) {
+                    numbers = JointsPanel::tr("%1 to %2").arg(numberOnly(piece.bandStart),
+                                                             lengthText(piece.bandEnd));
+                } else {
+                    QStringList parts;
+                    for (double mark : piece.marks) parts << numberOnly(mark);
+                    numbers = parts.join(QStringLiteral(" · ")) + QLatin1Char(' ') + unit;
+                }
+                const QString line =
+                    m.edgeNamed ? JointsPanel::tr("from the %1 edge: %2").arg(m.edge, numbers)
+                                : numbers;
+                RowModel::Painted written =
+                    prepared(m, line, RowModel::Label, RowModel::InkText, x0, y, x1 - x0);
+                m.painted.push_back(written);
+                m.appCopy << line;
+                y += written.rect.height();
+            }
+        }
+
+        // The one line shared by both pieces.
+        const QString inset = JointsPanel::tr("inset %1 from the face").arg(lengthText(m.inset));
+        QString shared;
+        if (!m.fellBack) {
+            shared = m.fastener
+                         ? JointsPanel::tr("%1 from the %2 edge · %3").arg(unit, m.edge, inset)
+                         : JointsPanel::tr("%1 from the %2 edge").arg(unit, m.edge);
+        } else if (m.edgeNamed) {
+            shared = m.fastener ? inset : QString();
+        } else {
+            shared = m.fastener ? JointsPanel::tr("%1 · %2").arg(m.edge, inset) : m.edge;
+        }
+        if (!shared.isEmpty()) {
+            y += 5.0;
+            RowModel::Painted line =
+                prepared(m, shared, RowModel::Label, RowModel::InkMuted, x0, y, x1 - x0);
+            m.painted.push_back(line);
+            m.appCopy << shared;
+            y += line.rect.height();
+        }
+    }
+
+    y += kRowPadB;
+    m.height = Theme::wholeDevicePixels(static_cast<int>(std::ceil(y)));
+}
+
+QColor inkColour(RowModel::Ink ink)
+{
+    switch (ink) {
+        case RowModel::InkText: return Theme::text();
+        case RowModel::InkMuted: return Theme::textMuted();
+        case RowModel::InkDanger: return Theme::danger();
+    }
+    return Theme::text();
+}
+
+// One row. Paints its model and nothing else: every rectangle and every
+// prepared string was decided in refresh().
+class JointRowWidget : public QWidget {
+public:
+    JointRowWidget(JointsPanel* panel, std::shared_ptr<const RowModel> model, QWidget* parent)
+        : QWidget(parent)
+        , myPanel(panel)
+        , myModel(std::move(model))
+    {
+        setAttribute(Qt::WA_NoSystemBackground);
+        setAttribute(Qt::WA_NoMousePropagation);
+        Theme::makeSurfaceTransparent(this);
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override
+    {
+        const RowModel& m = *myModel;
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing, true);
+
+        // The mockup's two row states: the open joint in the accent, a broken
+        // one in danger, each a soft ground and a 3px bar at the left edge.
+        if (m.broken || m.selected) {
+            QColor ground = m.broken ? Theme::danger() : Theme::accent();
+            ground.setAlphaF(m.broken ? 0.13 : 0.22);
+            p.fillRect(rect(), ground);
+            const QColor bar = m.broken ? Theme::danger() : Theme::accent().lighter(160);
+            p.fillRect(QRectF(0.0, 6.0, 3.0, std::max(0, height() - 12)), bar);
+        }
+        Theme::drawCrispRule(p, QPointF(0.0, 0.0), QPointF(width(), 0.0), Theme::border());
+
+        for (const RowModel::Painted& t : m.painted) {
+            p.setFont(m.fonts[t.font]);
+            p.setPen(inkColour(t.ink));
+            p.drawStaticText(t.rect.topLeft(), t.text);
+        }
+
+        if (m.hasCaveatGlyph) {
+            const QRectF g = m.caveatGlyph;
+            QPainterPath triangle;
+            triangle.moveTo(g.center().x(), g.top());
+            triangle.lineTo(g.right(), g.bottom());
+            triangle.lineTo(g.left(), g.bottom());
+            triangle.closeSubpath();
+            QPen amber(Theme::focusRing(), 1.4);
+            amber.setJoinStyle(Qt::RoundJoin);
+            amber.setCapStyle(Qt::RoundCap);
+            p.setPen(amber);
+            p.setBrush(Qt::NoBrush);
+            p.drawPath(triangle);
+            p.drawLine(QPointF(g.center().x(), g.top() + g.height() * 0.40),
+                       QPointF(g.center().x(), g.top() + g.height() * 0.66));
+            p.drawPoint(QPointF(g.center().x(), g.top() + g.height() * 0.84));
+        }
+
+        const QColor tickInk = Theme::accent().lighter(160);
+        for (const RowModel::Strip& strip : m.strips) {
+            p.setPen(QPen(Theme::border(), 1.0));
+            p.setBrush(Theme::chipHover());
+            p.drawRoundedRect(strip.bar, 1.5, 1.5);
+            if (!strip.band.isNull()) {
+                QColor band = Theme::accent();
+                band.setAlphaF(0.55);
+                p.fillRect(strip.band, band);
+            }
+            p.setPen(QPen(Theme::textMuted(), 1.4));
+            p.drawLine(QPointF(strip.bar.left(), strip.bar.top() - kZeroOverhang),
+                       QPointF(strip.bar.left(), strip.bar.bottom() + kZeroOverhang));
+            p.setPen(QPen(tickInk, 1.6));
+            for (double x : strip.ticks)
+                p.drawLine(QPointF(x, strip.bar.top() - kTickOverhang),
+                           QPointF(x, strip.bar.bottom() + kTickOverhang));
+            for (const RowModel::Painted& label : strip.labels) {
+                p.setFont(m.fonts[label.font]);
+                p.setPen(inkColour(label.ink));
+                p.drawStaticText(label.rect.topLeft(), label.text);
+            }
+        }
+
+        if (m.expanded) {
+            QPen chevron(Theme::textMuted(), 1.4);
+            chevron.setCapStyle(Qt::RoundCap);
+            chevron.setJoinStyle(Qt::RoundJoin);
+            p.setPen(chevron);
+            const QPointF c = m.chevron;
+            p.drawPolyline(QPolygonF{c + QPointF(-3.0, -1.5), c + QPointF(0.0, 1.5),
+                                     c + QPointF(3.0, -1.5)});
+        }
+    }
+
+    void mousePressEvent(QMouseEvent* event) override
+    {
+        if (event->button() == Qt::LeftButton) {
+            event->accept();
+            return;
+        }
+        QWidget::mousePressEvent(event);
+    }
+
+    void mouseReleaseEvent(QMouseEvent* event) override
+    {
+        if (event->button() != Qt::LeftButton) {
+            QWidget::mouseReleaseEvent(event);
+            return;
+        }
+        event->accept();
+        if (!rect().contains(event->position().toPoint())) return;
+        // Copied out before the call: activateRow() can rebuild every row, this
+        // one included (deleteLater - so this frame survives), and nothing below
+        // the call may touch this widget again.
+        const QPointer<JointsPanel> panel = myPanel;
+        const int jointId = myModel->jointId;
+        if (panel) panel->activateRow(jointId);
+    }
+
+    void mouseDoubleClickEvent(QMouseEvent* event) override { event->accept(); }
+
+private:
+    QPointer<JointsPanel> myPanel;
+    std::shared_ptr<const RowModel> myModel;
+};
+
+QString deleteCss()
+{
+    return QStringLiteral("QPushButton { background: transparent; border: none; "
+                          "border-radius: 4px; padding: 0px; } "
+                          "QPushButton:hover { background-color: %1; } "
+                          "QPushButton:disabled { background: transparent; }")
+        .arg(Theme::chipHover().name());
+}
+}  // namespace
+
+JointsPanel::JointsPanel(MainWindow* window, OcctViewWidget* view, QWidget* parent)
+    : QWidget(parent)
+    , myWindow(window)
+    , myView(view)
+{
+    setAttribute(Qt::WA_NoSystemBackground);
+    setAttribute(Qt::WA_NoMousePropagation);
+    Theme::makeSurfaceTransparent(this);
+    setFixedWidth(cardWidth());
+
+    myOuter = new QVBoxLayout(this);
+    // 1px in on each side so a row's ground never paints over the border.
+    myOuter->setContentsMargins(1, kPadTop, 1, kPadBottom);
+    myOuter->setSpacing(0);
+
+    auto* header = new QWidget(this);
+    header->setStyleSheet(QStringLiteral("background: transparent;"));
+    auto* headerLayout = new QHBoxLayout(header);
+    headerLayout->setContentsMargins(kHeaderSide, 0, kHeaderSide, 8);
+    headerLayout->setSpacing(8);
+    myTitle = new QLabel(tr("Joints"), header);
+    headerLayout->addWidget(myTitle, 1);
+    myCount = new QLabel(header);
+    myCount->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    headerLayout->addWidget(myCount);
+    myOuter->addWidget(header);
+
+    // VersionsPanel's transparent scroll idiom, the viewport rule included -
+    // QStyleSheetStyle paints a scroll viewport opaque without it, so the
+    // stylesheet goes on BOTH the area and its viewport.
+    myRowScroll = new QScrollArea(this);
+    myRowScroll->setWidgetResizable(true);
+    myRowScroll->setFrameShape(QFrame::NoFrame);
+    myRowScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    myRowScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    myRowScroll->setAttribute(Qt::WA_NoSystemBackground);
+    myRowScroll->viewport()->setAttribute(Qt::WA_NoSystemBackground);
+    myRowScroll->setStyleSheet(QStringLiteral("background: transparent;"));
+    myRowScroll->viewport()->setStyleSheet(QStringLiteral("background: transparent;"));
+    myRowScroll->setMaximumHeight(Theme::wholeDevicePixels(kScrollCap));
+    auto* rowsHost = new QWidget(myRowScroll);
+    rowsHost->setAttribute(Qt::WA_NoSystemBackground);
+    rowsHost->setStyleSheet(QStringLiteral("background: transparent;"));
+    auto* hostLayout = new QVBoxLayout(rowsHost);
+    hostLayout->setContentsMargins(0, 0, 0, 0);
+    hostLayout->setSpacing(0);
+    myRowsLayout = new QVBoxLayout();
+    myRowsLayout->setContentsMargins(0, 0, 0, 0);
+    myRowsLayout->setSpacing(0);
+    hostLayout->addLayout(myRowsLayout);
+    hostLayout->addStretch(1);
+    myRowScroll->setWidget(rowsHost);
+    myOuter->addWidget(myRowScroll);
+    myOuter->addStretch(1);
+
+    applyTheme();   // styles the header and builds the rows
+    connect(Theme::notifier(), &Theme::Notifier::changed, this, &JointsPanel::applyTheme);
+}
+
+JointsPanel::~JointsPanel() = default;
+
+int JointsPanel::cardWidth()
+{
+    const Theme::Spec shipped = Theme::defaultSpec();
+    const int now = QFontMetrics(Theme::labelFont()).horizontalAdvance(specimen());
+    const int atShippedScale =
+        QFontMetrics(Theme::labelFontFor(shipped)).horizontalAdvance(specimen());
+    return Theme::wholeDevicePixels(std::max(kBaseWidth, kBaseWidth + now - atShippedScale));
+}
+
+void JointsPanel::applyTheme()
+{
+    myTitle->setStyleSheet(QStringLiteral("background: transparent; color: %1; "
+                                          "font-weight: 600; font-size: %2pt;")
+                               .arg(Theme::text().name())
+                               .arg(Theme::titleFont().pointSizeF()));
+    myCount->setStyleSheet(QStringLiteral("background: transparent; color: %1; font-size: %2pt;")
+                               .arg(Theme::textMuted().name())
+                               .arg(Theme::labelFont().pointSizeF()));
+    setFixedWidth(cardWidth());
+    // Fonts and metrics are baked into every prepared string, so a theme edit
+    // is a rebuild, not a repaint.
+    myRowsBuilt = false;
+    refresh();
+}
+
+QSize JointsPanel::sizeHint() const
+{
+    const int cw = width() > 0 ? width() : cardWidth();
+    if (!myOuter) return QSize(cw, kMinHeight);
+    const int wrapped = myOuter->hasHeightForWidth() ? myOuter->heightForWidth(cw)
+                                                     : myOuter->totalSizeHint().height();
+    return QSize(cw, std::max(std::max(wrapped, myOuter->totalMinimumSize().height()), kMinHeight));
+}
+
+void JointsPanel::paintEvent(QPaintEvent* /*event*/)
+{
+    QPainter painter(this);
+    Theme::paintSurface(painter, rect(), kRadius);
+}
+
+void JointsPanel::refresh()
+{
+    std::vector<std::shared_ptr<RowModel>> models;
+    const bool live = myWindow != nullptr && !myWindow->isShowingInitScreen();
+    if (live) {
+        const DocumentModel& doc = myWindow->document();
+        // COPIES, both - see MainWindow::jointDerivations(). Nothing built below
+        // holds a reference into either across a later document change.
+        const std::vector<DocumentModel::Joint> joints = doc.joints();
+        const std::vector<Joinery::Derivation> derivations = myWindow->jointDerivations();
+        const std::size_t count = std::min(joints.size(), derivations.size());
+        const int selected = myWindow->selectedJointId();
+        QSet<int> alive;
+        for (std::size_t i = 0; i < count; ++i) {
+            alive.insert(joints[i].id);
+            models.push_back(contentFor(doc, joints[i], derivations[i], selected, myExpanded));
+        }
+        myExpanded.intersect(alive);
+    } else {
+        myExpanded.clear();
+    }
+    // Broken joints first, each group in document order.
+    std::stable_partition(models.begin(), models.end(),
+                          [](const std::shared_ptr<RowModel>& m) { return m->broken; });
+
+    const bool enabled =
+        live && !myWindow->isSketching() && !myWindow->renderModeEnabled();
+    myCount->setText(QString::number(models.size()));
+
+    QString signature = QString::number(models.size()) + QLatin1Char('\x1e');
+    for (const auto& m : models) signature += m->signature + QLatin1Char('\x1e');
+
+    if (myRowsBuilt && signature == myRowSignature) {
+        for (const Row& row : myRows)
+            if (row.remove) row.remove->setEnabled(enabled);
+        return;
+    }
+    myRowSignature = signature;
+    myRowsBuilt = true;
+
+    const int scrolledTo = myRowScroll->verticalScrollBar()->value();
+    while (QLayoutItem* item = myRowsLayout->takeAt(0)) {
+        if (QWidget* widget = item->widget()) {
+            // hide() is what a caller observes synchronously; the delete waits
+            // for the event loop, because this can run from inside a row's own
+            // click handler.
+            widget->hide();
+            widget->deleteLater();
+        }
+        delete item;
+    }
+    myRows.clear();
+    myEmpty = nullptr;
+
+    // Every position computed HERE, once per change - never per paint. Laid out
+    // at the full width first; if the rows overflow the cap, again at the width
+    // a scrollbar leaves, with the bar forced on, so a bar appearing can never
+    // leave a ruler drawn for a width the row no longer has.
+    const int cap = Theme::wholeDevicePixels(kScrollCap);
+    double rowWidth = cardWidth() - 2.0;
+    int total = 0;
+    for (const auto& m : models) {
+        layoutRow(*m, rowWidth);
+        total += m->height;
+    }
+    const bool overflow = total > cap;
+    if (overflow) {
+        rowWidth -= myRowScroll->verticalScrollBar()->sizeHint().width();
+        for (const auto& m : models) layoutRow(*m, rowWidth);
+    }
+    myRowScroll->setVerticalScrollBarPolicy(overflow ? Qt::ScrollBarAlwaysOn
+                                                     : Qt::ScrollBarAlwaysOff);
+
+    const QIcon deleteIcon = IconSet::icon(IconSet::Glyph::Delete);
+    const QString css = deleteCss();
+    QWidget* host = myRowScroll->widget();
+    for (const auto& m : models) {
+        auto* widget = new JointRowWidget(this, m, host);
+        widget->setFixedSize(m->width, m->height);
+        auto* remove = new QPushButton(widget);
+        remove->setFixedSize(Theme::wholeDevicePixels(QSize(kDeleteSize, kDeleteSize)));
+        remove->move(m->deleteAt);
+        remove->setIcon(deleteIcon);
+        remove->setIconSize(QSize(14, 14));
+        remove->setToolTip(deleteTooltip());
+        remove->setStyleSheet(css);
+        remove->setEnabled(enabled);
+        remove->setVisible(m->expanded);   // an OPEN row offers it, as mocked
+        const int jointId = m->jointId;
+        connect(remove, &QPushButton::clicked, this, [this, jointId] {
+            // ONE checkpoint with Undo, owned by the window. Nothing after this
+            // call may touch the row - the delete rebuilds every one of them.
+            if (myWindow) myWindow->deleteJoint(jointId);
+        });
+        myRowsLayout->addWidget(widget);
+        widget->show();
+        myRows.push_back({widget, remove, m});
+    }
+
+    if (models.empty() && live) {
+        myEmpty = new QLabel(emptyText(), host);
+        myEmpty->setWordWrap(true);
+        myEmpty->setContentsMargins(kHeaderSide, 4, kHeaderSide, 4);
+        myEmpty->setStyleSheet(QStringLiteral("background: transparent; color: %1; font-size: %2pt;")
+                                   .arg(Theme::textMuted().name())
+                                   .arg(Theme::bodyFont().pointSizeF()));
+        myRowsLayout->addWidget(myEmpty);
+        myEmpty->show();
+    }
+
+    myRowsLayout->invalidate();
+    myOuter->invalidate();
+    myOuter->activate();
+    if (host) {
+        const int want = host->sizeHint().height();
+        myRowScroll->setMinimumHeight(std::min(want, cap));
+    }
+    updateGeometry();
+    adjustSize();
+    myRowScroll->verticalScrollBar()->setValue(scrolledTo);
+    update();
+}
+
+void JointsPanel::activateRow(int jointId)
+{
+    if (myExpanded.contains(jointId))
+        myExpanded.remove(jointId);
+    else
+        myExpanded.insert(jointId);
+    // Selecting runs updateActions(), whose appStateChanged refreshes this
+    // panel; the direct refresh covers a joint that was already selected, and
+    // the signature early-out absorbs the second call.
+    if (myWindow) myWindow->setSelectedJoint(jointId);
+    refresh();
+}
+
+const JointsPanel::Row* JointsPanel::rowAt(int index) const
+{
+    return index >= 0 && index < static_cast<int>(myRows.size()) ? &myRows[index] : nullptr;
+}
+
+QString JointsPanel::rowTextAt(int index) const
+{
+    const Row* row = rowAt(index);
+    if (!row) return QString();
+    const RowModel& m = *row->model;
+    QString text = m.nameA + QStringLiteral(" ↔ ") + m.nameB + QLatin1Char('\n') + m.kindLine;
+    if (!m.caveat.isEmpty()) text += QLatin1Char('\n') + m.caveat;
+    return text;
+}
+
+void JointsPanel::expandRow(int index)
+{
+    const Row* row = rowAt(index);
+    if (!row) return;
+    myExpanded.insert(row->model->jointId);
+    refresh();
+}
+
+void JointsPanel::collapseRow(int index)
+{
+    const Row* row = rowAt(index);
+    if (!row) return;
+    myExpanded.remove(row->model->jointId);
+    refresh();
+}
+
+bool JointsPanel::isExpandedAt(int index) const
+{
+    const Row* row = rowAt(index);
+    return row && row->model->expanded;
+}
+
+bool JointsPanel::isSelectedAt(int index) const
+{
+    const Row* row = rowAt(index);
+    return row && row->model->selected;
+}
+
+bool JointsPanel::isBrokenAt(int index) const
+{
+    const Row* row = rowAt(index);
+    return row && row->model->broken;
+}
+
+int JointsPanel::jointIdAt(int index) const
+{
+    const Row* row = rowAt(index);
+    return row ? row->model->jointId : 0;
+}
+
+QString JointsPanel::readoutTextAt(int index) const
+{
+    const Row* row = rowAt(index);
+    return row ? row->model->readoutText : QString();
+}
+
+QString JointsPanel::caveatTextAt(int index) const
+{
+    const Row* row = rowAt(index);
+    return row ? row->model->caveat : QString();
+}
+
+QStringList JointsPanel::rowAppCopyAt(int index) const
+{
+    const Row* row = rowAt(index);
+    return row ? row->model->appCopy : QStringList();
+}
+
+QWidget* JointsPanel::rowWidgetAt(int index) const
+{
+    const Row* row = rowAt(index);
+    return row ? row->widget : nullptr;
+}
+
+QPushButton* JointsPanel::deleteButtonAt(int index) const
+{
+    const Row* row = rowAt(index);
+    return row ? row->remove : nullptr;
+}
+
+void JointsPanel::ensureRowVisible(int index)
+{
+    QWidget* widget = rowWidgetAt(index);
+    if (widget && myRowScroll) myRowScroll->ensureWidgetVisible(widget, 0, 8);
+}
+
+bool JointsPanel::rulerFellBackAt(int index) const
+{
+    const Row* row = rowAt(index);
+    return row && row->model->fellBack;
+}
+
+int JointsPanel::stripCountAt(int index) const
+{
+    const Row* row = rowAt(index);
+    return row ? static_cast<int>(row->model->strips.size()) : 0;
+}
+
+QRectF JointsPanel::rulerBarAt(int index, int strip) const
+{
+    const Row* row = rowAt(index);
+    if (!row || strip < 0 || strip >= static_cast<int>(row->model->strips.size())) return QRectF();
+    return row->model->strips[strip].bar;
+}
+
+std::vector<double> JointsPanel::tickXAt(int index, int strip) const
+{
+    const Row* row = rowAt(index);
+    if (!row || strip < 0 || strip >= static_cast<int>(row->model->strips.size())) return {};
+    return row->model->strips[strip].ticks;
+}
+
+QRectF JointsPanel::bandAt(int index, int strip) const
+{
+    const Row* row = rowAt(index);
+    if (!row || strip < 0 || strip >= static_cast<int>(row->model->strips.size())) return QRectF();
+    return row->model->strips[strip].band;
+}
+
+std::vector<QRectF> JointsPanel::labelRectsAt(int index, int strip) const
+{
+    std::vector<QRectF> rects;
+    const Row* row = rowAt(index);
+    if (!row || strip < 0 || strip >= static_cast<int>(row->model->strips.size())) return rects;
+    for (const RowModel::Painted& label : row->model->strips[strip].labels)
+        rects.push_back(label.rect);
+    return rects;
+}
+
+QStringList JointsPanel::labelTextsAt(int index, int strip) const
+{
+    QStringList texts;
+    const Row* row = rowAt(index);
+    if (!row || strip < 0 || strip >= static_cast<int>(row->model->strips.size())) return texts;
+    for (const RowModel::Painted& label : row->model->strips[strip].labels) texts << label.raw;
+    return texts;
+}
+
+QString JointsPanel::depthTextAt(int index, int strip) const
+{
+    const Row* row = rowAt(index);
+    if (!row || strip < 0 || strip >= static_cast<int>(row->model->strips.size())) return QString();
+    return row->model->strips[strip].depthText;
+}
+
+bool JointsPanel::isStaggeredAt(int index) const
+{
+    const Row* row = rowAt(index);
+    return row && row->model->staggered;
+}
+
+QRectF JointsPanel::nameRectAt(int index) const
+{
+    const Row* row = rowAt(index);
+    return row ? row->model->nameARect : QRectF();
+}
+
+QStringList JointsPanel::paintedTexts() const
+{
+    QStringList texts{tr("Joints"), emptyText(), deleteTooltip()};
+    for (const Row& row : myRows) texts << row.model->appCopy;
+    return texts;
+}
+
+QStringList JointsPanel::paintedNames() const
+{
+    QStringList names;
+    for (const Row& row : myRows) names << row.model->nameA << row.model->nameB;
+    return names;
+}

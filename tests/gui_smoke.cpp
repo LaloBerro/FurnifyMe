@@ -44,6 +44,7 @@
 #include "IconSet.h"
 #include "ItemsPanel.h"
 #include "Joinery.h"
+#include "JointsPanel.h"
 #include "MainWindow.h"
 #include "Measure.h"
 #include "ModelingOps.h"
@@ -117,6 +118,7 @@
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepBuilderAPI_MakePolygon.hxx>
+#include <BRepBuilderAPI_Transform.hxx>
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepGProp.hxx>
 #include <BRep_Tool.hxx>
@@ -837,6 +839,7 @@ constexpr BlockInfo kBlocks[] = {
     { "magnet-a-move-drag-sticks-to-another-body-s-alignments", false, true },
     { "joints-draw-as-ghosted-hardware-in-the-viewport", false, true },
     { "placing-a-joint-between-two-pieces", false, true },
+    { "the-joints-drawer-lists-rows-and-mark-out-numbers", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -23896,6 +23899,32 @@ int main(int argc, char* argv[])
     // See OcctViewWidget::PaintSample.
     if (blockEnabled("an-orbit-step-costs-one-frame-in-both-modes")) {
         RequiredTempDir lagDir;
+        // (joinery Task 12) The joints drawer is one more overlay the budget
+        // below pays for on EVERY orbit frame, and its heaviest state is a row
+        // opened to its rulers - so the orbit is measured in that state. Two
+        // boards and a dowel joint are SEEDED rather than sketched: snapped
+        // sketch clicks do not guarantee two faces coincide (the joints-draw
+        // block's own finding), and a joint needs pieces that provably meet.
+        QString lagFurnitureId;
+        {
+            FurnitureStore seedStore(lagDir.path());
+            lagFurnitureId = seedStore.createFurniture(QStringLiteral("Orbit pacing"));
+            DocumentModel seedDoc;
+            const int lagUpright =
+                seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 18.0, 300.0, 400.0));
+            const int lagShelf =
+                seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(18.0, 0.0, 200.0), 400.0, 300.0, 18.0));
+            const Joinery::ContactResult lagMeet =
+                Joinery::findContact(seedDoc.shapeOf(lagUpright), seedDoc.shapeOf(lagShelf));
+            const int lagJoint =
+                lagMeet.ok ? seedDoc.addJoint(Joinery::Kind::Dowel, lagUpright, lagShelf,
+                                              Joinery::defaultsForContact(Joinery::Kind::Dowel,
+                                                                          lagMeet.contact))
+                           : 0;
+            check(lagJoint > 0 && !lagFurnitureId.isEmpty() &&
+                      seedStore.saveFurniture(lagFurnitureId, seedDoc, QImage()),
+                  "orbit pacing: two boards and a joint between them are seeded");
+        }
         MainWindow probe(nullptr, /*persistProgress=*/false, lagDir.path());
         probe.setAttribute(Qt::WA_ShowWithoutActivating);
         probe.resize(1000, 720);
@@ -23903,10 +23932,23 @@ int main(int argc, char* argv[])
         settle(400);
         OcctViewWidget* lview = probe.view();
         lview->setAnimationsEnabled(false);
-        enterFreshFurniture(probe);
-        check(buildBody(probe, 0.35, 0.35, 0.60, 0.60, 80.0),
-              "a body for the orbit-pacing probe");
+        check(probe.openFurniture(lagFurnitureId),
+              "bodies for the orbit-pacing probe - the seeded boards open");
         settle(300);
+        lview->fitAll();
+        settle(200);
+        if (QAction* jointsDrawerAction = action(probe, QStringLiteral("Joints"));
+            jointsDrawerAction != nullptr && !jointsDrawerAction->isChecked())
+            jointsDrawerAction->trigger();
+        settle(200);
+        JointsPanel* lagDrawer = probe.jointsPanel();
+        if (lagDrawer != nullptr && lagDrawer->rowCount() > 0) lagDrawer->expandRow(0);
+        settle(250);
+        check(lagDrawer != nullptr && lagDrawer->isVisible() && lagDrawer->rowCount() == 1 &&
+                  lagDrawer->isExpandedAt(0) && lagDrawer->stripCountAt(0) > 0,
+              QStringLiteral("orbit pacing: measured with the joints drawer open and its row opened "
+                             "to %1 ruler strips")
+                  .arg(lagDrawer != nullptr ? lagDrawer->stripCountAt(0) : -1));
 
         struct OrbitRun {
             int moves = 0;
@@ -24094,6 +24136,16 @@ int main(int argc, char* argv[])
         check(treeMs > 0.0 && treeMs < 8.0,
               QStringLiteral("and so does the whole overlay tree together (%1 ms)")
                   .arg(treeMs, 0, 'f', 3));
+        // The joints drawer priced BY NAME, on the app bar's terms: it is the
+        // newest card in the tree and the one with the most to paint, a row
+        // open to two rulers - every position computed in refresh(), so a
+        // repaint is lines, rects and prepared text.
+        const double drawerMs = priceCard(lagDrawer);
+        std::printf("[orbit-pacing] joints drawer (row open to its rulers) = %.3f ms\n", drawerMs);
+        check(drawerMs >= 0.0 && drawerMs < 8.0,
+              QStringLiteral("one joints-drawer repaint, a row open to its rulers, fits inside half "
+                             "a 60 Hz frame (%1 ms) - it too is charged to every orbit frame")
+                  .arg(drawerMs, 0, 'f', 3));
 
         // And the structural half, which needs no clock at all: the app mark
         // is rasterized ONCE and handed out from a cache. A QPixmap built
@@ -27369,6 +27421,17 @@ int main(int argc, char* argv[])
         jv->setAnimationsEnabled(false);
         check(jw.openFurniture(furnitureId), "joints: the seeded furniture opens");
         settle(250);
+        // Since Task 12 a joint draws only while the joints drawer is open or
+        // that joint is selected. Every check below measures the document's
+        // joint on screen through state changes that clear any selection, so
+        // the drawer is opened: the one state in which the gate draws EVERY
+        // joint, which is what this block was written against.
+        if (QAction* jointsDrawerAction = action(jw, QStringLiteral("Joints"));
+            jointsDrawerAction != nullptr && !jointsDrawerAction->isChecked())
+            jointsDrawerAction->trigger();
+        settle(200);
+        check(jw.jointsDrawerOpen(),
+              "joints: the joints drawer is open, so the drawing gate draws every joint");
 
         // --- the layer contract ----------------------------------------------
         const Graphic3d_ZLayerId jointsLayer = jv->jointsZLayer();
@@ -28122,6 +28185,18 @@ int main(int argc, char* argv[])
         {
             check(pw.openFurniture(dowelFurnitureId), "placement: the dowel furniture opens");
             settle(250);
+            // (Task 12) This probe counts the hardware each furniture DRAWS, and
+            // since Task 12 a joint draws only while the joints drawer is open or
+            // it is the selected joint - a freshly opened furniture selects none.
+            // So the drawer is opened (its action is enabled once a furniture is
+            // open, not at the library) and closed again below, which keeps the
+            // drawer-closed placement check further down authoritative.
+            if (QAction* jointsDrawerAction = action(pw, QStringLiteral("Joints"));
+                jointsDrawerAction != nullptr && !jointsDrawerAction->isChecked())
+                jointsDrawerAction->trigger();
+            settle(200);
+            check(pw.jointsDrawerOpen(),
+                  "placement: (the joints drawer is open, so the gate draws every joint)");
             const int dowelRevision = pw.document().revision();
             const std::vector<Joinery::Derivation>& dowels = pw.jointDerivations();
             check(dowels.size() == 1 && dowels.front().ok && dowels.front().items.size() == 3 &&
@@ -28144,6 +28219,12 @@ int main(int argc, char* argv[])
                   QStringLiteral("placement: and it derives and draws ITS joint - one channel, not "
                                  "the previous furniture's three dowels (%1 drawn)")
                       .arg(pv->jointItemsShown()));
+            if (QAction* jointsDrawerAction = action(pw, QStringLiteral("Joints"));
+                jointsDrawerAction != nullptr && jointsDrawerAction->isChecked())
+                jointsDrawerAction->trigger();
+            settle(150);
+            check(!pw.jointsDrawerOpen(),
+                  "placement: (the joints drawer is closed again for the placement checks below)");
         }
 
         check(pw.openFurniture(mainId), "placement: the seeded furniture opens");
@@ -28469,6 +28550,19 @@ int main(int argc, char* argv[])
                 check(joints.size() == heldCount, "placement: (redo put the joint back)");
             }
 
+            // --- (Task 12) the drawer open, so EVERY joint is drawn --------------
+            // The two sub-blocks below pin that drawing is not cached and that a
+            // context loss brings every joint back. Since Task 12 a joint draws
+            // only while the joints drawer is open or it is the selected joint,
+            // and the undo/redo just above cleared the selection - so the drawer
+            // is opened, the one state in which "every joint" is the drawn set.
+            if (QAction* jointsDrawerAction = action(pw, QStringLiteral("Joints"));
+                jointsDrawerAction != nullptr && !jointsDrawerAction->isChecked())
+                jointsDrawerAction->trigger();
+            settle(200);
+            check(pw.jointsDrawerOpen(),
+                  "placement: (the joints drawer is open, so the gate draws every joint)");
+
             // --- deriving is cached on the revision; drawing is not -------------
             {
                 const int jointCount = static_cast<int>(joints.size());
@@ -28563,6 +28657,776 @@ int main(int argc, char* argv[])
         check(pw.findChild<QDialog*>() == nullptr, "placement: no modal appeared for any of it");
 
         pw.close();
+        settle(150);
+    }
+
+    // --- the joints drawer: rows, rulers, broken joints first (joinery, Task 12)
+    // Self-contained. Exact pieces seeded through FurnitureStore, for the
+    // placement block's reason: every joint here needs pieces that provably
+    // meet. Seven joints, each chosen to reach one row behaviour - a plain
+    // dowel ruler, a crowded one that must stagger, a dense one that must be
+    // written, a stopped dado's band, a half-lap's band on both pieces, a board
+    // angled so no single edge applies, and a notched contact's caveat.
+    if (blockEnabled("the-joints-drawer-lists-rows-and-mark-out-numbers")) {
+        RequiredTempDir drawerDir;
+        constexpr double kBoardMm = 18.0;
+        constexpr int kStaggerCount = 12;
+        constexpr int kDenseCount = 40;
+        QString drawerFurnitureId;
+        {
+            FurnitureStore seedStore(drawerDir.path());
+            drawerFurnitureId = seedStore.createFurniture(QStringLiteral("Joints drawer"));
+            DocumentModel seedDoc;
+            const auto addNamed = [&](const TopoDS_Shape& shape, const char* name) {
+                const int id = seedDoc.addSolid(shape);
+                seedDoc.setItemName(id, name);
+                return id;
+            };
+            const int side = addNamed(
+                ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), kBoardMm, 300.0, 400.0), "Side panel");
+            const int shelf = addNamed(
+                ModelingOps::makeBox(gp_Pnt(kBoardMm, 0.0, 200.0), 400.0, 300.0, kBoardMm), "Shelf");
+            // A user name spelled with a banned word - the drawer's sweep has to
+            // exempt the user's words and nothing else.
+            const int fusePanel = addNamed(
+                ModelingOps::makeBox(gp_Pnt(2000.0, 0.0, 0.0), kBoardMm, 300.0, 800.0), "Fuse panel");
+            const int top = addNamed(
+                ModelingOps::makeBox(gp_Pnt(2000.0 + kBoardMm, 0.0, 400.0), 400.0, 300.0, kBoardMm),
+                "Top");
+            const int rail =
+                addNamed(ModelingOps::makeBox(gp_Pnt(0.0, 800.0, 0.0), 400.0, 40.0, 20.0), "Rail");
+            const int crossRail = addNamed(
+                ModelingOps::makeBox(gp_Pnt(150.0, 700.0, 0.0), 60.0, 300.0, 20.0), "Cross rail");
+            // 40 degrees about Z: the run points 0.77 along an axis, under the
+            // 0.906 an edge word needs - no single edge applies.
+            gp_Trsf turn;
+            turn.SetRotation(gp_Ax1(gp_Pnt(4000.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0)),
+                             40.0 * (4.0 * std::atan(1.0)) / 180.0);
+            const auto turned = [&turn](const TopoDS_Shape& shape) {
+                return BRepBuilderAPI_Transform(shape, turn, Standard_True).Shape();
+            };
+            const int angledSide = addNamed(
+                turned(ModelingOps::makeBox(gp_Pnt(4000.0, 0.0, 0.0), kBoardMm, 300.0, 400.0)),
+                "Angled side");
+            const int angledShelf = addNamed(
+                turned(ModelingOps::makeBox(gp_Pnt(4000.0 + kBoardMm, 0.0, 200.0), 400.0, 300.0,
+                                            kBoardMm)),
+                "Angled shelf");
+            const int upright = addNamed(
+                ModelingOps::makeBox(gp_Pnt(6000.0, 0.0, 0.0), kBoardMm, 300.0, 800.0), "Upright");
+            const ModelingOps::BooleanResult notched = ModelingOps::applyBoolean(
+                ModelingOps::BooleanKind::Cut,
+                ModelingOps::makeBox(gp_Pnt(6000.0 + kBoardMm, 0.0, 400.0), 400.0, 300.0, kBoardMm),
+                ModelingOps::makeBox(gp_Pnt(6000.0 + kBoardMm, 0.0, 400.0), 50.0, 100.0,
+                                     kBoardMm / 2.0));
+            check(notched.ok, "drawer: the notched shelf builds");
+            const int notchedShelf = notched.ok ? addNamed(notched.shape, "Notched shelf") : 0;
+
+            const auto paramsFor = [&](Joinery::Kind kind, int a, int b) {
+                const Joinery::ContactResult meet =
+                    Joinery::findContact(seedDoc.shapeOf(a), seedDoc.shapeOf(b));
+                return meet.ok ? Joinery::defaultsForContact(kind, meet.contact)
+                               : Joinery::defaultsFor(kind, kBoardMm);
+            };
+            Joinery::Parameters crowded = paramsFor(Joinery::Kind::Dowel, side, shelf);
+            crowded.count = kStaggerCount;
+            crowded.endMarginMm = 40.0;
+            Joinery::Parameters dense = crowded;
+            dense.count = kDenseCount;
+            // STOPPED, so the band ends short of the far end and its right edge
+            // is a measurement rather than the bar's own end.
+            Joinery::Parameters stoppedDado = paramsFor(Joinery::Kind::Dado, fusePanel, top);
+            stoppedDado.stopped = true;
+            stoppedDado.stopMm = 60.0;
+            const int seeded[] = {
+                seedDoc.addJoint(Joinery::Kind::Dowel, side, shelf,
+                                 paramsFor(Joinery::Kind::Dowel, side, shelf)),
+                seedDoc.addJoint(Joinery::Kind::Dowel, side, shelf, crowded),
+                seedDoc.addJoint(Joinery::Kind::Dowel, side, shelf, dense),
+                seedDoc.addJoint(Joinery::Kind::Dado, fusePanel, top, stoppedDado),
+                seedDoc.addJoint(Joinery::Kind::HalfLap, rail, crossRail,
+                                 paramsFor(Joinery::Kind::HalfLap, rail, crossRail)),
+                seedDoc.addJoint(Joinery::Kind::Dowel, angledSide, angledShelf,
+                                 paramsFor(Joinery::Kind::Dowel, angledSide, angledShelf)),
+                notchedShelf > 0 ? seedDoc.addJoint(Joinery::Kind::Dowel, upright, notchedShelf,
+                                                    paramsFor(Joinery::Kind::Dowel, upright,
+                                                              notchedShelf))
+                                 : 0,
+            };
+            const bool allSeeded =
+                std::all_of(std::begin(seeded), std::end(seeded), [](int id) { return id > 0; });
+            check(allSeeded && !drawerFurnitureId.isEmpty() &&
+                      seedStore.saveFurniture(drawerFurnitureId, seedDoc, QImage()),
+                  "drawer: ten pieces and seven joints are seeded to disk");
+        }
+
+        MainWindow dw(nullptr, /*persistProgress=*/false, drawerDir.path());
+        dw.setAttribute(Qt::WA_ShowWithoutActivating);
+        dw.resize(1180, 860);
+        dw.show();
+        settle(300);
+        OcctViewWidget* dv = dw.view();
+        dv->setAnimationsEnabled(false);
+        check(dw.openFurniture(drawerFurnitureId), "drawer: the seeded furniture opens");
+        settle(300);
+        dv->fitAll();
+        settle(200);
+        // The Items drawer shares the TopLeft column; closed, so the joints
+        // drawer sits at the top of it where a capture can see all of it.
+        if (QAction* itemsAction = action(dw, QStringLiteral("Items"));
+            itemsAction != nullptr && itemsAction->isChecked())
+            itemsAction->trigger();
+        settle(150);
+
+        const auto& solids = dw.document().solids();
+        const auto& joints = dw.document().joints();
+        ToastHost* toasts = dw.findChild<ToastHost*>();
+        const auto toastText = [&]() { return toasts ? toasts->currentText() : QString(); };
+        const QString unit = QString::fromStdString(Measure::unitSuffix());
+        const auto lengthText = [](double mm) { return QString::fromStdString(Measure::formatLength(mm)); };
+        const auto numberOnly = [&](double mm) {
+            QString text = QString::fromStdString(Measure::formatLength(mm));
+            if (text.endsWith(QLatin1Char(' ') + unit)) text.chop(unit.size() + 1);
+            return text;
+        };
+
+        check(solids.size() == 10 && joints.size() == 7,
+              QStringLiteral("drawer: all ten pieces and seven joints are open (%1, %2)")
+                  .arg(solids.size()).arg(joints.size()));
+        // Guarded, not indexed on faith: every id below is read by POSITION
+        // (a loaded document mints its own ids), and a short list must skip,
+        // loudly, rather than read past its end.
+        if (solids.size() == 10 && joints.size() == 7) {
+            const int shelf = solids[1].id;
+            const int rail = solids[4].id;
+            const int crossRail = solids[5].id;
+            const int jDowel = joints[0].id;
+            const int jStagger = joints[1].id;
+            const int jDense = joints[2].id;
+            const int jDado = joints[3].id;
+            const int jLap = joints[4].id;
+            const int jAngled = joints[5].id;
+            const int jNotch = joints[6].id;
+            const auto derivationOf = [&dw](int jointId) {
+                const std::vector<Joinery::Derivation> all = dw.jointDerivations();
+                const std::vector<DocumentModel::Joint> list = dw.document().joints();
+                for (std::size_t i = 0; i < list.size() && i < all.size(); ++i)
+                    if (list[i].id == jointId) return all[i];
+                return Joinery::Derivation();
+            };
+            for (const int id : {jDowel, jStagger, jDense, jDado, jLap, jAngled, jNotch}) {
+                const Joinery::Derivation d = derivationOf(id);
+                check(d.ok, QStringLiteral("drawer: joint %1 derives (%2)")
+                                .arg(id).arg(QString::fromStdString(d.error)));
+            }
+
+            // --- the action -----------------------------------------------------
+            QAction* drawerAction = action(dw, QStringLiteral("Joints"));
+            check(drawerAction != nullptr && drawerAction->isCheckable() && !drawerAction->isChecked(),
+                  "drawer: there is a checkable Joints entry, unchecked at start");
+            check(drawerAction != nullptr &&
+                      drawerAction->shortcut() == QKeySequence(QStringLiteral("Ctrl+Alt+J")),
+                  "drawer: bound to Ctrl+Alt+J");
+            check(drawerAction != nullptr && action(dw, QStringLiteral("Joint")) != nullptr &&
+                      action(dw, QStringLiteral("Joint")) != drawerAction,
+                  "drawer: (and it is not the Joint placement action - the two names stay distinct)");
+            bool inViewMenu = false;
+            for (QMenu* menu : dw.findChildren<QMenu*>()) {
+                if (menu->title().remove(QLatin1Char('&')) == QStringLiteral("View") &&
+                    menu->actions().contains(drawerAction))
+                    inViewMenu = true;
+            }
+            check(drawerAction != nullptr && inViewMenu, "drawer: it is a View-menu entry");
+            JointsPanel* panel = dw.jointsPanel();
+            check(panel != nullptr && panel == dw.findChild<JointsPanel*>() && !panel->isVisible(),
+                  "drawer: the drawer exists and starts hidden - its visibility is the action's");
+
+            // --- the drawing gate: closed and nothing selected, nothing drawn ----
+            dv->clearSelection();
+            settle(150);
+            check(dw.selectedJointId() == 0 && dv->jointsShown() == 0,
+                  QStringLiteral("drawer: with the drawer closed and no joint selected, no hardware "
+                                 "is drawn (%1 of %2 joints)")
+                      .arg(dv->jointsShown()).arg(joints.size()));
+
+            if (drawerAction != nullptr && panel != nullptr) {
+                drawerAction->trigger();
+                settle(300);
+                check(panel->isVisible(), "drawer: the action opens the drawer");
+                check(dv->jointsShown() == static_cast<int>(joints.size()),
+                      QStringLiteral("drawer: and with it open EVERY joint is drawn (%1 of %2)")
+                          .arg(dv->jointsShown()).arg(joints.size()));
+                check(panel->rowCount() == static_cast<int>(joints.size()),
+                      QStringLiteral("drawer: one row per joint (%1)").arg(panel->rowCount()));
+
+                const auto rowOf = [panel](int jointId) {
+                    for (int i = 0; i < panel->rowCount(); ++i)
+                        if (panel->jointIdAt(i) == jointId) return i;
+                    return -1;
+                };
+
+                // Every row names its kind and both pieces.
+                {
+                    int named = 0;
+                    for (const DocumentModel::Joint& joint : joints) {
+                        const int row = rowOf(joint.id);
+                        const QString text = panel->rowTextAt(row);
+                        if (row >= 0 && !panel->isBrokenAt(row) &&
+                            text.contains(QString::fromStdString(Joinery::kindName(joint.kind))) &&
+                            text.contains(QString::fromStdString(dw.document().nameOf(joint.bodyA))) &&
+                            text.contains(QString::fromStdString(dw.document().nameOf(joint.bodyB))))
+                            ++named;
+                    }
+                    check(named == static_cast<int>(joints.size()),
+                          QStringLiteral("drawer: every row names its kind and both pieces (%1 of %2)")
+                              .arg(named).arg(joints.size()));
+                    const int dowelRow = rowOf(jDowel);
+                    const Joinery::Derivation d = derivationOf(jDowel);
+                    check(dowelRow >= 0 && !d.items.empty() &&
+                              panel->rowTextAt(dowelRow).contains(
+                                  QStringLiteral("Dowel, %1 × %2")
+                                      .arg(d.items.size())
+                                      .arg(lengthText(d.items.front().sizeMm))),
+                          QStringLiteral("drawer: a closed dowel row reads \"Dowel, count × size\" "
+                                         "(\"%1\")")
+                              .arg(panel->rowTextAt(dowelRow)));
+                }
+
+                // --- a real click: selects the joint and opens the row ----------
+                {
+                    int row = rowOf(jDowel);
+                    panel->ensureRowVisible(row);
+                    settle(150);
+                    QWidget* rowWidget = panel->rowWidgetAt(row);
+                    check(rowWidget != nullptr, "drawer: the dowel row has a widget");
+                    if (rowWidget != nullptr) {
+                        const QPoint aim = rowWidget->mapTo(dv, QPoint(30, 10));
+                        QWidget* hit = dv->childAt(aim);
+                        check(hit != nullptr && (hit == rowWidget || rowWidget->isAncestorOf(hit)),
+                              "drawer: a real click on the row lands on the row (childAt)");
+                        clickAt(rowWidget, QPointF(30.0, 10.0));
+                        settle(250);
+                        row = rowOf(jDowel);
+                        check(dw.selectedJointId() == jDowel && panel->isExpandedAt(row) &&
+                                  panel->isSelectedAt(row),
+                              QStringLiteral("drawer: clicking a row selects its joint AND opens it in "
+                                             "place (selected %1, open %2)")
+                                  .arg(dw.selectedJointId()).arg(panel->isExpandedAt(row)));
+                        check(panel->deleteButtonAt(row) != nullptr &&
+                                  panel->deleteButtonAt(row)->isVisible(),
+                              "drawer: an open row offers its delete");
+                        rowWidget = panel->rowWidgetAt(row);
+                        if (rowWidget != nullptr) clickAt(rowWidget, QPointF(30.0, 10.0));
+                        settle(250);
+                        row = rowOf(jDowel);
+                        check(!panel->isExpandedAt(row) && dw.selectedJointId() == jDowel,
+                              "drawer: a second click closes it again, the joint still selected");
+                    }
+
+                    // The gate's second term: the drawer closed, the selected joint
+                    // alone is drawn - not every joint, and not none.
+                    drawerAction->trigger();
+                    settle(250);
+                    const Joinery::Derivation d = derivationOf(jDowel);
+                    check(!panel->isVisible() && dv->jointsShown() == 1 &&
+                              dv->jointItemsShown() == static_cast<int>(d.items.size()),
+                          QStringLiteral("drawer: closed, only the SELECTED joint is drawn (%1 joints, "
+                                         "%2 pieces of hardware)")
+                              .arg(dv->jointsShown()).arg(dv->jointItemsShown()));
+                    dv->clearSelection();
+                    settle(200);
+                    check(dw.selectedJointId() == 0 && dv->jointsShown() == 0,
+                          "drawer: clearing the body selection ends the joint selection, and its "
+                          "hardware goes");
+                    drawerAction->trigger();
+                    settle(250);
+                    check(panel->isVisible() &&
+                              dv->jointsShown() == static_cast<int>(joints.size()),
+                          "drawer: (open again, every joint drawn)");
+                }
+
+                // --- the dowel ruler: to scale, one tick per item -----------------
+                {
+                    panel->expandRow(rowOf(jDowel));
+                    settle(200);
+                    const int row = rowOf(jDowel);
+                    const Joinery::Derivation d = derivationOf(jDowel);
+                    const double run = d.contact.runLength();
+                    const QString edge = QString::fromStdString(d.readout.referenceEdgeA);
+                    check(row >= 0 && panel->isExpandedAt(row) && !panel->isSelectedAt(row) &&
+                              !panel->rulerFellBackAt(row) && panel->stripCountAt(row) == 2,
+                          QStringLiteral("drawer: the open dowel row draws a ruler for each drilled "
+                                         "piece (%1 strips)")
+                              .arg(panel->stripCountAt(row)));
+                    check(panel->readoutTextAt(row).contains(QStringLiteral("mm")) &&
+                              panel->readoutTextAt(row).contains(
+                                  QStringLiteral("drill %1").arg(lengthText(d.readout.depthAMm))),
+                          QStringLiteral("drawer: its numbers are Measure-formatted (\"%1\")")
+                              .arg(panel->readoutTextAt(row).left(60)));
+                    check(panel->depthTextAt(row, 0) ==
+                                  QStringLiteral("drill %1").arg(lengthText(d.readout.depthAMm)) &&
+                              panel->depthTextAt(row, 1) ==
+                                  QStringLiteral("drill %1").arg(lengthText(d.readout.depthBMm)),
+                          QStringLiteral("drawer: each piece carries its own drill depth (\"%1\", "
+                                         "\"%2\")")
+                              .arg(panel->depthTextAt(row, 0), panel->depthTextAt(row, 1)));
+                    check(panel->paintedTexts().contains(
+                              QStringLiteral("%1 from the %2 edge · inset %3 from the face")
+                                  .arg(unit, edge, lengthText(d.readout.insetMm))),
+                          QStringLiteral("drawer: one shared line under the pieces: \"%1 from the %2 "
+                                         "edge · inset %3 from the face\"")
+                              .arg(unit, edge, lengthText(d.readout.insetMm)));
+
+                    for (int strip = 0; strip < panel->stripCountAt(row) && strip < 2; ++strip) {
+                        const QRectF bar = panel->rulerBarAt(row, strip);
+                        const std::vector<double> ticks = panel->tickXAt(row, strip);
+                        check(!bar.isEmpty() && run > 0.0 &&
+                                  ticks.size() == d.readout.alongMm.size() && ticks.size() == 3,
+                              QStringLiteral("drawer: strip %1 has one tick per dowel (%2)")
+                                  .arg(strip).arg(ticks.size()));
+                        if (ticks.size() == d.readout.alongMm.size() && run > 0.0) {
+                            double worst = 0.0;
+                            for (std::size_t i = 0; i < ticks.size(); ++i) {
+                                const double expected =
+                                    bar.left() + d.readout.alongMm[i] / run * bar.width();
+                                worst = std::max(worst, std::fabs(ticks[i] - expected));
+                            }
+                            check(worst < 0.01,
+                                  QStringLiteral("drawer: strip %1's ticks are TO SCALE - the edge at "
+                                                 "zero, the %2 mm run the bar's length (worst %3 px)")
+                                      .arg(strip).arg(run).arg(worst, 0, 'f', 4));
+                        }
+                        QStringList expectedLabels{edge};
+                        for (double along : d.readout.alongMm) expectedLabels << numberOnly(along);
+                        check(panel->labelTextsAt(row, strip) == expectedLabels,
+                              QStringLiteral("drawer: strip %1 labels the edge at zero and each tick "
+                                             "with its distance (%2)")
+                                  .arg(strip)
+                                  .arg(panel->labelTextsAt(row, strip).join(QStringLiteral(" | "))));
+                    }
+
+                    // Trust the pixel: the ticks the row PAINTS sit where the model
+                    // says, found as accent ink in the tick overhang above the bar,
+                    // where nothing else is drawn.
+                    QWidget* rowWidget = panel->rowWidgetAt(row);
+                    if (rowWidget != nullptr && panel->stripCountAt(row) > 0) {
+                        const QImage shot = renderExact(rowWidget);
+                        const QRectF bar = panel->rulerBarAt(row, 0);
+                        const std::vector<double> ticks = panel->tickXAt(row, 0);
+                        const int y = static_cast<int>(std::floor(bar.top() - 1.0));
+                        std::vector<double> inked;
+                        double sum = 0.0, weight = 0.0;
+                        for (int x = 0; x <= shot.width(); ++x) {
+                            bool ink = false;
+                            int alpha = 0;
+                            if (x < shot.width() && y >= 0 && y < shot.height()) {
+                                const QColor c = shot.pixelColor(x, y);
+                                ink = c.alpha() > 40 && c.blue() - c.green() > 40;
+                                alpha = c.alpha();
+                            }
+                            if (ink) {
+                                sum += (x + 0.5) * alpha;
+                                weight += alpha;
+                            } else if (weight > 0.0) {
+                                inked.push_back(sum / weight);
+                                sum = 0.0;
+                                weight = 0.0;
+                            }
+                        }
+                        bool matched = inked.size() == ticks.size() && !ticks.empty();
+                        double worst = 0.0;
+                        for (std::size_t i = 0; matched && i < ticks.size(); ++i)
+                            worst = std::max(worst, std::fabs(inked[i] - ticks[i]));
+                        check(matched && worst <= 1.0,
+                              QStringLiteral("drawer: the PAINTED ticks are where the model puts them - "
+                                             "%1 found for %2, worst %3 px off")
+                                  .arg(inked.size()).arg(ticks.size()).arg(worst, 0, 'f', 2));
+                    }
+
+                    // A capture of the real drawer for the design page: the dowel
+                    // row open, and selected, as mocked.
+                    dw.setSelectedJoint(jDowel);
+                    settle(250);
+                    const QImage dowelShot =
+                        printWindowCapture(&dw, outDir + QStringLiteral("/joints-drawer-dowel.png"));
+                    checkNoBlackLine(dowelShot, QStringLiteral("joints drawer (dowel row open)"));
+                    dv->clearSelection();
+                    settle(200);
+                    panel->collapseRow(rowOf(jDowel));
+                    settle(150);
+                }
+
+                // --- crowded: labels stagger onto two lines, and never overlap ----
+                {
+                    panel->expandRow(rowOf(jStagger));
+                    settle(200);
+                    const int row = rowOf(jStagger);
+                    const std::vector<QRectF> rects = panel->labelRectsAt(row, 0);
+                    check(row >= 0 && !panel->rulerFellBackAt(row) && panel->isStaggeredAt(row) &&
+                              rects.size() == static_cast<std::size_t>(kStaggerCount) + 1,
+                          QStringLiteral("drawer: %1 dowels still draw a ruler, staggered (%2 labels, "
+                                         "staggered %3, written %4)")
+                              .arg(kStaggerCount).arg(rects.size())
+                              .arg(panel->isStaggeredAt(row)).arg(panel->rulerFellBackAt(row)));
+                    int overlaps = 0;
+                    QSet<int> lines;
+                    for (std::size_t i = 0; i < rects.size(); ++i) {
+                        lines.insert(static_cast<int>(std::lround(rects[i].top() * 4.0)));
+                        for (std::size_t j = i + 1; j < rects.size(); ++j) {
+                            if (std::fabs(rects[i].top() - rects[j].top()) < 0.5 &&
+                                rects[i].intersects(rects[j]))
+                                ++overlaps;
+                        }
+                    }
+                    check(!rects.empty() && overlaps == 0 && lines.size() == 2,
+                          QStringLiteral("drawer: no two labels on one line overlap, across exactly two "
+                                         "lines (%1 overlaps, %2 lines)")
+                              .arg(overlaps).arg(lines.size()));
+                    // ...and staggering was NEEDED: two neighbouring tick labels,
+                    // centred on one line, would have collided at the painted font.
+                    bool neighboursWouldCollide = false;
+                    const std::vector<double> ticks = panel->tickXAt(row, 0);
+                    for (std::size_t i = 2; i < rects.size() && i - 1 < ticks.size(); ++i) {
+                        const double gap = ticks[i - 1] - ticks[i - 2];
+                        if (gap < (rects[i - 1].width() + rects[i].width()) / 2.0 + 3.0)
+                            neighboursWouldCollide = true;
+                    }
+                    check(neighboursWouldCollide,
+                          "drawer: (the crowded row's neighbours really would collide on one line - "
+                          "the stagger is not decoration)");
+                    panel->collapseRow(row);
+                    settle(150);
+                }
+
+                // --- dense: the ruler cannot be read, so the row is written -------
+                {
+                    panel->expandRow(rowOf(jDense));
+                    settle(200);
+                    const int row = rowOf(jDense);
+                    const Joinery::Derivation d = derivationOf(jDense);
+                    const QString edge = QString::fromStdString(d.readout.referenceEdgeA);
+                    check(row >= 0 && panel->isExpandedAt(row) && panel->rulerFellBackAt(row) &&
+                              panel->stripCountAt(row) == 0 && panel->tickXAt(row, 0).empty(),
+                          QStringLiteral("drawer: %1 dowels on one run fall back to written numbers - no "
+                                         "unreadable ruler")
+                              .arg(kDenseCount));
+                    int writtenCount = -1;
+                    const QString lead = QStringLiteral("from the %1 edge: ").arg(edge);
+                    for (const QString& line : panel->rowAppCopyAt(row)) {
+                        if (line.startsWith(lead))
+                            writtenCount = line.mid(lead.size()).split(QStringLiteral(" · ")).size();
+                    }
+                    check(writtenCount == kDenseCount,
+                          QStringLiteral("drawer: the written line carries every distance, from the named "
+                                         "edge (%1 of %2)")
+                              .arg(writtenCount).arg(kDenseCount));
+                    // ...and a ruler really could not hold them: neighbours even two
+                    // lines apart overlap, measured with the font they would be
+                    // painted in, on the bar width a ruler in this drawer has.
+                    const QRectF dowelBar = panel->rulerBarAt(rowOf(jStagger), 0);
+                    const double run = d.contact.runLength();
+                    const QFontMetricsF badge(Theme::badgeFont());
+                    double narrowest = 1.0e9;
+                    for (double along : d.readout.alongMm)
+                        narrowest = std::min(narrowest, badge.horizontalAdvance(numberOnly(along)));
+                    const double stepPx =
+                        d.readout.alongMm.size() > 1 && run > 0.0
+                            ? (d.readout.alongMm[1] - d.readout.alongMm[0]) / run *
+                                  (dowelBar.isEmpty() ? 200.0 : dowelBar.width())
+                            : 0.0;
+                    check(stepPx > 0.0 && 2.0 * stepPx < narrowest + 3.0,
+                          QStringLiteral("drawer: (two lines apart, neighbours are %1 px apart against "
+                                         "%2 px labels - no stagger fits them)")
+                              .arg(2.0 * stepPx, 0, 'f', 1).arg(narrowest, 0, 'f', 1));
+                    panel->collapseRow(row);
+                    settle(150);
+                }
+
+                // --- a stopped dado: a band, labelled at both ends, on the host alone
+                {
+                    panel->expandRow(rowOf(jDado));
+                    settle(200);
+                    const int row = rowOf(jDado);
+                    const Joinery::Derivation d = derivationOf(jDado);
+                    const double run = d.contact.runLength();
+                    check(row >= 0 && !panel->rulerFellBackAt(row) && panel->stripCountAt(row) == 1,
+                          QStringLiteral("drawer: a housing draws ONE strip - only the host is cut (%1)")
+                              .arg(panel->stripCountAt(row)));
+                    if (panel->stripCountAt(row) == 1 && !d.items.empty() && !d.readout.alongMm.empty() &&
+                        run > 0.0) {
+                        const double span = d.contact.runsAlongU() ? d.items.front().spanUMm
+                                                                   : d.items.front().spanVMm;
+                        const double start = d.readout.alongMm.front() - span / 2.0;
+                        const double end = d.readout.alongMm.front() + span / 2.0;
+                        const QRectF bar = panel->rulerBarAt(row, 0);
+                        const QRectF band = panel->bandAt(row, 0);
+                        check(end < run - 1.0,
+                              QStringLiteral("drawer: (the stopped channel ends short of the run - "
+                                             "%1 of %2 mm)")
+                                  .arg(end).arg(run));
+                        check(!band.isNull() &&
+                                  std::fabs(band.left() - (bar.left() + start / run * bar.width())) < 0.01 &&
+                                  std::fabs(band.right() - (bar.left() + end / run * bar.width())) < 0.01,
+                              QStringLiteral("drawer: the band covers the channel's span to scale "
+                                             "(%1..%2 px on a %3..%4 px bar)")
+                                  .arg(band.left(), 0, 'f', 2).arg(band.right(), 0, 'f', 2)
+                                  .arg(bar.left(), 0, 'f', 2).arg(bar.right(), 0, 'f', 2));
+                        check(panel->tickXAt(row, 0).size() == 2 &&
+                                  panel->labelTextsAt(row, 0) ==
+                                      QStringList{QString::fromStdString(d.readout.referenceEdgeA),
+                                                  numberOnly(start), numberOnly(end)},
+                              QStringLiteral("drawer: labelled at both ends (%1)")
+                                  .arg(panel->labelTextsAt(row, 0).join(QStringLiteral(" | "))));
+                        check(panel->depthTextAt(row, 0) ==
+                                  QStringLiteral("%1 × %2").arg(numberOnly(d.readout.widthMm),
+                                                                lengthText(d.readout.depthAMm)),
+                              QStringLiteral("drawer: \"width × depth\" where a fastener says drill "
+                                             "(\"%1\")")
+                                  .arg(panel->depthTextAt(row, 0)));
+                    }
+                }
+
+                // --- a half-lap: a band on BOTH pieces, each to its own depth -----
+                {
+                    panel->expandRow(rowOf(jLap));
+                    settle(200);
+                    const int row = rowOf(jLap);
+                    const Joinery::Derivation d = derivationOf(jLap);
+                    const QString expected = QStringLiteral("%1 × %2").arg(
+                        numberOnly(d.readout.widthMm), lengthText(d.readout.depthAMm));
+                    check(row >= 0 && panel->stripCountAt(row) == 2 && !panel->bandAt(row, 0).isNull() &&
+                              !panel->bandAt(row, 1).isNull() && panel->depthTextAt(row, 0) == expected &&
+                              panel->depthTextAt(row, 1) ==
+                                  QStringLiteral("%1 × %2").arg(numberOnly(d.readout.widthMm),
+                                                                lengthText(d.readout.depthBMm)),
+                          QStringLiteral("drawer: a half-lap bands both pieces, each \"lap span × its "
+                                         "own depth\" (\"%1\", \"%2\")")
+                              .arg(panel->depthTextAt(row, 0), panel->depthTextAt(row, 1)));
+                    check(std::fabs(d.readout.widthMm - 40.0) < 1.0e-6,
+                          QStringLiteral("drawer: (the lap's span is the 40 mm the rail is wide - %1)")
+                              .arg(d.readout.widthMm));
+                    panel->collapseRow(row);
+                    settle(150);
+                }
+
+                // --- no single edge: no zero point, so the numbers are written ----
+                {
+                    panel->expandRow(rowOf(jAngled));
+                    settle(200);
+                    const int row = rowOf(jAngled);
+                    const QStringList copy = panel->rowAppCopyAt(row);
+                    const bool sentence = std::any_of(copy.begin(), copy.end(), [](const QString& s) {
+                        return s.contains(QStringLiteral("no single edge — the piece is angled"));
+                    });
+                    const bool numbers = std::any_of(copy.begin(), copy.end(), [&](const QString& s) {
+                        return s.endsWith(QLatin1Char(' ') + unit) && !s.startsWith(QStringLiteral("from the"));
+                    });
+                    check(row >= 0 && panel->rulerFellBackAt(row) && panel->stripCountAt(row) == 0 &&
+                              sentence && numbers,
+                          QStringLiteral("drawer: a board angled across faces writes its numbers under the "
+                                         "no-single-edge sentence, with no ruler (written %1, sentence %2, "
+                                         "numbers %3)")
+                              .arg(panel->rulerFellBackAt(row)).arg(sentence).arg(numbers));
+                    panel->collapseRow(row);
+                    settle(150);
+                }
+
+                // --- the region-shortfall caveat --------------------------------
+                {
+                    const int row = rowOf(jNotch);
+                    const std::string caveat = Joinery::regionShortfallCaveat(derivationOf(jNotch).contact);
+                    check(row >= 0 && !caveat.empty() &&
+                              panel->caveatTextAt(row) == QString::fromStdString(caveat) &&
+                              panel->rowTextAt(row).contains(QString::fromStdString(caveat)),
+                          "drawer: the notched contact's row carries the shortfall caveat");
+                    check(panel->caveatTextAt(rowOf(jDowel)).isEmpty(),
+                          "drawer: and a plain rectangle's row carries none");
+                }
+
+                // --- broken: to the top, in danger ink, with no numbers at all ----
+                {
+                    panel->expandRow(rowOf(jDowel));   // OPEN when it breaks
+                    settle(150);
+                    gp_Trsf away;
+                    away.SetTranslation(gp_Vec(0.0, 0.0, 900.0));
+                    check(dw.transformBody(shelf, away), "drawer: the shelf is moved clear of its panel");
+                    settle(400);
+                    // The shelf carries three joints; all three break and sort first.
+                    bool topThreeBroken = panel->rowCount() == static_cast<int>(joints.size());
+                    for (int i = 0; topThreeBroken && i < 3; ++i) topThreeBroken = panel->isBrokenAt(i);
+                    check(topThreeBroken && !panel->isBrokenAt(3),
+                          "drawer: the three broken joints sort to the top, the healthy ones below");
+                    const int row = rowOf(jDowel);
+                    check(row >= 0 && row < 3 && panel->rowTextAt(row).contains(QStringLiteral("meet")),
+                          QStringLiteral("drawer: the broken row gives its reason (\"%1\")")
+                              .arg(panel->rowTextAt(row)));
+                    check(row >= 0 && panel->isExpandedAt(row) && panel->readoutTextAt(row).isEmpty() &&
+                              panel->stripCountAt(row) == 0 && !panel->rulerFellBackAt(row),
+                          "drawer: and though it is open, it carries NO numbers - no ruler, no written "
+                          "line, no readout - a stale measurement is worse than none");
+                    QString digits;
+                    for (const QString& text : panel->rowAppCopyAt(row))
+                        for (const QChar ch : text)
+                            if (ch.isDigit()) digits += ch;
+                    check(!panel->rowAppCopyAt(row).isEmpty() && digits.isEmpty(),
+                          QStringLiteral("drawer: not one digit in anything the broken row paints (%1)")
+                              .arg(digits.isEmpty() ? QStringLiteral("none") : digits));
+
+                    // Its name in danger ink - measured, not asserted.
+                    const auto dangerInk = [&](int r) {
+                        QWidget* w = panel->rowWidgetAt(r);
+                        if (w == nullptr) return -1;
+                        const QImage shot = renderExact(w);
+                        const QRect area = panel->nameRectAt(r).toAlignedRect().intersected(shot.rect());
+                        int count = 0;
+                        for (int yy = area.top(); yy <= area.bottom(); ++yy)
+                            for (int xx = area.left(); xx <= area.right(); ++xx) {
+                                const QColor c = shot.pixelColor(xx, yy);
+                                if (c.alpha() > 150 && colorDistance(c, Theme::danger()) < 60.0) ++count;
+                            }
+                        return count;
+                    };
+                    const int brokenInk = dangerInk(row);
+                    const int healthyInk = dangerInk(rowOf(jDado));
+                    check(brokenInk > 0 && healthyInk == 0,
+                          QStringLiteral("drawer: the broken row's name is painted in danger ink (%1 px), a "
+                                         "healthy row's is not (%2 px)")
+                              .arg(brokenInk).arg(healthyInk));
+
+                    // The second capture: a broken joint on top, a housing's band open.
+                    for (const int id : {jDowel, jStagger, jDense, jLap, jAngled})
+                        panel->collapseRow(rowOf(id));
+                    panel->expandRow(rowOf(jDado));
+                    panel->ensureRowVisible(rowOf(jDado));
+                    settle(300);
+                    const QImage brokenShot = printWindowCapture(
+                        &dw, outDir + QStringLiteral("/joints-drawer-broken-and-band.png"));
+                    checkNoBlackLine(brokenShot, QStringLiteral("joints drawer (broken row, band open)"));
+
+                    trigger(dw, QStringLiteral("Undo"));
+                    settle(400);
+                    bool anyBroken = false;
+                    for (int i = 0; i < panel->rowCount(); ++i) anyBroken = anyBroken || panel->isBrokenAt(i);
+                    check(!anyBroken, "drawer: undoing the move heals every joint on the shelf");
+                }
+
+                // --- delete from the row: ONE checkpoint, a Note with Undo --------
+                {
+                    panel->expandRow(rowOf(jDowel));
+                    panel->ensureRowVisible(rowOf(jDowel));
+                    settle(250);
+                    dw.setSelectedJoint(jDowel);
+                    settle(200);
+                    const int row = rowOf(jDowel);
+                    QPushButton* remove = panel->deleteButtonAt(row);
+                    check(remove != nullptr && remove->isVisible(), "drawer: the open row offers a delete");
+                    if (remove != nullptr) {
+                        const QPoint centre = remove->mapTo(dv, remove->rect().center());
+                        check(dv->childAt(centre) == remove,
+                              "drawer: a real click on the delete control lands on it (childAt)");
+                        const std::size_t before = joints.size();
+                        const QString expectedToast =
+                            QStringLiteral("Deleted the dowel between %1 and %2")
+                                .arg(QString::fromStdString(dw.document().nameOf(joints[0].bodyA)),
+                                     QString::fromStdString(dw.document().nameOf(joints[0].bodyB)));
+                        clickAt(remove, QPointF(remove->width() / 2.0, remove->height() / 2.0));
+                        remove = nullptr;   // the delete rebuilt every row - this one is gone
+                        settle(350);
+                        const bool gone = std::none_of(joints.begin(), joints.end(),
+                                                       [jDowel](const DocumentModel::Joint& j) {
+                                                           return j.id == jDowel;
+                                                       });
+                        check(joints.size() + 1 == before && gone && rowOf(jDowel) < 0 &&
+                                  panel->rowCount() + 1 == static_cast<int>(before),
+                              "drawer: the delete removes the joint and its row");
+                        check(dw.selectedJointId() == 0,
+                              "drawer: and the selection that named it is cleared");
+                        check(toastText() == expectedToast,
+                              QStringLiteral("drawer: reported by name (\"%1\")").arg(toastText()));
+                        check(toasts != nullptr && toasts->remainingMs() > 0 &&
+                                  toasts->remainingMs() <= 4000 && toasts->undoControl() != nullptr &&
+                                  toasts->undoControl()->isVisible(),
+                              "drawer: as a Note offering Undo - not a two-click confirm");
+                        trigger(dw, QStringLiteral("Undo"));
+                        settle(350);
+                        check(joints.size() == before && rowOf(joints[0].id) >= 0,
+                              "drawer: and ONE undo brings it back - a single checkpoint deleted it");
+                    }
+                }
+
+                // --- placement selects: drawn with the drawer closed, gone on undo --
+                {
+                    drawerAction->trigger();
+                    settle(250);
+                    check(!dw.jointsDrawerOpen(), "drawer: (closed for the placement probe)");
+                    dv->setSelectedSolids({rail, crossRail});
+                    settle(200);
+                    const std::size_t before = joints.size();
+                    trigger(dw, QStringLiteral("Joint"));
+                    settle(300);
+                    check(joints.size() == before + 1 && dw.selectedJointId() == joints.back().id,
+                          "drawer: placing a joint selects the joint it placed");
+                    check(dv->jointsShown() == 1,
+                          QStringLiteral("drawer: so it is drawn with the drawer closed - that one joint "
+                                         "alone (%1)")
+                              .arg(dv->jointsShown()));
+                    trigger(dw, QStringLiteral("Undo"));
+                    settle(300);
+                    check(joints.size() == before && dw.selectedJointId() == 0 && dv->jointsShown() == 0,
+                          "drawer: undoing it clears the selection with the joint, and nothing is drawn");
+                    drawerAction->trigger();
+                    settle(250);
+                }
+
+                // --- the vocabulary: app copy swept plainly, names exempted -------
+                {
+                    for (const int id : {jDowel, jDado, jLap})
+                        panel->expandRow(rowOf(id));
+                    settle(200);
+                    const QStringList copy = panel->paintedTexts();
+                    const QStringList names = panel->paintedNames();
+                    const auto has = [&copy](const QString& fragment) {
+                        return std::any_of(copy.begin(), copy.end(),
+                                           [&](const QString& s) { return s.contains(fragment); });
+                    };
+                    check(copy.size() > 10 && has(QStringLiteral("drill")) &&
+                              has(QStringLiteral("from the")) && has(QStringLiteral("×")),
+                          QStringLiteral("drawer: (the app-copy channel has %1 strings to sweep, open "
+                                         "rows' mark-out included)")
+                              .arg(copy.size()));
+                    QStringList offenders;
+                    for (const QString& text : copy)
+                        for (const QString& word : bannedWords())
+                            if (usesBannedWord(text, word))
+                                offenders << text.left(40) + QStringLiteral(" [") + word + QLatin1Char(']');
+                    check(offenders.isEmpty(),
+                          QStringLiteral("drawer: this app's copy uses no banned word - swept WITHOUT the "
+                                         "user-data exemption (%1)")
+                              .arg(offenders.isEmpty() ? QStringLiteral("none")
+                                                       : offenders.join(QStringLiteral(", "))));
+                    check(names.contains(QStringLiteral("Fuse panel")) &&
+                              usesBannedWord(QStringLiteral("Fuse panel"), QStringLiteral("Fuse")) &&
+                              !usesBannedWord(QStringLiteral("Fuse panel"), QStringLiteral("Fuse"),
+                                              /*isUserData=*/true),
+                          "drawer: the names channel carries the user's \"Fuse panel\" - a plain sweep "
+                          "fails it, the exempted one passes it");
+                    QStringList leaked;
+                    for (const QString& name : names)
+                        for (const QString& text : copy)
+                            if (!name.isEmpty() && text.contains(name)) leaked << name;
+                    check(leaked.isEmpty(),
+                          QStringLiteral("drawer: and no name leaks into the app-copy channel (%1)")
+                              .arg(leaked.isEmpty() ? QStringLiteral("none")
+                                                    : leaked.join(QStringLiteral(", "))));
+                }
+            }
+        } else {
+            std::printf("[FAIL] drawer: the seeded document did not open whole - every check that reads "
+                        "its pieces is skipped\n");
+        }
+        check(dw.findChild<QDialog*>() == nullptr, "drawer: no modal appeared for any of it");
+
+        dw.close();
         settle(150);
     }
 
