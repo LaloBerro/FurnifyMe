@@ -80,6 +80,14 @@ struct Parameters {
 // sizes rather than an arbitrary third of a millimetre.
 Parameters defaultsFor(Kind kind, double thinnerThicknessMm);
 
+// Sentinel for `Contact::regionAreaMm2`: no real area is ever negative, so
+// this cannot be mistaken for a measurement - a `Contact` built by hand (as
+// several test fixtures are) reads as "not measured" rather than silently
+// looking like a full rectangle, and `findContact()` leaves it exactly here
+// for an Overlap contact, which has no equally meaningful area to report
+// (see the field's own comment below).
+inline constexpr double kUnmeasuredRegionAreaMm2 = -1.0;
+
 // Where two pieces meet, in the contact's OWN frame - the one coordinate
 // system every derived position is expressed in, so nothing downstream
 // needs to know a world axis. A joint stores no world position; this is
@@ -168,6 +176,31 @@ struct Contact {
     double thicknessAMm = 0.0;
     double thicknessBMm = 0.0;
 
+    // The shared region's own REAL area, measured from the actual boolean
+    // intersection - not derived from `uLength()`/`vLength()`, which is the
+    // bounding rectangle's area and, for an L-shaped, C-shaped or rounded
+    // region, is larger than this. This is what lets a later reader tell a
+    // genuinely rectangular contact from one whose rectangle merely bounds
+    // an irregular region (see `regionShortfallCaveat()` below): the two
+    // areas agree, within floating-point tolerance, exactly when the
+    // rectangle IS the region.
+    //
+    // Populated for a Face contact only, from the exact planar area
+    // `findContact()` already computes to pick the best candidate face pair
+    // - no new measurement, just one that used to be discarded. LEFT AT
+    // `kUnmeasuredRegionAreaMm2` for an Overlap contact: the only
+    // already-computed area-shaped quantity there is the lap SOLID's own
+    // volume (mm3, from `BRepGProp::VolumeProperties`), and writing a volume
+    // into a field named and compared as an area would be exactly the wrong
+    // kind of number this sentinel exists to prevent - it would silently
+    // look like a real measurement and compare against `uLength() *
+    // vLength()` (mm2) in the wrong units. A real footprint area for a lap
+    // (the area of its own cross-section, perpendicular to the lap depth)
+    // is not computed anywhere today and would need a genuinely new
+    // measurement (a section cut through the lap solid) rather than a
+    // reused one; left undone rather than guessed at.
+    double regionAreaMm2 = kUnmeasuredRegionAreaMm2;
+
     double uLength() const { return uMax - uMin; }
     double vLength() const { return vMax - vMin; }
     // The longer in-plane direction - the line a row of fasteners runs
@@ -221,27 +254,49 @@ ContactResult findContact(const TopoDS_Shape& a, const TopoDS_Shape& b,
 // clause, ready to show beside a greyed-out choice. A joint that cannot
 // exist is never offered, so it can never be created.
 //
-// KNOWN GAP, left open rather than closed with an invented geometry
-// pipeline: `Contact` describes a BOUNDING RECTANGLE (see the long comment
-// on the struct above), and for an L-shaped, C-shaped or rounded contact
-// region, part of that rectangle is not actually in contact - a row laid
-// out across the full span can land an item where there is no wood, and
-// `at(0, 0)` itself is not guaranteed to sit on the region. This function
-// cannot catch that: it is handed the same four numbers (`uMin`/`uMax`/
-// `vMin`/`vMax`) a genuinely rectangular contact would report, and nothing
-// on `Contact` distinguishes the two cases - no area, no boundary, no flag.
-// Closing this honestly needs one more fact traveling from `findContact()`
-// into `Contact` - which already measures the region's real area for a Face
-// contact (`faceArea(region)` in the .cpp, computed and then discarded) -
-// such as a `regionAreaMm2` field this function could compare against
-// `uLength() * vLength()` and refuse or flag on a wide mismatch. That is a
-// change to `Contact` itself, ruled out of this task; it belongs to
-// whichever later task is willing to make it, and Task 11 - which shows
-// this reason to the user - is the one that most wants it.
+// Deliberately does NOT read `Contact::regionAreaMm2` (see that field's
+// comment, and `regionShortfallCaveat()` just below): `Contact` describes a
+// BOUNDING RECTANGLE (see the long comment on the struct above), and for an
+// L-shaped, C-shaped or rounded contact region, part of that rectangle is
+// not actually in contact - a row laid out across the full span can land an
+// item where there is no wood. That is real, but it is not a reason to
+// refuse the KIND - an L-shaped contact can carry a perfectly good dowel
+// row if the dowels happen to land on wood, and refusing every kind there
+// over a shape this function was never asked about would block real work.
+// The fact still has to reach the user; it does, through
+// `regionShortfallCaveat()`, which answers a different question
+// ("might this contact surprise you") rather than this one ("can this kind
+// exist here at all").
 std::string validityOf(Kind kind, const Contact& contact);
 
 // Every kind this contact can take, in menu order.
 std::vector<Kind> validKindsFor(const Contact& contact);
+
+// Non-empty when `contact`'s own region may not fill its bounding
+// rectangle, so items `layout()` places inside it can land where the two
+// pieces do not actually touch - the CAVEAT half of the gap `validityOf()`
+// documents above. This is additive, never a refusal: a kind `validityOf()`
+// already approved stays approved regardless of what this returns: a
+// shortfall is a fact worth showing beside the joint, not a veto over it.
+//
+// Compares `regionAreaMm2` against the bounding rectangle's own area
+// (`uLength() * vLength()`) - the region's REAL area against the area of
+// the box `Contact` reports, both taken from exact geometry (no
+// tessellation on either side), so they agree to a handful of parts in a
+// million for a genuine rectangle and are nowhere near that band for a real
+// shortfall (an L-shaped 90,000 mm2 rectangle over an 11,952 mm2 real
+// region is 87% short - see the struct comment's own numbers). That is why
+// this can use a tight floating-point tolerance rather than an invented
+// threshold: unlike the thickness-plausibility question this feature
+// considered and declined (no safe case to anchor a threshold against), a
+// rectangle either IS its own region or it is not, exactly.
+//
+// Empty - not "fills its rectangle", but literally "nothing to say" - when
+// `regionAreaMm2` is `kUnmeasuredRegionAreaMm2` (today, always true for an
+// Overlap contact; see the field's own comment). A caller that wants to
+// know whether a contact's shortfall is KNOWN rather than merely absent
+// reads `contact.regionAreaMm2` directly.
+std::string regionShortfallCaveat(const Contact& contact);
 
 // One placed piece of the joint - a dowel, a screw, a whole channel, a
 // tenon. `u`/`v` are its position in the contact's own coordinates (what

@@ -14,6 +14,7 @@
 #include <gp_Trsf.hxx>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <string>
@@ -967,6 +968,206 @@ int main()
               "is tilted, and it is a real, non-empty set");
         check(offeredFlat == offeredOblique,
               "and it is the identical set of kinds, in the identical order");
+    }
+
+    // --- the region-shortfall caveat: a fact, never a veto -------------
+    // Fix round 1: `Contact::regionAreaMm2` and `regionShortfallCaveat()`.
+    // The bounding-rectangle gap Task 6's own report identified - that
+    // `uLength() * vLength()` can cover area not actually in contact for an
+    // L-shaped, C-shaped or rounded region - is closed here for the ONE
+    // question that has an exact answer (does the region's own real area
+    // equal its bounding rectangle's), while `validityOf`/`validKindsFor`
+    // are asserted UNCHANGED by it: a shortfall is a caveat, never a
+    // refusal, so every earlier assertion in this file about which kinds
+    // are offered must still hold once this field exists.
+    {
+        // The ordinary case: a real, findContact()-sourced rectangular
+        // contact fills its own rectangle exactly (both sides come from
+        // exact geometry - a planar-face boolean Common and a curve-aware
+        // extent read - so they agree far tighter than the tolerance).
+        const TopoDS_Shape panel =
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 18.0, 300.0, 800.0).Shape();
+        const TopoDS_Shape shelf =
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 400.0), 600.0, 300.0, 18.0).Shape();
+        const Joinery::ContactResult flush = Joinery::findContact(panel, shelf);
+        check(flush.ok, "the flush rectangular contact is found, as in the earlier block");
+        if (flush.ok) {
+            // Pins the PLUMBING directly: this is what goes red if
+            // findContact() stops writing regionAreaMm2 at all, independent
+            // of regionShortfallCaveat()'s own threshold logic - the
+            // sentinel is -1.0, nowhere near the true ~5400.
+            checkNear(flush.contact.regionAreaMm2, 300.0 * 18.0, 1.0e-3,
+                      "a plain rectangular contact's measured area matches "
+                      "its own bounding rectangle almost exactly");
+            check(Joinery::regionShortfallCaveat(flush.contact).empty(),
+                  "and carries no shortfall caveat");
+        }
+
+        // A NON-CONVEX host (the stepped rabbet from the earlier block) is
+        // still a plain RECTANGULAR contact where the board actually lands
+        // - the step lives 300 mm away from the joint, not inside it - so
+        // geometric complexity ELSEWHERE on the host must not trigger the
+        // caveat. Distinguishes "the CONTACT is not a rectangle" from "the
+        // HOST is a complicated shape", which a cruder signal (e.g. solid
+        // face count) could not.
+        const TopoDS_Shape slab =
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 36.0, 300.0, 800.0).Shape();
+        const TopoDS_Shape rabbetCut =
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 0.0), 18.0, 300.0, 400.0).Shape();
+        const TopoDS_Shape stepped = BRepAlgoAPI_Cut(slab, rabbetCut).Shape();
+        const TopoDS_Shape onStep =
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 100.0), 600.0, 300.0, 18.0).Shape();
+        const Joinery::ContactResult stepJoint = Joinery::findContact(stepped, onStep);
+        check(stepJoint.ok, "the stepped-rabbet contact is found, as in the earlier block");
+        if (stepJoint.ok) {
+            check(Joinery::regionShortfallCaveat(stepJoint.contact).empty(),
+                  "a board on a rabbeted step still reports no shortfall - "
+                  "the CONTACT itself is a plain rectangle even though the "
+                  "host it sits on is not");
+        }
+
+        // The L-shaped contact from the earlier block, rebuilt fresh (each
+        // block in this file is self-contained): a real 11,952 mm2 region
+        // inside a 382 x 300 = 114,600 mm2 bounding rectangle - the exact
+        // numbers the Contact struct's own header comment documents. This
+        // is the case the whole fix exists for.
+        const TopoDS_Shape upstand =
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 418.0), 600.0, 18.0, 364.0).Shape();
+        ShapeUpgrade_UnifySameDomain unifyL(BRepAlgoAPI_Fuse(shelf, upstand).Shape(),
+                                           Standard_True, Standard_True, Standard_True);
+        unifyL.Build();
+        const Joinery::ContactResult lJoint = Joinery::findContact(panel, unifyL.Shape());
+        check(lJoint.ok, "the L-shaped contact is found, as in the earlier block");
+        if (lJoint.ok) {
+            checkNear(lJoint.contact.regionAreaMm2, 11952.0, 1.0e-3,
+                      "the L-shaped region's own real area is measured, not "
+                      "assumed to fill its rectangle");
+            const std::string caveat = Joinery::regionShortfallCaveat(lJoint.contact);
+            check(!caveat.empty(),
+                  "and a real shortfall now surfaces as a caveat (" + caveat + ")");
+            // validityOf/validKindsFor are UNCHANGED by any of this - a
+            // shortfall is a fact, never a veto. Re-asserts the earlier
+            // block's own promise on THIS non-rectangular contact
+            // specifically, which is the case that actually matters.
+            check(Joinery::validityOf(Joinery::Kind::Dowel, lJoint.contact).empty(),
+                  "an L-shaped contact still offers a dowel - the caveat "
+                  "does not refuse it");
+            check(!Joinery::validKindsFor(lJoint.contact).empty(),
+                  "and validKindsFor still offers real kinds on it");
+        }
+
+        // The C-shaped contact from the earlier block: a real 34,000 mm2
+        // region (a 300 x 300 square less a 280 x 200 notch) inside a
+        // 300 x 300 = 90,000 mm2 bounding rectangle - again the exact
+        // numbers the struct comment documents.
+        const TopoDS_Shape slabC =
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 400.0), 600.0, 300.0, 300.0).Shape();
+        const TopoDS_Shape notchC =
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 20.0, 450.0), 600.0, 280.0, 200.0).Shape();
+        ShapeUpgrade_UnifySameDomain unifyC(BRepAlgoAPI_Cut(slabC, notchC).Shape(),
+                                           Standard_True, Standard_True, Standard_True);
+        unifyC.Build();
+        const Joinery::ContactResult cJoint = Joinery::findContact(panel, unifyC.Shape());
+        check(cJoint.ok, "the C-shaped contact is found, as in the earlier block");
+        if (cJoint.ok) {
+            checkNear(cJoint.contact.regionAreaMm2, 34000.0, 1.0e-3,
+                      "the C-shaped region's own real area is measured too");
+            check(!Joinery::regionShortfallCaveat(cJoint.contact).empty(),
+                  "and it carries the caveat as well");
+        }
+
+        // An Overlap contact (two crossing rails) carries NO measured area
+        // today - the decision this fix round documented rather than
+        // guessed at: the only already-computed area-shaped quantity on
+        // that branch is the lap SOLID's own volume, in the wrong unit
+        // entirely, so nothing is written and the field stays at the
+        // sentinel. Pinned here so a later change that quietly starts
+        // writing a volume into this field - the exact hazard the sentinel
+        // exists to catch - is caught by exact-value comparison, not
+        // merely "some number came out".
+        const TopoDS_Shape railA =
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 400.0, 40.0, 20.0).Shape();
+        const TopoDS_Shape railB =
+            BRepPrimAPI_MakeBox(gp_Pnt(150.0, -100.0, 0.0), 60.0, 300.0, 20.0).Shape();
+        const Joinery::ContactResult crossed = Joinery::findContact(railA, railB);
+        check(crossed.ok && crossed.contact.type == Joinery::Contact::Type::Overlap,
+              "the crossing-rails overlap is found, as in the earlier block");
+        if (crossed.ok) {
+            check(crossed.contact.regionAreaMm2 == Joinery::kUnmeasuredRegionAreaMm2,
+                  "an overlap contact's regionAreaMm2 is left at the exact "
+                  "sentinel, not a wrong-unit number");
+            check(Joinery::regionShortfallCaveat(crossed.contact).empty(),
+                  "so an overlap carries no caveat either way - unmeasured, "
+                  "not 'fills its rectangle'");
+        }
+
+        // A hand-built Contact left at its OWN struct default (regionAreaMm2
+        // never touched) reads the same way: unmeasured, not "full". This is
+        // the property the sentinel exists for - a Contact built by hand in
+        // a test (as several fixtures in this file are) must not silently
+        // look like a genuine rectangular measurement.
+        Joinery::Contact handBuilt;
+        handBuilt.type = Joinery::Contact::Type::Face;
+        handBuilt.frame = gp_Ax3(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
+        handBuilt.uMin = 0.0; handBuilt.uMax = 300.0;
+        handBuilt.vMin = 0.0; handBuilt.vMax = 18.0;
+        check(handBuilt.regionAreaMm2 == Joinery::kUnmeasuredRegionAreaMm2,
+              "Contact's own default member initializer is the sentinel, "
+              "not zero or a value that happens to look like a real area");
+        check(Joinery::regionShortfallCaveat(handBuilt).empty(),
+              "and a hand-built contact therefore carries no caveat");
+
+        // The threshold itself, hand-built rather than found - this pins
+        // the TOLERANCE the brief's report identified as the one place an
+        // "arbitrary" number is actually safe (a rectangle either IS its
+        // own region or it is not), not merely that some caveat appears
+        // for some sufficiently-short region. A 100 x 100 mm rectangle
+        // (10,000 mm2) two values apart: comfortably inside the fill
+        // tolerance, and comfortably outside it - not pinned to the exact
+        // boundary itself, since the tolerance constant is private to the
+        // .cpp and re-deriving its literal value here would test this
+        // file's own arithmetic rather than the implementation's.
+        Joinery::Contact square;
+        square.type = Joinery::Contact::Type::Face;
+        square.frame = gp_Ax3(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
+        square.uMin = 0.0; square.uMax = 100.0;
+        square.vMin = 0.0; square.vMax = 100.0;
+
+        Joinery::Contact almostFull = square;
+        almostFull.regionAreaMm2 = 10000.0 * (1.0 - 5.0e-5);  // fraction 0.99995
+        check(Joinery::regionShortfallCaveat(almostFull).empty(),
+              "a region 0.005% short of its rectangle reads as filling it - "
+              "inside the floating-point tolerance band");
+
+        Joinery::Contact meaningfullyShort = square;
+        meaningfullyShort.regionAreaMm2 = 10000.0 * (1.0 - 2.0e-4);  // fraction 0.9998
+        check(!Joinery::regionShortfallCaveat(meaningfullyShort).empty(),
+              "a region 0.02% short is a genuine shortfall, not noise - "
+              "four times the almost-full case's own gap");
+
+        // The caveat text itself: user-visible (Task 11/12 paint it), so it
+        // is held to the same vocabulary law as validityOf's own reason
+        // strings - no banned word, CASE-INSENSITIVELY per the law's own
+        // wording, singular/plural written out.
+        const std::string caveatText = Joinery::regionShortfallCaveat(meaningfullyShort);
+        check(!caveatText.empty(), "sanity: the short case really does carry a caveat");
+        std::string lowerCaveat = caveatText;
+        std::transform(lowerCaveat.begin(), lowerCaveat.end(), lowerCaveat.begin(),
+                       [](unsigned char ch) { return std::tolower(ch); });
+        for (const std::string& banned :
+             {std::string("solid"), std::string("fuse"), std::string("merge"),
+              std::string("bevel"), std::string("round"), std::string("flatten"),
+              std::string("symmetry"), std::string("occt"), std::string("mm3"),
+              std::string("(s)")}) {
+            check(lowerCaveat.find(banned) == std::string::npos,
+                  "the caveat text does not contain the banned word \"" + banned + "\"");
+        }
+        // "join" as a bare word is banned too, but "joint" is explicitly the
+        // app's own word and must not false-positive this check.
+        check(lowerCaveat.find("joint") != std::string::npos ||
+                  lowerCaveat.find("join") == std::string::npos,
+              "if \"join\" appears at all it is as part of \"joint\", the "
+              "permitted noun");
     }
 
     // --- laying fasteners out along the contact -----------------------

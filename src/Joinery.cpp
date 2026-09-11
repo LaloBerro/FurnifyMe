@@ -671,6 +671,12 @@ ContactResult findContact(const TopoDS_Shape& a, const TopoDS_Shape& b,
                 result.contact.vMax = v1 - v0;
                 result.contact.thicknessAMm = localA;
                 result.contact.thicknessBMm = localB;
+                // The exact planar area of THIS candidate region - already
+                // computed above to decide whether it beats the running
+                // best, not a new measurement. Written every time a new
+                // best is found, same as every other field here, so it
+                // never lags behind whichever candidate actually won.
+                result.contact.regionAreaMm2 = area;
             }
         }
         if (result.ok) return result;
@@ -773,6 +779,21 @@ ContactResult findContact(const TopoDS_Shape& a, const TopoDS_Shape& b,
                         result.contact.vMax = v1 - v0;
                         result.contact.thicknessAMm = localA;
                         result.contact.thicknessBMm = localB;
+                        // Left at the sentinel, EXPLICITLY rather than by
+                        // omission: the only already-computed area-shaped
+                        // quantity here is the lap SOLID's own volume
+                        // (`volProps.Mass()`, mm3, from
+                        // BRepGProp::VolumeProperties above), and writing a
+                        // volume into a field compared against `uLength() *
+                        // vLength()` (mm2) would be exactly the
+                        // wrong-unit-but-plausible-looking number this
+                        // sentinel exists to prevent. A real footprint area
+                        // - the lap's own cross-section, perpendicular to
+                        // the lap depth - is not computed anywhere today and
+                        // would need a genuinely new measurement (a section
+                        // cut through the lap solid), which this task does
+                        // not add.
+                        result.contact.regionAreaMm2 = kUnmeasuredRegionAreaMm2;
                         return result;
                     }
                 }
@@ -835,6 +856,37 @@ std::vector<Kind> validKindsFor(const Contact& contact)
         if (validityOf(kind, contact).empty()) offered.push_back(kind);
     }
     return offered;
+}
+
+std::string regionShortfallCaveat(const Contact& contact)
+{
+    // Unmeasured (today, always an Overlap contact) - nothing to say, not
+    // "it fills its rectangle". See kUnmeasuredRegionAreaMm2's own comment.
+    if (contact.regionAreaMm2 < 0.0) return std::string();
+
+    const double rectArea = contact.uLength() * contact.vLength();
+    // Nothing to compare a real area against - validityOf's own size floor
+    // refuses a contact this small anyway, so this is a defensive no-op
+    // guard, not a case this function expects to matter in practice.
+    if (rectArea <= 1.0e-9) return std::string();
+
+    // The region can never be LARGER than the rectangle that bounds it, so
+    // this fraction is at most 1.0 for any real measurement; the >=
+    // comparison below still reads correctly if floating-point noise ever
+    // pushes it a hair over. A genuine rectangle's own measured area agrees
+    // with uLength() * vLength() to a handful of parts in a million (both
+    // sides come from exact geometry, no tessellation on either one), while
+    // a real shortfall - an L-shaped 90,000 mm2 rectangle over an
+    // 11,952 mm2 region, 87% short - is nowhere near that band. The
+    // tolerance is therefore about floating-point noise, not taste: unlike
+    // a plausibility threshold with no safe case to anchor it against, a
+    // rectangle either IS its own region or it is not.
+    constexpr double kFillFraction = 1.0 - 1.0e-4;
+    const double fraction = contact.regionAreaMm2 / rectArea;
+    if (fraction >= kFillFraction) return std::string();
+
+    return "this contact isn't a plain rectangle — part of the joint may "
+           "land where the two pieces don't actually touch";
 }
 
 namespace {
