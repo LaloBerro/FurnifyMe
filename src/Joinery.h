@@ -97,9 +97,19 @@ struct Contact {
     // every position Tasks 3 onward derive is measured from this origin, so
     // two conventions on one struct would be a trap rather than a detail:
     //
-    //   ORIGIN is the region's own (uMin, vMin) corner. `uMin` and `vMin`
-    //   are therefore ALWAYS 0.0, `uMax`/`vMax` ARE the region's own size,
-    //   and at(0, 0) is a real corner of it.
+    //   ORIGIN is the corner of the region's own BOUNDING RECTANGLE at
+    //   (uMin, vMin). `uMin` and `vMin` are therefore ALWAYS 0.0, and
+    //   at(0, 0) is that corner.
+    //
+    //   `uMax`/`vMax` are the bounding rectangle's SIZE, which is the
+    //   region's own size only when the region is a rectangle - which it is
+    //   for every joint this app makes today. For a region that is not (a
+    //   notched board's L-shaped end, a C), the rectangle COVERS AREA THAT IS
+    //   NOT IN CONTACT: measured, a 300 x 300 square with a 260 x 110 notch
+    //   taken out of it - 25,000 mm2 of a 90,000 mm2 rectangle - reports
+    //   u = 300, v = 300. A caller laying items out across that span has to
+    //   accept that some of them may fall over the notch; nothing here can
+    //   tell it which, because `Contact` describes a rectangle by design.
     //
     //   X comes from the REGION'S OWN GEOMETRY - the direction of its
     //   longest boundary edge - never from a world axis and never from
@@ -111,8 +121,8 @@ struct Contact {
     //   mean what they say at every orientation. Y is Z x X, right-handed.
     //
     //   Z is the contact normal. For a Face contact it points FROM bodyA
-    //   INTO bodyB, settled by classifying a point a hair either side of the
-    //   region's centroid against each solid - not from a face's
+    //   INTO bodyB, settled by classifying a point a hair either side of a
+    //   point genuinely ON the region against each solid - not from a face's
     //   orientation flag, which carries no such information, and not from
     //   the two planes' signed offset, which is exactly 0.0 for a flush
     //   contact and so answers the same for findContact(a, b) and
@@ -124,10 +134,16 @@ struct Contact {
     gp_Ax3 frame;
     double uMin = 0.0, uMax = 0.0;
     double vMin = 0.0, vMax = 0.0;
-    // Each piece's own thickness at the joint, for defaultsFor() - the
-    // smallest extent over that solid's OWN face normals, so a board the
-    // transform gizmo has rotated still measures 18 mm rather than the
-    // 224.86 mm its world bounding box would report.
+    // Each piece's own MATERIAL thickness - the smallest side of that solid's
+    // own oriented bounding box, so a board the transform gizmo has rotated
+    // still measures 18 mm rather than the 224.86 mm its world bounding box
+    // would report, and a round leg measures its diameter.
+    //
+    // The whole solid's, deliberately NOT "at the joint": a 36 mm panel
+    // rabbeted to 18 mm where the shelf lands reports 36. That is the number
+    // defaultsFor() wants - a dowel diameter is chosen for the board's
+    // material, not for a local step, and you do not fit a 6 mm dowel to a
+    // 36 mm panel because it happens to be thinner at one rabbet.
     double thicknessAMm = 0.0;
     double thicknessBMm = 0.0;
 
@@ -135,6 +151,12 @@ struct Contact {
     double vLength() const { return vMax - vMin; }
     // The longer in-plane direction - the line a row of fasteners runs
     // along, and the length a housing is cut across.
+    //
+    // Note for a caller thinking of branching on it: u is taken from the
+    // region's longest boundary edge, so for any RECTANGULAR region - every
+    // joint this app makes today - runsAlongU() is true BY CONSTRUCTION and
+    // runLength() == uLength() always. The false branch is unreachable in
+    // practice; write it if you like, but do not expect to exercise it.
     bool runsAlongU() const { return uLength() >= vLength(); }
     double runLength() const { return std::max(uLength(), vLength()); }
     // A point in the contact's own coordinates, in the world.
@@ -157,13 +179,18 @@ struct ContactResult {
 // crossing-rails case a half-lap is cut from.
 //
 // `toleranceMm` is how far apart two faces may be and still count as
-// touching - a model is never perfect, and 0.1 mm of slop is not a gap.
+// touching - a model is never perfect, and 0.1 mm of slop is not a gap. It is
+// purely PERMISSIVE and has no upper bound: raising it can only widen what
+// counts as a contact, never narrow it, and nothing else in here is derived
+// from it.
 //
-// Refuses, with a reason, when the pieces do not meet, when a piece is
-// missing, when the kernel throws, and when they meet only on a CURVED
-// boundary whose rectangle cannot be measured - a flat board on a round leg
-// touches along a line, and ok == true with a zero-size contact would be a
-// refusal surfacing as a success.
+// A curved contact boundary is MEASURED, not cut short at its endpoints - an
+// arc that bulges past the vertices it runs between contributes its own
+// extremes. Refuses, with a reason, when the pieces do not meet, when a piece
+// is missing, when the kernel throws, and when the region has no straight
+// boundary edge at all to take u from (a flat board on a round leg touches
+// along a line, and ok == true with a zero-size contact would be a refusal
+// surfacing as a success).
 ContactResult findContact(const TopoDS_Shape& a, const TopoDS_Shape& b,
                           double toleranceMm = 0.1);
 

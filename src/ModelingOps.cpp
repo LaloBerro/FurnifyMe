@@ -84,6 +84,47 @@ TopoDS_Face makeFaceFromWire(const TopoDS_Wire& wire)
     return mkFace.Face();
 }
 
+// A point genuinely ON `face`'s own material - not merely inside its
+// bounding box, and NOT its area centroid. This app's canonical face has a
+// hole in it (the slab-with-a-rectangular-through-hole CLAUDE.md's own STEP
+// export check pins), and BRepGProp::SurfaceProperties' centroid is the
+// centroid of OUTER-MINUS-INNER area: for a centred hole that point lands
+// exactly in the hole, on no material at all - fix round 1, found by
+// review before it ever reached the suite. Samples a grid of the face's own
+// UV parameter space and classifies each candidate with
+// BRepClass_FaceClassifier, the one classifier that reads every wire (the
+// outer boundary AND any hole) rather than trusting a bounding box or an
+// area-weighted average. False (leaving `out` untouched) only for a
+// genuinely degenerate face no sample lands inside - not expected for
+// anything this app builds, and the caller (outwardPlane(), below) falls
+// back to the flag-based guess alone rather than refuse the pull over it.
+//
+// Declared in the header, and NOT in this file's anonymous namespace, since
+// Joinery's contact finder needs exactly this - an interior point of a
+// shared contact region, which for an L- or C-shaped region its area
+// centroid is not. One sampler, one set of pitfalls learned once.
+bool pointOnFace(const TopoDS_Face& face, gp_Pnt& out)
+{
+    Standard_Real umin = 0.0, umax = 0.0, vmin = 0.0, vmax = 0.0;
+    BRepTools::UVBounds(face, umin, umax, vmin, vmax);
+    const Handle(Geom_Surface) geometry = BRep_Tool::Surface(face);
+    if (geometry.IsNull()) return false;
+
+    constexpr int kGrid = 9;   // odd, so the exact centre is sampled too
+    for (int iu = 0; iu < kGrid; ++iu) {
+        const double u = umin + (umax - umin) * (iu + 0.5) / kGrid;
+        for (int iv = 0; iv < kGrid; ++iv) {
+            const double v = vmin + (vmax - vmin) * (iv + 0.5) / kGrid;
+            BRepClass_FaceClassifier classifier(face, gp_Pnt2d(u, v), 1.0e-7);
+            if (classifier.State() == TopAbs_IN) {
+                out = geometry->Value(u, v);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 namespace {
 
 // True when `direction` actually carries the profile off its own plane, which
@@ -108,42 +149,6 @@ bool isShapeSane(const TopoDS_Shape& shape)
     if (shape.IsNull()) return false;
     const BRepCheck_Analyzer analyzer(shape);
     return analyzer.IsValid();
-}
-
-// A point genuinely ON `face`'s own material - not merely inside its
-// bounding box, and NOT its area centroid. This app's canonical face has a
-// hole in it (the slab-with-a-rectangular-through-hole CLAUDE.md's own STEP
-// export check pins), and BRepGProp::SurfaceProperties' centroid is the
-// centroid of OUTER-MINUS-INNER area: for a centred hole that point lands
-// exactly in the hole, on no material at all - fix round 1, found by
-// review before it ever reached the suite. Samples a grid of the face's own
-// UV parameter space and classifies each candidate with
-// BRepClass_FaceClassifier, the one classifier that reads every wire (the
-// outer boundary AND any hole) rather than trusting a bounding box or an
-// area-weighted average. False (leaving `out` untouched) only for a
-// genuinely degenerate face no sample lands inside - not expected for
-// anything this app builds, and the caller (outwardPlane(), below) falls
-// back to the flag-based guess alone rather than refuse the pull over it.
-bool pointOnFace(const TopoDS_Face& face, gp_Pnt& out)
-{
-    Standard_Real umin = 0.0, umax = 0.0, vmin = 0.0, vmax = 0.0;
-    BRepTools::UVBounds(face, umin, umax, vmin, vmax);
-    const Handle(Geom_Surface) geometry = BRep_Tool::Surface(face);
-    if (geometry.IsNull()) return false;
-
-    constexpr int kGrid = 9;   // odd, so the exact centre is sampled too
-    for (int iu = 0; iu < kGrid; ++iu) {
-        const double u = umin + (umax - umin) * (iu + 0.5) / kGrid;
-        for (int iv = 0; iv < kGrid; ++iv) {
-            const double v = vmin + (vmax - vmin) * (iv + 0.5) / kGrid;
-            BRepClass_FaceClassifier classifier(face, gp_Pnt2d(u, v), 1.0e-7);
-            if (classifier.State() == TopAbs_IN) {
-                out = geometry->Value(u, v);
-                return true;
-            }
-        }
-    }
-    return false;
 }
 
 // BRepAdaptor_Surface carries geometry and location only - it never applies

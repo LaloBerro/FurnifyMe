@@ -58,6 +58,20 @@ struct StepResult {
 // Closed polyline through `points`. Returns a null wire if fewer than 3 points.
 TopoDS_Wire makePolygonWire(const std::vector<gp_Pnt>& points);
 
+// A point genuinely ON `face`'s own material - not merely inside its bounding
+// box, and NOT its area centroid, which for a face with a hole lands in the
+// hole and for an L- or C-shaped face lands off the face entirely. Samples
+// the face's own UV grid and classifies each candidate with
+// BRepClass_FaceClassifier, which reads every wire. False (leaving `out`
+// untouched) only for a degenerate face no sample lands inside.
+//
+// Public because two callers need it: outwardPlane() here, to decide which
+// side of a face is outward without trusting TopAbs_Orientation, and
+// Joinery::findContact, to decide which side of a contact plane each solid
+// occupies. Both are "classify a point that is genuinely on the geometry",
+// and both got it wrong first by using a centroid.
+bool pointOnFace(const TopoDS_Face& face, gp_Pnt& out);
+
 // Planar face from a closed wire. Null face if the wire is not planar/closed.
 TopoDS_Face makeFaceFromWire(const TopoDS_Wire& wire);
 

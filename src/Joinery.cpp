@@ -1,5 +1,8 @@
 #include "Joinery.h"
 
+#include "ModelingOps.h"
+
+#include <BRepAdaptor_Curve.hxx>
 #include <BRepAdaptor_Surface.hxx>
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepBndLib.hxx>
@@ -7,7 +10,7 @@
 #include <BRepClass3d_SolidClassifier.hxx>
 #include <BRepGProp.hxx>
 #include <BRep_Tool.hxx>
-#include <Bnd_Box.hxx>
+#include <Bnd_OBB.hxx>
 #include <GProp_GProps.hxx>
 #include <Standard_Failure.hxx>
 #include <TopExp.hxx>
@@ -129,16 +132,64 @@ gp_Pnt Contact::at(double u, double v) const
 
 namespace {
 
-// The [min, max] extent of a shape's OWN VERTICES projected onto `axis` -
-// deliberately not the world axis-aligned bounding box, whose eight corners
-// projected onto an oblique axis measure the BOX's diagonal rather than the
-// solid's own extent along that direction (a 600x18 board spun 45 degrees
-// about Z has a roughly 437x437 world AABB, which projected onto the board's
-// own thickness normal spans about 618 mm against a true 18 mm). Exact for
-// the planar-faced boards this app produces; on a curved body it can only
-// under-measure, never over-measure.
+// The extreme value of a curve's projection onto `axis` over [t0, t1], for
+// the maximum (`wantMax`) or the minimum. Coarse-sampled to bracket the
+// extremum, then ternary-refined inside that bracket - a plain sample grid
+// alone is only accurate to the sampling step, and this number IS the answer
+// Tasks 3/4/5 lay items along, so "close" is not good enough. 32 intervals
+// brackets any single arc of a contact boundary; 90 ternary steps shrink the
+// bracket by (2/3)^90, far past double precision.
+double curveExtreme(const BRepAdaptor_Curve& curve, const gp_Vec& axis, bool wantMax)
+{
+    const double t0 = curve.FirstParameter();
+    const double t1 = curve.LastParameter();
+    const double sign = wantMax ? 1.0 : -1.0;
+    const auto value = [&curve, &axis, sign](double t) {
+        const gp_Pnt p = curve.Value(t);
+        return sign * (p.X() * axis.X() + p.Y() * axis.Y() + p.Z() * axis.Z());
+    };
+
+    constexpr int kIntervals = 32;
+    int bestIndex = 0;
+    double best = -std::numeric_limits<double>::max();
+    for (int i = 0; i <= kIntervals; ++i) {
+        const double t = t0 + (t1 - t0) * i / double(kIntervals);
+        const double f = value(t);
+        if (f > best) {
+            best = f;
+            bestIndex = i;
+        }
+    }
+
+    double lo = t0 + (t1 - t0) * std::max(bestIndex - 1, 0) / double(kIntervals);
+    double hi = t0 + (t1 - t0) * std::min(bestIndex + 1, kIntervals) / double(kIntervals);
+    for (int step = 0; step < 90 && hi - lo > 0.0; ++step) {
+        const double m1 = lo + (hi - lo) / 3.0;
+        const double m2 = hi - (hi - lo) / 3.0;
+        if (value(m1) < value(m2)) lo = m1;
+        else hi = m2;
+    }
+    const double refined = std::max(value(0.5 * (lo + hi)), best);
+    return sign * refined;
+}
+
+// The [min, max] extent of `shape` projected onto `axis`, measured from the
+// shape's OWN geometry - deliberately not the world axis-aligned bounding
+// box, whose eight corners projected onto an oblique axis measure the BOX's
+// diagonal rather than the shape's extent along that direction (a 600x18
+// board spun 45 degrees about Z has a roughly 437x437 world AABB, which
+// projected onto the board's own thickness normal spans about 618 mm against
+// a true 18 mm).
+//
+// Vertices are not enough on their own: an ARC that bulges past its own
+// endpoints is invisible to a vertex walk, and a stadium-ended post under a
+// board measured a 100 mm run where the truth was 140 - 29% short, reported
+// as a success, which is the same "a wrong size is a refusal surfacing as a
+// success" law in the permissive direction. Every boundary edge that is not
+// a straight line therefore contributes its own extremes as well.
 void projectedRange(const TopoDS_Shape& shape, const gp_Dir& axis, double& lo, double& hi)
 {
+    const gp_Vec along(axis);
     lo = std::numeric_limits<double>::max();
     hi = -std::numeric_limits<double>::max();
     for (TopExp_Explorer iv(shape, TopAbs_VERTEX); iv.More(); iv.Next()) {
@@ -147,10 +198,16 @@ void projectedRange(const TopoDS_Shape& shape, const gp_Dir& axis, double& lo, d
         lo = std::min(lo, t);
         hi = std::max(hi, t);
     }
-    if (lo > hi) {
-        lo = 0.0;
-        hi = 0.0;
+    for (TopExp_Explorer ie(shape, TopAbs_EDGE); ie.More(); ie.Next()) {
+        const BRepAdaptor_Curve curve(TopoDS::Edge(ie.Current()));
+        // A line's extremes are its endpoints, already walked above.
+        if (curve.GetType() == GeomAbs_Line) continue;
+        lo = std::min(lo, curveExtreme(curve, along, false));
+        hi = std::max(hi, curveExtreme(curve, along, true));
     }
+    // Nothing walked leaves lo > hi, deliberately: that is planeExtent's own
+    // "there is no region here" signal and must not be flattened to [0, 0],
+    // which reads as a real but zero-sized region.
 }
 
 // Every direction the shape's OWN planar faces face, with opposite senses
@@ -178,36 +235,28 @@ std::vector<gp_Dir> planeNormalsOf(const TopoDS_Shape& shape)
     return dirs;
 }
 
-// A board's own thickness - the smallest extent over the solid's OWN face
-// normals, not over the world axes. For an axis-aligned box the two are the
-// same three directions and this reproduces the bounding box's answer
-// exactly; for a board the transform gizmo has rotated they are not, and the
-// world AABB reports (18+300)/sqrt(2) = 224.86 mm for an 18 mm panel spun 45
-// degrees - which defaultsFor() would then turn into a 224.86 mm wide dado
-// and a 12 mm dowel drilled 168 mm into an 18 mm board. One Rotate gesture
-// away, so it is measured in the solid's own frame.
+// A board's own material thickness - the smallest side of the solid's own
+// ORIENTED bounding box, not of the world axis-aligned one. The world AABB
+// reports (18+300)/sqrt(2) = 224.86 mm for an 18 mm panel spun 45 degrees,
+// which defaultsFor() would turn into a 224.86 mm wide dado and a 12 mm dowel
+// drilled 168 mm into an 18 mm board - one Rotate gesture away.
 //
-// A shape with no planar face at all (a sphere) has no such frame to be
-// measured in and falls back to the bounding box, which is the best answer
-// available rather than a wrong one.
+// Bnd_OBB rather than a walk of the solid's own planar face normals, which
+// was this file's previous answer and is wrong for anything round: a
+// cylinder's only planar faces are its two end discs, so a 40 mm leg 700 mm
+// tall measured 700. The OBB is orientation-independent by construction,
+// reproduces an axis-aligned box exactly, and answers 40 for the leg.
 double thicknessOf(const TopoDS_Shape& shape)
 {
-    const std::vector<gp_Dir> dirs = planeNormalsOf(shape);
-    if (dirs.empty()) {
-        Bnd_Box box;
-        BRepBndLib::Add(shape, box);
-        if (box.IsVoid()) return 0.0;
-        Standard_Real x0, y0, z0, x1, y1, z1;
-        box.Get(x0, y0, z0, x1, y1, z1);
-        return std::min({x1 - x0, y1 - y0, z1 - z0});
-    }
-    double best = std::numeric_limits<double>::max();
-    for (const gp_Dir& d : dirs) {
-        double lo = 0.0, hi = 0.0;
-        projectedRange(shape, d, lo, hi);
-        best = std::min(best, hi - lo);
-    }
-    return best;
+    Bnd_OBB obb;
+    // Shape tolerance deliberately NOT added in: it inflates every side by the
+    // B-rep's own fuzz, which is invisible at 18 mm and is the whole answer at
+    // 0.15 mm. This is a measurement of the wood, not a containment box.
+    BRepBndLib::AddOBB(shape, obb, Standard_True /* use triangulation */,
+                       Standard_True /* optimal */,
+                       Standard_False /* no shape tolerance */);
+    if (obb.IsVoid()) return 0.0;
+    return 2.0 * std::min({obb.XHSize(), obb.YHSize(), obb.ZHSize()});
 }
 
 double faceArea(const TopoDS_Shape& face)
@@ -255,47 +304,64 @@ bool regionAxis(const TopoDS_Shape& region, const gp_Dir& normal, gp_Dir& out)
     return true;
 }
 
-// The shared region's own centroid, which is where every side-or-inside
-// question about this contact gets asked. False for a region with no
-// measurable area, whose centre of mass is meaningless.
+// A point genuinely ON the shared region, which is where every side-or-inside
+// question about this contact gets asked.
 //
-// Note the one case this point is not inside the region: a region with a
-// hole through its middle, whose area-weighted centroid lands in the hole.
-// The caller's classifier probes then both come back "outside everything",
-// which it reads as "not a separating contact here" and skips - a safe
-// rejection rather than a wrong answer.
-bool regionCentroid(const TopoDS_Shape& region, gp_Pnt& out)
+// NOT the region's area centroid, which was this file's previous answer and is
+// simply not on the region for anything non-convex: an L-shaped contact face
+// of 11,952 mm2 and a C-shaped one of 25,000 mm2 - a notched or rabbeted board
+// butting a panel, which this app's own Subtract and face pull produce
+// routinely - both put the area-weighted centre in the notch, so every
+// classifier probe came back "outside everything" and a real contact was
+// refused outright with "these two pieces don't meet". A hole through the
+// middle does it too; that was the only case the old comment named, and it
+// understated the problem by a lot.
+//
+// ModelingOps::pointOnFace is the sampler, reused rather than reimplemented:
+// it learned exactly this lesson on exactly this kind of face (the
+// slab-with-a-through-hole), and one sampler means one set of pitfalls.
+// The region's LARGEST face is probed, so the point sits on the dominant
+// patch when a boolean has split the region into several.
+bool regionProbePoint(const TopoDS_Shape& region, gp_Pnt& out)
 {
-    GProp_GProps props;
-    BRepGProp::SurfaceProperties(region, props);
-    if (props.Mass() <= 1.0e-9) return false;
-    out = props.CentreOfMass();
-    return true;
+    std::vector<TopoDS_Face> faces;
+    for (TopExp_Explorer it(region, TopAbs_FACE); it.More(); it.Next()) {
+        faces.push_back(TopoDS::Face(it.Current()));
+    }
+    std::sort(faces.begin(), faces.end(),
+              [](const TopoDS_Face& l, const TopoDS_Face& r) {
+                  return faceArea(l) > faceArea(r);
+              });
+    for (const TopoDS_Face& face : faces) {
+        if (ModelingOps::pointOnFace(face, out)) return true;
+    }
+    return false;
 }
 
-// The [uMin,uMax] x [vMin,vMax] extent of `shape`'s own vertices in
-// `frame`'s (u, v) axes. NOT the world AABB's two diagonal corners: that
-// trick only recovers the right answer when `frame`'s X/Y directions
-// happen to be world-axis-aligned. Exact in whatever frame it is handed -
-// which is why the frame has to be the region's own (see regionAxis).
+// The [uMin,uMax] x [vMin,vMax] extent of `shape` in `frame`'s (u, v) axes.
+// NOT the world AABB's two diagonal corners: that trick only recovers the
+// right answer when `frame`'s X/Y directions happen to be world-axis-aligned.
+// Exact in whatever frame it is handed - which is why the frame has to be the
+// region's own (see regionAxis) - and curve-aware, through projectedRange, so
+// a rounded boundary is measured rather than cut short at its endpoints.
 bool planeExtent(const TopoDS_Shape& shape, const gp_Ax3& frame,
                   double& uMin, double& uMax, double& vMin, double& vMax)
 {
-    uMin = std::numeric_limits<double>::max();
-    uMax = -std::numeric_limits<double>::max();
-    vMin = std::numeric_limits<double>::max();
-    vMax = -std::numeric_limits<double>::max();
-    for (TopExp_Explorer iv(shape, TopAbs_VERTEX); iv.More(); iv.Next()) {
-        const gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(iv.Current()));
-        const gp_Vec toP(frame.Location(), p);
-        const double u = toP.Dot(gp_Vec(frame.XDirection()));
-        const double v = toP.Dot(gp_Vec(frame.YDirection()));
-        uMin = std::min(uMin, u);
-        uMax = std::max(uMax, u);
-        vMin = std::min(vMin, v);
-        vMax = std::max(vMax, v);
-    }
-    return uMin <= uMax && vMin <= vMax;
+    const gp_Dir x = frame.XDirection();
+    const gp_Dir y = frame.YDirection();
+    projectedRange(shape, x, uMin, uMax);
+    projectedRange(shape, y, vMin, vMax);
+    if (uMin > uMax || vMin > vMax) return false;
+    // projectedRange answers in absolute projections; (u, v) are measured from
+    // the frame's own origin.
+    const gp_Pnt o = frame.Location();
+    const double uo = o.X() * x.X() + o.Y() * x.Y() + o.Z() * x.Z();
+    const double vo = o.X() * y.X() + o.Y() * y.Y() + o.Z() * y.Z();
+    uMin -= uo;
+    uMax -= uo;
+    vMin -= vo;
+    vMax -= vo;
+    return true;
 }
 
 // The refusal for a contact region this cannot measure: a curved boundary,
@@ -319,16 +385,26 @@ ContactResult findContact(const TopoDS_Shape& a, const TopoDS_Shape& b,
     }
 
     // Hoisted out of the O(Fa x Fb) candidate loop: neither depends on the
-    // candidate pair, and each is a full vertex walk of a whole solid.
+    // candidate pair, and each builds a bounding box of a whole solid.
     const double thicknessA = thicknessOf(a);
     const double thicknessB = thicknessOf(b);
 
     // How far off the shared region the side-or-inside probes are placed.
-    // Big enough to reach across `toleranceMm` of modelling slop - and past
-    // an interpenetration of the same order, which is exactly the "two boards
-    // can touch AND intersect slightly" case - and small enough to stay well
-    // inside an 18 mm board.
-    const double probeMm = std::max(2.0 * toleranceMm, 1.0e-3);
+    // Derived from the WOOD, never from the caller's `toleranceMm`, which is
+    // documented as purely permissive and must stay that way: at
+    // `2 * toleranceMm` the probe outgrew the piece it was probing once the
+    // tolerance reached half a thickness, so RAISING the tolerance refused a
+    // joint it had accepted - measured, a flush 300 x 18 joint was found at
+    // tolerance 8.9 and refused at 9.0, and a 6 mm back panel flipped at 3.0.
+    // A monotonic parameter that silently stops being monotonic is a trap for
+    // six later callers.
+    //
+    // 1 mm off the contact is local by any furniture standard, and a quarter
+    // of the thinner piece keeps the probe inside wood thinner than 4 mm -
+    // which is the other end of the same band: a 0.2 mm piece used to be
+    // refused for being thinner than the probe.
+    const double probeMm =
+        std::max(1.0e-4, std::min(1.0, 0.25 * std::min(thicknessA, thicknessB)));
 
     // Set when a candidate is a genuine, separating contact whose region
     // cannot be measured (a curved boundary). Reported in place of the
@@ -396,9 +472,10 @@ ContactResult findContact(const TopoDS_Shape& a, const TopoDS_Shape& b,
                 if (area <= bestArea || area < 1.0e-6) continue;
 
                 // Is this plane actually a separating surface, HERE? Asked
-                // with a point classification a hair either side of the
-                // shared region's own centroid, which answers "which side of
-                // this plane does each solid occupy at this contact" exactly.
+                // with a point classification a hair either side of a point
+                // genuinely ON the shared region, which answers "which side
+                // of this plane does each solid occupy at this contact"
+                // exactly.
                 //
                 // Two earlier criteria got this wrong in the same way, by
                 // asking a LOCAL question with a GLOBAL measurement. Comparing
@@ -420,14 +497,23 @@ ContactResult findContact(const TopoDS_Shape& a, const TopoDS_Shape& b,
                 // replacing the flag reasoning with a classifier probe at a
                 // genuine on-face point. A classifier costs more than a
                 // projection; this runs once when a joint is created.
-                gp_Pnt centroid;
-                if (!regionCentroid(region, centroid)) continue;
-                const gp_Pnt ahead = centroid.Translated(shift * probeMm);
-                const gp_Pnt behind = centroid.Translated(shift * -probeMm);
-                const bool aAhead = occupies(insideA, ahead);
-                const bool aBehind = occupies(insideA, behind);
-                const bool bAhead = occupies(insideB, ahead);
-                const bool bBehind = occupies(insideB, behind);
+                gp_Pnt onRegion;
+                if (!regionProbePoint(region, onRegion)) continue;
+
+                // a's own face LIES on this plane, so a's probe only has to
+                // clear zero. b's face sits `signedGap` away, up to
+                // `toleranceMm`, so b's probe has to clear that gap first or
+                // it lands in the slop between the two faces and reports
+                // "outside everything". Two offsets, not one - and b's extra
+                // reach is the gap that is actually there, never the tolerance
+                // that was merely allowed, so a flush joint answers the same
+                // at every tolerance.
+                const double aProbeMm = probeMm;
+                const double bProbeMm = probeMm + std::fabs(signedGap);
+                const bool aAhead = occupies(insideA, onRegion.Translated(shift * aProbeMm));
+                const bool aBehind = occupies(insideA, onRegion.Translated(shift * -aProbeMm));
+                const bool bAhead = occupies(insideB, onRegion.Translated(shift * bProbeMm));
+                const bool bBehind = occupies(insideB, onRegion.Translated(shift * -bProbeMm));
 
                 gp_Dir normal;
                 if (aBehind && bAhead && !aAhead && !bBehind) {

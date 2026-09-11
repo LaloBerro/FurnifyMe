@@ -4,9 +4,11 @@
 #include "Joinery.h"
 
 #include <BRepAlgoAPI_Cut.hxx>
+#include <BRepAlgoAPI_Fuse.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <BRepPrimAPI_MakeCylinder.hxx>
+#include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <gp_Ax1.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Trsf.hxx>
@@ -259,7 +261,7 @@ int main()
         // an 18 mm straddle, 300 mm away from the joint, and refuses it.
         // Whether a plane separates two solids is a question about where
         // they are AT THE CONTACT, which is why it is asked with a point
-        // classification either side of the region's own centroid.
+        // classification either side of a point genuinely ON the region.
         const TopoDS_Shape slab =
             BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 36.0, 300.0, 800.0).Shape();
         const TopoDS_Shape rabbet =
@@ -276,6 +278,36 @@ int main()
                       18.0, 1.0e-6, "and as wide as the board is thick");
             checkDir(stepJoint.contact.frame.Direction(), gp_Dir(1.0, 0.0, 0.0),
                      "with the normal still running from the panel into the board");
+            checkNear(stepJoint.contact.thicknessAMm, 36.0, 1.0e-6,
+                      "the rabbeted panel's material thickness is the board's 36 mm, "
+                      "not the 18 it happens to be at the step");
+        }
+
+        // Two pieces of DIFFERENT thickness, both ways round. Every other pair
+        // in this file is equal-thickness, so nothing told thicknessAMm from
+        // thicknessBMm: swapping the two assignments in the implementation
+        // reran green. These four assertions cannot both hold with them
+        // swapped, in either argument order.
+        const TopoDS_Shape panel36 =
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 36.0, 300.0, 800.0).Shape();
+        const TopoDS_Shape thinShelf =
+            BRepPrimAPI_MakeBox(gp_Pnt(36.0, 0.0, 400.0), 600.0, 300.0, 18.0).Shape();
+        const Joinery::ContactResult unequal = Joinery::findContact(panel36, thinShelf);
+        check(unequal.ok, "a 36 mm panel and an 18 mm shelf have a contact");
+        if (unequal.ok) {
+            checkNear(unequal.contact.thicknessAMm, 36.0, 1.0e-6,
+                      "thicknessA is bodyA's own 36 mm");
+            checkNear(unequal.contact.thicknessBMm, 18.0, 1.0e-6,
+                      "and thicknessB is bodyB's own 18 mm");
+        }
+        const Joinery::ContactResult unequalSwapped =
+            Joinery::findContact(thinShelf, panel36);
+        check(unequalSwapped.ok, "and the same contact the other way round");
+        if (unequalSwapped.ok) {
+            checkNear(unequalSwapped.contact.thicknessAMm, 18.0, 1.0e-6,
+                      "where thicknessA is now the 18 mm shelf");
+            checkNear(unequalSwapped.contact.thicknessBMm, 36.0, 1.0e-6,
+                      "and thicknessB the 36 mm panel - the two follow the arguments");
         }
 
         // A flat board on a ROUND leg's top touches along a line, not over a
@@ -369,9 +401,24 @@ int main()
             checkNear(crossed.contact.thicknessAMm, 20.0, 1.0e-6,
                       "each rail's own thickness is measured");
             checkNear(crossed.contact.thicknessBMm, 20.0, 1.0e-6, "both of them");
+            // uMin/vMin against 0.0 only restate literals the implementation
+            // writes; what actually pins the origin convention is at() landing
+            // on a real corner of the lap, which is asserted for the Face
+            // branch and was not for this one - deleting the in-plane half of
+            // the Overlap origin shift reran green. The true lap is
+            // x[150,210] y[0,40] z[0,20].
             checkNear(crossed.contact.uMin, 0.0, 1.0e-9,
                       "the lap's origin is its own corner too - the same convention");
             checkNear(crossed.contact.vMin, 0.0, 1.0e-9, "in both directions");
+            checkPnt(crossed.contact.at(0.0, 0.0), gp_Pnt(150.0, 0.0, 0.0), 1.0e-6,
+                     "and at(0, 0) is a real corner of the lap, not its centre");
+            checkPnt(crossed.contact.at(crossed.contact.uMax, crossed.contact.vMax),
+                     gp_Pnt(210.0, 40.0, 0.0), 1.0e-6,
+                     "with (uMax, vMax) the diagonally opposite one");
+            checkPnt(crossed.contact.at(crossed.contact.uLength() / 2.0,
+                                        crossed.contact.vLength() / 2.0),
+                     gp_Pnt(180.0, 20.0, 0.0), 1.0e-6,
+                     "so the middle of (u, v) is the middle of the lap");
             // The lap depth is the rails' 20 mm thickness, which here runs
             // along world Z. The frame's origin sits on the lap's own
             // minimum-depth face, so the lap spans [0, 20] from it.
@@ -441,6 +488,203 @@ int main()
         if (down.ok) {
             checkDir(down.contact.frame.Direction(), gp_Dir(0.0, 0.0, -1.0),
                      "with the depth reversed, as bodyA-into-bodyB requires");
+        }
+    }
+
+    // --- regions that are not a plain rectangle -----------------------
+    // Every case here was a wrong answer before this round: two of them
+    // refused a real contact outright, one under-reported its run by 29%,
+    // and one measured a 40 mm leg as a 700 mm board.
+    {
+        const TopoDS_Shape panel =
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 18.0, 300.0, 800.0).Shape();
+        const TopoDS_Shape shelf =
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 400.0), 600.0, 300.0, 18.0).Shape();
+
+        // An L-SHAPED contact region: a shelf with an upstand on its end, the
+        // whole L face butting the panel. Its AREA CENTROID is at roughly
+        // (y 72.7, z 513.7), which at z > 418 is off the L entirely - so a
+        // probe placed there classifies as outside BOTH solids, and a real
+        // 11,952 mm2 contact with no interpenetration whatever was refused
+        // with "these two pieces don't meet". A notched board butting a panel
+        // is bread-and-butter furniture; the probe has to sit on a point
+        // genuinely ON the region, which is what ModelingOps::pointOnFace
+        // answers.
+        const TopoDS_Shape upstand =
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 418.0), 600.0, 18.0, 364.0).Shape();
+        ShapeUpgrade_UnifySameDomain unifyL(BRepAlgoAPI_Fuse(shelf, upstand).Shape(),
+                                           Standard_True, Standard_True, Standard_True);
+        unifyL.Build();
+        const Joinery::ContactResult lJoint = Joinery::findContact(panel, unifyL.Shape());
+        check(lJoint.ok, "an L-shaped contact region is found, not refused");
+        if (lJoint.ok) {
+            checkNear(lJoint.contact.uLength(), 382.0, 1.0e-6,
+                      "spanning the whole L - 18 of shelf plus 364 of upstand");
+            checkNear(lJoint.contact.vLength(), 300.0, 1.0e-6, "by the board's 300 mm depth");
+            checkDir(lJoint.contact.frame.Direction(), gp_Dir(1.0, 0.0, 0.0),
+                     "with the normal still running from the panel into the board");
+        }
+
+        // A C-SHAPED region - a channel end, no hole anywhere - puts its area
+        // centroid in the notch for the same reason. 300 x 300 bounding
+        // rectangle, and the header now says plainly that a non-rectangular
+        // region's extents cover area that is not in contact.
+        const TopoDS_Shape slabC =
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 400.0), 600.0, 300.0, 300.0).Shape();
+        const TopoDS_Shape notchC =
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 20.0, 450.0), 600.0, 280.0, 200.0).Shape();
+        ShapeUpgrade_UnifySameDomain unifyC(BRepAlgoAPI_Cut(slabC, notchC).Shape(),
+                                           Standard_True, Standard_True, Standard_True);
+        unifyC.Build();
+        const Joinery::ContactResult cJoint = Joinery::findContact(panel, unifyC.Shape());
+        check(cJoint.ok, "and so is a C-shaped one");
+        if (cJoint.ok) {
+            checkNear(cJoint.contact.uLength(), 300.0, 1.0e-6,
+                      "reported as its bounding rectangle - 300 mm");
+            checkNear(cJoint.contact.vLength(), 300.0, 1.0e-6, "by 300 mm");
+        }
+
+        // A CURVED boundary is measured now, not cut short at its vertices. A
+        // stadium-ended post's top is one face of area 100*40 + pi*400: its
+        // vertices sit at x = +/-50 where the straight sides end, so a vertex-
+        // only walk reported a 100 mm run against a true 140 - 29% short, and
+        // reported it as a success, which is the same "a wrong size is a
+        // refusal surfacing as a success" law in the permissive direction.
+        const TopoDS_Shape core =
+            BRepPrimAPI_MakeBox(gp_Pnt(-50.0, -20.0, 0.0), 100.0, 40.0, 700.0).Shape();
+        const TopoDS_Shape capL =
+            BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(-50.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0)),
+                                     20.0, 700.0).Shape();
+        const TopoDS_Shape capR =
+            BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(50.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0)),
+                                     20.0, 700.0).Shape();
+        ShapeUpgrade_UnifySameDomain unifyPost(
+            BRepAlgoAPI_Fuse(BRepAlgoAPI_Fuse(core, capL).Shape(), capR).Shape(),
+            Standard_True, Standard_True, Standard_True);
+        unifyPost.Build();
+        const TopoDS_Shape lid =
+            BRepPrimAPI_MakeBox(gp_Pnt(-150.0, -150.0, 700.0), 300.0, 300.0, 18.0).Shape();
+        const Joinery::ContactResult stadium =
+            Joinery::findContact(unifyPost.Shape(), lid);
+        check(stadium.ok, "a stadium-ended post under a board has a contact");
+        if (stadium.ok) {
+            checkNear(stadium.contact.uLength(), 140.0, 1.0e-6,
+                      "measured across its rounded ends - 140 mm, not the 100 between "
+                      "its vertices");
+            checkNear(stadium.contact.vLength(), 40.0, 1.0e-6, "by 40 mm");
+        }
+        // The flat control: the same 140 x 40 with square ends must not move.
+        const TopoDS_Shape flatPost =
+            BRepPrimAPI_MakeBox(gp_Pnt(-70.0, -20.0, 0.0), 140.0, 40.0, 700.0).Shape();
+        const Joinery::ContactResult square = Joinery::findContact(flatPost, lid);
+        check(square.ok, "and so does a square-ended one of the same size");
+        if (square.ok) {
+            checkNear(square.contact.uLength(), 140.0, 1.0e-6,
+                      "which still measures exactly 140 mm - sampling arcs changed "
+                      "nothing for a straight boundary");
+            checkNear(square.contact.vLength(), 40.0, 1.0e-6, "by 40 mm");
+        }
+
+        // A fat cylinder standing on a narrow board, the board deliberately
+        // OFF CENTRE. Three things at once:
+        //
+        // the region is the disc clipped to the board's 75 mm width, so its
+        // straight edges are 2*sqrt(100^2 - 30^2) = 190.788 and
+        // 2*sqrt(100^2 - 45^2) = 178.606 long while the region really spans
+        // 200 - the arc's own extreme, at x = 0, is not a vertex and not an
+        // endpoint of any straight edge;
+        //
+        // the off-centre 75 mm (rather than a symmetric 60) is what makes the
+        // arc ASYMMETRIC in its own parameter, so its extreme does not land on
+        // a sample point. On a symmetric arc it lands exactly on the middle
+        // sample and a coarse walk is accidentally exact; here it is 0.0036 mm
+        // out, which only a refinement inside the bracketing interval closes;
+        //
+        // and the cylinder's thickness is its 200 mm DIAMETER. Its only planar
+        // faces are its two end discs, so measuring the smallest extent over a
+        // solid's own face normals - this file's previous answer - reported the
+        // 700 mm HEIGHT of a 200 mm-wide post. The oriented bounding box has
+        // no such blind spot.
+        const TopoDS_Shape fatLeg =
+            BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0)),
+                                     100.0, 700.0).Shape();
+        const TopoDS_Shape narrowBoard =
+            BRepPrimAPI_MakeBox(gp_Pnt(-30.0, -150.0, -18.0), 75.0, 300.0, 18.0).Shape();
+        const Joinery::ContactResult clipped =
+            Joinery::findContact(fatLeg, narrowBoard);
+        check(clipped.ok, "a fat round leg on a narrow board has a contact");
+        if (clipped.ok) {
+            checkNear(clipped.contact.uLength(), 200.0, 1.0e-6,
+                      "spanning the disc's full 200 mm, not the 190.788 between the "
+                      "clipped edges' ends");
+            checkNear(clipped.contact.vLength(), 75.0, 1.0e-6, "by the board's 75 mm width");
+            checkNear(clipped.contact.thicknessAMm, 200.0, 1.0e-6,
+                      "and the leg is a 200 mm-thick piece of wood, not a 700 mm one");
+            checkNear(clipped.contact.thicknessBMm, 18.0, 1.0e-6,
+                      "while the board is still 18 mm");
+        }
+    }
+
+    // --- toleranceMm is permissive only, in both directions -----------
+    {
+        const TopoDS_Shape panel =
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 18.0, 300.0, 800.0).Shape();
+        const TopoDS_Shape shelf =
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 400.0), 600.0, 300.0, 18.0).Shape();
+
+        // Raising the tolerance must never take a contact away. It did: with
+        // the probe offset derived from toleranceMm, the probe outgrew the
+        // piece it was probing once the tolerance reached half a thickness,
+        // and this exact flush joint was found at 8.9 and REFUSED at 9.0. The
+        // header documents the parameter as purely permissive with no upper
+        // bound and six later tasks call it.
+        const double wide[] = {0.0, 9.0, 12.0, 50.0, 200.0};
+        for (const double tol : wide) {
+            const Joinery::ContactResult loose =
+                Joinery::findContact(panel, shelf, tol);
+            check(loose.ok, "a flush joint is still found at a wide tolerance");
+            if (loose.ok) {
+                checkNear(loose.contact.runLength(), 300.0, 1.0e-6,
+                          "and measures the same 300 mm however loose the tolerance is");
+            }
+        }
+
+        // And a deliberately loose tolerance must still reach a genuinely
+        // gappy joint, which is the direction the parameter exists for. The
+        // probe on bodyA's side only has to clear zero - a's own face lies on
+        // the contact plane - while the probe on bodyB's side has to clear the
+        // gap first or it lands in the slop between the two faces and reports
+        // "outside everything". Two offsets, not one: here the 5 mm gap is
+        // wider than the 1 mm the wood allows, so a single shared offset
+        // cannot reach bodyB at all.
+        gp_Trsf far;
+        far.SetTranslation(gp_Vec(5.0, 0.0, 0.0));
+        const TopoDS_Shape apart =
+            BRepBuilderAPI_Transform(shelf, far, Standard_True).Shape();
+        check(!Joinery::findContact(panel, apart).ok,
+              "a 5 mm gap is no contact at the default tolerance");
+        const Joinery::ContactResult gappy = Joinery::findContact(panel, apart, 6.0);
+        check(gappy.ok, "but it is one when the caller allows 6 mm of slop");
+        if (gappy.ok) {
+            checkNear(gappy.contact.runLength(), 300.0, 1.0e-6,
+                      "and it measures the same 300 mm across the gap");
+            checkDir(gappy.contact.frame.Direction(), gp_Dir(1.0, 0.0, 0.0),
+                     "with the normal still running from the panel into the shelf");
+        }
+
+        // The same mechanism from the other end: a piece thinner than the
+        // probe offset was refused. 0.15 mm is not furniture, but the band it
+        // sits at the bottom of reaches a 6 mm back panel at tolerance 3.
+        const TopoDS_Shape veneer =
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 400.0), 600.0, 300.0, 0.15).Shape();
+        const Joinery::ContactResult sliver = Joinery::findContact(panel, veneer);
+        check(sliver.ok, "and a 0.15 mm piece is found rather than refused for being thin");
+        if (sliver.ok) {
+            checkNear(sliver.contact.uLength(), 300.0, 1.0e-6, "300 mm along the joint");
+            checkNear(sliver.contact.vLength(), 0.15, 1.0e-9,
+                      "by its own 0.15 mm - the contact is as thin as the wood");
+            checkNear(sliver.contact.thicknessBMm, 0.15, 1.0e-9,
+                      "and that is its measured thickness too");
         }
     }
 
