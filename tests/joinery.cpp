@@ -860,6 +860,249 @@ int main()
         }
     }
 
+    // --- housings and interlocks are regions, not points --------------
+    {
+        Joinery::Contact c;
+        c.type = Joinery::Contact::Type::Face;
+        c.frame = gp_Ax3(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
+        c.uMin = 0.0; c.uMax = 300.0;
+        c.vMin = 0.0; c.vMax = 18.0;
+        c.thicknessAMm = 18.0;
+        c.thicknessBMm = 18.0;
+
+        // A dado: ONE channel, as wide as the housed piece, running the
+        // whole way across unless it is stopped.
+        Joinery::Parameters dado = Joinery::defaultsFor(Joinery::Kind::Dado, 18.0);
+        const std::vector<Joinery::Item> channel =
+            Joinery::layout(Joinery::Kind::Dado, dado, c, {});
+        check(channel.size() == 1, "a dado is a single channel");
+        if (channel.size() == 1) {
+            checkNear(channel[0].spanUMm, 300.0, 1.0e-6,
+                      "running the full length of the contact");
+            checkNear(channel[0].spanVMm, 18.0, 1.0e-6,
+                      "and as wide as the piece it houses");
+            checkNear(channel[0].depthAMm, 6.0, 1.0e-6, "cut a third deep into the host");
+        }
+
+        // Stopped: short of the far end by its stop distance.
+        Joinery::Parameters stopped = dado;
+        stopped.stopped = true;
+        stopped.stopMm = 10.0;
+        const std::vector<Joinery::Item> blind =
+            Joinery::layout(Joinery::Kind::Dado, stopped, c, {});
+        checkNear(blind[0].spanUMm, 290.0, 1.0e-6, "a stopped dado runs 10 mm short");
+
+        // A tenon: one block, its own thickness and length.
+        Joinery::Parameters mt =
+            Joinery::defaultsFor(Joinery::Kind::MortiseTenon, 18.0);
+        const std::vector<Joinery::Item> tenon =
+            Joinery::layout(Joinery::Kind::MortiseTenon, mt, c, {});
+        check(tenon.size() == 1, "a mortise and tenon is one interlock");
+        if (tenon.size() == 1) {
+            checkNear(tenon[0].spanVMm, mt.thicknessMm, 1.0e-6,
+                      "the tenon is as thick as its parameter says");
+            check(tenon[0].spanUMm > 0.0 && tenon[0].spanUMm < 300.0,
+                  "and narrower than the joint, leaving shoulders");
+            checkNear(tenon[0].depthAMm, mt.depthAMm, 1.0e-6,
+                      "with the mortise cut to match");
+        }
+    }
+
+    // --- housing/interlock at a thickness that collides with no struct
+    // default -----------------------------------------------------------
+    // The block above uses an 18 mm board, where a dado's widthMm (18.0)
+    // and a tenon's thicknessMm (6.0) both happen to equal Parameters' own
+    // struct defaults (`widthMm = 18.0`, `thicknessMm = 6.0`) - so a
+    // mutation that ignored params.widthMm/thicknessMm outright and read
+    // the untouched struct default instead would still pass every
+    // assertion above. 24 mm shares no field value with either struct
+    // default, so this block is what actually pins that housingRegion and
+    // interlockRegion read their OWN parameters rather than coincide with
+    // them - the same discipline the file's earlier "at 24 mm" blocks
+    // already apply to defaultsFor() itself.
+    {
+        Joinery::Contact c;
+        c.type = Joinery::Contact::Type::Face;
+        c.frame = gp_Ax3(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0));
+        c.uMin = 0.0; c.uMax = 300.0;
+        c.vMin = 0.0; c.vMax = 18.0;
+        c.thicknessAMm = 24.0;
+        c.thicknessBMm = 24.0;
+
+        const Joinery::Parameters dado24 = Joinery::defaultsFor(Joinery::Kind::Dado, 24.0);
+        const std::vector<Joinery::Item> channel24 =
+            Joinery::layout(Joinery::Kind::Dado, dado24, c, {});
+        check(channel24.size() == 1, "a dado at 24 mm is still one channel");
+        if (channel24.size() == 1) {
+            checkNear(channel24[0].spanVMm, 24.0, 1.0e-6,
+                      "reads the housed piece's OWN 24 mm width, not the 18 mm "
+                      "struct default");
+            checkNear(channel24[0].sizeMm, 24.0, 1.0e-6,
+                      "and carries that width in sizeMm too");
+            checkNear(channel24[0].depthAMm, 8.0, 1.0e-6,
+                      "and its own depth - a third of a 24 mm host");
+            checkNear(channel24[0].depthBMm, 0.0, 1.0e-9, "a housing has no second depth");
+            checkNear(channel24[0].u, 150.0, 1.0e-6,
+                      "centred on the full run when unstopped");
+            checkNear(channel24[0].v, 9.0, 1.0e-6, "and centred across the joint");
+            checkPnt(channel24[0].centre, gp_Pnt(150.0, 9.0, 0.0), 1.0e-6,
+                     "with a world centre derived from the contact frame");
+        }
+
+        // Position/anchoring for a stopped dado: it starts at uMin and stops
+        // short of the far end, so its centre shifts toward the START of the
+        // run rather than staying at the full joint's own midpoint - the
+        // formula anchors the shrunk run at uMin, it does not keep the
+        // original centre and merely shrink the span around it.
+        Joinery::Parameters stopped24 = dado24;
+        stopped24.stopped = true;
+        stopped24.stopMm = 10.0;
+        const std::vector<Joinery::Item> blind24 =
+            Joinery::layout(Joinery::Kind::Dado, stopped24, c, {});
+        check(blind24.size() == 1, "a stopped dado is still one channel");
+        if (blind24.size() == 1) {
+            checkNear(blind24[0].spanUMm, 290.0, 1.0e-6, "290 mm of the 300 mm run");
+            checkNear(blind24[0].u, 145.0, 1.0e-6,
+                      "centred on the run it actually occupies, anchored at the "
+                      "start - not on the full joint's own midpoint (150)");
+        }
+
+        const Joinery::Parameters mt24 =
+            Joinery::defaultsFor(Joinery::Kind::MortiseTenon, 24.0);
+        const std::vector<Joinery::Item> tenon24 =
+            Joinery::layout(Joinery::Kind::MortiseTenon, mt24, c, {});
+        check(tenon24.size() == 1, "a tenon at 24 mm is still one interlock");
+        if (tenon24.size() == 1) {
+            checkNear(tenon24[0].spanVMm, 8.0, 1.0e-6,
+                      "reads its own 8 mm thickness, not the 6 mm struct default");
+            checkNear(tenon24[0].sizeMm, 8.0, 1.0e-6, "and carries it in sizeMm too");
+            checkNear(tenon24[0].spanUMm, 210.0, 1.0e-6,
+                      "leaves a 15% shoulder at each end of the 300 mm run "
+                      "(300 - 2*45)");
+            checkNear(tenon24[0].depthAMm, 38.0, 1.0e-6,
+                      "with the mortise cut to its own 38 mm depth");
+            checkNear(tenon24[0].depthBMm, mt24.lengthMm, 1.0e-6,
+                      "carrying the tenon's own length");
+            checkNear(tenon24[0].u, 150.0, 1.0e-6,
+                      "centred on the joint - unlike a stopped housing, an "
+                      "interlock is never anchored to one end");
+            checkNear(tenon24[0].v, 9.0, 1.0e-6, "and across it too");
+        }
+
+        // A half-lap has NO shoulder at all - it fills the whole overlap
+        // outright, unlike a tenon's inset shoulders. Untested by the block
+        // above, whose only interlock kind is MortiseTenon, so the
+        // shoulder-is-zero branch of interlockRegion's ternary had no
+        // coverage at all.
+        const Joinery::Parameters hl24 = Joinery::defaultsFor(Joinery::Kind::HalfLap, 24.0);
+        const std::vector<Joinery::Item> lap24 =
+            Joinery::layout(Joinery::Kind::HalfLap, hl24, c, {});
+        check(lap24.size() == 1, "a half-lap is one interlock too");
+        if (lap24.size() == 1) {
+            checkNear(lap24[0].spanUMm, 300.0, 1.0e-6,
+                      "a half-lap fills the whole run - no shoulder, unlike a tenon's 210");
+            checkNear(lap24[0].spanVMm, 8.0, 1.0e-6, "as thick as its own parameter says");
+        }
+    }
+
+    // --- an OBLIQUE frame: housing and interlock arithmetic must not care --
+    // Same requirement as the fastener row's own oblique test above, and for
+    // the same reason: Task 2 lost four fix rounds to an oriented quantity
+    // measured or built in world-axis-aligned terms, looking right every
+    // time and measuring wrong every time, and a Task 3 review proved a
+    // rotation about the frame's own NORMAL alone cannot catch that class of
+    // bug - it leaves the region's edges lined up with whatever axes gp_Ax3
+    // picked, so it tests an oblique normal and never an oblique rectangle.
+    // This tilts about the frame's own X (in-plane, not the normal), so the
+    // rectangle itself tips out of the world plane, and asserts BOTH halves:
+    // the LOCAL (u, v, span) arithmetic is unchanged by the tilt, and the
+    // DERIVED world centre and axis are correct for the tilted frame.
+    {
+        Joinery::Contact flat;
+        flat.type = Joinery::Contact::Type::Face;
+        flat.frame = gp_Ax3(gp_Pnt(5.0, -3.0, 2.0), gp_Dir(0.0, 0.0, 1.0),
+                            gp_Dir(1.0, 0.0, 0.0));
+        flat.uMin = 0.0; flat.uMax = 300.0;
+        flat.vMin = 0.0; flat.vMax = 18.0;
+        flat.thicknessAMm = 18.0;
+        flat.thicknessBMm = 18.0;
+
+        const Joinery::Parameters dado = Joinery::defaultsFor(Joinery::Kind::Dado, 18.0);
+        const std::vector<Joinery::Item> flatChannel =
+            Joinery::layout(Joinery::Kind::Dado, dado, flat, {});
+        const Joinery::Parameters mt = Joinery::defaultsFor(Joinery::Kind::MortiseTenon, 18.0);
+        const std::vector<Joinery::Item> flatTenon =
+            Joinery::layout(Joinery::Kind::MortiseTenon, mt, flat, {});
+
+        const double tiltAngle = 37.0 * (4.0 * std::atan(1.0)) / 180.0;  // not 45/90
+        gp_Trsf tilt;
+        tilt.SetRotation(gp_Ax1(flat.frame.Location(), flat.frame.XDirection()), tiltAngle);
+        const gp_Ax3 obliqueFrame = flat.frame.Transformed(tilt);
+        // The rotation axis is the frame's own X (in-plane), not its Z
+        // (normal) - so this genuinely exercises "not the frame's own
+        // normal" rather than merely renaming the same rotation.
+        check(std::fabs(flat.frame.XDirection().Dot(flat.frame.Direction())) < 1.0e-9,
+              "sanity: the housing/interlock tilt axis is in-plane, not the normal");
+        check(obliqueFrame.Direction().Dot(gp_Dir(0.0, 0.0, 1.0)) < 1.0 - 1.0e-6,
+              "and it genuinely moves the plane's own normal off world Z");
+
+        Joinery::Contact oblique = flat;
+        oblique.frame = obliqueFrame;
+
+        const std::vector<Joinery::Item> obliqueChannel =
+            Joinery::layout(Joinery::Kind::Dado, dado, oblique, {});
+        check(obliqueChannel.size() == 1, "the oblique dado is still a single channel");
+        if (obliqueChannel.size() == 1 && flatChannel.size() == 1) {
+            checkNear(obliqueChannel[0].spanUMm, flatChannel[0].spanUMm, 1.0e-9,
+                      "span U is identical on the tilted frame - local arithmetic "
+                      "never reads the frame's orientation");
+            checkNear(obliqueChannel[0].spanVMm, flatChannel[0].spanVMm, 1.0e-9,
+                      "and so is span V");
+            checkNear(obliqueChannel[0].u, flatChannel[0].u, 1.0e-9,
+                      "and its local u position");
+            checkNear(obliqueChannel[0].v, flatChannel[0].v, 1.0e-9,
+                      "and its local v position");
+
+            // Computed here from the tilted frame's own raw components,
+            // independently of Contact::at(), so a layout() bug that calls
+            // at() with the wrong u/v (or skips deriving centre at all)
+            // cannot hide behind at()'s own already-tested arithmetic.
+            const gp_XYZ expectedCentre =
+                obliqueFrame.Location().XYZ() +
+                obliqueFrame.XDirection().XYZ() * obliqueChannel[0].u +
+                obliqueFrame.YDirection().XYZ() * obliqueChannel[0].v;
+            checkPnt(obliqueChannel[0].centre, gp_Pnt(expectedCentre), 1.0e-6,
+                     "the channel's world centre matches the tilted frame");
+            check(obliqueChannel[0].centre.Distance(flatChannel[0].centre) > 1.0,
+                  "and is genuinely a different point than the flat frame gave");
+            checkDir(obliqueChannel[0].axis, obliqueFrame.Direction(),
+                     "the channel's axis follows the tilted contact normal");
+        }
+
+        const std::vector<Joinery::Item> obliqueTenon =
+            Joinery::layout(Joinery::Kind::MortiseTenon, mt, oblique, {});
+        check(obliqueTenon.size() == 1, "the oblique tenon is still one interlock");
+        if (obliqueTenon.size() == 1 && flatTenon.size() == 1) {
+            checkNear(obliqueTenon[0].spanUMm, flatTenon[0].spanUMm, 1.0e-9,
+                      "the tenon's span U is unchanged by the tilt");
+            checkNear(obliqueTenon[0].spanVMm, flatTenon[0].spanVMm, 1.0e-9,
+                      "and its span V");
+            checkNear(obliqueTenon[0].u, flatTenon[0].u, 1.0e-9, "and its local u position");
+            checkNear(obliqueTenon[0].v, flatTenon[0].v, 1.0e-9, "and its local v position");
+
+            const gp_XYZ expectedTenonCentre =
+                obliqueFrame.Location().XYZ() +
+                obliqueFrame.XDirection().XYZ() * obliqueTenon[0].u +
+                obliqueFrame.YDirection().XYZ() * obliqueTenon[0].v;
+            checkPnt(obliqueTenon[0].centre, gp_Pnt(expectedTenonCentre), 1.0e-6,
+                     "the tenon's world centre matches the tilted frame");
+            check(obliqueTenon[0].centre.Distance(flatTenon[0].centre) > 1.0,
+                  "and is genuinely a different point than the flat frame gave");
+            checkDir(obliqueTenon[0].axis, obliqueFrame.Direction(),
+                     "the tenon's axis follows the tilted contact normal");
+        }
+    }
+
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures,
                 g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;

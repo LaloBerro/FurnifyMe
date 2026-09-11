@@ -838,6 +838,68 @@ void fastenerRow(const Contact& contact, const Parameters& params,
     }
 }
 
+// A housing is ONE region: the full run of the contact (less the stop, if
+// it is blind), as wide as the piece being housed, cut `depthAMm` into the
+// host.
+//
+// Like fastenerRow above, this reads the contact's BOUNDING RECTANGLE
+// (uMin/uMax/vMin/vMax, runLength()) - see the long comment on `Contact` and
+// on `layout()` in the header. A housing spanning the full run of a
+// non-rectangular contact (an L, a C, a stadium) can therefore describe a
+// channel partly cut through thin air; nothing here invents a containment
+// test to catch that, by the same ruling layout() already documents.
+void housingRegion(const Contact& contact, const Parameters& params,
+                   std::vector<Item>& out)
+{
+    const bool alongU = contact.runsAlongU();
+    const double runLen = std::max(contact.runLength() -
+                                       (params.stopped ? params.stopMm : 0.0),
+                                   0.0);
+    const double width = std::clamp(params.widthMm, 0.0, std::max(contact.uLength(),
+                                                                  contact.vLength()));
+    Item item;
+    item.u = alongU ? contact.uMin + runLen / 2.0
+                    : contact.uMin + contact.uLength() / 2.0;
+    item.v = alongU ? contact.vMin + contact.vLength() / 2.0
+                    : contact.vMin + runLen / 2.0;
+    item.spanUMm = alongU ? runLen : width;
+    item.spanVMm = alongU ? width : runLen;
+    item.sizeMm = width;
+    item.depthAMm = params.depthAMm;
+    item.depthBMm = 0.0;
+    out.push_back(item);
+}
+
+// An interlock is ONE region too, but centred and inset from both ends -
+// a tenon leaves shoulders, a half-lap takes the whole overlap.
+//
+// Same bounding-rectangle caveat as housingRegion just above: centred on
+// contact.uMin + contact.uLength() / 2.0, which is the bounding rectangle's
+// own centre and not guaranteed to sit on a non-rectangular region.
+void interlockRegion(Kind kind, const Contact& contact, const Parameters& params,
+                     std::vector<Item>& out)
+{
+    const bool alongU = contact.runsAlongU();
+    const double runLen = contact.runLength();
+    // A tenon is inset from both ends by a shoulder; a half-lap fills its
+    // overlap outright.
+    const double shoulder = kind == Kind::HalfLap ? 0.0 : runLen * 0.15;
+    const double span = std::max(runLen - 2.0 * shoulder, 0.0);
+    const double thickness =
+        std::clamp(params.thicknessMm, 0.0,
+                   std::max(alongU ? contact.vLength() : contact.uLength(), 0.0));
+
+    Item item;
+    item.u = contact.uMin + contact.uLength() / 2.0;
+    item.v = contact.vMin + contact.vLength() / 2.0;
+    item.spanUMm = alongU ? span : thickness;
+    item.spanVMm = alongU ? thickness : span;
+    item.sizeMm = thickness;
+    item.depthAMm = params.depthAMm;
+    item.depthBMm = params.lengthMm;
+    out.push_back(item);
+}
+
 }  // namespace
 
 std::vector<Item> layout(Kind kind, const Parameters& params, const Contact& contact,
@@ -849,8 +911,10 @@ std::vector<Item> layout(Kind kind, const Parameters& params, const Contact& con
             fastenerRow(contact, params, items);
             break;
         case Family::Housing:
+            housingRegion(contact, params, items);
+            break;
         case Family::Interlock:
-            // Task 4.
+            interlockRegion(kind, contact, params, items);
             break;
     }
 
