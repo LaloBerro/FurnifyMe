@@ -217,7 +217,14 @@ void jsonToLinkGroups(const QJsonObject& obj, DocumentModel::DocumentMeta& meta)
 // {"list": [{"kind":.., "a":.., "b":.., "count":.., "size":.., "depthA":..,
 // "depthB":.., "inset":.., "endMargin":.., "angle":.., "width":..,
 // "stopped":.., "stop":.., "thickness":.., "length":.., "haunched":..,
+// "drilledFrom": "insetFace" | "oppositeFace",
 // "adjustments": [{"i":.., "du":.., "dv":..}, ...]}, ...]}
+//
+// "drilledFrom" (Task 13) is a WORD rather than the enum's integer, so a file
+// read by a later build that reorders or extends Joinery::DrilledFrom still
+// means the face it was saved with.
+constexpr const char* kDrilledFromInsetFace = "insetFace";
+constexpr const char* kDrilledFromOppositeFace = "oppositeFace";
 QJsonObject jointsToJson(const DocumentModel::DocumentMeta& meta)
 {
     QJsonArray list;
@@ -239,6 +246,9 @@ QJsonObject jointsToJson(const DocumentModel::DocumentMeta& meta)
         obj[QStringLiteral("thickness")] = record.params.thicknessMm;
         obj[QStringLiteral("length")] = record.params.lengthMm;
         obj[QStringLiteral("haunched")] = record.params.haunched;
+        obj[QStringLiteral("drilledFrom")] = QString::fromLatin1(
+            record.params.drilledFrom == Joinery::DrilledFrom::OppositeFace ? kDrilledFromOppositeFace
+                                                                            : kDrilledFromInsetFace);
         QJsonArray adjustments;
         for (const Joinery::Adjustment& adj : record.adjustments) {
             QJsonObject a;
@@ -299,6 +309,15 @@ void jsonToJoints(const QJsonObject& obj, DocumentModel::DocumentMeta& meta)
             o.value(QStringLiteral("thickness")).toDouble(defaults.thicknessMm);
         record.params.lengthMm = o.value(QStringLiteral("length")).toDouble(defaults.lengthMm);
         record.params.haunched = o.value(QStringLiteral("haunched")).toBool(defaults.haunched);
+        // Absent - every file saved before Task 13 - or a word this build does
+        // not know falls back to the struct's own default, like every tunable
+        // above; only the one word that names the other face moves it.
+        const QString drilledFrom = o.value(QStringLiteral("drilledFrom")).toString();
+        record.params.drilledFrom =
+            drilledFrom == QLatin1String(kDrilledFromOppositeFace)
+                ? Joinery::DrilledFrom::OppositeFace
+                : drilledFrom == QLatin1String(kDrilledFromInsetFace) ? Joinery::DrilledFrom::InsetFace
+                                                                      : defaults.drilledFrom;
         for (const QJsonValue& av : o.value(QStringLiteral("adjustments")).toArray()) {
             const QJsonObject a = av.toObject();
             Joinery::Adjustment adj;

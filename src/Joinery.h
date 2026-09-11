@@ -49,6 +49,27 @@ Family familyOf(Kind kind);
 // The real woodworking name, for every painted string and every message.
 std::string kindName(Kind kind);
 
+// Which face of the drilled piece a pocket screw's pocket is cut from (the
+// spec's "for pocket screws, the angle and the face drilled from"). A pocket
+// screw leans ACROSS the joint, about the run its row follows, and the lean
+// decides which of the drilled piece's two broad faces the pocket opens on -
+// the direction is the whole point of planning a pocket hole at all.
+//
+//   InsetFace    - the face the inset is measured from (the across axis's LOW
+//                  side, `Contact::vMin` for a joint running along u). The
+//                  default, and exactly the lean every pocket screw was drawn
+//                  with before this field existed.
+//   OppositeFace - the other broad face; the lean mirrors.
+//
+// Read by layout() alone, which signs Item::angleDeg from it, so everything
+// downstream of an Item (the renderer's pin) follows without knowing the field
+// exists. Only a kind with a non-zero angle leans, so for every other fastener
+// the value changes nothing. drilledFromFaceName() below names the face.
+enum class DrilledFrom {
+    InsetFace,
+    OppositeFace,
+};
+
 // One parameter block serves all three families - a kind reads the fields
 // that apply to it and ignores the rest. One struct rather than a variant
 // because it is persisted, undone and edited as a unit, and a variant would
@@ -63,6 +84,8 @@ struct Parameters {
     double endMarginMm = 40.0; // first and last item's distance from the ends
     double angleDeg = 0.0;     // an angle belongs to the kinds that drill at
                                 // one (pocket screws) - defaultsFor() sets it
+    // The face a pocket screw is drilled from - see DrilledFrom above.
+    DrilledFrom drilledFrom = DrilledFrom::InsetFace;
 
     // Housings.
     double widthMm = 18.0;     // channel width, defaults to the housed piece
@@ -428,6 +451,11 @@ struct Item {
     // it lies along - a pocket screw's 15 degrees, 0 for anything driven
     // straight. Copied from the parameters by layout(), so whatever draws or
     // reads an item never has to reach back for them.
+    //
+    // SIGNED, by layout(), from Parameters::drilledFrom: a positive rotation
+    // about the run leans the B end of the pin toward the face that field
+    // names, so the renderer's one rotation draws either face without reading
+    // the field. The magnitude is always the parameters' own angle.
     double angleDeg = 0.0;
 };
 
@@ -490,6 +518,18 @@ struct Readout {
 // in a drawer and the word any other surface reads can never disagree.
 Readout readout(Kind kind, const Parameters& params, const Contact& contact,
                 const std::vector<Item>& items);
+
+// The face a pocket screw is drilled from, as a word a person can find on the
+// board - "bottom", "front", ... - through the SAME edge-naming rule readout()
+// uses (one place decides the word, so the drawer and the joint's chip can
+// never name one face two ways). `named` is false, and the answer the honest
+// no-single-edge sentence, when the face does not line up with a world axis -
+// Readout::referenceEdgeNamed's own contract.
+//
+// The face is the across axis's low side for InsetFace and its high side for
+// OppositeFace, in the contact's own frame - the side layout() leans the pin
+// toward (see DrilledFrom).
+std::string drilledFromFaceName(const Contact& contact, DrilledFrom from, bool& named);
 
 // Everything a joint is, right now, derived from the live shapes: where it
 // sits, where its items fall, and the numbers to mark. ok == false carries

@@ -574,6 +574,35 @@ bool DocumentModel::setJointAdjustments(int jointId,
     return false;
 }
 
+bool DocumentModel::setJointKind(int jointId, Joinery::Kind kind,
+                                 const Joinery::Parameters& params)
+{
+    for (Joint& joint : myJoints) {
+        if (joint.id != jointId) continue;
+        // Edited where it stands, so `id` - and the joint's place in the list,
+        // which the drawer and the derivation cache index by - never moves.
+        joint.kind = kind;
+        joint.params = params;
+        joint.adjustments.clear();
+        ++myRevision;
+        return true;
+    }
+    return false;
+}
+
+bool DocumentModel::swapJointPieces(int jointId, const Joinery::Parameters& params)
+{
+    for (Joint& joint : myJoints) {
+        if (joint.id != jointId) continue;
+        std::swap(joint.bodyA, joint.bodyB);
+        joint.params = params;
+        joint.adjustments.clear();
+        ++myRevision;
+        return true;
+    }
+    return false;
+}
+
 std::vector<DocumentModel::Joint> DocumentModel::jointsOn(int bodyId) const
 {
     std::vector<Joint> found;

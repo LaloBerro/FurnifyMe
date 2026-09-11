@@ -13,6 +13,7 @@
 #include <gp_Ax1.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Trsf.hxx>
+#include <gp_Vec.hxx>
 
 #include <algorithm>
 #include <cctype>
@@ -2851,6 +2852,226 @@ int main()
               "a Contact nobody measured names no end-on piece");
         check(Joinery::Contact().coverageA < 0.0 && Joinery::Contact().coverageB < 0.0,
               "and carries no coverage");
+    }
+
+    // --- Task 13: a kind switch keeps the id, re-defaults and clears -------
+    // The joint's chip switches kind in place. The id must survive (the
+    // selection and the drawer row point at it), the adjustments must go (they
+    // index items the new kind does not have), and ONE undo must bring back the
+    // old kind, its parameters and its adjustments together.
+    {
+        DocumentModel doc;
+        const int panel = doc.addSolid(
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 18.0, 300.0, 800.0).Shape());
+        const int shelf = doc.addSolid(
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 400.0), 600.0, 300.0, 18.0).Shape());
+        Joinery::Parameters dowelParams = Joinery::defaultsFor(Joinery::Kind::Dowel, 18.0);
+        dowelParams.count = 7;   // not the struct's 3
+        const int jointId = doc.addJoint(Joinery::Kind::Dowel, panel, shelf, dowelParams);
+        const std::vector<Joinery::Adjustment> adjustments = {
+            Joinery::Adjustment{0, 12.5, -3.0}, Joinery::Adjustment{2, -6.0, 4.25}};
+        check(jointId > 0 && doc.setJointAdjustments(jointId, adjustments),
+              "kind switch: a dowel joint with two adjustments to switch");
+
+        Joinery::Parameters dadoParams = Joinery::defaultsFor(Joinery::Kind::Dado, 18.0);
+        dadoParams.depthAMm = 6.25;   // not defaultsFor's 6.0 nor the struct's 15
+        doc.checkpoint();
+        const int revisionBefore = doc.revision();
+        check(doc.setJointKind(jointId, Joinery::Kind::Dado, dadoParams),
+              "kind switch: setJointKind accepts a live joint");
+        check(doc.joints().size() == 1, "kind switch: still exactly one joint");
+        if (doc.joints().size() == 1) {
+            const DocumentModel::Joint& j = doc.joints().front();
+            check(j.id == jointId, "kind switch: the joint KEEPS its id");
+            check(j.kind == Joinery::Kind::Dado, "kind switch: and is now a dado");
+            check(j.bodyA == panel && j.bodyB == shelf, "kind switch: between the same pieces");
+            checkNear(j.params.depthAMm, 6.25, 1.0e-9,
+                      "kind switch: carrying the parameters it was handed");
+            check(j.params.count == dadoParams.count && j.params.count != 7,
+                  "kind switch: the old kind's count is gone with its parameters");
+            check(j.adjustments.empty(), "kind switch: and its adjustments are cleared");
+        }
+        check(doc.revision() > revisionBefore, "kind switch: the revision moves");
+
+        check(doc.undo(), "kind switch: one undo");
+        check(doc.joints().size() == 1, "kind switch: undo leaves one joint");
+        if (doc.joints().size() == 1) {
+            const DocumentModel::Joint& j = doc.joints().front();
+            check(j.id == jointId && j.kind == Joinery::Kind::Dowel,
+                  "kind switch: one undo restores the old kind, same id");
+            check(j.params.count == 7, "kind switch: and its parameters (count 7)");
+            check(j.adjustments.size() == 2, "kind switch: and both its adjustments");
+            if (j.adjustments.size() == 2) {
+                check(j.adjustments[1].index == 2 && j.adjustments[1].du == -6.0 &&
+                          j.adjustments[1].dv == 4.25,
+                      "kind switch: exactly as they were");
+            }
+        }
+
+        const int revisionAtRefusal = doc.revision();
+        check(!doc.setJointKind(jointId + 99, Joinery::Kind::Dado, dadoParams),
+              "kind switch: an unknown id is refused");
+        check(doc.revision() == revisionAtRefusal && doc.joints().size() == 1 &&
+                  doc.joints().front().kind == Joinery::Kind::Dowel,
+              "kind switch: and the refusal writes nothing");
+    }
+
+    // --- Task 13: "Cut into" swaps the host in place, id kept ---------------
+    {
+        DocumentModel doc;
+        const int panel = doc.addSolid(
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 18.0, 300.0, 800.0).Shape());
+        const int shelf = doc.addSolid(
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 400.0), 600.0, 300.0, 18.0).Shape());
+        Joinery::Parameters rabbet = Joinery::defaultsFor(Joinery::Kind::Rabbet, 18.0);
+        rabbet.depthAMm = 5.5;
+        const int jointId = doc.addJoint(Joinery::Kind::Rabbet, panel, shelf, rabbet);
+        check(jointId > 0 && doc.setJointAdjustments(jointId, {Joinery::Adjustment{0, 1.5, 2.5}}),
+              "host swap: a rabbet cut into the panel, with an adjustment");
+
+        Joinery::Parameters swapped = rabbet;
+        swapped.depthAMm = 9.75;
+        doc.checkpoint();
+        check(doc.swapJointPieces(jointId, swapped), "host swap: accepted for a live joint");
+        if (doc.joints().size() == 1) {
+            const DocumentModel::Joint& j = doc.joints().front();
+            check(j.id == jointId, "host swap: the joint KEEPS its id");
+            check(j.bodyA == shelf && j.bodyB == panel,
+                  "host swap: the shelf is now the host, piece A");
+            check(j.kind == Joinery::Kind::Rabbet, "host swap: the kind is unchanged");
+            checkNear(j.params.depthAMm, 9.75, 1.0e-9, "host swap: with the re-defaulted parameters");
+            check(j.adjustments.empty(), "host swap: and the old frame's adjustments cleared");
+        }
+        check(doc.undo(), "host swap: one undo");
+        if (doc.joints().size() == 1) {
+            const DocumentModel::Joint& j = doc.joints().front();
+            check(j.id == jointId && j.bodyA == panel && j.bodyB == shelf,
+                  "host swap: one undo restores the original orientation");
+            checkNear(j.params.depthAMm, 5.5, 1.0e-9, "host swap: and the original parameters");
+            check(j.adjustments.size() == 1, "host swap: and the adjustment");
+        }
+        check(!doc.swapJointPieces(jointId + 99, swapped), "host swap: an unknown id is refused");
+    }
+
+    // --- Task 13: the face a pocket screw is drilled from ------------------
+    // The field signs the lean. Asserted against the GEOMETRY the renderer
+    // builds from an item (the contact normal rotated about the run by the
+    // item's angle), not merely "the sign flips": the face the pin leans toward
+    // has to be the face drilledFromFaceName() names, on both branches of
+    // runsAlongU().
+    {
+        Joinery::Parameters p = Joinery::defaultsFor(Joinery::Kind::PocketScrew, 18.0);
+        check(p.angleDeg > 1.0, "drilled from: (a pocket screw really leans)");
+        check(Joinery::Parameters().drilledFrom == Joinery::DrilledFrom::InsetFace,
+              "drilled from: a default-constructed block drills from the inset face");
+        p.count = 1;
+
+        // Where the B end of the pin leans, in the contact's own frame: the
+        // renderer's rotation, applied to a unit normal.
+        const auto lean = [](const Joinery::Contact& c, const Joinery::Item& item) {
+            const gp_Dir run = c.runsAlongU() ? c.frame.XDirection() : c.frame.YDirection();
+            const gp_Dir tilted = item.axis.Rotated(gp_Ax1(item.centre, run),
+                                                    item.angleDeg * 3.14159265358979323846 / 180.0);
+            return gp_Vec(tilted.XYZ() - item.axis.XYZ());
+        };
+
+        // Along u: the across axis is the frame's Y, low side = the inset face.
+        Joinery::Contact along;
+        along.frame = gp_Ax3(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0), gp_Dir(1.0, 0.0, 0.0));
+        along.uMax = 300.0;
+        along.vMax = 18.0;
+        // ...and the same joint across: u is 18, v the 300 mm run.
+        Joinery::Contact across = along;
+        across.uMax = 18.0;
+        across.vMax = 300.0;
+
+        for (const Joinery::Contact* c : {&along, &across}) {
+            const std::string branch = c->runsAlongU() ? "along u" : "along v";
+            const gp_Dir acrossDir = c->runsAlongU() ? c->frame.YDirection() : c->frame.XDirection();
+            for (const Joinery::DrilledFrom from :
+                 {Joinery::DrilledFrom::InsetFace, Joinery::DrilledFrom::OppositeFace}) {
+                Joinery::Parameters q = p;
+                q.drilledFrom = from;
+                const std::vector<Joinery::Item> items = Joinery::layout(Joinery::Kind::PocketScrew, q, *c, {});
+                check(items.size() == 1, "drilled from: one pocket screw laid out (" + branch + ")");
+                if (items.size() != 1) continue;
+                const bool inset = from == Joinery::DrilledFrom::InsetFace;
+                checkNear(std::fabs(items[0].angleDeg), p.angleDeg, 1.0e-9,
+                          "drilled from: the magnitude is the parameters' own angle (" + branch + ")");
+                const double side = lean(*c, items[0]).Dot(gp_Vec(acrossDir));
+                check(inset ? side < -1.0e-6 : side > 1.0e-6,
+                      std::string("drilled from: the ") + (inset ? "inset" : "opposite") +
+                          " face leans the pin toward the across axis's " +
+                          (inset ? "LOW" : "HIGH") + " side (" + branch + ", " +
+                          std::to_string(side) + ")");
+            }
+        }
+
+        // The word: a shelf's end against a panel's face - normal +X, run along
+        // world Y, so the across axis is world Z and the inset face is the
+        // shelf's underside.
+        Joinery::Contact shelfOnPanel;
+        shelfOnPanel.frame = gp_Ax3(gp_Pnt(18.0, 0.0, 400.0), gp_Dir(1.0, 0.0, 0.0), gp_Dir(0.0, 1.0, 0.0));
+        shelfOnPanel.uMax = 300.0;
+        shelfOnPanel.vMax = 18.0;
+        bool insetNamed = false, oppositeNamed = false;
+        const std::string insetWord =
+            Joinery::drilledFromFaceName(shelfOnPanel, Joinery::DrilledFrom::InsetFace, insetNamed);
+        const std::string oppositeWord =
+            Joinery::drilledFromFaceName(shelfOnPanel, Joinery::DrilledFrom::OppositeFace, oppositeNamed);
+        check(insetNamed && insetWord == "bottom",
+              "drilled from: a shelf on a panel drills from the bottom by default (" + insetWord + ")");
+        check(oppositeNamed && oppositeWord == "top",
+              "drilled from: and from the top when flipped (" + oppositeWord + ")");
+        // A frame spun 45 degrees about the normal has no honest word.
+        Joinery::Contact spun = shelfOnPanel;
+        spun.frame = gp_Ax3(gp_Pnt(18.0, 0.0, 400.0), gp_Dir(1.0, 0.0, 0.0),
+                            gp_Dir(0.0, std::sqrt(0.5), std::sqrt(0.5)));
+        bool spunNamed = true;
+        const std::string spunWord =
+            Joinery::drilledFromFaceName(spun, Joinery::DrilledFrom::InsetFace, spunNamed);
+        check(!spunNamed && spunWord.find("no single edge") != std::string::npos,
+              "drilled from: a board spun 45 degrees gets the honest sentence (" + spunWord + ")");
+
+        // Round-trips through the document's own serialization.
+        DocumentModel doc;
+        const int panelId = doc.addSolid(
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 18.0, 300.0, 800.0).Shape());
+        const int shelfId = doc.addSolid(
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 400.0), 600.0, 300.0, 18.0).Shape());
+        Joinery::Parameters flipped = p;
+        flipped.drilledFrom = Joinery::DrilledFrom::OppositeFace;
+        doc.addJoint(Joinery::Kind::PocketScrew, panelId, shelfId, flipped);
+        DocumentModel::DocumentMeta meta;
+        const FurnifySerial::SerializedDocument serial = doc.toSerialized(meta);
+        DocumentModel loaded;
+        check(loaded.fromSerialized(serial, meta) && loaded.joints().size() == 1 &&
+                  loaded.joints().front().params.drilledFrom == Joinery::DrilledFrom::OppositeFace,
+              "drilled from: the opposite face survives toSerialized/fromSerialized");
+    }
+
+    // --- Task 13: the inset clamp, now reachable from the chip -------------
+    // The chip puts inset behind More, so a user can type a number wider than
+    // the board. layout() clamps it into the contact; the typed value is what
+    // the joint STORES (asserted in gui_smoke), and this is what it lays out.
+    {
+        Joinery::Contact c;
+        c.frame = gp_Ax3(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0), gp_Dir(1.0, 0.0, 0.0));
+        c.uMax = 300.0;
+        c.vMax = 18.0;
+        Joinery::Parameters wide = Joinery::defaultsFor(Joinery::Kind::Dowel, 18.0);
+        wide.insetMm = 500.0;
+        const std::vector<Joinery::Item> tooFar = Joinery::layout(Joinery::Kind::Dowel, wide, c, {});
+        check(!tooFar.empty(), "inset clamp: a row is still laid out");
+        if (!tooFar.empty())
+            checkNear(tooFar.front().v, 18.0, 1.0e-9,
+                      "inset clamp: a 500 mm inset on an 18 mm contact lands on its far edge");
+        Joinery::Parameters negative = wide;
+        negative.insetMm = -5.0;
+        const std::vector<Joinery::Item> behind = Joinery::layout(Joinery::Kind::Dowel, negative, c, {});
+        if (!behind.empty())
+            checkNear(behind.front().v, 0.0, 1.0e-9,
+                      "inset clamp: a negative inset lands on its near edge");
     }
 
     // The summary goes LAST - above every check in this file - so a red check can

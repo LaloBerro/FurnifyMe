@@ -18506,6 +18506,9 @@ int main(int argc, char* argv[])
         params.thicknessMm = 9.5;
         params.lengthMm = 28.0;
         params.haunched = true;
+        // (Task 13) The face a pocket screw is drilled from - the other face,
+        // not the default, for the same reason as every field above.
+        params.drilledFrom = Joinery::DrilledFrom::OppositeFace;
 
         int savedCount = 0;
         {
@@ -18559,6 +18562,8 @@ int main(int argc, char* argv[])
             check(std::fabs(p.thicknessMm - 9.5) < 1.0e-9, "thicknessMm round-trips");
             check(std::fabs(p.lengthMm - 28.0) < 1.0e-9, "lengthMm round-trips");
             check(p.haunched == true, "haunched round-trips");
+            check(p.drilledFrom == Joinery::DrilledFrom::OppositeFace,
+                  "drilledFrom round-trips - the opposite face, not the default");
 
             check(j.adjustments.size() == 1, "the adjustment round-trips too");
             if (j.adjustments.size() == 1) {
@@ -18567,6 +18572,56 @@ int main(int argc, char* argv[])
                           std::fabs(j.adjustments.front().dv - (-4.5)) < 1.0e-9,
                       "with its exact index/du/dv");
             }
+        }
+
+        // (Task 13) A manifest saved before "drilledFrom" existed carries every
+        // other joint field and no drilledFrom key. It loads, and the face falls
+        // back to a default-constructed Parameters' own - while the fields that
+        // ARE there still read their saved, non-default values, so the load is
+        // not a silent reset of the whole block.
+        {
+            QString dirPath;
+            for (const FurnitureStore::FurnitureInfo& info : jointStore.listFurniture()) {
+                if (info.id == furnitureId) dirPath = info.filePath;
+            }
+            const QString manifestPath = dirPath + QStringLiteral("/manifest.json");
+            QJsonObject manifest;
+            {
+                QFile file(manifestPath);
+                check(!dirPath.isEmpty() && file.open(QIODevice::ReadOnly),
+                      "drilledFrom: reading the raw manifest");
+                manifest = QJsonDocument::fromJson(file.readAll()).object();
+            }
+            QJsonObject jointsObj = manifest.value(QStringLiteral("joints")).toObject();
+            QJsonArray list = jointsObj.value(QStringLiteral("list")).toArray();
+            check(!list.isEmpty() &&
+                      list.at(0).toObject().value(QStringLiteral("drilledFrom")).toString() ==
+                          QStringLiteral("oppositeFace"),
+                  "drilledFrom: (the saved manifest really carries the word \"oppositeFace\")");
+            for (int i = 0; i < list.size(); ++i) {
+                QJsonObject entry = list.at(i).toObject();
+                entry.remove(QStringLiteral("drilledFrom"));
+                list.replace(i, entry);
+            }
+            jointsObj[QStringLiteral("list")] = list;
+            manifest[QStringLiteral("joints")] = jointsObj;
+            {
+                QFile file(manifestPath);
+                check(file.open(QIODevice::WriteOnly | QIODevice::Truncate),
+                      "drilledFrom: rewriting the manifest without the key");
+                file.write(QJsonDocument(manifest).toJson());
+            }
+            DocumentModel withoutKey;
+            QString withoutKeyError;
+            check(jointStore.loadFurniture(furnitureId, withoutKey, &withoutKeyError),
+                  QStringLiteral("drilledFrom: a joint with no drilledFrom key still loads (%1)")
+                      .arg(withoutKeyError));
+            check(withoutKey.joints().size() == 1 &&
+                      withoutKey.joints().front().params.drilledFrom ==
+                          Joinery::Parameters().drilledFrom &&
+                      withoutKey.joints().front().params.count == 4,
+                  "drilledFrom: absent means the default face, while the saved count (4) still "
+                  "reads back");
         }
 
         // An older-format manifest has no "joints" key at all - absent
@@ -18618,6 +18673,12 @@ int main(int argc, char* argv[])
                 ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 18.0, 300.0, 800.0));
             const int shelf = current.addSolid(
                 ModelingOps::makeBox(gp_Pnt(18.0, 0.0, 400.0), 600.0, 300.0, 18.0));
+            // (Task 13) The version path carries the drilled-from face too.
+            Joinery::Parameters versionParams = Joinery::defaultsFor(Joinery::Kind::PocketScrew, 18.0);
+            versionParams.drilledFrom = Joinery::DrilledFrom::OppositeFace;
+            const int pocketId =
+                current.addJoint(Joinery::Kind::PocketScrew, panel, shelf, versionParams);
+            check(pocketId > 0, "a pocket screw on the far face for the version probe");
             const int jointId =
                 current.addJoint(Joinery::Kind::MortiseTenon, panel, shelf,
                                   Joinery::defaultsFor(Joinery::Kind::MortiseTenon, 18.0));
@@ -18629,11 +18690,18 @@ int main(int argc, char* argv[])
             DocumentModel versionLoaded;
             check(jointStore.loadVersion(furnitureId, QStringLiteral("With A Joint"), versionLoaded),
                   "loadVersion succeeds");
-            check(versionLoaded.joints().size() == 1,
-                  "loadVersion carries the joint back - the version path, not just the "
+            // Two joints since Task 13: the pocket screw on the far face first,
+            // the mortise and tenon second.
+            check(versionLoaded.joints().size() == 2,
+                  "loadVersion carries the joints back - the version path, not just the "
                   "current-document path");
-            if (versionLoaded.joints().size() == 1) {
-                const DocumentModel::Joint& vj = versionLoaded.joints().front();
+            if (versionLoaded.joints().size() == 2) {
+                const DocumentModel::Joint& pocket = versionLoaded.joints()[0];
+                check(pocket.kind == Joinery::Kind::PocketScrew &&
+                          pocket.params.drilledFrom == Joinery::DrilledFrom::OppositeFace,
+                      "the version path carries a pocket screw's drilled-from face - the "
+                      "opposite one it was saved with");
+                const DocumentModel::Joint& vj = versionLoaded.joints()[1];
                 check(vj.kind == Joinery::Kind::MortiseTenon, "the loaded version's joint kind");
                 check(versionLoaded.contains(vj.bodyA) && versionLoaded.contains(vj.bodyB) &&
                           vj.bodyA != vj.bodyB,
@@ -18642,12 +18710,12 @@ int main(int argc, char* argv[])
 
             // Restore replaces the CURRENT document through one undoable
             // checkpoint (CLAUDE.md) - a live document with no joints that
-            // restores a version WITH one must come back with it.
+            // restores a version WITH them must come back with them.
             DocumentModel restoreTarget;
             restoreTarget.checkpoint();
             restoreTarget.restoreFrom(versionLoaded);
-            check(restoreTarget.joints().size() == 1,
-                  "restoring the version installs its joint into the live document");
+            check(restoreTarget.joints().size() == 2,
+                  "restoring the version installs its joints into the live document");
             check(restoreTarget.canUndo(),
                   "...behind the one checkpoint the caller took, same as every other restore");
         }

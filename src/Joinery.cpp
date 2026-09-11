@@ -1005,6 +1005,17 @@ void fastenerRow(const Contact& contact, const Parameters& params,
     const double across =
         acrossMin + std::clamp(params.insetMm, 0.0, std::max(acrossLen, 0.0));
 
+    // The lean's SIGN, from the face the pocket is drilled from. The renderer
+    // rotates the contact normal about the run by +angle: about X (a joint
+    // running along u) that carries the pin's B end toward -Y, the across
+    // axis's LOW side; about Y it carries it toward +X, the across axis's HIGH
+    // side. So the same face needs opposite signs on the two branches, and
+    // signing it here is what lets the one rotation in the renderer draw both.
+    const double towardInsetFace = alongU ? 1.0 : -1.0;
+    const double signedAngle =
+        params.angleDeg * towardInsetFace *
+        (params.drilledFrom == DrilledFrom::OppositeFace ? -1.0 : 1.0);
+
     for (int i = 0; i < count; ++i) {
         const double along = count > 1 ? first + step * double(i) : runMin + runLen / 2.0;
         Item item;
@@ -1013,7 +1024,7 @@ void fastenerRow(const Contact& contact, const Parameters& params,
         item.sizeMm = params.sizeMm;
         item.depthAMm = params.depthAMm;
         item.depthBMm = params.depthBMm;
-        item.angleDeg = params.angleDeg;
+        item.angleDeg = signedAngle;
         out.push_back(item);
     }
 }
@@ -1230,6 +1241,17 @@ Readout readout(Kind kind, const Parameters& params, const Contact& contact,
             break;
     }
     return out;
+}
+
+std::string drilledFromFaceName(const Contact& contact, DrilledFrom from, bool& named)
+{
+    // The across axis in the world: the pin leans ACROSS the run, so the two
+    // faces a pocket can open on lie either side of it. InsetFace is its low
+    // side - the side fastenerRow() signs the lean toward by default.
+    const gp_Dir across =
+        contact.runsAlongU() ? contact.frame.YDirection() : contact.frame.XDirection();
+    const gp_Dir face = from == DrilledFrom::OppositeFace ? across : across.Reversed();
+    return edgeName(face, named);
 }
 
 Derivation derive(Kind kind, const Parameters& params,

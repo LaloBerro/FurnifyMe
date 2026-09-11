@@ -310,6 +310,26 @@ public:
     bool removeJoint(int jointId);
     bool updateJointParameters(int jointId, const Joinery::Parameters& params);
     bool setJointAdjustments(int jointId, const std::vector<Joinery::Adjustment>& adj);
+    // Switches an existing joint to another kind IN PLACE (Task 13, the joint's
+    // chip): the id is KEPT - remove-then-add would mint a new one and orphan
+    // the selection and the drawer row that point at it. The caller passes the
+    // new kind's parameters (Joinery::defaultsForContact() on the joint's live
+    // contact): a count, a channel width and a tenon thickness are different
+    // readings of one block, so the old kind's numbers mean nothing to the new
+    // one. Adjustments are CLEARED, for the same reason one level down - they
+    // are overrides indexed by item, and a new kind lays out a different item
+    // set. False, nothing written, for an unknown id. Takes NO checkpoint; the
+    // caller's gesture owns one, so one undo restores kind, parameters and
+    // adjustments together.
+    bool setJointKind(int jointId, Joinery::Kind kind, const Joinery::Parameters& params);
+    // Swaps which piece is the host (bodyA) and which is housed (bodyB) IN
+    // PLACE, id kept, with `params` re-defaulted by the caller from the SWAPPED
+    // contact - the spec's "which piece is host and which is housed", which
+    // geometry can read wrong (a back panel on a carcase side's edge, a slotted
+    // board). Adjustments are cleared: they live in the contact's frame, and
+    // the swapped contact's frame points the other way. False, nothing written,
+    // for an unknown id. No checkpoint, same contract as above.
+    bool swapJointPieces(int jointId, const Joinery::Parameters& params);
     const std::vector<Joint>& joints() const { return myJoints; }
     // Every joint touching `bodyId`, from either side.
     std::vector<Joint> jointsOn(int bodyId) const;
