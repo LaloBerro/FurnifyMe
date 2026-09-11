@@ -5,6 +5,7 @@
 
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
+#include <gp_Ax1.hxx>
 #include <gp_Trsf.hxx>
 
 #include <cmath>
@@ -146,6 +147,39 @@ int main()
             BRepPrimAPI_MakeBox(gp_Pnt(18.0, 300.0, 800.0), 600.0, 300.0, 18.0).Shape();
         check(!Joinery::findContact(panel, edgeOnly).ok,
               "two boards touching only at an edge have no contact face");
+
+        // Spin the WHOLE touching assembly 45 degrees about Z: the joint
+        // itself is unchanged (both pieces move together, so they still
+        // touch exactly as before), but the contact plane - originally the
+        // axis-aligned x=18 plane - is now oblique in world space, the way
+        // a mitred frame corner or a body spun by the transform gizmo
+        // actually sits. A world-AABB-based straddle measurement over-
+        // estimates a rotated board's extent along an oblique axis and
+        // wrongly refuses this exact joint; measuring the shape's own
+        // vertices does not.
+        gp_Trsf spin;
+        const double angle = std::atan(1.0);  // pi/4 radians - 45 degrees
+        spin.SetRotation(gp_Ax1(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0)), angle);
+        const TopoDS_Shape panelSpun =
+            BRepBuilderAPI_Transform(panel, spin, Standard_True).Shape();
+        const TopoDS_Shape shelfSpun =
+            BRepBuilderAPI_Transform(shelf, spin, Standard_True).Shape();
+
+        const Joinery::ContactResult oblique = Joinery::findContact(panelSpun, shelfSpun);
+        check(oblique.ok,
+              "a joint on an oblique contact plane is still found, not refused");
+        if (oblique.ok) {
+            check(oblique.contact.type == Joinery::Contact::Type::Face,
+                  "and it reads as a face contact, not a misdetected overlap");
+            const double along = oblique.contact.uMax - oblique.contact.uMin;
+            const double across = oblique.contact.vMax - oblique.contact.vMin;
+            const double longSide = std::max(along, across);
+            const double shortSide = std::min(along, across);
+            checkNear(longSide, 300.0, 1.0e-6,
+                      "rotating the joint does not change its own length");
+            checkNear(shortSide, 18.0, 1.0e-6,
+                      "or its own width - the joint's size is frame-invariant");
+        }
     }
 
     // --- overlap: two pieces crossing, for a half-lap -----------------

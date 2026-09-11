@@ -5,11 +5,13 @@
 #include <BRepBndLib.hxx>
 #include <BRepBuilderAPI_Transform.hxx>
 #include <BRepGProp.hxx>
+#include <BRep_Tool.hxx>
 #include <Bnd_Box.hxx>
 #include <GProp_GProps.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Face.hxx>
+#include <TopoDS_Vertex.hxx>
 #include <gp_Trsf.hxx>
 #include <gp_Vec.hxx>
 
@@ -141,34 +143,73 @@ double faceArea(const TopoDS_Shape& face)
     return props.Mass();
 }
 
-// The [min, max] extent of a shape's bounding box projected onto `axis`.
-// A genuine touching contact is a SEPARATING plane - each solid sits on
-// its own side of it, meeting only within tolerance. Two rails of equal
-// thickness crossing at the same height share their top and bottom planes
-// exactly (both boxes span the same Z range) without either one actually
-// separating anything there - both solids extend the same distance past
-// that plane on the SAME side. That is an interpenetrating Overlap
-// wearing a coincidentally-coplanar face, not a face contact, and this is
-// what tells the two apart: a real contact plane straddles almost none of
-// either solid's own extent past it.
+// The [uMin,uMax] x [vMin,vMax] extent of `shape`'s own vertices in
+// `frame`'s (u, v) axes. NOT the world AABB's two diagonal corners: that
+// trick only recovers the right answer when `frame`'s X/Y directions
+// happen to be world-axis-aligned, which is true whenever the contact
+// plane's normal is a world axis but false the moment the whole joint is
+// rotated (a mitred corner, a body spun by the transform gizmo) - the
+// diagonal-corner shortcut then measures the WORLD AABB's diagonal along
+// an oblique axis, not the region's own footprint. Walking the actual
+// vertices and projecting each onto frame's own axes is exact regardless
+// of how the frame sits in world space, the same fix projectedRange()
+// needed for the same underlying reason.
+bool planeExtent(const TopoDS_Shape& shape, const gp_Ax3& frame,
+                  double& uMin, double& uMax, double& vMin, double& vMax)
+{
+    uMin = std::numeric_limits<double>::max();
+    uMax = -std::numeric_limits<double>::max();
+    vMin = std::numeric_limits<double>::max();
+    vMax = -std::numeric_limits<double>::max();
+    for (TopExp_Explorer iv(shape, TopAbs_VERTEX); iv.More(); iv.Next()) {
+        const gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(iv.Current()));
+        const gp_Vec toP(frame.Location(), p);
+        const double u = toP.Dot(gp_Vec(frame.XDirection()));
+        const double v = toP.Dot(gp_Vec(frame.YDirection()));
+        uMin = std::min(uMin, u);
+        uMax = std::max(uMax, u);
+        vMin = std::min(vMin, v);
+        vMax = std::max(vMax, v);
+    }
+    return uMin <= uMax && vMin <= vMax;
+}
+
+// The [min, max] extent of a shape's OWN VERTICES projected onto `axis` -
+// deliberately not the world axis-aligned bounding box. A genuine touching
+// contact is a SEPARATING plane - each solid sits on its own side of it,
+// meeting only within tolerance - and that has to be measured along the
+// contact plane's own normal, which is arbitrary in world space (a mitred
+// frame corner's contact plane sits at 45 degrees). Projecting the WORLD
+// AABB's eight corners onto an oblique axis measures the box's diagonal,
+// not the solid's true thickness along that axis: a 600x18 board rotated
+// 45 degrees about Z has a roughly 437x437 world AABB, and that AABB
+// projected onto the board's own 45-degree thickness normal spans about
+// 618 mm against a true 18 mm thickness - enough to make every real
+// touching contact look like a 600 mm straddle and refuse a genuine joint.
+// Walking the shape's actual vertices is exact for the planar-faced boards
+// this app produces, and on a curved body it can only under-measure the
+// true extent, which errs permissive: it can keep a face contact the AABB
+// would have wrongly dropped, never invent one that isn't there. Two rails
+// of equal thickness crossing at the same height still share their top and
+// bottom planes exactly (both spans equal on this same measurement) without
+// either one actually separating anything there - both solids extend the
+// same distance past that plane on the SAME side. That is an
+// interpenetrating Overlap wearing a coincidentally-coplanar face, not a
+// face contact, and this is what tells the two apart: a real contact plane
+// straddles almost none of either solid's own extent past it.
 void projectedRange(const TopoDS_Shape& shape, const gp_Dir& axis, double& lo, double& hi)
 {
-    Bnd_Box box;
-    BRepBndLib::Add(shape, box);
-    lo = 0.0;
-    hi = 0.0;
-    if (box.IsVoid()) return;
-    Standard_Real x0, y0, z0, x1, y1, z1;
-    box.Get(x0, y0, z0, x1, y1, z1);
     lo = std::numeric_limits<double>::max();
     hi = -std::numeric_limits<double>::max();
-    for (int i = 0; i < 8; ++i) {
-        const double x = (i & 1) ? x1 : x0;
-        const double y = (i & 2) ? y1 : y0;
-        const double z = (i & 4) ? z1 : z0;
-        const double t = x * axis.X() + y * axis.Y() + z * axis.Z();
+    for (TopExp_Explorer iv(shape, TopAbs_VERTEX); iv.More(); iv.Next()) {
+        const gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(iv.Current()));
+        const double t = p.X() * axis.X() + p.Y() * axis.Y() + p.Z() * axis.Z();
         lo = std::min(lo, t);
         hi = std::max(hi, t);
+    }
+    if (lo > hi) {
+        lo = 0.0;
+        hi = 0.0;
     }
 }
 
@@ -187,7 +228,15 @@ ContactResult findContact(const TopoDS_Shape& a, const TopoDS_Shape& b,
     // faces genuinely share area. Projecting b's face onto a's plane before
     // the common is what lets a 0.05 mm gap still count - a boolean between
     // two faces in different planes shares nothing at all.
-    double bestArea = 0.0;
+    //
+    // The sentinel starts NEGATIVE, deliberately not 0.0: this field also
+    // decides which candidate wins, and a 0.0 start let "is this the best
+    // so far" silently double as the degeneracy guard below (any exact-zero
+    // area already failed `area <= bestArea`), which meant the explicit
+    // `area < 1.0e-6` check was never the thing actually rejecting a
+    // degenerate candidate in this suite. A negative sentinel means the
+    // FIRST candidate, area or not, must clear `1.0e-6` on its own.
+    double bestArea = -1.0;
     for (TopExp_Explorer ia(a, TopAbs_FACE); ia.More(); ia.Next()) {
         const TopoDS_Face fa = TopoDS::Face(ia.Current());
         BRepAdaptor_Surface sa(fa);
@@ -232,34 +281,24 @@ ContactResult findContact(const TopoDS_Shape& a, const TopoDS_Shape& b,
             const double area = faceArea(common.Shape());
             if (area <= bestArea || area < 1.0e-6) continue;
 
-            Bnd_Box box;
-            BRepBndLib::Add(common.Shape(), box);
-            if (box.IsVoid()) continue;
-
             // The contact's own frame: origin at the shared region's corner,
             // Z along a's face normal pointing toward b.
             const gp_Dir normal =
                 signedGap >= 0.0 ? pa.Axis().Direction()
                                  : gp_Dir(pa.Axis().Direction().Reversed());
             gp_Ax3 frame(pa.Location(), normal);
-            Standard_Real x0, y0, z0, x1, y1, z1;
-            box.Get(x0, y0, z0, x1, y1, z1);
-            const gp_Pnt lo(x0, y0, z0), hi(x1, y1, z1);
-            const gp_Vec toLo(frame.Location(), lo), toHi(frame.Location(), hi);
-            const double u0 = toLo.Dot(gp_Vec(frame.XDirection()));
-            const double u1 = toHi.Dot(gp_Vec(frame.XDirection()));
-            const double v0 = toLo.Dot(gp_Vec(frame.YDirection()));
-            const double v1 = toHi.Dot(gp_Vec(frame.YDirection()));
+            double u0, u1, v0, v1;
+            if (!planeExtent(common.Shape(), frame, u0, u1, v0, v1)) continue;
 
             bestArea = area;
             result.ok = true;
             result.error.clear();
             result.contact.type = Contact::Type::Face;
             result.contact.frame = frame;
-            result.contact.uMin = std::min(u0, u1);
-            result.contact.uMax = std::max(u0, u1);
-            result.contact.vMin = std::min(v0, v1);
-            result.contact.vMax = std::max(v0, v1);
+            result.contact.uMin = u0;
+            result.contact.uMax = u1;
+            result.contact.vMin = v0;
+            result.contact.vMax = v1;
             result.contact.thicknessAMm = thicknessOf(a);
             result.contact.thicknessBMm = thicknessOf(b);
         }
