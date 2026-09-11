@@ -52,8 +52,8 @@ int main()
     const Joinery::Parameters dowel = Joinery::defaultsFor(Joinery::Kind::Dowel, 18.0);
     checkNear(dowel.sizeMm, 6.0, 1.0e-9, "an 18 mm board gets a 6 mm dowel");
     check(dowel.count == 3, "with three of them by default");
-    check(dowel.depthAMm > 0.0 && dowel.depthAMm < 18.0,
-          "drilled deep enough to hold and shallow enough not to break through");
+    checkNear(dowel.depthAMm, 13.5, 1.0e-9,
+               "drilled deep enough to hold and shallow enough not to break through");
     const Joinery::Parameters thick = Joinery::defaultsFor(Joinery::Kind::Dowel, 36.0);
     checkNear(thick.sizeMm, 12.0, 1.0e-9, "a 36 mm board gets a 12 mm dowel");
 
@@ -66,6 +66,35 @@ int main()
     const Joinery::Parameters tenon =
         Joinery::defaultsFor(Joinery::Kind::MortiseTenon, 18.0);
     checkNear(tenon.thicknessMm, 6.0, 1.0e-9, "a tenon is a third of the stile");
+
+    // --- defaults at a thickness that collides with no struct default -----
+    // 24 mm shares no field value with Parameters' own defaults, so every
+    // assertion below fails if its corresponding defaultsFor() line were
+    // ever deleted - unlike the 18 mm block above, where several computed
+    // values happen to equal the untouched struct defaults.
+    const Joinery::Parameters dowel24 = Joinery::defaultsFor(Joinery::Kind::Dowel, 24.0);
+    checkNear(dowel24.sizeMm, 8.0, 1.0e-9, "a 24 mm board gets an 8 mm dowel");
+    checkNear(dowel24.depthAMm, 18.0, 1.0e-9, "depth A is three quarters of 24 mm");
+    checkNear(dowel24.depthBMm, 18.0, 1.0e-9, "depth B matches depth A for a dowel");
+    checkNear(dowel24.insetMm, 12.0, 1.0e-9, "inset is half the board thickness");
+    checkNear(dowel24.endMarginMm, 40.0, 1.0e-9, "end margin stays the fixed 40 mm");
+    checkNear(dowel24.angleDeg, 0.0, 1.0e-9, "a dowel is not driven at an angle");
+
+    const Joinery::Parameters pocketScrew24 =
+        Joinery::defaultsFor(Joinery::Kind::PocketScrew, 24.0);
+    checkNear(pocketScrew24.angleDeg, 15.0, 1.0e-9,
+               "a pocket screw is the one kind driven at an angle");
+
+    const Joinery::Parameters dado24 = Joinery::defaultsFor(Joinery::Kind::Dado, 24.0);
+    checkNear(dado24.widthMm, 24.0, 1.0e-9, "a dado is as wide as the piece it houses");
+    checkNear(dado24.depthAMm, 8.0, 1.0e-9, "and a third as deep as the host is thick");
+    checkNear(dado24.depthBMm, 0.0, 1.0e-9, "a dado has no second depth");
+
+    const Joinery::Parameters tenon24 =
+        Joinery::defaultsFor(Joinery::Kind::MortiseTenon, 24.0);
+    checkNear(tenon24.thicknessMm, 8.0, 1.0e-9, "a tenon is a third of the stile");
+    checkNear(tenon24.lengthMm, 36.0, 1.0e-9, "a tenon is one and a half times as long as it is thick");
+    checkNear(tenon24.depthAMm, 38.0, 1.0e-9, "the mortise is a hair deeper than the tenon");
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures,
                 g_failures == 1 ? "" : "s");

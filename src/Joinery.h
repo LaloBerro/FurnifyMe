@@ -21,7 +21,7 @@
 
 namespace Joinery {
 
-// The nine kinds, grouped by the three behaviours that actually differ.
+// The ten kinds, grouped by the three behaviours that actually differ.
 // A kind is a preset over its family: same placement rule, same derivation,
 // different parameters and a different thing drawn.
 enum class Kind {
