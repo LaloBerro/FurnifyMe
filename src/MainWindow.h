@@ -1745,6 +1745,44 @@ private:
     // callers; refreshJoints() reads it in place, within one call, and holds
     // the reference no longer than that.
     const std::vector<Joinery::Derivation>& cachedJointDerivations() const;
+    // --- joinery (Task 14): a joint mirrors with its pieces ------------------
+    //
+    // Copies ONE joint onto its two pieces' twins - false, and nothing
+    // written, when either piece has no live twin (half a mirrored joint is
+    // not a plan) or when the joint's own two pieces ARE the twins it would
+    // be copied onto (a joint between a body and its own twin is already its
+    // own mirror image; copying it would make a second, reversed duplicate).
+    //
+    // Takes NO checkpoint of its own, deliberately: every caller is already
+    // inside one (the mirror gesture inside pairWithMirror()'s own, joint
+    // placement inside checkpointDocument()'s), so one undo removes the twins
+    // and the joint that arrived with them together - this task's own
+    // requirement, and the same one-gesture-one-checkpoint rule every
+    // twin-follows edit in this file already keeps.
+    //
+    // KIND AND PARAMETERS are copied verbatim, with bodyA staying bodyA (which
+    // piece is the HOST is the joint's own plan). The ADJUSTMENTS are not. A
+    // mirror is an isometry, so the twins' contact is congruent to the
+    // original's and the same kind at the same numbers is valid on it by
+    // construction - but an adjustment is a per-item nudge in the CONTACT's
+    // own (u, v) frame, and the twin's frame is re-derived from the mirrored
+    // region (Joinery::Contact's X comes from the region's own longest
+    // boundary edge, whose sense a mirror can flip), so a copied du is not
+    // guaranteed to name the same direction. The twin joint therefore starts
+    // unadjusted rather than nudged in a direction nothing here can vouch for.
+    bool mirrorJointOntoTwins(const DocumentModel::Joint& joint);
+    // The mirror GESTURE's half: every joint that touches one of
+    // `freshlyPairedIds` - bodies this gesture has just given a twin to - and
+    // whose other piece has a twin as well, copied onto those twins. Answers
+    // how many were made.
+    //
+    // FRESHNESS is the whole guard against doubling, and it is exact rather
+    // than a heuristic: a twin created by this call carries no joints at all,
+    // so a joint onto it cannot already exist. Nothing here compares kinds or
+    // pieces to guess whether a copy is already there - which would be wrong
+    // in both directions (two dowel joints between one pair of pieces are two
+    // joints, and a body legitimately carries several kinds at once).
+    int mirrorJointsOntoTwins(const std::vector<int>& freshlyPairedIds);
     // --- joinery (Task 12) ---------------------------------------------------
     // View -> Joints (Ctrl+Alt+J) - the drawer's law, both directions, exactly
     // as myVersionsPanelAction is the versions drawer's.

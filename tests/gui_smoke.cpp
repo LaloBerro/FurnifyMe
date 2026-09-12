@@ -661,7 +661,14 @@ void skipByEnvironment(int checks, const QString& why)
 // sweep and the rail's eleventh-chip pins landed +96 checks; the official
 // run measured 3592 + 1 environment skip. The floor is that accounted
 // total, exactly.
-constexpr int kCheckFloor = 3601;
+// RE-RATCHETED (2026-09-11, joinery Task 14 - the branch's closing official
+// run): the whole joinery feature's blocks (the headless-backed persistence
+// round trip, the ghosted hardware, placement, the drawer, the chip, and this
+// task's own "joints and the rest of the app" - mirror, isolate, render mode
+// and delete, 45 checks) measured 4119 checks + 1 environment skip. The floor
+// is that accounted total, exactly. The one skip is the RayTracing floor-blend
+// measurement, which does not apply when PathTracing is the session's tier.
+constexpr int kCheckFloor = 4120;
 
 void check(bool condition, const QString& what)
 {
@@ -842,6 +849,7 @@ constexpr BlockInfo kBlocks[] = {
     { "placing-a-joint-between-two-pieces", false, true },
     { "the-joints-drawer-lists-rows-and-mark-out-numbers", false, true },
     { "the-joint-chip-edits-a-joint-through-one-checkpoint", false, true },
+    { "joints-and-the-rest-of-the-app", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -30851,6 +30859,253 @@ int main(int argc, char* argv[])
         }
 
         cw.close();
+        settle(150);
+    }
+
+    // --- Task 14: joints and the rest of the app -----------------------------
+    //
+    // A joint is a RELATIONSHIP between two pieces, never a world position, so
+    // every whole-document operation this app already had has to carry it:
+    // mirroring the pieces mirrors the joint, hiding one piece takes the
+    // hardware with it, a render is the furniture alone, and deleting a piece
+    // deletes what it was part of. Four gestures, one rule each, every one of
+    // them driven through the real action.
+    if (blockEnabled("joints-and-the-rest-of-the-app")) {
+        RequiredTempDir restDir;
+        constexpr double kBoardMm = 18.0;
+        QString restFurnitureId;
+        {
+            FurnitureStore seedStore(restDir.path());
+            restFurnitureId = seedStore.createFurniture(QStringLiteral("Joints and the rest"));
+            DocumentModel seedDoc;
+            // A panel and a shelf meeting face to end, both wholly on the near
+            // side of the mirror gesture's own default plane (tangent to their
+            // combined bounding box, so neither straddles it and both pair).
+            const TopoDS_Shape panelShape =
+                ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), kBoardMm, 300.0, 400.0);
+            const TopoDS_Shape shelfShape =
+                ModelingOps::makeBox(gp_Pnt(kBoardMm, 0.0, 200.0), 400.0, 300.0, kBoardMm);
+            const int panelId = seedDoc.addSolid(panelShape);
+            const int shelfId = seedDoc.addSolid(shelfShape);
+            const Joinery::ContactResult meet = Joinery::findContact(panelShape, shelfShape);
+            check(meet.ok, QStringLiteral("rest: the two seeded pieces meet (%1)")
+                               .arg(QString::fromStdString(meet.error)));
+            const int seedJoint = seedDoc.addJoint(
+                Joinery::Kind::Dowel, panelId, shelfId,
+                Joinery::defaultsForContact(Joinery::Kind::Dowel, meet.contact));
+            // A non-default adjustment, so "the twin starts unadjusted" below is
+            // a real difference rather than two struct defaults agreeing.
+            check(seedJoint > 0 &&
+                      seedDoc.setJointAdjustments(seedJoint, {Joinery::Adjustment{1, 6.5, -3.25}}),
+                  "rest: the seeded joint carries an adjustment");
+            check(!restFurnitureId.isEmpty() &&
+                      seedStore.saveFurniture(restFurnitureId, seedDoc, QImage()),
+                  "rest: two pieces and one joint are seeded to disk");
+        }
+
+        MainWindow rw(nullptr, /*persistProgress=*/false, restDir.path());
+        rw.setAttribute(Qt::WA_ShowWithoutActivating);
+        rw.resize(1100, 800);
+        rw.show();
+        settle(300);
+        OcctViewWidget* rv = rw.view();
+        rv->setAnimationsEnabled(false);
+        check(rw.openFurniture(restFurnitureId), "rest: the seeded furniture opens");
+        settle(300);
+        rv->fitAll();
+        settle(200);
+        ToastHost* restToasts = rw.findChild<ToastHost*>();
+        const auto restToastText = [&]() {
+            return restToasts ? restToasts->currentText() : QString();
+        };
+
+        // The drawer open, so the drawing gate draws EVERY joint - which is what
+        // makes each disappearance below the gate's own doing rather than a
+        // selection quietly changing under the probe.
+        if (QAction* restDrawerAction = action(rw, QStringLiteral("Joints"));
+            restDrawerAction != nullptr && !restDrawerAction->isChecked())
+            restDrawerAction->trigger();
+        settle(250);
+        check(rw.jointsDrawerOpen(), "rest: (the joints drawer is open, so every joint draws)");
+
+        const std::vector<DocumentModel::Solid>& restSolids = rw.document().solids();
+        const std::vector<DocumentModel::Joint>& restJoints = rw.document().joints();
+        JointsPanel* restPanel = rw.jointsPanel();
+        check(restSolids.size() == 2 && restJoints.size() == 1,
+              QStringLiteral("rest: two pieces and one joint are open (%1, %2)")
+                  .arg(restSolids.size()).arg(restJoints.size()));
+        check(restPanel != nullptr && restPanel->rowCount() == 1,
+              QStringLiteral("rest: the drawer lists it (%1 row)")
+                  .arg(restPanel ? restPanel->rowCount() : -1));
+
+        if (restPanel != nullptr && restSolids.size() == 2 && restJoints.size() == 1) {
+            const int panel = restSolids[0].id;
+            const int shelf = restSolids[1].id;
+            const int seededJointId = restJoints[0].id;
+            const Joinery::Parameters seededParams = restJoints[0].params;
+            check(rv->jointsShown() == 1,
+                  QStringLiteral("rest: and its hardware is on screen (%1 drawn)")
+                      .arg(rv->jointsShown()));
+
+            // --- Mirror: a joint mirrors with its pieces ----------------------
+            rv->setSelectedSolids({panel, shelf});
+            settle(150);
+            const std::size_t depthBeforeMirror = rw.document().undoDepth();
+            trigger(rw, QStringLiteral("Mirror"));
+            check(rv->mirrorPlacementActive(),
+                  "rest: S with both pieces selected begins the mirror placement");
+            sendKeyTo(&rw, Qt::Key_Return);
+            settle(300);
+            check(!rv->mirrorPlacementActive() && rw.document().symmetryOn(),
+                  "rest: Enter mirrors them");
+            const int twinPanel = rw.document().twinOf(panel);
+            const int twinShelf = rw.document().twinOf(shelf);
+            check(rw.document().count() == 4 && twinPanel > 0 && twinShelf > 0,
+                  QStringLiteral("rest: both pieces have twins (%1 bodies)")
+                      .arg(rw.document().count()));
+            check(restJoints.size() == 2,
+                  QStringLiteral("rest: and the joint came with them (%1 joints)")
+                      .arg(restJoints.size()));
+
+            DocumentModel::Joint mirroredJoint;
+            for (const DocumentModel::Joint& candidate : restJoints) {
+                if (candidate.id != seededJointId) mirroredJoint = candidate;
+            }
+            check(mirroredJoint.bodyA == twinPanel && mirroredJoint.bodyB == twinShelf,
+                  "rest: between the two TWINS, and bodyA stays bodyA - which piece hosts "
+                  "the joint is the joint's own plan");
+            check(mirroredJoint.kind == Joinery::Kind::Dowel &&
+                      mirroredJoint.params.count == seededParams.count &&
+                      std::fabs(mirroredJoint.params.sizeMm - seededParams.sizeMm) < 1.0e-9 &&
+                      std::fabs(mirroredJoint.params.depthAMm - seededParams.depthAMm) < 1.0e-9,
+                  "rest: carrying the same kind at the same numbers");
+            // `mirroredJoint.id > 0` is not decoration: a default-constructed
+            // Joint has no adjustments either, so without it this check passes
+            // for the wrong reason the moment no twin joint was made at all
+            // (measured - it was the one check a mutation of the mirror half
+            // left green).
+            check(mirroredJoint.id > 0 && mirroredJoint.adjustments.empty() &&
+                      restJoints[0].adjustments.size() == 1,
+                  "rest: and no adjustments - a per-item nudge lives in the contact's own "
+                  "frame, which the twin re-derives from mirrored wood");
+            Joinery::Derivation twinDerivation;
+            check(rw.jointDerivationOf(mirroredJoint.id, twinDerivation) && twinDerivation.ok &&
+                      static_cast<int>(twinDerivation.items.size()) == seededParams.count,
+                  QStringLiteral("rest: it derives on the mirrored wood, same item count (%1)")
+                      .arg(twinDerivation.ok
+                               ? QString::number(twinDerivation.items.size())
+                               : QString::fromStdString(twinDerivation.error)));
+            check(rw.document().undoDepth() == depthBeforeMirror + 1,
+                  QStringLiteral("rest: ONE checkpoint covers the twins and the joint that "
+                                 "came with them (%1 -> %2)")
+                      .arg(depthBeforeMirror).arg(rw.document().undoDepth()));
+            check(restToastText().contains(QStringLiteral("1 joint mirrored with them")),
+                  QStringLiteral("rest: and the toast says so rather than leaving it to be "
+                                 "noticed (\"%1\")").arg(restToastText()));
+            check(rv->jointsShown() == 2 && restPanel->rowCount() == 2,
+                  QStringLiteral("rest: both joints draw and both are listed (%1 drawn, %2 rows)")
+                      .arg(rv->jointsShown()).arg(restPanel->rowCount()));
+
+            trigger(rw, QStringLiteral("Undo"));
+            settle(300);
+            check(rw.document().count() == 2 && restJoints.size() == 1,
+                  "rest: one undo removes the twins AND the joint that arrived with them");
+            trigger(rw, QStringLiteral("Redo"));
+            settle(300);
+            check(rw.document().count() == 4 && restJoints.size() == 2,
+                  "rest: redo brings the pair and its joint back together");
+
+            // The other order: the pieces are mirrored FIRST, and the joint is
+            // placed afterwards. One gesture, one checkpoint, two joints.
+            rv->setSelectedSolids({panel, shelf});
+            settle(150);
+            const std::size_t depthBeforePlace = rw.document().undoDepth();
+            const std::size_t jointsBeforePlace = restJoints.size();
+            trigger(rw, QStringLiteral("Joint"));
+            settle(300);
+            check(restJoints.size() == jointsBeforePlace + 2,
+                  QStringLiteral("rest: placing a joint on pieces that are already mirrored "
+                                 "places its twin too (%1 -> %2)")
+                      .arg(jointsBeforePlace).arg(restJoints.size()));
+            check(rw.document().undoDepth() == depthBeforePlace + 1,
+                  "rest: ...in ONE checkpoint");
+            check(restToastText().contains(QStringLiteral("the mirrored twins carry it too")),
+                  QStringLiteral("rest: named in the same message (\"%1\")").arg(restToastText()));
+            trigger(rw, QStringLiteral("Undo"));
+            settle(300);
+            check(restJoints.size() == jointsBeforePlace,
+                  "rest: and one undo takes both of those back");
+
+            // --- Isolate: a joint is drawn only while BOTH pieces are on screen
+            rv->setSelectedSolids({panel});
+            settle(150);
+            trigger(rw, QStringLiteral("Isolate"));
+            settle(300);
+            check(rw.isolateActive() && rv->isSolidVisible(panel) && !rv->isSolidVisible(shelf),
+                  "rest: isolating the panel takes the shelf off screen");
+            check(rv->jointsShown() == 0,
+                  QStringLiteral("rest: ...and the hardware with it - a joint drawn against a "
+                                 "piece that is not there reads as a joint to nothing (%1 drawn)")
+                      .arg(rv->jointsShown()));
+            check(restPanel->rowCount() == 2,
+                  QStringLiteral("rest: while the drawer still lists both - the joint exists, "
+                                 "it is merely not on screen (%1 rows)")
+                      .arg(restPanel->rowCount()));
+            trigger(rw, QStringLiteral("Isolate"));
+            settle(300);
+            check(!rw.isolateActive() && rv->jointsShown() == 2,
+                  QStringLiteral("rest: I again brings everything back, hardware included "
+                                 "(%1 drawn)").arg(rv->jointsShown()));
+
+            // --- Render mode: the viewport is the furniture alone -------------
+            QAction* restRenderAction = action(rw, QStringLiteral("Render mode"));
+            check(restRenderAction != nullptr && restRenderAction->isCheckable(),
+                  "rest: there is a checkable Render mode action");
+            if (restRenderAction != nullptr) {
+                restRenderAction->trigger();
+                settle(900);
+                check(restRenderAction->isChecked() && rv->jointsShown() == 0,
+                      QStringLiteral("rest: entering render mode takes every joint off the "
+                                     "scene - hardware is decoration like the grid (%1 drawn)")
+                          .arg(rv->jointsShown()));
+                restRenderAction->trigger();
+                settle(600);
+                check(!restRenderAction->isChecked() && rv->jointsShown() == 2,
+                      QStringLiteral("rest: and leaving it brings both back (%1 drawn)")
+                          .arg(rv->jointsShown()));
+            }
+
+            // --- Delete: a joint dies with the piece it was part of -----------
+            trigger(rw, QStringLiteral("Turn Mirroring Off"));
+            settle(250);
+            check(!rw.document().symmetryOn(),
+                  "rest: (mirroring off, so the delete below takes one piece and not a pair)");
+            rv->setSelectedSolids({shelf});
+            settle(150);
+            const std::size_t depthBeforeDelete = rw.document().undoDepth();
+            trigger(rw, QStringLiteral("Delete Selected"));
+            settle(300);
+            check(rw.document().count() == 3 && restJoints.size() == 1,
+                  QStringLiteral("rest: deleting a piece removes the joint it was part of "
+                                 "(%1 bodies, %2 joints)")
+                      .arg(rw.document().count()).arg(restJoints.size()));
+            check(restPanel->rowCount() == 1,
+                  QStringLiteral("rest: ...and its drawer row with it (%1 row)")
+                      .arg(restPanel->rowCount()));
+            check(rw.document().undoDepth() == depthBeforeDelete + 1,
+                  "rest: in one checkpoint");
+            trigger(rw, QStringLiteral("Undo"));
+            settle(350);
+            check(rw.document().count() == 4 && restJoints.size() == 2 &&
+                      restPanel->rowCount() == 2,
+                  QStringLiteral("rest: and one undo restores the piece, its joint and the row "
+                                 "together (%1 bodies, %2 joints, %3 rows)")
+                      .arg(rw.document().count()).arg(restJoints.size())
+                      .arg(restPanel->rowCount()));
+            check(rw.findChild<QDialog*>() == nullptr, "rest: no modal appeared for any of it");
+        }
+
+        rw.close();
         settle(150);
     }
 

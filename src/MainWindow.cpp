@@ -6483,6 +6483,16 @@ bool MainWindow::confirmMirrorPlacement()
     // line regardless of whether its own entry point already guards it.
     if (myRenderModeOn) setRenderModeEnabled(false);
 
+    // Which of these bodies were ALREADY paired going in, read before the call
+    // that changes it: the difference is exactly the set this gesture gave a
+    // twin to, and a fresh twin is the one thing that cannot already carry a
+    // mirrored joint (see mirrorJointsOntoTwins()). PairResult reports counts
+    // and skip lists rather than the ids it paired, so this is measured here.
+    std::vector<int> pairedBefore;
+    for (int id : ids) {
+        if (myDocument.twinOf(id) > 0) pairedBefore.push_back(id);
+    }
+
     const DocumentModel::PairResult result = myDocument.pairWithMirror(ids, plane);
     myView->endMirrorPlacement();
 
@@ -6508,6 +6518,20 @@ bool MainWindow::confirmMirrorPlacement()
         // signal, whatever its two listeners currently do with it.
         return false;
     }
+
+    // A joint the mirrored pieces already carried gets mirrored with them,
+    // INSIDE pairWithMirror()'s own checkpoint (nothing has checkpointed again
+    // since it returned), so one undo takes the twins and their joints back
+    // together. Before resyncView(), which is what drops the derivation cache
+    // and rebuilds the presentation - so the joints that arrive here are in the
+    // document by the time anything derives or draws them.
+    std::vector<int> freshlyPaired;
+    for (int id : ids) {
+        if (myDocument.twinOf(id) > 0 &&
+            std::find(pairedBefore.begin(), pairedBefore.end(), id) == pairedBefore.end())
+            freshlyPaired.push_back(id);
+    }
+    const int mirroredJoints = mirrorJointsOntoTwins(freshlyPaired);
 
     resyncView();
     myView->clearSelection();
@@ -6538,6 +6562,12 @@ bool MainWindow::confirmMirrorPlacement()
                            "paired, already linked, or too complex to mirror")
                              .arg(skipped);
     }
+    // The joints that came with them, named rather than left to be noticed: the
+    // user asked for bodies to be mirrored and got hardware as well, and a
+    // count is the only way to tell that from a joint that was already there.
+    if (mirroredJoints == 1) message += tr(" — 1 joint mirrored with them");
+    else if (mirroredJoints > 1)
+        message += tr(" — %1 joints mirrored with them").arg(mirroredJoints);
     // Undo pops pairWithMirror()'s own checkpoint, restoring the document
     // to exactly the state it held before this call - "one undo removes
     // everything" (this task's own requirement), because the checkpoint
@@ -6758,6 +6788,16 @@ bool MainWindow::placeJoint(bool firstThatFits, Joinery::Kind requested)
     // appStateChanged it emits already draws it.
     mySelectedJointId = id;
 
+    // A joint placed between two pieces that ALREADY carry twins gets a twin of
+    // its own, inside this same checkpoint - the other half of Task 14's mirror
+    // rule. The first half (mirroring pieces that already carry a joint) lives
+    // in confirmMirrorPlacement(); both go through the one helper, so "a joint
+    // mirrors with its pieces" has one implementation whichever order the user
+    // does the two gestures in. Read back by id rather than rebuilt by hand, so
+    // what is mirrored is exactly the record that was written.
+    DocumentModel::Joint placed;
+    const bool mirroredJoint = jointOf(id, placed) && mirrorJointOntoTwins(placed);
+
     updateActions();
     emit documentChanged();
     refreshJoints();
@@ -6766,6 +6806,9 @@ bool MainWindow::placeJoint(bool firstThatFits, Joinery::Kind requested)
                           .arg(QString::fromStdString(Joinery::kindName(kind)),
                                QString::fromStdString(myDocument.nameOf(hostId)),
                                QString::fromStdString(myDocument.nameOf(otherId)));
+    // One gesture, one checkpoint, one message naming both - the same rule a
+    // twin-follows edit already keeps for the bodies themselves.
+    if (mirroredJoint) message += tr(" — the mirrored twins carry it too");
     // A contact that is not a plain rectangle can put part of the joint where
     // the pieces do not touch. That is a fact to show, never a veto - and this
     // is the first moment a user places a joint, so it is said HERE or nowhere.
@@ -6774,6 +6817,48 @@ bool MainWindow::placeJoint(bool firstThatFits, Joinery::Kind requested)
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
     return true;
+}
+
+bool MainWindow::mirrorJointOntoTwins(const DocumentModel::Joint& joint)
+{
+    // Gated on symmetryOn() as well as twinOf(), the guard every consumer of a
+    // pairing in this file carries: the pairing map is undo-tracked while the
+    // mode is not, so an undo can resurrect a pairing that must stay inert
+    // (CLAUDE.md, "Live symmetry is twins, not replay").
+    if (!myDocument.symmetryOn()) return false;
+
+    const int twinA = myDocument.twinOf(joint.bodyA);
+    const int twinB = myDocument.twinOf(joint.bodyB);
+    // Half a mirrored joint is not a plan: one piece paired and the other not
+    // leaves a relationship with nothing on the far end of it.
+    if (twinA <= 0 || twinB <= 0) return false;
+    // A joint between a body and its OWN twin is already its own mirror image -
+    // mirroring it would add the same relationship back to front.
+    if ((twinA == joint.bodyB && twinB == joint.bodyA)) return false;
+
+    // bodyA stays bodyA: which piece is the HOST - the one a housing or a
+    // mortise is cut into - is the joint's own plan, and the mirrored pair is
+    // the same two pieces the same way round. The adjustments are deliberately
+    // not carried; see the header for the contact-frame reason.
+    return myDocument.addJoint(joint.kind, twinA, twinB, joint.params) > 0;
+}
+
+int MainWindow::mirrorJointsOntoTwins(const std::vector<int>& freshlyPairedIds)
+{
+    if (freshlyPairedIds.empty() || !myDocument.symmetryOn()) return 0;
+    const std::set<int> fresh(freshlyPairedIds.begin(), freshlyPairedIds.end());
+
+    // A COPY of the list, not a reference: mirrorJointOntoTwins() appends to
+    // the very vector this walks.
+    const std::vector<DocumentModel::Joint> existing = myDocument.joints();
+    int made = 0;
+    for (const DocumentModel::Joint& joint : existing) {
+        // At least one piece freshly twinned - see the header for why this is
+        // the exact guard against a second copy rather than a guess at one.
+        if (fresh.count(joint.bodyA) == 0 && fresh.count(joint.bodyB) == 0) continue;
+        if (mirrorJointOntoTwins(joint)) ++made;
+    }
+    return made;
 }
 
 std::vector<Joinery::Derivation> MainWindow::jointDerivations() const
@@ -6827,8 +6912,20 @@ void MainWindow::refreshJoints()
     const int selectedId = selectedJointId();
     const std::vector<DocumentModel::Joint>& jointList = myDocument.joints();
     const auto drawJoint = [&](std::size_t index) {
+        if (index >= jointList.size()) return false;
+        // A JOINT IS ONLY ON SCREEN WHILE BOTH ITS PIECES ARE (Task 14). Asked
+        // of the VIEW, not the document: myView->isSolidVisible() is the
+        // composed answer - the document's own persisted eye AND the session
+        // Isolate filter, written in one place by applyIsolation() - so
+        // isolating one piece of a joint takes its hardware with the piece that
+        // left, and the eye button does the same, without this gate knowing
+        // either mechanism exists. Hardware floating against nothing is worse
+        // than no drawing at all: it reads as a joint to a piece that is there.
+        const DocumentModel::Joint& joint = jointList[index];
+        if (!myView->isSolidVisible(joint.bodyA) || !myView->isSolidVisible(joint.bodyB))
+            return false;
         if (drawerOpen) return true;
-        return selectedId > 0 && index < jointList.size() && jointList[index].id == selectedId;
+        return selectedId > 0 && jointList[index].id == selectedId;
     };
 
     // Every call, cache warm or not: showJoints() is a compare when nothing

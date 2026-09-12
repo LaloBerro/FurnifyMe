@@ -1221,6 +1221,93 @@ wrapped in `try/catch` so a throw cannot strand `params.Method`. An **under-conv
 path-traced Dump is systematically dark** — the accumulation buffer is a running mean — so
 every measuring probe and `Save Screenshot` wait for convergence first.
 
+### Joinery: a joint is a relationship, never a world position
+
+Spec `docs/superpowers/specs/2026-09-10-joinery-design.md`, fourteen tasks, all merged. This is
+a **planning layer and nothing else: no code anywhere cuts a shape.** A joint is a plan for
+wood the user will cut by hand — drawn as ghosted hardware seen through the boards, read off
+as numbers to mark with a pencil and a square.
+
+- **`DocumentModel::Joint` is `{id, kind, bodyA, bodyB, parameters, adjustments}` and holds not
+  one coordinate.** Where the hardware actually is gets DERIVED from the two live shapes every
+  time it is wanted — `Joinery::derive()` runs `findContact` → `validityOf` → `layout` →
+  `readout` end to end — so a joint follows its pieces for free: pull a face, bevel an edge,
+  move a body, and the dowels are in the new wood with no correspondence tracked anywhere.
+  This is the same argument "twins, not replay" makes for symmetry, one layer up: a stored
+  world point would have to be re-derived at every edit site, and the site somebody missed
+  would be the one that lied. Even a per-item override is stored in the CONTACT's own (u, v)
+  frame (`Joinery::Adjustment`) rather than as a point, for exactly that reason.
+- **Nine kinds on three families** (`Joinery::familyOf`): **Fasteners** — Dowel, Pocket screw,
+  Biscuit, Domino, Screw — lay N discrete items in a row along the contact; **Housings** —
+  Dado, Rabbet, Groove — cut a channel in one piece that the other sits in; **Interlocks** —
+  Mortise and tenon, Half-lap — remove complementary material from both. One `Parameters`
+  block serves all three and a kind reads the fields that apply to it, because the block is
+  persisted, undone and edited as a unit; a variant would buy type-safety at the cost of three
+  serializers. Defaults come off the wood (`defaultsForContact()` knows each piece's own
+  thickness at the joint, so a half-lap is half of EACH piece and a mortise is capped at its
+  host's thickness — a default that punches out of the back of the host is not a proposal).
+- **Invalid is never offered.** `validKindsFor()` answers off the real measured contact, so `J`
+  places the first kind that fits and the chip's kind menu lists only what this contact can
+  take; a refusal names the kind and the reason, never a bare "no".
+- **It breaks LOUDLY, and with no numbers.** When the pieces stop meeting, `derive()` refuses
+  with a reason and empty items, the drawer floats the broken joints to the top and prints the
+  reason where the mark-out numbers go. A joint that kept its last good numbers after the
+  pieces moved apart would be worse than no joint at all: those numbers still look
+  transferable to wood.
+- **One derivation, cached on `revision()`, dropped by `resyncView()`.**
+  `MainWindow::cachedJointDerivations()` is THE place this window derives a joint — the
+  viewport and the drawer read the same answer, so a number on screen and a number in the list
+  cannot disagree, and a broken joint is broken in both at once. Deriving runs `findContact()`
+  per joint (booleans, a classifier probe, a ray cast) while `appStateChanged` fires on every
+  selection click, so re-deriving there would put a kernel pass per joint on the app's hottest
+  gesture. The cache is keyed on the revision **and** dropped by `resyncView()`, because a
+  freshly opened furniture can land on the same revision number as the one it replaced.
+  `jointDerivations()` hands callers a COPY: the cache is rebuilt in place the next time
+  anything reaches it after the document moves, so a reference held across a delete or a kind
+  switch would read destroyed-and-rebuilt, possibly shorter data — and never crash doing it.
+  `refreshJoints()` is the one place drawings are pushed to the viewport, and the one place
+  that decides which joints are drawn at all (the drawer open draws every joint; otherwise
+  only the selected one, which placement sets).
+- **Every whole-document operation carries the joints, and each is one rule in one place.**
+  **Mirror** copies a joint onto its pieces' twins, both ways round: mirroring two pieces that
+  already carry a joint copies it inside `pairWithMirror()`'s own checkpoint, and placing a
+  joint on pieces that are already mirrored places the twin's inside the placement's
+  checkpoint — so one undo takes both, whichever order the user works in. A joint whose other
+  piece has no twin is not copied (half a mirrored joint is not a plan), and the guard against
+  a SECOND copy is **freshness** — which bodies this gesture just paired, which is exact,
+  since a twin that was just created can carry no joints — rather than comparing kinds and
+  pieces, which would be wrong in both directions: two dowel joints between one pair of pieces
+  are two joints. Kind and parameters copy verbatim with bodyA staying bodyA (which piece
+  HOSTS the joint is the joint's own plan); the adjustments deliberately do not, because a
+  nudge lives in the contact's own frame and the twin's frame is re-derived from mirrored wood,
+  whose longest boundary edge — which is what orients that frame — can run the other way.
+  **Isolate** and the eye button needed no code of their own: `refreshJoints()`'s gate asks
+  `OcctViewWidget::isSolidVisible()`, the COMPOSED answer `applyIsolation()` writes in one
+  place, so a joint draws only while both its pieces are on screen — hardware floating against
+  a piece that is not there reads as a joint to nothing. **Render mode** clears them on entry
+  inside `setRenderMode()` (scene decoration, exactly like the grid), and the only thing that
+  brings them back on exit is the `appStateChanged` → `refreshJoints()` connection: deleting
+  that one line leaves the exit at 0 joints drawn and leaves STALE hardware standing through
+  an Isolate — measured, 4 drawn where 0 and 2 were required. **Delete** needed no code either:
+  `DocumentModel::removeSolid()` drops every joint touching the body inside the caller's own
+  checkpoint, so one undo restores the piece, its joint and its drawer row together.
+- **The ledgered gap, recorded rather than implied:** a mirrored joint is a COPY taken at the
+  moment of mirroring or placement, and nothing keeps the two in step afterwards — switching a
+  kind, editing a number or deleting one of the pair touches that one alone. The twin's SHAPE
+  still follows (the twin engine's job, untouched by any of this); the twin's PLAN does not.
+- **What it deliberately does not do,** out of scope by the spec and not gestured at anywhere
+  in the code: no geometry is cut (the bodies stay the B-reps they were; the hardware is a
+  separate presentation channel), no soundness or strength checking, no grain direction, no
+  saved joint presets, and no export of joinery data of any kind — STEP carries solids, and a
+  joint is not one.
+- **Vocabulary.** "Joint" is this app's own word, which put it head-on against the banned
+  `Join` family, so `gui_smoke`'s `usesBannedWord()` carries ONE stem exception: "Joint" and
+  "Joints" pass while "join", "joined", "joining" and "joins" still fail, pinned in both
+  directions in the same place as the word-boundary rule — do not weaken it. "Rabbet" and
+  "groove" are the real woodworking names for two of the housings and collide with nothing:
+  neither is in the banned `bevel` family, which is Fillet's and Chamfer's Never column, and a
+  housing is material removed to seat another board rather than an edge rounded or flattened.
+
 ### Qt plugin deployment - do not remove
 
 Qt will not start without a platform plugin, and it looks for one in a `platforms/`
@@ -1551,6 +1638,20 @@ Construction splits in two, and the split is what retires the old lazy-init pitf
   point is still the only place the ratio is applied. Its native handle is
   `WindowFromDC(wglGetCurrentDC())` — the window the *bound context* belongs to, never
   `winId()`, which would re-create the native surface this migration removed.
+
+**A non-null `V3d_View` is not a view that can convert a point, and one signal reaches every
+overlay in exactly that state.** `initializeViewer()` creates the `V3d_View` with **no
+window** — `initializeGL()` is what grants it one — so between those two moments
+`myView.IsNull()` is false while every `Convert`/`ConvertWithProj` has no window to answer
+against. The route there is ordinary, not exotic: `resyncView()` → `displaySolid()` →
+`initializeViewer()`, which emits `cameraChanged` while still windowless, and every overlay
+that projected a point faulted on it (found on the joint chip's context-loss path, which is
+precisely where that rebuild runs). `OcctViewWidget::viewReady()` is the missing half of the
+question `IsNull()` was already asking, consulted in `projectToScreen()` — the ONE function
+every projecting overlay goes through. The residual, stated honestly: `initializeViewer()`
+still emits `cameraChanged` while windowless, and the overlays are safe only *because* they
+all route through that choke point. A projection written straight against `myView` somewhere
+new would fault exactly as before.
 
 `paintGL()` wraps Qt's current FBO (`OpenGl_FrameBuffer::InitWrapper`, through a subclass
 that calls `SetFrameBufferSRGB(true, false)` because Qt's colour attachment is `GL_RGBA8`
@@ -2128,6 +2229,17 @@ document-only predicate.
   commit deterministically broke it (the `initializeViewer()` regression above). The rule
   holds generally: "pre-existing" and "environmental" are claims that need a comparison run to
   back them, not a plausible story.
+- **A mutation test that produces no red line has tested nothing — and in this repo three
+  separate mechanisms each made a mutation report GREEN while the mutation never applied at
+  all.** The tree's files are LF, so a patch anchor written with CRLF matched nothing. An
+  anchor spanning a non-ASCII character — an em dash, which this project's copy is full of —
+  did not survive PowerShell's `ReadAllLines`/`WriteAllLines` round trip. And `Copy-Item`
+  **preserves mtime** on the restore, so MSBuild skipped the rebuild and the run measured a
+  stale exe. Every one of the three reads exactly like a pass. The rule: a mutation counts
+  only when it produces a real red line **naming the expected check**, and a run that left no
+  output file is a failure to apply, never a pass. Editing the source in place — so the tool
+  writes LF and moves the mtime for free — and then reading the named failure back is what
+  makes the evidence worth having.
 
 ## Milestone 1 acceptance — all of these, on **both** platforms
 
