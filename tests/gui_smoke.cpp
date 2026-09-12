@@ -28806,10 +28806,12 @@ int main(int argc, char* argv[])
     // --- the joints drawer: rows, rulers, broken joints first (joinery, Task 12)
     // Self-contained. Exact pieces seeded through FurnitureStore, for the
     // placement block's reason: every joint here needs pieces that provably
-    // meet. Seven joints, each chosen to reach one row behaviour - a plain
+    // meet. Eight joints, each chosen to reach one row behaviour - a plain
     // dowel ruler, a crowded one that must stagger, a dense one that must be
     // written, a stopped dado's band, a half-lap's band on both pieces, a board
-    // angled so no single edge applies, and a notched contact's caveat.
+    // angled so no single edge applies, a notched contact's caveat, and one
+    // carrying an out-of-range inset, so the shared line can be asked whether
+    // it names the number that was typed or the one the hardware uses.
     if (blockEnabled("the-joints-drawer-lists-rows-and-mark-out-numbers")) {
         RequiredTempDir drawerDir;
         constexpr double kBoardMm = 18.0;
@@ -28882,6 +28884,20 @@ int main(int argc, char* argv[])
             Joinery::Parameters stoppedDado = paramsFor(Joinery::Kind::Dado, fusePanel, top);
             stoppedDado.stopped = true;
             stoppedDado.stopMm = 60.0;
+            // An inset the chip genuinely lets a user type and the joint
+            // genuinely STORES - 500 mm across an 18 mm contact - so the drawer
+            // can be asked which of the two numbers it prints (whole-branch
+            // review, Finding 1). Seeded rather than typed, so the probe costs
+            // the shared window no edit and no undo.
+            //
+            // On fusePanel/top rather than side/shelf DELIBERATELY: the broken-
+            // joints block moves the SHELF and asserts that exactly three joints
+            // break and sort to the top ("the shelf carries three joints"), so a
+            // fourth joint on that pair would quietly change what an existing
+            // check means. These two pieces are never moved, and their contact is
+            // the same 18 mm across, which is what the clamp is measured against.
+            Joinery::Parameters overInset = paramsFor(Joinery::Kind::Dowel, fusePanel, top);
+            overInset.insetMm = 500.0;
             const int seeded[] = {
                 seedDoc.addJoint(Joinery::Kind::Dowel, side, shelf,
                                  paramsFor(Joinery::Kind::Dowel, side, shelf)),
@@ -28896,12 +28912,13 @@ int main(int argc, char* argv[])
                                                     paramsFor(Joinery::Kind::Dowel, upright,
                                                               notchedShelf))
                                  : 0,
+                seedDoc.addJoint(Joinery::Kind::Dowel, fusePanel, top, overInset),
             };
             const bool allSeeded =
                 std::all_of(std::begin(seeded), std::end(seeded), [](int id) { return id > 0; });
             check(allSeeded && !drawerFurnitureId.isEmpty() &&
                       seedStore.saveFurniture(drawerFurnitureId, seedDoc, QImage()),
-                  "drawer: ten pieces and seven joints are seeded to disk");
+                  "drawer: ten pieces and eight joints are seeded to disk");
             // And one furniture with nothing in it, for the empty state.
             drawerEmptyId = seedStore.createFurniture(QStringLiteral("Empty"));
             check(!drawerEmptyId.isEmpty() &&
@@ -28939,13 +28956,13 @@ int main(int argc, char* argv[])
             return text;
         };
 
-        check(solids.size() == 10 && joints.size() == 7,
-              QStringLiteral("drawer: all ten pieces and seven joints are open (%1, %2)")
+        check(solids.size() == 10 && joints.size() == 8,
+              QStringLiteral("drawer: all ten pieces and eight joints are open (%1, %2)")
                   .arg(solids.size()).arg(joints.size()));
         // Guarded, not indexed on faith: every id below is read by POSITION
         // (a loaded document mints its own ids), and a short list must skip,
         // loudly, rather than read past its end.
-        if (solids.size() == 10 && joints.size() == 7) {
+        if (solids.size() == 10 && joints.size() == 8) {
             const int shelf = solids[1].id;
             const int rail = solids[4].id;
             const int crossRail = solids[5].id;
@@ -28956,6 +28973,7 @@ int main(int argc, char* argv[])
             const int jLap = joints[4].id;
             const int jAngled = joints[5].id;
             const int jNotch = joints[6].id;
+            const int jOverInset = joints[7].id;
             const auto derivationOf = [&dw](int jointId) {
                 const std::vector<Joinery::Derivation> all = dw.jointDerivations();
                 const std::vector<DocumentModel::Joint> list = dw.document().joints();
@@ -28963,7 +28981,8 @@ int main(int argc, char* argv[])
                     if (list[i].id == jointId) return all[i];
                 return Joinery::Derivation();
             };
-            for (const int id : {jDowel, jStagger, jDense, jDado, jLap, jAngled, jNotch}) {
+            for (const int id : {jDowel, jStagger, jDense, jDado, jLap, jAngled, jNotch,
+                                 jOverInset}) {
                 const Joinery::Derivation d = derivationOf(id);
                 check(d.ok, QStringLiteral("drawer: joint %1 derives (%2)")
                                 .arg(id).arg(QString::fromStdString(d.error)));
@@ -29535,6 +29554,54 @@ int main(int argc, char* argv[])
                                          "%2 px labels - no stagger fits them)")
                               .arg(2.0 * stepPx, 0, 'f', 1).arg(narrowest, 0, 'f', 1));
                     panel->collapseRow(row);
+                    settle(150);
+                }
+
+                // --- the shared line names the inset the HARDWARE uses ------------
+                // (whole-branch review, Finding 1.) layout() CLAMPS the inset into
+                // the contact, and readout() used to report the raw stored
+                // parameter - so this row, whose joint genuinely stores the 500 mm
+                // a user can type into the chip, printed "inset 500 mm from the
+                // face" above dowels this app itself draws at 18. Both
+                // expectations below come from the ITEM layout() built and the
+                // contact's own extent, never from d.readout, which is the value
+                // under test - the drawer's other inset check derives its string
+                // from d.readout.insetMm and so cannot see this at all.
+                {
+                    panel->expandRow(rowOf(jOverInset));
+                    settle(200);
+                    const int insetRow = rowOf(jOverInset);
+                    const Joinery::Derivation d = derivationOf(jOverInset);
+                    double stored = 0.0;
+                    for (const DocumentModel::Joint& j : dw.document().joints())
+                        if (j.id == jOverInset) stored = j.params.insetMm;
+                    const double acrossMin =
+                        d.contact.runsAlongU() ? d.contact.vMin : d.contact.uMin;
+                    const double builtInset =
+                        d.items.empty()
+                            ? -1.0
+                            : (d.contact.runsAlongU() ? d.items.front().v : d.items.front().u) -
+                                  acrossMin;
+                    check(insetRow >= 0 && d.ok && !d.items.empty() &&
+                              std::fabs(stored - 500.0) < 1.0e-9,
+                          QStringLiteral("drawer: (the probe row's joint really stores the typed "
+                                         "500 mm inset - %1)")
+                              .arg(stored));
+                    check(std::fabs(builtInset - kBoardMm) < 1.0e-6,
+                          QStringLiteral("drawer: (and layout() really lays that row on the "
+                                         "contact's own %1 mm edge - %2)")
+                              .arg(kBoardMm).arg(builtInset));
+                    const QString line = panel->readoutTextAt(insetRow);
+                    check(line.contains(QStringLiteral("inset %1 from the face")
+                                            .arg(lengthText(builtInset))),
+                          QStringLiteral("drawer: the shared line names the inset the HARDWARE "
+                                         "uses, not the one that was typed (\"%1\")")
+                              .arg(line.section(QLatin1Char('\n'), -1)));
+                    check(!line.contains(QStringLiteral("500")),
+                          QStringLiteral("drawer: and the typed 500 appears nowhere among the "
+                                         "row's numbers (\"%1\")")
+                              .arg(QString(line).replace(QLatin1Char('\n'), QLatin1Char('|'))));
+                    panel->collapseRow(insetRow);
                     settle(150);
                 }
 

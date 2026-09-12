@@ -273,7 +273,11 @@ std::shared_ptr<RowModel> contentFor(const DocumentModel& doc, const DocumentMod
     m->width = r.widthMm;
     m->edge = QString::fromStdString(r.referenceEdgeA);
     m->edgeNamed = r.referenceEdgeNamed;
-    m->caveat = QString::fromStdString(Joinery::regionShortfallCaveat(d.contact));
+    // THE caveat channel, kind and contact together - not regionShortfallCaveat()
+    // directly: a housing or a mortise on a contact that names no end-on piece
+    // carries a caveat of its own, and asking the one composed function is what
+    // keeps this row and the placement message showing the same set.
+    m->caveat = QString::fromStdString(Joinery::caveatsFor(joint.kind, d.contact));
 
     if (m->fastener) {
         const double size = d.items.empty() ? joint.params.sizeMm : d.items.front().sizeMm;

@@ -615,8 +615,9 @@ public:
     // Refused - Failure toast, nothing written - for a count below 1 (which
     // Joinery::layout() would silently clamp to a single invented fastener, so
     // it is refused where it is WRITTEN rather than where it is drawn), for a
-    // count past what a joint can carry, and for a size or depth of zero. True
-    // and nothing written when nothing actually changed.
+    // count past `Joinery::kMaxItemCount` - the same bound the LOAD path
+    // refuses a whole file on, one rule read by both surfaces - and for a size
+    // or depth of zero. True and nothing written when nothing actually changed.
     bool editJointParameters(int jointId, const Joinery::Parameters& params);
     // The chip's own refusals - a parse it could not make sense of - said the
     // way every other refusal in this app is: the status bar and a Failure

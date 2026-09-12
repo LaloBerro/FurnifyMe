@@ -3,6 +3,7 @@
 #include "ModelingOps.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <unordered_set>
 
@@ -957,6 +958,31 @@ bool DocumentModel::fromSerialized(const FurnifySerial::SerializedDocument& seri
             if (record.kindIndex < static_cast<int>(Joinery::Kind::Dowel) ||
                 record.kindIndex > static_cast<int>(Joinery::Kind::HalfLap)) {
                 return false;
+            }
+            // The TUNABLES too (whole-branch fix wave). The bounds used to live
+            // at the UI alone - the chip's parse and editJointParameters() -
+            // so a manifest carrying `count: 100000` meshed 100,000 shapes on
+            // load and a negative `endMargin` laid a row outside its contact,
+            // neither refused by anything. Joinery::parametersInRange() is the
+            // one rule both surfaces read, so a number this app will not let
+            // you type is one it will not load.
+            //
+            // REFUSED, not clamped, and deliberately: every value this app has
+            // ever WRITTEN comes from defaultsFor()/defaultsForContact() or a
+            // bounded parse, so an out-of-range number in a file is corruption
+            // or a hand edit rather than an older build's honest choice - there
+            // is no older-version case here for a clamp to rescue. The genuinely
+            // older file is the one that omits a key, and that already has its
+            // own forward-compatible answer (FurnitureStore::jsonToJoints()
+            // falls back to the struct default). Clamping instead would quietly
+            // rewrite a document the owner may still be able to repair by hand.
+            if (!Joinery::parametersInRange(record.params)) return false;
+            // An adjustment is a position in the contact's own frame; a
+            // non-finite one would put an item's world centre at NaN, which
+            // nothing downstream can draw or measure. Its INDEX needs no bound -
+            // Joinery::layout() already ignores one that names no item.
+            for (const Joinery::Adjustment& adj : record.adjustments) {
+                if (!std::isfinite(adj.du) || !std::isfinite(adj.dv)) return false;
             }
         }
     }

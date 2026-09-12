@@ -84,6 +84,23 @@ std::string kindName(Kind kind)
     return "Joint";
 }
 
+bool parametersInRange(const Parameters& params)
+{
+    if (params.count < kMinItemCount || params.count > kMaxItemCount) return false;
+    // Every length in one sweep, so a field added to Parameters and forgotten
+    // here is one line to add rather than a new branch to notice.
+    for (const double length : {params.sizeMm, params.depthAMm, params.depthBMm,
+                                params.insetMm, params.endMarginMm, params.widthMm,
+                                params.stopMm, params.thicknessMm, params.lengthMm}) {
+        if (!std::isfinite(length) || length < 0.0) return false;
+    }
+    // An angle may legitimately be EITHER sign - layout() signs it again from
+    // drilledFrom - but a pin driven past a quarter turn is not leaning across
+    // the joint any more, it is lying along it.
+    if (!std::isfinite(params.angleDeg) || std::fabs(params.angleDeg) > 90.0) return false;
+    return true;
+}
+
 Parameters defaultsFor(Kind kind, double thinnerThicknessMm)
 {
     const double t = thinnerThicknessMm > 1.0e-6 ? thinnerThicknessMm : 18.0;
@@ -96,9 +113,14 @@ Parameters defaultsFor(Kind kind, double thinnerThicknessMm)
         case Family::Fasteners: {
             p.sizeMm = realDowelSize(t / 3.0);
             p.count = 3;
-            // Deep enough to hold, short enough to leave material: a third
-            // of the board on the through side, and a shade under half the
-            // board's own thickness on the end-grain side.
+            // Deep enough to hold, short enough to leave material: three
+            // quarters of the board into EACH piece - 13.5 mm on an 18 mm
+            // board - with a 10 mm floor so thin stock still gets a fastener
+            // long enough to grip. SYMMETRIC, deliberately: a dowel does not
+            // care which of the two pieces it was driven from first, and
+            // defaultsForContact() is where a per-piece refinement belongs
+            // (it has each piece's own thickness; this function has one
+            // number and cannot express a difference between the sides).
             p.depthAMm = std::max(t * 0.75, 10.0);
             p.depthBMm = std::max(t * 0.75, 10.0);
             // endMarginMm is left at the struct default (40 mm) - fasteners
@@ -973,6 +995,31 @@ std::string regionShortfallCaveat(const Contact& contact)
            "land where the two pieces don't actually touch";
 }
 
+std::string contactKindCaveat(Kind kind, const Contact& contact)
+{
+    // An Overlap has no end grain and always reads Neither (findContact()
+    // sets it so explicitly), which would make this fire on every lap.
+    if (contact.type != Contact::Type::Face) return std::string();
+    // The contact does name a host - nothing to say.
+    if (contact.endOn != Contact::EndOn::Neither) return std::string();
+    // Only the kinds CUT INTO one piece care which piece that is: a lap is cut
+    // into both, and a fastener into neither.
+    if (kind == Kind::HalfLap) return std::string();
+    if (familyOf(kind) == Family::Fasteners) return std::string();
+
+    return "neither piece meets this contact end-on — a joint cut into one "
+           "piece usually wants the other piece's end against its face";
+}
+
+std::string caveatsFor(Kind kind, const Contact& contact)
+{
+    const std::string shortfall = regionShortfallCaveat(contact);
+    const std::string perKind = contactKindCaveat(kind, contact);
+    if (perKind.empty()) return shortfall;
+    if (shortfall.empty()) return perKind;
+    return shortfall + " — " + perKind;
+}
+
 namespace {
 
 // The row a family of fasteners runs along, in contact coordinates: the
@@ -996,8 +1043,15 @@ void fastenerRow(const Contact& contact, const Parameters& params,
     const double acrossLen = alongU ? contact.vLength() : contact.uLength();
 
     const int count = std::max(1, params.count);
-    // A margin wider than the joint would put the first item past the last;
-    // clamped so every item stays inside the contact whatever is typed.
+    // A margin wider than the joint would put the first item past the last,
+    // so it is capped at just under half the run. Capped at the TOP ONLY, and
+    // that asymmetry is deliberate: a NEGATIVE margin would lay items outside
+    // the contact, and it is refused where such a number can actually arrive
+    // rather than silently straightened here. The chip has no end-margin
+    // field, so a FILE is the only route in, and Joinery::parametersInRange()
+    // refuses it on load. (housingRegion's stopMm IS clamped at both ends,
+    // because `stopped`/`stopMm` ARE on the chip - one rule, applied where
+    // each value can be typed.)
     const double margin = std::min(params.endMarginMm, runLen / 2.0 * 0.9);
     const double first = runMin + margin;
     const double span = std::max(runLen - 2.0 * margin, 0.0);
@@ -1209,37 +1263,48 @@ Readout readout(Kind kind, const Parameters& params, const Contact& contact,
     for (const Item& item : items) {
         out.alongMm.push_back((alongU ? item.u : item.v) - runMin);
     }
-    out.insetMm = params.insetMm;
-    out.depthAMm = params.depthAMm;
-    switch (familyOf(kind)) {
-        case Family::Fasteners:
-            out.depthBMm = params.depthBMm;
-            out.widthMm = params.thicknessMm;
-            break;
-        case Family::Housing:
-            // The channel is cut in A alone; B sits in it and is not cut.
-            out.depthBMm = 0.0;
-            out.widthMm = params.widthMm;
-            break;
-        case Family::Interlock:
-            if (kind == Kind::HalfLap) {
-                // A half-lap takes material out of BOTH pieces, each to its
-                // own depth, across the WHOLE overlap. Its thicknessMm is half
-                // a board by default - a number that describes nothing a
-                // person marks - so the width is the lap's own span across
-                // the overlap, read off the item layout() cut (interlockRegion
-                // gives a lap the full across extent), and the second depth is
-                // what comes out of B.
-                out.depthBMm = params.depthBMm;
-                out.widthMm = items.empty() ? 0.0 : items.front().sizeMm;
-            } else {
-                // A mortise and tenon: the tenon is thicknessMm thick, and the
-                // second depth is how far it reaches into B - its length.
-                out.depthBMm = params.lengthMm;
-                out.widthMm = params.thicknessMm;
-            }
-            break;
-    }
+    // THE RULE, one rule for every number below: a readout describes what
+    // layout() actually BUILT, read off the Item it built - never the raw
+    // request handed in. layout() CLAMPS three parameters into the contact
+    // (fastenerRow's inset, housingRegion's width, interlockRegion's
+    // thickness), so reading the request prints a number the hardware does
+    // not use: a 500 mm inset typed into the chip - which the joint stores
+    // verbatim, by design - used to print "inset 500 mm from the face" above
+    // a row of dowels this app itself draws at 18 mm, a number a woodworker
+    // would transfer to wood for hardware that is somewhere else. The
+    // half-lap's width was the ONE branch that already read an Item; every
+    // number reads one now, and the per-family switch those two conventions
+    // needed is gone with them.
+    //
+    // Items carry any ADJUSTMENT the caller made, so an adjusted first item
+    // moves the inset with it - right, for the same reason: the drawer paints
+    // ONE shared inset line per row, and what it should name is where the
+    // hardware went.
+    const Item* const built = items.empty() ? nullptr : &items.front();
+    // The across axis's own low edge, mirroring fastenerRow's arithmetic
+    // rather than assuming the frame convention's 0.0, so the two agree by
+    // construction the way runMin already does.
+    const double acrossMin = alongU ? contact.vMin : contact.uMin;
+    // Nothing built - no kind reaches this (every family pushes at least one
+    // Item), so it is the honest answer to a hand-called readout() with an
+    // empty list rather than a live case: there are no numbers to mark.
+    out.insetMm = built != nullptr ? (alongU ? built->v : built->u) - acrossMin : 0.0;
+    out.depthAMm = built != nullptr ? built->depthAMm : 0.0;
+    // One read serves all three families: fastenerRow puts params.depthBMm
+    // here, housingRegion puts 0 (the channel is cut in A alone; B sits in it
+    // uncut), interlockRegion puts a lap's own far depth or a tenon's LENGTH
+    // into B. The old switch said those four things in four places.
+    out.depthBMm = built != nullptr ? built->depthBMm : 0.0;
+    // The one number no Item carries. A fastener's widthMm is the
+    // interlock/fastener thickness field, which fastenerRow neither reads nor
+    // clamps - so there is nothing built to read it off, and taking
+    // item.sizeMm here would silently report a dowel's DIAMETER as the joint's
+    // width. Every other family's Item sizeMm IS the built width: a housing's
+    // clamped channel width, a tenon's clamped thickness, a lap's full span
+    // across the overlap.
+    out.widthMm = familyOf(kind) == Family::Fasteners
+                      ? params.thicknessMm
+                      : (built != nullptr ? built->sizeMm : 0.0);
     return out;
 }
 

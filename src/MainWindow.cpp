@@ -6809,10 +6809,14 @@ bool MainWindow::placeJoint(bool firstThatFits, Joinery::Kind requested)
     // One gesture, one checkpoint, one message naming both - the same rule a
     // twin-follows edit already keeps for the bodies themselves.
     if (mirroredJoint) message += tr(" — the mirrored twins carry it too");
-    // A contact that is not a plain rectangle can put part of the joint where
-    // the pieces do not touch. That is a fact to show, never a veto - and this
-    // is the first moment a user places a joint, so it is said HERE or nowhere.
-    const std::string caveat = Joinery::regionShortfallCaveat(found.contact);
+    // Every caveat this contact carries for this kind, through the ONE composed
+    // channel the drawer's row reads too: a contact that is not a plain
+    // rectangle can put part of the joint where the pieces do not touch, and a
+    // housing or a mortise on a contact that names no end-on piece is a joint
+    // pointed the way it usually is not. Both are facts to show, never a veto -
+    // and this is the first moment a user places a joint, so they are said HERE
+    // or nowhere.
+    const std::string caveat = Joinery::caveatsFor(kind, found.contact);
     if (!caveat.empty()) message += tr(" — %1").arg(QString::fromStdString(caveat));
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
@@ -7281,16 +7285,18 @@ bool MainWindow::editJointParameters(int jointId, const Joinery::Parameters& par
     // where it is drawn: Joinery::layout() silently clamps 0 to one invented
     // fastener, so a document carrying a count of 0 would show a joint nobody
     // asked for and no surface would ever say why.
-    if (params.count < 1) {
+    if (params.count < Joinery::kMinItemCount) {
         refuseJointEdit(tr("A joint needs at least one item — the count can't go below 1"));
         return false;
     }
     // ...and an upper bound, for the same reason from the other side: every
-    // item is a meshed solid, and a four-figure count typed by accident is a
-    // frozen window rather than a plan.
-    constexpr int kMaxItems = 100;
-    if (params.count > kMaxItems) {
-        refuseJointEdit(tr("A joint can carry at most %1 items").arg(kMaxItems));
+    // item is a meshed shape, and a four-figure count typed by accident is a
+    // frozen window rather than a plan. Both bounds come from Joinery itself
+    // now rather than a literal here, because the LOAD path refuses a file on
+    // exactly these numbers (Joinery::parametersInRange()) - a count this
+    // window will not accept must not arrive through a manifest instead.
+    if (params.count > Joinery::kMaxItemCount) {
+        refuseJointEdit(tr("A joint can carry at most %1 items").arg(Joinery::kMaxItemCount));
         return false;
     }
 

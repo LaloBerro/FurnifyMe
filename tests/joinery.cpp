@@ -19,6 +19,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <limits>
 #include <string>
 
 namespace {
@@ -1181,6 +1182,150 @@ int main()
               "permitted noun");
     }
 
+    // --- the per-kind contact caveat: a housing wants an end against a face
+    // (whole-branch review, Finding 2 - RULED as a caveat, never a refusal)
+    // The spec states the rule ("a dado wants end-against-face") and nothing
+    // enforced it: validityOf() never reads Contact::endOn, so two boards laid
+    // face to face were offered a dado, a rabbet, a groove and a mortise with
+    // nothing said. A hard gate was ruled OUT - the spec also makes host and
+    // housed the user's own choice, and the coverage rule endOn is read from
+    // has named limits (a back panel on a carcase side's edge reads the side as
+    // end-on) - so this reaches the user the way the region shortfall already
+    // does: one sentence beside the joint, and every kind still offered. ------
+    {
+        // A REAL lamination, not a hand-built contact: two equal boards glued
+        // face to face, so each one's contacting face is covered whole and
+        // neither can be more than twice the other - findContact() names
+        // Neither, which is the precondition this caveat turns on. Measured
+        // here rather than assumed, because a fixture that quietly produced a
+        // decisive endOn would make every check below vacuous.
+        const TopoDS_Shape lower =
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 300.0, 200.0, 18.0).Shape();
+        const TopoDS_Shape upper =
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 18.0), 300.0, 200.0, 18.0).Shape();
+        const Joinery::ContactResult glued = Joinery::findContact(lower, upper);
+        check(glued.ok && glued.contact.type == Joinery::Contact::Type::Face &&
+                  glued.contact.endOn == Joinery::Contact::EndOn::Neither,
+              "two boards laid face to face are a face contact that names NO "
+              "end-on piece (" + glued.error + ")");
+        if (glued.ok) {
+            const std::string housed =
+                Joinery::contactKindCaveat(Joinery::Kind::Dado, glued.contact);
+            check(!housed.empty() && housed.find("end-on") != std::string::npos,
+                  "so a dado on it carries the per-kind caveat (" + housed + ")");
+            check(Joinery::contactKindCaveat(Joinery::Kind::MortiseTenon, glued.contact) == housed,
+                  "and a mortise and tenon carries the same one - both are cut "
+                  "INTO one piece, so both want the other's end");
+            check(Joinery::contactKindCaveat(Joinery::Kind::Rabbet, glued.contact) == housed &&
+                      Joinery::contactKindCaveat(Joinery::Kind::Groove, glued.contact) == housed,
+                  "as do the other two housings");
+
+            // A FASTENER never carries it: a row of dowels does not care how the
+            // two pieces meet, which is the whole reason this is per-kind.
+            check(Joinery::contactKindCaveat(Joinery::Kind::Dowel, glued.contact).empty() &&
+                      Joinery::contactKindCaveat(Joinery::Kind::Screw, glued.contact).empty(),
+                  "while a fastener on the very same contact carries none");
+            check(Joinery::contactKindCaveat(Joinery::Kind::HalfLap, glued.contact).empty(),
+                  "and neither does a half-lap, which is cut into both pieces");
+
+            // A CAVEAT, NOT A VETO - the promise that makes this safe to ship.
+            check(Joinery::validityOf(Joinery::Kind::Dado, glued.contact).empty() &&
+                      Joinery::validityOf(Joinery::Kind::MortiseTenon, glued.contact).empty(),
+                  "and every one of them is still VALID on it - the caveat "
+                  "refuses nothing");
+            const std::vector<Joinery::Kind> offered = Joinery::validKindsFor(glued.contact);
+            check(offered.size() == 9 &&
+                      std::find(offered.begin(), offered.end(), Joinery::Kind::Dado) != offered.end(),
+                  "and the full set of nine kinds is still offered on a lamination");
+        }
+
+        // The contact that DOES name a host says nothing: a shelf standing on a
+        // panel's face is exactly what a dado is for.
+        const TopoDS_Shape panel =
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 18.0, 300.0, 800.0).Shape();
+        const TopoDS_Shape shelf =
+            BRepPrimAPI_MakeBox(gp_Pnt(18.0, 0.0, 400.0), 600.0, 300.0, 18.0).Shape();
+        const Joinery::ContactResult endOn = Joinery::findContact(panel, shelf);
+        check(endOn.ok && endOn.contact.endOn != Joinery::Contact::EndOn::Neither,
+              "sanity: the shelf-on-panel contact DOES name an end-on piece");
+        if (endOn.ok) {
+            check(Joinery::contactKindCaveat(Joinery::Kind::Dado, endOn.contact).empty(),
+                  "so a dado on a shelf standing against a panel carries no "
+                  "caveat - it is the joint the contact is asking for");
+        }
+
+        // An OVERLAP carries none either way. findContact() sets endOn to
+        // Neither there BY CONSTRUCTION (a lap has no end grain), so without the
+        // type gate this would fire on every half-lap ever made.
+        const TopoDS_Shape railA =
+            BRepPrimAPI_MakeBox(gp_Pnt(0.0, 0.0, 0.0), 400.0, 40.0, 20.0).Shape();
+        const TopoDS_Shape railB =
+            BRepPrimAPI_MakeBox(gp_Pnt(150.0, -100.0, 0.0), 60.0, 300.0, 20.0).Shape();
+        const Joinery::ContactResult crossed = Joinery::findContact(railA, railB);
+        check(crossed.ok && crossed.contact.type == Joinery::Contact::Type::Overlap &&
+                  crossed.contact.endOn == Joinery::Contact::EndOn::Neither,
+              "sanity: a crossing is an Overlap that names Neither - the case the "
+              "type gate exists for");
+        if (crossed.ok) {
+            check(Joinery::contactKindCaveat(Joinery::Kind::HalfLap, crossed.contact).empty() &&
+                      Joinery::contactKindCaveat(Joinery::Kind::Dado, crossed.contact).empty(),
+                  "and no kind carries the per-kind caveat on an overlap");
+        }
+
+        // --- caveatsFor(): ONE channel, both caveats -----------------------
+        // Hand-built so BOTH conditions hold at once and exactly - a real
+        // contact that is short of its rectangle AND names no end-on piece is
+        // hard to build deterministically, and what needs pinning is the
+        // composition, not the geometry.
+        Joinery::Contact both;
+        both.type = Joinery::Contact::Type::Face;
+        both.frame = gp_Ax3(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0), gp_Dir(1.0, 0.0, 0.0));
+        both.uMin = 0.0; both.uMax = 100.0;
+        both.vMin = 0.0; both.vMax = 100.0;
+        both.regionAreaMm2 = 10000.0 * 0.5;   // half its own rectangle
+        // endOn is left at its default, Neither - the hand-built contact's own
+        // documented reading ("no host known", never a guess).
+        const std::string shortfall = Joinery::regionShortfallCaveat(both);
+        const std::string perKind = Joinery::contactKindCaveat(Joinery::Kind::Dado, both);
+        const std::string composed = Joinery::caveatsFor(Joinery::Kind::Dado, both);
+        check(!shortfall.empty() && !perKind.empty(),
+              "sanity: the composed fixture really does carry both caveats");
+        check(composed.find(shortfall) != std::string::npos &&
+                  composed.find(perKind) != std::string::npos,
+              "caveatsFor carries BOTH caveats when both apply, losing neither");
+        check(composed == shortfall + " \xE2\x80\x94 " + perKind,
+              "joined by an em dash, the app's own clause separator (" + composed + ")");
+        // And it is a superset, never a replacement: the caveat that was already
+        // shipping still comes through on its own for a kind that adds nothing.
+        check(Joinery::caveatsFor(Joinery::Kind::Dowel, both) == shortfall,
+              "while a fastener on the same contact gets exactly the shortfall "
+              "caveat it always did - the composed channel added nothing to it");
+        Joinery::Contact plain = both;
+        plain.regionAreaMm2 = 10000.0;
+        plain.endOn = Joinery::Contact::EndOn::B;
+        check(Joinery::caveatsFor(Joinery::Kind::Dado, plain).empty(),
+              "and a plain rectangular contact with a host named carries nothing "
+              "at all - the channel is silent when there is nothing to say");
+
+        // The new sentence is user-visible, so it is held to the vocabulary law
+        // the shortfall caveat's own text already is: no banned word, matched
+        // case-insensitively, and "join" only ever inside "joint".
+        std::string lowerCaveat = perKind;
+        std::transform(lowerCaveat.begin(), lowerCaveat.end(), lowerCaveat.begin(),
+                       [](unsigned char ch) { return std::tolower(ch); });
+        for (const std::string& banned :
+             {std::string("solid"), std::string("fuse"), std::string("merge"),
+              std::string("bevel"), std::string("round"), std::string("flatten"),
+              std::string("symmetry"), std::string("occt"), std::string("mm3"),
+              std::string("(s)")}) {
+            check(lowerCaveat.find(banned) == std::string::npos,
+                  "the per-kind caveat does not contain the banned word \"" + banned + "\"");
+        }
+        check(lowerCaveat.find("joint") != std::string::npos ||
+                  lowerCaveat.find("join") == std::string::npos,
+              "and if \"join\" appears at all it is as part of \"joint\"");
+    }
+
     // --- laying fasteners out along the contact -----------------------
     {
         Joinery::Contact c;
@@ -1779,8 +1924,16 @@ int main()
                   r.referenceEdgeA == "left" || r.referenceEdgeA == "right" ||
                   r.referenceEdgeA == "top" || r.referenceEdgeA == "bottom",
               "by a word a person can find on the wood (" + r.referenceEdgeA + ")");
-        check(r.referenceEdgeB == r.referenceEdgeA,
-              "and bodyB's own reference edge is carried too, not left empty");
+        // The SAME WORD, necessarily rather than coincidentally (whole-branch
+        // review, Minor 5): one contact has one frame and one run, and
+        // edgeName() maps that single world direction to a single word - neither
+        // piece's own geometry is consulted, so there is no second answer B
+        // could carry. The reference edge is one physical line where the two
+        // pieces meet and both are marked from it. Pinned as an EQUALITY, so a
+        // future change that tried to derive the two separately would have to
+        // come here and read Joinery::Readout's own comment first.
+        check(r.referenceEdgeB == r.referenceEdgeA && !r.referenceEdgeB.empty(),
+              "and bodyB's reference edge is that same word, not a second answer");
     }
 
     // --- the readout distinguishes families: depthB and width -----------
@@ -2346,6 +2499,68 @@ int main()
         check(oldLoaded.joints().empty(), "...and simply has no joints");
     }
 
+    // --- the parameter bounds themselves: ONE rule, two surfaces ----------
+    // (whole-branch review, Minor 4.) The bounds used to live at the UI alone,
+    // so a file bounded nothing. Joinery::parametersInRange() is what both the
+    // chip's own count refusal and DocumentModel::fromSerialized() now read.
+    {
+        check(Joinery::parametersInRange(Joinery::Parameters()),
+              "bounds: the struct's own defaults are in range - a bound that "
+              "refused those would refuse every file ever written");
+        check(Joinery::parametersInRange(Joinery::defaultsFor(Joinery::Kind::Dowel, 18.0)) &&
+                  Joinery::parametersInRange(Joinery::defaultsFor(Joinery::Kind::MortiseTenon, 18.0)) &&
+                  Joinery::parametersInRange(Joinery::defaultsFor(Joinery::Kind::Dado, 6.0)),
+              "bounds: and so is every defaults block this app proposes");
+
+        // A merely LARGE value is legitimate and must stay loadable: the chip
+        // stores a typed inset verbatim, layout() clamps it, readout() reports
+        // the clamped number. This is the line between a bound and a
+        // plausibility judgement, and it is the reason the bound is not a clamp.
+        Joinery::Parameters wide;
+        wide.insetMm = 500.0;
+        check(Joinery::parametersInRange(wide),
+              "bounds: a 500 mm inset is IN range - out of range for its contact, "
+              "but a number the app itself stores");
+
+        const auto refuses = [](const Joinery::Parameters& p, const std::string& what) {
+            check(!Joinery::parametersInRange(p), "bounds: refused - " + what);
+        };
+        Joinery::Parameters p;
+        p = Joinery::Parameters(); p.count = 0;
+        refuses(p, "a count of zero");
+        p = Joinery::Parameters(); p.count = Joinery::kMaxItemCount + 1;
+        refuses(p, "a count one past the maximum");
+        p = Joinery::Parameters(); p.count = 100000;
+        refuses(p, "a four-figure count, which would mesh that many shapes on load");
+        p = Joinery::Parameters(); p.endMarginMm = -1000.0;
+        refuses(p, "a negative end margin, which lays a row outside its contact");
+        p = Joinery::Parameters(); p.depthAMm = -1.0;
+        refuses(p, "a negative depth");
+        p = Joinery::Parameters(); p.sizeMm = std::numeric_limits<double>::quiet_NaN();
+        refuses(p, "a size that is not a number");
+        p = Joinery::Parameters(); p.widthMm = std::numeric_limits<double>::infinity();
+        refuses(p, "an infinite width");
+        p = Joinery::Parameters(); p.angleDeg = 200.0;
+        refuses(p, "an angle past a quarter turn");
+
+        // The boundaries are INCLUSIVE at both ends, pinned exactly so a
+        // mutation sliding either one by a single item is caught.
+        p = Joinery::Parameters(); p.count = Joinery::kMinItemCount;
+        check(Joinery::parametersInRange(p), "bounds: exactly one item is allowed");
+        p = Joinery::Parameters(); p.count = Joinery::kMaxItemCount;
+        check(Joinery::parametersInRange(p), "bounds: and exactly the maximum is too");
+        // Zero is allowed wherever a length appears, and that is load-bearing:
+        // one Parameters serves all three families, so a housing's depth into B
+        // legitimately IS zero and an unread field must not decide a load.
+        p = Joinery::Parameters(); p.depthBMm = 0.0; p.stopMm = 0.0; p.insetMm = 0.0;
+        check(Joinery::parametersInRange(p),
+              "bounds: a zero depth into B, stop and inset are all allowed - a "
+              "housing's own defaults, not corruption");
+        // An angle may be either sign: layout() signs it again from drilledFrom.
+        p = Joinery::Parameters(); p.angleDeg = -15.0;
+        check(Joinery::parametersInRange(p), "bounds: and an angle leans either way");
+    }
+
     // --- persistence (Task 9): fromSerialized refuses a corrupt joint
     // record OUTRIGHT - never a half-restored document - and each refusal
     // is pinned by WHICH check actually fired, leaving the target document
@@ -2399,6 +2614,58 @@ int main()
             DocumentModel::DocumentMeta::JointRecord r = base;
             r.kindIndex = 99;  // no such Joinery::Kind
             refusalProbe(r, "a kind index outside the enum's range");
+        }
+
+        // The TUNABLES (whole-branch review, Minor 4). The load path used to
+        // accept any number for every one of them, so a manifest carrying
+        // `count: 100000` meshed 100,000 shapes on load and `endMargin: -1000`
+        // laid the row outside its contact, with nothing refusing either.
+        // Refused OUTRIGHT rather than clamped, for the reason on
+        // Joinery::parametersInRange(): every value this app has ever written
+        // comes from defaultsFor()/defaultsForContact() or a bounded parse, so
+        // an out-of-range number in a file is corruption or a hand edit, not an
+        // older build's honest choice for a clamp to rescue.
+        {
+            DocumentModel::DocumentMeta::JointRecord r = base;
+            r.params.count = 100000;
+            refusalProbe(r, "a count no window would ever have accepted");
+        }
+        {
+            DocumentModel::DocumentMeta::JointRecord r = base;
+            r.params.count = 0;
+            refusalProbe(r, "a count of zero");
+        }
+        {
+            DocumentModel::DocumentMeta::JointRecord r = base;
+            r.params.endMarginMm = -1000.0;
+            refusalProbe(r, "a negative end margin");
+        }
+        {
+            DocumentModel::DocumentMeta::JointRecord r = base;
+            r.params.depthAMm = std::numeric_limits<double>::quiet_NaN();
+            refusalProbe(r, "a depth that is not a number at all");
+        }
+        {
+            DocumentModel::DocumentMeta::JointRecord r = base;
+            r.adjustments.push_back(
+                Joinery::Adjustment{0, std::numeric_limits<double>::infinity(), 0.0});
+            refusalProbe(r, "an adjustment at infinity, which would put an item's "
+                            "world centre at NaN");
+        }
+
+        // ...and the counterweight, without which the bound above would be a
+        // plausibility judgement rather than a bound: a merely LARGE value is a
+        // document this app itself writes, and it still loads, verbatim.
+        {
+            DocumentModel::DocumentMeta meta = cleanMeta;
+            DocumentModel::DocumentMeta::JointRecord r = base;
+            r.params.insetMm = 500.0;
+            meta.joints.push_back(r);
+            DocumentModel target;
+            check(target.fromSerialized(serial, meta) && target.joints().size() == 1 &&
+                      std::fabs(target.joints().front().params.insetMm - 500.0) < 1.0e-9,
+                  "fromSerialized still LOADS a 500 mm inset - out of range for its "
+                  "contact, in range as a number, and stored exactly as typed");
         }
         {
             // What FurnitureStore::jsonToJoints() actually produces for a
@@ -3075,9 +3342,62 @@ int main()
         Joinery::Parameters negative = wide;
         negative.insetMm = -5.0;
         const std::vector<Joinery::Item> behind = Joinery::layout(Joinery::Kind::Dowel, negative, c, {});
+        // COUNTED, not a bare `if`: the sibling four lines above already does it
+        // this way, and the whole-branch review proved this gate vacuous BY
+        // MUTATION - `fastenerRow` returning no items for a negative inset left
+        // the suite at "PASS (0 failures)" with the check below silently absent
+        // from the output rather than red.
+        check(!behind.empty(), "inset clamp: a negative inset still lays a row out");
         if (!behind.empty())
             checkNear(behind.front().v, 0.0, 1.0e-9,
                       "inset clamp: a negative inset lands on its near edge");
+
+        // --- and the READOUT reports what was BUILT, not what was asked for ---
+        // (whole-branch review, Finding 1.) layout() clamps three parameters
+        // into the contact; readout() used to report the raw request for all
+        // three, so the drawer printed "inset 500 mm from the face" over a row
+        // this app itself lays at 18 mm - a number a woodworker would transfer
+        // to wood for hardware that is somewhere else. Every expected value
+        // below is the CONTACT's own 18 mm extent, never readout()'s own
+        // output, so none of them can pass by agreeing with itself.
+        const Joinery::Readout wideReadout =
+            Joinery::readout(Joinery::Kind::Dowel, wide, c, tooFar);
+        checkNear(wideReadout.insetMm, 18.0, 1.0e-6,
+                  "readout: a 500 mm inset reads as the 18 mm the row is actually "
+                  "laid at, not as the number that was typed");
+        const Joinery::Readout behindReadout =
+            Joinery::readout(Joinery::Kind::Dowel, negative, c, behind);
+        checkNear(behindReadout.insetMm, 0.0, 1.0e-6,
+                  "readout: and a negative inset reads as the near edge it lands on");
+
+        // The other two clamped parameters, same defect and same fix: a housing's
+        // channel width and a tenon's thickness. 250 mm on an 18 mm contact is as
+        // far out of range as the inset above.
+        Joinery::Parameters wideDado = Joinery::defaultsFor(Joinery::Kind::Dado, 18.0);
+        wideDado.widthMm = 250.0;
+        const Joinery::Readout dadoClamped = Joinery::readout(
+            Joinery::Kind::Dado, wideDado, c, Joinery::layout(Joinery::Kind::Dado, wideDado, c, {}));
+        checkNear(dadoClamped.widthMm, 18.0, 1.0e-6,
+                  "readout: a 250 mm channel width on an 18 mm contact reads as the "
+                  "18 mm channel layout() actually cut");
+        Joinery::Parameters wideTenon = Joinery::defaultsFor(Joinery::Kind::MortiseTenon, 18.0);
+        wideTenon.thicknessMm = 250.0;
+        const Joinery::Readout tenonClamped =
+            Joinery::readout(Joinery::Kind::MortiseTenon, wideTenon, c,
+                             Joinery::layout(Joinery::Kind::MortiseTenon, wideTenon, c, {}));
+        checkNear(tenonClamped.widthMm, 18.0, 1.0e-6,
+                  "readout: and a 250 mm tenon thickness reads as the 18 mm the tenon "
+                  "is actually cut to");
+
+        // The counterweight, which is what makes the three above a RULE rather
+        // than "always report the contact's extent": an in-range value still
+        // reads straight through.
+        const Joinery::Parameters sane = Joinery::defaultsFor(Joinery::Kind::Dowel, 18.0);
+        const Joinery::Readout saneReadout = Joinery::readout(
+            Joinery::Kind::Dowel, sane, c, Joinery::layout(Joinery::Kind::Dowel, sane, c, {}));
+        checkNear(saneReadout.insetMm, 9.0, 1.0e-6,
+                  "readout: an in-range 9 mm inset is still reported as 9 - the clamp "
+                  "is what moved, not every number");
     }
 
     // The summary goes LAST - above every check in this file - so a red check can

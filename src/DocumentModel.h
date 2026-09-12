@@ -518,8 +518,12 @@ public:
     // rest of this function's validate-before-mutate discipline exists to
     // prevent - or (Task 9) a `JointRecord` whose `bodyAPosition`/
     // `bodyBPosition` does not index a real body, whose two positions are
-    // equal, or whose `kindIndex` falls outside `Joinery::Kind`'s own
-    // range. A record missing its "kind"/"a"/"b" JSON key decodes (see
+    // equal, whose `kindIndex` falls outside `Joinery::Kind`'s own
+    // range, or (whole-branch fix wave) whose PARAMETERS could not describe a
+    // real joint at all - `Joinery::parametersInRange()`, the same bound the
+    // joint's chip enforces on a typed value, so a number this app refuses to
+    // accept is one it also refuses to load, and a non-finite adjustment is
+    // refused beside it. A record missing its "kind"/"a"/"b" JSON key decodes (see
     // FurnitureStore::jsonToJoints()) to -1 rather than a plausible-looking
     // 0, so a missing identity field is refused by this SAME range check
     // rather than a third mechanism. Every joint is validated before any

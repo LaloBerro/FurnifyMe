@@ -98,6 +98,39 @@ struct Parameters {
     bool haunched = false;
 };
 
+// The bounds a joint's own numbers sit inside to describe a real joint at
+// all. ONE place, read by BOTH surfaces that judge a `Parameters`: the UI
+// that refuses a typed value (MainWindow::editJointParameters) and the load
+// path that refuses a file (DocumentModel::fromSerialized). Two surfaces,
+// one rule - a number this app will not let you type is a number it will not
+// load either, which is exactly what was missing while the bounds lived at
+// the UI alone.
+inline constexpr int kMinItemCount = 1;
+inline constexpr int kMaxItemCount = 100;
+
+// False when `params` could not describe a real joint whatever contact it is
+// read against: a non-finite number anywhere, a negative length, a count
+// outside [kMinItemCount, kMaxItemCount], or an angle past a quarter turn
+// either way.
+//
+// Deliberately contact-INDEPENDENT, and deliberately not a plausibility
+// judgement. A merely LARGE value is legitimate and must keep loading: the
+// joint's chip stores exactly what was typed, so a 500 mm inset on an 18 mm
+// contact is a document this app itself writes - layout() clamps it into the
+// contact and readout() reports the clamped value, which is the whole of how
+// an out-of-range request is handled. Refusing it on load would refuse a file
+// of our own making, and the load path cannot know the contact anyway. What
+// this rejects is the class of value NO version of this app has ever written:
+// every write path is defaultsFor()/defaultsForContact() or a bounded parse,
+// so a negative depth, a NaN, or a count of 100,000 in a file is corruption
+// or a hand edit, never an older build's honest choice.
+//
+// Zero is allowed everywhere a length appears, and that is not laxness: one
+// Parameters serves all three families and a kind reads only the fields that
+// apply to it, so a Housing's depth into B legitimately IS zero and an unread
+// field left at its own default must never decide whether a document loads.
+bool parametersInRange(const Parameters& params);
+
 // Real-world-sane defaults, measured off the wood: `thinnerThicknessMm` is
 // the thinner of the two pieces at the joint. Dowels land on real drill
 // sizes rather than an arbitrary third of a millimetre.
@@ -431,6 +464,38 @@ std::vector<Kind> validKindsFor(const Contact& contact);
 // reads `contact.regionAreaMm2` directly.
 std::string regionShortfallCaveat(const Contact& contact);
 
+// Non-empty when `kind` is the sort of joint that is CUT INTO one piece - a
+// housing, or a mortise and tenon - and `contact` names no end-on piece at
+// all: two faces laid together, or two equal ends butted. The spec's own
+// per-kind rule ("a dado wants end-against-face") reaching the user as a
+// sentence.
+//
+// A CAVEAT, never a refusal, and that is a ruling rather than an omission.
+// The spec also makes host-and-housed the USER's choice (the joint's chip
+// carries it), and the coverage rule `endOn` is read from has named limits of
+// its own - see kEndOnCoverageRatio: a 6 mm back panel on a carcase side's
+// back edge reads the SIDE as end-on, and a contacting face split into
+// disjoint strips can read a definite and wrong host. A hard gate would
+// therefore refuse joints a woodworker legitimately wants, in a layer that
+// cuts no geometry at all; offering a questionable joint beside a sentence
+// saying why it is questionable is the smaller harm. Same shape as
+// regionShortfallCaveat() above, for the same reason.
+//
+// Empty for every FASTENER (a row of dowels does not care how the two pieces
+// meet), for a HALF-LAP and for every Overlap contact - a lap has no end
+// grain and findContact() names Neither there BY CONSTRUCTION, so a caveat
+// that fired on it would fire on every lap ever made - and whenever the
+// contact does name an end-on piece.
+std::string contactKindCaveat(Kind kind, const Contact& contact);
+
+// THE caveat channel: every caveat this contact carries for this kind, as one
+// string ready to paint, clauses separated by an em dash like the rest of the
+// app's copy. The two surfaces that show a caveat - the joints drawer's row
+// and the placement message - call THIS and never one of the two above it, so
+// a caveat added later reaches both for free instead of reaching whichever
+// one its author remembered.
+std::string caveatsFor(Kind kind, const Contact& contact);
+
 // One placed piece of the joint - a dowel, a screw, a whole channel, a
 // tenon. `u`/`v` are its position in the contact's own coordinates (what
 // an adjustment moves, and what the readout measures); `centre` is that
@@ -489,7 +554,21 @@ std::vector<Item> layout(Kind kind, const Parameters& params, const Contact& con
 // NAMED edge - "from the front edge: 60, 150, 240" - because an
 // unlabelled number is not a measurement you can transfer to wood.
 struct Readout {
-    std::string referenceEdgeA;   // the edge of bodyA these are measured from
+    // The edge the numbers are measured from, for each piece. THE SAME WORD
+    // IN BOTH, always, and by construction rather than by coincidence: a
+    // contact has ONE frame and ONE run, `alongMm` is measured along that run
+    // from its low end, and edgeName() maps that one world direction to one
+    // word. Neither piece's own geometry is consulted, so there is no second
+    // answer for B to carry - the reference edge is a single physical line
+    // where the two pieces meet, and both of them are marked from it.
+    //
+    // Kept as a PAIR rather than collapsed into one field so a reader asking
+    // "which edge do I measure bodyB from" finds it where they look; this
+    // paragraph is here so nobody writes a consumer expecting the two words
+    // to be ABLE to differ. If a later data model ever gives the two pieces
+    // separate frames, this is the comment that changes with it - and
+    // readout() is the one place that writes either field.
+    std::string referenceEdgeA;
     std::string referenceEdgeB;
     // True when referenceEdgeA/B is one of the six edge WORDS; false when it is
     // the honest no-single-edge sentence. Decided in the one place the word is
