@@ -2933,6 +2933,11 @@ int main()
         swapped.depthAMm = 9.75;
         doc.checkpoint();
         check(doc.swapJointPieces(jointId, swapped), "host swap: accepted for a live joint");
+        // Counted BEFORE the gate, never only inside it: a bare `if` on the size
+        // would let a wrong size skip every check below in silence, which is the
+        // anti-pattern this feature has already produced three times. The
+        // kind-switch block forty lines up does exactly this.
+        check(doc.joints().size() == 1, "host swap: still exactly one joint");
         if (doc.joints().size() == 1) {
             const DocumentModel::Joint& j = doc.joints().front();
             check(j.id == jointId, "host swap: the joint KEEPS its id");
@@ -2943,6 +2948,7 @@ int main()
             check(j.adjustments.empty(), "host swap: and the old frame's adjustments cleared");
         }
         check(doc.undo(), "host swap: one undo");
+        check(doc.joints().size() == 1, "host swap: undo leaves one joint");
         if (doc.joints().size() == 1) {
             const DocumentModel::Joint& j = doc.joints().front();
             check(j.id == jointId && j.bodyA == panel && j.bodyB == shelf,

@@ -1763,6 +1763,13 @@ private:
     // (linkGestureEnvironmentOk()'s two) and a live Mirror placement, whose
     // application-wide key claim this card must never sit beside.
     bool jointEditEnvironmentOk() const;
+    // Re-selects the selected joint's own two pieces after a resync has cleared
+    // the selection - the body selection jointChipJointId() needs, so the card
+    // survives an undo, a redo and a GL-context-loss recovery. Clears the joint
+    // selection instead when the joint is no longer in the live document (an
+    // undo that removed it), and does nothing when either piece is hidden.
+    // Called AFTER resyncView(), never before: see the context-loss handler.
+    void restoreSelectedJointPieces();
     // The rail and the axis gizmo card, kept here rather than found with
     // findChild<>() on demand - both are constructed as locals inside
     // buildOverlay() otherwise, and both need to be reached from the

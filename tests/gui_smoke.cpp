@@ -30230,13 +30230,25 @@ int main(int argc, char* argv[])
                 check(jointById(jDowel).params.count == 3,
                       QStringLiteral("chip: and ONE undo takes it back (%1)")
                           .arg(jointById(jDowel).params.count));
-                check(!chip->isVisible() && cw.selectedJointId() == 0,
-                      "chip: the undo ends the joint selection, and the card goes down with it");
-                check(reselect(jDowel, /*openMore=*/false) &&
-                          fieldOf(JointChip::Slot::Count) != nullptr &&
+                // AN UNDO KEEPS THE JOINT SELECTED (fix round 1, item 3). The
+                // joint is still in the restored document, so it is still
+                // exactly the joint the user picked - losing the card over an
+                // unrelated edit would be Task 12's kept-selection rule dying
+                // for a lesser reason. The card stays up and re-seeds itself
+                // from what the undo restored.
+                check(cw.selectedJointId() == jDowel && chip->isVisible() &&
+                          chip->jointId() == jDowel,
+                      "chip: an undo that did not remove the joint keeps it selected, card and all");
+                check(fieldOf(JointChip::Slot::Count) != nullptr &&
                           fieldOf(JointChip::Slot::Count)->text() == QStringLiteral("3"),
-                      "chip: asking for the joint again brings the card back, seeded from what the "
-                      "undo restored");
+                      "chip: re-seeded from what the undo restored");
+                std::vector<int> afterUndo = cv->selectedSolidIds();
+                std::sort(afterUndo.begin(), afterUndo.end());
+                check(afterUndo == pieces &&
+                          cv->selectionKind() == OcctViewWidget::PickKind::Body,
+                      QStringLiteral("chip: with the joint's own two pieces selected again, which "
+                                     "is what the card stands on (%1 of 2)")
+                          .arg(afterUndo.size()));
             }
 
             // --- Escape leaves the joint untouched -----------------------------
@@ -30777,6 +30789,62 @@ int main(int argc, char* argv[])
                                                 : leaked.join(QStringLiteral(", "))));
                 chip->closeKindMenu();
                 settle(150);
+            }
+
+            // --- an undo that REMOVES the joint clears the selection ----------
+            // The other half of item 3's rule, and the one that keeps it honest:
+            // "keep the selection" must not mean "keep an id pointing at
+            // nothing". Placing a joint is one checkpoint, so one undo removes
+            // it - and with it the selection and the card.
+            {
+                check(reselect(jDowel, /*openMore=*/false), "chip: (a card is up to lose)");
+                cv->setSelectedSolids({panel, shelf});
+                settle(200);
+                const std::size_t before = joints.size();
+                trigger(cw, QStringLiteral("Joint"));
+                settle(300);
+                const bool placed = joints.size() == before + 1;
+                const int placedId = placed ? joints.back().id : 0;
+                check(placed && cw.selectedJointId() == placedId && chip->isVisible(),
+                      "chip: (J placed a joint, selected it, and its card is up)");
+                trigger(cw, QStringLiteral("Undo"));
+                settle(350);
+                check(joints.size() == before && cw.selectedJointId() == 0 && !chip->isVisible(),
+                      "chip: an undo that REMOVED the joint clears the selection and the card - "
+                      "keeping a selection must never mean keeping an id that points at nothing");
+            }
+
+            // --- the card comes back after a lost GL context (item 4) ---------
+            // Task 12 made the joint selection survive a context loss because
+            // the document did not change. The card now survives with it: the
+            // body selection it stands on is restored AFTER resyncView(), which
+            // is the only safe moment - and the readiness guard in
+            // projectToScreen() is what makes the projection during that
+            // rebuild a refusal rather than a fault.
+            {
+                check(reselect(jDowel, /*openMore=*/false) && chip->isVisible(),
+                      "chip: (a card is up before the context loss)");
+                const int shownBefore = cv->jointsShown();
+                QOpenGLContext* glContext = cv->context();
+                check(glContext != nullptr, "chip: the viewport holds a live GL context to lose");
+                if (glContext != nullptr) {
+                    const int releasesBefore = OcctViewWidget::glReleaseCount();
+                    emit glContext->aboutToBeDestroyed();
+                    settle(400);
+                    check(OcctViewWidget::glReleaseCount() == releasesBefore + 1,
+                          "chip: the loss really released the viewer");
+                    check(cw.selectedJointId() == jDowel && cv->jointsShown() == shownBefore,
+                          QStringLiteral("chip: the joint is still selected and its hardware is "
+                                         "back (%1 drawn, was %2)")
+                              .arg(cv->jointsShown()).arg(shownBefore));
+                    std::vector<int> afterLoss = cv->selectedSolidIds();
+                    std::sort(afterLoss.begin(), afterLoss.end());
+                    check(afterLoss == pieces,
+                          QStringLiteral("chip: with its two pieces selected again (%1 of 2)")
+                              .arg(afterLoss.size()));
+                    check(chip->isVisible() && chip->jointId() == jDowel,
+                          "chip: so the CARD comes back too, rather than needing a re-pick");
+                }
             }
 
             check(cw.findChild<QDialog*>() == nullptr, "chip: no modal appeared for any of it");

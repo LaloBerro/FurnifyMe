@@ -412,11 +412,10 @@ JointChip::~JointChip()
 
 void JointChip::applyTheme()
 {
-    const QString fieldStyle =
-        QStringLiteral("QLineEdit { background-color: %1; color: %2; border: 1px solid %3; "
-                       "border-radius: 5px; padding: 1px 6px; } "
-                       "QLineEdit:focus { border: 2px solid %4; padding: 0px 5px; } "
-                       "QLineEdit:disabled { color: %5; }");
+    // The field stylesheet is restyleField()'s ALONE - it is the one that knows
+    // whether the field is marked invalid. A second copy here was dead, and a
+    // maintainer editing the prominent dead one would have changed nothing on
+    // screen with the unused-variable warning switched off to hide it.
     for (int i = 0; i < kSlotCount; ++i) {
         QLineEdit* edit = myFields[static_cast<std::size_t>(i)];
         if (!edit) continue;
@@ -425,7 +424,6 @@ void JointChip::applyTheme()
         edit->setFont(Theme::bodyFont());
         restyleField(static_cast<Slot>(i));
     }
-    Q_UNUSED(fieldStyle);
 
     if (myKindButton) {
         myKindButton->setFont(Theme::labelFont());

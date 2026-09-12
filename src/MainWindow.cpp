@@ -859,18 +859,23 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         const int keptJoint = mySelectedJointId;
         resyncView();
         mySelectedJointId = keptJoint;
-        // THE BODY SELECTION IS NOT PUT BACK HERE, and that is deliberate.
-        // resyncView() clears it with the viewer, so a joint that survives the
-        // loss has no selection beside it and its chip (Task 13) stays down
-        // until the user picks the joint again - the hardware comes back, the
-        // card does not. Restoring it was tried and CRASHED the suite: this
-        // handler runs from inside QOpenGLContext::aboutToBeDestroyed, after
-        // releaseGlResources() has dropped the V3d_View, and
-        // setSelectedSolids() reaches that released view through its own
-        // redraw/annotation path. Rebuilding the view here to satisfy a card
-        // would be doing the migration's work in the one handler that must not
-        // touch a dying context - see OcctViewWidget's "context lifetime is
-        // OWNED" note.
+        // ...AND THE BODY SELECTION THE CARD STANDS ON, restored here - AFTER
+        // resyncView(), never before it. resyncView() clears the selection with
+        // the viewer, and jointChipJointId() needs the joint's own two pieces
+        // selected, so without this the hardware came back and the card did not.
+        //
+        // This is the one ordering that is safe, and the difference is not
+        // stylistic. An earlier cut restored the selection BEFORE resyncView()
+        // had rebuilt anything and crashed the suite - not because selecting is
+        // forbidden here, but because everything downstream of it projects a
+        // point through a V3d_View that releaseGlResources() had just dropped
+        // and initializeGL() had not yet replaced. That window is what
+        // OcctViewWidget::viewReady() now closes at the one function every
+        // projecting overlay goes through, which is what makes this line
+        // ordinary rather than clever: by the time it runs, resyncView() has
+        // re-displayed every solid, and any projection that is still too early
+        // is refused rather than faulting.
+        restoreSelectedJointPieces();
         setRenderModeEnabled(false);
         // The joints' hardware went with the context too (releaseGlResources()
         // detaches the renderer and forgets what it drew), and nothing about
@@ -4500,8 +4505,19 @@ void MainWindow::onUndo()
     // An outline the undo handed back is the thing the user just took back,
     // so it becomes the one Extrude will consume - see adoptRestoredOutline().
     adoptRestoredOutline(outlinesBefore);
+    // A SELECTED JOINT SURVIVES AN UNDO THAT DID NOT REMOVE IT. Task 12 made
+    // the joint selection survive a GL context loss on the reasoning that the
+    // document had not changed; an undo DOES change the document, but if the
+    // joint is still in the restored one then it is still exactly the joint the
+    // user picked, and losing the card over an unrelated edit is that same
+    // selection dying for a lesser reason. Captured before the clear, put back
+    // after resyncView(), and dropped by restoreSelectedJointPieces() itself
+    // when the undo took the joint away - which is correct, not a regression.
+    const int keptJoint = mySelectedJointId;
     myView->clearSelection();
     resyncView();
+    mySelectedJointId = keptJoint;
+    restoreSelectedJointPieces();
     updateActions();
     emit documentChanged();
     statusBar()->showMessage(myDocument.count() == 1
@@ -4521,8 +4537,12 @@ void MainWindow::onRedo()
     // The same rule the other way: a redo that brings an outline back is the
     // user putting it there, so it is the one they mean.
     adoptRestoredOutline(outlinesBefore);
+    // The same rule the other way - see onUndo().
+    const int keptJoint = mySelectedJointId;
     myView->clearSelection();
     resyncView();
+    mySelectedJointId = keptJoint;
+    restoreSelectedJointPieces();
     updateActions();
     emit documentChanged();
     statusBar()->showMessage(myDocument.count() == 1
@@ -6954,6 +6974,26 @@ bool MainWindow::jointEditEnvironmentOk() const
     if (isCompareOpen()) return false;
     if (myView->mirrorPlacementActive()) return false;
     return true;
+}
+
+void MainWindow::restoreSelectedJointPieces()
+{
+    // ONE implementation of "the selected joint keeps its card", called from
+    // the three places a resync can take the selection out from under it: an
+    // undo, a redo, and a GL-context-loss recovery. Never a fourth mechanism -
+    // the id is validated against the LIVE document here, so a joint the undo
+    // removed clears the selection rather than pointing at nothing.
+    if (mySelectedJointId <= 0) return;
+    DocumentModel::Joint joint;
+    if (!jointOf(mySelectedJointId, joint)) {
+        mySelectedJointId = 0;
+        return;
+    }
+    // Only when both pieces are on screen: setSelectedSolids() refuses a hidden
+    // body, and an empty selection would run onSelectionChanged()'s own "the
+    // bodies are gone, so is the joint" rule and undo this.
+    if (!myView->isSolidVisible(joint.bodyA) || !myView->isSolidVisible(joint.bodyB)) return;
+    myView->setSelectedSolids({joint.bodyA, joint.bodyB});
 }
 
 bool MainWindow::jointOf(int jointId, DocumentModel::Joint& out) const
