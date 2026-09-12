@@ -1228,7 +1228,7 @@ a **planning layer and nothing else: no code anywhere cuts a shape.** A joint is
 wood the user will cut by hand — drawn as ghosted hardware seen through the boards, read off
 as numbers to mark with a pencil and a square.
 
-- **`DocumentModel::Joint` is `{id, kind, bodyA, bodyB, parameters, adjustments}` and holds not
+- **`DocumentModel::Joint` is `{id, kind, bodyA, bodyB, params, adjustments}` and holds not
   one coordinate.** Where the hardware actually is gets DERIVED from the two live shapes every
   time it is wanted — `Joinery::derive()` runs `findContact` → `validityOf` → `layout` →
   `readout` end to end — so a joint follows its pieces for free: pull a face, bevel an edge,
@@ -1237,7 +1237,7 @@ as numbers to mark with a pencil and a square.
   world point would have to be re-derived at every edit site, and the site somebody missed
   would be the one that lied. Even a per-item override is stored in the CONTACT's own (u, v)
   frame (`Joinery::Adjustment`) rather than as a point, for exactly that reason.
-- **Nine kinds on three families** (`Joinery::familyOf`): **Fasteners** — Dowel, Pocket screw,
+- **Ten kinds on three families** (`Joinery::familyOf`): **Fasteners** — Dowel, Pocket screw,
   Biscuit, Domino, Screw — lay N discrete items in a row along the contact; **Housings** —
   Dado, Rabbet, Groove — cut a channel in one piece that the other sits in; **Interlocks** —
   Mortise and tenon, Half-lap — remove complementary material from both. One `Parameters`

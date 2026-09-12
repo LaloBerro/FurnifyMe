@@ -30974,7 +30974,15 @@ int main(int argc, char* argv[])
             check(mirroredJoint.bodyA == twinPanel && mirroredJoint.bodyB == twinShelf,
                   "rest: between the two TWINS, and bodyA stays bodyA - which piece hosts "
                   "the joint is the joint's own plan");
-            check(mirroredJoint.kind == Joinery::Kind::Dowel &&
+            // `id > 0` for the same reason its neighbour below carries it, and
+            // this one is the thinner escape: a default-constructed Joint is
+            // already `kind = Dowel`, and at this fixture's 18 mm board
+            // defaultsForContact() returns the struct's own `count = 3` and
+            // `sizeMm = 6.0` too - only depthAMm (13.5 against 15.0) makes the
+            // rest discriminate. At a 20 mm board even that coincides. A check
+            // that survives on arithmetic accident is one fixture edit from
+            // being vacuous.
+            check(mirroredJoint.id > 0 && mirroredJoint.kind == Joinery::Kind::Dowel &&
                       mirroredJoint.params.count == seededParams.count &&
                       std::fabs(mirroredJoint.params.sizeMm - seededParams.sizeMm) < 1.0e-9 &&
                       std::fabs(mirroredJoint.params.depthAMm - seededParams.depthAMm) < 1.0e-9,
@@ -31102,6 +31110,80 @@ int main(int argc, char* argv[])
                                  "together (%1 bodies, %2 joints, %3 rows)")
                       .arg(rw.document().count()).arg(restJoints.size())
                       .arg(restPanel->rowCount()));
+            // --- half a mirrored joint is not a plan --------------------------
+            //
+            // The refusal branch every scenario above walks straight past: a
+            // joint one of whose pieces gets a twin while the other does not.
+            // Turning mirroring off for the delete probe left everything
+            // unpaired, so mirroring the PANEL ALONE builds exactly that state -
+            // the panel's twin arrives, the shelf has none, and the joint
+            // between them has nothing to be copied onto. Note which guard this
+            // reaches: the panel IS freshly paired, so the freshness filter
+            // hands this joint through to the twin test rather than skipping it,
+            // which is what makes this a pin on the refusal itself.
+            rv->clearSelection();
+            settle(120);
+            rv->setSelectedSolids({panel});
+            settle(150);
+            const std::size_t jointsBeforeOneSided = restJoints.size();
+            const std::size_t bodiesBeforeOneSided = rw.document().count();
+            trigger(rw, QStringLiteral("Mirror"));
+            check(rv->mirrorPlacementActive(),
+                  "rest: (a placement begins with the panel alone selected)");
+            sendKeyTo(&rw, Qt::Key_Return);
+            settle(300);
+            check(rw.document().count() == bodiesBeforeOneSided + 1 &&
+                      rw.document().twinOf(panel) > 0 && rw.document().twinOf(shelf) == -1,
+                  QStringLiteral("rest: (the panel alone is paired - it has a twin, the shelf "
+                                 "has none) (%1 bodies)").arg(rw.document().count()));
+            check(restJoints.size() == jointsBeforeOneSided,
+                  QStringLiteral("rest: a joint whose other piece has no twin is NOT copied - "
+                                 "half a mirrored joint is not a plan (%1 joints, was %2)")
+                      .arg(restJoints.size()).arg(jointsBeforeOneSided));
+            check(!restToastText().contains(QStringLiteral("joint mirrored")),
+                  QStringLiteral("rest: ...and the message does not claim one was (\"%1\")")
+                      .arg(restToastText()));
+
+            // --- this probe's own toasts join the vocabulary sweep -------------
+            //
+            // The SAME mechanism the rename probe's own sweep uses
+            // (Toast::paintedTexts() records every message shown this run, not
+            // only the live one), pointed at `rw`. The suite's toast sweep walks
+            // the SHARED window many thousands of lines before this block, which
+            // builds its own MainWindow and is registered last in kBlocks - so
+            // the two clauses this task added were swept by nothing at all.
+            {
+                QStringList restToastCopy;
+                for (Toast* toastWidget : rw.findChildren<Toast*>())
+                    restToastCopy += toastWidget->paintedTexts();
+                const auto sawClause = [&](const QString& fragment) {
+                    return std::any_of(restToastCopy.begin(), restToastCopy.end(),
+                                       [&](const QString& text) { return text.contains(fragment); });
+                };
+                // Non-vacuity, and specifically about THIS task's two strings: a
+                // sweep of a channel that never carried them passes exactly as
+                // loudly as a clean one.
+                check(sawClause(QStringLiteral("joint mirrored with them")) &&
+                          sawClause(QStringLiteral("the mirrored twins carry it too")),
+                      QStringLiteral("rest: (the toast channel carries both clauses this task "
+                                     "added, so the sweep below is about them - %1 messages)")
+                          .arg(restToastCopy.size()));
+                QStringList restToastOffenders;
+                for (const QString& text : restToastCopy) {
+                    for (const QString& word : bannedWords()) {
+                        if (usesBannedWord(text, word))
+                            restToastOffenders
+                                << (text + QStringLiteral(" [") + word + QStringLiteral("]"));
+                    }
+                }
+                check(restToastOffenders.isEmpty(),
+                      QStringLiteral("rest: and every message this probe has shown uses no banned "
+                                     "word - \"joint\" passes on the stem exception alone (%1)")
+                          .arg(restToastOffenders.isEmpty()
+                                   ? QStringLiteral("none")
+                                   : restToastOffenders.join(QStringLiteral(", "))));
+            }
+
             check(rw.findChild<QDialog*>() == nullptr, "rest: no modal appeared for any of it");
         }
 
