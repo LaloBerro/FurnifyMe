@@ -176,6 +176,18 @@ the floor check, so a filtered run can never be mistaken for an official
 one; only a plain, filter-less invocation is the real gate, and that
 invocation's accounting is unchanged by any of this.
 
+**`kCheckFloor` is 4126, and it is ~4 LOW as of the joinery merge — read this before
+trusting it.** The number is real: two consecutive official runs measured 4125 checks + 1
+environment skip = 4126, agreeing to the digit, and it is committed with its provenance.
+But the branch's last two commits (the drawer-numbers fix and its pin) added roughly five
+more checks *after* that run, and the user deliberately chose to merge without taking a
+third one. So the floor sits about four below the true accounted total. It cannot produce a
+false pass — a floor below the total never does — but it does mean **about four checks could
+stop running without the gate noticing**, which is exactly the slack the floor exists to
+remove. The next official run should re-ratchet to whatever it measures, and must not
+compute the number: this project has twice chosen measuring over arithmetic here, both times
+because a floor written from a prediction is a number nobody has ever seen the suite produce.
+
 **The no-input law runs both ways.** `gui_smoke` installs an application-wide filter that
 drops every *spontaneous* mouse, wheel and key event, so the machine's own user cannot drive
 the app under test either. That is not belt-and-braces: Windows' "scroll inactive windows on
@@ -734,8 +746,9 @@ they generalize.
   `the-3d-gizmos-unlit-tokens-hover-and-handles` (hover brighten + cursor, dead negative
   handles, ink at fifteen tool×camera combinations), and the size block now pins ONE
   screen size at every zoom plus the `gizmoScale` token. `kCheckFloor` was LOWERED
-  deliberately to 3100 with the deletions and must be re-ratcheted on the next official
-  run.
+  deliberately to 3100 with the deletions. **That debt is settled** — the joinery branch
+  re-ratcheted it to a measured **4126** (see the joinery section's closing note for the
+  one caveat that came with it).
 
 **`Theme` is spec-backed** since the Appearance panel: every colour accessor and the four
 derived fonts (badge = base−2, label = base−1, body = base, title = base+3 pt) read
@@ -1307,6 +1320,34 @@ as numbers to mark with a pencil and a square.
   "groove" are the real woodworking names for two of the housings and collide with nothing:
   neither is in the banned `bevel` family, which is Fillet's and Chamfer's Never column, and a
   housing is material removed to seat another board rather than an edge rounded or flattened.
+
+**Closing note on how far the suite was actually run, since `kCheckFloor` points here.** The
+branch's own gate is honest about one gap. Two consecutive official runs measured **4125 checks
++ 1 environment skip = 4126**, agreeing to the digit, and that measured number is what
+`kCheckFloor` carries — the 3100 the gizmo deletion left behind is settled. But the last two
+commits (`readout()` reading every number off the `Item` that `layout()` built, and the fixture
+that pins the one exception) landed **after** that run and added about five checks, and the
+merge was taken deliberately without a third run. So the floor sits roughly four low: it cannot
+false-pass, but about four checks could stop running unnoticed. The final tree's evidence is all
+six joinery blocks green at 963 checks filtered, and headless at 665 with `ctest` 8/8 — not a
+filter-less invocation. Re-ratchet on the next official run, and **measure it rather than
+computing it**: a predicted floor is a number nobody has watched the suite produce, which is
+the whole reason this project measured it twice instead of adding six to the last one.
+
+**What the green run is worth, and why.** The number to trust on this feature is not 4125 checks
+passing — it is that roughly two dozen mutations were each made to produce a **named** red line,
+that **seven vacuous assertions** were found and closed (a check satisfied by a default value; one
+passing because a helper cleared the selection first; one whose arithmetic coincided with the
+defaults at a single board thickness; two indexed reads gated behind a bare `if (size == N)` with
+no counted `check()`; a "no adjustments" check a default-constructed object also satisfies; and an
+exception whose fixture could not tell its two candidate fields apart), and that **three separate
+harness mechanisms were caught reporting GREEN while never applying the mutation at all** — a
+CRLF anchor against LF files, an anchor spanning an em dash that PowerShell's
+`ReadAllLines`/`WriteAllLines` did not round-trip, and `Copy-Item` preserving mtime so MSBuild
+skipped the rebuild and the run measured a stale exe. All three are in Pitfalls. The rule they
+add up to: **a mutation counts only when it produces a real red line naming the expected check**,
+and a run that produces no output file, or a check that simply vanishes from the output, is a
+failure to apply rather than a pass.
 
 ### Qt plugin deployment - do not remove
 
