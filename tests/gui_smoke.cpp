@@ -665,10 +665,18 @@ void skipByEnvironment(int checks, const QString& why)
 // run): the whole joinery feature's blocks (the headless-backed persistence
 // round trip, the ghosted hardware, placement, the drawer, the chip, and this
 // task's own "joints and the rest of the app" - mirror, isolate, render mode
-// and delete, 45 checks) measured 4119 checks + 1 environment skip. The floor
-// is that accounted total, exactly. The one skip is the RayTracing floor-blend
-// measurement, which does not apply when PathTracing is the session's tier.
-constexpr int kCheckFloor = 4120;
+// and delete, 45 checks) measured 4119 checks + 1 environment skip. The one
+// skip is the RayTracing floor-blend measurement, which does not apply when
+// PathTracing is the session's tier.
+// RE-RATCHETED AGAIN (2026-09-11, Task 14 fix round 1): the round's six new
+// checks - the refusal branch "a joint whose other piece has no twin is NOT
+// copied" (3) and this block's own probe-local toast sweep (2), plus the
+// asymmetry setup (1) - took the block 492 -> 498 filtered. A SECOND official
+// unfiltered run measured 4125 checks + 1 environment skip; the floor is that
+// accounted total, exactly. It was measured rather than computed on purpose:
+// a floor six below the real total lets six checks stop running unnoticed,
+// which is the whole failure this constant exists to catch.
+constexpr int kCheckFloor = 4126;
 
 void check(bool condition, const QString& what)
 {
