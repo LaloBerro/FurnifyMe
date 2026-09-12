@@ -1295,13 +1295,23 @@ Readout readout(Kind kind, const Parameters& params, const Contact& contact,
     // uncut), interlockRegion puts a lap's own far depth or a tenon's LENGTH
     // into B. The old switch said those four things in four places.
     out.depthBMm = built != nullptr ? built->depthBMm : 0.0;
-    // The one number no Item carries. A fastener's widthMm is the
-    // interlock/fastener thickness field, which fastenerRow neither reads nor
-    // clamps - so there is nothing built to read it off, and taking
-    // item.sizeMm here would silently report a dowel's DIAMETER as the joint's
-    // width. Every other family's Item sizeMm IS the built width: a housing's
-    // clamped channel width, a tenon's clamped thickness, a lap's full span
-    // across the overlap.
+    // The one number NOT read off an Item: a fastener's widthMm carries
+    // params.thicknessMm. Three facts together are why F1's raw-versus-clamped
+    // defect class cannot exist here - there is no BUILT COUNTERPART that could
+    // disagree with the request:
+    //   - no Item carries this field at all;
+    //   - fastenerRow neither reads nor clamps thicknessMm, so the request is
+    //     the only value in play - nothing clamps it into anything;
+    //   - item.sizeMm is a DIFFERENT QUANTITY, the dowel's diameter snapped to a
+    //     real drill size by realDowelSize(), so reading it here would report a
+    //     diameter as the joint's width rather than a built version of this.
+    // Pinned on a 20 mm board, where thicknessMm is 6.667 against a 6.0 dowel.
+    // The 24 mm fixture beside it in the suite CANNOT discriminate - there both
+    // are 8.0, so that assertion passes whichever field is read, which is
+    // exactly why it is not the evidence for this line.
+    // Every other family's Item sizeMm IS the built width: a housing's clamped
+    // channel width, a tenon's clamped thickness, a lap's full span across the
+    // overlap.
     out.widthMm = familyOf(kind) == Family::Fasteners
                       ? params.thicknessMm
                       : (built != nullptr ? built->sizeMm : 0.0);

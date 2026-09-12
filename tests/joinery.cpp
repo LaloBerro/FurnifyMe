@@ -1236,7 +1236,9 @@ int main()
             const std::vector<Joinery::Kind> offered = Joinery::validKindsFor(glued.contact);
             check(offered.size() == 9 &&
                       std::find(offered.begin(), offered.end(), Joinery::Kind::Dado) != offered.end(),
-                  "and the full set of nine kinds is still offered on a lamination");
+                  "and nine of this app's TEN kinds are still offered on a lamination - "
+                  "every one but the half-lap, which the pre-existing crossing rule "
+                  "refuses here for its own unrelated reason");
         }
 
         // The contact that DOES name a host says nothing: a shelf standing on a
@@ -1964,6 +1966,38 @@ int main()
         checkNear(dowelReadout.widthMm, dowel24.thicknessMm, 1.0e-9,
                   "and a fastener's width falls back to the interlock/fastener "
                   "thickness field, not the housing width");
+
+        // ...and THAT check cannot tell the two candidate fields apart, which is
+        // why the one below exists. At t = 24 the fastener thickness is 8.0 and
+        // realDowelSize(8.0) is also 8.0, so `item.sizeMm` and
+        // `params.thicknessMm` are the same number and the assertion above
+        // passes whichever one readout() reads - proven by mutation: swapping in
+        // the item's own sizeMm left the whole suite PASS with that check
+        // printing "got 8.0000, wanted 8.0000". A check that cannot fail is the
+        // defect class this branch has spent its length hunting, so the one
+        // number readout() still takes from the PARAMETERS gets a fixture that
+        // discriminates: a 20 mm board puts thicknessMm at 6.667 while the
+        // nearest real dowel at or below that is 6.0.
+        const Joinery::Parameters dowel20 = Joinery::defaultsFor(Joinery::Kind::Dowel, 20.0);
+        const std::vector<Joinery::Item> dowel20Items =
+            Joinery::layout(Joinery::Kind::Dowel, dowel20, c, {});
+        // Non-vacuity first: if these two ever coincide again, every assertion
+        // below is worthless and this is what says so.
+        check(!dowel20Items.empty() &&
+                  std::fabs(dowel20.thicknessMm - dowel20Items.front().sizeMm) > 0.5,
+              "sanity: on a 20 mm board the fastener thickness and the real dowel "
+              "size are genuinely DIFFERENT numbers, so the two checks below can "
+              "tell which field the readout read");
+        const Joinery::Readout dowel20Readout =
+            Joinery::readout(Joinery::Kind::Dowel, dowel20, c, dowel20Items);
+        checkNear(dowel20Readout.widthMm, 20.0 / 3.0, 1.0e-6,
+                  "a fastener's readout width IS the parameter-derived thickness - the "
+                  "one number readout() does not read off an Item, because no Item "
+                  "carries it");
+        check(!dowel20Items.empty() &&
+                  std::fabs(dowel20Readout.widthMm - dowel20Items.front().sizeMm) > 0.5,
+              "and NOT the item's own dowel diameter - a diameter is a different "
+              "quantity from the thickness field a fastener carries here");
 
         // A stray, deliberately non-zero depthBMm left sitting in a Housing's
         // own params - defaultsFor() never sets one, but readout() must not
