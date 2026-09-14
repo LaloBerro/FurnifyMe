@@ -1892,13 +1892,10 @@ void MainWindow::buildOverlay()
     tool(mySubtractAction,    IconSet::Glyph::Cut);
     tool(myIntersectAction,   IconSet::Glyph::Intersect);
     tool(myDeleteAction,      IconSet::Glyph::Delete);
-    rail->addSeparator();
-    // Ten chips, not thirteen: the three selection-mode buttons that used to
-    // close this group are gone with the modes themselves (Phase 2 of the
-    // auto-selection spec). The rail's derived minimum height below follows
-    // for free - it reads rail->sizeHint(), never a count - so the viewport's
-    // floor simply dropped by three buttons and a separator's worth.
-    tool(mySnapAction,        IconSet::Glyph::Snap);
+    // Snap to Grid is View-menu-only now, by the user's call - it is a setting
+    // you flip rarely, not a tool you reach for, and it was the rail's last
+    // checkable chip. The rail's derived minimum height below follows for free:
+    // it reads rail->sizeHint(), never a count.
     rail->addStretch();
     tool(myUndoAction,        IconSet::Glyph::Undo);
     tool(myRedoAction,        IconSet::Glyph::Redo);

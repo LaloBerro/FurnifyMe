@@ -4695,7 +4695,6 @@ int main(int argc, char* argv[])
                 QStringLiteral("Add shape"),
                 QStringLiteral("Union"),         QStringLiteral("Subtract"),
                 QStringLiteral("Intersect"),     QStringLiteral("Delete Selected"),
-                QStringLiteral("Snap to Grid"),
                 QStringLiteral("Undo"),          QStringLiteral("Redo"),
             };
             const QVector<ToolChip*> chips = rail->chips();
@@ -4717,7 +4716,7 @@ int main(int argc, char* argv[])
             check(wrong.isEmpty(),
                   QStringLiteral("and they are the window's own actions in the "
                                  "designed order (%1)")
-                      .arg(wrong.isEmpty() ? QStringLiteral("all eleven match")
+                      .arg(wrong.isEmpty() ? QStringLiteral("all ten match")
                                            : wrong.join(QStringLiteral("; "))));
 
             // ...and the three that are GONE are gone from the WINDOW, not
@@ -4918,32 +4917,37 @@ int main(int argc, char* argv[])
                                                  : unreachable.join(QStringLiteral("; "))));
 
             // ...and a real click on one drives its action, which is the
-            // whole point of an action-driven shell. Snap to Grid inherited
-            // this probe from Select Faces when the three selection-mode
-            // chips went: it is the rail's remaining CHECKABLE action, which
-            // is what the second half of this check needs - a chip that
-            // stores no state of its own can only be proved by moving the
-            // action underneath it and watching the chip follow.
-            QAction* snapForClick = action(window, QStringLiteral("Snap to Grid"));
-            ToolChip* snapClickButton = nullptr;
+            // whole point of an action-driven shell. Items inherited this
+            // probe from Snap to Grid when Snap left the rail for the View
+            // menu: it is the rail's remaining CHECKABLE action, which is what
+            // the second half of this check needs - a chip that stores no
+            // state of its own can only be proved by moving the action
+            // underneath it and watching the chip follow.
+            QAction* itemsForClick = action(window, QStringLiteral("Items"));
+            ToolChip* itemsClickButton = nullptr;
             for (ToolChip* chip : chips) {
-                if (chip->action() == snapForClick) snapClickButton = chip;
+                if (chip->action() == itemsForClick) itemsClickButton = chip;
             }
-            if (snapClickButton && snapForClick) {
-                const bool snapWasOn = snapForClick->isChecked();
-                check(snapWasOn, "Snap to Grid is on before the rail button is clicked");
-                clickAt(snapClickButton, QPointF(snapClickButton->width() / 2.0,
-                                                 snapClickButton->height() / 2.0));
+            check(itemsClickButton != nullptr && itemsForClick != nullptr &&
+                      itemsForClick->isCheckable(),
+                  "the rail's Items button exists and is checkable, so the click probe "
+                  "has a state to move");
+            if (itemsClickButton && itemsForClick) {
+                const bool itemsWasOn = itemsForClick->isChecked();
+                clickAt(itemsClickButton, QPointF(itemsClickButton->width() / 2.0,
+                                                  itemsClickButton->height() / 2.0));
                 settle(120);
-                check(!snapForClick->isChecked() && !snapClickButton->isChecked(),
-                      "clicking the rail's Snap button un-checks the action, and the "
+                check(itemsForClick->isChecked() != itemsWasOn &&
+                          itemsClickButton->isChecked() == itemsForClick->isChecked(),
+                      "clicking the rail's Items button flips the action, and the "
                       "button follows the action rather than itself");
-                snapForClick->trigger();
+                itemsForClick->trigger();
                 settle(120);
-                check(snapForClick->isChecked() && snapClickButton->isChecked(),
-                      "and driving the action alone re-checks the button, which stores "
+                check(itemsForClick->isChecked() == itemsWasOn &&
+                          itemsClickButton->isChecked() == itemsWasOn,
+                      "and driving the action alone flips the button back, which stores "
                       "no state of its own");
-                if (snapForClick->isChecked() != snapWasOn) snapForClick->trigger();
+                if (itemsForClick->isChecked() != itemsWasOn) itemsForClick->trigger();
                 settle(80);
             }
 
@@ -4962,44 +4966,11 @@ int main(int argc, char* argv[])
                                                             QStringLiteral(" / "))
                                  : QString()));
 
-            // ...and it is RECOMPOSED whenever the action changes, not
-            // captured once at construction. Items' tooltip never varies, so
-            // the check above passes against a capture-once implementation.
-            // Snap to Grid's does: updateActions() rebuilds it from
-            // snapTooltipText(), which formats the grid step through Measure
-            // and therefore reads differently in every display unit. Driven
-            // through the real Units actions - the same path the app bar's
-            // unit chip uses - and put back, so the units blocks further down
-            // still start from millimetres.
-            ToolChip* snapButton = nullptr;
-            for (ToolChip* chip : chips) {
-                if (chip->action() == action(window, QStringLiteral("Snap to Grid")))
-                    snapButton = chip;
-            }
-            QAction* toCentimetres = action(window, QStringLiteral("Centimetres"));
-            QAction* toMillimetres = action(window, QStringLiteral("Millimetres"));
-            if (snapButton && toCentimetres && toMillimetres) {
-                const QString before = snapButton->toolTip();
-                check(before.contains(QStringLiteral("Snap to Grid")) &&
-                          before.contains(QStringLiteral("10 mm")),
-                      QStringLiteral("the Snap button's tooltip names its command and "
-                                     "the grid step in millimetres (\"%1\")")
-                          .arg(QString(before).replace(QLatin1Char('\n'),
-                                                       QStringLiteral(" / "))));
-                toCentimetres->trigger();
-                settle(150);
-                const QString after = snapButton->toolTip();
-                check(after != before && after.contains(QStringLiteral("1 cm")) &&
-                          after.contains(QStringLiteral("Snap to Grid")),
-                      QStringLiteral("and it follows the action when the unit changes "
-                                     "rather than being captured once (\"%1\")")
-                          .arg(QString(after).replace(QLatin1Char('\n'),
-                                                      QStringLiteral(" / "))));
-                toMillimetres->trigger();
-                settle(150);
-                check(snapButton->toolTip() == before,
-                      "and back again when the unit is put back");
-            }
+            // The tooltip-RECOMPOSE probe that lived here went with Snap's
+            // chip: Snap to Grid was the only rail action whose tooltip moves
+            // (it formats the grid step through Measure), and no rail chip that
+            // remains has a varying tooltip to probe. ToolChip's recompose on
+            // QAction::changed() is unchanged code.
 
             // --- state rendering, at the glyph -----------------------------
             // Disabled: the SAME chip, rendered either way, sampled over the
@@ -5036,12 +5007,12 @@ int main(int argc, char* argv[])
             // could always have differed at that pixel for some other reason,
             // and one button cannot.
             ToolChip* ringChip = nullptr;
-            QAction* ringAction = action(window, QStringLiteral("Snap to Grid"));
+            QAction* ringAction = action(window, QStringLiteral("Items"));
             for (ToolChip* chip : chips) {
                 if (chip->action() == ringAction) ringChip = chip;
             }
             check(ringChip != nullptr && ringAction != nullptr && ringChip->isChecked(),
-                  "the rail's Snap button is checkable and checked, so the ring probe "
+                  "the rail's Items button is checkable and checked, so the ring probe "
                   "has a state to move");
             if (ringChip && ringAction && ringChip->isChecked()) {
                 const int m = Theme::surfaceShadowMargin();
@@ -11904,7 +11875,7 @@ int main(int argc, char* argv[])
             IconSet::Glyph::Fuse,        IconSet::Glyph::Cut,
             IconSet::Glyph::Intersect,   IconSet::Glyph::Delete,
             IconSet::Glyph::Undo,        IconSet::Glyph::Redo,
-            IconSet::Glyph::Items,       IconSet::Glyph::Snap,
+            IconSet::Glyph::Items,
             // SelectFace and SelectEdge went with the three selection-mode
             // chips (auto-selection spec, Phase 2); SelectSolid survives as
             // Body, still drawn by every ItemsPanel visibility button.

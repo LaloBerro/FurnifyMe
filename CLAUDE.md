@@ -1451,9 +1451,10 @@ rather than floating beside it:
   does. Before this feedback round the two never shared a column and a `std::max()` was the
   correct floor; now that they read as one column, the floor has to be the sum of both,
   because the viewport must clear the header AND the spine stacked, not whichever alone
-  happens to be taller. The rail carries TEN chips since the auto-selection switch deleted
-  Select Bodies/Faces/Edges (Items · Start Sketch, Extrude · Union, Subtract, Intersect,
-  Delete · Snap to Grid · Undo, Redo), and the floor followed for free because it is
+  happens to be taller. The rail carries TEN chips (Items · Start Sketch, Extrude, Add
+  shape · Union, Subtract, Intersect, Delete · Undo, Redo) — the auto-selection switch
+  deleted Select Bodies/Faces/Edges, and Snap to Grid moved to the View menu alone by the
+  user's call, since it is a setting flipped rarely — and the floor followed for free because it is
   derived from `rail->sizeHint()` rather than from a count. An eleventh rail tool still
   raises that floor rather than
   reintroducing the clip that cost Redo, then Undo, but the user's actual screen height is a

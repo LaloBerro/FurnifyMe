@@ -24,7 +24,8 @@ namespace IconSet {
 // needs a glyph that means "projection" rather than either of the two words.
 enum class Glyph {
     Sketch, Extrude, Fuse, Cut, Intersect, Delete,
-    Undo, Redo, Items, Snap,
+    // Snap went with its rail chip - Snap to Grid is View-menu-only.
+    Undo, Redo, Items,
     // A filled cube. It was SelectSolid, the rail's body-selection chip,
     // until the auto-selection spec's Phase 2 deleted the three selection
     // modes and their three chips - but the glyph itself never belonged to

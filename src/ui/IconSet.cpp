@@ -68,13 +68,6 @@ void paintGlyph(QPainter& p, Glyph glyph)
             p.drawLine(5, 12, 19, 12);
             p.drawLine(5, 17, 19, 17);
             break;
-        case Glyph::Snap:                         // grid with a marked node
-            for (int i = 5; i <= 19; i += 7) {
-                p.drawLine(i, 5, i, 19);
-                p.drawLine(5, i, 19, i);
-            }
-            p.drawEllipse(QPoint(12, 12), 2, 2);
-            break;
         case Glyph::Body:                         // filled cube
             p.drawRect(6, 6, 12, 12);
             p.fillRect(QRect(9, 9, 6, 6), QBrush(p.pen().color()));
