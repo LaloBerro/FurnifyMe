@@ -865,6 +865,214 @@ BooleanResult mirrorShape(const TopoDS_Shape& shape, const gp_Pln& plane)
     return out;
 }
 
+namespace {
+
+// The end face's own in-plane axis: the direction of its LONGEST boundary
+// edge, with any component along `normal` removed - Joinery's regionAxis(),
+// for the reason recorded there: gp_Ax3(point, dir) picks X and Y out of world
+// space, so extents measured against it are a world-oriented box of the face,
+// which is right at 0 and 90 degrees of in-plane rotation and wrong everywhere
+// in between.
+bool faceOwnAxis(const TopoDS_Face& face, const gp_Dir& normal, gp_Dir& out)
+{
+    const gp_Vec along(normal);
+    double bestLength = 0.0;
+    gp_Vec best;
+    for (TopExp_Explorer ie(face, TopAbs_EDGE); ie.More(); ie.Next()) {
+        TopoDS_Vertex v0, v1;
+        TopExp::Vertices(TopoDS::Edge(ie.Current()), v0, v1);
+        if (v0.IsNull() || v1.IsNull()) continue;
+        gp_Vec chord(BRep_Tool::Pnt(v0), BRep_Tool::Pnt(v1));
+        chord -= along * chord.Dot(along);
+        const double length = chord.Magnitude();
+        if (length > bestLength + 1.0e-9) {
+            bestLength = length;
+            best = chord;
+        }
+    }
+    if (bestLength <= 1.0e-9) return false;
+    out = gp_Dir(best);
+    return true;
+}
+
+// The [lo, hi] of `shape`'s own vertices projected onto `axis`, as absolute
+// projections. lo > hi when there is no vertex at all.
+void vertexRange(const TopoDS_Shape& shape, const gp_Dir& axis, double& lo, double& hi)
+{
+    lo = 1.0e300;
+    hi = -1.0e300;
+    for (TopExp_Explorer iv(shape, TopAbs_VERTEX); iv.More(); iv.Next()) {
+        const gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(iv.Current()));
+        const double t = p.XYZ().Dot(axis.XYZ());
+        lo = std::min(lo, t);
+        hi = std::max(hi, t);
+    }
+}
+
+bool refuseFrame(std::string* why, const char* sentence)
+{
+    if (why) *why = sentence;
+    return false;
+}
+
+}  // namespace
+
+bool mitreFrame(const TopoDS_Shape& body, const TopoDS_Face& endFace, bool flip,
+                MitreFrame& out, std::string* why)
+{
+    if (body.IsNull() || endFace.IsNull())
+        return refuseFrame(why, "mitre: body or face is null");
+    if (!faceBelongsToBody(body, endFace))
+        return refuseFrame(why, "mitre: face does not belong to the body");
+
+    try {
+        const BRepAdaptor_Surface surface(endFace);
+        if (surface.GetType() != GeomAbs_Plane)
+            return refuseFrame(why, "mitre: face is not planar");
+
+        // OUTWARD, the way pullFace() derives it - the flag as a guess, then
+        // the classifier probe that a mirrored twin's flag needs.
+        const gp_Dir outward = outwardPlane(body, endFace, surface).Axis().Direction();
+
+        gp_Dir u;
+        if (!faceOwnAxis(endFace, outward, u))
+            return refuseFrame(why, "mitre: face has no straight extent to measure");
+        const gp_Dir v = outward.Crossed(u);
+
+        double uLo = 0.0, uHi = 0.0, vLo = 0.0, vHi = 0.0;
+        vertexRange(endFace, u, uLo, uHi);
+        vertexRange(endFace, v, vLo, vHi);
+        if (uLo > uHi || vLo > vHi) return refuseFrame(why, "mitre: face has no vertices");
+
+        // WIDTH is the longer in-plane extent, THICKNESS the shorter - measured
+        // along the face's own axes, never a world box.
+        const bool uIsWidth = (uHi - uLo) >= (vHi - vLo);
+        const gp_Dir widthAxis = uIsWidth ? u : v;
+        const gp_Dir thicknessAxis = uIsWidth ? v : u;
+        const double wLo = uIsWidth ? uLo : vLo;
+        const double wHi = uIsWidth ? uHi : vHi;
+        const double tLo = uIsWidth ? vLo : uLo;
+        const double tHi = uIsWidth ? vHi : uHi;
+        const double width = wHi - wLo;
+        const double thickness = tHi - tLo;
+        if (width < 1.0e-6 || thickness < 1.0e-6)
+            return refuseFrame(why, "mitre: face has no width or no thickness");
+
+        // How far the body reaches behind the end face, along -outward.
+        const double facePlane = surface.Plane().Location().XYZ().Dot(outward.XYZ());
+        double nLo = 0.0, nHi = 0.0;
+        vertexRange(body, outward, nLo, nHi);
+        const double length = facePlane - nLo;
+        if (length < 1.0e-6)
+            return refuseFrame(why, "mitre: there is no board behind this face");
+
+        // The three axes are orthonormal, so a point is the sum of its three
+        // absolute projections.
+        const double pivotW = flip ? wHi : wLo;
+        const gp_XYZ pivot = widthAxis.XYZ() * pivotW +
+                             thicknessAxis.XYZ() * (0.5 * (tLo + tHi)) +
+                             outward.XYZ() * facePlane;
+
+        out.pivot = gp_Pnt(pivot);
+        out.across = flip ? widthAxis.Reversed() : widthAxis;
+        out.outward = outward;
+        out.thicknessAxis = thicknessAxis;
+        out.width = width;
+        out.thickness = thickness;
+        out.length = length;
+        return true;
+    } catch (const Standard_Failure&) {
+        return refuseFrame(why, "mitre: kernel exception while measuring the face");
+    }
+}
+
+bool canMitreEnd(const TopoDS_Shape& body, const TopoDS_Face& endFace, std::string* why)
+{
+    MitreFrame ignored;
+    return mitreFrame(body, endFace, false, ignored, why);
+}
+
+BooleanResult mitreEnd(const TopoDS_Shape& body, const TopoDS_Face& endFace, double angleDeg,
+                       bool flip)
+{
+    BooleanResult out;
+    // Angle first: it is the one refusal the frame cannot make, and an
+    // out-of-range angle should say so even about a perfectly good board.
+    if (!(angleDeg >= 1.0 - 1.0e-9 && angleDeg <= 89.0 + 1.0e-9)) {
+        out.error = "mitre: the angle must be between 1 and 89 degrees";
+        return out;
+    }
+
+    MitreFrame frame;
+    if (!mitreFrame(body, endFace, flip, frame, &out.error)) return out;
+
+    const double tanA = std::tan(angleDeg * kPi / 180.0);
+    // How far back along the board the cut's far end reaches. Past the length
+    // it would take the whole end off, which is not a mitre.
+    const double depth = frame.width * tanA;
+    if (depth > frame.length + 1.0e-7) {
+        out.error = "mitre: the cut would run past the far end of the board";
+        return out;
+    }
+
+    try {
+        // The tool, in the (across, outward) plane through the pivot, swept
+        // along the thickness axis. The cut line runs from the pivot along
+        // across*cos - outward*sin; the tool is the region on the END side of
+        // it, bounded to the face's own width and thickness plus a margin so
+        // no tool face is coplanar with a board face it merely touches.
+        const double margin = std::max(1.0, 0.1 * frame.width);
+        const gp_Vec a(frame.across);
+        const gp_Vec n(frame.outward);
+        const gp_Vec t(frame.thicknessAxis);
+        const gp_Pnt base = frame.pivot.Translated(t * -(0.5 * frame.thickness + margin));
+        const auto at = [&](double w, double h) { return base.Translated(a * w + n * h); };
+
+        const double nearW = -margin;
+        const double farW = frame.width + margin;
+        const double top = margin * tanA + margin;   // clear of the end face on both ends
+        const std::vector<gp_Pnt> profile = {
+            at(nearW, -nearW * tanA),   // on the cut line, behind the pivot
+            at(farW, -farW * tanA),     // on the cut line, past the far edge
+            at(farW, top),
+            at(nearW, top),
+        };
+        const TopoDS_Face section = makeFaceFromWire(makePolygonWire(profile));
+        if (section.IsNull()) {
+            out.error = "mitre: the cutting tool could not be built";
+            return out;
+        }
+        const TopoDS_Shape tool = extrude(section, frame.thicknessAxis,
+                                          frame.thickness + 2.0 * margin);
+        if (tool.IsNull()) {
+            out.error = "mitre: the cutting tool could not be built";
+            return out;
+        }
+
+        const BooleanResult cut = applyBoolean(BooleanKind::Cut, body, tool);
+        if (!cut.ok) {
+            out.error = "mitre: " + cut.error;
+            return out;
+        }
+        if (cut.shape.IsNull() || countSolids(cut.shape) != 1 || volume(cut.shape) < 1.0e-6) {
+            out.error = "mitre: the cut did not leave exactly one board";
+            return out;
+        }
+        if (!isShapeSane(cut.shape)) {
+            out.error = "mitre: result failed validity check";
+            return out;
+        }
+        out.ok = true;
+        out.shape = cut.shape;
+    } catch (const Standard_Failure& e) {
+        out.ok = false;
+        out.shape = TopoDS_Shape();
+        out.error = std::string("mitre: kernel exception - ") +
+                    (e.GetMessageString() ? e.GetMessageString() : "unknown");
+    }
+    return out;
+}
+
 bool boundingBoxStraddlesPlane(const TopoDS_Shape& shape, const gp_Pln& plane, double tolerance)
 {
     if (shape.IsNull()) return false;

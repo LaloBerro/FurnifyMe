@@ -79,6 +79,10 @@ add_executable(headless_joinery tests/joinery.cpp)
 target_link_libraries(headless_joinery PRIVATE furnify_geometry)
 add_test(NAME headless_joinery COMMAND headless_joinery)
 
+add_executable(headless_mitre tests/mitre.cpp)
+target_link_libraries(headless_mitre PRIVATE furnify_geometry)
+add_test(NAME headless_mitre COMMAND headless_mitre)
+
 # ---------------------------------------------------------------------------
 # Application (Qt + OCCT visualization)
 # ---------------------------------------------------------------------------

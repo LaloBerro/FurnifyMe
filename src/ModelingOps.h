@@ -292,6 +292,84 @@ gp_Trsf snapTransform(const gp_Trsf& delta, const gp_Pnt& pivot,
 bool isIdentityTransform(const gp_Trsf& trsf, double linearTolerance = 1.0e-7,
                          double angularToleranceDeg = 1.0e-5);
 
+// --- Mitre end (improvements item 4) -----------------------------------------
+//
+// Cuts a board's end off at an angle, the way a mitre saw does: across the
+// board's WIDTH, never through its thickness (no compound cut).
+//
+// THE BOARD FRAME IS THE END FACE'S OWN, and never a world axis. This branch's
+// most repeated bug was an oriented quantity measured in world terms - a world
+// bounding box of a rotated board reports the box's diagonal, not the board -
+// so every number below comes off the face itself:
+//
+//   - outward:   the end face's OUTWARD normal, which is the board's length
+//                axis pointing out of the wood. Derived exactly as pullFace()
+//                derives it (the orientation flag as a guess, then a
+//                BRepClass3d_SolidClassifier probe from a point genuinely on
+//                the face), because the flag alone reads a mirrored twin's end
+//                backwards.
+//   - the two in-plane axes: the face's LONGEST boundary edge (its component
+//                along `outward` removed) and outward x that. The face's own
+//                VERTICES are projected onto both, and the longer extent is
+//                the board's WIDTH, the shorter its THICKNESS -
+//                Joinery::findContact's regionAxis/planeExtent discipline.
+//   - length:    how far the body reaches behind the end face along -outward,
+//                from the body's own vertices.
+//
+// THE CUT. The cut plane contains the thickness axis and is rotated by
+// `angleDeg` away from the end face's plane, about the line along the
+// thickness axis through one of the end face's two width EDGES - the pivot
+// edge. The board keeps its full length along the pivot edge; the triangular
+// prism beyond the plane comes off. `flip` puts the pivot on the OTHER width
+// edge. `angleDeg` is the saw's own angle, measured from a square cut: 45
+// removes a right-isosceles prism, and the volume removed is exactly
+//
+//     0.5 * width * (width * tan(angleDeg)) * thickness
+//
+// whenever width * tan(angleDeg) does not exceed the length.
+//
+// The tool is a triangular-ish prism bounded to the end face's own width and
+// thickness (plus a margin), not an unbounded half-space: a half-space would
+// also shear off anything of the body that happens to lie beyond the plane
+// well away from this end.
+//
+// Refuses (ok == false, null shape, a sentence in `error`): a null body or
+// face; a face that is not one of `body`'s own faces (pullFace's guard - a
+// mis-wired pick must refuse, not cut an unrelated boolean); a non-planar
+// face; a degenerate face with no width or thickness; an angle outside
+// [1, 89]; a cut whose far end would run past the board's length (it would
+// take the whole end off); and any kernel failure. The result goes through
+// ShapeUpgrade_UnifySameDomain like every boolean here.
+struct MitreFrame {
+    // On the end face's plane, on the pivot width edge, at mid-thickness.
+    gp_Pnt pivot;
+    // In the end face's plane, from the pivot edge toward the far width edge.
+    gp_Dir across{0.0, 1.0, 0.0};
+    // The end face's outward normal - the board's length axis, out of the wood.
+    gp_Dir outward{1.0, 0.0, 0.0};
+    // In the end face's plane, perpendicular to `across`.
+    gp_Dir thicknessAxis{0.0, 0.0, 1.0};
+    double width = 0.0;       // the end face's longer in-plane extent
+    double thickness = 0.0;   // its shorter one
+    double length = 0.0;      // the body behind the end face, along -outward
+};
+
+// The frame above for `endFace`, with the pivot on the edge `flip` chooses.
+// False - with a sentence in *why when given, and `out` untouched - for every
+// refusal mitreEnd() makes that does not depend on the angle. mitreEnd() is
+// built on this, so the two can never disagree about what a board is.
+bool mitreFrame(const TopoDS_Shape& body, const TopoDS_Face& endFace, bool flip,
+                MitreFrame& out, std::string* why = nullptr);
+
+// Whether `endFace` can be mitred at all - mitreFrame()'s own answer, so the
+// app's enabled state asks the geometry's one implementation of every
+// refusal rather than a copy of it.
+bool canMitreEnd(const TopoDS_Shape& body, const TopoDS_Face& endFace,
+                 std::string* why = nullptr);
+
+BooleanResult mitreEnd(const TopoDS_Shape& body, const TopoDS_Face& endFace, double angleDeg,
+                       bool flip);
+
 // --- Symmetry (Milestone 3) -------------------------------------------------
 //
 // Reflects `shape` across `plane` - gp_Trsf::SetMirror(gp_Ax2(plane.Location(),
