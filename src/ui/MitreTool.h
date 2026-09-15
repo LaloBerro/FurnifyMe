@@ -75,15 +75,17 @@ public:
     // from the same functions paintEvent() draws through.
     QStringList paintedTexts() const;
 
-    // The last angle that actually read, in degrees, and which corner comes off.
+    // The last angle that actually read, in degrees, and which edge of the end
+    // keeps the board's length (ModelingOps::MitreSide).
     double angle() const { return myAngle; }
-    bool flipped() const { return myFlip; }
+    ModelingOps::MitreSide side() const { return mySide; }
     // True while a preview ghost is on screen for this gesture.
     bool hasPreview() const { return myHasPreview; }
     // Why the current value shows no ghost, or empty.
     QString reasonText() const { return myReason; }
 
-    // Flip's route (the button calls it): the other width edge keeps the length.
+    // Flip's route (the button calls it): the NEXT edge of the end keeps the
+    // length - left, top, right, bottom, left (ModelingOps::nextMitreSide()).
     void flip();
     // Escape's route: ends the gesture with nothing changed.
     void cancel();
@@ -108,7 +110,9 @@ private:
     void syncControls();
     void markInvalid(bool invalid);
     void onDialDragged(double angleDeg);
-    // The live frame for the current flip, cached on the revision and flip.
+    // Puts the live kind of cut into the Flip button's and the field's tooltips.
+    void applySideTooltips();
+    // The live frame for the current side, cached on the revision and side.
     bool frame(ModelingOps::MitreFrame& out);
 
     QString labelText() const;
@@ -129,7 +133,7 @@ private:
     TopoDS_Face myFace;
     int myBodyId = 0;
     double myAngle = 45.0;
-    bool myFlip = false;
+    ModelingOps::MitreSide mySide = ModelingOps::MitreSide::WidthA;
     bool myHasPreview = false;
     bool myInvalid = false;
     QString myReason;
@@ -141,11 +145,11 @@ private:
     TopoDS_Shape myPreviewShape;
     int myPreviewRevision = -1;
     double myPreviewAngle = -1.0;
-    bool myPreviewFlip = false;
+    ModelingOps::MitreSide myPreviewSide = ModelingOps::MitreSide::WidthA;
 
     ModelingOps::MitreFrame myFrame;
     int myFrameRevision = -1;
-    bool myFrameFlip = false;
+    ModelingOps::MitreSide myFrameSide = ModelingOps::MitreSide::WidthA;
     bool myFrameOk = false;
 
     QPointer<QLineEdit> myField;       // siblings, not children - see the class comment

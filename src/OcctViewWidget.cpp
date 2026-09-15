@@ -2915,6 +2915,7 @@ void OcctViewWidget::updateMitreDial()
         radius < myMitreDialBuiltRadius * 1.02 && radius > myMitreDialBuiltRadius * 0.98 &&
         myMitreDial.centre.IsEqual(myMitreDialBuiltCentre, 1.0e-9) &&
         myMitreDial.across.IsEqual(myMitreDialBuiltAcross, 1.0e-9) &&
+        myMitreDial.normal.IsEqual(myMitreDialBuiltNormal, 1.0e-9) &&
         std::fabs(myMitreDial.angleDeg - myMitreDialBuiltAngle) < 1.0e-9) {
         return;
     }
@@ -2979,6 +2980,7 @@ void OcctViewWidget::updateMitreDial()
     myMitreDialBuiltRadius = radius;
     myMitreDialBuiltCentre = myMitreDial.centre;
     myMitreDialBuiltAcross = myMitreDial.across;
+    myMitreDialBuiltNormal = myMitreDial.normal;
     myMitreDialBuiltAngle = myMitreDial.angleDeg;
     if (!myApplyingCamera) scheduleRedraw();
 }

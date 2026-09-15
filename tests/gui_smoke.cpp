@@ -32141,6 +32141,10 @@ int main(int argc, char* argv[])
         const auto removedAt = [&](double degrees) {
             return 0.5 * kWide * (kWide * std::tan(degrees * kPiM / 180.0)) * kThick;
         };
+        // A thickness side tilts through the 18 mm instead: 0.5 * 18 * 18*tan(a) * 60.
+        const auto removedThroughAt = [&](double degrees) {
+            return 0.5 * kThick * (kThick * std::tan(degrees * kPiM / 180.0)) * kWide;
+        };
         QString mitreFurnitureId;
         {
             FurnitureStore seedStore(mitreDir.path());
@@ -32286,9 +32290,12 @@ int main(int argc, char* argv[])
         check(pullArrow && !pullArrow->isVisible() && !mv->hasPullArrow(),
               "mitre: the pull arrow is gone - its predicate refuses on a live mitre");
         check(mw.findChildren<QDialog*>().isEmpty(), "mitre: and nothing modal appeared");
-        check(tool && std::fabs(tool->angle() - 45.0) < 1.0e-9 && !tool->flipped(),
-              "mitre: it opens at 45 degrees, unflipped");
+        check(tool && std::fabs(tool->angle() - 45.0) < 1.0e-9 &&
+                  tool->side() == ModelingOps::MitreSide::WidthA,
+              "mitre: it opens at 45 degrees, on the first side (WidthA, across the width)");
         check(stateLabelText(mw).contains(QStringLiteral("Mitre 45°")) &&
+                  stateLabelText(mw).contains(MainWindow::mitreSideText(
+                      ModelingOps::MitreSide::WidthA)) &&
                   stateLabelText(mw).contains(QStringLiteral("Enter to apply")),
               QStringLiteral("mitre: the status label names the end, the angle and both keys (%1)")
                   .arg(stateLabelText(mw)));
@@ -32328,7 +32335,11 @@ int main(int argc, char* argv[])
             QStringList copy = tool ? tool->paintedTexts() : QStringList();
             copy << MainWindow::mitreActionTooltip() << MainWindow::mitreAngleRangeRefusalText()
                  << MainWindow::mitreTooLongRefusalText() << MainWindow::mitreKernelRefusalText()
+                 << MainWindow::mitreSideText(ModelingOps::MitreSide::WidthA)
+                 << MainWindow::mitreSideText(ModelingOps::MitreSide::ThicknessA)
                  << stateLabelText(mw);
+            if (mFlip) copy << mFlip->toolTip();
+            if (mField) copy << mField->toolTip();
             bool clean = !copy.isEmpty();
             for (const QString& text : copy)
                 for (const QString& word : bannedWords())
@@ -32394,24 +32405,108 @@ int main(int argc, char* argv[])
                   mToasts->toast() && !mToasts->toast()->hasUndo(),
               "mitre: and reports the refusal as a Failure naming the reason");
 
-        // --- Flip ------------------------------------------------------------
+        // --- Flip: four sides, left -> top -> right -> bottom -> left ---------
+        //
+        // Every step is a real click on the button. The two width sides remove
+        // equal volumes and so do the two thickness sides, so which edge was
+        // kept is asserted by where the ghost's mass went: across Y for the
+        // width pair, across Z for the thickness pair.
         if (mField) mField->setText(QStringLiteral("45"));
         settle(120);
+        const auto ghostRemoved = [&]() {
+            return boardVolume - ModelingOps::volume(mv->modelingPreviewShape());
+        };
+        const auto clickFlip = [&]() {
+            if (mFlip) clickAt(mFlip, QPointF(mFlip->rect().center()));
+            settle(150);
+        };
         const gp_Pnt ghostCentre = ModelingOps::centreOfMass(mv->modelingPreviewShape());
-        if (mFlip) clickAt(mFlip, QPointF(mFlip->rect().center()));
-        settle(150);
-        check(tool && tool->flipped() && mw.mitreEndActive(),
-              "mitre: clicking Flip flips, and the gesture survives the click");
+        const gp_Dir widthDialNormal = mv->mitreDialNormal();
+        check(mv->hasMitreDial() && widthDialNormal.IsParallel(gp_Dir(0, 0, 1), 1.0e-6),
+              "mitre: on a width side the dial lies square to the thickness (normal along Z)");
+
+        clickFlip();
+        check(tool && tool->side() == ModelingOps::MitreSide::ThicknessA && mw.mitreEndActive(),
+              "mitre: clicking Flip steps left -> top (WidthA -> ThicknessA), and the gesture "
+              "survives the click");
+        check(mv->hasModelingPreview() &&
+                  std::fabs(ghostRemoved() - removedThroughAt(45.0)) < removedThroughAt(45.0) * 1.0e-3,
+              QStringLiteral("mitre: ThicknessA's ghost removes 0.5 * T * T*tan(a) * W (%1 against %2)")
+                  .arg(ghostRemoved())
+                  .arg(removedThroughAt(45.0)));
+        const gp_Pnt topCentre = ModelingOps::centreOfMass(mv->modelingPreviewShape());
+        check(mv->hasMitreDial() && mv->mitreDialNormal().IsParallel(gp_Dir(0, 1, 0), 1.0e-6) &&
+                  !mv->mitreDialNormal().IsParallel(widthDialNormal, 1.0e-6),
+              "mitre: on a thickness side the dial moves onto a width face (normal along Y)");
+        {
+            // The dial's extent moved with its plane, so the chip must have
+            // been re-placed clear of it - measured off the dial's own points.
+            QRect dialExtent;
+            for (int degrees = 0; degrees <= 180; degrees += 15) {
+                gp_Pnt p;
+                QPoint at;
+                if (!mv->mitreDialPointAt(degrees, p) || !mv->projectToScreen(p, at)) continue;
+                dialExtent = dialExtent.isNull() ? QRect(at, QSize(1, 1))
+                                                 : dialExtent.united(QRect(at, QSize(1, 1)));
+            }
+            check(tool && !dialExtent.isNull() && !tool->geometry().intersects(dialExtent),
+                  QStringLiteral("mitre: after Flip the chip stands clear of the moved dial "
+                                 "(chip %1,%2 %3x%4, dial %5,%6 %7x%8)")
+                      .arg(tool ? tool->x() : 0).arg(tool ? tool->y() : 0)
+                      .arg(tool ? tool->width() : 0).arg(tool ? tool->height() : 0)
+                      .arg(dialExtent.x()).arg(dialExtent.y())
+                      .arg(dialExtent.width()).arg(dialExtent.height()));
+        }
+        check(stateLabelText(mw).contains(QStringLiteral("through the thickness")) &&
+                  mFlip && mFlip->toolTip().contains(QStringLiteral("through the thickness")),
+              QStringLiteral("mitre: the status label and Flip's tooltip say through the thickness (%1)")
+                  .arg(stateLabelText(mw)));
+        {
+            // The thickness side live, dial and chip, for looking at.
+            settle(200);
+            const QImage shot =
+                printWindowCapture(&mw, outDir + QStringLiteral("/mitre-thickness.png"));
+            check(!shot.isNull(), "mitre: the live thickness-side dial and chip are captured");
+        }
+
+        clickFlip();
+        check(tool && tool->side() == ModelingOps::MitreSide::WidthB,
+              "mitre: Flip steps top -> right (ThicknessA -> WidthB)");
+        check(mv->hasModelingPreview() &&
+                  std::fabs(ghostRemoved() - removedAt(45.0)) < removedAt(45.0) * 1.0e-3,
+              "mitre: WidthB's ghost removes 0.5 * W * W*tan(a) * T");
         const gp_Pnt flippedCentre = ModelingOps::centreOfMass(mv->modelingPreviewShape());
         check(mv->hasModelingPreview() &&
                   (ghostCentre.Y() - kWide / 2.0) * (flippedCentre.Y() - kWide / 2.0) < -1.0e-6,
-              QStringLiteral("mitre: Flip takes the OTHER corner off - the ghost's mass moves "
-                             "across the board's width (%1 -> %2)")
+              QStringLiteral("mitre: WidthB takes the OTHER width corner off - the ghost's mass "
+                             "moves across the board's width (%1 -> %2)")
                   .arg(ghostCentre.Y())
                   .arg(flippedCentre.Y()));
-        if (tool) tool->flip();
-        settle(120);
-        check(tool && !tool->flipped(), "mitre: and flips back");
+        check(mv->mitreDialNormal().IsParallel(gp_Dir(0, 0, 1), 1.0e-6) &&
+                  stateLabelText(mw).contains(QStringLiteral("across the width")),
+              "mitre: back on a width side the dial and the label follow");
+
+        clickFlip();
+        check(tool && tool->side() == ModelingOps::MitreSide::ThicknessB,
+              "mitre: Flip steps right -> bottom (WidthB -> ThicknessB)");
+        check(mv->hasModelingPreview() &&
+                  std::fabs(ghostRemoved() - removedThroughAt(45.0)) < removedThroughAt(45.0) * 1.0e-3,
+              "mitre: ThicknessB's ghost removes 0.5 * T * T*tan(a) * W");
+        const gp_Pnt bottomCentre = ModelingOps::centreOfMass(mv->modelingPreviewShape());
+        check((topCentre.Z() - kThick / 2.0) * (bottomCentre.Z() - kThick / 2.0) < -1.0e-6 &&
+                  std::fabs(topCentre.Y() - kWide / 2.0) < 1.0e-6 &&
+                  std::fabs(bottomCentre.Y() - kWide / 2.0) < 1.0e-6,
+              QStringLiteral("mitre: ThicknessB keeps the OTHER thickness edge - the ghost's mass "
+                             "moves through the thickness, not across the width (z %1 -> %2)")
+                  .arg(topCentre.Z())
+                  .arg(bottomCentre.Z()));
+
+        clickFlip();
+        check(tool && tool->side() == ModelingOps::MitreSide::WidthA,
+              "mitre: a fourth Flip steps bottom -> left - four presses come home to WidthA");
+        check(mv->hasModelingPreview() &&
+                  ModelingOps::centreOfMass(mv->modelingPreviewShape()).Distance(ghostCentre) < 1.0e-6,
+              "mitre: and the ghost is the starting side's again");
 
         // --- dragging the dial ----------------------------------------------
         {
@@ -32524,6 +32619,40 @@ int main(int argc, char* argv[])
         check(std::fabs(ModelingOps::volume(mw.document().shapeOf(board)) - boardVolume) < 1.0e-6 &&
                   mw.document().undoDepth() == depthCommit,
               "mitre: one Undo restores the original board");
+
+        // --- a thickness side commits one checkpoint too --------------------
+        check(pickBoardEnd(), "mitre: the end is picked for a thickness-side mitre");
+        trigger(mw, QStringLiteral("Mitre end"));
+        settle(120);
+        if (tool) tool->flip();   // WidthA -> ThicknessA
+        settle(120);
+        if (mField) mField->setText(QStringLiteral("30"));
+        settle(120);
+        const double ghostThrough30 = ModelingOps::volume(mv->modelingPreviewShape());
+        const std::size_t depthThrough = mw.document().undoDepth();
+        check(tool && tool->side() == ModelingOps::MitreSide::ThicknessA,
+              "mitre: (the live side is ThicknessA before Enter)");
+        mv->setFocus();
+        settle(60);
+        sendKeyTo(&mw, Qt::Key_Return);
+        settle(200);
+        const double committedThrough = ModelingOps::volume(mw.document().shapeOf(board));
+        check(!mw.mitreEndActive() && mw.document().undoDepth() == depthThrough + 1,
+              QStringLiteral("mitre: a thickness-side mitre commits exactly ONE checkpoint (%1 -> %2)")
+                  .arg(depthThrough)
+                  .arg(mw.document().undoDepth()));
+        check(std::fabs(boardVolume - committedThrough - removedThroughAt(30.0)) <
+                      removedThroughAt(30.0) * 1.0e-3 &&
+                  std::fabs(committedThrough - ghostThrough30) < 1.0e-6,
+              "mitre: the committed thickness-side board is the formula's volume and the ghost's");
+        check(mToasts && mToasts->currentText().startsWith(QStringLiteral("Mitred ")) &&
+                  mToasts->toast() && mToasts->toast()->hasUndo(),
+              "mitre: and a Note with Undo names it");
+        trigger(mw, QStringLiteral("Undo"));
+        settle(200);
+        check(std::fabs(ModelingOps::volume(mw.document().shapeOf(board)) - boardVolume) < 1.0e-6 &&
+                  mw.document().undoDepth() == depthThrough,
+              "mitre: one Undo restores the board after a thickness-side mitre");
 
         // --- a mirrored twin follows ----------------------------------------
         mv->setSelectedSolids({board});

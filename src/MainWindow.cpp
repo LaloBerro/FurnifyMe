@@ -4242,11 +4242,14 @@ void MainWindow::updateStateLabel()
                     .arg(QString::fromStdString(
                         myDocument.outlineNameOf(pendingOutlineId())));
     } else if (myMitreActive) {
-        // The mockup's own sentence: which end, which angle, and both verbs.
-        state = tr("%1 end — Mitre %2 — drag the dial or type the angle, Enter to apply, "
-                   "Esc to cancel")
+        // The mockup's own sentence: which end, which angle, which kind of
+        // cut Flip has landed on - so a width side and a thickness side can be
+        // told apart without reading the ghost - and both verbs.
+        state = tr("%1 end — Mitre %2 — %3 — drag the dial or type the angle, Enter to "
+                   "apply, Esc to cancel")
                     .arg(QString::fromStdString(myDocument.nameOf(myMitreBodyId)),
-                         QString::fromStdString(Measure::formatAngle(myMitreLiveAngle)));
+                         QString::fromStdString(Measure::formatAngle(myMitreLiveAngle)),
+                         mitreSideText(myMitreLiveSide));
     } else if (canPullSelectedFace()) {
         // The gizmo is on screen and it is not obvious what to do with it -
         // an arrow with no words is a guess. Reads the same predicate the
@@ -5410,7 +5413,13 @@ bool MainWindow::pullFaceBy(const TopoDS_Face& face, double distance)
 QString MainWindow::mitreActionTooltip()
 {
     return tr("Mitre the selected board end at an angle, like a mitre saw (M)\n"
-              "Drag the dial or type the angle — Flip picks the other corner.");
+              "Drag the dial or type the angle — Flip steps through the end's four edges.");
+}
+
+QString MainWindow::mitreSideText(ModelingOps::MitreSide side)
+{
+    return ModelingOps::mitreSideIsThickness(side) ? tr("through the thickness")
+                                                   : tr("across the width");
 }
 
 QString MainWindow::mitreAngleRangeRefusalText()
@@ -5492,7 +5501,7 @@ bool MainWindow::beginMitreEnd()
     myMitreBodyId = bodyIdForFace(myMitreFace);
     myMitreRevision = myDocument.revision();
     myMitreLiveAngle = 45.0;
-    myMitreLiveFlip = false;
+    myMitreLiveSide = ModelingOps::MitreSide::WidthA;
     myMitreActive = true;
     // The pull arrow retires and MitreTool begins off this one emission.
     updateActions();
@@ -5509,20 +5518,20 @@ void MainWindow::cancelMitreEnd()
     statusBar()->showMessage(tr("Mitre cancelled — nothing was changed"));
 }
 
-void MainWindow::setMitreLiveValue(double angleDeg, bool flip)
+void MainWindow::setMitreLiveValue(double angleDeg, ModelingOps::MitreSide side)
 {
     myMitreLiveAngle = angleDeg;
-    myMitreLiveFlip = flip;
+    myMitreLiveSide = side;
     // The label only - never updateActions(): this is called from inside an
     // appStateChanged slot, and updateActions() is what emits that signal.
     updateStateLabel();
 }
 
-QString MainWindow::mitreRefusalFor(double angleDeg, bool flip) const
+QString MainWindow::mitreRefusalFor(double angleDeg, ModelingOps::MitreSide side) const
 {
     if (!myMitreActive) return QString();
     switch (ModelingOps::checkMitre(myDocument.shapeOf(myMitreBodyId), myMitreFace, angleDeg,
-                                    flip)) {
+                                    side)) {
         case ModelingOps::MitreCheck::Ok: return QString();
         case ModelingOps::MitreCheck::AngleOutOfRange: return mitreAngleRangeRefusalText();
         case ModelingOps::MitreCheck::RunsPastTheEnd: return mitreTooLongRefusalText();
@@ -5531,7 +5540,7 @@ QString MainWindow::mitreRefusalFor(double angleDeg, bool flip) const
     return mitreKernelRefusalText();
 }
 
-bool MainWindow::mitreEndBy(double angleDeg, bool flip)
+bool MainWindow::mitreEndBy(double angleDeg, ModelingOps::MitreSide side)
 {
     if (!myMitreActive) return false;
     const int id = myMitreBodyId;
@@ -5539,12 +5548,12 @@ bool MainWindow::mitreEndBy(double angleDeg, bool flip)
     const TopoDS_Shape body = myDocument.shapeOf(id);
     if (id <= 0 || body.IsNull() || face.IsNull()) return false;
 
-    const ModelingOps::BooleanResult result = ModelingOps::mitreEnd(body, face, angleDeg, flip);
+    const ModelingOps::BooleanResult result = ModelingOps::mitreEnd(body, face, angleDeg, side);
     if (!result.ok) {
         // Never a failed operation surfaced as a success, and never the
         // kernel's own string: it is written for ModelingOps, not the user.
         qWarning("Mitre failed: %s", result.error.c_str());
-        QString why = mitreRefusalFor(angleDeg, flip);
+        QString why = mitreRefusalFor(angleDeg, side);
         if (why.isEmpty()) why = mitreKernelRefusalText();
         myToasts->show(why, Toast::Kind::Failure, false);
         statusBar()->showMessage(tr("Mitre refused — nothing was changed"));

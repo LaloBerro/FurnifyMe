@@ -688,11 +688,14 @@ hazard the transform gizmo's `Deactivate` closes, one layer up and by a differen
 
 Improvements item 4. The user picked "C+" from an HTML mockup round (the protractor dial
 plus a chip with a typed angle and Flip), and the page's "The same in all three" list is
-the contract: select a board's end face, **Model → Mitre end** or **M**; the cut runs across
-the board's width like a mitre saw, never through its thickness; **Flip** swaps which corner
-comes off; a live preview; Enter applies, Esc cancels; 1°–89°, snapping to 5° while Snap to
-Grid is on when the dial is dragged, typed values exact; one undo step, the mirror twin and
-linked copies follow, joints re-derive.
+the contract: select a board's end face, **Model → Mitre end** or **M**; a live preview; Enter
+applies, Esc cancels; 1°–89°, snapping to 5° while Snap to Grid is on when the dial is
+dragged, typed values exact; one undo step, the mirror twin and linked copies follow, joints
+re-derive. **Flip steps through the end face's four edges** (a follow-up the user picked from
+a preview, drawn looking straight at the end): left → top → right → bottom → left, where
+left/right cut **across the width** (the mitre) and top/bottom tilt **through the
+thickness** — one or the other, never a compound cut. The edge Flip lands on is the one that
+keeps the board's full length.
 
 - **The geometry is `ModelingOps::mitreEnd`, headless-tested first** (`tests/mitre.cpp`,
   written red against a stub). **The board frame is the END FACE'S OWN, never a world axis**
@@ -707,6 +710,27 @@ linked copies follow, joints re-derive.
   the end face's LONGER extent`), and the flag-only outward normal (red only on the mirrored
   board — `mirrored: the outward normal is +X` — which is exactly why that case is in the
   suite).
+- **The four sides are `ModelingOps::MitreSide`, named by the board's own axes, never by
+  the user's picture** — the model has no camera. `WidthA`/`WidthB` pivot on the width's low
+  and high edge (a pivot edge running along the thickness; the cut swings across the width,
+  removing `0.5 × W × W·tan(a) × T`); `ThicknessA`/`ThicknessB` pivot on the thickness's
+  high and low edge (a pivot edge running along the width; the tilt removes
+  `0.5 × T × T·tan(a) × W`). Declared in Flip's order, and `nextMitreSide()` is the one place
+  that order is written. The mapping to left/top/right/bottom holds because the frame
+  **signs** its in-plane axes: `thicknessAxis = outward × widthAxis`, always, so looking at
+  the end from outside the wood width points right and thickness up (which way "right" is on a
+  given board still follows its longest edge). `MitreFrame` carries `pivotAxis` (along the
+  pivot edge — the tool's sweep and the dial's normal), `span` (across from the pivot edge —
+  what `checkMitre()`'s `RunsPastTheEnd` multiplies by tan a, so a thin board refuses far
+  less often through its thickness) and `sweep`; one tool construction serves all four.
+  `tests/mitre.cpp` pins each side's formula, and **which edge was kept by centre of mass**
+  (within a pair the volumes are equal, so volume alone cannot tell A from B), plus the new
+  face containing the pivot edge, on the square board, on a board rotated 53° about
+  (−2,1,4), on a mirrored board through the thickness, and the length refusal on a 10 mm
+  stub (18·tan 30° = 10.39 refused, 25° fits). Mutations: `ThicknessA` mapped onto `WidthA`
+  went red on 13 checks (first `square ThicknessA: pivots on an edge along the WIDTH`); A/B
+  swapped on the thickness pair went red on 6 (`square ThicknessA: the mass moves to
+  +thickness (the HIGH thickness edge is kept)`).
 - **The tool is a bounded prism, not a half-space.** It spans the face's own width and
   thickness plus a margin, with its near edge extended behind the pivot so no tool face lies
   coplanar with a board side it merely touches. A half-space would also shear off anything
@@ -729,10 +753,16 @@ linked copies follow, joints re-derive.
   `myMitreActive` — the arrow retires and its Enter/Escape claim with it. Rename and
   Save version exclude the gesture the way they exclude a mirror placement.
 - **The dial is `OcctViewWidget`'s, the chip is `MitreTool`'s** — PullArrow's split. The dial
-  is a half circle with a tick every 15° in the plane square to the board's thickness, on
-  the thickness face turned toward the camera, with a `gizmoAxisX` radius and handle at the
+  is a half circle with a tick every 15° **in the plane the angle is measured in — square to
+  the pivot edge** — so on a thickness face for a width side and on a width face for a
+  thickness side, whichever of the two faces the pivot edge pierces is turned toward the
+  camera, with a `gizmoAxisX` radius and handle at the
   live angle; angle a points along `across·cos a − outward·sin a`, so the red radius lies
-  exactly on the line the mitre leaves on that face. Sized at `kMitreDialPx` (90) through
+  exactly on the line the mitre leaves on that face. Flip re-places the chip, because the
+  dial's projected extent moves with its plane (measured: without it the chip covered the
+  thickness-side dial's lower quarter). The status label carries `— across the width` /
+  `— through the thickness` and Flip's and the field's tooltips say the same, all from
+  `MainWindow::mitreSideText()`. Sized at `kMitreDialPx` (90) through
   `worldPerPixelAt()`, drawn in `gizmoZLayer()` (depth-cleared, Immediate — the shadow-map
   pitfall), equal-guarded in `applyCameraState()`. The handle takes a press at
   `kHandleGrabPx`, the frame is **frozen at the press** (the Move gizmo's lesson), the angle is
@@ -740,7 +770,7 @@ linked copies follow, joints re-derive.
   [1, 89]; the release is swallowed and does **not** commit — Enter does. A press anywhere
   else picks as usual, and a pick that changes the selection ends the gesture, by contract.
 - **The chip follows ExtrudePreview's contract clause for clause.** The preview is
-  `ModelingOps::mitreEnd` on `setModelingPreview` (cached on revision/angle/flip and re-shown
+  `ModelingOps::mitreEnd` on `setModelingPreview` (cached on revision/angle/side and re-shown
   on every `appStateChanged`, because every other gizmo's `refresh()` clears that channel on
   the way past — which is also why `MitreTool` is constructed after every other chip:
   connection order is emission order). Unreadable or out-of-range input keeps the last good
@@ -763,8 +793,16 @@ linked copies follow, joints re-derive.
   twin following. Three mutations each went red on a named check: the preview built through a
   5°-snapped angle (`a typed 32.5 is EXACT`), Enter left unclaimed (`Enter, with focus on the
   viewport, commits`), and an extra checkpoint (`exactly ONE checkpoint (0 -> 2)`).
+  The four-sides follow-up grew it to 86: four real clicks of Flip walk
+  WidthA → ThicknessA → WidthB → ThicknessB → WidthA, each ghost against its own formula,
+  the kept corner differing A/B by centre of mass on both pairs (Y for width, Z for
+  thickness), the dial's normal moving from Z to Y and back, the chip clear of the moved
+  dial, the label and tooltip naming the kind, and a thickness-side mitre committing one
+  checkpoint that one Undo restores. A Flip that toggled only two sides went red on 11 checks
+  (first `clicking Flip steps left -> top (WidthA -> ThicknessA)`); dropping the re-place went
+  red on `after Flip the chip stands clear of the moved dial`.
   `kCheckFloor` was **not** touched: this branch ran filtered blocks only, and the floor is
-  re-ratcheted by measuring an official run, never by adding 67 to it.
+  re-ratcheted by measuring an official run, never by adding to it.
 - **Honest limits.** The preview wears the app's one preview look — the yellow ghost with the
   body caged — not the mockup's translucent red plane. The frame's extents come from vertices,
   so a board end bounded by an arc is measured at its endpoints (Joinery's curve-aware

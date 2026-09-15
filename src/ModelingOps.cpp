@@ -917,7 +917,24 @@ bool refuseFrame(std::string* why, const char* sentence)
 
 }  // namespace
 
-bool mitreFrame(const TopoDS_Shape& body, const TopoDS_Face& endFace, bool flip,
+MitreSide nextMitreSide(MitreSide side)
+{
+    // left -> top -> right -> bottom -> left, the order the user picked.
+    switch (side) {
+        case MitreSide::WidthA: return MitreSide::ThicknessA;
+        case MitreSide::ThicknessA: return MitreSide::WidthB;
+        case MitreSide::WidthB: return MitreSide::ThicknessB;
+        case MitreSide::ThicknessB: return MitreSide::WidthA;
+    }
+    return MitreSide::WidthA;
+}
+
+bool mitreSideIsThickness(MitreSide side)
+{
+    return side == MitreSide::ThicknessA || side == MitreSide::ThicknessB;
+}
+
+bool mitreFrame(const TopoDS_Shape& body, const TopoDS_Face& endFace, MitreSide side,
                 MitreFrame& out, std::string* why)
 {
     if (body.IsNull() || endFace.IsNull())
@@ -946,13 +963,16 @@ bool mitreFrame(const TopoDS_Shape& body, const TopoDS_Face& endFace, bool flip,
 
         // WIDTH is the longer in-plane extent, THICKNESS the shorter - measured
         // along the face's own axes, never a world box.
+        // Signed so thicknessAxis = outward x widthAxis on both branches: with
+        // v = outward x u, that is v itself when u is the width, and -u (its
+        // range negated) when v is - outward x v = outward x (outward x u) = -u.
         const bool uIsWidth = (uHi - uLo) >= (vHi - vLo);
         const gp_Dir widthAxis = uIsWidth ? u : v;
-        const gp_Dir thicknessAxis = uIsWidth ? v : u;
+        const gp_Dir thicknessAxis = uIsWidth ? v : u.Reversed();
         const double wLo = uIsWidth ? uLo : vLo;
         const double wHi = uIsWidth ? uHi : vHi;
-        const double tLo = uIsWidth ? vLo : uLo;
-        const double tHi = uIsWidth ? vHi : uHi;
+        const double tLo = uIsWidth ? vLo : -uHi;
+        const double tHi = uIsWidth ? vHi : -uLo;
         const double width = wHi - wLo;
         const double thickness = tHi - tLo;
         if (width < 1.0e-6 || thickness < 1.0e-6)
@@ -967,19 +987,51 @@ bool mitreFrame(const TopoDS_Shape& body, const TopoDS_Face& endFace, bool flip,
             return refuseFrame(why, "mitre: there is no board behind this face");
 
         // The three axes are orthonormal, so a point is the sum of its three
-        // absolute projections.
-        const double pivotW = flip ? wHi : wLo;
-        const gp_XYZ pivot = widthAxis.XYZ() * pivotW +
-                             thicknessAxis.XYZ() * (0.5 * (tLo + tHi)) +
+        // absolute projections. Each side names the edge that keeps the
+        // length (see MitreSide): its coordinate on the axis the cut swings
+        // along, and halfway along the other.
+        double pivotW = 0.5 * (wLo + wHi);
+        double pivotT = 0.5 * (tLo + tHi);
+        gp_Dir across = widthAxis;
+        gp_Dir pivotAxis = thicknessAxis;
+        switch (side) {
+            case MitreSide::WidthA:       // [left]: the width's low edge
+                pivotW = wLo;
+                across = widthAxis;
+                pivotAxis = thicknessAxis;
+                break;
+            case MitreSide::WidthB:       // [right]: the width's high edge
+                pivotW = wHi;
+                across = widthAxis.Reversed();
+                pivotAxis = thicknessAxis;
+                break;
+            case MitreSide::ThicknessA:   // [top]: the thickness's high edge
+                pivotT = tHi;
+                across = thicknessAxis.Reversed();
+                pivotAxis = widthAxis;
+                break;
+            case MitreSide::ThicknessB:   // [bottom]: the thickness's low edge
+                pivotT = tLo;
+                across = thicknessAxis;
+                pivotAxis = widthAxis;
+                break;
+        }
+        const bool throughThickness = mitreSideIsThickness(side);
+        const gp_XYZ pivot = widthAxis.XYZ() * pivotW + thicknessAxis.XYZ() * pivotT +
                              outward.XYZ() * facePlane;
 
         out.pivot = gp_Pnt(pivot);
-        out.across = flip ? widthAxis.Reversed() : widthAxis;
+        out.across = across;
         out.outward = outward;
+        out.pivotAxis = pivotAxis;
+        out.widthAxis = widthAxis;
         out.thicknessAxis = thicknessAxis;
+        out.span = throughThickness ? thickness : width;
+        out.sweep = throughThickness ? width : thickness;
         out.width = width;
         out.thickness = thickness;
         out.length = length;
+        out.side = side;
         return true;
     } catch (const Standard_Failure&) {
         return refuseFrame(why, "mitre: kernel exception while measuring the face");
@@ -989,11 +1041,11 @@ bool mitreFrame(const TopoDS_Shape& body, const TopoDS_Face& endFace, bool flip,
 bool canMitreEnd(const TopoDS_Shape& body, const TopoDS_Face& endFace, std::string* why)
 {
     MitreFrame ignored;
-    return mitreFrame(body, endFace, false, ignored, why);
+    return mitreFrame(body, endFace, MitreSide::WidthA, ignored, why);
 }
 
 MitreCheck checkMitre(const TopoDS_Shape& body, const TopoDS_Face& endFace, double angleDeg,
-                      bool flip, MitreFrame* frameOut, std::string* why)
+                      MitreSide side, MitreFrame* frameOut, std::string* why)
 {
     // Angle first: it is the one refusal the frame cannot make, and an
     // out-of-range angle should say so even about a perfectly good board.
@@ -1004,11 +1056,13 @@ MitreCheck checkMitre(const TopoDS_Shape& body, const TopoDS_Face& endFace, doub
     }
 
     MitreFrame frame;
-    if (!mitreFrame(body, endFace, flip, frame, why)) return MitreCheck::NotABoardEnd;
+    if (!mitreFrame(body, endFace, side, frame, why)) return MitreCheck::NotABoardEnd;
 
-    // How far back along the board the cut's far end reaches. Past the length
-    // it would take the whole end off, which is not a mitre.
-    const double depth = frame.width * std::tan(angleDeg * kPi / 180.0);
+    // How far back along the board the cut's far end reaches - the span
+    // across from the pivot edge, so the width on a width side and the
+    // thickness on a thickness side. Past the length it would take the whole
+    // end off, which is not a mitre.
+    const double depth = frame.span * std::tan(angleDeg * kPi / 180.0);
     if (depth > frame.length + 1.0e-7) {
         if (why) *why = "mitre: the cut would run past the far end of the board";
         return MitreCheck::RunsPastTheEnd;
@@ -1018,29 +1072,30 @@ MitreCheck checkMitre(const TopoDS_Shape& body, const TopoDS_Face& endFace, doub
 }
 
 BooleanResult mitreEnd(const TopoDS_Shape& body, const TopoDS_Face& endFace, double angleDeg,
-                       bool flip)
+                       MitreSide side)
 {
     BooleanResult out;
     MitreFrame frame;
-    if (checkMitre(body, endFace, angleDeg, flip, &frame, &out.error) != MitreCheck::Ok)
+    if (checkMitre(body, endFace, angleDeg, side, &frame, &out.error) != MitreCheck::Ok)
         return out;
     const double tanA = std::tan(angleDeg * kPi / 180.0);
 
     try {
         // The tool, in the (across, outward) plane through the pivot, swept
-        // along the thickness axis. The cut line runs from the pivot along
+        // along the pivot edge. The cut line runs from the pivot along
         // across*cos - outward*sin; the tool is the region on the END side of
-        // it, bounded to the face's own width and thickness plus a margin so
-        // no tool face is coplanar with a board face it merely touches.
+        // it, bounded to the face's own span and sweep plus a margin so no
+        // tool face is coplanar with a board face it merely touches. One
+        // construction serves all four sides: only the frame differs.
         const double margin = std::max(1.0, 0.1 * frame.width);
         const gp_Vec a(frame.across);
         const gp_Vec n(frame.outward);
-        const gp_Vec t(frame.thicknessAxis);
-        const gp_Pnt base = frame.pivot.Translated(t * -(0.5 * frame.thickness + margin));
+        const gp_Vec p(frame.pivotAxis);
+        const gp_Pnt base = frame.pivot.Translated(p * -(0.5 * frame.sweep + margin));
         const auto at = [&](double w, double h) { return base.Translated(a * w + n * h); };
 
         const double nearW = -margin;
-        const double farW = frame.width + margin;
+        const double farW = frame.span + margin;
         const double top = margin * tanA + margin;   // clear of the end face on both ends
         const std::vector<gp_Pnt> profile = {
             at(nearW, -nearW * tanA),   // on the cut line, behind the pivot
@@ -1053,8 +1108,8 @@ BooleanResult mitreEnd(const TopoDS_Shape& body, const TopoDS_Face& endFace, dou
             out.error = "mitre: the cutting tool could not be built";
             return out;
         }
-        const TopoDS_Shape tool = extrude(section, frame.thicknessAxis,
-                                          frame.thickness + 2.0 * margin);
+        const TopoDS_Shape tool = extrude(section, frame.pivotAxis,
+                                          frame.sweep + 2.0 * margin);
         if (tool.IsNull()) {
             out.error = "mitre: the cutting tool could not be built";
             return out;

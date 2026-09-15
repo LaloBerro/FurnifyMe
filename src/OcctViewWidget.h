@@ -905,8 +905,11 @@ public:
     // --- the Mitre end dial (improvements item 4) --------------------------
     //
     // The protractor the user picked: a half circle with a tick every 15
-    // degrees, standing at the board's end in the plane square to the board's
-    // THICKNESS, and a radius line to a draggable handle at the live angle.
+    // degrees, standing at the board's end in the plane the angle is measured
+    // in - square to the mitre's PIVOT EDGE (`normal`, ModelingOps::MitreFrame's
+    // pivotAxis): on a thickness face for a width side, on a width face for a
+    // thickness side - and a radius line to a draggable handle at the live
+    // angle.
     // MitreTool (src/ui/MitreTool.h) owns the gesture, the preview and the
     // commit; this widget owns only the drawing and the drag, the split
     // PullArrow and the mirror placement already draw.
@@ -930,6 +933,8 @@ public:
     void clearMitreDial();
     bool hasMitreDial() const { return myMitreDial.showing; }
     double mitreDialAngle() const { return myMitreDial.angleDeg; }
+    // The normal of the plane the dial lies in, as last shown.
+    gp_Dir mitreDialNormal() const { return myMitreDial.normal; }
     // The handle's world position, and the world point at any angle on the
     // dial's radius - so a check aims a drag at the dial's own geometry rather
     // than at a pixel guess. False while no dial is up.
@@ -2694,6 +2699,7 @@ private:
     double myMitreDialBuiltRadius = 0.0;
     gp_Pnt myMitreDialBuiltCentre{0.0, 0.0, 0.0};
     gp_Dir myMitreDialBuiltAcross{0.0, 1.0, 0.0};
+    gp_Dir myMitreDialBuiltNormal{0.0, 0.0, 1.0};
     double myMitreDialBuiltAngle = -1.0;
     Handle(AIS_InteractiveObject) myMitreDialArcObject;
     Handle(AIS_InteractiveObject) myMitreDialRayObject;

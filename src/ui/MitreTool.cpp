@@ -126,7 +126,7 @@ void MitreTool::begin()
     myFace = myWindow->mitreEndFace();
     myBodyId = myWindow->mitreEndBodyId();
     myAngle = 45.0;
-    myFlip = false;
+    mySide = ModelingOps::MitreSide::WidthA;
     myHasPreview = false;
     myReason.clear();
     myPreviewShape.Nullify();
@@ -140,6 +140,7 @@ void MitreTool::begin()
         myField->setText(QString::fromStdString(Measure::formatAngle(myAngle)));
         myField->blockSignals(false);
     }
+    applySideTooltips();
     updatePreview();
 
     applySize();
@@ -174,11 +175,11 @@ void MitreTool::end()
 bool MitreTool::frame(ModelingOps::MitreFrame& out)
 {
     const int revision = myWindow->document().revision();
-    if (myFrameRevision != revision || myFrameFlip != myFlip) {
+    if (myFrameRevision != revision || myFrameSide != mySide) {
         myFrameOk = ModelingOps::mitreFrame(myWindow->document().shapeOf(myBodyId), myFace,
-                                            myFlip, myFrame);
+                                            mySide, myFrame);
         myFrameRevision = revision;
-        myFrameFlip = myFlip;
+        myFrameSide = mySide;
     }
     out = myFrame;
     return myFrameOk;
@@ -192,13 +193,15 @@ void MitreTool::pushDial()
         myView->clearMitreDial();
         return;
     }
-    // On the face of the board that faces the camera, so the protractor lies
-    // on wood the user can see rather than on the underside.
+    // The dial lies in the plane the angle is MEASURED in - square to the
+    // pivot edge - so on one of the two board faces the pivot edge pierces:
+    // a thickness face for a width side, a width face for a thickness side.
+    // Of those two, the one that faces the camera, so the protractor lies on
+    // wood the user can see rather than on the underside.
     const gp_Vec towardEye = -gp_Vec(myView->liveCameraDirection());
-    const double side = gp_Vec(f.thicknessAxis).Dot(towardEye) >= 0.0 ? 1.0 : -1.0;
-    const gp_Pnt centre =
-        f.pivot.Translated(gp_Vec(f.thicknessAxis) * (side * 0.5 * f.thickness));
-    myView->showMitreDial(centre, f.across, f.outward, f.thicknessAxis, myAngle);
+    const double facing = gp_Vec(f.pivotAxis).Dot(towardEye) >= 0.0 ? 1.0 : -1.0;
+    const gp_Pnt centre = f.pivot.Translated(gp_Vec(f.pivotAxis) * (facing * 0.5 * f.sweep));
+    myView->showMitreDial(centre, f.across, f.outward, f.pivotAxis, myAngle);
 }
 
 void MitreTool::updatePreview()
@@ -221,19 +224,19 @@ void MitreTool::updatePreview()
     }
 
     myAngle = typed;
-    myWindow->setMitreLiveValue(myAngle, myFlip);
+    myWindow->setMitreLiveValue(myAngle, mySide);
     pushDial();
 
     const int revision = myWindow->document().revision();
     const bool cached = !myPreviewShape.IsNull() && myPreviewRevision == revision &&
-                        myPreviewAngle == myAngle && myPreviewFlip == myFlip;
+                        myPreviewAngle == myAngle && myPreviewSide == mySide;
     if (!cached) {
         // The SAME ModelingOps::mitreEnd() MainWindow::mitreEndBy() commits.
         const ModelingOps::BooleanResult result = ModelingOps::mitreEnd(
-            myWindow->document().shapeOf(myBodyId), myFace, myAngle, myFlip);
+            myWindow->document().shapeOf(myBodyId), myFace, myAngle, mySide);
         myPreviewRevision = revision;
         myPreviewAngle = myAngle;
-        myPreviewFlip = myFlip;
+        myPreviewSide = mySide;
         myPreviewShape = result.ok ? result.shape : TopoDS_Shape();
     }
 
@@ -241,7 +244,7 @@ void MitreTool::updatePreview()
         // A value the geometry refuses shows NO ghost - a ghost of the last
         // good angle would be a picture of a mitre Enter will not make.
         markInvalid(true);
-        myReason = myWindow->mitreRefusalFor(myAngle, myFlip);
+        myReason = myWindow->mitreRefusalFor(myAngle, mySide);
         if (myReason.isEmpty()) myReason = MainWindow::mitreKernelRefusalText();
         if (myHasPreview) myView->clearModelingPreview();
         myHasPreview = false;
@@ -265,8 +268,26 @@ void MitreTool::onDialDragged(double angleDeg)
 void MitreTool::flip()
 {
     if (!myActive) return;
-    myFlip = !myFlip;
+    // One step round the end face's four edges - left, top, right, bottom -
+    // through the geometry library's one statement of that order.
+    mySide = ModelingOps::nextMitreSide(mySide);
+    applySideTooltips();
     updatePreview();
+    // A width side's dial lies on a thickness face and a thickness side's on
+    // a width face, so the dial's projected extent moved: re-place the chip
+    // against it, or it is left standing over the half it now covers.
+    reposition();
+}
+
+void MitreTool::applySideTooltips()
+{
+    // The kind of cut in words, so it can be told without reading the ghost -
+    // the same phrase the status label carries (MainWindow::mitreSideText()).
+    const QString kind = MainWindow::mitreSideText(mySide);
+    if (myFlipButton)
+        myFlipButton->setToolTip(
+            tr("Mitre %1 — Flip steps to the next edge of the end").arg(kind));
+    if (myField) myField->setToolTip(tr("Mitre angle, %1 — 1° to 89°").arg(kind));
 }
 
 void MitreTool::cancel()
@@ -285,7 +306,7 @@ void MitreTool::commit()
     const double angle = Measure::parseAngle(myField->text().toStdString(), typed)
                              ? typed
                              : std::numeric_limits<double>::quiet_NaN();
-    myWindow->mitreEndBy(angle, myFlip);
+    myWindow->mitreEndBy(angle, mySide);
     // On success mitreEndBy() ended the gesture and its appStateChanged has
     // already run refresh() -> end() here.
 }

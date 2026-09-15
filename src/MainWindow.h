@@ -142,20 +142,23 @@ public:
     int mitreEndBodyId() const { return myMitreBodyId; }
     // The chip reports the live angle and flip here so the persistent state
     // label can name them - the mockup's "Body 03 end — Mitre 45° — ...".
-    void setMitreLiveValue(double angleDeg, bool flip);
+    void setMitreLiveValue(double angleDeg, ModelingOps::MitreSide side);
     // Enter's route: builds ModelingOps::mitreEnd() - the call the preview
     // made - and commits it through commitReplaceBody(), ONE checkpoint, so
     // the mirror twin re-derives, linked copies follow, joints re-derive and
     // render mode and autosave follow. A Note with Undo on success; a Failure
     // naming the reason (mitreRefusalFor()) and the body untouched otherwise.
-    bool mitreEndBy(double angleDeg, bool flip);
+    bool mitreEndBy(double angleDeg, ModelingOps::MitreSide side);
     // Why ModelingOps::mitreEnd() would refuse this angle on the live
     // gesture's face, in the user's words, or an empty string when it would
     // not - read by the chip's reason row and by the Failure toast, so the two
     // cannot say different things.
-    QString mitreRefusalFor(double angleDeg, bool flip) const;
+    QString mitreRefusalFor(double angleDeg, ModelingOps::MitreSide side) const;
     // The painted copy, one source each, for the banned-word sweep.
     static QString mitreActionTooltip();
+    // The kind of cut a side makes, in words - "across the width" or "through
+    // the thickness" - read by the status label and the chip's tooltips alike.
+    static QString mitreSideText(ModelingOps::MitreSide side);
     static QString mitreAngleRangeRefusalText();
     static QString mitreTooLongRefusalText();
     static QString mitreKernelRefusalText();
@@ -1892,7 +1895,7 @@ private:
     int myMitreBodyId = 0;
     int myMitreRevision = -1;
     double myMitreLiveAngle = 45.0;
-    bool myMitreLiveFlip = false;
+    ModelingOps::MitreSide myMitreLiveSide = ModelingOps::MitreSide::WidthA;
     // canMitreEnd() walks the body, so the answer is cached on the face and
     // the revision it was asked at - updateActions() asks it on every
     // selection click.
