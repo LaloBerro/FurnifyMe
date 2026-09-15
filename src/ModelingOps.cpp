@@ -992,28 +992,39 @@ bool canMitreEnd(const TopoDS_Shape& body, const TopoDS_Face& endFace, std::stri
     return mitreFrame(body, endFace, false, ignored, why);
 }
 
+MitreCheck checkMitre(const TopoDS_Shape& body, const TopoDS_Face& endFace, double angleDeg,
+                      bool flip, MitreFrame* frameOut, std::string* why)
+{
+    // Angle first: it is the one refusal the frame cannot make, and an
+    // out-of-range angle should say so even about a perfectly good board.
+    // Written so a NaN fails it too.
+    if (!(angleDeg >= 1.0 - 1.0e-9 && angleDeg <= 89.0 + 1.0e-9)) {
+        if (why) *why = "mitre: the angle must be between 1 and 89 degrees";
+        return MitreCheck::AngleOutOfRange;
+    }
+
+    MitreFrame frame;
+    if (!mitreFrame(body, endFace, flip, frame, why)) return MitreCheck::NotABoardEnd;
+
+    // How far back along the board the cut's far end reaches. Past the length
+    // it would take the whole end off, which is not a mitre.
+    const double depth = frame.width * std::tan(angleDeg * kPi / 180.0);
+    if (depth > frame.length + 1.0e-7) {
+        if (why) *why = "mitre: the cut would run past the far end of the board";
+        return MitreCheck::RunsPastTheEnd;
+    }
+    if (frameOut) *frameOut = frame;
+    return MitreCheck::Ok;
+}
+
 BooleanResult mitreEnd(const TopoDS_Shape& body, const TopoDS_Face& endFace, double angleDeg,
                        bool flip)
 {
     BooleanResult out;
-    // Angle first: it is the one refusal the frame cannot make, and an
-    // out-of-range angle should say so even about a perfectly good board.
-    if (!(angleDeg >= 1.0 - 1.0e-9 && angleDeg <= 89.0 + 1.0e-9)) {
-        out.error = "mitre: the angle must be between 1 and 89 degrees";
-        return out;
-    }
-
     MitreFrame frame;
-    if (!mitreFrame(body, endFace, flip, frame, &out.error)) return out;
-
-    const double tanA = std::tan(angleDeg * kPi / 180.0);
-    // How far back along the board the cut's far end reaches. Past the length
-    // it would take the whole end off, which is not a mitre.
-    const double depth = frame.width * tanA;
-    if (depth > frame.length + 1.0e-7) {
-        out.error = "mitre: the cut would run past the far end of the board";
+    if (checkMitre(body, endFace, angleDeg, flip, &frame, &out.error) != MitreCheck::Ok)
         return out;
-    }
+    const double tanA = std::tan(angleDeg * kPi / 180.0);
 
     try {
         // The tool, in the (across, outward) plane through the pivot, swept

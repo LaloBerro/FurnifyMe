@@ -902,6 +902,45 @@ public:
     // nothing on that release either (see mouseReleaseEvent()).
     bool mirrorPlacementDragActive() const { return myMirrorDrag.active; }
 
+    // --- the Mitre end dial (improvements item 4) --------------------------
+    //
+    // The protractor the user picked: a half circle with a tick every 15
+    // degrees, standing at the board's end in the plane square to the board's
+    // THICKNESS, and a radius line to a draggable handle at the live angle.
+    // MitreTool (src/ui/MitreTool.h) owns the gesture, the preview and the
+    // commit; this widget owns only the drawing and the drag, the split
+    // PullArrow and the mirror placement already draw.
+    //
+    // The dial's own geometry, in the frame the geometry library measured
+    // (ModelingOps::MitreFrame): angle a points along
+    //     across * cos(a) - outward * sin(a)
+    // from `centre` - 0 degrees lies along the end face (a square cut), 90
+    // runs straight back along the board, and the red radius at the live angle
+    // lies exactly on the line the mitre leaves on that face of the board.
+    //
+    // Sized in SCREEN pixels at the centre's own depth (kMitreDialPx through
+    // worldPerPixelAt(), the body gizmos' rule), drawn in gizmoZLayer() -
+    // depth cleared, IMMEDIATE - so it reads over the board it stands on
+    // without wiping the Shadows tier's shadow map (see the Pitfalls). Never
+    // pickable: the handle is hit-tested in screen space at kHandleGrabPx, and
+    // the drag measures the cursor ray against the dial's own plane, with the
+    // frame FROZEN at the press.
+    void showMitreDial(const gp_Pnt& centre, const gp_Dir& across, const gp_Dir& outward,
+                       const gp_Dir& normal, double angleDeg);
+    void clearMitreDial();
+    bool hasMitreDial() const { return myMitreDial.showing; }
+    double mitreDialAngle() const { return myMitreDial.angleDeg; }
+    // The handle's world position, and the world point at any angle on the
+    // dial's radius - so a check aims a drag at the dial's own geometry rather
+    // than at a pixel guess. False while no dial is up.
+    bool mitreDialHandle(gp_Pnt& out) const;
+    bool mitreDialPointAt(double angleDeg, gp_Pnt& out) const;
+    // Whether the handle's 14 px screen-space hit test claims this LOGICAL
+    // pixel - the exact question mousePressEvent() asks. False with no dial.
+    bool mitreDialClaimsPoint(const QPoint& logical) const;
+    bool mitreDialDragActive() const { return myMitreDialDrag.active; }
+    static constexpr double kMitreDialPx = 90.0;
+
     // The Z-layer every piece of sketch work is displayed in - the in-progress
     // outline and the pending face (setPreview), the direct-modeling preview,
     // the point markers, the cursor marker and the dimension annotation.
@@ -1773,6 +1812,14 @@ signals:
     // false for a press and release that never moved.
     void mirrorPlaneReleased(bool dragged);
 
+    // A live drag of the Mitre end dial's handle: the angle the cursor now
+    // points at, in degrees, already clamped to [1, 89] and snapped to 5
+    // degree steps while Snap to Grid is on. Emitted only when it changes.
+    void mitreDialDragged(double angleDeg);
+    // The end of that drag, on pullReleased()'s own terms. A release does NOT
+    // commit a mitre - Enter does - so this only tells the chip the hand let go.
+    void mitreDialReleased(bool dragged);
+
     // A LEFT press landed in the viewport while render mode is active - the
     // brief's "a pick press in the viewport" exit. This widget does not know
     // what leaving render mode means beyond its own scene (MainWindow owns
@@ -2035,6 +2082,11 @@ private:
     // change" cache that indicator needs would only be extra bookkeeping
     // here. A no-op while no gesture is active.
     void updateMirrorPlacementIndicator();
+    // Rebuilds the Mitre end dial at the current screen scale - equal-guarded,
+    // so applyCameraState()'s per-tick call is free when nothing moved.
+    void updateMitreDial();
+    // The dial's world radius right now: kMitreDialPx at the centre's own depth.
+    double mitreDialWorldRadius() const;
     // The FIXED line a mirror-placement drag is measured along - the
     // selection's own combined centre (never the current, possibly already
     // offset, plane location) and the current orientation's normal. Fixed
@@ -2617,6 +2669,35 @@ private:
     // setModelingPreview/setPreview split exists to avoid repeating.
     Handle(AIS_InteractiveObject) myMirrorPlacementPlaneObject;
     Handle(AIS_InteractiveObject) myMirrorPlacementHandleObject;
+
+    // The Mitre end dial - see showMitreDial(). `showing` is the whole of its
+    // state; the frame is what the chip last handed in.
+    struct MitreDial {
+        bool showing = false;
+        gp_Pnt centre{0.0, 0.0, 0.0};
+        gp_Dir across{0.0, 1.0, 0.0};
+        gp_Dir outward{1.0, 0.0, 0.0};
+        gp_Dir normal{0.0, 0.0, 1.0};
+        double angleDeg = 45.0;
+    };
+    MitreDial myMitreDial;
+    // The frame FROZEN at the press that grabbed the handle - the Move gizmo's
+    // lesson (myMoveDragLine): never measure a drag against geometry the drag
+    // itself moves.
+    struct MitreDialDrag {
+        bool active = false;
+        bool moved = false;
+        MitreDial frame;
+    };
+    MitreDialDrag myMitreDialDrag;
+    // What updateMitreDial() last built, for its equal-guard.
+    double myMitreDialBuiltRadius = 0.0;
+    gp_Pnt myMitreDialBuiltCentre{0.0, 0.0, 0.0};
+    gp_Dir myMitreDialBuiltAcross{0.0, 1.0, 0.0};
+    double myMitreDialBuiltAngle = -1.0;
+    Handle(AIS_InteractiveObject) myMitreDialArcObject;
+    Handle(AIS_InteractiveObject) myMitreDialRayObject;
+    Handle(AIS_InteractiveObject) myMitreDialHandleObject;
 
     // See the constructor's own comment - the compare pane's flag.
     bool myViewerOnly = false;

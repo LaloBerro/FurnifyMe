@@ -142,6 +142,7 @@ if(FURNIFYME_BUILD_APP)
       src/ui/ExtrudePreview.cpp
       src/ui/PullArrow.cpp
       src/ui/BevelArrow.cpp
+      src/ui/MitreTool.cpp
       src/ui/TransformGizmo.cpp
       src/ui/InlineRename.cpp
       src/ui/WindowChrome.cpp

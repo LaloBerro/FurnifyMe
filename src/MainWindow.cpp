@@ -26,6 +26,7 @@
 #include "VersionsPanel.h"
 #include "JointChip.h"
 #include "JointsPanel.h"
+#include "MitreTool.h"
 #include "WalkthroughPanel.h"
 #include "WindowChrome.h"
 
@@ -1323,6 +1324,14 @@ void MainWindow::buildActions()
     myJointAction->setToolTip(tr("Plan a wood joint between two selected pieces (J)"));
     connect(myJointAction, &QAction::triggered, this, [this] { placeJointBetweenSelected(); });
 
+    // Mitre end (improvements item 4): M begins the live mitre gesture on the
+    // selected board end. M was checked free: no Qt::Key_M binding exists
+    // anywhere else in src/ or tests/.
+    myMitreAction = new QAction(tr("Mitre &end"), this);
+    myMitreAction->setShortcut(QKeySequence(Qt::Key_M));
+    myMitreAction->setToolTip(mitreActionTooltip());
+    connect(myMitreAction, &QAction::triggered, this, [this] { beginMitreEnd(); });
+
     myExportStepAction = new QAction(tr("Export &STEP..."), this);
     // Ctrl+S is Save's now - the platform standard key and a furniture SAVE
     // is what it should mean the moment a library exists to save into.
@@ -1695,6 +1704,10 @@ QMenuBar* MainWindow::buildMenus()
     modelMenu->addAction(myUnionAction);
     modelMenu->addAction(mySubtractAction);
     modelMenu->addAction(myIntersectAction);
+    modelMenu->addSeparator();
+    // Mitre end - menu-only, no rail chip, for the rail-floor rule below; its
+    // real home is M with a board end already selected.
+    modelMenu->addAction(myMitreAction);
     modelMenu->addSeparator();
     // Menu-only, no rail chip: the rail-floor rule (see the shell section of
     // CLAUDE.md - a fourteenth chip raises the viewport's minimum height), and
@@ -2392,6 +2405,14 @@ void MainWindow::buildOverlay()
     auto* mirrorChip = new MirrorPlacementChip(this, myView);
     myMirrorChip = mirrorChip;
 
+    // The Mitre end tool (improvements item 4), on the same terms: it parents
+    // itself to the viewport and derives its visibility from mitreEndActive()
+    // on every appStateChanged. Built AFTER every other gesture chip on
+    // purpose: their refresh() slots each clear the shared modeling-preview
+    // channel on the way past, and connection order is emission order, so the
+    // mitre ghost is put back after they have run rather than before.
+    myMitreTool = new MitreTool(this, myView);
+
     // The live view's half of the compare camera sync - see syncCamera()'s
     // declaration. A no-op for as long as myCompareView is null, which is
     // most of this window's life; wired once, here, rather than re-wired
@@ -2440,6 +2461,7 @@ void MainWindow::buildOverlay()
     connect(myOverlay, &ViewportOverlay::laidOut, myJointChip, &JointChip::replace);
     connect(myOverlay, &ViewportOverlay::laidOut, myMoveTool, &MoveTool::replace);
     connect(myOverlay, &ViewportOverlay::laidOut, mirrorChip, &MirrorPlacementChip::replace);
+    connect(myOverlay, &ViewportOverlay::laidOut, myMitreTool, &MitreTool::replace);
 
     // The unsaved-changes question (improvements item 3). Built LAST and
     // connected to laidOut() LAST, so its re-raise runs after every other
@@ -2485,6 +2507,19 @@ void MainWindow::updateActions()
     // body - is no selection. Pruned HERE, before appStateChanged, so every
     // surface that follows it (the drawer, the drawing gate) sees one answer.
     if (mySelectedJointId > 0 && !jointExists(mySelectedJointId)) mySelectedJointId = 0;
+
+    // A live Mitre end gesture that no longer holds ends HERE, the same prune:
+    // a selection change, any document change (undo, delete, a boolean - all
+    // move revision()), a sketch, render mode, a compare pane, the library or
+    // the close question. Derived in one predicate rather than a cancel at
+    // every one of those sites, so a new route that ends it cannot be the one
+    // somebody forgot. MitreTool::refresh() takes the dial and ghost down off
+    // the appStateChanged this function ends with.
+    if (myMitreActive && !mitreGestureStillHolds()) {
+        myMitreActive = false;
+        myMitreFace.Nullify();
+        myMitreBodyId = 0;
+    }
 
     const std::size_t selectedCount = myView->selectedSolidIds().size();
     const bool booleanReady = !mySketching && !atInit && selectedCount == 2;
@@ -2548,6 +2583,18 @@ void MainWindow::updateActions()
     const QString planeReason = mySketching ? sketchReason : pendingReason;
     myLockFaceAction->setToolTip(planeCanMove ? lockTooltipText() : planeReason);
     myUnlockFaceAction->setToolTip(planeCanMove ? unlockTooltipText() : planeReason);
+
+    // Mitre end (M): one board end face, asked of the geometry. The disabled
+    // tooltip says why, the sketch and outline reasons first for the reason
+    // the plane actions above give.
+    if (myMitreAction) {
+        const bool canMitre = canMitreSelectedFace();
+        myMitreAction->setEnabled(canMitre);
+        myMitreAction->setToolTip(canMitre         ? mitreActionTooltip()
+                                  : mySketching     ? sketchReason
+                                  : hasPendingFace() ? pendingReason
+                                                     : mitreUnavailableReason());
+    }
 
     // Symmetry (Milestone 3, rebound in Milestone 4 Phase 3). The checked
     // state is STILL document state - undo, redo, opening a different
@@ -2764,7 +2811,7 @@ void MainWindow::updateActions()
     // carries the same guard directly, for the reason its own comment gives
     // (a disabled action does not stop a programmatic trigger()).
     const bool canRename = !mySketching && !atInit && drawerVisible &&
-                           !myView->mirrorPlacementActive() &&
+                           !myView->mirrorPlacementActive() && !myMitreActive &&
                            (selectedCount == 1 || renameTargetsOutline);
     myRenameAction->setEnabled(canRename);
     myRenameAction->setToolTip(
@@ -3765,7 +3812,8 @@ bool MainWindow::canOpenSaveVersion() const
     // transform gizmo, so a pending version-create card and a live plane
     // placement really would fight over the same key.
     return !myShowingInitScreen && !myRenderModeOn && !mySketching && !hasPendingFace() &&
-           !canPullSelectedFace() && !canBevelSelectedEdge() && !myView->mirrorPlacementActive();
+           !canPullSelectedFace() && !canBevelSelectedEdge() && !myView->mirrorPlacementActive() &&
+           !myMitreActive;
 }
 
 void MainWindow::onSaveVersion()
@@ -4193,6 +4241,12 @@ void MainWindow::updateStateLabel()
         state = tr("%1 ready — press E to extrude")
                     .arg(QString::fromStdString(
                         myDocument.outlineNameOf(pendingOutlineId())));
+    } else if (myMitreActive) {
+        // The mockup's own sentence: which end, which angle, and both verbs.
+        state = tr("%1 end — Mitre %2 — drag the dial or type the angle, Enter to apply, "
+                   "Esc to cancel")
+                    .arg(QString::fromStdString(myDocument.nameOf(myMitreBodyId)),
+                         QString::fromStdString(Measure::formatAngle(myMitreLiveAngle)));
     } else if (canPullSelectedFace()) {
         // The gizmo is on screen and it is not obvious what to do with it -
         // an arrow with no words is a guess. Reads the same predicate the
@@ -5165,6 +5219,12 @@ bool MainWindow::canPullSelectedFace() const
     // viewport's own suppression does.
     if (mySketching || hasPendingFace() || myRenderModeOn) return false;
 
+    // A live Mitre end gesture stands on exactly this selection - one face -
+    // so without this term the pull arrow and the mitre dial would both be up
+    // and both claim Enter and Escape. The gizmo predicates stay provably
+    // disjoint by making the gesture a term the arrow refuses on.
+    if (myMitreActive) return false;
+
     // THE SELECTION-CONTENT TERM, and it is new: it used to be implicit,
     // because selectedFace() answered null outside face-selection mode and
     // face-selection mode was a thing the user chose. With auto selection
@@ -5338,6 +5398,181 @@ bool MainWindow::pullFaceBy(const TopoDS_Face& face, double distance)
         tr("%1 pulled — %2")
             .arg(QString::fromStdString(myDocument.nameOf(id)),
                  QString::fromStdString(Measure::formatDimensions(result.shape)));
+    if (twinFollowed) message += tr(" — twin followed");
+    message += linkedGroupSuffix(linkedOthersUpdated);
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    return true;
+}
+
+// --- Mitre end (improvements item 4) -----------------------------------------
+
+QString MainWindow::mitreActionTooltip()
+{
+    return tr("Mitre the selected board end at an angle, like a mitre saw (M)\n"
+              "Drag the dial or type the angle — Flip picks the other corner.");
+}
+
+QString MainWindow::mitreAngleRangeRefusalText()
+{
+    return tr("A mitre takes an angle from 1° to 89° — type one in that range, or drag "
+              "the dial");
+}
+
+QString MainWindow::mitreTooLongRefusalText()
+{
+    return tr("This board is too short for a mitre that steep — it would run past the far "
+              "end. Try a smaller angle");
+}
+
+QString MainWindow::mitreKernelRefusalText()
+{
+    return tr("This end can't be mitred at that angle — the geometry engine could not build "
+              "the shape. Try a different angle");
+}
+
+bool MainWindow::canMitreSelectedFace() const
+{
+    if (myShowingInitScreen || isAskingBeforeClose() || mySketching || hasPendingFace() ||
+        myRenderModeOn || isCompareOpen() || myView->mirrorPlacementActive() || myMitreActive)
+        return false;
+    if (myView->selectionKind() != OcctViewWidget::PickKind::Face) return false;
+    const TopoDS_Face face = myView->selectedFace();
+    if (face.IsNull()) return false;
+    const int id = bodyIdForFace(face);
+    const TopoDS_Shape body = myDocument.shapeOf(id);
+    if (id <= 0 || body.IsNull()) return false;
+
+    // Cached on the face and the revision: canMitreEnd() runs a classifier
+    // probe and walks the body, and this is asked on every selection click.
+    if (!myMitreCheckFace.IsNull() && myMitreCheckFace.IsSame(face) &&
+        myMitreCheckRevision == myDocument.revision())
+        return myMitreCheckResult;
+    myMitreCheckFace = face;
+    myMitreCheckRevision = myDocument.revision();
+    myMitreCheckResult = ModelingOps::canMitreEnd(body, face);
+    return myMitreCheckResult;
+}
+
+QString MainWindow::mitreUnavailableReason() const
+{
+    if (myMitreActive) return tr("A mitre is already live — Enter applies, Esc cancels");
+    if (myRenderModeOn) return tr("Unavailable in render mode");
+    if (isCompareOpen()) return tr("Unavailable while comparing versions");
+    if (myView->mirrorPlacementActive())
+        return tr("Unavailable while placing a mirror plane — Enter mirrors, Esc cancels");
+    if (myView->selectionKind() != OcctViewWidget::PickKind::Face || myView->selectedFace().IsNull())
+        return tr("Select the flat end of a board, then mitre it (M)");
+    return tr("This face can't be mitred — select the flat end of a board (M)");
+}
+
+bool MainWindow::mitreGestureStillHolds() const
+{
+    if (!myMitreActive) return false;
+    if (myShowingInitScreen || isAskingBeforeClose() || mySketching || hasPendingFace() ||
+        myRenderModeOn || isCompareOpen() || myView->mirrorPlacementActive())
+        return false;
+    if (myDocument.revision() != myMitreRevision) return false;
+    if (myView->selectionKind() != OcctViewWidget::PickKind::Face) return false;
+    const TopoDS_Face face = myView->selectedFace();
+    return !face.IsNull() && face.IsSame(myMitreFace);
+}
+
+bool MainWindow::beginMitreEnd()
+{
+    if (!canMitreSelectedFace()) {
+        // trigger() does not consult isEnabled(), so the gesture asks for
+        // itself - and says why in the one place a key press can be answered.
+        statusBar()->showMessage(mySketching        ? tr("Unavailable while you're drawing")
+                                 : hasPendingFace() ? tr("Unavailable while an outline is waiting")
+                                                    : mitreUnavailableReason());
+        return false;
+    }
+    myMitreFace = myView->selectedFace();
+    myMitreBodyId = bodyIdForFace(myMitreFace);
+    myMitreRevision = myDocument.revision();
+    myMitreLiveAngle = 45.0;
+    myMitreLiveFlip = false;
+    myMitreActive = true;
+    // The pull arrow retires and MitreTool begins off this one emission.
+    updateActions();
+    return true;
+}
+
+void MainWindow::cancelMitreEnd()
+{
+    if (!myMitreActive) return;
+    myMitreActive = false;
+    myMitreFace.Nullify();
+    myMitreBodyId = 0;
+    updateActions();
+    statusBar()->showMessage(tr("Mitre cancelled — nothing was changed"));
+}
+
+void MainWindow::setMitreLiveValue(double angleDeg, bool flip)
+{
+    myMitreLiveAngle = angleDeg;
+    myMitreLiveFlip = flip;
+    // The label only - never updateActions(): this is called from inside an
+    // appStateChanged slot, and updateActions() is what emits that signal.
+    updateStateLabel();
+}
+
+QString MainWindow::mitreRefusalFor(double angleDeg, bool flip) const
+{
+    if (!myMitreActive) return QString();
+    switch (ModelingOps::checkMitre(myDocument.shapeOf(myMitreBodyId), myMitreFace, angleDeg,
+                                    flip)) {
+        case ModelingOps::MitreCheck::Ok: return QString();
+        case ModelingOps::MitreCheck::AngleOutOfRange: return mitreAngleRangeRefusalText();
+        case ModelingOps::MitreCheck::RunsPastTheEnd: return mitreTooLongRefusalText();
+        case ModelingOps::MitreCheck::NotABoardEnd: return mitreKernelRefusalText();
+    }
+    return mitreKernelRefusalText();
+}
+
+bool MainWindow::mitreEndBy(double angleDeg, bool flip)
+{
+    if (!myMitreActive) return false;
+    const int id = myMitreBodyId;
+    const TopoDS_Face face = myMitreFace;
+    const TopoDS_Shape body = myDocument.shapeOf(id);
+    if (id <= 0 || body.IsNull() || face.IsNull()) return false;
+
+    const ModelingOps::BooleanResult result = ModelingOps::mitreEnd(body, face, angleDeg, flip);
+    if (!result.ok) {
+        // Never a failed operation surfaced as a success, and never the
+        // kernel's own string: it is written for ModelingOps, not the user.
+        qWarning("Mitre failed: %s", result.error.c_str());
+        QString why = mitreRefusalFor(angleDeg, flip);
+        if (why.isEmpty()) why = mitreKernelRefusalText();
+        myToasts->show(why, Toast::Kind::Failure, false);
+        statusBar()->showMessage(tr("Mitre refused — nothing was changed"));
+        return false;
+    }
+
+    // The gesture, the ghost, the dial and the selection all describe a face
+    // that is about to stop existing - gone before the body is redisplayed.
+    myMitreActive = false;
+    myMitreFace.Nullify();
+    myMitreBodyId = 0;
+    myView->clearModelingPreview();
+    myView->clearMitreDial();
+    myView->clearSelection();
+
+    // ONE checkpoint, through the choke point every replace-body edit uses:
+    // render mode exits, the twin re-derives by mirroring, linked copies
+    // follow, and joints re-derive off the revision it moves.
+    bool twinFollowed = false;
+    int linkedOthersUpdated = 0;
+    commitReplaceBody(id, result.shape, twinFollowed, linkedOthersUpdated);
+    recordProgress("mitre.completed");
+
+    updateActions();
+    emit documentChanged();
+    QString message = tr("Mitred %1 — %2")
+                          .arg(QString::fromStdString(myDocument.nameOf(id)),
+                               QString::fromStdString(Measure::formatAngle(angleDeg)));
     if (twinFollowed) message += tr(" — twin followed");
     message += linkedGroupSuffix(linkedOthersUpdated);
     statusBar()->showMessage(message);

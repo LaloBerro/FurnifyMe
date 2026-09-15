@@ -160,6 +160,46 @@ bool parseLength(const std::string& text, double& out)
     return true;
 }
 
+std::string formatAngle(double degrees)
+{
+    double rounded = std::round(degrees * 100.0) / 100.0;
+    if (rounded == 0.0) rounded = 0.0;   // collapses -0.0
+    char digits[48];
+    std::snprintf(digits, sizeof(digits), "%.2f", rounded);
+    std::string out(digits);
+    // Trailing zeros, then a bare point: "45.00" -> "45", "32.50" -> "32.5".
+    while (!out.empty() && out.back() == '0') out.pop_back();
+    if (!out.empty() && out.back() == '.') out.pop_back();
+    return out + "\xC2\xB0";
+}
+
+bool parseAngle(const std::string& text, double& out)
+{
+    std::string trimmed = text;
+    const auto trimSpaces = [](std::string& s) {
+        std::size_t begin = 0;
+        while (begin < s.size() && std::isspace(static_cast<unsigned char>(s[begin]))) ++begin;
+        std::size_t end = s.size();
+        while (end > begin && std::isspace(static_cast<unsigned char>(s[end - 1]))) --end;
+        s = s.substr(begin, end - begin);
+    };
+    trimSpaces(trimmed);
+    static const std::string kDegree = "\xC2\xB0";
+    if (trimmed.size() >= kDegree.size() &&
+        trimmed.compare(trimmed.size() - kDegree.size(), kDegree.size(), kDegree) == 0) {
+        trimmed.erase(trimmed.size() - kDegree.size());
+        trimSpaces(trimmed);
+    }
+    if (trimmed.empty() || !looksLikePlainNumber(trimmed)) return false;
+
+    const char* start = trimmed.c_str();
+    char* endPtr = nullptr;
+    const double parsed = std::strtod(start, &endPtr);
+    if (endPtr != start + trimmed.size() || !std::isfinite(parsed)) return false;
+    out = parsed;
+    return true;
+}
+
 std::string formatDimensions(const TopoDS_Shape& shape)
 {
     if (shape.IsNull()) return std::string();

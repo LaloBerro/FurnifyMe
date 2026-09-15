@@ -24,6 +24,7 @@ class AxisGizmo;
 class BevelArrow;
 class ExtrudePreview;
 class JointChip;
+class MitreTool;
 class OcctViewWidget;
 class PullArrow;
 class QAction;
@@ -110,6 +111,55 @@ public:
     // Enter/Escape claims are therefore mutually exclusive by construction
     // rather than by luck.
     bool canPullSelectedFace() const;
+
+    // --- Mitre end (improvements item 4) -----------------------------------
+    //
+    // Model -> Mitre end (M). The user's pick from the mockup round ("C+"):
+    // a protractor dial at the board's end plus a chip with a typed angle and
+    // Flip. The geometry is ModelingOps::mitreEnd(); this window owns the
+    // GESTURE's state - which face, which body, since which revision - and the
+    // commit, the way it owns every other gizmo's commit. MitreTool
+    // (src/ui/MitreTool.h) owns the dial, the chip, the preview and the keys.
+    //
+    // Whether M can START a mitre on what is selected right now: exactly one
+    // planar face (selectionKind() == Face), on a document body, that
+    // ModelingOps::canMitreEnd() accepts - the geometry's own one
+    // implementation of every refusal - with no sketch, no outline waiting,
+    // no render mode, no compare pane, no mirror placement and no mitre
+    // already live. updateActions() enables the action off this and writes
+    // the disabled tooltip off mitreUnavailableReason().
+    bool canMitreSelectedFace() const;
+    QString mitreUnavailableReason() const;
+    // The action's route. False (with a status-bar sentence) when the
+    // predicate above does not hold - QAction::trigger() does not consult
+    // isEnabled(), so the gesture checks for itself.
+    bool beginMitreEnd();
+    // Escape's route, and every derived cancel's: ends the gesture with
+    // nothing changed. Safe when nothing is live.
+    void cancelMitreEnd();
+    bool mitreEndActive() const { return myMitreActive; }
+    TopoDS_Face mitreEndFace() const { return myMitreFace; }
+    int mitreEndBodyId() const { return myMitreBodyId; }
+    // The chip reports the live angle and flip here so the persistent state
+    // label can name them - the mockup's "Body 03 end — Mitre 45° — ...".
+    void setMitreLiveValue(double angleDeg, bool flip);
+    // Enter's route: builds ModelingOps::mitreEnd() - the call the preview
+    // made - and commits it through commitReplaceBody(), ONE checkpoint, so
+    // the mirror twin re-derives, linked copies follow, joints re-derive and
+    // render mode and autosave follow. A Note with Undo on success; a Failure
+    // naming the reason (mitreRefusalFor()) and the body untouched otherwise.
+    bool mitreEndBy(double angleDeg, bool flip);
+    // Why ModelingOps::mitreEnd() would refuse this angle on the live
+    // gesture's face, in the user's words, or an empty string when it would
+    // not - read by the chip's reason row and by the Failure toast, so the two
+    // cannot say different things.
+    QString mitreRefusalFor(double angleDeg, bool flip) const;
+    // The painted copy, one source each, for the banned-word sweep.
+    static QString mitreActionTooltip();
+    static QString mitreAngleRangeRefusalText();
+    static QString mitreTooLongRefusalText();
+    static QString mitreKernelRefusalText();
+    MitreTool* mitreTool() const { return myMitreTool; }
 
     // THE predicate behind the transform gizmo: the document id of the one
     // body it should be standing on, or 0. Exactly one WHOLE BODY selected,
@@ -1828,6 +1878,29 @@ private:
     // and derives its own visibility; this window keeps the pointer for the
     // laidOut() re-place every self-placing panel gets, and for the suite.
     JointChip* myJointChip = nullptr;
+
+    // --- Mitre end (improvements item 4) -------------------------------------
+    // Model -> Mitre end (M) - menu-only, no rail chip (the rail-floor rule).
+    QAction* myMitreAction = nullptr;
+    MitreTool* myMitreTool = nullptr;
+    // THE gesture's state. The face and body are captured at beginMitreEnd();
+    // the revision is what makes "any change to the document ends it" one
+    // comparison in updateActions() rather than a call at every edit site
+    // (undo, delete, a boolean, a restore all move revision()).
+    bool myMitreActive = false;
+    TopoDS_Face myMitreFace;
+    int myMitreBodyId = 0;
+    int myMitreRevision = -1;
+    double myMitreLiveAngle = 45.0;
+    bool myMitreLiveFlip = false;
+    // canMitreEnd() walks the body, so the answer is cached on the face and
+    // the revision it was asked at - updateActions() asks it on every
+    // selection click.
+    mutable TopoDS_Face myMitreCheckFace;
+    mutable int myMitreCheckRevision = -1;
+    mutable bool myMitreCheckResult = false;
+    // True while the gesture's derived cancel still holds - see updateActions().
+    bool mitreGestureStillHolds() const;
     // The terms a joint edit shares with every other gesture's environment -
     // canPullSelectedFace()'s own three, plus the library and a compare pane
     // (linkGestureEnvironmentOk()'s two) and a live Mirror placement, whose

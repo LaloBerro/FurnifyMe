@@ -787,6 +787,12 @@ void OcctViewWidget::releaseGlResources()
     mySymmetryIndicatorBuiltHalfSpan = 0.0;
     myMirrorPlacementPlaneObject.Nullify();
     myMirrorPlacementHandleObject.Nullify();
+    myMitreDialArcObject.Nullify();
+    myMitreDialRayObject.Nullify();
+    myMitreDialHandleObject.Nullify();
+    myMitreDial = MitreDial();
+    myMitreDialDrag = MitreDialDrag();
+    myMitreDialBuiltRadius = 0.0;
     myRenderFloor.Nullify();
     myRenderSavedLights.clear();
     myRenderSavedAmbients.clear();
@@ -2834,6 +2840,149 @@ void OcctViewWidget::updateMirrorPlacementIndicator()
     myMirrorPlacementBuiltNormal = normal0;
 }
 
+// --- the Mitre end dial (improvements item 4) --------------------------------
+
+void OcctViewWidget::showMitreDial(const gp_Pnt& centre, const gp_Dir& across,
+                                   const gp_Dir& outward, const gp_Dir& normal, double angleDeg)
+{
+    initializeViewer();
+    if (myContext.IsNull()) return;
+    myMitreDial.showing = true;
+    myMitreDial.centre = centre;
+    myMitreDial.across = across;
+    myMitreDial.outward = outward;
+    myMitreDial.normal = normal;
+    myMitreDial.angleDeg = angleDeg;
+    updateMitreDial();
+}
+
+void OcctViewWidget::clearMitreDial()
+{
+    const bool had = myMitreDial.showing;
+    myMitreDial = MitreDial();
+    myMitreDialDrag = MitreDialDrag();
+    myMitreDialBuiltRadius = 0.0;
+    myMitreDialBuiltAngle = -1.0;
+    if (myContext.IsNull()) return;
+    for (Handle(AIS_InteractiveObject)* object :
+         {&myMitreDialArcObject, &myMitreDialRayObject, &myMitreDialHandleObject}) {
+        if (!object->IsNull()) {
+            myContext->Remove(*object, Standard_False);
+            object->Nullify();
+        }
+    }
+    if (had) scheduleRedraw();
+}
+
+double OcctViewWidget::mitreDialWorldRadius() const
+{
+    return kMitreDialPx * worldPerPixelAt(myMitreDial.centre);
+}
+
+bool OcctViewWidget::mitreDialPointAt(double angleDeg, gp_Pnt& out) const
+{
+    if (!myMitreDial.showing) return false;
+    const double a = angleDeg * 3.14159265358979323846 / 180.0;
+    const double r = mitreDialWorldRadius();
+    out = myMitreDial.centre.Translated(gp_Vec(myMitreDial.across) * (r * std::cos(a)) -
+                                        gp_Vec(myMitreDial.outward) * (r * std::sin(a)));
+    return true;
+}
+
+bool OcctViewWidget::mitreDialHandle(gp_Pnt& out) const
+{
+    return mitreDialPointAt(myMitreDial.angleDeg, out);
+}
+
+bool OcctViewWidget::mitreDialClaimsPoint(const QPoint& logical) const
+{
+    gp_Pnt handle;
+    if (!mitreDialHandle(handle)) return false;
+    QPoint screen;
+    if (!projectToScreen(handle, screen)) return false;
+    const QPoint d = logical - screen;
+    return std::sqrt(static_cast<double>(d.x() * d.x() + d.y() * d.y())) <= kHandleGrabPx;
+}
+
+void OcctViewWidget::updateMitreDial()
+{
+    if (!myMitreDial.showing || myContext.IsNull()) return;
+
+    const double radius = mitreDialWorldRadius();
+    // The equal-guard: an orbit that neither zooms nor moves the dial costs
+    // nothing but this comparison, updateMirrorPlacementIndicator()'s rule.
+    if (!myMitreDialArcObject.IsNull() && myMitreDialBuiltRadius > 0.0 &&
+        radius < myMitreDialBuiltRadius * 1.02 && radius > myMitreDialBuiltRadius * 0.98 &&
+        myMitreDial.centre.IsEqual(myMitreDialBuiltCentre, 1.0e-9) &&
+        myMitreDial.across.IsEqual(myMitreDialBuiltAcross, 1.0e-9) &&
+        std::fabs(myMitreDial.angleDeg - myMitreDialBuiltAngle) < 1.0e-9) {
+        return;
+    }
+
+    const gp_Pnt c = myMitreDial.centre;
+    const gp_Vec across(myMitreDial.across);
+    const gp_Vec back = -gp_Vec(myMitreDial.outward);
+    const auto at = [&](double degrees, double r) {
+        const double a = degrees * 3.14159265358979323846 / 180.0;
+        return c.Translated(across * (r * std::cos(a)) + back * (r * std::sin(a)));
+    };
+
+    // The half circle (36 chords) and a tick every 15 degrees, pointing in.
+    constexpr int kChords = 36;
+    constexpr int kTicks = 13;
+    Handle(Graphic3d_ArrayOfSegments) arc =
+        new Graphic3d_ArrayOfSegments(2 * (kChords + kTicks));
+    for (int i = 0; i < kChords; ++i) {
+        arc->AddVertex(at(180.0 * i / kChords, radius));
+        arc->AddVertex(at(180.0 * (i + 1) / kChords, radius));
+    }
+    for (int i = 0; i < kTicks; ++i) {
+        const double degrees = 15.0 * i;
+        arc->AddVertex(at(degrees, radius));
+        arc->AddVertex(at(degrees, radius * 0.89));
+    }
+    Handle(SymmetryPlaneObject) arcObject = new SymmetryPlaneObject();
+    arcObject->segments = arc;
+    arcObject->colour = toOcctColor(Theme::text());
+    arcObject->width = 1.6;
+
+    // The live radius, in the X axis token's red - the mockup's red, and the
+    // colour every live gizmo handle in this app already wears for "grab me".
+    Handle(Graphic3d_ArrayOfSegments) ray = new Graphic3d_ArrayOfSegments(2);
+    const gp_Pnt tip = at(myMitreDial.angleDeg, radius);
+    ray->AddVertex(c);
+    ray->AddVertex(tip);
+    Handle(SymmetryPlaneObject) rayObject = new SymmetryPlaneObject();
+    rayObject->segments = ray;
+    rayObject->colour = toOcctColor(Theme::gizmoAxisX());
+    rayObject->width = 2.6;
+
+    Handle(SketchPointMarker) handle = makeMarker(tip, SketchMarkerShape::Disc, 13,
+                                                  toOcctColor(Theme::gizmoAxisX()),
+                                                  devicePixelRatioF());
+
+    const Graphic3d_ZLayerId layer =
+        myGizmoLayer != Graphic3d_ZLayerId_UNKNOWN ? myGizmoLayer : Graphic3d_ZLayerId_Topmost;
+    const std::pair<Handle(AIS_InteractiveObject)*, Handle(AIS_InteractiveObject)> built[] = {
+        {&myMitreDialArcObject, arcObject},
+        {&myMitreDialRayObject, rayObject},
+        {&myMitreDialHandleObject, handle},
+    };
+    for (const auto& [slot, object] : built) {
+        if (!slot->IsNull()) myContext->Remove(*slot, Standard_False);
+        // Layer BEFORE Display - markInSketchLayer()'s rule.
+        myContext->SetZLayer(object, layer);
+        myContext->Display(object, 0, -1, Standard_False);
+        *slot = object;
+    }
+
+    myMitreDialBuiltRadius = radius;
+    myMitreDialBuiltCentre = myMitreDial.centre;
+    myMitreDialBuiltAcross = myMitreDial.across;
+    myMitreDialBuiltAngle = myMitreDial.angleDeg;
+    if (!myApplyingCamera) scheduleRedraw();
+}
+
 bool OcctViewWidget::solidPresentationTransform(int id, gp_Trsf& out) const
 {
     const auto it = mySolids.find(id);
@@ -4113,6 +4262,8 @@ void OcctViewWidget::applyCameraState()
     // Screen-sized the same way, and no-ops itself the same way - see its
     // own equal-guard.
     updateMirrorPlacementIndicator();
+    // And the Mitre end dial, on the same equal-guarded terms.
+    updateMitreDial();
     // Slots FIRST, redraw second. A slot on cameraChanged() that changes the
     // scene - PullArrow rebuilds its 3D arrow, which is sized in screen
     // pixels and so has to be rebuilt whenever the camera moves - was
@@ -6320,6 +6471,21 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
     if (event->button() == Qt::LeftButton && !mySketchMode && myMirrorPlacement.active)
         return;
 
+    // The Mitre end dial's handle, on the arrows' terms: a 14 px screen-space
+    // claim that takes the press outright, with the dial's frame FROZEN here.
+    // Never up beside another handle - MainWindow's mitre gesture needs one
+    // face and is a term the pull arrow refuses on - so the order is not
+    // load-bearing. A press anywhere else falls through to an ordinary pick,
+    // and a pick that changes the selection ends the gesture: that is the
+    // contract, not a leak.
+    if (event->button() == Qt::LeftButton && !mySketchMode && myMitreDial.showing &&
+        mitreDialClaimsPoint(myLastPos)) {
+        myMitreDialDrag.active = true;
+        myMitreDialDrag.moved = false;
+        myMitreDialDrag.frame = myMitreDial;
+        return;
+    }
+
     // The bevel arrow, on exactly the same terms - including claiming the
     // gesture at an angle the maths refuses. The two arrows are never up at
     // once - selectionKind() answers Face for one and Edge for the other, and
@@ -6466,6 +6632,17 @@ void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
     if (myMirrorDrag.active && event->button() == Qt::LeftButton) {
         myMirrorDrag.active = false;
         emit mirrorPlaneReleased(myMirrorDrag.moved);
+        return;
+    }
+
+    // The end of a Mitre dial drag, swallowed for the arrows' reason: the
+    // press was aimed at the handle, and re-picking here would replace the
+    // face selection the gesture stands on - which would end the gesture the
+    // user was in the middle of adjusting.
+    if (myMitreDialDrag.active && event->button() == Qt::LeftButton) {
+        const bool moved = myMitreDialDrag.moved;
+        myMitreDialDrag = MitreDialDrag();
+        emit mitreDialReleased(moved);
         return;
     }
 
@@ -6641,6 +6818,31 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
             updateMirrorPlacementIndicator();
             emit mirrorPlaneDragged(myMirrorPlacement.offset);
         }
+    } else if (myMitreDialDrag.active) {
+        // The cursor ray against the dial's own plane, in the frame frozen at
+        // the press; the angle is the hit's direction from the centre, read
+        // in the dial's (across, -outward) axes.
+        const MitreDial& frame = myMitreDialDrag.frame;
+        gp_Lin ray;
+        gp_Pnt hit;
+        if (rayThroughPixel(pos.x(), pos.y(), ray) &&
+            SketchController::intersectRayWithPlane(ray, gp_Pln(frame.centre, frame.normal),
+                                                    hit)) {
+            const gp_Vec fromCentre(frame.centre, hit);
+            const double x = fromCentre.Dot(gp_Vec(frame.across));
+            const double y = -fromCentre.Dot(gp_Vec(frame.outward));
+            if (std::hypot(x, y) > 1.0e-9) {
+                double degrees = std::atan2(y, x) * 180.0 / 3.14159265358979323846;
+                // Snap to Grid's angular step for this tool is 5 degrees, the
+                // step a mitre saw's detents think in; typed values stay exact.
+                if (mySnapEnabled) degrees = std::round(degrees / 5.0) * 5.0;
+                degrees = std::clamp(degrees, 1.0, 89.0);
+                if (std::fabs(degrees - myMitreDial.angleDeg) > 1.0e-9) {
+                    myMitreDialDrag.moved = true;
+                    emit mitreDialDragged(degrees);
+                }
+            }
+        }
     } else if (myPullDrag.active) {
         if (advanceAxisDrag(myPullDrag, myPullArrow.axis(), pos))
             emit pullDragged(myPullDrag.value);
@@ -6777,7 +6979,7 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
         // truth at that pixel; OCCT's detection is cleared rather than
         // merely skipped, so an owner lit BEFORE the cursor slid onto the
         // arm goes out too.
-        if (bodyGizmoHandleAt(pos)) {
+        if (bodyGizmoHandleAt(pos) || mitreDialClaimsPoint(pos)) {
             if (myContext->HasDetected()) myContext->ClearDetected(Standard_False);
         } else {
             // Hover highlight. Suppressed while sketching so the in-progress
@@ -6870,7 +7072,8 @@ void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
     // swallowed exactly as a landed pick's is. Shift is exempt, preserving
     // the pinned gesture: a Shift+double-click over an arm still adds the
     // body underneath.
-    if (!(event->modifiers() & Qt::ShiftModifier) && bodyGizmoHandleAt(pos)) {
+    if (!(event->modifiers() & Qt::ShiftModifier) &&
+        (bodyGizmoHandleAt(pos) || mitreDialClaimsPoint(pos))) {
         myAutoBodyPickTaken = true;
         return;
     }

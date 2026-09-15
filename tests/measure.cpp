@@ -202,6 +202,31 @@ int main()
         Measure::setDisplayUnit(Measure::Unit::Millimetres);
     }
 
+    // --- angles (Mitre end) ------------------------------------------------------
+    {
+        const std::string deg = "\xC2\xB0";
+        checkEq(Measure::formatAngle(45.0), "45" + deg, "a whole angle has no decimals");
+        checkEq(Measure::formatAngle(32.5), "32.5" + deg, "a half degree keeps one decimal");
+        checkEq(Measure::formatAngle(22.25), "22.25" + deg, "a quarter degree keeps two");
+        checkEq(Measure::formatAngle(44.999), "45" + deg, "past two decimals it rounds");
+        Measure::setDisplayUnit(Measure::Unit::Centimetres);
+        checkEq(Measure::formatAngle(30.0), "30" + deg, "an angle ignores the display unit");
+        Measure::setDisplayUnit(Measure::Unit::Millimetres);
+
+        double a = -1.0;
+        check(Measure::parseAngle("30", a) && a == 30.0, "\"30\" parses to 30");
+        check(Measure::parseAngle(" 32.5 ", a) && a == 32.5, "\" 32.5 \" parses exactly");
+        check(Measure::parseAngle("45" + deg, a) && a == 45.0, "a trailing degree sign is allowed");
+        check(Measure::parseAngle("12.75 " + deg, a) && a == 12.75,
+              "and a space before it too, still exact");
+        a = 7.0;
+        check(!Measure::parseAngle("", a) && a == 7.0, "empty is refused and leaves out alone");
+        check(!Measure::parseAngle("abc", a), "letters are refused");
+        check(!Measure::parseAngle("1e1", a), "scientific notation is refused");
+        check(!Measure::parseAngle(deg, a), "a bare degree sign is refused");
+        check(!Measure::parseAngle("4" + deg + "5", a), "a degree sign in the middle is refused");
+    }
+
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL",
                 g_failures, g_failures == 1 ? "" : "s");
     return g_failures == 0 ? 0 : 1;

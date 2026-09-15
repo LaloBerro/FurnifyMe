@@ -76,4 +76,17 @@ bool parseLength(const std::string& text, double& out);
 // a formatted number.
 std::string unitSuffix();
 
+// An angle in degrees, the way the Mitre end tool shows it: "45°", "32.5°",
+// "22.25°" - up to two decimals, trailing zeros dropped, no space before the
+// degree sign. Angles have no display unit, so this never reads it. The
+// string is UTF-8 (the degree sign is two bytes).
+std::string formatAngle(double degrees);
+
+// Parses a typed angle in degrees: parseLength()'s plain-decimal grammar
+// (sign, digits, at most one '.'), optionally followed by one degree sign
+// ("°", UTF-8) and surrounding spaces. EXACT - "32.5" reads 32.5, never
+// rounded - because a typed mitre angle is the one the saw is set to. False,
+// `out` untouched, for anything outside the grammar. Range is the caller's.
+bool parseAngle(const std::string& text, double& out);
+
 }  // namespace Measure

@@ -367,6 +367,16 @@ bool mitreFrame(const TopoDS_Shape& body, const TopoDS_Face& endFace, bool flip,
 bool canMitreEnd(const TopoDS_Shape& body, const TopoDS_Face& endFace,
                  std::string* why = nullptr);
 
+// Which of mitreEnd()'s refusals applies BEFORE the kernel is asked, as a
+// value a caller can put its own sentence to - the app's chip and its Failure
+// toast both read this, so neither re-derives a rule this file owns (the same
+// reason BooleanResult::combinationRefused exists rather than a substring
+// match on `error`). Ok means mitreEnd() will ask the kernel; the kernel can
+// still refuse, which mitreEnd()'s own ok == false reports.
+enum class MitreCheck { Ok, AngleOutOfRange, NotABoardEnd, RunsPastTheEnd };
+MitreCheck checkMitre(const TopoDS_Shape& body, const TopoDS_Face& endFace, double angleDeg,
+                      bool flip, MitreFrame* frame = nullptr, std::string* why = nullptr);
+
 BooleanResult mitreEnd(const TopoDS_Shape& body, const TopoDS_Face& endFace, double angleDeg,
                        bool flip);
 

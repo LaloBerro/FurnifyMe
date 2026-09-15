@@ -47,6 +47,7 @@
 #include "JointChip.h"
 #include "JointsPanel.h"
 #include "MainWindow.h"
+#include "MitreTool.h"
 #include "Measure.h"
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
@@ -861,6 +862,7 @@ constexpr BlockInfo kBlocks[] = {
     { "the-joints-drawer-lists-rows-and-mark-out-numbers", false, true },
     { "the-joint-chip-edits-a-joint-through-one-checkpoint", false, true },
     { "joints-and-the-rest-of-the-app", false, true },
+    { "mitre-end-a-board-end-at-an-angle", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -32123,6 +32125,442 @@ int main(int argc, char* argv[])
 
         rw.close();
         settle(150);
+    }
+
+    // --- Mitre end (improvements item 4) ----------------------------------------
+    //
+    // The user's pick from the mockup round, "C+": a protractor dial on the
+    // board's end plus a chip with a typed angle and Flip. Every number below
+    // comes off one seeded board - x 0..300, y 0..60, z 0..18 - so the removed
+    // volume at angle a is 0.5 * 60 * 60*tan(a) * 18, and a cylinder beside it
+    // supplies the curved face that must not be mitred.
+    if (blockEnabled("mitre-end-a-board-end-at-an-angle")) {
+        RequiredTempDir mitreDir;
+        constexpr double kLen = 300.0, kWide = 60.0, kThick = 18.0;
+        const double kPiM = 3.14159265358979323846;
+        const auto removedAt = [&](double degrees) {
+            return 0.5 * kWide * (kWide * std::tan(degrees * kPiM / 180.0)) * kThick;
+        };
+        QString mitreFurnitureId;
+        {
+            FurnitureStore seedStore(mitreDir.path());
+            mitreFurnitureId = seedStore.createFurniture(QStringLiteral("Mitre bench"));
+            DocumentModel seedDoc;
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), kLen, kWide, kThick));
+            seedDoc.addSolid(
+                BRepPrimAPI_MakeCylinder(gp_Ax2(gp_Pnt(150.0, -120.0, 0.0), gp_Dir(0, 0, 1)), 20.0,
+                                         100.0)
+                    .Shape());
+            check(!mitreFurnitureId.isEmpty() &&
+                      seedStore.saveFurniture(mitreFurnitureId, seedDoc, QImage()),
+                  "mitre: a board and a post are seeded to disk");
+        }
+
+        MainWindow mw(nullptr, /*persistProgress=*/false, mitreDir.path());
+        mw.setAttribute(Qt::WA_ShowWithoutActivating);
+        mw.resize(1100, 800);
+        mw.show();
+        settle(300);
+        OcctViewWidget* mv = mw.view();
+        mv->setAnimationsEnabled(false);
+        check(mw.openFurniture(mitreFurnitureId), "mitre: the seeded furniture opens");
+        settle(300);
+        ToastHost* mToasts = mw.findChild<ToastHost*>();
+        MitreTool* tool = mw.mitreTool();
+        QAction* mitreAction = action(mw, QStringLiteral("Mitre end"));
+        check(tool != nullptr && mitreAction != nullptr,
+              "mitre: the tool and the Model -> Mitre end action exist");
+        check(mitreAction && mitreAction->shortcut() == QKeySequence(Qt::Key_M),
+              "mitre: the action is bound to M");
+
+        const std::vector<DocumentModel::Solid> seeded = mw.document().solids();
+        const int board = seeded.size() == 2 ? seeded[0].id : 0;
+        const int post = seeded.size() == 2 ? seeded[1].id : 0;
+        const double boardVolume = ModelingOps::volume(mw.document().shapeOf(board));
+
+        // The board's +X end, seen from +X / -Y and close enough that the 18 mm
+        // end is tens of pixels tall - its centre then sits far outside Auto's
+        // 8 px edge reach, so a click there takes the FACE.
+        CameraState endView;
+        endView.target = gp_Pnt(kLen, kWide / 2.0, kThick / 2.0);
+        endView.azimuthDeg = -120.0;
+        endView.elevationDeg = 25.0;
+        endView.distance = 320.0;
+        mv->setCameraStateNow(endView);
+        settle(200);
+
+        const auto faceNear = [&](int bodyId, const gp_Pnt& at) {
+            TopoDS_Face best;
+            double bestDistance = 1.0e300;
+            for (TopExp_Explorer it(mw.document().shapeOf(bodyId), TopAbs_FACE); it.More();
+                 it.Next()) {
+                GProp_GProps props;
+                BRepGProp::SurfaceProperties(it.Current(), props);
+                const double d = props.CentreOfMass().Distance(at);
+                if (d < bestDistance) {
+                    bestDistance = d;
+                    best = TopoDS::Face(it.Current());
+                }
+            }
+            return best;
+        };
+        const gp_Pnt endCentre(kLen, kWide / 2.0, kThick / 2.0);
+        // Clicks the board's end the way a hand does and reports whether the
+        // app selected exactly that face.
+        const auto pickBoardEnd = [&]() {
+            mv->clearSelection();
+            settle(80);
+            QPoint at;
+            if (!mv->projectToScreen(endCentre, at)) return false;
+            clickAt(mv, QPointF(at));
+            settle(120);
+            const TopoDS_Face want = faceNear(board, endCentre);
+            return !mv->selectedFace().IsNull() && mv->selectedFace().IsSame(want);
+        };
+        const auto mitreEnabled = [&]() { return mitreAction && mitreAction->isEnabled(); };
+
+        // --- M is available on a board end and nowhere else ------------------
+        mv->clearSelection();
+        settle(100);
+        check(!mitreEnabled(), "mitre: M is disabled with nothing selected");
+        check(mitreAction && !mitreAction->toolTip().isEmpty() &&
+                  mitreAction->toolTip() != MainWindow::mitreActionTooltip(),
+              "mitre: and its tooltip says why rather than advertising the tool");
+
+        mv->setSelectedSolids({board});   // the kind as setup - the seam's sanctioned use
+        settle(100);
+        check(mv->selectionKind() == OcctViewWidget::PickKind::Body && !mitreEnabled(),
+              "mitre: M is disabled with a whole body selected");
+
+        QPoint edgeAt;
+        TopoDS_Edge someEdge;
+        check(pickEdgeOf(mw, board, edgeAt, someEdge) && !mitreEnabled(),
+              "mitre: M is disabled with an edge selected");
+
+        {
+            // A pixel ON the post's curved side, facing the camera.
+            const gp_Dir toEye = -mv->liveCameraDirection();
+            gp_Vec radial(toEye.X(), toEye.Y(), 0.0);
+            if (radial.Magnitude() > 1.0e-9) radial.Normalize();
+            const gp_Pnt onSide =
+                gp_Pnt(150.0, -120.0, 50.0).Translated(radial * 20.0);
+            CameraState postView = endView;
+            postView.target = gp_Pnt(150.0, -120.0, 50.0);
+            mv->setCameraStateNow(postView);
+            settle(150);
+            mv->clearSelection();
+            settle(80);
+            QPoint sideAt;
+            const bool projected = mv->projectToScreen(onSide, sideAt);
+            if (projected) clickAt(mv, QPointF(sideAt));
+            settle(120);
+            const TopoDS_Face curved = mv->selectedFace();
+            check(!curved.IsNull() &&
+                      BRepAdaptor_Surface(curved).GetType() == GeomAbs_Cylinder &&
+                      mw.bodyIdForFace(curved) == post,
+                  "mitre: the post's curved side is selected");
+            check(!mitreEnabled(), "mitre: M is disabled on a curved face");
+            check(mitreAction && mitreAction->toolTip() != MainWindow::mitreActionTooltip(),
+                  "mitre: and says why");
+            mv->setCameraStateNow(endView);
+            settle(150);
+        }
+
+        check(pickBoardEnd(), "mitre: a click on the board's end selects that face");
+        check(mitreEnabled(), "mitre: M is enabled on a board end face");
+        check(mitreAction && mitreAction->toolTip() == MainWindow::mitreActionTooltip(),
+              "mitre: with the tool's own tooltip");
+        PullArrow* pullArrow = mw.findChild<PullArrow*>();
+        check(pullArrow && pullArrow->isVisible(),
+              "mitre: (before M, the face selection raises the pull arrow as always)");
+
+        // --- triggering: dial + chip, no pull arrow, no dialog ---------------
+        const TopoDS_Shape originalShape = mw.document().shapeOf(board);
+        const std::size_t depthBefore = mw.document().undoDepth();
+        const int revisionBefore = mw.document().revision();
+        trigger(mw, QStringLiteral("Mitre end"));
+        settle(150);
+        check(mw.mitreEndActive(), "mitre: M begins the gesture");
+        check(tool && tool->isVisible(), "mitre: the chip is on screen");
+        check(mv->hasMitreDial(), "mitre: the dial is drawn in the viewport");
+        check(pullArrow && !pullArrow->isVisible() && !mv->hasPullArrow(),
+              "mitre: the pull arrow is gone - its predicate refuses on a live mitre");
+        check(mw.findChildren<QDialog*>().isEmpty(), "mitre: and nothing modal appeared");
+        check(tool && std::fabs(tool->angle() - 45.0) < 1.0e-9 && !tool->flipped(),
+              "mitre: it opens at 45 degrees, unflipped");
+        check(stateLabelText(mw).contains(QStringLiteral("Mitre 45°")) &&
+                  stateLabelText(mw).contains(QStringLiteral("Enter to apply")),
+              QStringLiteral("mitre: the status label names the end, the angle and both keys (%1)")
+                  .arg(stateLabelText(mw)));
+        check(mv->hasModelingPreview() &&
+                  std::fabs(boardVolume - ModelingOps::volume(mv->modelingPreviewShape()) -
+                            removedAt(45.0)) < removedAt(45.0) * 1.0e-3,
+              "mitre: the 45 degree ghost is up and removes exactly the formula's volume");
+        check(mw.document().undoDepth() == depthBefore &&
+                  mw.document().revision() == revisionBefore,
+              "mitre: a live preview takes no checkpoint and changes nothing");
+        {
+            // One capture of the live dial and chip, for looking at against
+            // the mockup - the composited window, so the chip is in it.
+            settle(200);
+            const QImage shot =
+                printWindowCapture(&mw, outDir + QStringLiteral("/mitre-live.png"));
+            check(!shot.isNull(), "mitre: the live dial and chip are captured");
+        }
+
+        // Reachability, asked the way a hand asks it.
+        QLineEdit* mField = tool ? tool->field() : nullptr;
+        QPushButton* mFlip = tool ? tool->flipButton() : nullptr;
+        check(mField && mField->isVisible() &&
+                  mv->childAt(mField->mapTo(mv, mField->rect().center())) == mField,
+              "mitre: the angle field is reachable by a real click");
+        check(mFlip && mFlip->isVisible() &&
+                  mv->childAt(mFlip->mapTo(mv, mFlip->rect().center())) == mFlip,
+              "mitre: the Flip button is reachable by a real click");
+        check(mField && mField->testAttribute(Qt::WA_NoMousePropagation) && mFlip &&
+                  mFlip->testAttribute(Qt::WA_NoMousePropagation),
+              "mitre: both carry WA_NoMousePropagation");
+        check(mField && mField->font().pointSizeF() == Theme::bodyFont().pointSizeF(),
+              "mitre: the field reads in the type scale's body size");
+
+        // The chip's painted copy and every sentence the tool can say, swept.
+        {
+            QStringList copy = tool ? tool->paintedTexts() : QStringList();
+            copy << MainWindow::mitreActionTooltip() << MainWindow::mitreAngleRangeRefusalText()
+                 << MainWindow::mitreTooLongRefusalText() << MainWindow::mitreKernelRefusalText()
+                 << stateLabelText(mw);
+            bool clean = !copy.isEmpty();
+            for (const QString& text : copy)
+                for (const QString& word : bannedWords())
+                    if (usesBannedWord(text, word)) {
+                        clean = false;
+                        std::printf("  banned '%s' in \"%s\"\n", qPrintable(word), qPrintable(text));
+                    }
+            check(clean, "mitre: none of the tool's copy uses a banned word");
+            check(tool && tool->paintedTexts().contains(QStringLiteral("Mitre")),
+                  "mitre: the chip says Mitre");
+        }
+
+        // --- typing ----------------------------------------------------------
+        if (mField) mField->setText(QStringLiteral("30"));
+        settle(120);
+        check(tool && std::fabs(tool->angle() - 30.0) < 1.0e-9 &&
+                  std::fabs(mv->mitreDialAngle() - 30.0) < 1.0e-9,
+              "mitre: typing 30 moves the angle and the dial");
+        check(mv->hasModelingPreview() &&
+                  std::fabs(boardVolume - ModelingOps::volume(mv->modelingPreviewShape()) -
+                            removedAt(30.0)) < removedAt(30.0) * 1.0e-3,
+              QStringLiteral("mitre: typing 30 updates the ghost to the formula's volume (%1)")
+                  .arg(boardVolume - ModelingOps::volume(mv->modelingPreviewShape())));
+
+        if (mField) mField->setText(QStringLiteral("32.5"));
+        settle(120);
+        const double ghostAt325 = ModelingOps::volume(mv->modelingPreviewShape());
+        check(std::fabs(boardVolume - ghostAt325 - removedAt(32.5)) < removedAt(32.5) * 1.0e-3,
+              QStringLiteral("mitre: a typed 32.5 is EXACT - the ghost is the preview the commit "
+                             "would build, not a snapped cousin of it (%1 against %2)")
+                  .arg(boardVolume - ghostAt325)
+                  .arg(removedAt(32.5)));
+
+        if (mField) mField->setText(QStringLiteral("abc"));
+        settle(120);
+        check(mv->hasModelingPreview() &&
+                  std::fabs(ModelingOps::volume(mv->modelingPreviewShape()) - ghostAt325) < 1.0e-6,
+              "mitre: unreadable input keeps the last good ghost");
+        check(tool && tool->reasonText() == MainWindow::mitreAngleRangeRefusalText(),
+              "mitre: and the chip says what it wants");
+        if (mField) mField->setText(QStringLiteral("95"));
+        settle(120);
+        check(mv->hasModelingPreview() &&
+                  std::fabs(ModelingOps::volume(mv->modelingPreviewShape()) - ghostAt325) < 1.0e-6,
+              "mitre: an angle past 89 keeps the last good ghost too");
+
+        // 60 * tan(89) runs far past a 300 mm board.
+        if (mField) mField->setText(QStringLiteral("89"));
+        settle(150);
+        check(!mv->hasModelingPreview() && tool && !tool->hasPreview(),
+              "mitre: an angle the board is too short for shows NO ghost");
+        check(tool && tool->reasonText() == MainWindow::mitreTooLongRefusalText(),
+              "mitre: and the chip says why");
+        mv->setFocus();
+        settle(60);
+        std::size_t depthRefused = mw.document().undoDepth();
+        sendKeyTo(&mw, Qt::Key_Return);
+        settle(150);
+        check(mw.mitreEndActive() && mw.document().undoDepth() == depthRefused &&
+                  mw.document().shapeOf(board).IsSame(originalShape),
+              "mitre: Enter on a refused angle changes nothing and leaves the gesture live");
+        check(mToasts && mToasts->currentText() == MainWindow::mitreTooLongRefusalText() &&
+                  mToasts->toast() && !mToasts->toast()->hasUndo(),
+              "mitre: and reports the refusal as a Failure naming the reason");
+
+        // --- Flip ------------------------------------------------------------
+        if (mField) mField->setText(QStringLiteral("45"));
+        settle(120);
+        const gp_Pnt ghostCentre = ModelingOps::centreOfMass(mv->modelingPreviewShape());
+        if (mFlip) clickAt(mFlip, QPointF(mFlip->rect().center()));
+        settle(150);
+        check(tool && tool->flipped() && mw.mitreEndActive(),
+              "mitre: clicking Flip flips, and the gesture survives the click");
+        const gp_Pnt flippedCentre = ModelingOps::centreOfMass(mv->modelingPreviewShape());
+        check(mv->hasModelingPreview() &&
+                  (ghostCentre.Y() - kWide / 2.0) * (flippedCentre.Y() - kWide / 2.0) < -1.0e-6,
+              QStringLiteral("mitre: Flip takes the OTHER corner off - the ghost's mass moves "
+                             "across the board's width (%1 -> %2)")
+                  .arg(ghostCentre.Y())
+                  .arg(flippedCentre.Y()));
+        if (tool) tool->flip();
+        settle(120);
+        check(tool && !tool->flipped(), "mitre: and flips back");
+
+        // --- dragging the dial ----------------------------------------------
+        {
+            QAction* snapAction = action(mw, QStringLiteral("Snap to Grid"));
+            if (snapAction && !snapAction->isChecked()) snapAction->trigger();
+            settle(80);
+            check(mv->snapEnabled(), "mitre: (Snap to Grid is on for the snapped drag)");
+            gp_Pnt handle, aim;
+            QPoint handleAt, aimAt;
+            const bool located = mv->mitreDialHandle(handle) &&
+                                 mv->projectToScreen(handle, handleAt) &&
+                                 mv->mitreDialPointAt(62.0, aim) && mv->projectToScreen(aim, aimAt);
+            check(located && mv->mitreDialClaimsPoint(handleAt),
+                  "mitre: the dial's handle claims its own projected pixel");
+            const std::size_t depthDrag = mw.document().undoDepth();
+            if (located) dragButton(mv, QPointF(handleAt), QPointF(aimAt), Qt::LeftButton);
+            settle(150);
+            check(tool && std::fabs(tool->angle() - 60.0) < 1.0e-9 && mField &&
+                      mField->text() == QStringLiteral("60°"),
+                  QStringLiteral("mitre: dragging the handle toward 62 degrees lands on 60 - "
+                                 "5 degree steps with Snap to Grid on (%1)")
+                      .arg(tool ? tool->angle() : -1.0));
+            check(mw.mitreEndActive() && mw.document().undoDepth() == depthDrag &&
+                      !mv->mitreDialDragActive(),
+                  "mitre: the release ends the drag without committing or ending the gesture");
+            check(mv->hasModelingPreview() &&
+                      std::fabs(boardVolume - ModelingOps::volume(mv->modelingPreviewShape()) -
+                                removedAt(60.0)) < removedAt(60.0) * 1.0e-3,
+                  "mitre: the dragged angle previews through the same path");
+
+            if (snapAction) snapAction->trigger();
+            settle(80);
+            gp_Pnt handle2, aim2;
+            QPoint handle2At, aim2At;
+            const bool located2 = mv->mitreDialHandle(handle2) &&
+                                  mv->projectToScreen(handle2, handle2At) &&
+                                  mv->mitreDialPointAt(37.0, aim2) &&
+                                  mv->projectToScreen(aim2, aim2At);
+            if (located2) dragButton(mv, QPointF(handle2At), QPointF(aim2At), Qt::LeftButton);
+            settle(150);
+            check(!mv->snapEnabled() && tool && std::fabs(tool->angle() - 37.0) < 2.5 &&
+                      std::fabs(tool->angle() - std::round(tool->angle() / 5.0) * 5.0) > 1.0e-6,
+                  QStringLiteral("mitre: with Snap to Grid off the drag is free (aimed at 37, "
+                                 "got %1)")
+                      .arg(tool ? tool->angle() : -1.0));
+            if (snapAction && !snapAction->isChecked()) snapAction->trigger();
+            settle(80);
+        }
+
+        // --- Escape cancels, byte-identical ---------------------------------
+        mv->setFocus();
+        settle(60);
+        sendKeyTo(&mw, Qt::Key_Escape);
+        settle(150);
+        check(!mw.mitreEndActive() && tool && !tool->isVisible() && !mv->hasMitreDial() &&
+                  !mv->hasModelingPreview(),
+              "mitre: Esc ends the gesture - no chip, no dial, no ghost");
+        check(mw.document().undoDepth() == depthBefore &&
+                  mw.document().revision() == revisionBefore &&
+                  mw.document().shapeOf(board).IsSame(originalShape) &&
+                  std::fabs(ModelingOps::volume(mw.document().shapeOf(board)) - boardVolume) <
+                      1.0e-9,
+              "mitre: and the board is byte-identical, with no checkpoint taken");
+        check(pullArrow && pullArrow->isVisible(),
+              "mitre: the end face is still selected, so the pull arrow is back");
+
+        // --- a selection change cancels -------------------------------------
+        trigger(mw, QStringLiteral("Mitre end"));
+        settle(120);
+        check(mw.mitreEndActive(), "mitre: M begins again on the still-selected end");
+        QPoint otherEdgeAt;
+        TopoDS_Edge otherEdge;
+        pickEdgeOf(mw, board, otherEdgeAt, otherEdge);
+        settle(120);
+        check(!mw.mitreEndActive() && tool && !tool->isVisible() && !mv->hasMitreDial(),
+              "mitre: a selection change ends the gesture");
+
+        // --- Enter commits one checkpoint ------------------------------------
+        check(pickBoardEnd(), "mitre: the end is picked again");
+        trigger(mw, QStringLiteral("Mitre end"));
+        settle(120);
+        if (mField) mField->setText(QStringLiteral("30"));
+        settle(120);
+        const double ghostAt30 = ModelingOps::volume(mv->modelingPreviewShape());
+        const std::size_t depthCommit = mw.document().undoDepth();
+        // Focus deliberately OFF the field: Enter belongs to the gesture
+        // whatever holds focus.
+        mv->setFocus();
+        settle(60);
+        sendKeyTo(&mw, Qt::Key_Return);
+        settle(200);
+        const double committed = ModelingOps::volume(mw.document().shapeOf(board));
+        check(!mw.mitreEndActive(), "mitre: Enter, with focus on the viewport, commits");
+        check(mw.document().undoDepth() == depthCommit + 1,
+              QStringLiteral("mitre: exactly ONE checkpoint (%1 -> %2)")
+                  .arg(depthCommit)
+                  .arg(mw.document().undoDepth()));
+        check(std::fabs(boardVolume - committed - removedAt(30.0)) < removedAt(30.0) * 1.0e-3,
+              "mitre: the committed board has the formula's volume");
+        check(std::fabs(committed - ghostAt30) < 1.0e-6,
+              "mitre: and it is exactly the ghost the user was shown");
+        check(mToasts && mToasts->currentText().startsWith(QStringLiteral("Mitred ")) &&
+                  mToasts->currentText().contains(QStringLiteral("30°")) && mToasts->toast() &&
+                  mToasts->toast()->hasUndo(),
+              QStringLiteral("mitre: a Note with Undo names it (%1)")
+                  .arg(mToasts ? mToasts->currentText() : QString()));
+
+        trigger(mw, QStringLiteral("Undo"));
+        settle(200);
+        check(std::fabs(ModelingOps::volume(mw.document().shapeOf(board)) - boardVolume) < 1.0e-6 &&
+                  mw.document().undoDepth() == depthCommit,
+              "mitre: one Undo restores the original board");
+
+        // --- a mirrored twin follows ----------------------------------------
+        mv->setSelectedSolids({board});
+        settle(100);
+        trigger(mw, QStringLiteral("Mirror"));
+        sendKeyTo(&mw, Qt::Key_Y);   // tangent on +Y, clear of the board's end
+        sendKeyTo(&mw, Qt::Key_Return);
+        settle(250);
+        const int twin = mw.document().twinOf(board);
+        check(mw.document().symmetryOn() && twin > 0, "mitre: the board is mirrored");
+        check(pickBoardEnd(), "mitre: the ORIGINAL board's end is picked beside its twin");
+        trigger(mw, QStringLiteral("Mitre end"));
+        settle(120);
+        if (mField) mField->setText(QStringLiteral("45"));
+        settle(120);
+        mv->setFocus();
+        settle(60);
+        const std::size_t depthTwin = mw.document().undoDepth();
+        sendKeyTo(&mw, Qt::Key_Return);
+        settle(250);
+        if (twin > 0) {
+            const TopoDS_Shape mitred = mw.document().shapeOf(board);
+            const TopoDS_Shape twinShape = mw.document().shapeOf(twin);
+            check(mw.document().undoDepth() == depthTwin + 1 &&
+                      std::fabs(boardVolume - ModelingOps::volume(mitred) - removedAt(45.0)) <
+                          removedAt(45.0) * 1.0e-3,
+                  "mitre: the mirrored board mitres in one checkpoint");
+            const gp_Pln plane = mw.document().symmetryPlane();
+            const gp_Pnt c = ModelingOps::centreOfMass(mitred);
+            gp_Trsf reflect;
+            reflect.SetMirror(gp_Ax2(plane.Location(), plane.Axis().Direction()));
+            check(std::fabs(ModelingOps::volume(twinShape) - ModelingOps::volume(mitred)) < 1.0e-6 &&
+                      ModelingOps::centreOfMass(twinShape).Distance(c.Transformed(reflect)) < 1.0e-6,
+                  "mitre: the twin followed - the mirror image of the mitred board");
+            check(mToasts && mToasts->currentText().contains(QStringLiteral("twin followed")),
+                  "mitre: and the Note says so");
+        }
     }
 
     // The coverage floor, asserted OUTSIDE check() on purpose: an assertion

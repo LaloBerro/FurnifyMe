@@ -259,6 +259,7 @@ Source files under `src/`, plus `tests/`:
 | `ui/DimensionRenderer.{h,cpp}` | CAD length annotation; one renderer for the sketch and edges |
 | `ui/PullArrow.{h,cpp}` | face pull: 3D arrow + value chip, preview by the commit's own call |
 | `ui/BevelArrow.{h,cpp}` | edge drag: inward fillets, outward chamfers, same contract |
+| `ui/MitreTool.{h,cpp}` | Mitre end chip: typed angle, Flip, preview by the commit's own call; the dial is `OcctViewWidget`'s |
 | `ui/TransformGizmo.{h,cpp}` | the gizmo we draw: shared `GizmoRenderer` base + the Move tool |
 | `ui/AppearancePanel.{h,cpp}` | every Theme token editable live; debounced persistence |
 | `ui/AppBar.{h,cpp}` | the floating pill: app mark, wordmark, real `QMenuBar` |
@@ -289,6 +290,7 @@ tooltip contains a banned word, so this table is executable, not aspirational.
 | The 3D area | viewport | scene, canvas, view |
 | Rounding an edge | Fillet, `R 20 mm` | bevel, round-over, round |
 | Flattening an edge | Chamfer, `C 20 mm` | bevel, break, flatten |
+| Cutting a board's end off at an angle | Mitre, `Mitre end`, `45°` | bevel, miter, angle cut, cut |
 | Repositioning a body | Move / Rotate / Scale | transform, translate |
 | A live mirrored twin | Mirror | symmetry, mirroring-mode, reflect |
 | A copy that follows its source | Linked copy, `Duplicate linked` | instance, clone, reference |
@@ -681,6 +683,94 @@ is a 14 px Qt-side test, not an AIS owner, so it does not *compete* for a pick �
 the press outright. The bevel arrow stands on the last edge picked and the next edge is
 usually right beside it, so the press handler excludes Shift from the arrow branch. Same
 hazard the transform gizmo's `Deactivate` closes, one layer up and by a different mechanism.
+
+#### Mitre end: a board's end at an angle, measured in the end's own frame
+
+Improvements item 4. The user picked "C+" from an HTML mockup round (the protractor dial
+plus a chip with a typed angle and Flip), and the page's "The same in all three" list is
+the contract: select a board's end face, **Model → Mitre end** or **M**; the cut runs across
+the board's width like a mitre saw, never through its thickness; **Flip** swaps which corner
+comes off; a live preview; Enter applies, Esc cancels; 1°–89°, snapping to 5° while Snap to
+Grid is on when the dial is dragged, typed values exact; one undo step, the mirror twin and
+linked copies follow, joints re-derive.
+
+- **The geometry is `ModelingOps::mitreEnd`, headless-tested first** (`tests/mitre.cpp`,
+  written red against a stub). **The board frame is the END FACE'S OWN, never a world axis**
+  — this branch's most repeated bug was an oriented quantity measured in world terms. Length
+  axis = the face's outward normal from `pullFace`'s `outwardPlane()` (flag as a guess, then
+  the classifier probe); the in-plane axes are the face's longest boundary edge and outward ×
+  that; the face's own **vertices** projected on both give width (longer) and thickness
+  (shorter) — `Joinery::regionAxis`/`planeExtent`'s discipline. Removed volume is exactly
+  `0.5 × W × W·tan(a) × T`, pinned at 45° and 30°, on a board rotated 37° about (1,2,3)
+  through an off-origin point, and on a mirrored board. Two mutations were each made to go
+  red on named checks: swapping width and thickness (20 red, starting with `frame width is
+  the end face's LONGER extent`), and the flag-only outward normal (red only on the mirrored
+  board — `mirrored: the outward normal is +X` — which is exactly why that case is in the
+  suite).
+- **The tool is a bounded prism, not a half-space.** It spans the face's own width and
+  thickness plus a margin, with its near edge extended behind the pivot so no tool face lies
+  coplanar with a board side it merely touches. A half-space would also shear off anything
+  of the body lying beyond the plane well away from this end.
+- **One implementation of every refusal: `ModelingOps::checkMitre()` returns a value**
+  (`AngleOutOfRange` — NaN included, which is how an unreadable typed angle arrives —
+  `NotABoardEnd`, `RunsPastTheEnd`), the `combinationRefused` precedent. `mitreEnd()` is built
+  on it, `canMitreEnd()` is its angle-free half, and `MainWindow::mitreRefusalFor()` only maps
+  the value to a sentence; nothing in the app re-derives "W·tan(a) past the length".
+- **The gesture's state is `MainWindow`'s, and it ends by derivation.** `beginMitreEnd()`
+  captures the face, the body and `revision()`; `updateActions()` prunes a gesture that no
+  longer holds — selection not exactly that face, revision moved (undo, delete, a boolean),
+  sketch, pending outline, render mode, compare pane, mirror placement, library, close
+  question — one predicate (`mitreGestureStillHolds()`) rather than a cancel at every site.
+  `beginMitreEnd()` re-checks `canMitreSelectedFace()` itself, because `QAction::trigger()`
+  does not consult `isEnabled()`. `canMitreSelectedFace()` caches the geometry's answer on the
+  face and the revision, since it is asked on every selection click.
+- **Disjointness is kept by a term, not by luck.** A live mitre stands on exactly the
+  selection the pull arrow wants (one face), so `canPullSelectedFace()` refuses while
+  `myMitreActive` — the arrow retires and its Enter/Escape claim with it. Rename and
+  Save version exclude the gesture the way they exclude a mirror placement.
+- **The dial is `OcctViewWidget`'s, the chip is `MitreTool`'s** — PullArrow's split. The dial
+  is a half circle with a tick every 15° in the plane square to the board's thickness, on
+  the thickness face turned toward the camera, with a `gizmoAxisX` radius and handle at the
+  live angle; angle a points along `across·cos a − outward·sin a`, so the red radius lies
+  exactly on the line the mitre leaves on that face. Sized at `kMitreDialPx` (90) through
+  `worldPerPixelAt()`, drawn in `gizmoZLayer()` (depth-cleared, Immediate — the shadow-map
+  pitfall), equal-guarded in `applyCameraState()`. The handle takes a press at
+  `kHandleGrabPx`, the frame is **frozen at the press** (the Move gizmo's lesson), the angle is
+  the cursor ray against the dial's own plane, snapped to 5° with Snap to Grid and clamped to
+  [1, 89]; the release is swallowed and does **not** commit — Enter does. A press anywhere
+  else picks as usual, and a pick that changes the selection ends the gesture, by contract.
+- **The chip follows ExtrudePreview's contract clause for clause.** The preview is
+  `ModelingOps::mitreEnd` on `setModelingPreview` (cached on revision/angle/flip and re-shown
+  on every `appStateChanged`, because every other gizmo's `refresh()` clears that channel on
+  the way past — which is also why `MitreTool` is constructed after every other chip:
+  connection order is emission order). Unreadable or out-of-range input keeps the last good
+  ghost and marks the field; an angle the board is too short for shows **no** ghost and a
+  reason row says why. Dragging writes the field. Field and Flip are viewport siblings with
+  `WA_NoMousePropagation`, pinned by `childAt`; Flip takes no focus; the field takes focus at
+  begin so typed digits do not reach the 0–3 view shortcuts. `Measure::formatAngle`/
+  `parseAngle` are the one angle format (`45°`, `32.5°`), Qt-free and headless-tested.
+- **Commit is `commitReplaceBody()`** — one checkpoint, render mode exits, the twin
+  re-derives by mirroring, links propagate, joints re-derive off the moved revision — with a
+  `Mitred Body 03 — 45°` Note carrying Undo, or a Failure carrying the named reason with the
+  gesture left live.
+- **`gui_smoke` block `mitre-end-a-board-end-at-an-angle`** (self-contained, 67 checks)
+  seeds a 300 × 60 × 18 board and a post through `FurnitureStore` and pins availability on
+  nothing/body/edge/curved face/board end, the dial and chip with the arrow gone, typing 30
+  and an exact 32.5 against the formula, invalid input, a too-short refusal on screen and on
+  Enter, Flip moving the removed corner, a snapped (60 from an aim at 62) and a free drag,
+  Esc byte-identical with no checkpoint, a selection change cancelling, Enter with focus off
+  the field committing exactly one checkpoint equal to the ghost, one Undo, and a mirrored
+  twin following. Three mutations each went red on a named check: the preview built through a
+  5°-snapped angle (`a typed 32.5 is EXACT`), Enter left unclaimed (`Enter, with focus on the
+  viewport, commits`), and an extra checkpoint (`exactly ONE checkpoint (0 -> 2)`).
+  `kCheckFloor` was **not** touched: this branch ran filtered blocks only, and the floor is
+  re-ratcheted by measuring an official run, never by adding 67 to it.
+- **Honest limits.** The preview wears the app's one preview look — the yellow ghost with the
+  body caged — not the mockup's translucent red plane. The frame's extents come from vertices,
+  so a board end bounded by an arc is measured at its endpoints (Joinery's curve-aware
+  `projectedRange` was not ported). A board already mitred at its FAR end is length-checked
+  against its longest reach, and only the result's one-solid check stands behind the corner
+  there.
 
 #### The custom transform gizmos: three 3D tools, one chip, no AIS_Manipulator
 

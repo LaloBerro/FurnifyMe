@@ -342,6 +342,18 @@ int main()
                       "and removes the formula's volume");
 
         check(canMitreEnd(plain, end), "canMitreEnd says yes to a board's end face");
+
+        // The classifier the app puts its sentences to - one implementation
+        // of every pre-kernel refusal, named.
+        check(checkMitre(plain, end, 45.0, false) == MitreCheck::Ok, "checkMitre: 45 on a board is Ok");
+        check(checkMitre(plain, end, 0.0, false) == MitreCheck::AngleOutOfRange,
+              "checkMitre: 0 is AngleOutOfRange");
+        check(checkMitre(plain, end, std::nan(""), false) == MitreCheck::AngleOutOfRange,
+              "checkMitre: NaN (an unreadable typed angle) is AngleOutOfRange");
+        check(checkMitre(post, side, 45.0, false) == MitreCheck::NotABoardEnd,
+              "checkMitre: a curved face is NotABoardEnd");
+        check(checkMitre(plain, end, 89.0, false) == MitreCheck::RunsPastTheEnd,
+              "checkMitre: 89 on a 600 mm board is RunsPastTheEnd");
     }
 
     std::printf("\n%s (%d failure%s)\n", g_failures == 0 ? "PASS" : "FAIL", g_failures,
