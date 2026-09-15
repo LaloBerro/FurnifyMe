@@ -864,6 +864,7 @@ constexpr BlockInfo kBlocks[] = {
     { "the-joint-chip-edits-a-joint-through-one-checkpoint", false, true },
     { "joints-and-the-rest-of-the-app", false, true },
     { "mitre-end-a-board-end-at-an-angle", false, true },
+    { "ctrl-a-selects-every-body-on-screen", false, true },
     { "selection-sizes-around-the-selection", false, true },
     { "and-the-show-sizes-preference-persists", false, true },
 };
@@ -32767,6 +32768,69 @@ int main(int argc, char* argv[])
     // degrees about Z (its world box reads 669.6 x 559.8 - neither side), and
     // a small cabinet of two 18 x 300 x 700 sides and a 636 x 300 x 18 top,
     // whose overall box is 636 x 300 x 718.
+    // --- Ctrl+A selects every body ON SCREEN (improvements item 6) ------------
+    // Hidden bodies stay out: a selection the user cannot see is one they cannot
+    // check before Delete or Move acts on it.
+    if (blockEnabled("ctrl-a-selects-every-body-on-screen")) {
+        RequiredTempDir allDir;
+        QString allFurnitureId;
+        {
+            FurnitureStore seedStore(allDir.path());
+            allFurnitureId = seedStore.createFurniture(QStringLiteral("Select all"));
+            DocumentModel seedDoc;
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 100.0, 100.0, 100.0));
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(300.0, 0.0, 0.0), 100.0, 100.0, 100.0));
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(600.0, 0.0, 0.0), 100.0, 100.0, 100.0));
+            check(!allFurnitureId.isEmpty() && seedStore.saveFurniture(allFurnitureId, seedDoc, QImage()),
+                  "select all: three bodies are seeded");
+        }
+        MainWindow aw(nullptr, /*persistProgress=*/false, allDir.path());
+        aw.setAttribute(Qt::WA_ShowWithoutActivating);
+        aw.resize(1000, 760);
+        aw.show();
+        settle(300);
+        aw.view()->setAnimationsEnabled(false);
+        check(aw.openFurniture(allFurnitureId), "select all: the furniture opens");
+        settle(300);
+
+        QAction* selectAll = action(aw, QStringLiteral("Select All"));
+        check(selectAll != nullptr && selectAll->shortcut() == QKeySequence(QKeySequence::SelectAll),
+              "select all: Edit has Select All on the platform's own Select All key (Ctrl+A)");
+        const std::vector<DocumentModel::Solid> bodies = aw.document().solids();
+        check(bodies.size() == 3, "select all: three bodies are open");
+        if (selectAll && bodies.size() == 3) {
+            check(selectAll->isEnabled(), "select all: enabled with bodies on screen");
+            selectAll->trigger();
+            settle(120);
+            std::vector<int> picked = aw.view()->selectedSolidIds();
+            std::sort(picked.begin(), picked.end());
+            check(picked.size() == 3 &&
+                      aw.view()->selectionKind() == OcctViewWidget::PickKind::Body,
+                  QStringLiteral("select all: all three WHOLE bodies are selected (%1)").arg(picked.size()));
+
+            aw.view()->setSelectedSolids({});
+            aw.view()->setSolidVisible(bodies[1].id, false);
+            settle(120);
+            selectAll->trigger();
+            settle(120);
+            picked = aw.view()->selectedSolidIds();
+            const bool hiddenLeftOut =
+                std::find(picked.begin(), picked.end(), bodies[1].id) == picked.end();
+            check(picked.size() == 2 && hiddenLeftOut,
+                  QStringLiteral("select all: a hidden body is left out - only the two on screen (%1)")
+                      .arg(picked.size()));
+
+            aw.view()->setSolidVisible(bodies[0].id, false);
+            aw.view()->setSolidVisible(bodies[2].id, false);
+            // Clearing the selection AFTER hiding emits selectionChanged(),
+            // which is the ordinary route that re-derives the window's actions.
+            aw.view()->setSelectedSolids({});
+            settle(120);
+            check(aw.view()->selectedSolidIds().empty() && !selectAll->isEnabled(),
+                  "select all: disabled with nothing on screen");
+        }
+    }
+
     if (blockEnabled("selection-sizes-around-the-selection")) {
         RequiredTempDir sizesDir;
         const double kPiS = 3.14159265358979323846;

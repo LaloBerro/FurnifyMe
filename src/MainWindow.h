@@ -1692,6 +1692,11 @@ private:
     // no body is selected - never for a multi-body selection, where Delete
     // stays available but this does not.
     QAction* myRenameAction = nullptr;
+    // Ctrl+A: every body ON SCREEN - a hidden or isolated-away body is not
+    // selected, because a selection the user cannot see is one they cannot
+    // check before Delete or Move acts on it. See onSelectAll().
+    QAction* mySelectAllAction = nullptr;
+    void onSelectAll();
     QAction* myUndoAction = nullptr;
     QAction* myRedoAction = nullptr;
     QAction* myItemsPanelAction = nullptr;

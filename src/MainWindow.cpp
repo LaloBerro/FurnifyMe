@@ -1434,6 +1434,15 @@ void MainWindow::buildActions()
     myDeleteAction->setToolTip(tr("Delete the selected bodies (Del)"));
     connect(myDeleteAction, &QAction::triggered, this, &MainWindow::onDeleteSelected);
 
+    // QKeySequence::SelectAll is Ctrl+A. A text field with focus (a rename,
+    // the mitre chip's angle) still takes it for its own text: QLineEdit
+    // claims the standard SelectAll key through ShortcutOverride before this
+    // window-level shortcut is ever consulted.
+    mySelectAllAction = new QAction(tr("Select &All"), this);
+    mySelectAllAction->setShortcut(QKeySequence::SelectAll);
+    mySelectAllAction->setToolTip(tr("Select every body on screen (Ctrl+A)"));
+    connect(mySelectAllAction, &QAction::triggered, this, &MainWindow::onSelectAll);
+
     // Renames the Items drawer's selected row - see the header for why this
     // is exactly one item, never a multi-body selection. F2 is the row's
     // keyboard route; double-click on a row is its mouse route, wired
@@ -1727,6 +1736,8 @@ QMenuBar* MainWindow::buildMenus()
     editMenu->addSeparator();
     editMenu->addAction(myDeleteAction);
     editMenu->addAction(myRenameAction);
+    editMenu->addSeparator();
+    editMenu->addAction(mySelectAllAction);
 
     QMenu* modelMenu = bar->addMenu(tr("&Model"));
     modelMenu->addAction(myExtrudeAction);
@@ -2797,6 +2808,12 @@ void MainWindow::updateActions()
     // true the moment the user does anything else. Which meaning applies is
     // decided HERE, in the one place that decides what is available, and
     // onDeleteSelected() asks the same question the same way.
+    bool anyBodyOnScreen = false;
+    for (const DocumentModel::Solid& solid : myDocument.solids()) {
+        if (myView->isSolidVisible(solid.id)) { anyBodyOnScreen = true; break; }
+    }
+    mySelectAllAction->setEnabled(!mySketching && !atInit && !myRenderModeOn && anyBodyOnScreen);
+
     const bool deleteTargetsOutline = selectedCount == 0 && hasPendingFace();
     myDeleteAction->setEnabled(!mySketching && !atInit && (selectedCount > 0 || hasPendingFace()));
     // A control whose meaning moves has to say which meaning is live, or the
@@ -3368,6 +3385,22 @@ void MainWindow::onCloseDiscardChosen()
     myDiscardedRevision = myDocument.revision();
     if (myAutosaveTimer) myAutosaveTimer->stop();
     finishClose(route, tr("Closed %1 without saving").arg(name));
+}
+
+void MainWindow::onSelectAll()
+{
+    // The same gates updateActions() puts on the action, asked again for a
+    // caller that reaches this without it.
+    if (mySketching || myShowingInitScreen || isAskingBeforeClose() || myRenderModeOn) return;
+    std::vector<int> onScreen;
+    for (const DocumentModel::Solid& solid : myDocument.solids()) {
+        if (myView->isSolidVisible(solid.id)) onScreen.push_back(solid.id);
+    }
+    if (onScreen.empty()) return;
+    // Whole bodies, through the one call every programmatic body selection
+    // uses - it emits selectionChanged(), which re-derives the actions, the
+    // gizmos and the selection sizes like any other pick.
+    myView->setSelectedSolids(onScreen);
 }
 
 void MainWindow::onCloseKeepChosen()
