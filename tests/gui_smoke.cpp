@@ -103,6 +103,7 @@
 #include <QPainter>
 #include <QPointF>
 #include <QPointer>
+#include <QTimer>
 #include <QPushButton>
 #include <QSet>
 #include <QSettings>
@@ -958,6 +959,43 @@ protected:
         default:
             return false;
         }
+    }
+};
+
+// Sends every top-level window this suite shows to the BACK of the desktop's
+// z-order, so the user keeps working in front of it while it runs. The input
+// blocker above keeps the user from driving the suite; this keeps the suite
+// from covering the user.
+//
+// Minimized would not do: Windows gives a minimized window no surface, the
+// viewport never paints, and every Dump- and PrintWindow-measured check fails.
+// An occluded window loses nothing this suite reads - the viewport renders
+// into its own framebuffer, V3d_View::Dump reads that framebuffer, and
+// PrintWindow(PW_RENDERFULLCONTENT) captures a window whatever covers it.
+// WA_ShowWithoutActivating already keeps focus away; it does not stop Windows
+// putting a newly shown window on TOP, which is the part that blocked the
+// user's screen. Posted rather than done inside the Show event, because the
+// native window is not visible yet at that point and a z-order change made
+// before it is shown is undone by the show itself.
+class KeepSuiteWindowsBehind : public QObject {
+public:
+    using QObject::QObject;
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        if (event->type() != QEvent::Show) return false;
+        auto* widget = qobject_cast<QWidget*>(watched);
+        if (!widget || !widget->isWindow()) return false;
+#ifdef _WIN32
+        QPointer<QWidget> guard(widget);
+        QTimer::singleShot(0, this, [guard] {
+            if (!guard || !guard->isVisible()) return;
+            SetWindowPos(reinterpret_cast<HWND>(guard->winId()), HWND_BOTTOM, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+        });
+#endif
+        return false;
     }
 };
 
@@ -2283,6 +2321,10 @@ int main(int argc, char* argv[])
     // it enforces and the 1.75x flake it closes.
     SpontaneousInputBlocker inputBlocker;
     app.installEventFilter(&inputBlocker);
+    // ...and behind the user's own windows, so the suite never covers the
+    // screen while it runs - see KeepSuiteWindowsBehind.
+    KeepSuiteWindowsBehind keepBehind;
+    app.installEventFilter(&keepBehind);
     // Exercise what actually ships: main.cpp themes the app before building the
     // window, so the test must too, or it checks an app nobody runs.
     Theme::apply(app);

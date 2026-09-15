@@ -198,7 +198,15 @@ scale-dependent because the window covers more screen at 1.75×.
 
 A window still appears - OCCT's `V3d_View` needs a real native window and a GL surface, so
 `-platform offscreen` cannot work - but it is shown with `WA_ShowWithoutActivating` and
-never takes focus. `gui_smoke` is deliberately **not** registered with ctest: it needs a GPU
+never takes focus, and `KeepSuiteWindowsBehind` sends every top-level window the suite shows
+to the **back** of the desktop z-order (`SetWindowPos(HWND_BOTTOM)`, posted after the show,
+since a z-order change made before the native window is visible is undone by the show), so
+the user keeps working in front of it. Not minimized: a minimized window gets no surface and
+every `Dump`- and `PrintWindow`-measured check would fail. Occluded costs nothing the suite
+reads — the viewport renders into its own framebuffer, `Dump` reads that, and
+`PrintWindow(PW_RENDERFULLCONTENT)` captures a covered window; the render-mode shadow block,
+the selection-sizes block, the startup layout block and the SelectorWindow composited
+black-line sweep were each run green with the windows sent behind. `gui_smoke` is deliberately **not** registered with ctest: it needs a GPU
 and a window server, while the headless tests must stay runnable anywhere, including CI.
 
 **Do not go back to `SetCursorPos`/`mouse_event` PowerShell scripts.** That approach cost far
