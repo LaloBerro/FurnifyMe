@@ -52,9 +52,11 @@ public:
 
     void refresh();
     int rowCount() const { return static_cast<int>(myRowList.size()); }
-    // The name and dimension text painted on one row, concatenated - a read
-    // accessor for the suite, which is preferable to it walking this panel's
-    // child widgets itself. Empty for an out-of-range index.
+    // The name painted on one row - a read accessor for the suite, which is
+    // preferable to it walking this panel's child widgets itself. No
+    // dimension is painted on a row any more (sizes moved to the viewport's
+    // own selection-sizes drawing, see CLAUDE.md's "Direct modeling" section);
+    // this reports the name alone. Empty for an out-of-range index.
     QString rowTextAt(int index) const
     {
         return index >= 0 && index < static_cast<int>(myRowList.size()) ? myRowList[index].text
@@ -156,7 +158,7 @@ protected:
 
 private:
     // Restyles what is on screen from the live Theme - the title's stylesheet,
-    // each row's two label stylesheets, each eye button's rasterised icon -
+    // each row's name-label stylesheet, each eye button's rasterised icon -
     // and re-derives the card's width for the current type scale.
     //
     // It does NOT rebuild the rows, and that is the point. It used to call
@@ -172,6 +174,11 @@ private:
     // stable against the actual body names - a drawer that resized itself to
     // the longest name would move the viewport's usable area around under
     // the user, which is the reason this card was fixed-width to begin with.
+    // Rows no longer paint a dimension (see the class comment), but the
+    // width itself is UNCHANGED - kept at what it always reserved rather
+    // than shrunk to a name-only measure, because a narrower drawer would
+    // shift the rail, the drawer's own stacking neighbours and everything
+    // ViewportOverlay anchors beside it, none of which this task asked for.
     static int cardWidth();
 
     // One row's widgets, kept so applyTheme() can restyle in place. Replaces
@@ -180,7 +187,6 @@ private:
     struct Row {
         QWidget* widget = nullptr;
         class QLabel* name = nullptr;
-        class QLabel* size = nullptr;
         class QPushButton* eye = nullptr;
         int id = 0;
         // Outline rows come first and are not part of the viewport selection -

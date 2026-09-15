@@ -6652,11 +6652,14 @@ int main(int argc, char* argv[])
             settle(100);
         }
 
-        // Content unchanged: the row still carries name and dimensions.
-        check(drawer != nullptr &&
-                  drawer->rowTextAt(0).contains(QString::fromUtf8("\xC3\x97")) &&
-                  drawer->rowTextAt(0).contains(QStringLiteral("mm")),
-              QStringLiteral("rowTextAt(0) still carries the body's dimensions "
+        // Content unchanged: the row still carries the body's name, and
+        // carries no dimension at all any more - sizes moved to the
+        // viewport's own selection-sizes drawing (CLAUDE.md's "Sizes around
+        // the selection").
+        check(drawer != nullptr && !drawer->rowTextAt(0).isEmpty() &&
+                  !drawer->rowTextAt(0).contains(QString::fromUtf8("\xC3\x97")) &&
+                  !drawer->rowTextAt(0).contains(QStringLiteral("mm")),
+              QStringLiteral("rowTextAt(0) carries the body's name and no dimension "
                              "(\"%1\")")
                   .arg(drawer ? drawer->rowTextAt(0) : QString()));
 
@@ -9354,7 +9357,9 @@ int main(int argc, char* argv[])
               "so hasPendingFace() still answers exactly as it always has");
 
         // The drawer lists it, ABOVE the bodies, with the vocabulary's name
-        // and its own plane-local size.
+        // and no size at all - sizes moved to the viewport's own
+        // selection-sizes drawing, and an outline is not a Body selection
+        // that drawing follows in the first place.
         check(drawer && drawer->rowCount() == rowsAtStart + 1,
               QStringLiteral("the drawer grows one row for it (%1, was %2)")
                   .arg(drawer ? drawer->rowCount() : -1).arg(rowsAtStart));
@@ -9362,15 +9367,9 @@ int main(int argc, char* argv[])
         check(outlineRow.contains(QStringLiteral("Outline ")),
               QStringLiteral("and the FIRST row is the outline, above the bodies "
                              "(\"%1\")").arg(outlineRow));
-        check(outlineRow.contains(QString::fromUtf8("\xC3\x97")) &&
-                  outlineRow.contains(QStringLiteral("mm")),
-              QStringLiteral("carrying its size the way a body row does (\"%1\")")
-                  .arg(outlineRow));
-        // Two numbers, not three: an outline is flat, and a row reading
-        // "340 x 220 x 0 mm" would be the world-axis box this deliberately
-        // does not use.
-        check(outlineRow.count(QString::fromUtf8("\xC3\x97")) == 1,
-              QStringLiteral("as TWO dimensions, not a body's three (\"%1\")")
+        check(!outlineRow.contains(QString::fromUtf8("\xC3\x97")) &&
+                  !outlineRow.contains(QStringLiteral("mm")),
+              QStringLiteral("carrying no size at all - the row is name-only (\"%1\")")
                   .arg(outlineRow));
         check(!outlineRow.contains(QStringLiteral("Body")),
               "and the outline row is not named as a body");
@@ -12447,18 +12446,39 @@ int main(int argc, char* argv[])
         check(mm != nullptr && cm != nullptr, "both units are offered");
         check(mm != nullptr && mm->isChecked(), "millimetres is the default");
 
+        // The Items drawer carries no length at all any more - sizes moved to
+        // the viewport's own selection-sizes drawing and the status bar
+        // (CLAUDE.md's "Sizes around the selection") - so a unit switch has
+        // nothing left to rewrite on a row. Pinned in both units below, once
+        // each, rather than only here: a row that grew a size back would have
+        // to fail every one of those checks, not just this one.
         ItemsPanel* items = window.findChild<ItemsPanel*>();
-        check(items != nullptr, "the items panel is present");
-        const QString beforeItems = items ? items->rowTextAt(0) : QString();
-        check(beforeItems.contains(QStringLiteral("mm")),
-              QStringLiteral("the panel reads in millimetres (\"%1\")").arg(beforeItems));
+        check(items != nullptr && items->rowCount() > 0, "the items panel is present");
+        check(items != nullptr && items->rowCount() > 0 &&
+                  !items->rowTextAt(0).contains(QStringLiteral("mm")) &&
+                  !items->rowTextAt(0).contains(QStringLiteral("cm")),
+              QStringLiteral("the items row carries no unit in either unit (\"%1\")")
+                  .arg(items && items->rowCount() > 0 ? items->rowTextAt(0) : QString()));
+
+        // What still reads in the chosen unit is a selected body's status-bar
+        // readout (selectionStatusText()'s own "N body selected - W x D x H").
+        check(!window.document().solids().empty(),
+              "a body exists to select for the unit-follow checks");
+        const int probeId =
+            window.document().solids().empty() ? 0 : window.document().solids().front().id;
+        view->setSelectedSolids({probeId});
+        settle(150);
+        const QString beforeStatus = window.statusBar()->currentMessage();
+        check(beforeStatus.contains(QStringLiteral("mm")),
+              QStringLiteral("the status bar reads the selection in millimetres (\"%1\")")
+                  .arg(beforeStatus));
 
         // The unit chip is not a second unit-writing path: it triggers the
-        // OTHER unit's existing QAction, so persistence, the items panel,
-        // the status bar and the extrude field's label all follow the one
-        // route Phase 4 built. Asserting the menu action's checked state after
-        // each click is what proves that - a private toggle inside the chip
-        // would move the label and leave the menu behind.
+        // OTHER unit's existing QAction, so persistence, the status bar and
+        // the extrude field's label all follow the one route Phase 4 built.
+        // Asserting the menu action's checked state after each click is what
+        // proves that - a private toggle inside the chip would move the
+        // label and leave the menu behind.
         ToolChip* unitButton = unitChip(window);
         check(unitButton != nullptr && unitButton->textGlyph() == QStringLiteral("mm"),
               "the unit chip starts on millimetres");
@@ -12471,9 +12491,9 @@ int main(int argc, char* argv[])
                       .arg(unitButton->textGlyph()));
             check(cm->isChecked() && !mm->isChecked(),
                   "and it went through the Units actions, not a private toggle");
-            check(items && items->rowTextAt(0).contains(QStringLiteral("cm")),
-                  QStringLiteral("the items panel follows the chip (\"%1\")")
-                      .arg(items ? items->rowTextAt(0) : QString()));
+            check(window.statusBar()->currentMessage().contains(QStringLiteral("cm")),
+                  QStringLiteral("the status bar follows the chip (\"%1\")")
+                      .arg(window.statusBar()->currentMessage()));
 
             clickAt(unitButton, QPointF(unitButton->width() / 2.0,
                                         unitButton->height() / 2.0));
@@ -12482,18 +12502,21 @@ int main(int argc, char* argv[])
                   "clicking it again cycles back to millimetres");
             check(mm->isChecked() && !cm->isChecked(),
                   "the Units actions came back with it");
-            check(items && items->rowTextAt(0).contains(QStringLiteral("mm")),
-                  "and so did the items panel");
+            check(window.statusBar()->currentMessage().contains(QStringLiteral("mm")),
+                  "and so did the status bar");
         }
 
         if (cm) {
             cm->trigger();
             settle(150);
-            const QString afterItems = items ? items->rowTextAt(0) : QString();
-            check(afterItems.contains(QStringLiteral("cm")),
-                  QStringLiteral("the panel follows the unit (\"%1\")").arg(afterItems));
-            check(!afterItems.contains(QStringLiteral("mm")),
+            const QString afterStatus = window.statusBar()->currentMessage();
+            check(afterStatus.contains(QStringLiteral("cm")),
+                  QStringLiteral("the status bar follows the unit (\"%1\")").arg(afterStatus));
+            check(!afterStatus.contains(QStringLiteral("mm")),
                   "and no millimetre value is left behind");
+            check(items != nullptr && items->rowCount() > 0 &&
+                      !items->rowTextAt(0).contains(QStringLiteral("cm")),
+                  "and the items row still carries no unit for centimetres to appear in");
 
             // The trap: a field that displays centimetres and reads millimetres.
             trigger(window, QStringLiteral("Start Sketch"));
@@ -12524,18 +12547,29 @@ int main(int argc, char* argv[])
 
             mm->trigger();
             settle(150);
-            check(items && items->rowTextAt(0).contains(QStringLiteral("mm")),
-                  "switching back restores millimetres");
+            // Starting the sketch above dropped the selection - reselect the
+            // probe body so the status bar has something to read the
+            // restored unit through.
+            view->setSelectedSolids({probeId});
+            settle(150);
+            check(window.statusBar()->currentMessage().contains(QStringLiteral("mm")),
+                  "switching back restores millimetres on the status bar");
         }
+
+        view->clearSelection();
+        settle(100);
     }
 
     // --- a dimension already on screen follows the unit too -------------------
     // DimensionRenderer is not a QObject and nothing rebuilt a label that was
     // already up, so it kept saying "40 mm" over a viewport that had switched
     // to centimetres, until the next mouse move happened to redraw it. The
-    // spec asked for the status bar, the items panel and a dimension label
-    // checked together, which is what this does - and the label is checked
-    // BEFORE any mouse move, because a move would rebuild it either way.
+    // spec asked for the status bar and a dimension label checked together,
+    // which is what this does - and the label is checked BEFORE any mouse
+    // move, because a move would rebuild it either way. The items panel is
+    // checked too, but only for the NEGATIVE: it carries no length at all any
+    // more (sizes moved to the viewport's own selection-sizes drawing), so a
+    // mid-sketch unit switch has nothing on a row to rewrite.
     if (blockEnabled("a-dimension-already-on-screen-follows-the-unit-too")) {
         QAction* mm = action(window, QStringLiteral("Millimetres"));
         QAction* cm = action(window, QStringLiteral("Centimetres"));
@@ -12569,9 +12603,12 @@ int main(int argc, char* argv[])
             check(label.endsWith(QStringLiteral("cm")),
                   QStringLiteral("and carries the new unit, not the old one (\"%1\")")
                       .arg(label));
-            check(items->rowTextAt(0).contains(QStringLiteral("cm")),
-                  QStringLiteral("the items panel switched in the same breath (\"%1\")")
-                      .arg(items->rowTextAt(0)));
+            check(items->rowCount() == 0 ||
+                      (!items->rowTextAt(0).contains(QStringLiteral("cm")) &&
+                       !items->rowTextAt(0).contains(QStringLiteral("mm"))),
+                  QStringLiteral("the items row carries no length for a mid-sketch switch "
+                                 "to rewrite (\"%1\")")
+                      .arg(items->rowCount() > 0 ? items->rowTextAt(0) : QString()));
 
             // The status bar's cursor readout is written on each move, so one
             // move is what proves it formats in the new unit as well.

@@ -1081,6 +1081,15 @@ on by default, persisted as `showSizes`, no shortcut.
   commit's own Note (`Body 01 scaled — …`) or a kind-lock refusal stands. The size rides only
   on a Body selection, and it stays in the status bar with Show sizes off: the preference
   governs the drawing, and a line of status text covers nothing.
+- **The Items drawer stopped showing a size once this existed.** A row is name and eye button
+  only now — `ItemsPanel::Row` carries no dimension label, and `rowTextAt()` reports the name
+  alone. `cardWidth()` keeps the card's width exactly what it always reserved (a narrower
+  drawer would shift the rail and everything anchored beside it), so the removal is invisible
+  in layout even though the field it used to measure is gone. Side benefit: the row used to
+  read `Measure::formatDimensions()`, the WORLD-axis bounding box — the exact "neither side"
+  bug the oriented-box paragraph above describes (a 600 × 300 × 18 board turned 30° read
+  669.6 × 559.8 in the list) — while the viewport's own selection sizes read the board's true
+  600 × 300 × 18 from day one of this feature.
 
 ### Files, versions and the library
 

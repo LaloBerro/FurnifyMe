@@ -3,7 +3,6 @@
 #include "DocumentModel.h"
 #include "IconSet.h"
 #include "InlineRename.h"
-#include "Measure.h"
 #include "OcctViewWidget.h"
 #include "Theme.h"
 
@@ -25,10 +24,15 @@ namespace {
 // the viewport's usable area around under the user. cardWidth() grows it by
 // what a larger base size actually costs, and by nothing else.
 constexpr int kBaseWidth = 240;
-// What kBaseWidth was chosen to hold: a body name beside a comfortably large
-// dimension string. Specimens, not live content - see cardWidth().
+// What kBaseWidth was chosen to hold: a body name beside a comfortably wide
+// reserved margin. Rows painted a dimension string here once; they no longer
+// do (sizes moved to the viewport's own selection-sizes drawing), but the
+// WIDTH this margin reserves is kept exactly as it was rather than shrunk -
+// a narrower drawer would shift the rail and everything else anchored beside
+// it, which nobody asked for. `widthReserveSpecimen` names what it is now:
+// a placeholder that reproduces the old width, not a size being measured.
 QString nameSpecimen() { return QStringLiteral("Body 88"); }
-QString sizeSpecimen() { return QStringLiteral("482.9 × 590 × 10 mm"); }
+QString widthReserveSpecimen() { return QStringLiteral("482.9 × 590 × 10 mm"); }
 // The same radius the rail wears (ToolCluster's kCardRadius), not the
 // family's default 8: the two cards sit side by side against the same top
 // edge, and a different corner between immediate neighbours reads as a
@@ -96,7 +100,7 @@ int ItemsPanel::cardWidth()
     const Theme::Spec shipped = Theme::defaultSpec();
     auto measure = [](const QFont& name, const QFont& size) {
         return QFontMetrics(name).horizontalAdvance(nameSpecimen()) +
-               QFontMetrics(size).horizontalAdvance(sizeSpecimen());
+               QFontMetrics(size).horizontalAdvance(widthReserveSpecimen());
     };
     const int now = measure(Theme::bodyFont(), Theme::labelFont());
     const int atShippedScale = measure(Theme::bodyFontFor(shipped), Theme::labelFontFor(shipped));
@@ -125,11 +129,6 @@ void ItemsPanel::applyTheme()
         if (row.name)
             row.name->setStyleSheet(QStringLiteral("background: transparent; color: %1;")
                                         .arg(Theme::text().name()));
-        if (row.size)
-            row.size->setStyleSheet(QStringLiteral("background: transparent; color: %1; "
-                                                   "font-size: %2pt;")
-                                        .arg(Theme::textMuted().name())
-                                        .arg(Theme::labelFont().pointSizeF()));
         // Rasterised out of text()/textDisabled() when it was built, so it is
         // pixels rather than a description - the same cached-appearance value
         // ToolChip::applyTheme() has to rebuild.
@@ -193,34 +192,29 @@ void ItemsPanel::paintEvent(QPaintEvent* /*event*/)
 
 void ItemsPanel::refresh()
 {
-    // What the rows would SAY if they were rebuilt right now: id, name,
-    // dimension text and the eye's state, for every body in order.
+    // What the rows would SAY if they were rebuilt right now: id, name and
+    // the eye's state, for every body in order.
     //
     // This exists because refresh() is driven by appStateChanged, which fires
     // at the end of every updateActions() - including the one a Theme edit
     // ends with, and a colour picker emits one per mouse MOVE. Rebuilding the
     // whole list per frame of a drag changes nothing the user can see.
-    // Moving the connection to documentChanged instead is NOT the fix:
-    // appStateChanged is deliberately what drives this, because a unit switch
-    // touches no document and still has to re-read every dimension shown here
-    // (see MainWindow's constructor). Comparing what the rows would say keeps
-    // that case working - a unit switch changes every dimension string, so it
-    // rebuilds - while a theme edit, which changes none of them, does not.
-    //
-    // Costs one formatDimensions() per body, which is exactly what the
-    // rebuild below already paid on every call.
+    // Moving the connection to documentChanged instead is NOT the fix: a row
+    // no longer paints a dimension (sizes moved to the viewport's own
+    // selection-sizes drawing), but it still dims when the body it names
+    // goes off screen, and Isolate reaches that through the VIEW rather than
+    // through a document edit - see the view-visibility term below, which is
+    // exactly the case appStateChanged, and not documentChanged, is needed
+    // for.
     QString signature;
     if (myDocument) {
         // Outlines first, exactly as the rows are built below. Everything a
-        // row DISPLAYS goes into the signature - id, name, extents,
-        // visibility - which is the Phase-5 lesson: a field a row shows but
-        // the early-out does not compare is a field that stops updating.
+        // row DISPLAYS goes into the signature - id, name, visibility - which
+        // is the Phase-5 lesson: a field a row shows but the early-out does
+        // not compare is a field that stops updating.
         for (const DocumentModel::Outline& outline : myDocument->outlines()) {
             signature += QString::number(outline.id) + QLatin1Char('\x1f') +
                          QString::fromStdString(outline.name) + QLatin1Char('\x1f') +
-                         QString::fromStdString(
-                             Measure::formatFaceExtents(outline.face, outline.plane)) +
-                         QLatin1Char('\x1f') +
                          (myDocument->isVisible(outline.id) ? QLatin1Char('1')
                                                             : QLatin1Char('0')) +
                          QLatin1Char('\x1e');
@@ -228,8 +222,6 @@ void ItemsPanel::refresh()
         for (const DocumentModel::Solid& solid : myDocument->solids()) {
             signature += QString::number(solid.id) + QLatin1Char('\x1f') +
                          QString::fromStdString(solid.name) + QLatin1Char('\x1f') +
-                         QString::fromStdString(Measure::formatDimensions(solid.shape)) +
-                         QLatin1Char('\x1f') +
                          (myDocument->isVisible(solid.id) ? QLatin1Char('1')
                                                           : QLatin1Char('0')) +
                          // The VIEW's composed answer too, not only the
@@ -239,7 +231,10 @@ void ItemsPanel::refresh()
                          // block already records, applied to the field the
                          // dimming added ("a field a row shows but the
                          // early-out does not compare is a field that stops
-                         // updating").
+                         // updating"). This term is why refresh() still has
+                         // to stay on appStateChanged rather than move to
+                         // documentChanged - dropping it is exactly the
+                         // regression that lesson was learned from.
                          ((myView && myView->isSolidVisible(solid.id)) ? QLatin1Char('1')
                                                                        : QLatin1Char('0')) +
                          QLatin1Char('\x1e');
@@ -285,8 +280,7 @@ void ItemsPanel::refresh()
     // visibility channel the eye drives and which signal a click emits -
     // writing the widget construction twice would be two places to fix the
     // next time a row grows a control.
-    auto addRow = [this](int id, const QString& itemName, const QString& sizeText,
-                         bool visible, bool isOutline) {
+    auto addRow = [this](int id, const QString& itemName, bool visible, bool isOutline) {
         auto* row = new QWidget(this);
         auto* layout = new QHBoxLayout(row);
         layout->setContentsMargins(6, 4, 6, 4);
@@ -314,15 +308,6 @@ void ItemsPanel::refresh()
         // Neither label has an interactive child of its own to lose by this.
         name->setAttribute(Qt::WA_TransparentForMouseEvents);
         layout->addWidget(name, 1);
-
-        auto* size = new QLabel(sizeText, row);
-        // A secondary readout beside the name, sized like a chip label.
-        size->setStyleSheet(QStringLiteral("background: transparent; color: %1; "
-                                           "font-size: %2pt;")
-                                .arg(Theme::textMuted().name())
-                                .arg(Theme::labelFont().pointSizeF()));
-        size->setAttribute(Qt::WA_TransparentForMouseEvents);
-        layout->addWidget(size);
 
         auto* eye = new QPushButton(row);
         eye->setCheckable(true);
@@ -372,8 +357,7 @@ void ItemsPanel::refresh()
         // it. adjustSize() below has to see the real rows, now, not one event
         // loop turn from now.
         row->show();
-        Row entry{row, name, size, eye, id, isOutline,
-                  name->text() + QLatin1Char(' ') + size->text()};
+        Row entry{row, name, eye, id, isOutline, name->text()};
         myRowList.push_back(entry);
     };
 
@@ -381,12 +365,10 @@ void ItemsPanel::refresh()
     // on, and it is the newest item in the document whenever one exists.
     for (const DocumentModel::Outline& outline : myDocument->outlines()) {
         addRow(outline.id, QString::fromStdString(outline.name),
-               QString::fromStdString(Measure::formatFaceExtents(outline.face, outline.plane)),
                myDocument->isVisible(outline.id), /*isOutline=*/true);
     }
     for (const DocumentModel::Solid& solid : myDocument->solids()) {
         addRow(solid.id, QString::fromStdString(solid.name),
-               QString::fromStdString(Measure::formatDimensions(solid.shape)),
                myDocument->isVisible(solid.id), /*isOutline=*/false);
     }
 
@@ -541,9 +523,8 @@ void ItemsPanel::beginRenameForItem(int id, bool isOutline)
         if (!row.name) return;
         const QString current = row.name->text();
         // The name label's own geometry, in row.widget's coordinates - the
-        // "text cell" InlineRename opens over. Not the whole row: the size
-        // readout beside it is derived, not editable, and the eye button is
-        // its own control.
+        // "text cell" InlineRename opens over. Not the whole row: the eye
+        // button beside it is its own control.
         const QRect cellRect = row.name->geometry();
         InlineRename::beginRename(row.widget, cellRect, current,
                                   [this, id, isOutline](QString newName) {
