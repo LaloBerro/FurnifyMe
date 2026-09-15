@@ -47,6 +47,7 @@
 #include <Image_PixMap.hxx>
 #include <Graphic3d_AspectLine3d.hxx>
 #include <Graphic3d_AspectMarker3d.hxx>
+#include <Graphic3d_MarkerImage.hxx>
 #include <Graphic3d_Camera.hxx>
 #include <Graphic3d_CLight.hxx>
 #include <Graphic3d_CView.hxx>
@@ -105,6 +106,8 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QImage>
+#include <QPainter>
+#include <QPen>
 #include <QMouseEvent>
 #include <QOpenGLContext>
 #include <QSet>
@@ -115,11 +118,30 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <functional>
 #include <limits>
+#include <map>
+#include <utility>
 
 namespace {
+// In-scene multisampling for every frame this view draws, modeling and render
+// mode alike: Graphic3d_RenderingParams::NbMsaaSamples, which OCCT resolves
+// inside its own offscreen framebuffers before anything reaches Qt's FBO -
+// so V3d_View::Dump, and every pixel this project measures out of one, still
+// reads an ordinary single-sample buffer. (That is the difference from
+// QSurfaceFormat::setSamples(), which multisamples the DEFAULT framebuffer and
+// is forbidden - see surfaceFormat().)
+//
+// 4, measured against 0 and 8 on the same scene (RTX 4090, 1100x776, 100%):
+// the gizmo silhouettes went from ~0% partial-coverage pixels to 50-70%, with
+// each arm's centre still the exact axis token; the Shadows tier's cast shadow
+// still drew with its ratio unchanged; and an orbit step went from 4.14 to
+// 4.17 ms. 8 added only a few more points of edge coverage for twice the
+// per-pixel sample cost, so it buys nothing a user can see.
+constexpr int kViewMsaaSamples = 4;
+
 // AIS_Shape selection modes are plain integers: 0 whole shape, 2 edge, 4 face.
 constexpr int kSelectionModeWholeShape = 0;
 constexpr int kSelectionModeEdge       = 2;
@@ -356,13 +378,9 @@ public:
 // contract ("size does not depend on the zoom value of the views"), so a
 // marker never balloons up close or vanishes far away the way a fixed
 // millimetre size would. That contract held up (confirmed: these markers
-// stay a constant pixel size as the camera moves). The scale argument does
-// grow the rendered size, but not proportionally at the low end: 2.2
-// against the ordinary dots' 1.5 measured pixel-for-pixel identical in this
-// build, so the first-point ring below leans on a much larger jump (4.0)
-// AND a different colour rather than trusting a small scale delta alone -
-// colour is the one difference here that cannot silently fail to render,
-// unlike fill and, it turns out, a modest scale bump. Same shape as
+// stay a constant pixel size as the camera moves). The drawing itself is an
+// antialiased IMAGE rather than one of OCCT's stock glyphs - see
+// sketchMarkerImage() below for why and how. Same shape as
 // DimensionRenderer's DimensionLines: a bespoke AIS_InteractiveObject that
 // only implements Compute() and a no-op ComputeSelection(), because the
 // primitive it draws (Graphic3d_ArrayOfPoints via a Graphic3d_Group) needs
@@ -371,10 +389,18 @@ public:
 // drawing nothing in this build (see DimensionRenderer's arrowhead
 // comment) - confirmed by an actual snapshot before this shipped, not by
 // that reasoning alone.
+enum class SketchMarkerShape { Ring, Disc, Square };
+
 class SketchPointMarker : public AIS_InteractiveObject {
 public:
     gp_Pnt point;
     Handle(Graphic3d_AspectMarker3d) aspect;
+    // What the aspect was built FROM, kept so a display-scale change can
+    // rebuild it in place (see OcctViewWidget::refreshSketchMarkerImages()).
+    SketchMarkerShape shape = SketchMarkerShape::Disc;
+    int basePx = 0;
+    Quantity_Color colour;
+    double builtAtRatio = 0.0;
 
     void Compute(const Handle(PrsMgr_PresentationManager)&,
                  const Handle(Prs3d_Presentation)& presentation,
@@ -396,43 +422,120 @@ public:
     }
 };
 
-Handle(SketchPointMarker) makeMarker(const gp_Pnt& point, Aspect_TypeOfMarker type,
-                                     const Quantity_Color& colour, double scale)
+// The sketch marks' sizes at 100% display scale, in pixels. The first two are
+// the device-pixel extents OCCT's own stock glyphs had when these marks were
+// Aspect_TOM_RING1 at scale 4.0 and Aspect_TOM_BALL at scale 1.5 (read off
+// Graphic3d_MarkerImage::StandardMarker(...)->GetTextureSize, and confirmed
+// against a Dump) - the images below replaced those glyphs at exactly the size
+// the user had been looking at. The square is the 7x7 the start mark always was.
+constexpr int kCursorRingPx = 17;
+constexpr int kPlacedDotPx = 9;
+constexpr int kStartSquarePx = 7;
+
+// The sketch marks are ANTIALIASED IMAGES, not stock glyphs, and not because
+// the glyphs were wrong - because nothing else in the scene can smooth them.
+// OCCT's stock markers are hard-edged sprites: Aspect_TOM_BALL measured as a
+// small hollow ring in this build rather than the disc its name suggests,
+// Aspect_TOM_RING1 is a staircase, and 4x in-scene MSAA (kViewMsaaSamples)
+// leaves every one of them pixel-for-pixel unchanged, because multisampling
+// smooths the edges of GEOMETRY and a point sprite has no geometric edge to
+// smooth. So each mark is painted once by QPainter with antialiasing on and
+// handed to OCCT as an Aspect_TOM_USERDEFINED image, which is the capture the
+// user picked: a thin clean cursor ring, solid round placed points, and the
+// accent square on the first point.
+//
+// The image is an ALPHA mask (Image_Format_Alpha), not RGBA: OCCT tints a
+// non-coloured marker image with the aspect's own colour, so the Theme token
+// stays the single colour source and a theme edit recolours a mark by
+// rebuilding its aspect around the SAME cached image. Measured: 21-23 distinct
+// alpha levels along each edge, where the stock glyphs had two.
+//
+// Sized at the widget's device pixel ratio, so a mark keeps the on-screen size
+// it has at 100% on any other scale (the stock glyphs stayed the same number
+// of DEVICE pixels and so shrank on a 150% display). Rounded to an odd size so
+// the mark's centre is a whole pixel - the point it stands on.
+//
+// CACHED, keyed on shape and device size: setSketchCursorMarker() rebuilds
+// its marker on every hover move, and a fresh Image_PixMap each time would be
+// a fresh texture upload per mouse event - the same per-gesture asset cost
+// CLAUDE.md forbids an overlay paintEvent. One image per key for the life of
+// the process; OCCT's GL side keys its texture on the image's own id, so the
+// upload happens once per context as well.
+int sketchMarkerDevicePx(int basePx, double ratio)
 {
-    Handle(SketchPointMarker) marker = new SketchPointMarker();
-    marker->point = point;
-    marker->aspect = new Graphic3d_AspectMarker3d(type, colour, scale);
-    return marker;
+    const int px = std::max(1, int(std::lround(basePx * std::max(ratio, 0.01))));
+    return (px % 2 == 0) ? px + 1 : px;
 }
 
-// The first point's marker: a FILLED square, which no Aspect_TypeOfMarker
-// offers. Every stock type is a dot, a ring or a stroke glyph, so the square
-// has to come from Graphic3d_AspectMarker3d's bitmap constructor - a
-// monochrome stamp, sized in pixels and tinted by the colour argument, so it
-// stays a Theme token exactly like the dots and the ring.
-//
-// The bitmap is glBitmap's classic layout: one bit per pixel, rows padded to
-// whole bytes. Seven pixels wide fits inside one byte per row, and every bit
-// is set, so whether the driver reads the row most- or least-significant-bit
-// first the result is the same solid square - which matters here, because
-// this file has twice found a primitive that was "obviously" fine drawing
-// nothing at all (Aspect_TOM_POINT, Graphic3d_ArrayOfTriangles). The suite
-// samples the middle of this square for the fill colour rather than trusting
-// that it renders.
-constexpr int kStartMarkerPx = 7;
+Handle(Graphic3d_MarkerImage) sketchMarkerImage(SketchMarkerShape shape, int px)
+{
+    static std::map<std::pair<int, int>, Handle(Graphic3d_MarkerImage)> cache;
+    const std::pair<int, int> key(static_cast<int>(shape), px);
+    const auto found = cache.find(key);
+    if (found != cache.end()) return found->second;
 
-Handle(SketchPointMarker) makeFilledSquareMarker(const gp_Pnt& point,
-                                                 const Quantity_Color& colour)
+    QImage image(px, px, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::transparent);
+    {
+        QPainter painter(&image);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        const QRectF box(0.0, 0.0, px, px);
+        switch (shape) {
+        case SketchMarkerShape::Ring: {
+            // Thin, as captured: a tenth of the ring's width, never under
+            // 1.5 px (1.7 px at 100% for the 17 px ring).
+            const double pen = std::max(1.5, px / 10.0);
+            painter.setPen(QPen(Qt::white, pen));
+            painter.setBrush(Qt::NoBrush);
+            const double inset = pen / 2.0 + 0.5;
+            painter.drawEllipse(box.adjusted(inset, inset, -inset, -inset));
+            break;
+        }
+        case SketchMarkerShape::Disc:
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(Qt::white);
+            painter.drawEllipse(box.adjusted(0.5, 0.5, -0.5, -0.5));
+            break;
+        case SketchMarkerShape::Square:
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(Qt::white);
+            painter.drawRoundedRect(box.adjusted(0.5, 0.5, -0.5, -0.5), px / 7.0, px / 7.0);
+            break;
+        }
+    }
+
+    // Coverage only: the colour comes from the aspect at draw time.
+    Handle(Image_PixMap) mask = new Image_PixMap();
+    mask->InitZero(Image_Format_Alpha, px, px);
+    for (int y = 0; y < px; ++y) {
+        const QRgb* row = reinterpret_cast<const QRgb*>(image.constScanLine(y));
+        for (int x = 0; x < px; ++x)
+            mask->ChangeRawValue(y, x)[0] = static_cast<Standard_Byte>(qAlpha(row[x]));
+    }
+    Handle(Graphic3d_MarkerImage) built = new Graphic3d_MarkerImage(mask);
+    cache.emplace(key, built);
+    return built;
+}
+
+void buildSketchMarkerAspect(SketchPointMarker& marker, double ratio)
+{
+    Handle(Graphic3d_AspectMarker3d) aspect = new Graphic3d_AspectMarker3d();
+    aspect->SetType(Aspect_TOM_USERDEFINED);
+    aspect->SetMarkerImage(
+        sketchMarkerImage(marker.shape, sketchMarkerDevicePx(marker.basePx, ratio)));
+    aspect->SetColor(marker.colour);
+    marker.aspect = aspect;    marker.builtAtRatio = ratio;
+}
+
+Handle(SketchPointMarker) makeMarker(const gp_Pnt& point, SketchMarkerShape shape,
+                                     int basePx, const Quantity_Color& colour, double ratio)
 {
     Handle(SketchPointMarker) marker = new SketchPointMarker();
     marker->point = point;
-
-    Handle(NCollection_HArray1<uint8_t>) bits =
-        new NCollection_HArray1<uint8_t>(0, kStartMarkerPx - 1);
-    for (int row = 0; row < kStartMarkerPx; ++row) bits->SetValue(row, 0xFF);
-
-    marker->aspect =
-        new Graphic3d_AspectMarker3d(colour, kStartMarkerPx, kStartMarkerPx, bits);
+    marker->shape = shape;
+    marker->basePx = basePx;
+    marker->colour = colour;
+    buildSketchMarkerAspect(*marker, ratio);
     return marker;
 }
 
@@ -548,8 +651,10 @@ QSurfaceFormat OcctViewWidget::surfaceFormat()
     // probe's own shadow test, the floor blend, the shadow ratios. A
     // multisample colour attachment cannot be read without a resolve step
     // nothing here performs. Antialiasing is OCCT's to do inside the scene
-    // (Graphic3d_RenderingParams::IsAntialiasingEnabled, and the ray-traced
-    // tiers' own sampling), where it costs the measurements nothing.
+    // (kViewMsaaSamples, Graphic3d_RenderingParams::NbMsaaSamples, resolved
+    // in OCCT's own offscreen buffers before the frame reaches this FBO; and
+    // the ray-traced tiers' own sampling), where it costs the measurements
+    // nothing.
     //
     // AND NO setSwapInterval() - a SECOND decision not to ask for something,
     // added by Milestone 5's modeling-lag investigation, which suspected the
@@ -732,6 +837,12 @@ void OcctViewWidget::initializeViewer()
     myViewer->SetLightOn();
 
     myView = myViewer->CreateView();
+    // Set HERE, where the view is born, and nowhere else: this is the one
+    // function every view goes through - the first show, the compare pane's
+    // second viewer, and the rebuild after releaseGlResources() - so no path
+    // can come up without it. Render mode's save/restore round trip does not
+    // list this field, so entering and leaving render mode leaves it alone.
+    myView->ChangeRenderingParams().NbMsaaSamples = kViewMsaaSamples;
     myContext = new AIS_InteractiveContext(myViewer);
     // What OCCT itself starts the selector at, captured rather than assumed:
     // Auto raises this tolerance and every other mode has to be handed back
@@ -1258,6 +1369,10 @@ void OcctViewWidget::resizeGL(int w, int h)
     // exactly this callback), and Auto's edge tolerance is a promise in
     // LOGICAL pixels. Re-derived here, so the promise survives the move.
     applySelectionTolerance();
+    // The sketch marks are images sized at the device pixel ratio, so a move
+    // to a display at another scale rebuilds them here too. A no-op unless
+    // the ratio actually changed.
+    refreshSketchMarkerImages();
     invalidateAccumulation();
 }
 
@@ -2701,8 +2816,12 @@ void OcctViewWidget::updateMirrorPlacementIndicator()
     myMirrorPlacementPlaneObject = plane3d;
     myContext->Display(myMirrorPlacementPlaneObject, 0, -1, Standard_False);
 
+    // The same antialiased disc the sketch's placed points wear, at the size
+    // the stock Aspect_TOM_BALL glyph it replaced drew (scale 2.2 measured
+    // pixel-for-pixel identical to the dots' 1.5).
     Handle(SketchPointMarker) handle =
-        makeMarker(origin, Aspect_TOM_BALL, toOcctColor(Theme::accent()), 2.2);
+        makeMarker(origin, SketchMarkerShape::Disc, kPlacedDotPx,
+                   toOcctColor(Theme::accent()), devicePixelRatioF());
     markInSketchLayer(handle);
     if (!myMirrorPlacementHandleObject.IsNull())
         myContext->Remove(myMirrorPlacementHandleObject, Standard_False);
@@ -2731,18 +2850,15 @@ void OcctViewWidget::setSketchPointMarkers(const std::vector<gp_Pnt>& points)
     clearSketchPointMarkers();
     if (points.empty()) return;
 
-    // Aspect_TOM_POINT was tried first for the ordinary dots and is
-    // documented as OCCT's smallest displayable dot, but it drew nothing at
-    // all in this build - a snapshot caught that before it shipped (see
-    // this class's own comment on Graphic3d_ArrayOfTriangles for the
-    // earlier instance of the same lesson). Aspect_TOM_BALL, tried next,
-    // does draw - but pixel-sampled, it turned out to be a small HOLLOW
-    // ring rather than the filled disc its name and doc suggest, in this
-    // build. It still reads clearly as "a small marker at this point",
-    // which is what matters here.
+    // A SOLID antialiased disc per placed point - see sketchMarkerImage() for
+    // why these are images. (The stock glyphs before them were
+    // Aspect_TOM_POINT, which drew nothing at all in this build, and then
+    // Aspect_TOM_BALL, which drew a small hollow ring.)
+    const double ratio = devicePixelRatioF();
     for (const gp_Pnt& p : points) {
         Handle(SketchPointMarker) dot =
-            makeMarker(p, Aspect_TOM_BALL, toOcctColor(Theme::sketchPointMarker()), 1.5);
+            makeMarker(p, SketchMarkerShape::Disc, kPlacedDotPx,
+                       toOcctColor(Theme::sketchPointMarker()), ratio);
         markInSketchLayer(dot);
         myContext->Display(dot, 0, -1, Standard_False);
         myPlacedMarkers.push_back(dot);
@@ -2756,15 +2872,24 @@ void OcctViewWidget::setSketchPointMarkers(const std::vector<gp_Pnt>& points)
     // much as a colour one - which is the point. The three sketch marks are
     // now told apart by SHAPE first: a square starts the outline, a dot is a
     // placed point, a ring is where the cursor is. That matters because this
-    // file has already been burned once by leaning on size alone (scale 2.2
-    // against 1.5 pixel-sampled IDENTICAL on this driver), and once more by
+    // file has already been burned once by leaning on size alone (two stock
+    // glyph scales pixel-sampled IDENTICAL on this driver), and once more by
     // assuming a primitive draws at all. Theme::accent() is the app's own
     // "this is the interactive thing" colour and no other sketch mark wears
-    // it, so colour still carries the distinction independently.
+    // it, so colour still carries the distinction independently. It sits on
+    // top of the first point's own dot, two pixels smaller, so the dot's rim
+    // shows round it - which is the capture the user picked.
     Handle(SketchPointMarker) square =
-        makeFilledSquareMarker(points.front(), toOcctColor(Theme::accent()));
+        makeMarker(points.front(), SketchMarkerShape::Square, kStartSquarePx,
+                   toOcctColor(Theme::accent()), ratio);
     markInSketchLayer(square);
     myContext->Display(square, 0, -1, Standard_False);
+    // ON TOP of its dot by priority, not by display order. The two sprites
+    // stand at the same depth, so whichever OCCT draws second wins, and it
+    // does not draw them in the order they were displayed: measured, the
+    // solid dot covered the square completely. (The hollow stock glyph that
+    // dot replaced had let the square show through its hole either way.)
+    myContext->SetDisplayPriority(square, Graphic3d_DisplayPriority_Above);
     myFirstPointMarker = square;
 
     scheduleRedraw();
@@ -2801,14 +2926,15 @@ void OcctViewWidget::setSketchCursorMarker(const gp_Pnt& point)
     // first point's filled square and the placed points' dots. Its violet is
     // Theme::sketchPointMarker(), the palette's own sketch hue, which the
     // small placed dots also wear: the cursor is told apart from them by
-    // being an open ring four times the size, the one size delta this file
-    // has actually measured to be visible (1.5 against 4.0 - see
-    // setSketchPointMarkers()). Sharing the hue is deliberate rather than
-    // conceded: the live cursor is the same KIND of thing as the points it is
-    // about to become, while the square that closes the outline is not, and
-    // that is the distinction accent() is spent on.
+    // being an open, thin ring nearly twice their width. Sharing the hue is
+    // deliberate rather than conceded: the live cursor is the same KIND of
+    // thing as the points it is about to become, while the square that
+    // closes the outline is not, and that is the distinction accent() is
+    // spent on. Rebuilt on every hover move, which is why its image is cached
+    // (see sketchMarkerImage()).
     Handle(SketchPointMarker) cursor =
-        makeMarker(point, Aspect_TOM_RING1, toOcctColor(Theme::sketchPointMarker()), 4.0);
+        makeMarker(point, SketchMarkerShape::Ring, kCursorRingPx,
+                   toOcctColor(Theme::sketchPointMarker()), devicePixelRatioF());
     markInSketchLayer(cursor);
     myContext->Display(cursor, 0, -1, Standard_False);
     myCursorMarker = cursor;
@@ -2825,6 +2951,33 @@ void OcctViewWidget::clearSketchCursorMarker()
 bool OcctViewWidget::hasSketchCursorMarker() const
 {
     return !myCursorMarker.IsNull();
+}
+
+quintptr OcctViewWidget::sketchCursorMarkerImageId() const
+{
+    const Handle(SketchPointMarker) cursor = Handle(SketchPointMarker)::DownCast(myCursorMarker);
+    if (cursor.IsNull() || cursor->aspect.IsNull()) return 0;
+    return static_cast<quintptr>(
+        reinterpret_cast<std::uintptr_t>(cursor->aspect->MarkerImage().get()));
+}
+
+void OcctViewWidget::refreshSketchMarkerImages()
+{
+    if (myContext.IsNull()) return;
+    const double ratio = devicePixelRatioF();
+    auto refresh = [&](const Handle(AIS_InteractiveObject)& object) {
+        const Handle(SketchPointMarker) marker = Handle(SketchPointMarker)::DownCast(object);
+        if (marker.IsNull() || marker->builtAtRatio == ratio) return false;
+        buildSketchMarkerAspect(*marker, ratio);
+        myContext->Redisplay(marker, Standard_False);
+        return true;
+    };
+    bool changed = false;
+    for (const auto& marker : myPlacedMarkers) changed |= refresh(marker);
+    changed |= refresh(myFirstPointMarker);
+    changed |= refresh(myCursorMarker);
+    changed |= refresh(myMirrorPlacementHandleObject);
+    if (changed) scheduleRedraw();
 }
 
 void OcctViewWidget::setSketchStraightAnchor(const gp_Pnt& prev)
@@ -5140,6 +5293,7 @@ OcctViewWidget::RenderParamsProbe OcctViewWidget::renderParamsProbe() const
     probe.isShadowEnabled = params.IsShadowEnabled;
     probe.shadowMapResolution = params.ShadowMapResolution;
     probe.nbRayTracingTiles = params.NbRayTracingTiles;
+    probe.nbMsaaSamples = params.NbMsaaSamples;
     return probe;
 }
 

@@ -1858,6 +1858,41 @@ project treats as ground truth is read back out of that buffer — a multisample
 attachment cannot be read without a resolve step nothing here performs. Antialiasing is
 OCCT's to do inside the scene, where it costs the measurements nothing.
 
+**And the scene does it: `NbMsaaSamples = 4` (`kViewMsaaSamples`), chosen from captures.**
+OCCT multisamples inside its own offscreen framebuffers and resolves before the frame reaches
+Qt's FBO, so `Dump` still reads a single-sample buffer and the "no `setSamples()`" law above is
+untouched. It is set **once, in `initializeViewer()` right after `CreateView()`** — the one
+function the first show, the compare pane's viewer and the rebuild after
+`releaseGlResources()` all go through — so it applies to ordinary modeling, not only render
+mode, and render mode's save/restore does not list the field and so cannot drop it. Measured
+on an RTX 4090 at 1100×776, 100%: gizmo silhouettes went from ~0% partial-coverage pixels to
+50–70%, each arm's middle stayed the exact axis token (a fully covered pixel resolves to
+exactly its colour, so every token count in the suite stands), the Shadows tier's cast-shadow
+check passed with its ratio unchanged, and an orbit step went 4.14 → 4.17 ms. **8 was
+measured and rejected**: a few more points of edge coverage at twice the per-pixel sample
+cost. `gui_smoke` pins it structurally (`RenderParamsProbe::nbMsaaSamples` is 4 before render
+mode, after leaving it, on a fresh viewer, and on that viewer again after its context's
+`aboutToBeDestroyed` released and rebuilt it) and in pixels (the Move X arm's cross-sections:
+exact token in the middle, and 9 of 24 silhouette edges blended against 0 of 24 with the
+samples at 0).
+
+**MSAA does nothing for the sketch marks, which is why they are images.** A point sprite has
+no geometric edge to multisample: OCCT's stock `Aspect_TOM_RING1`/`Aspect_TOM_BALL` glyphs
+measured pixel-for-pixel unchanged under it. The cursor ring, the placed-point dots, the
+first point's accent square and the Mirror placement handle are therefore
+`Aspect_TOM_USERDEFINED` markers built from a `QPainter`-antialiased **alpha mask**
+(`sketchMarkerImage()`), which OCCT tints with the aspect's colour — so the `Theme` token is
+still the one colour source and a theme edit recolours a mark around the same image. Sizes
+are the stock glyphs' own device extents at 100% (ring 17, dot 9, square 7) times
+`devicePixelRatioF()`, rounded odd, re-derived from `resizeGL()` on a scale change; the ring
+is thin (a tenth of its width, 1.7 px at 100%) because that is the capture the user picked.
+Images are **cached by shape and size** — the cursor ring is rebuilt on every hover move,
+and a fresh image per move would be a texture upload per mouse event. Two findings: at equal depth
+the solid dot measured covering the square completely although the square is displayed
+after it, so the square carries `Graphic3d_DisplayPriority_Above`; and the outline's own line is drawn over
+the marks, so a mark's centre pixel is legitimately contested and the suite asks its fill of
+the ground (no bare ground in the square's interior) rather than of a 3×3 core.
+
 Event wiring: RMB drag→turntable orbit around the current view target (Unity-style, the user's explicit preference — no cursor-anchored pivoting), MMB drag→pan, wheel→zoomToward cursor; camera state lives in CameraController and is pushed via SetEye/SetCenter/SetUp. FOVy is fixed at 45° for the life of the view **except while render mode is on**, where the settings card's Camera FOV override is read through `OcctViewWidget::effectiveFovyDeg()` by both `applyCameraState()` and `worldPerPixel()` and pushed back through `applyCameraState()` on exit, so no override ever leaks outside render mode; **which projection is drawn with it moves** — see below.
 
 #### Projection: a base mode and a loan

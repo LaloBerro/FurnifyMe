@@ -671,17 +671,18 @@ public:
     // Feedback for the in-progress outline, in a channel of its own -
     // setPreview() above is already shared by two features, and CLAUDE.md
     // records the bug that caused (cancelling the extrude preview erased
-    // the pending face). Every placed point gets a small dot; the first
-    // additionally gets a ring on top of its dot, because clicking it back
-    // is what closes the outline. Rebuilds from scratch each call - the
-    // point count here is small enough that caching would be complexity
-    // with no payoff. Non-selectable, the same way the preview shape is.
+    // the pending face). Every placed point gets a small solid dot; the first
+    // additionally gets an accent square on top of its dot, because clicking
+    // it back is what closes the outline. The marker OBJECTS are rebuilt from
+    // scratch each call (the point count is small); the antialiased images
+    // they draw are cached - see sketchMarkerImage() in the .cpp.
+    // Non-selectable, the same way the preview shape is.
     void setSketchPointMarkers(const std::vector<gp_Pnt>& points);
     void clearSketchPointMarkers();
     // Number of placed-point dots currently displayed - not the count of
     // marker objects, which is one more whenever the start ring is up too.
     int sketchPointMarkerCount() const;
-    // Whether the first point's extra ring is currently displayed.
+    // Whether the first point's extra square is currently displayed.
     bool hasSketchStartMarker() const;
 
     // The live snapped cursor point while sketching - a dot at exactly
@@ -690,6 +691,11 @@ public:
     void setSketchCursorMarker(const gp_Pnt& point);
     void clearSketchCursorMarker();
     bool hasSketchCursorMarker() const;
+    // The identity of the image the live cursor ring is drawn with, 0 when
+    // there is no cursor marker. A plain value for the suite: two hover moves
+    // at the same display scale must draw the SAME cached image, never a
+    // freshly built one.
+    quintptr sketchCursorMarkerImageId() const;
 
     // The plane clicks are unprojected onto. The ground plane until a face is
     // locked. Setting it rebuilds the grid immediately, whether or not a
@@ -1316,6 +1322,11 @@ public:
         bool isShadowEnabled = true;
         int shadowMapResolution = 1024;
         int nbRayTracingTiles = 256;
+        // Not part of the render-mode round trip - set once when the view is
+        // built (kViewMsaaSamples in the .cpp) and never touched again - and
+        // read here so the suite can pin that it is still in force outside
+        // render mode, after leaving it, and after a view rebuild.
+        int nbMsaaSamples = 0;
     };
     RenderParamsProbe renderParamsProbe() const;
 
@@ -1862,6 +1873,11 @@ private:
     // NOT emit: it is also the destructor's teardown, where there is no owner
     // left to tell.
     void releaseGlResources();
+    // Rebuilds every live sketch marker's aspect (and the mirror placement
+    // handle's) at the current device pixel ratio, when it differs from the
+    // ratio the marker was built at. Called from resizeGL(), which is the
+    // callback a move to a display at another scale arrives through.
+    void refreshSketchMarkerImages();
     // Wraps the framebuffer object Qt is currently rendering into as OCCT's
     // default FBO, and syncs the neutral window to its size. Run before every
     // frame OCCT draws, because QOpenGLWidget recreates that FBO on resize and
@@ -2335,8 +2351,8 @@ private:
     // The sketch point markers - see setSketchPointMarkers()'s comment for
     // why these are not the preview slot above. One object per placed
     // point (each is a single-point marker; see SketchPointMarker in the
-    // .cpp), plus one more for the first point's ring and one for the live
-    // cursor dot.
+    // .cpp), plus one more for the first point's square and one for the live
+    // cursor ring.
     std::vector<Handle(AIS_InteractiveObject)> myPlacedMarkers;
     Handle(AIS_InteractiveObject) myFirstPointMarker;
     Handle(AIS_InteractiveObject) myCursorMarker;

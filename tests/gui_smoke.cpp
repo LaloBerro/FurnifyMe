@@ -5348,6 +5348,36 @@ int main(int argc, char* argv[])
                 return shot.rect().adjusted(12, 12, -12, -12).contains(out);
             };
 
+            // The sketch marks are antialiased images sized at the device
+            // pixel ratio (OcctViewWidget.cpp's sketchMarkerDevicePx(): the
+            // 100% size times the ratio, rounded to an odd number so the
+            // centre is a whole pixel). Restated rather than exported - the
+            // suite is asserting the size the user sees, not re-reading the
+            // number the implementation chose.
+            auto sketchMarkPx = [](int basePx, double ratio) {
+                const int px = std::max(1, int(std::lround(basePx * std::max(ratio, 0.01))));
+                return (px % 2 == 0) ? px + 1 : px;
+            };
+
+            // How much of `token` a dump pixel carries over the viewport's
+            // ground: the pixel's position along the ground->token line, or -1
+            // when it is not ON that line (the outline's yellow, a grid line
+            // under a blend) - so a blend with some OTHER ink is never counted
+            // as the mark's own antialiasing.
+            auto markAlpha = [](const QColor& c, const QColor& token,
+                                const QColor& ground = Theme::viewport()) {
+                const double gx = token.red() - ground.red(), gy = token.green() - ground.green(),
+                             gz = token.blue() - ground.blue();
+                const double px = c.red() - ground.red(), py = c.green() - ground.green(),
+                             pz = c.blue() - ground.blue();
+                const double len2 = gx * gx + gy * gy + gz * gz;
+                if (len2 < 1.0) return -1.0;
+                const double a = (px * gx + py * gy + pz * gz) / len2;
+                const double rx = px - a * gx, ry = py - a * gy, rz = pz - a * gz;
+                if (std::sqrt(rx * rx + ry * ry + rz * rz) > 14.0) return -1.0;
+                return a;
+            };
+
             // Pixels within `half` of `centre` that match `colour`, and the
             // bounding box they occupy - enough to say "a filled patch about
             // seven pixels across" rather than "some pixels were blue".
@@ -5468,23 +5498,6 @@ int main(int argc, char* argv[])
             check(haveAll,
                   "the first point, a later point and the live cursor all project "
                   "inside the dump, so the six style checks below cannot vanish quietly");
-            // The eight pixels ringing `centre` at `radius` that match
-            // `colour` - the honest way to ask "is the middle of this mark
-            // filled or hollow", since a single pixel answers for one point
-            // and an area count answers for neither.
-            auto ringAt = [&](const QPoint& centre, const QColor& colour, int radius) {
-                const QPoint offsets[8] = {{-radius, 0}, {radius, 0}, {0, -radius},
-                                           {0, radius},  {-radius, -radius}, {radius, -radius},
-                                           {-radius, radius}, {radius, radius}};
-                int found = 0;
-                for (const QPoint& o : offsets) {
-                    const QPoint p = centre + o;
-                    if (!shot.rect().contains(p)) continue;
-                    if (colorDistance(shot.pixelColor(p), colour) <= 42.0) ++found;
-                }
-                return found;
-            };
-
             if (haveAll) {
                 int hits = 0, boxW = 0, boxH = 0;
                 patch(firstAt, Theme::accent(), 9, hits, boxW, boxH);
@@ -5509,35 +5522,41 @@ int main(int argc, char* argv[])
                 check(colorDistance(middle, Theme::viewport()) > 25.0,
                       QStringLiteral("the first point's middle is painted, not bare ground "
                                      "showing through a ring (%1)").arg(middle.name()));
-                // The mark's own 3x3 CORE, not a ring two pixels out. Measured
-                // on real captures, this mark renders an accent core about
-                // five pixels across, so radius 2 samples its ANTIALIASED
-                // RIM - and grid ink beneath that rim blends a pixel or two
-                // out of tolerance, which moved this count between 2 and 5
-                // across builds whose marker pixels were otherwise identical
-                // (17 accent pixels, same bounding box, compared pixel by
-                // pixel against the previous build's own capture). That is
-                // compositing, not a fill regression. The core states the
-                // same claim far off the noise floor, with both sides of it
-                // MEASURED: this filled patch reads 7 of 9 (the mark is
-                // small enough that its own antialiased corners cost two),
-                // while the cursor RING's identical 3x3 probe a few checks
-                // below reads at most 1 of 9 through its hole. A threshold
-                // of 6 sits in the middle of that gap with margin on both
-                // sides, where the old radius-2 ring sample had none.
-                int filled = 0;
-                for (int dy = -1; dy <= 1; ++dy) {
-                    for (int dx = -1; dx <= 1; ++dx) {
-                        const QPoint p = squareAt + QPoint(dx, dy);
-                        if (!shot.rect().contains(p)) continue;
-                        if (colorDistance(shot.pixelColor(p), Theme::accent()) <= 42.0)
-                            ++filled;
+                // FILLED, asked of the square's whole interior rather than of a
+                // 3x3 core. The core used to read 7 of 9; with the square an
+                // antialiased image under 4x MSAA the outline's own yellow
+                // segment - which leaves the first point through its middle
+                // and is drawn over the marks - now claims three of those nine
+                // pixels with its smoothed edge, and a count of accent pixels
+                // alone cannot tell "the line crosses the fill" from "a ring's
+                // hole". What CAN tell them apart is the GROUND: a hollow mark
+                // shows the viewport through its middle, a filled one never
+                // does. So: every pixel of the interior (the square minus its
+                // one-pixel antialiased rim, 5x5 at 100%) is either the accent
+                // or the outline crossing it, none is bare ground, and the
+                // accent is the majority - measured 19 of 25, the other six
+                // the line.
+                {
+                    const int interiorHalf =
+                        std::max(1, (sketchMarkPx(7, scale) - 2) / 2);
+                    int accentPx = 0, groundPx = 0, total = 0;
+                    for (int dy = -interiorHalf; dy <= interiorHalf; ++dy) {
+                        for (int dx = -interiorHalf; dx <= interiorHalf; ++dx) {
+                            const QPoint p = squareAt + QPoint(dx, dy);
+                            if (!shot.rect().contains(p)) continue;
+                            ++total;
+                            const QColor c = shot.pixelColor(p);
+                            if (colorDistance(c, Theme::accent()) <= 12.0) ++accentPx;
+                            else if (colorDistance(c, Theme::viewport()) <= 60.0) ++groundPx;
+                        }
                     }
+                    check(total > 0 && groundPx == 0 && accentPx * 2 > total,
+                          QStringLiteral("and it is FILLED with the accent right up to its "
+                                         "middle - %1 of the %2 interior pixels are the "
+                                         "accent, the rest the outline crossing it, and %3 "
+                                         "show bare ground where a ring would have its hole")
+                              .arg(accentPx).arg(total).arg(groundPx));
                 }
-                check(filled >= 6,
-                      QStringLiteral("and it is FILLED with the accent right up to its "
-                                     "middle - %1 of the 9 core pixels are accent, "
-                                     "where a ring would have its hole").arg(filled));
                 check(hits >= 12,
                       QStringLiteral("the first point is a filled accent patch, not an "
                                      "outline (%1 accent px)").arg(hits));
@@ -5572,7 +5591,59 @@ int main(int argc, char* argv[])
                 check(foundRing,
                       "the cursor's mark can be found in the dump, so the rim and hole "
                       "checks below have something to measure");
-                const int rim = ringAt(ringAtPoint, Theme::sketchPointMarker(), 5);
+                // The rim is sampled ON THE RING'S OWN CIRCLE. The stock
+                // Aspect_TOM_RING1 glyph this replaced was a thick band whose
+                // pixels sat at radius 5 on the axes and the diagonals' square
+                // offsets alike; the antialiased ring is thin - a 1.7 px pen
+                // centred 7.15 px out at 100% (sketchMarkerImage()'s own
+                // geometry) - so radius 5 now lands in its hole and a square
+                // (r, r) offset lands outside it. Sixteen sectors of the true
+                // circle's annulus, each inked if any of its pixels carries
+                // the ring at half strength or more. (One rounded sample per
+                // direction was tried first and missed the ink on a diagonal:
+                // a thin ring's pixels do not sit where a rounded cos/sin
+                // lands.) Other ink drawn OVER the rim is not a gap: in this
+                // scene the outline segment ending at the centre covers the
+                // 0-degree sector outright (measured: 15 inked, 1 covered). So
+                // a sector is inked, covered by another colour, or BARE -
+                // ground showing where the ring should be - and the claim is
+                // no bare sector at all, with most of the circle actually
+                // inked so a scene that covered everything cannot pass.
+                const double rimRadius = (sketchMarkPx(17, scale) -
+                                          2.0 * (std::max(1.5, sketchMarkPx(17, scale) / 10.0) /
+                                                     2.0 + 0.5)) / 2.0;
+                int rim = 0, occluded = 0;
+                QStringList bareDirections;
+                {
+                    // Every pixel in the annulus rimRadius +-1.5 px, binned
+                    // into sixteen 22.5-degree sectors - not one rounded sample
+                    // per direction, which on a ring this thin lands beside the
+                    // ink on the diagonals.
+                    const double pi = std::acos(-1.0);
+                    bool inked[16] = {}, covered[16] = {};
+                    const int reach = int(std::ceil(rimRadius + 1.5));
+                    for (int dy = -reach; dy <= reach; ++dy) {
+                        for (int dx = -reach; dx <= reach; ++dx) {
+                            const double r = std::hypot(double(dx), double(dy));
+                            if (std::abs(r - rimRadius) > 1.5) continue;
+                            const QPoint p = ringAtPoint + QPoint(dx, dy);
+                            if (!shot.rect().contains(p)) continue;
+                            double angle = std::atan2(double(dy), double(dx));
+                            if (angle < 0.0) angle += 2.0 * pi;
+                            const int k = int(std::lround(angle / (pi / 8.0))) % 16;
+                            const QColor c = shot.pixelColor(p);
+                            const double a = markAlpha(c, Theme::sketchPointMarker());
+                            if (a >= 0.5) inked[k] = true;
+                            else if (a < 0.0 && colorDistance(c, Theme::viewport()) > 60.0)
+                                covered[k] = true;   // another ink lies over the rim here
+                        }
+                    }
+                    for (int k = 0; k < 16; ++k) {
+                        if (inked[k]) ++rim;
+                        else if (covered[k]) ++occluded;
+                        else bareDirections << QString::number(k * 22.5, 'f', 1);
+                    }
+                }
                 int middleHits = 0;
                 for (int dy = -1; dy <= 1; ++dy) {
                     for (int dx = -1; dx <= 1; ++dx) {
@@ -5582,9 +5653,13 @@ int main(int argc, char* argv[])
                             ++middleHits;
                     }
                 }
-                check(rim >= 6,
+                check(bareDirections.isEmpty() && rim >= 12,
                       QStringLiteral("the cursor mark has a rim all the way round "
-                                     "(%1 of 8 pixels at radius 5)").arg(rim));
+                                     "(%1 of 16 directions inked at its own radius, %2 px, "
+                                     "%3 covered by other ink; bare at %4 deg)")
+                          .arg(rim).arg(rimRadius, 0, 'f', 2).arg(occluded)
+                          .arg(bareDirections.isEmpty() ? QStringLiteral("none")
+                                                        : bareDirections.join(QLatin1Char(','))));
                 // <= 1, not == 0 - a fix round traced an occasional single
                 // hit here to the live sketch preview segment (ordinary
                 // yellow, drawn correctly), which terminates exactly at the
@@ -5608,7 +5683,155 @@ int main(int argc, char* argv[])
                       QStringLiteral("and a hollow middle - it is a ring, not a ball "
                                      "(%1 of the 9 middle pixels wear its colour)")
                           .arg(middleHits));
+
+                // --- and all three are SMOOTH: antialiased images ------------
+                //
+                // The user picked these marks from captures, and what the
+                // captures show is edges that blend into the ground. OCCT's
+                // stock glyphs are hard sprites that 4x MSAA leaves unchanged
+                // (a point sprite has no geometric edge to multisample), so
+                // "smooth" is asked of the pixels directly: the pixels that lie
+                // BETWEEN the ground and the mark's token - on that line, so a
+                // blend with the outline's yellow or a grid line is never
+                // counted - and how many distinct levels they take. A stock
+                // glyph has few or none. Plus the size (the 100% size times the
+                // display ratio) and that the ink reaches the exact token.
+                struct MarkPixels {
+                    int partial = 0;
+                    int levels = 0;
+                    int exactNearCentre = 0;
+                    int width = 0;
+                    int height = 0;
+                };
+                auto measureMark = [&](const QPoint& centre, const QColor& token, int half,
+                                       const QColor& ground) {
+                    MarkPixels m;
+                    const int side = half * 2 + 1;
+                    std::vector<char> inked(std::size_t(side) * side, 0);
+                    QSet<int> levels;
+                    for (int iy = 0; iy < side; ++iy) {
+                        for (int ix = 0; ix < side; ++ix) {
+                            const QPoint p = centre + QPoint(ix - half, iy - half);
+                            if (!shot.rect().contains(p)) continue;
+                            const QColor c = shot.pixelColor(p);
+                            const double a = markAlpha(c, token, ground);
+                            if (a > 0.1 && a < 0.9) {
+                                ++m.partial;
+                                levels.insert(int(std::lround(a * 64.0)));
+                            }
+                            if (a >= 0.35) inked[std::size_t(iy) * side + ix] = 1;
+                            if (std::abs(ix - half) <= 2 && std::abs(iy - half) <= 2 &&
+                                colorDistance(c, token) <= 6.0)
+                                ++m.exactNearCentre;
+                        }
+                    }
+                    m.levels = levels.size();
+                    // Bounding box of the inked components that do not reach
+                    // the window's edge - markCentre()'s own rule, so a line
+                    // of the same colour passing through is not the mark.
+                    std::vector<char> seen(inked.size(), 0);
+                    int minX = side, minY = side, maxX = -1, maxY = -1;
+                    for (int iy = 0; iy < side; ++iy) {
+                        for (int ix = 0; ix < side; ++ix) {
+                            const std::size_t at = std::size_t(iy) * side + ix;
+                            if (!inked[at] || seen[at]) continue;
+                            std::vector<QPoint> blob, stack{QPoint(ix, iy)};
+                            seen[at] = 1;
+                            bool touchesEdge = false;
+                            while (!stack.empty()) {
+                                const QPoint c = stack.back();
+                                stack.pop_back();
+                                blob.push_back(c);
+                                if (c.x() == 0 || c.y() == 0 || c.x() == side - 1 ||
+                                    c.y() == side - 1)
+                                    touchesEdge = true;
+                                for (int ny = c.y() - 1; ny <= c.y() + 1; ++ny) {
+                                    for (int nx = c.x() - 1; nx <= c.x() + 1; ++nx) {
+                                        if (nx < 0 || ny < 0 || nx >= side || ny >= side) continue;
+                                        const std::size_t n = std::size_t(ny) * side + nx;
+                                        if (!inked[n] || seen[n]) continue;
+                                        seen[n] = 1;
+                                        stack.push_back(QPoint(nx, ny));
+                                    }
+                                }
+                            }
+                            if (touchesEdge) continue;
+                            for (const QPoint& c : blob) {
+                                minX = std::min(minX, c.x()); maxX = std::max(maxX, c.x());
+                                minY = std::min(minY, c.y()); maxY = std::max(maxY, c.y());
+                            }
+                        }
+                    }
+                    m.width = maxX >= minX ? maxX - minX + 1 : 0;
+                    m.height = maxY >= minY ? maxY - minY + 1 : 0;
+                    return m;
+                };
+                auto reportMark = [&](const char* name, const MarkPixels& m, int expectedPx,
+                                      int minPartial, int minLevels) {
+                    std::printf("[info] %s mark: %d partial px, %d levels, %d exact near "
+                                "centre, %dx%d (expected %d)\n",
+                                name, m.partial, m.levels, m.exactNearCentre, m.width,
+                                m.height, expectedPx);
+                    check(m.partial >= minPartial && m.levels >= minLevels,
+                          QStringLiteral("the %1 mark has SOFT edges - %2 pixels blend "
+                                         "between the ground and its colour, across %3 "
+                                         "distinct levels: the antialiased image, not a "
+                                         "stock glyph")
+                              .arg(QLatin1String(name)).arg(m.partial).arg(m.levels));
+                    check(std::abs(m.width - expectedPx) <= 2 &&
+                              std::abs(m.height - expectedPx) <= 2,
+                          QStringLiteral("the %1 mark keeps its size at this display scale "
+                                         "(%2x%3 px, expected %4)")
+                              .arg(QLatin1String(name)).arg(m.width).arg(m.height)
+                              .arg(expectedPx));
+                };
+
+                QPoint dotAt = secondAt;
+                const bool foundDot =
+                    markCentre(secondAt, Theme::sketchPointMarker(), 8, dotAt);
+                check(foundDot, "a later point's dot can be found in the dump, so its "
+                                "smoothness checks below have something to measure");
+                const MarkPixels dot =
+                    measureMark(dotAt, Theme::sketchPointMarker(), 8, Theme::viewport());
+                // Thresholds are HALF what each mark measured at 100% on the
+                // RTX 4090 (dot 15 px / 8 levels, square 14 / 5, ring 66 / 26).
+                // The stock glyphs these replaced, drawn under the same 4x
+                // MSAA, measured 0 / 0 for the dot and 23 / 12 for the ring
+                // (RING1's own few baked-in shades), so each threshold sits
+                // between the two.
+                reportMark("placed-point", dot, sketchMarkPx(9, scale), 8, 4);
+                check(dot.exactNearCentre >= 4,
+                      QStringLiteral("and the dot is SOLID - its middle is the exact "
+                                     "sketch-point token (%1 exact pixels within 2 px of "
+                                     "its centre)").arg(dot.exactNearCentre));
+
+                // The square stands on the first point's own dot, two pixels
+                // smaller, so its antialiased rim blends into the DOT's colour,
+                // not the ground - which is the line its edge pixels lie on.
+                const MarkPixels square =
+                    measureMark(squareAt, Theme::accent(), 6, Theme::sketchPointMarker());
+                reportMark("start-square", square, sketchMarkPx(7, scale), 7, 3);
+                check(square.exactNearCentre >= 9,
+                      QStringLiteral("and the square's middle is the exact accent token "
+                                     "(%1 exact pixels within 2 px of its centre)")
+                          .arg(square.exactNearCentre));
+
+                const MarkPixels ring =
+                    measureMark(ringAtPoint, Theme::sketchPointMarker(), 12, Theme::viewport());
+                reportMark("cursor-ring", ring, sketchMarkPx(17, scale), 33, 13);
             }
+        }
+
+        // The cursor ring is rebuilt on EVERY hover move, so its image must be
+        // the cached one, not rebuilt per mouse event - a fresh image each move
+        // would be a fresh texture upload per event.
+        {
+            const quintptr before = view->sketchCursorMarkerImageId();
+            moveTo(view, QPointF(0.36 * w, 0.55 * h));
+            const quintptr after = view->sketchCursorMarkerImageId();
+            check(before != 0 && before == after,
+                  "a hover move rebuilds the cursor ring around the SAME cached image, "
+                  "never a freshly built one");
         }
 
         trigger(window, QStringLiteral("Undo Last Point"));
@@ -22343,6 +22566,19 @@ int main(int argc, char* argv[])
                   .arg(paramsBeforeEntry.nbRayTracingTiles)
                   .arg(paramsAfterExit.nbRayTracingTiles));
 
+        // In-scene 4x MSAA is set ONCE, where the view is built, and is not a
+        // field render mode's save/restore lists - so this pins that it is in
+        // force for ordinary modeling and that the round trip above did not
+        // hand it back as 0. A render-mode restore that rebuilt params from a
+        // default-constructed Graphic3d_RenderingParams would pass every field
+        // comparison above and fail here.
+        check(paramsBeforeEntry.nbMsaaSamples == 4,
+              QStringLiteral("the viewport multisamples 4x outside render mode "
+                             "(NbMsaaSamples %1)").arg(paramsBeforeEntry.nbMsaaSamples));
+        check(paramsAfterExit.nbMsaaSamples == 4,
+              QStringLiteral("...and still 4x after leaving render mode "
+                             "(NbMsaaSamples %1)").arg(paramsAfterExit.nbMsaaSamples));
+
         // The selection render mode cleared on entry is NOT restored on
         // exit - the consistent behaviour this task shipped (a real
         // ClearSelected(), never a remembered cursor to put back), asserted
@@ -22606,6 +22842,41 @@ int main(int argc, char* argv[])
             check(!renderAction->isChecked() && !rview->renderModeActive(),
                   "...and Render mode is unchecked rather than left claiming a mode the "
                   "widget no longer has");
+        }
+
+        // --- ...and the view a context loss rebuilds still multisamples --------
+        // The half the simulation above does not reach: releaseGlResources()
+        // itself, and the rebuild after it. Driven on a THROWAWAY viewer, so
+        // the viewport every later check needs is untouched: its context's own
+        // aboutToBeDestroyed is emitted (the one hook the real loss arrives
+        // through), which releases the viewer, the view and the context for
+        // real; the next entry point then rebuilds them through
+        // initializeViewer(), and a frame re-attaches to the live context.
+        {
+            QWidget host;
+            host.setAttribute(Qt::WA_ShowWithoutActivating);
+            host.resize(320, 240);
+            auto* spare = new OcctViewWidget(&host, true);
+            spare->setGeometry(0, 0, 320, 240);
+            host.show();
+            settle(150);
+            check(spare->context() != nullptr && spare->renderParamsProbe().nbMsaaSamples == 4,
+                  QStringLiteral("a spare viewer comes up multisampling 4x (NbMsaaSamples %1)")
+                      .arg(spare->renderParamsProbe().nbMsaaSamples));
+            if (spare->context() != nullptr) {
+                emit spare->context()->aboutToBeDestroyed();
+                check(spare->renderParamsProbe().nbMsaaSamples == 0 && !spare->viewReady(),
+                      "the simulated loss genuinely released the spare viewer's view");
+                spare->setSketchCursorMarker(gp_Pnt(0.0, 0.0, 0.0));
+                spare->clearSketchCursorMarker();
+                spare->update();
+                settle(150);
+                check(spare->viewReady() && spare->renderParamsProbe().nbMsaaSamples == 4,
+                      QStringLiteral("...and the view rebuilt after it multisamples 4x again "
+                                     "(NbMsaaSamples %1, ready %2)")
+                          .arg(spare->renderParamsProbe().nbMsaaSamples)
+                          .arg(int(spare->viewReady())));
+            }
         }
     }
 
@@ -26901,6 +27172,101 @@ int main(int argc, char* argv[])
             check(!base.isNull() && baseBright >= 0 && baseBright < 40,
                   QStringLiteral("...which carries (almost) no hover-brightened X "
                                  "pixels (%1)").arg(baseBright));
+
+            // --- the arms are multisampled: exact inside, blended at the edge
+            // The viewport draws with 4x in-scene MSAA (kViewMsaaSamples). What
+            // that must and must not change on a gizmo is asked of the X arm's
+            // own cross-sections in this dump: across the shaft, the middle is
+            // STILL the exact unlit token (MSAA resolves a fully covered pixel
+            // to exactly its colour, so the suite's token counts stand), while
+            // the pixel where the shaft meets what is behind it carries PARTIAL
+            // coverage - a colour between the two, on the line joining them.
+            // Measured on this very probe (RTX 4090, 100%): 0 of 24 silhouette
+            // edges blended with NbMsaaSamples at 0, 9 of 24 at 4 - so the
+            // bar is a quarter. Twelve cross-sections between 30% and 80% of
+            // the arm, two edges each.
+            {
+                gp_Pnt armTip;
+                QPoint pivotAt, tipAt;
+                const gp_Pnt armPivot = gv->moveGizmoPivot();
+                const bool haveArm = !base.isNull() && gv->moveGizmoArmTip(0, armTip) &&
+                                     gv->projectToScreen(armPivot, pivotAt) &&
+                                     gv->projectToScreen(armTip, tipAt);
+                check(haveArm, "the X arm projects into the baseline dump, so the "
+                               "multisampling checks below have something to measure");
+                if (haveArm) {
+                    const double s = double(base.width()) / std::max(1, gv->width());
+                    const QColor token = Theme::gizmoAxisX();
+                    auto exact = [&](const QColor& c) {
+                        return std::abs(c.red() - token.red()) <= 6 &&
+                               std::abs(c.green() - token.green()) <= 6 &&
+                               std::abs(c.blue() - token.blue()) <= 6;
+                    };
+                    const QPointF p0(pivotAt.x() * s, pivotAt.y() * s);
+                    const QPointF p1(tipAt.x() * s, tipAt.y() * s);
+                    const double len = std::max(std::hypot(p1.x() - p0.x(), p1.y() - p0.y()), 1.0);
+                    const QPointF dir((p1.x() - p0.x()) / len, (p1.y() - p0.y()) / len);
+                    const QPointF perp(-dir.y(), dir.x());
+                    int sections = 0, exactCentres = 0, edges = 0, blendedEdges = 0;
+                    for (int i = 0; i < 12; ++i) {
+                        const double f = 0.30 + 0.50 * i / 11.0;
+                        const QPointF at(p0.x() + (p1.x() - p0.x()) * f,
+                                         p0.y() + (p1.y() - p0.y()) * f);
+                        const int reach = 14;
+                        std::vector<QColor> across;
+                        bool inside = true;
+                        for (int t = -reach; t <= reach; ++t) {
+                            const QPoint px(int(std::lround(at.x() + perp.x() * t)),
+                                            int(std::lround(at.y() + perp.y() * t)));
+                            if (!base.rect().contains(px)) { inside = false; break; }
+                            across.push_back(base.pixelColor(px));
+                        }
+                        if (!inside) continue;
+                        ++sections;
+                        int centre = -1;
+                        for (int d = 0; d <= 3 && centre < 0; ++d) {
+                            if (exact(across[reach + d])) centre = reach + d;
+                            else if (exact(across[reach - d])) centre = reach - d;
+                        }
+                        if (centre < 0) continue;
+                        ++exactCentres;
+                        int lo = centre, hi = centre;
+                        while (lo > 0 && exact(across[lo - 1])) --lo;
+                        while (hi + 1 < int(across.size()) && exact(across[hi + 1])) ++hi;
+                        auto edgeBlends = [&](int edge, int beyond) {
+                            if (edge < 0 || edge >= int(across.size()) || beyond < 0 ||
+                                beyond >= int(across.size()))
+                                return false;
+                            const QColor bg = across[beyond];
+                            const QColor c = across[edge];
+                            const double gx = token.red() - bg.red(), gy = token.green() - bg.green(),
+                                         gz = token.blue() - bg.blue();
+                            const double len2 = gx * gx + gy * gy + gz * gz;
+                            if (len2 < 400.0) return false;   // background too like the arm
+                            const double px = c.red() - bg.red(), py = c.green() - bg.green(),
+                                         pz = c.blue() - bg.blue();
+                            const double a = (px * gx + py * gy + pz * gz) / len2;
+                            const double rx = px - a * gx, ry = py - a * gy, rz = pz - a * gz;
+                            return a > 0.1 && a < 0.9 && std::sqrt(rx * rx + ry * ry + rz * rz) <= 24.0;
+                        };
+                        edges += 2;
+                        if (edgeBlends(lo - 1, lo - 4)) ++blendedEdges;
+                        if (edgeBlends(hi + 1, hi + 4)) ++blendedEdges;
+                    }
+                    std::printf("[info] Move X arm cross-sections: %d measured, %d exact "
+                                "centres, %d of %d silhouette edges blended\n",
+                                sections, exactCentres, blendedEdges, edges);
+                    check(sections >= 10 && exactCentres >= sections - 2,
+                          QStringLiteral("the X arm's middle is STILL the exact unlit token "
+                                         "under 4x multisampling (%1 of %2 cross-sections)")
+                              .arg(exactCentres).arg(sections));
+                    check(edges > 0 && blendedEdges * 4 >= edges,
+                          QStringLiteral("and its silhouette carries partial coverage - %1 of "
+                                         "%2 edge pixels blend the arm into what is behind "
+                                         "it, where a single-sampled edge has none")
+                              .arg(blendedEdges).arg(edges));
+                }
+            }
 
             gp_Pnt tip;
             QPoint grabAt;
