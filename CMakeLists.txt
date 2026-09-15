@@ -83,6 +83,10 @@ add_executable(headless_mitre tests/mitre.cpp)
 target_link_libraries(headless_mitre PRIVATE furnify_geometry)
 add_test(NAME headless_mitre COMMAND headless_mitre)
 
+add_executable(headless_measured_box tests/measured_box.cpp)
+target_link_libraries(headless_measured_box PRIVATE furnify_geometry)
+add_test(NAME headless_measured_box COMMAND headless_measured_box)
+
 # ---------------------------------------------------------------------------
 # Application (Qt + OCCT visualization)
 # ---------------------------------------------------------------------------

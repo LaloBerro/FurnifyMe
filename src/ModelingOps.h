@@ -487,4 +487,76 @@ gp_Pnt centreOfMass(const TopoDS_Shape& shape);
 // such point, and the origin would be a plausible-looking lie.
 bool boundingBoxCentre(const TopoDS_Shape& shape, gp_Pnt& out);
 
+// --- Selection sizes (improvements item 5) -----------------------------------
+//
+// The box the viewport draws its width, depth and height around when bodies
+// are selected: one body's own box, or one box around a whole group.
+//
+// "MEASURED ALONG ITS OWN SIDES" MEANS AN ORIENTED BOX. The world axis-aligned
+// box of a 600 x 300 board turned 30 degrees about Z reports a width of
+// 600 cos 30 + 300 sin 30 = 669.6, which is not any side of that board - the
+// oriented-quantity-measured-in-world-terms mistake this app has made more
+// often than any other. So the box is OCCT's Bnd_OBB (BRepBndLib::AddOBB),
+// built in its OPTIMAL mode on the exact B-rep rather than the triangulation.
+// Both choices were measured on OCCT 8.0.1: on a 600 x 300 x 18 box axis-
+// aligned, turned 30 degrees about Z and tilted 37 degrees about (1, 2, 3),
+// every mode reads the sides to six decimals, but on a tessellated cylinder
+// the triangulation-based modes read 299.9 (the mesh sits inside the surface)
+// and the non-optimal exact mode 300.1, while optimal-on-exact reads 300.
+//
+// THE WORLD AXES WIN WHEN THEY FIT JUST AS WELL. An OBB's axes are arbitrary
+// wherever the shape does not pin them - measured: a sphere's optimal OBB
+// came back turned (0.104, 0.994, -0.027), a cone's by 0.002 - and a skewed
+// frame puts slanted dimension lines, and odd numbers, on an ordinary cabinet.
+// So the world-aligned box (BRepBndLib::AddOptimal, exact, no tolerance
+// enlargement) is computed too and USED whenever its volume is within
+// kPreferWorldBoxTolerance of the oriented box's. 1% because the gap it has
+// to absorb is optimizer slack, which measured at zero to six decimals on
+// every shape above, while a board turned by a visible amount inflates its
+// world box by far more: a 600 x 300 x 18 board at 1 degree about Z is +4.4%,
+// at 0.25 degrees +1.1%. Below a quarter of a degree a board reads its world
+// extents, which is a sub-millimetre difference on furniture-sized sides.
+//
+// Consequence, stated rather than implied: the rule is about FIT, not about
+// how the pieces themselves sit. A group of axis-aligned pieces laid out along
+// a diagonal (three 100 x 100 squares stepping 200 in X and Y) fits a turned
+// box of a third the volume, and is measured along that diagonal.
+//
+// WHICH EXTENT IS WHICH. `height` is the extent along the axis closest to
+// world Z (largest |axis . Z|; heightAxis is signed to point up). Of the
+// other two, `width` is the longer and `depth` the shorter - a tie gives
+// width to whichever axis came first (world X in the world frame).
+// depthAxis = heightAxis x widthAxis, so (width, depth, height) is right-
+// handed; widthAxis is signed so its largest component is positive, which
+// makes the frame deterministic for a caller laying out lines.
+//
+// Refuses (ok == false, `error` says why) an empty list, a list with a null
+// shape, and a union with no extent at all (a void box).
+constexpr double kPreferWorldBoxTolerance = 0.01;
+
+struct MeasuredBox {
+    bool ok = false;
+    std::string error;
+    gp_Pnt centre;
+    gp_Dir widthAxis{1.0, 0.0, 0.0};
+    gp_Dir depthAxis{0.0, 1.0, 0.0};
+    gp_Dir heightAxis{0.0, 0.0, 1.0};
+    double width = 0.0;
+    double depth = 0.0;
+    double height = 0.0;
+    // True when the world-aligned box was chosen (see above).
+    bool worldAligned = false;
+
+    // A corner: each sign is -1 or +1 along widthAxis, depthAxis, heightAxis.
+    gp_Pnt corner(int widthSign, int depthSign, int heightSign) const;
+};
+
+MeasuredBox measuredBox(const std::vector<TopoDS_Shape>& shapes);
+
+// How many times measuredBox() has run in this process - the app caches the
+// box on the selection and the document revision, and the suite counts calls
+// to prove an orbit never recomputes it. A count of the real work, not of a
+// cache's own bookkeeping, so a cache that silently stopped caching shows.
+long long measuredBoxCallCount();
+
 }  // namespace ModelingOps

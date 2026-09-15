@@ -54,6 +54,7 @@
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopTools_ListOfShape.hxx>
 #include <Bnd_Box.hxx>
+#include <Bnd_OBB.hxx>
 #include <gp_Ax1.hxx>
 #include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
@@ -1269,6 +1270,121 @@ bool boundingBoxCentre(const TopoDS_Shape& shape, gp_Pnt& out)
     box.Get(x0, y0, z0, x1, y1, z1);
     out = gp_Pnt(0.5 * (x0 + x1), 0.5 * (y0 + y1), 0.5 * (z0 + z1));
     return true;
+}
+
+// --- Selection sizes ------------------------------------------------------------
+
+namespace {
+long long g_measuredBoxCalls = 0;
+}  // namespace
+
+long long measuredBoxCallCount()
+{
+    return g_measuredBoxCalls;
+}
+
+gp_Pnt MeasuredBox::corner(int widthSign, int depthSign, int heightSign) const
+{
+    const gp_Vec v = gp_Vec(widthAxis) * (0.5 * width * widthSign) +
+                     gp_Vec(depthAxis) * (0.5 * depth * depthSign) +
+                     gp_Vec(heightAxis) * (0.5 * height * heightSign);
+    return centre.Translated(v);
+}
+
+MeasuredBox measuredBox(const std::vector<TopoDS_Shape>& shapes)
+{
+    ++g_measuredBoxCalls;
+    MeasuredBox out;
+    if (shapes.empty()) {
+        out.error = "Nothing to measure: no shapes were given.";
+        return out;
+    }
+    for (const TopoDS_Shape& s : shapes) {
+        if (s.IsNull()) {
+            out.error = "Nothing to measure: a shape in the list is null.";
+            return out;
+        }
+    }
+    const TopoDS_Shape all = shapes.size() == 1 ? shapes.front() : makeCompound(shapes);
+
+    // The world-aligned box, exact: no triangulation, no tolerance enlargement
+    // (a plain BRepBndLib::Add pads every box by the shape tolerance).
+    Bnd_Box world;
+    BRepBndLib::AddOptimal(all, world, false, false);
+    if (world.IsVoid()) {
+        out.error = "Nothing to measure: the shapes have no extent.";
+        return out;
+    }
+    Standard_Real x0, y0, z0, x1, y1, z1;
+    world.Get(x0, y0, z0, x1, y1, z1);
+
+    // The oriented box: optimal mode on the exact geometry - see the header
+    // for the measurements behind both flags.
+    Bnd_OBB obb;
+    try {
+        BRepBndLib::AddOBB(all, obb, /*triangulation*/ false, /*optimal*/ true,
+                           /*shapeTolerance*/ false);
+    } catch (const Standard_Failure&) {
+        obb.SetVoid();
+    }
+
+    gp_Dir axes[3] = {gp_Dir(1, 0, 0), gp_Dir(0, 1, 0), gp_Dir(0, 0, 1)};
+    double ext[3] = {x1 - x0, y1 - y0, z1 - z0};
+    gp_Pnt centre(0.5 * (x0 + x1), 0.5 * (y0 + y1), 0.5 * (z0 + z1));
+    bool worldAligned = true;
+
+    if (!obb.IsVoid()) {
+        // A zero extent (a flat piece) must not make every volume equal zero
+        // and so compare "within tolerance" whatever the frame - a hair of
+        // floor keeps the comparison about the other two sides.
+        const double hair = 1.0e-6;
+        const double worldVolume = std::max(ext[0], hair) * std::max(ext[1], hair) *
+                                   std::max(ext[2], hair);
+        const double obbExt[3] = {2.0 * obb.XHSize(), 2.0 * obb.YHSize(), 2.0 * obb.ZHSize()};
+        const double obbVolume = std::max(obbExt[0], hair) * std::max(obbExt[1], hair) *
+                                 std::max(obbExt[2], hair);
+        if (worldVolume > obbVolume * (1.0 + kPreferWorldBoxTolerance)) {
+            worldAligned = false;
+            axes[0] = obb.XDirection();
+            axes[1] = obb.YDirection();
+            axes[2] = obb.ZDirection();
+            for (int i = 0; i < 3; ++i) ext[i] = obbExt[i];
+            centre = gp_Pnt(obb.Center());
+        }
+    }
+
+    // Height: the axis closest to world Z.
+    int h = 0;
+    for (int i = 1; i < 3; ++i) {
+        if (std::abs(axes[i].Z()) > std::abs(axes[h].Z()) + 1.0e-12) h = i;
+    }
+    // Width: the longer of the other two; a tie keeps the first.
+    int a = (h + 1) % 3, b = (h + 2) % 3;
+    if (a > b) std::swap(a, b);
+    int w = a, d = b;
+    if (ext[b] > ext[a] + 1.0e-9) std::swap(w, d);
+
+    gp_Dir heightAxis = axes[h];
+    if (heightAxis.Z() < 0.0) heightAxis.Reverse();
+    gp_Dir widthAxis = axes[w];
+    {
+        const double cx = widthAxis.X(), cy = widthAxis.Y(), cz = widthAxis.Z();
+        double big = cx;
+        if (std::abs(cy) > std::abs(big)) big = cy;
+        if (std::abs(cz) > std::abs(big)) big = cz;
+        if (big < 0.0) widthAxis.Reverse();
+    }
+
+    out.ok = true;
+    out.centre = centre;
+    out.widthAxis = widthAxis;
+    out.heightAxis = heightAxis;
+    out.depthAxis = gp_Dir(gp_Vec(heightAxis).Crossed(gp_Vec(widthAxis)));
+    out.width = ext[w];
+    out.depth = ext[d];
+    out.height = ext[h];
+    out.worldAligned = worldAligned;
+    return out;
 }
 
 static int countOf(const TopoDS_Shape& shape, TopAbs_ShapeEnum type)
