@@ -4799,17 +4799,22 @@ int main(int argc, char* argv[])
                           .arg(rowColours.join(QStringLiteral(" "))));
             }
 
-            // Three group dividers - drawer | sketch | model | select - as
-            // separate widgets between the chips, not gaps that merely look
-            // like dividers.
+            // Two group dividers - drawer | sketch | model - as separate
+            // widgets between the chips, not gaps that merely look like
+            // dividers. History (Undo, Redo) sits after the stretch with no
+            // separator widget of its own - addStretch() adds a layout
+            // stretch item, not a child widget, so it is invisible to this
+            // findChildren() sweep by construction. Snap to Grid's removal
+            // took its separator with it; the rail is now three groups and
+            // two dividers before the stretch, not four and three.
             QList<QWidget*> separators;
             for (QWidget* child :
                  rail->findChildren<QWidget*>(QString(), Qt::FindDirectChildrenOnly)) {
                 if (!qobject_cast<ToolChip*>(child)) separators << child;
             }
-            check(separators.size() == 3,
-                  QStringLiteral("three separators divide the rail's four groups "
-                                 "(found %1)").arg(separators.size()));
+            check(separators.size() == 2,
+                  QStringLiteral("two separators divide the rail's three groups "
+                                 "before the stretch (found %1)").arg(separators.size()));
             if (!separators.isEmpty()) {
                 // The rule is really painted, in border(), on the middle row.
                 // "A separator widget exists" would pass against one that
