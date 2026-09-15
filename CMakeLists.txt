@@ -146,6 +146,7 @@ if(FURNIFYME_BUILD_APP)
       src/ui/JointChip.cpp
       src/ui/JointsPanel.cpp
       src/ui/RenderSettingsPanel.cpp
+      src/ui/UnsavedCloseCard.cpp
       src/FurnitureStore.cpp
     )
     target_include_directories(furnify_app PUBLIC src/ui)

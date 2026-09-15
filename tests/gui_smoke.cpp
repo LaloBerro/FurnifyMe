@@ -61,6 +61,7 @@
 #include "ShortcutSheet.h"
 #include "Theme.h"
 #include "Toast.h"
+#include "UnsavedCloseCard.h"
 #include "ToolChip.h"
 #include "ToolCluster.h"
 #include "TransformGizmo.h"
@@ -73,6 +74,7 @@
 #include <QAction>
 #include <QActionGroup>
 #include <QApplication>
+#include <QDirIterator>
 #include <QCoreApplication>
 #include <QColorDialog>
 #include <QComboBox>
@@ -746,6 +748,7 @@ constexpr BlockInfo kBlocks[] = {
     { "milestone-4-fix-round-2-with-autosave-on-an-earlier", true, true },
     { "resyncview-reapplies-hidden-state-on-every-caller", true, true },
     { "closeevent-itself-saves-flushes-a-pending-autosave", true, true },
+    { "closing-with-unsaved-changes-asks-in-the-window", false, true },
     { "the-window-carries-the-app-s-own-mark", true, false },
     { "the-walkthrough-appears-for-a-newcomer", true, false },
     { "the-hint-balloon-has-nothing-to-say-before-any-body", true, false },
@@ -1207,6 +1210,29 @@ bool trigger(MainWindow& window, const QString& label)
     }
     found->trigger();
     settle(120);
+    return true;
+}
+
+// The unsaved-changes question (improvements item 3): answers it the way a
+// hand does. The button's centre is asked of the VIEWPORT's childAt(), and
+// the click is delivered only when that pixel reaches this very button - a
+// click sent straight at a control nobody can reach proves nothing (CLAUDE.md,
+// "Widgets over the viewport"). Returns false, clicking nothing, when the card
+// is not up or the pixel reaches something else.
+enum class CloseAnswer { Save, Discard, Keep };
+bool answerCloseCard(MainWindow& window, CloseAnswer which)
+{
+    UnsavedCloseCard* card = window.closeQuestion();
+    if (!card || !card->isVisible()) return false;
+    QAbstractButton* button = which == CloseAnswer::Save      ? card->saveButton()
+                              : which == CloseAnswer::Discard ? card->discardButton()
+                                                              : card->keepButton();
+    OcctViewWidget* view = window.view();
+    if (!button || !view) return false;
+    const QPoint centre(button->width() / 2, button->height() / 2);
+    if (view->childAt(button->mapTo(view, centre)) != button) return false;
+    clickAt(button, QPointF(centre));
+    settle(150);
     return true;
 }
 
@@ -3250,6 +3276,14 @@ int main(int argc, char* argv[])
 
         check(trigger(saveProbe, QStringLiteral("Close furniture")),
               "Close furniture's action triggers");
+        // Improvements item 3 (Option A): unsaved changes ASK now, never a
+        // silent save. The answer that saves is what this block's reload
+        // oracle below measures.
+        check(saveProbe.isAskingBeforeClose() && !saveProbe.isShowingInitScreen(),
+              "...and with unsaved changes it asks first rather than saving silently - "
+              "still on this furniture, the question standing");
+        check(answerCloseCard(saveProbe, CloseAnswer::Save),
+              "Save and close is reachable at its own pixel and answers the question");
         check(saveProbe.isShowingInitScreen(), "...and it lands back on the init screen");
         // Milestone 4 fix round 1 (MINOR ruling): closeCurrentFurniture()
         // used to raise a "Saved and closed" Note toast here too, but
@@ -3407,6 +3441,12 @@ int main(int argc, char* argv[])
         check(quitHookCalls == 0, "the quit hook has not fired from anything above");
         handoffWindow.close();
         settle(250);
+        // Improvements item 3: with unsaved changes the X asks first, and
+        // asking requests no quit of its own - Enter (Save and close) does.
+        check(quitHookCalls == 0 && handoffWindow.isAskingBeforeClose(),
+              "with unsaved changes the native X asks before quitting - no quit requested yet");
+        sendKeyTo(&handoffWindow, Qt::Key_Return);
+        settle(250);
         check(quitHookCalls == 1,
               "the native X requests QUIT through the handoff's one quit hook");
         check(!handoffSelector->isVisible(),
@@ -3533,8 +3573,15 @@ int main(int argc, char* argv[])
         ToastHost* saveFailToasts = saveFailProbe.findChild<ToastHost*>();
 
         // --- leg one: the menu action ------------------------------------------
+        // Improvements item 3: the close asks first, and it is the answer's
+        // own save - Save and close - that refuses here.
         check(trigger(saveFailProbe, QStringLiteral("Close furniture")),
               "Close furniture's action triggers");
+        check(saveFailProbe.isAskingBeforeClose(), "...and asks, the furniture being dirty");
+        check(answerCloseCard(saveFailProbe, CloseAnswer::Save),
+              "...answered with Save and close, the one save that runs");
+        check(!saveFailProbe.isAskingBeforeClose(),
+              "...and the question is gone, so the Failure toast stands over a clear viewport");
         check(!saveFailProbe.isShowingInitScreen(),
               "...but the failed save ABORTS the handoff - the editor is still open on "
               "this furniture, not back at the gallery");
@@ -3553,6 +3600,9 @@ int main(int argc, char* argv[])
         // --- leg two: the native X, same refusal still in place ---------------
         saveFailProbe.close();
         settle(150);
+        check(saveFailProbe.isAskingBeforeClose(), "the native X asks the same question");
+        sendKeyTo(&saveFailProbe, Qt::Key_Return);
+        settle(150);
         check(!saveFailProbe.isShowingInitScreen(),
               "the native X aborts the same way - still open on this furniture");
         check(saveFailProbe.isVisible(), "...still visible");
@@ -3565,6 +3615,8 @@ int main(int argc, char* argv[])
               "the blocking directory is cleared, unblocking the save");
         check(trigger(saveFailProbe, QStringLiteral("Close furniture")),
               "Close furniture triggers again");
+        check(answerCloseCard(saveFailProbe, CloseAnswer::Save),
+              "...asks again, and Save and close is answered");
         check(saveFailProbe.isShowingInitScreen(),
               "...and THIS time, with nothing left to refuse it, the handoff completes");
         check(!saveFailProbe.isVisible(), "...the editor hides");
@@ -3622,6 +3674,8 @@ int main(int argc, char* argv[])
         // on top of the timer's own stale failure.
         check(trigger(autosaveFailProbe, QStringLiteral("Close furniture")),
               "Close furniture triggers with autosave on, after its own timer already failed");
+        check(answerCloseCard(autosaveFailProbe, CloseAnswer::Save),
+              "...asks, the furniture still being dirty, and Save and close is answered");
         check(!autosaveFailProbe.isShowingInitScreen(),
               "the close-time save (the same refusal still in place) aborts the handoff too "
               "- autosave being on does not paper over it");
@@ -3631,6 +3685,8 @@ int main(int argc, char* argv[])
               "the blocking directory is cleared");
         check(trigger(autosaveFailProbe, QStringLiteral("Close furniture")),
               "Close furniture triggers again, unblocked");
+        check(answerCloseCard(autosaveFailProbe, CloseAnswer::Save),
+              "...asks again, and Save and close is answered");
         check(autosaveFailProbe.isShowingInitScreen(),
               "...and completes - the fresh, close-time attempt is what decided it, not "
               "the stale failure from before");
@@ -3774,13 +3830,31 @@ int main(int argc, char* argv[])
         flushProbe.close();
         settle(150);
 
+        // Improvements item 3: a pending debounce is work not yet on disk, so
+        // the X ASKS rather than flushing it - and asking writes nothing.
+        check(flushProbe.isAskingBeforeClose(),
+              "closeEvent() with an autosave still pending asks rather than flushing it");
+        check(flushProbe.autosavePendingMs() < 0,
+              "...and the question stopped the debounce, so it cannot write underneath");
+        {
+            DocumentModel whileAsking;
+            QString askErr;
+            FurnitureStore askStore(flushDir.path());
+            check(askStore.loadFurniture(flushId, whileAsking, &askErr) &&
+                      whileAsking.count() == 0,
+                  QStringLiteral("...nothing was written while it asks (%1 bodies on disk)")
+                      .arg(whileAsking.count()));
+        }
+        sendKeyTo(&flushProbe, Qt::Key_Return);
+        settle(150);
+
         DocumentModel reloadedFlush;
         QString flushErr;
         FurnitureStore flushStore(flushDir.path());
         check(flushStore.loadFurniture(flushId, reloadedFlush, &flushErr) &&
                   reloadedFlush.count() == 1,
-              QStringLiteral("closeEvent() flushed the still-pending autosave before the "
-                             "window closed (%1)")
+              QStringLiteral("Enter (Save and close) put the checkpoint the pending autosave "
+                             "had not written yet on disk (%1)")
                   .arg(flushErr.isEmpty() ? QStringLiteral("ok") : flushErr));
     }
     {
@@ -3813,15 +3887,442 @@ int main(int argc, char* argv[])
 
         closeProbe.close();
         settle(150);
+        check(closeProbe.isAskingBeforeClose(),
+              "closeEvent() with autosave off asks before closing a dirty furniture");
+        check(answerCloseCard(closeProbe, CloseAnswer::Save),
+              "...and Save and close answers it at its own pixel");
 
         DocumentModel reloadedClose;
         QString closeErr;
         FurnitureStore closeStore(closeDir.path());
         check(closeStore.loadFurniture(closeId, reloadedClose, &closeErr) &&
                   reloadedClose.count() == 1,
-              QStringLiteral("closeEvent() saved outright with autosave off, with no "
+              QStringLiteral("Save and close saved outright with autosave off, with no "
                              "debounce to have flushed (%1)")
                   .arg(closeErr.isEmpty() ? QStringLiteral("ok") : closeErr));
+    }
+
+    // --- Closing with unsaved changes asks, in the window (improvements item 3)
+    // The user's pick, Option A: a card over a dimmed viewport, never a
+    // QDialog, asked ONLY when there is work not on disk, by both exits (the
+    // X quits, File -> Close furniture returns to the library), with three
+    // answers that each mean exactly one thing. Two probes of its own, each
+    // with an injected library root and its own settings, so nothing here
+    // can touch a real library or a real registry.
+    //
+    // The on-disk oracle is the WHOLE library directory's bytes, every file,
+    // taken before the question and compared after the answer - "nothing was
+    // written" cannot be proved by a reload that happens to read the same
+    // body count.
+    if (blockEnabled("closing-with-unsaved-changes-asks-in-the-window")) {
+        ScopedTestSettings closeAskSettings;
+        auto libraryBytes = [](const QString& root) {
+            QMap<QString, QByteArray> files;
+            QDirIterator it(root, QDir::Files | QDir::Hidden, QDirIterator::Subdirectories);
+            while (it.hasNext()) {
+                const QString path = it.next();
+                QFile file(path);
+                if (file.open(QIODevice::ReadOnly))
+                    files.insert(QDir(root).relativeFilePath(path), file.readAll());
+            }
+            return files;
+        };
+        auto centreX = [](const TopoDS_Shape& shape) {
+            GProp_GProps props;
+            BRepGProp::VolumeProperties(shape, props);
+            return props.CentreOfMass().X();
+        };
+
+        // ===== probe one: the native X, which quits =============================
+        RequiredTempDir askDir;
+        MainWindow ask(nullptr, /*persistProgress=*/false, askDir.path());
+        ask.setAttribute(Qt::WA_ShowWithoutActivating);
+        ask.resize(1000, 700);
+        ask.show();
+        settle(300);
+        ask.view()->setAnimationsEnabled(false);
+        int askQuits = 0;
+        EditorSelectorHandoff::Hooks askHooks;
+        askHooks.quit = [&askQuits] { ++askQuits; };
+        SelectorWindow* askSelector = wireSelector(ask, askHooks);
+        QPushButton* askNew = askSelector ? askSelector->newFurnitureButton() : nullptr;
+        check(askNew != nullptr, "the ask probe's selector offers New furniture");
+        if (askNew) {
+            clickAt(askNew, QPointF(askNew->width() / 2.0, askNew->height() / 2.0));
+            settle(250);
+        }
+        check(!ask.isShowingInitScreen(), "the ask probe has a furniture open");
+        UnsavedCloseCard* card = ask.closeQuestion();
+        FurnitureNameMark* nameMark = ask.furnitureNameMark();
+        OcctViewWidget* askView = ask.view();
+        check(card != nullptr && nameMark != nullptr,
+              "the window carries the unsaved-changes question and the name mark");
+        if (!card || !nameMark) return 1;
+        check(card->parentWidget() == askView,
+              "the question is a card parented to the viewport, like every other overlay card");
+
+        // --- 1. nothing unsaved: the X quits straight away, no question ------
+        check(!ask.isFurnitureDirty(), "a fresh furniture has nothing unsaved");
+        check(!nameMark->showsUnsavedDot() && nameMark->isVisible() &&
+                  nameMark->name() == ask.currentFurnitureName(),
+              QStringLiteral("the status bar names the open furniture with no dot (\"%1\")")
+                  .arg(nameMark->name()));
+        ask.close();
+        settle(200);
+        check(askQuits == 1 && !ask.isAskingBeforeClose() && !card->isVisible(),
+              QStringLiteral("with nothing unsaved the X quits straight away - no question "
+                             "(%1 quit requests)").arg(askQuits));
+
+        // --- a saved baseline, then an unsaved move --------------------------
+        QAction* askAutosaveOff = action(ask, QStringLiteral("Off"));
+        if (askAutosaveOff) askAutosaveOff->trigger();
+        check(ask.autosaveMode() == MainWindow::AutosaveMode::Off,
+              "autosave off for the X probe - only an answer may write");
+        check(buildBody(ask, 0.35, 0.35, 0.55, 0.55, 90.0), "a body for the X probe");
+        const int askBody =
+            ask.document().solids().empty() ? 0 : ask.document().solids().front().id;
+        check(ask.saveCurrentFurniture() && !ask.isFurnitureDirty(), "...saved - the baseline");
+        const double savedX = askBody ? centreX(ask.document().shapeOf(askBody)) : 0.0;
+        gp_Trsf askMove;
+        askMove.SetTranslation(gp_Vec(25.0, 0.0, 0.0));
+        check(askBody != 0 && ask.transformBody(askBody, askMove) && ask.isFurnitureDirty(),
+              "an unsaved move - the furniture is dirty");
+        settle(100);
+
+        // --- 9. the dot, derived and actually painted -------------------------
+        check(nameMark->showsUnsavedDot() && nameMark->isVisible(),
+              "the name mark shows the unsaved dot while the furniture is dirty");
+        {
+            const QImage markShot = nameMark->grab().toImage();
+            const double dpr = markShot.devicePixelRatio();
+            const QRect dot = nameMark->dotRect();
+            QColor centre;
+            if (!dot.isNull()) {
+                const QPoint at(qRound(dot.center().x() * dpr), qRound(dot.center().y() * dpr));
+                if (markShot.valid(at)) centre = markShot.pixelColor(at);
+            }
+            const QColor caution = Theme::caution();
+            check(centre.isValid() && std::abs(centre.red() - caution.red()) <= 8 &&
+                      std::abs(centre.green() - caution.green()) <= 8 &&
+                      std::abs(centre.blue() - caution.blue()) <= 8,
+                  QStringLiteral("...painted in the caution token at its own centre (%1 against "
+                                 "%2)").arg(centre.isValid() ? centre.name() : QStringLiteral("none"),
+                                            caution.name()));
+        }
+
+        // --- 2. dirty: the X asks ----------------------------------------------
+        askView->setSelectedSolids({askBody});
+        settle(100);
+        const std::vector<int> selectedBeforeAsk = askView->selectedSolidIds();
+        const QMap<QString, QByteArray> bytesBeforeAsk = libraryBytes(askDir.path());
+        check(!bytesBeforeAsk.isEmpty(), "the library holds real files to compare against");
+        ask.close();
+        settle(200);
+        check(ask.isAskingBeforeClose() && card->isVisible(),
+              "with unsaved changes the X raises the question - asked, and genuinely visible");
+        check(askQuits == 1, "...and asking requests no quit of its own");
+        check(ask.findChild<QDialog*>() == nullptr && QApplication::activeModalWidget() == nullptr,
+              "...and it is no QDialog - the window holds none, and nothing is modal");
+        check(card->geometry() == askView->rect(),
+              "the scrim covers the viewport edge to edge");
+        // For a human to look at, not a check: the whole composed window.
+        ask.grab().save(outDir + QStringLiteral("/close-question.png"));
+        check(card->titleText() ==
+                  QStringLiteral("Save changes to %1 before closing?").arg(ask.currentFurnitureName()) &&
+                  card->bodyText() == QStringLiteral("You have changes since the last save."),
+              QStringLiteral("the card asks in the chosen words (\"%1\")").arg(card->titleText()));
+        const QList<QPair<QAbstractButton*, QString>> askButtons = {
+            {card->saveButton(), QStringLiteral("Save and close")},
+            {card->discardButton(), QStringLiteral("Close without saving")},
+            {card->keepButton(), QStringLiteral("Keep editing")},
+        };
+        int buttonTop = -1;
+        bool topToBottom = true;
+        for (const auto& entry : askButtons) {
+            QAbstractButton* button = entry.first;
+            if (!button) { check(false, entry.second + QStringLiteral(" exists")); continue; }
+            const QPoint centre = button->mapTo(askView, button->rect().center());
+            check(askView->childAt(centre) == button,
+                  QStringLiteral("%1 is the widget a real click at its centre reaches")
+                      .arg(entry.second));
+            check(button->isVisible() && button->text() == entry.second &&
+                      button->testAttribute(Qt::WA_NoMousePropagation),
+                  QStringLiteral("%1 is visible, labelled, and propagates no mouse event")
+                      .arg(entry.second));
+            bool transparentAncestor = false;
+            for (QWidget* w = button; w; w = w->parentWidget())
+                if (w->testAttribute(Qt::WA_TransparentForMouseEvents)) transparentAncestor = true;
+            check(!transparentAncestor,
+                  QStringLiteral("%1 has no mouse-transparent ancestor").arg(entry.second));
+            const QPoint top = button->mapTo(askView, QPoint(0, 0));
+            if (top.y() <= buttonTop) topToBottom = false;
+            buttonTop = top.y();
+        }
+        check(topToBottom, "the three answers stack top to bottom: save, discard, keep");
+        {
+            QStringList offenders;
+            for (const QString& text : card->paintedTexts() + nameMark->paintedTexts())
+                for (const QString& word : bannedWords())
+                    if (usesBannedWord(text, word)) offenders << text + QStringLiteral(": ") + word;
+            for (const QString& text : card->paintedUserTexts())
+                for (const QString& word : bannedWords())
+                    if (usesBannedWord(text, word, /*isUserData=*/true)) offenders << text;
+            check(!card->paintedTexts().isEmpty() && offenders.isEmpty(),
+                  QStringLiteral("the question's painted copy uses no banned word (%1)")
+                      .arg(offenders.join(QStringLiteral("; "))));
+        }
+        for (const char* label : {"Undo", "Delete Selected", "Start Sketch", "Close furniture"}) {
+            QAction* a = action(ask, QString::fromLatin1(label));
+            check(a != nullptr && !a->isEnabled(),
+                  QStringLiteral("%1 is unavailable while the question stands")
+                      .arg(QString::fromLatin1(label)));
+        }
+
+        // --- 10. the scrim swallows every click ------------------------------
+        int selectionSignals = 0;
+        const QMetaObject::Connection selectionWatch =
+            QObject::connect(askView, &OcctViewWidget::selectionChanged, askView,
+                             [&selectionSignals] { ++selectionSignals; });
+        {
+            QPoint bodyPoint;
+            const bool projected = askBody != 0 &&
+                askView->projectToScreen(
+                    [&] {
+                        GProp_GProps p;
+                        BRepGProp::VolumeProperties(ask.document().shapeOf(askBody), p);
+                        return p.CentreOfMass();
+                    }(),
+                    bodyPoint);
+            // Off the card, over the body - the pixel a pick would take.
+            if (projected && card->cardRect().contains(bodyPoint))
+                bodyPoint = QPoint(card->cardRect().left() - 30, bodyPoint.y());
+            check(projected && askView->childAt(bodyPoint) == card,
+                  "a pixel over the model reaches the scrim, not the viewport");
+            clickAt(card, QPointF(bodyPoint));
+            settle(150);
+            clickAt(card, QPointF(12.0, askView->height() - 12.0));
+            settle(150);
+        }
+        check(selectionSignals == 0 && askView->selectedSolidIds() == selectedBeforeAsk,
+              QStringLiteral("clicks on the scrim change no selection (%1 selection signals)")
+                  .arg(selectionSignals));
+        QObject::disconnect(selectionWatch);
+
+        // The key claim takes every shortcut back from QShortcutMap: a
+        // ShortcutOverride arriving IGNORED must leave accepted - the claim,
+        // and nothing else in this window, accepts one for Ctrl+Z.
+        {
+            QKeyEvent overrideUndo(QEvent::ShortcutOverride, Qt::Key_Z, Qt::ControlModifier);
+            overrideUndo.ignore();
+            QCoreApplication::sendEvent(&ask, &overrideUndo);
+            check(overrideUndo.isAccepted() && ask.isAskingBeforeClose(),
+                  "the question claims Ctrl+Z's ShortcutOverride - no shortcut reaches the "
+                  "document behind it");
+        }
+
+        // --- 4. Escape: keep editing -------------------------------------------
+        sendKeyTo(&ask, Qt::Key_Escape);
+        check(!ask.isAskingBeforeClose() && !card->isVisible(),
+              "Escape takes the question away");
+        check(ask.isFurnitureDirty() && askQuits == 1 && !ask.isShowingInitScreen(),
+              "...closing nothing - still open, still dirty, no quit");
+        check(libraryBytes(askDir.path()) == bytesBeforeAsk,
+              "...and nothing on disk moved - Keep editing writes nothing");
+        check(action(ask, QStringLiteral("Undo")) && action(ask, QStringLiteral("Undo"))->isEnabled(),
+              "...and the actions come back with the question gone");
+
+        // --- 3. Enter: save and close -------------------------------------------
+        ask.close();
+        settle(200);
+        check(ask.isAskingBeforeClose(), "the X asks again");
+        sendKeyTo(&ask, Qt::Key_Return);
+        settle(150);
+        check(!ask.isAskingBeforeClose() && askQuits == 2,
+              QStringLiteral("Enter saves and closes - one quit requested (%1 in all)")
+                  .arg(askQuits));
+        check(!ask.isFurnitureDirty(), "...the furniture is saved");
+        {
+            DocumentModel reloaded;
+            FurnitureStore store(askDir.path());
+            check(store.loadFurniture(ask.currentFurnitureId(), reloaded, nullptr) &&
+                      reloaded.count() == 1 &&
+                      std::fabs(centreX(reloaded.solids().front().shape) - (savedX + 25.0)) < 1.0e-3,
+                  "...with the move on disk");
+        }
+        settle(100);
+        check(!nameMark->showsUnsavedDot(), "and the dot is gone once the save landed");
+
+        // --- 5. Close without saving -------------------------------------------
+        check(ask.transformBody(askBody, askMove) && ask.isFurnitureDirty(),
+              "another unsaved move");
+        const QMap<QString, QByteArray> bytesBeforeDiscard = libraryBytes(askDir.path());
+        ask.close();
+        settle(200);
+        check(answerCloseCard(ask, CloseAnswer::Discard),
+              "Close without saving is answered at its own pixel");
+        check(askQuits == 3 && !ask.isAskingBeforeClose(),
+              QStringLiteral("Close without saving quits (%1 quit requests)").arg(askQuits));
+        settle(MainWindow::kAutosaveWriteMs + 200);
+        check(libraryBytes(askDir.path()) == bytesBeforeDiscard,
+              "Close without saving leaves every file on disk byte-identical to the last save");
+        check(ask.isFurnitureDirty(),
+              "...the discarded move genuinely was never written (the window still reads dirty)");
+
+        // --- 6 (quit route). a failed save never quits ---------------------------
+        QString askFurnitureDir;
+        for (const FurnitureStore::FurnitureInfo& info : ask.furnitureStore().listFurniture())
+            if (info.id == ask.currentFurnitureId()) askFurnitureDir = info.filePath;
+        const QString askBlock = askFurnitureDir + QStringLiteral("/shapes.bin.tmp");
+        check(!askFurnitureDir.isEmpty() && QDir().mkpath(askBlock),
+              "a directory blocks the shapes temp file - saves refuse from here");
+        ask.close();
+        settle(200);
+        check(ask.isAskingBeforeClose(), "the X asks with the save blocked");
+        check(answerCloseCard(ask, CloseAnswer::Save), "...Save and close is answered");
+        ToastHost* askToasts = ask.findChild<ToastHost*>();
+        check(askQuits == 3,
+              QStringLiteral("a failed Save and close requests no quit (%1 quit requests)")
+                  .arg(askQuits));
+        check(!ask.isAskingBeforeClose() && ask.isVisible() && !ask.isShowingInitScreen() &&
+                  ask.isFurnitureDirty(),
+              "...the question is gone, the window stays open on this furniture, still dirty");
+        check(askToasts && askToasts->isShowing() &&
+                  askToasts->currentText().contains(QStringLiteral("Couldn't save")),
+              QStringLiteral("...and the Failure toast is up and readable (\"%1\")")
+                  .arg(askToasts ? askToasts->currentText() : QString()));
+        check(QDir(askBlock).removeRecursively(), "the blocking directory is cleared");
+
+        // --- render mode: the question is asked in modeling ---------------------
+        ask.setRenderModeEnabled(true);
+        settle(400);
+        check(ask.renderModeEnabled(), "render mode is on going into the close");
+        ask.close();
+        settle(300);
+        check(ask.isAskingBeforeClose() && card->isVisible() && !ask.renderModeEnabled(),
+              "closing in render mode leaves render mode first and asks over the modeling "
+              "viewport");
+        check(card->saveButton() &&
+                  askView->childAt(card->saveButton()->mapTo(
+                      askView, card->saveButton()->rect().center())) == card->saveButton(),
+              "...with Save and close still reachable at its own pixel");
+        check(answerCloseCard(ask, CloseAnswer::Keep), "...and Keep editing is answered");
+        check(!ask.isAskingBeforeClose() && ask.isFurnitureDirty() && askQuits == 3,
+              "Keep editing closes nothing and saves nothing");
+        check(ask.findChild<QDialog*>() == nullptr, "none of the X's answers opened a QDialog");
+
+        // ===== probe two: File -> Close furniture, which returns to the library ==
+        RequiredTempDir libDir;
+        MainWindow lib(nullptr, /*persistProgress=*/false, libDir.path());
+        lib.setAttribute(Qt::WA_ShowWithoutActivating);
+        lib.resize(1000, 700);
+        lib.show();
+        settle(300);
+        lib.view()->setAnimationsEnabled(false);
+        int libQuits = 0;
+        EditorSelectorHandoff::Hooks libHooks;
+        libHooks.quit = [&libQuits] { ++libQuits; };
+        SelectorWindow* libSelector = wireSelector(lib, libHooks);
+        QPushButton* libNew = libSelector ? libSelector->newFurnitureButton() : nullptr;
+        if (libNew) {
+            clickAt(libNew, QPointF(libNew->width() / 2.0, libNew->height() / 2.0));
+            settle(250);
+        }
+        check(!lib.isShowingInitScreen() &&
+                  lib.autosaveMode() == MainWindow::AutosaveMode::AfterEveryChange,
+              "the library probe has a furniture open, autosave After every change");
+        check(buildBody(lib, 0.35, 0.35, 0.55, 0.55, 90.0), "a body for the library probe");
+        settle(MainWindow::kAutosaveWriteMs + 300);
+        check(!lib.isFurnitureDirty(), "...which autosave put on disk - the baseline");
+        const QString libId = lib.currentFurnitureId();
+        const double libBaselineY = [&] {
+            if (lib.document().solids().empty()) return 0.0;
+            GProp_GProps p;
+            BRepGProp::VolumeProperties(lib.document().solids().front().shape, p);
+            return p.CentreOfMass().Y();
+        }();
+
+        // --- 1 (library route). nothing unsaved closes straight away ------------
+        check(trigger(lib, QStringLiteral("Close furniture")) && !lib.isAskingBeforeClose() &&
+                  lib.isShowingInitScreen(),
+              "with nothing unsaved Close furniture returns to the library at once - no question");
+        // Reopened through the handoff itself, so the editor is shown again.
+        if (libSelector) emit libSelector->furnitureChosen(libId);
+        settle(300);
+        check(!libId.isEmpty() && !lib.isShowingInitScreen() && lib.isVisible(),
+              "the furniture is opened again through the library");
+        const int libBodyAgain =
+            lib.document().solids().empty() ? 0 : lib.document().solids().front().id;
+        check(libBodyAgain != 0, "...with its body");
+
+        // --- 7 + 8. Close furniture asks, and autosave holds its fire ----------
+        const QMap<QString, QByteArray> libBytes = libraryBytes(libDir.path());
+        gp_Trsf libMove;
+        libMove.SetTranslation(gp_Vec(0.0, 30.0, 0.0));
+        check(libBodyAgain != 0 && lib.transformBody(libBodyAgain, libMove) &&
+                  lib.isFurnitureDirty() && lib.autosavePendingMs() > 0,
+              "an unsaved move arms the autosave debounce");
+        check(trigger(lib, QStringLiteral("Close furniture")) && lib.isAskingBeforeClose() &&
+                  lib.closeQuestion() && lib.closeQuestion()->isVisible() &&
+                  !lib.isShowingInitScreen(),
+              "File -> Close furniture asks the same question with unsaved changes");
+        check(lib.autosavePendingMs() < 0, "...and asking stopped the debounce");
+        settle(MainWindow::kAutosaveWriteMs + 300);
+        lib.debugFireAutosaveInterval();
+        settle(100);
+        check(lib.isFurnitureDirty() && libraryBytes(libDir.path()) == libBytes,
+              "autosave writes nothing while the question stands - neither the debounce nor "
+              "the timed tick");
+        check(answerCloseCard(lib, CloseAnswer::Discard),
+              "Close without saving is answered on the library route");
+        check(lib.isShowingInitScreen() && libSelector && libSelector->isVisible() &&
+                  libQuits == 0,
+              "...which returns to the library, requesting no quit");
+        settle(MainWindow::kAutosaveWriteMs + 300);
+        check(libraryBytes(libDir.path()) == libBytes,
+              "...and leaves every file on disk byte-identical - the discard wrote nothing on "
+              "its way out");
+        {
+            DocumentModel reloaded;
+            FurnitureStore store(libDir.path());
+            double reloadedY = -1.0e9;
+            if (store.loadFurniture(libId, reloaded, nullptr) && reloaded.count() == 1) {
+                GProp_GProps p;
+                BRepGProp::VolumeProperties(reloaded.solids().front().shape, p);
+                reloadedY = p.CentreOfMass().Y();
+            }
+            check(std::fabs(reloadedY - libBaselineY) < 1.0e-3,
+                  QStringLiteral("...and the furniture reloads where the last save left it, "
+                                 "without the discarded move (Y %1 against %2)")
+                      .arg(reloadedY, 0, 'f', 3).arg(libBaselineY, 0, 'f', 3));
+        }
+
+        // --- 6 (library route). a failed Save and close stays in the editor -----
+        if (libSelector) emit libSelector->furnitureChosen(libId);
+        settle(300);
+        check(!lib.isShowingInitScreen() && lib.isVisible(), "opened once more");
+        QString libFurnitureDir;
+        for (const FurnitureStore::FurnitureInfo& info : lib.furnitureStore().listFurniture())
+            if (info.id == libId) libFurnitureDir = info.filePath;
+        const QString libBlock = libFurnitureDir + QStringLiteral("/shapes.bin.tmp");
+        check(!libFurnitureDir.isEmpty() && QDir().mkpath(libBlock), "saves blocked again");
+        const int libBodyThird =
+            lib.document().solids().empty() ? 0 : lib.document().solids().front().id;
+        check(libBodyThird != 0 && lib.transformBody(libBodyThird, libMove) &&
+                  lib.isFurnitureDirty(),
+              "an unsaved move before the blocked close");
+        check(trigger(lib, QStringLiteral("Close furniture")) && lib.isAskingBeforeClose(),
+              "Close furniture asks");
+        check(answerCloseCard(lib, CloseAnswer::Save), "...Save and close is answered");
+        ToastHost* libToasts = lib.findChild<ToastHost*>();
+        check(!lib.isShowingInitScreen() && lib.isVisible() && !lib.isAskingBeforeClose() &&
+                  lib.isFurnitureDirty() && libSelector && !libSelector->isVisible(),
+              "a failed Save and close leaves the editor open on the dirty furniture, question "
+              "gone, library hidden");
+        check(libToasts && libToasts->isShowing() &&
+                  libToasts->currentText().contains(QStringLiteral("Couldn't save")),
+              "...with its Failure toast readable");
+        QDir(libBlock).removeRecursively();
+        check(lib.findChild<QDialog*>() == nullptr, "none of the library route opened a QDialog");
     }
 
     // --- the window carries the app's own mark --------------------------------

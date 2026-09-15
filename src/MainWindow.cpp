@@ -21,6 +21,7 @@
 #include "ToolChip.h"
 #include "ToolCluster.h"
 #include "TransformGizmo.h"
+#include "UnsavedCloseCard.h"
 #include "ViewportOverlay.h"
 #include "VersionsPanel.h"
 #include "JointChip.h"
@@ -1142,6 +1143,18 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // no matching stylesheet rule would still be correct.
     statusBar()->setFont(Theme::labelFont());
 
+    // The furniture's name, and a caution dot beside it while there are
+    // unsaved changes (improvements item 3) - left of the state label, so the
+    // question closing asks is never a surprise. Pushed from appStateChanged
+    // below; it stores nothing of its own.
+    myNameMark = new FurnitureNameMark(this);
+    statusBar()->addPermanentWidget(myNameMark);
+    connect(this, &MainWindow::appStateChanged, this, [this] {
+        if (!myNameMark) return;
+        const bool open = !myShowingInitScreen && !myFurnitureId.isEmpty();
+        myNameMark->setState(open ? myFurnitureName : QString(), isFurnitureDirty());
+        myNameMark->setVisible(open);
+    });
     // Permanent widget so it survives transient showMessage() calls: the left
     // side reports what just happened, the right side always says where you are.
     myStateLabel = new QLabel(this);
@@ -2427,6 +2440,23 @@ void MainWindow::buildOverlay()
     connect(myOverlay, &ViewportOverlay::laidOut, myJointChip, &JointChip::replace);
     connect(myOverlay, &ViewportOverlay::laidOut, myMoveTool, &MoveTool::replace);
     connect(myOverlay, &ViewportOverlay::laidOut, mirrorChip, &MirrorPlacementChip::replace);
+
+    // The unsaved-changes question (improvements item 3). Built LAST and
+    // connected to laidOut() LAST, so its re-raise runs after every other
+    // self-placing card has raised itself - the question stays on top of the
+    // toast, the balloon and the chips through any resize. The window
+    // controls go back over it: the scrim blocks the viewport, not the
+    // window, and minimizing while deciding is harmless.
+    myCloseCard = new UnsavedCloseCard(myView);
+    connect(myOverlay, &ViewportOverlay::laidOut, this, [this] {
+        if (!myCloseCard || !myCloseCard->isAsking()) return;
+        myCloseCard->replace();
+        if (myWindowButtons) myWindowButtons->raise();
+    });
+    connect(myCloseCard, &UnsavedCloseCard::saveChosen, this, &MainWindow::onCloseSaveChosen);
+    connect(myCloseCard, &UnsavedCloseCard::discardChosen, this,
+            &MainWindow::onCloseDiscardChosen);
+    connect(myCloseCard, &UnsavedCloseCard::keepChosen, this, &MainWindow::onCloseKeepChosen);
 }
 
 void MainWindow::updateActions()
@@ -2442,7 +2472,14 @@ void MainWindow::updateActions()
     // rather than trusted to the document being empty, because "empty" and
     // "no furniture is open" are two different facts that only happen to
     // coincide right now.
-    const bool atInit = myShowingInitScreen;
+    //
+    // The unsaved-changes question closes the same gate while it stands
+    // (improvements item 3): every gesture that would change the document
+    // the question is about goes dark until it is answered. The card's own
+    // key claim already swallows every shortcut and its scrim every click;
+    // this is the one place that says so, so the menus, the rail and the
+    // toast's Undo pill agree with it.
+    const bool atInit = myShowingInitScreen || isAskingBeforeClose();
 
     // A selected joint that no longer exists - deleted, undone, taken with a
     // body - is no selection. Pruned HERE, before appStateChanged, so every
@@ -2837,7 +2874,9 @@ void MainWindow::updateActions()
     // than a state this file expects to actually reach.
     if (myRenderModeAction) {
         const bool canRender = canOpenRenderMode();
-        myRenderModeAction->setEnabled(canRender || myRenderModeOn);
+        // Not while the unsaved-changes question stands: asking exits render
+        // mode first, and nothing may re-enter it behind the question.
+        myRenderModeAction->setEnabled((canRender || myRenderModeOn) && !isAskingBeforeClose());
         myRenderModeAction->setToolTip(
             canRender || myRenderModeOn
                 ? tr("Strip the viewport to the furniture alone, with real shadows")
@@ -3122,27 +3161,120 @@ void MainWindow::closeEvent(QCloseEvent* event)
         writeRenderSettingsNow();
     }
 
-    // Close-saves-first still binds. The save is closeCurrentFurniture()'s
-    // own fresh-decision rule (cancel the pending autosave debounce, one
-    // authoritative attempt, isFurnitureDirty() read fresh), without that
-    // function's return-to-selector tail: a quit does not go through the
-    // library. A failed save returns here with the toast up and the
-    // furniture open and dirty exactly as it was - no quit is requested for
-    // an app that could not put the work on disk.
-    if (!myShowingInitScreen && !myFurnitureId.isEmpty()) {
-        if (myAutosaveTimer && myAutosaveTimer->isActive()) myAutosaveTimer->stop();
-        if (isFurnitureDirty() && !performSave(/*announce=*/false)) return;
+    // Unsaved changes ASK (improvements item 3, Option A): the in-window
+    // card, the same question File -> Close furniture asks, and nothing
+    // closes until it is answered - see askBeforeClosing(). "Dirty" is read
+    // fresh: a pending autosave debounce that has not written yet is work
+    // not on disk, so it asks too; autosave having caught up is exactly
+    // what makes it close straight away.
+    if (!myShowingInitScreen && !myFurnitureId.isEmpty() && isFurnitureDirty()) {
+        askBeforeClosing(CloseRoute::Quit);
+        return;
     }
+    if (myAutosaveTimer && myAutosaveTimer->isActive()) myAutosaveTimer->stop();
     // A window nobody wired (no EditorSelectorHandoff - a standalone
     // instance, a future embedding, a test block's own probe) must still be
     // CLOSABLE: with the event ignored and quitRequested() heard by no one,
-    // the X did nothing at all, forever (the branch review's finding). The
-    // save-first above has already run either way; accepting here merely
-    // hides an unwired window, which is the most a class that owns no quit
-    // can honestly do.
+    // the X did nothing at all, forever (the branch review's finding).
+    // Accepting here merely hides an unwired window, which is the most a
+    // class that owns no quit can honestly do.
     if (!isSignalConnected(QMetaMethod::fromSignal(&MainWindow::quitRequested)))
         event->accept();
     emit quitRequested();
+}
+
+bool MainWindow::isAskingBeforeClose() const
+{
+    return myCloseCard && myCloseCard->isAsking();
+}
+
+void MainWindow::askBeforeClosing(CloseRoute route)
+{
+    if (myShowingInitScreen || myFurnitureId.isEmpty() || !myCloseCard) return;
+    // The latest exit asked for is the one an answer carries out: an X
+    // pressed while Close furniture's question stands means quit.
+    myCloseRoute = route;
+    // Render mode hides every overlay and would keep the status bar's dot
+    // out of sight - and render mode's own gate says a document change ends
+    // it. Leaving the editor is one, so the question is asked in modeling.
+    if (myRenderModeOn) setRenderModeEnabled(false);
+    // No autosave may write while the question stands: an answer of "Close
+    // without saving" must find the file exactly as the last save left it.
+    // The debounce is stopped here; flushAutosave() and the timed tick both
+    // refuse while isAskingBeforeClose() holds, so neither timer can slip a
+    // write in underneath the card.
+    if (myAutosaveTimer) myAutosaveTimer->stop();
+    myCloseCard->ask(myFurnitureName);
+    updateActions();
+    // Raised AFTER updateActions(): its appStateChanged() lets the hint
+    // balloon and the guide reconsider themselves, and either may raise()
+    // on the way - over the scrim, where a live control would be clickable
+    // through the question. The window controls go back on top last: the
+    // scrim blocks the viewport, not the window.
+    myCloseCard->raise();
+    if (myWindowButtons) myWindowButtons->raise();
+}
+
+void MainWindow::finishClose(CloseRoute route, const QString& statusMessage)
+{
+    if (route == CloseRoute::Library) {
+        statusBar()->showMessage(statusMessage);
+        showInitScreen();
+        return;
+    }
+    statusBar()->showMessage(statusMessage);
+    updateActions();
+    // The unwired-window rule closeEvent() keeps, for a close that was
+    // answered rather than taken straight away.
+    if (!isSignalConnected(QMetaMethod::fromSignal(&MainWindow::quitRequested))) hide();
+    emit quitRequested();
+}
+
+void MainWindow::onCloseSaveChosen()
+{
+    const CloseRoute route = myCloseRoute;
+    if (myShowingInitScreen || myFurnitureId.isEmpty()) {
+        updateActions();
+        return;
+    }
+    const QString name = myFurnitureName;
+    // ONE fresh save attempt. A refusal has already raised its Failure toast
+    // (the card hid itself before emitting, so the toast stands over a clear
+    // viewport); the close is ABORTED - editor open, furniture open and
+    // dirty, no quit and no return to the library. The never-silent-failure
+    // law this route has always kept.
+    if (isFurnitureDirty() && !performSave(/*announce=*/false)) {
+        updateActions();
+        return;
+    }
+    finishClose(route, tr("Saved and closed %1").arg(name));
+}
+
+void MainWindow::onCloseDiscardChosen()
+{
+    const CloseRoute route = myCloseRoute;
+    if (myShowingInitScreen || myFurnitureId.isEmpty()) {
+        updateActions();
+        return;
+    }
+    const QString name = myFurnitureName;
+    // Writes NOTHING. The revision being thrown away is marked so neither
+    // autosave path can put it on disk afterwards - showInitScreen()'s
+    // pending-debounce flush on the library route, or the timed tick on a
+    // quit route whose window lingers (a test's substitute quit hook).
+    myDiscardedRevision = myDocument.revision();
+    if (myAutosaveTimer) myAutosaveTimer->stop();
+    finishClose(route, tr("Closed %1 without saving").arg(name));
+}
+
+void MainWindow::onCloseKeepChosen()
+{
+    // Nothing saved, nothing closed. The debounce the question stopped is
+    // re-armed, so "After every change" still keeps its promise for the
+    // edit that was waiting when the user asked to close.
+    if (myAutosaveMode == AutosaveMode::AfterEveryChange && isFurnitureDirty())
+        armAutosaveTimer();
+    updateActions();
 }
 
 RenderShutterButton* MainWindow::renderShutter() const
@@ -3171,11 +3303,18 @@ void MainWindow::showInitScreen()
     // keeps the splitter from outliving the furniture it was comparing.
     if (myCompareView) closeCompare();
 
-    // Belt for any route that reaches here without closeCurrentFurniture()'s
-    // own fresh save decision (which cancels the debounce and saves before
-    // ever calling this): a debounce still pending at this point is flushed
-    // rather than left to fire after the editor has hidden. On the ordinary
-    // close path the timer is already stopped and this is a no-op.
+    // The unsaved-changes question belongs to the furniture being closed.
+    // Every answered route hides it before arriving here; this is the belt
+    // for any other route.
+    if (myCloseCard && myCloseCard->isAsking()) myCloseCard->hide();
+
+    // Belt for any route that reaches here without an answered close (every
+    // answer stops the debounce before calling this): a debounce still
+    // pending at this point is flushed rather than left to fire after the
+    // editor has hidden. On the ordinary close path the timer is already
+    // stopped and this is a no-op - and flushAutosave() refuses the revision
+    // "Close without saving" discarded, so the discard route cannot write on
+    // its way out.
     if (myAutosaveTimer && myAutosaveTimer->isActive()) {
         myAutosaveTimer->stop();
         flushAutosave();
@@ -3192,6 +3331,7 @@ void MainWindow::showInitScreen()
     // the very first tick's report for whatever opens next.
     applyAutosaveIntervalTimer();
     myAutosaveFailedAtRevision = -1;
+    myDiscardedRevision = -1;
 
     // A FRESH document, not a cleared one: DocumentModel::clear() leaves the
     // undo stack standing, and the next furniture opened must not inherit
@@ -3261,6 +3401,7 @@ bool MainWindow::openFurniture(const QString& id)
     // Fresh document, fresh episode - see showInitScreen()'s identical
     // reasoning for why a stale failure mark must not carry over.
     myAutosaveFailedAtRevision = -1;
+    myDiscardedRevision = -1;
     // The timed modes' periodic timer starts here, on the newly open
     // furniture's own clock - applyAutosaveIntervalTimer() reads the live
     // mode and (no)-ops accordingly for Off/AfterEveryChange.
@@ -3360,6 +3501,9 @@ void MainWindow::flushAutosave()
 {
     if (myShowingInitScreen || myFurnitureId.isEmpty()) return;
     if (!isFurnitureDirty()) return;   // nothing changed since the last write
+    // Not while the unsaved-changes question stands, and never the revision
+    // "Close without saving" threw away - see askBeforeClosing().
+    if (isAskingBeforeClose() || myDocument.revision() == myDiscardedRevision) return;
     performSave(/*announce=*/false);
 }
 
@@ -3424,6 +3568,9 @@ void MainWindow::onAutosaveIntervalTick()
 {
     if (myShowingInitScreen || myFurnitureId.isEmpty()) return;
     if (!isFurnitureDirty()) return;   // a clean fire is a no-op - no toast, no write
+    // The same two refusals flushAutosave() makes: no write under the
+    // unsaved-changes question, none of a discarded revision.
+    if (isAskingBeforeClose() || myDocument.revision() == myDiscardedRevision) return;
     // The ATTEMPT always runs while dirty - never skipped - so a problem
     // that resolves on its own (disk space freed, a folder restored) is
     // picked up by the very next tick with no new edit required. Only the
@@ -3489,50 +3636,24 @@ void MainWindow::closeCurrentFurniture()
 {
     if (myShowingInitScreen || myFurnitureId.isEmpty()) return;
 
-    // Cancel any pending autosave debounce outright rather than flushing it
-    // separately - the check-and-save below is the ONE authoritative save
-    // this close performs, so a separate flush here would risk a second,
-    // independent save attempt (and a second Failure toast) for the exact
-    // same dirty state a moment later. Fix round 2's own ruling: "only the
-    // close-time save's own result decides" - an EARLIER autosave attempt
-    // (this timer firing on its own before the user ever clicked Close, or
-    // this very flush under the old two-step design) must not be
-    // double-reported; a single fresh decision, made right here, is what
-    // that requires.
-    if (myAutosaveTimer && myAutosaveTimer->isActive()) {
-        myAutosaveTimer->stop();
-    }
-
-    const QString name = myFurnitureName;
+    // Unsaved changes ASK (improvements item 3, Option A) - the same
+    // question, the same card and the same three answers the native X gets
+    // (closeEvent()); only what an answer carries out differs, since this
+    // route returns to the library instead of quitting. The answer's own
+    // save, if chosen, is the ONE authoritative attempt (onCloseSaveChosen()),
+    // and a failed one aborts the close with its Failure toast readable - the
+    // fix-round-2 never-silent-failure ruling, unchanged.
     if (isFurnitureDirty()) {
-        // One fresh save attempt, whether autosave is on or off, and
-        // regardless of whether some earlier autosave attempt already
-        // failed - isFurnitureDirty() is read fresh, not from a cached
-        // "did the last autosave succeed" flag, so a stale failure and a
-        // resolved one are not confused with each other.
-        //
-        // Fix round 2 (CLAUDE.md's never-silent-failure law): a FAILED save
-        // here must ABORT the whole handoff, not merely fail to save.
-        // performSave() has already raised its own Failure toast - but
-        // showInitScreen() below is what hides this window a moment later
-        // (see EditorSelectorHandoff.h), and a toast on a window that is
-        // about to disappear is silent in practice, exactly the failure
-        // this law forbids. Returning here instead leaves the editor open,
-        // the toast readable, and the furniture open and dirty exactly as
-        // it was - both the menu route and the native X (MainWindow::
-        // closeEvent(), which already ignore()s the close event
-        // unconditionally) get this for free, since both call this
-        // function and neither does anything further once it returns.
-        if (!performSave(/*announce=*/false)) return;
-        statusBar()->showMessage(tr("Saved and closed %1").arg(name));
-    } else {
-        // Nothing to save (the ruling: never a modal question - and never
-        // a toast either, per fix round 1's own MINOR ruling. The refreshed
-        // selector's own card is the visible confirmation now).
-        statusBar()->showMessage(tr("Closed %1").arg(name));
+        askBeforeClosing(CloseRoute::Library);
+        return;
     }
 
-    showInitScreen();
+    // Nothing to save (and never a toast either, per fix round 1's own MINOR
+    // ruling - the refreshed selector's own card is the visible
+    // confirmation). A debounce can only be pending on a dirty document, so
+    // this stop is a belt.
+    if (myAutosaveTimer && myAutosaveTimer->isActive()) myAutosaveTimer->stop();
+    finishClose(CloseRoute::Library, tr("Closed %1").arg(myFurnitureName));
 }
 
 bool MainWindow::canOpenRenderMode() const

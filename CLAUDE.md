@@ -268,6 +268,7 @@ Source files under `src/`, plus `tests/`:
 | `EditorSelectorHandoff.{h,cpp}` | the ONE wiring that swaps editor and selector; `main.cpp` and `gui_smoke` share it |
 | `ui/InlineRename.{h,cpp}` | the one `QLineEdit`-in-place helper: selector cards and drawer rows both use it |
 | `ui/VersionsPanel.{h,cpp}` | versions drawer: thumbnail cards, Compare, Restore, two-click Delete |
+| `ui/UnsavedCloseCard.{h,cpp}` | the close question over a dimmed viewport, and the status bar's unsaved dot (`FurnitureNameMark`) |
 | `ui/RenderSettingsPanel.{h,cpp}` | the render-mode settings card and its shutter (`RenderShutterButton`, same file) |
 
 ### The vocabulary — enforced by test
@@ -905,10 +906,34 @@ never half-loads and never lies about having saved.
   panel's own discipline, because a drag or a fast sequence of edits must not thrash the disk
   once per intermediate state — and flushed on close or on returning to the init screen so a
   debounce window can never eat the last edit.
-- **Close-saves-first, never a modal question.** With autosave on there is nothing to ask;
-  with it off, leaving to the init screen or closing the window saves first and a toast names
-  what happened — a library app's files are not precious enough to lose work over a missed
-  dialog, and this app has no modal dialogs regardless (see "Reporting outcomes").
+- **Close asks — only when there is something to lose, and never in a dialog.** (Improvements
+  item 3, the user's Option A; it replaced "close-saves-first", which saved silently and left no
+  way to throw an experiment away.) Nothing unsaved — nothing changed, or autosave already
+  caught up — and both exits close straight away, exactly as before. Unsaved changes, and
+  both exits ask the SAME question: `UnsavedCloseCard`, a sibling over `OcctViewWidget` that
+  dims the viewport edge to edge and asks "Save changes to <furniture> before closing?" with
+  **Save and close** (Enter), **Close without saving** and **Keep editing** (Esc). The X
+  still quits and File → Close furniture still returns to the library; only what an answer
+  carries out differs (`MainWindow::CloseRoute`). The card is `ExtrudePreview`'s shape: an
+  app-wide key filter installed on show and removed on hide that claims EVERY
+  `ShortcutOverride` in its window (a Ctrl+Z reaching its action behind the question would
+  change the very document it is about), a scrim that swallows every mouse event, buttons
+  carrying `WA_NoMousePropagation` and reached by `childAt()` in the suite; `updateActions()`
+  closes the modeling gate while it stands. Three rules each answer holds. **Save and close
+  is one save attempt, and a failure aborts the close** — the card hides *before* reporting
+  the answer, so the Failure toast lands on a clear viewport, and the window stays open on
+  the dirty furniture. **Close without saving writes nothing on its way out**, which is a
+  claim about three writers, not one: the autosave debounce is stopped when the question is
+  asked, `flushAutosave()` and the timed tick both refuse while it stands, and both refuse the
+  revision the discard threw away (`myDiscardedRevision`) — so `showInitScreen()`'s own
+  pending-debounce flush cannot put it on disk either. The suite's oracle is the whole
+  library directory's bytes, never a reload that happens to count the same bodies. **Keep
+  editing** closes and saves nothing, and re-arms the debounce it stopped. **Render mode is
+  left first**: asking is leaving the editor, which render mode's own gate already treats as a
+  document change, and the question then stands over the modeling viewport where its dot is
+  on screen. While there are unsaved changes the status bar names the furniture beside a
+  `Theme::caution()` dot (`FurnitureNameMark`), pushed from `isFurnitureDirty()` on every
+  `appStateChanged` — derived, never stored — so the question is never a surprise.
 - **A version is a named snapshot living inside the furniture's own file**, captured on
   demand only, never automatically — shapes, item names, visibility, and (the ruling that
   resolved the one real T1/T4 conflict) the symmetry pairings and plane, because a version is
@@ -1152,8 +1177,9 @@ first** and hides the source second, so at least one window is always visible; a
 mere `hide()` and a posted `QEvent::Quit` cannot be taken back later in the same call
 stack. Quitting is TWO deliberate gestures since Milestone 5 ("dont show project selector
 when app closes"): closing the selector, and closing the EDITOR - whose `closeEvent()`
-still saves first (a failed save aborts the quit with its toast readable, never silently)
-and then emits `quitRequested()` into the same handoff quit hook, so the X no longer
+asks first when there are unsaved changes (see "Close asks" above; a failed Save and close
+aborts the quit with its toast readable, never silently) and only once answered emits
+`quitRequested()` into the same handoff quit hook, so the X no longer
 bounces the user to the library; File -> Close furniture remains the route back. The
 Windows binary is also a GUI-subsystem executable now (`WIN32_EXECUTABLE` +
 `/ENTRY:mainCRTStartup`, so `main()` stays portable) - no console window opens with the

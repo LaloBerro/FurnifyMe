@@ -773,25 +773,25 @@ public:
     // OcctViewWidget::captureThumbnail(), advance the saved-revision mark.
     // Read-only while no furniture is open or the init screen is showing.
     bool saveCurrentFurniture();
-    // File -> Close furniture, and the native X's own route to it
-    // (MainWindow::closeEvent(), which always calls this when a furniture
-    // is open). SAVES FIRST whenever the furniture is dirty - never a modal
-    // question - then returns to the init screen. Cancels any autosave
-    // debounce still pending first, so a furniture closed a moment after
-    // its last edit never loses that edit to a timer that had not fired
-    // yet, but performs at most ONE fresh save attempt itself rather than
-    // also flushing that timer separately - CLAUDE.md's fix-round-2 ruling
-    // that an earlier failed autosave must not be double-reported.
+    // File -> Close furniture: back to the library. With nothing unsaved it
+    // closes straight away. With unsaved changes it ASKS - the in-window
+    // UnsavedCloseCard over a dimmed viewport, never a modal dialog - and the
+    // answer decides: Save and close (one fresh save attempt; a FAILED save
+    // aborts the close, leaving the editor open, the Failure toast readable
+    // and the furniture open and dirty - the never-silent-failure law), Close
+    // without saving (writes nothing on its way out), or Keep editing. The
+    // native X (closeEvent()) asks the very same question through the same
+    // askBeforeClosing(); only what "close" means differs - it quits.
     //
-    // Fix round 2 (never-silent-failure law): if that save FAILS, this
-    // ABORTS the whole close - it returns without calling showInitScreen(),
-    // so the editor stays open, the Failure toast performSave() already
-    // raised stays genuinely readable (it would not if this window hid a
-    // moment later, per EditorSelectorHandoff.h), and the furniture stays
-    // open and dirty. A caller cannot tell success from failure by return
-    // value (this is still void, matching every other route into it) -
-    // isFurnitureDirty() and isShowingInitScreen() are what to read instead.
+    // A caller cannot tell the outcome by return value (still void) -
+    // isAskingBeforeClose(), isFurnitureDirty() and isShowingInitScreen() are
+    // what to read.
     void closeCurrentFurniture();
+    // Whether the unsaved-changes question stands right now. Derived from the
+    // card's own hidden flag, never a stored bool.
+    bool isAskingBeforeClose() const;
+    class UnsavedCloseCard* closeQuestion() const { return myCloseCard; }
+    class FurnitureNameMark* furnitureNameMark() const { return myNameMark; }
     // File -> Autosave (Milestone 5, item 10): a submenu of five exclusive
     // modes, replacing the old single checkable entry. "Off" and "After
     // every change" carry the old boolean's two states forward exactly -
@@ -1001,8 +1001,10 @@ signals:
     void returnedToSelector();
     // The native X on THIS window asked to quit the app (Milestone 5, "dont
     // show project selector when app closes"), and everything that had to
-    // happen first - the debounce flushes, the close-time save - already
-    // succeeded; a failed save aborts before this is ever emitted, on the
+    // happen first already did: the settings debounces flushed, and - when
+    // the furniture had unsaved changes - the user answered the question
+    // with Save and close (and the save succeeded) or Close without saving.
+    // A failed save aborts before this is ever emitted, on the
     // never-silent-failure law. EditorSelectorHandoff::wire() connects it to
     // the app's one quit function; this window still knows nothing of that
     // class, and File -> Close furniture still returns to the library
@@ -1523,6 +1525,29 @@ private:
     // successful save (performSave()) and implicitly re-armed by any new
     // edit, since a fresh checkpoint's revision can never equal this one.
     int myAutosaveFailedAtRevision = -1;
+
+    // The unsaved-changes question (improvements item 3, Option A). Which
+    // exit asked it: the X quits, Close furniture returns to the library.
+    enum class CloseRoute { Quit, Library };
+    // Shows the question for `route` - exits render mode first, stops the
+    // autosave debounce, raises the card. Asked again while it stands, the
+    // latest route wins (an X over Close furniture's question means quit).
+    void askBeforeClosing(CloseRoute route);
+    // Performs the close itself once nothing more needs asking: the library
+    // route through showInitScreen(), the quit route through quitRequested().
+    void finishClose(CloseRoute route, const QString& statusMessage);
+    void onCloseSaveChosen();
+    void onCloseDiscardChosen();
+    void onCloseKeepChosen();
+    class UnsavedCloseCard* myCloseCard = nullptr;
+    class FurnitureNameMark* myNameMark = nullptr;
+    CloseRoute myCloseRoute = CloseRoute::Library;
+    // The revision "Close without saving" threw away, or -1. Both autosave
+    // paths (the debounce's flushAutosave() and the timed tick) refuse to
+    // write THIS revision - a discard that an autosave could still put on
+    // disk a moment later would not be a discard. Any new edit moves the
+    // revision past it; opening or closing a furniture clears it.
+    int myDiscardedRevision = -1;
 
     // Which outline item Extrude would consume, when the user has chosen one
     // from the drawer. Not the pending face itself and not a cursor into the
