@@ -23,16 +23,14 @@ namespace {
 // rail, and a card that changed width with the longest body name would move
 // the viewport's usable area around under the user. cardWidth() grows it by
 // what a larger base size actually costs, and by nothing else.
-constexpr int kBaseWidth = 240;
-// What kBaseWidth was chosen to hold: a body name beside a comfortably wide
-// reserved margin. Rows painted a dimension string here once; they no longer
-// do (sizes moved to the viewport's own selection-sizes drawing), but the
-// WIDTH this margin reserves is kept exactly as it was rather than shrunk -
-// a narrower drawer would shift the rail and everything else anchored beside
-// it, which nobody asked for. `widthReserveSpecimen` names what it is now:
-// a placeholder that reproduces the old width, not a size being measured.
-QString nameSpecimen() { return QStringLiteral("Body 88"); }
-QString widthReserveSpecimen() { return QStringLiteral("482.9 × 590 × 10 mm"); }
+// 240 while rows carried a dimension string beside the name; 200 since sizes
+// moved to the viewport's selection-sizes drawing and a row became a name and
+// an eye button - narrowed by the user's call ("adjust the width a little
+// bit"), and kept wide enough that an ordinary renamed piece still fits.
+constexpr int kBaseWidth = 200;
+// What kBaseWidth was chosen to hold: a typical renamed piece beside the eye
+// button. A specimen, not live content - see cardWidth().
+QString nameSpecimen() { return QStringLiteral("Left side panel"); }
 // The same radius the rail wears (ToolCluster's kCardRadius), not the
 // family's default 8: the two cards sit side by side against the same top
 // edge, and a different corner between immediate neighbours reads as a
@@ -98,12 +96,11 @@ int ItemsPanel::cardWidth()
     // drawer every time a body was made or deleted, which is the behaviour
     // the fixed width exists to prevent. Specimens keep it stable.
     const Theme::Spec shipped = Theme::defaultSpec();
-    auto measure = [](const QFont& name, const QFont& size) {
-        return QFontMetrics(name).horizontalAdvance(nameSpecimen()) +
-               QFontMetrics(size).horizontalAdvance(widthReserveSpecimen());
+    auto measure = [](const QFont& name) {
+        return QFontMetrics(name).horizontalAdvance(nameSpecimen());
     };
-    const int now = measure(Theme::bodyFont(), Theme::labelFont());
-    const int atShippedScale = measure(Theme::bodyFontFor(shipped), Theme::labelFontFor(shipped));
+    const int now = measure(Theme::bodyFont());
+    const int atShippedScale = measure(Theme::bodyFontFor(shipped));
     return std::max(kBaseWidth, kBaseWidth + now - atShippedScale);
 }
 

@@ -1083,9 +1083,10 @@ on by default, persisted as `showSizes`, no shortcut.
   governs the drawing, and a line of status text covers nothing.
 - **The Items drawer stopped showing a size once this existed.** A row is name and eye button
   only now — `ItemsPanel::Row` carries no dimension label, and `rowTextAt()` reports the name
-  alone. `cardWidth()` keeps the card's width exactly what it always reserved (a narrower
-  drawer would shift the rail and everything anchored beside it), so the removal is invisible
-  in layout even though the field it used to measure is gone. Side benefit: the row used to
+  alone. The card then went from 240 to **200 px** at the shipped scale by the user's call
+  ("adjust the width a little bit"), `cardWidth()` now growing it by what a typical renamed
+  piece ("Left side panel") costs at a larger type scale rather than by a dimension string
+  no row paints. Side benefit: the row used to
   read `Measure::formatDimensions()`, the WORLD-axis bounding box — the exact "neither side"
   bug the oriented-box paragraph above describes (a 600 × 300 × 18 board turned 30° read
   669.6 × 559.8 in the list) — while the viewport's own selection sizes read the board's true

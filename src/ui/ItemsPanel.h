@@ -168,17 +168,14 @@ private:
     // theme change alters WHICH bodies exist - only how they are painted -
     // so the rebuild belongs to documentChanged and the restyle belongs here.
     void applyTheme();
-    // The card's width for the current type scale: the shipped 240, plus
-    // however much wider a specimen row measures now than it did under
-    // defaultSpec(). Exactly 240 at the shipped look, by construction, and
+    // The card's width for the current type scale: the shipped 200, plus
+    // however much wider a specimen name measures now than it did under
+    // defaultSpec(). Exactly 200 at the shipped look, by construction, and
     // stable against the actual body names - a drawer that resized itself to
     // the longest name would move the viewport's usable area around under
     // the user, which is the reason this card was fixed-width to begin with.
-    // Rows no longer paint a dimension (see the class comment), but the
-    // width itself is UNCHANGED - kept at what it always reserved rather
-    // than shrunk to a name-only measure, because a narrower drawer would
-    // shift the rail, the drawer's own stacking neighbours and everything
-    // ViewportOverlay anchors beside it, none of which this task asked for.
+    // It was 240 while rows also painted a dimension; the user narrowed it
+    // once rows became a name and an eye button.
     static int cardWidth();
 
     // One row's widgets, kept so applyTheme() can restyle in place. Replaces
