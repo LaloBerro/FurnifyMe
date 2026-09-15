@@ -87,6 +87,10 @@ add_executable(headless_measured_box tests/measured_box.cpp)
 target_link_libraries(headless_measured_box PRIVATE furnify_geometry)
 add_test(NAME headless_measured_box COMMAND headless_measured_box)
 
+add_executable(headless_resize_axis tests/resize_axis.cpp)
+target_link_libraries(headless_resize_axis PRIVATE furnify_geometry)
+add_test(NAME headless_resize_axis COMMAND headless_resize_axis)
+
 # ---------------------------------------------------------------------------
 # Application (Qt + OCCT visualization)
 # ---------------------------------------------------------------------------

@@ -834,6 +834,188 @@ bool isIdentityTransform(const gp_Trsf& trsf, double linearTolerance,
     return std::fabs(angle) <= angularToleranceDeg * kPi / 180.0;
 }
 
+// --- Re-Measure (improvements item 8) ---------------------------------------
+
+namespace {
+
+// The body's own span along `axis`, from its vertices. Used to decide WHICH
+// end a face sits at; the size itself never comes from here (that is
+// measuredBox()'s answer, see the header) - this only has to agree with it
+// about which end is which, which two extremes of the same direction always
+// do.
+bool vertexSpanAlong(const TopoDS_Shape& shape, const gp_Dir& axis, double& lo, double& hi)
+{
+    const gp_Vec along(axis);
+    bool any = false;
+    for (TopExp_Explorer it(shape, TopAbs_VERTEX); it.More(); it.Next()) {
+        const gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(it.Current()));
+        const double d = gp_Vec(p.X(), p.Y(), p.Z()).Dot(along);
+        if (!any) {
+            lo = hi = d;
+            any = true;
+        } else {
+            lo = std::min(lo, d);
+            hi = std::max(hi, d);
+        }
+    }
+    return any;
+}
+
+// The ONE planar face square to `axis` at `highEnd`'s end of the body, or a
+// null face. `found` reports how many were there, so a caller can tell "this
+// end is a mitre" (0) from "this end is a step or an L" (2 or more) - both
+// refuse, and neither may be approximated by picking one of them.
+TopoDS_Face endFaceAlong(const TopoDS_Shape& body, const gp_Dir& axis, bool highEnd, int& found)
+{
+    found = 0;
+    double lo = 0.0, hi = 0.0;
+    if (!vertexSpanAlong(body, axis, lo, hi)) return TopoDS_Face();
+    const double target = highEnd ? hi : lo;
+    const double tol = 1.0e-6 * std::max(1.0, hi - lo) + 1.0e-7;
+    const gp_Vec along(axis);
+
+    TopoDS_Face best;
+    for (TopExp_Explorer it(body, TopAbs_FACE); it.More(); it.Next()) {
+        const TopoDS_Face face = TopoDS::Face(it.Current());
+        const BRepAdaptor_Surface surface(face);
+        if (surface.GetType() != GeomAbs_Plane) continue;
+        const gp_Pln pln = surface.Plane();
+        // Square to the axis - the geometric normal, no orientation flag
+        // needed: both senses of a perpendicular plane are square to it.
+        if (std::fabs(gp_Vec(pln.Axis().Direction()).Dot(along)) < 1.0 - 1.0e-6) continue;
+        const gp_Pnt at = pln.Location();
+        if (std::fabs(gp_Vec(at.X(), at.Y(), at.Z()).Dot(along) - target) > tol) continue;
+        ++found;
+        best = face;
+    }
+    if (found != 1) return TopoDS_Face();
+    return best;
+}
+
+// The measured box's extent along `axis`, whichever of its three axes that is
+// (either sign). False when `axis` is not one of them.
+bool measuredExtentAlong(const MeasuredBox& box, const gp_Dir& axis, double& extent)
+{
+    const gp_Vec along(axis);
+    const gp_Dir axes[3] = {box.widthAxis, box.depthAxis, box.heightAxis};
+    const double sizes[3] = {box.width, box.depth, box.height};
+    for (int i = 0; i < 3; ++i) {
+        if (std::fabs(gp_Vec(axes[i]).Dot(along)) >= 1.0 - 1.0e-6) {
+            extent = sizes[i];
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
+ResizeCheck checkResize(const TopoDS_Shape& body, const gp_Dir& axis, double newExtentMm,
+                        ResizeAnchor anchor, double* currentExtent, std::string* why)
+{
+    auto refuse = [&](ResizeCheck code, const char* text) {
+        if (why) *why = text;
+        return code;
+    };
+    if (body.IsNull()) return refuse(ResizeCheck::NotMeasurable, "resize: body is null");
+    if (!(newExtentMm > kResizeNoChange))
+        return refuse(ResizeCheck::SizeNotPositive, "resize: the new size must be above zero");
+
+    const MeasuredBox box = measuredBox(std::vector<TopoDS_Shape>{body});
+    if (!box.ok) return refuse(ResizeCheck::NotMeasurable, "resize: the body has no extent");
+
+    double extent = 0.0;
+    if (!measuredExtentAlong(box, axis, extent))
+        return refuse(ResizeCheck::AxisNotASide, "resize: that direction is not one of the "
+                                                 "body's own sides");
+    if (currentExtent) *currentExtent = extent;
+
+    const double delta = newExtentMm - extent;
+    // Already that size: nothing has to move, so no end has to be flat.
+    if (std::fabs(delta) < kResizeNoChange) return ResizeCheck::Ok;
+
+    // Which end(s) this anchor moves - Centre moves both, so both must be
+    // flat for the gesture to be honest about what it is going to do.
+    const bool movesHigh = anchor != ResizeAnchor::High;
+    const bool movesLow = anchor != ResizeAnchor::Low;
+    int found = 0;
+    if (movesHigh && endFaceAlong(body, axis, true, found).IsNull())
+        return refuse(ResizeCheck::EndNotFlat, "resize: no single flat end square to that size");
+    if (movesLow && endFaceAlong(body, axis, false, found).IsNull())
+        return refuse(ResizeCheck::EndNotFlat, "resize: no single flat end square to that size");
+    return ResizeCheck::Ok;
+}
+
+BooleanResult resizeAlongAxis(const TopoDS_Shape& body, const gp_Dir& axis, double newExtentMm,
+                              ResizeAnchor anchor)
+{
+    BooleanResult out;
+    std::string why;
+    double extent = 0.0;
+    const ResizeCheck check = checkResize(body, axis, newExtentMm, anchor, &extent, &why);
+    if (check != ResizeCheck::Ok) {
+        out.error = why;
+        return out;
+    }
+
+    const double delta = newExtentMm - extent;
+    if (std::fabs(delta) < kResizeNoChange) {
+        // Already that size - see the header: a no-op is not a refusal.
+        out.ok = true;
+        out.shape = body;
+        return out;
+    }
+
+    // How far each end moves OUTWARD. Centre is half each, which is what makes
+    // it a third case rather than a spelling of Low: the centre of mass stays
+    // where it was, and neither end does.
+    struct Step {
+        bool high;
+        double move;
+    };
+    std::vector<Step> steps;
+    switch (anchor) {
+        case ResizeAnchor::Low: steps.push_back({true, delta}); break;
+        case ResizeAnchor::High: steps.push_back({false, delta}); break;
+        case ResizeAnchor::Centre:
+            steps.push_back({true, 0.5 * delta});
+            steps.push_back({false, 0.5 * delta});
+            break;
+    }
+
+    TopoDS_Shape current = body;
+    for (const Step& step : steps) {
+        // Re-derived from the SHAPE IN HAND rather than from the original: the
+        // first pull rebuilds the body through ShapeUpgrade_UnifySameDomain,
+        // so the second end's face is a different TopoDS_Face than it was
+        // (CLAUDE.md's topological-naming warning, met by never carrying one
+        // across a rebuild).
+        int found = 0;
+        const TopoDS_Face face = endFaceAlong(current, axis, step.high, found);
+        if (face.IsNull()) {
+            out.error = "resize: no single flat end square to that size";
+            return out;
+        }
+        // pullFace() owns the outward normal, the mirrored-body probe and
+        // every kernel refusal - positive grows that end outward, negative
+        // carves it in, which is exactly "move this end by `move`".
+        const BooleanResult pulled = pullFace(current, face, step.move);
+        if (!pulled.ok) {
+            out.error = "resize: " + pulled.error;
+            return out;
+        }
+        current = pulled.shape;
+    }
+
+    if (countSolids(current) != 1) {
+        out.error = "resize: the result is not one body";
+        return out;
+    }
+    out.ok = true;
+    out.shape = current;
+    return out;
+}
+
 BooleanResult mirrorShape(const TopoDS_Shape& shape, const gp_Pln& plane)
 {
     BooleanResult out;

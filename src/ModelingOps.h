@@ -419,6 +419,72 @@ MitreCheck checkMitre(const TopoDS_Shape& body, const TopoDS_Face& endFace, doub
 BooleanResult mitreEnd(const TopoDS_Shape& body, const TopoDS_Face& endFace, double angleDeg,
                        MitreSide side);
 
+// --- Re-Measure (improvements item 8) ----------------------------------------
+//
+// Retype one of a body's three sizes and the body changes to match. The user
+// right-clicks a size number drawn around the selection (the selection sizes,
+// below) and types a new one; this is the geometry underneath that.
+//
+// THE FACES MOVE; NOTHING IS SCALED. gp_Trsf has no per-axis scale and
+// GTransform would turn every planar face into a NURBS surface (CLAUDE.md's
+// own ruling on transformShape), so a 600 mm board asked for 450 would come
+// back 0.75x in its thickness too - which is not what "make it 450 long"
+// means to anybody cutting wood. So the END FACE at the moving end is pulled
+// by the difference, through pullFace() itself: one implementation of the
+// outward normal, of the mirrored-body classifier probe, and of every kernel
+// refusal. Every other side is untouched, to the micron.
+//
+// THE SIZE IS MEASURED OFF measuredBox(), never off a world bounding box. The
+// number the user right-clicked came from that box, so the number being
+// changed has to come from the same place or the two disagree the moment a
+// board is turned: the world AABB of a 600 x 300 board at 30 degrees about Z
+// reads 669.6, and typing 450 against THAT would move the end by -219.6
+// instead of -150. `axis` is therefore one of the measured box's own three
+// axes (either sign - a direction, not an end), and a direction that is not
+// one of them is refused rather than guessed at.
+//
+// WHICH END STAYS PUT is the Anchor, in the axis's own direction:
+//   Low     - the end at the low side of `axis` stays; the high end moves.
+//   Centre  - BOTH ends move by half. The default (the user's own change to
+//             the picked mockup), and the reason the three cases cannot be
+//             told apart by volume alone: a test that only measures the
+//             result's extent passes for all three.
+//   High    - the high end stays; the low end moves.
+//
+// Refuses (ok == false, null shape, a sentence in `error` - the file's own
+// contract): a null body; a size that is not greater than zero; an `axis`
+// that is not one of the body's own sides; an end that must move and has no
+// SINGLE planar face square to `axis` there (a mitred, rounded or stepped
+// end - expected, and reported rather than approximated); a result that is
+// not one solid; and any kernel refusal pullFace() makes, including a shrink
+// that would consume the body. A refusal writes nothing.
+//
+// A new size equal to the current one within kResizeNoChange is not a
+// refusal: it succeeds with the body handed straight back, so a caller that
+// commits on Enter without retyping anything cannot be told a no-op failed.
+enum class ResizeAnchor { Low, Centre, High };
+
+// Whether resizeAlongAxis() will reach the kernel at all, as a value a caller
+// can put its own sentence to - checkMitre()'s own contract, and for its own
+// reason: `error` is written for this file and never shown, and a caller
+// matching substrings of it would break the first time a sentence was
+// reworded. `currentExtent`, when given, receives the body's size along
+// `axis` as measuredBox() reads it, so a UI can seed its field from the same
+// number the operation will compare against.
+enum class ResizeCheck { Ok, NotMeasurable, SizeNotPositive, AxisNotASide, EndNotFlat };
+ResizeCheck checkResize(const TopoDS_Shape& body, const gp_Dir& axis, double newExtentMm,
+                        ResizeAnchor anchor, double* currentExtent = nullptr,
+                        std::string* why = nullptr);
+
+// How near the current size counts as no change at all - a micron, which is
+// three orders below anything furniture is cut to and two above the 1e-7
+// pullFace() refuses a distance below (so a Centre resize, which moves each
+// end by half, can never hand the kernel a distance it will refuse).
+constexpr double kResizeNoChange = 1.0e-6;
+
+BooleanResult resizeAlongAxis(const TopoDS_Shape& body, const gp_Dir& axis, double newExtentMm,
+                              ResizeAnchor anchor);
+
 // --- Symmetry (Milestone 3) -------------------------------------------------
 //
 // Reflects `shape` across `plane` - gp_Trsf::SetMirror(gp_Ax2(plane.Location(),
