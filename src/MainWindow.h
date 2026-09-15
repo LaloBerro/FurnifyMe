@@ -812,6 +812,29 @@ public:
     void showInitScreen();
     bool openFurniture(const QString& id);
     bool isShowingInitScreen() const { return myShowingInitScreen; }
+
+    // --- the selection sizes (improvements item 5) -------------------------
+    //
+    // THE predicate, and the only one: View -> Show sizes on, a furniture
+    // open, not sketching, a BODY selection (selectionKind() == Body - a face
+    // or an edge keeps its own annotations), not render mode, no body-gizmo
+    // drag live. Derived from live state on every call, never stored, so
+    // nothing can leave the sizes up after the state that allowed them has
+    // gone. refreshSelectionSizes() applies it, from appStateChanged and from
+    // the gizmo drag signals (a drag moves no document and emits no
+    // appStateChanged until it commits).
+    bool selectionSizesVisible() const;
+    // The box the selection is measured by - ModelingOps::measuredBox over the
+    // selected bodies, CACHED on the sorted selected ids and the document's
+    // revision (dropped by resyncView(), for the joint cache's reason). A
+    // refused box (ok == false) for no body selection. A copy, so a caller
+    // cannot hold a reference across a rebuild.
+    ModelingOps::MeasuredBox selectionBox() const;
+    // The status bar's selection sentence: "Nothing selected", "1 body
+    // selected — 600 × 300 × 18 mm", "3 bodies selected — overall 636 × 300 ×
+    // 718 mm". The size rides only on a BODY selection; a face or an edge
+    // reports its body count as it always did.
+    QString selectionStatusText() const;
     QString currentFurnitureId() const { return myFurnitureId; }
     QString currentFurnitureName() const { return myFurnitureName; }
     // Dirty = the live document's revision differs from the revision as of
@@ -1446,6 +1469,11 @@ private:
     // a Failure is not this preference's to suppress.
     void setShowNotifications(bool show);
 
+    // View -> Show sizes. Same shape as setShowNotifications(): stores the
+    // preference under the same guard and calls updateActions(), whose
+    // appStateChanged is what refreshSelectionSizes() follows.
+    void setShowSizes(bool show);
+
     // View -> Show bottom bar. Same shape as setShowNotifications() - stores
     // the preference under the same guard, calls updateActions(), which is
     // what derives statusBar()'s visibility from it (the same
@@ -1716,6 +1744,20 @@ private:
     // What the stored setting said, read in the constructor before any action
     // exists so the View entry is built already ticked correctly. Default true.
     bool myShowNotifications = true;
+    // View -> Show sizes: checkable, the single source of the preference's
+    // truth, read in the constructor before the action exists. Default true.
+    QAction* myShowSizesAction = nullptr;
+    bool myShowSizes = true;
+    // selectionBox()'s cache. -1 matches no revision, which is how
+    // resyncView() drops it.
+    mutable std::vector<int> mySizesCacheIds;
+    mutable int mySizesCacheRevision = -1;
+    mutable ModelingOps::MeasuredBox mySizesCacheBox;
+    // The selection sentence this window last put on the status bar, so a
+    // live update (a pull, an undo) replaces only its OWN sentence and never
+    // a refusal or a report somebody else is showing.
+    QString myLastSelectionStatus;
+    void refreshSelectionSizes();
     // Checkable, and the single source of the bottom bar's own visibility,
     // exactly as myItemsPanelAction is for the drawer - statusBar()'s shown
     // state is DERIVED from this action's checked state, both directions, in

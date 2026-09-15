@@ -755,6 +755,8 @@ void OcctViewWidget::releaseGlResources()
     myRotateGizmo.detach();
     myScaleGizmo.detach();
     myJointRenderer.detach();
+    mySelectionSizes.detach();
+    mySizesWanted = false;
 
     // OCCT's own order: remove every presentation, drop the context, destroy
     // the view, then the viewer.
@@ -804,6 +806,7 @@ void OcctViewWidget::releaseGlResources()
     // viewer never had.
     myGizmoLayer = Graphic3d_ZLayerId_UNKNOWN;
     myJointsLayer = Graphic3d_ZLayerId_UNKNOWN;
+    mySizesLayer = Graphic3d_ZLayerId_UNKNOWN;
     // Pointed into the context that has just gone, same reasoning as every
     // other handle cleared above - a fresh viewer's first MoveTo() must
     // compare against nothing, not a stale owner from the torn-down one.
@@ -1000,6 +1003,37 @@ void OcctViewWidget::initializeViewer()
                 : myViewer->InsertLayerAfter(layer, settings, Graphic3d_ZLayerId_Topmost);
         if (inserted) myJointsLayer = layer;
     }
+    // A SIXTH, for the selection sizes (improvements item 5). An annotation
+    // around a selected body has to READ over it - a dimension line along the
+    // far edge of a box, or a dashed outline edge behind the body, is exactly
+    // the line a depth-tested layer would hide - so this one does not depth
+    // test at all, and does not write depth either: display order is paint
+    // order inside it, which is what puts each boxed number over its own box
+    // and line (see DimensionRenderer's BoxedLabel).
+    //
+    // IMMEDIATE for the shadow-map reason recorded on the gizmo layer above,
+    // even though it clears nothing: an annotation is feedback, drawn after
+    // the scene, and staying out of the normal layer list the shadow pass
+    // walks is the rule for every custom overlay layer here rather than a
+    // judgement made per layer about which settings happen to be harmless.
+    // Before the joints' layer, so hardware and a live gizmo draw over it -
+    // though render mode and a gizmo drag both hide the sizes anyway.
+    {
+        Graphic3d_ZLayerSettings settings;
+        settings.SetName("FurnifyMe selection sizes");
+        settings.SetClearDepth(Standard_False);
+        settings.SetEnableDepthTest(Standard_False);
+        settings.SetEnableDepthWrite(Standard_False);
+        settings.SetRaytracable(Standard_False);
+        settings.SetRenderInDepthPrepass(Standard_False);
+        settings.SetImmediate(Standard_True);
+        Graphic3d_ZLayerId layer = Graphic3d_ZLayerId_UNKNOWN;
+        const bool inserted =
+            myJointsLayer != Graphic3d_ZLayerId_UNKNOWN
+                ? myViewer->InsertLayerBefore(layer, settings, myJointsLayer)
+                : myViewer->InsertLayerAfter(layer, settings, Graphic3d_ZLayerId_Topmost);
+        if (inserted) mySizesLayer = layer;
+    }
     myGridRenderer.update(myCamera.state().distance, myCamera.state().target,
                           myCamera.eyePosition(), gridPlane(),
                           Theme::gridDensity());
@@ -1023,6 +1057,8 @@ void OcctViewWidget::initializeViewer()
         myScaleGizmo.setZLayer(myGizmoLayer);
         myJointRenderer.attach(myContext);
         myJointRenderer.setZLayer(myJointsLayer);
+        mySelectionSizes.attach(myContext);
+        mySelectionSizes.setZLayer(mySizesLayer);
     }
 
     // The field of view is fixed at kFovyDeg for ordinary modeling; render
@@ -2552,6 +2588,42 @@ void OcctViewWidget::showJoints(const std::vector<Joinery::Derivation>& derivati
 void OcctViewWidget::clearJoints()
 {
     if (myJointRenderer.clear()) scheduleRedraw();
+}
+
+void OcctViewWidget::showSelectionSizes(const ModelingOps::MeasuredBox& box,
+                                        SelectionSizesRenderer::Kind kind)
+{
+    mySizesBox = box;
+    mySizesKind = kind;
+    mySizesWanted = box.ok;
+    updateSelectionSizes();
+}
+
+void OcctViewWidget::clearSelectionSizes()
+{
+    mySizesWanted = false;
+    if (mySelectionSizes.clear()) scheduleRedraw();
+}
+
+void OcctViewWidget::updateSelectionSizes()
+{
+    if (!mySizesWanted || myView.IsNull()) {
+        if (mySelectionSizes.clear()) scheduleRedraw();
+        return;
+    }
+    // The pixel size at the BOX's depth (worldPerPixelAt(), the gizmos' rule)
+    // - but QUANTIZED to 5% steps. An orbit in perspective moves the box's
+    // depth by a hair on every step, and an unquantized value would defeat
+    // every line's equal-guard and rebuild all three per mouse move; a 5%
+    // step is below what an eye reads in a 34 px offset and turns an orbit
+    // that crosses no edge choice into zero rebuilds.
+    const double raw = worldPerPixelAt(mySizesBox.centre);
+    const double step = std::log(1.05);
+    const double quantized =
+        raw > 0.0 ? std::exp(std::round(std::log(raw) / step) * step) : worldPerPixel();
+    if (mySelectionSizes.show(mySizesBox, mySizesKind, myCamera.viewDirection(),
+                              myCamera.upVector(), quantized))
+        scheduleRedraw();
 }
 
 void OcctViewWidget::updateSymmetryIndicator()
@@ -4266,6 +4338,9 @@ void OcctViewWidget::applyCameraState()
     updateMirrorPlacementIndicator();
     // And the Mitre end dial, on the same equal-guarded terms.
     updateMitreDial();
+    // And the selection sizes: a LAYOUT pass around the box already handed in
+    // - which edges carry the lines from this angle - never a measurement.
+    updateSelectionSizes();
     // Slots FIRST, redraw second. A slot on cameraChanged() that changes the
     // scene - PullArrow rebuilds its 3D arrow, which is sized in screen
     // pixels and so has to be rebuilt whenever the camera moves - was
@@ -4585,6 +4660,8 @@ void OcctViewWidget::applyTheme()
     // And the joints' hardware, which bakes Theme::accent() the same way.
     // A no-op when nothing is drawn - and nothing is while render mode is on.
     myJointRenderer.reapplyTheme();
+    // And the selection sizes, which bake their two tokens and the panel fill.
+    mySelectionSizes.reapplyTheme();
 
     scheduleRedraw();
 }

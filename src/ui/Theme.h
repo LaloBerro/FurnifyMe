@@ -84,6 +84,15 @@ struct Spec {
     // they became editable.
     QColor highlightHover;
     QColor highlightSelected;
+    // The selection sizes (improvements item 5): the dimension lines and the
+    // label borders drawn around ONE selected body, and the dashed outline and
+    // dimensions drawn around a GROUP. Two tokens rather than one, because the
+    // picked mockup tells the two apart by colour - a light blue for a body's
+    // own sides, a light violet for a group's overall box - and neither is a
+    // colour any other surface owns: the accent marks state, and the edge
+    // dimension already wears it.
+    QColor sizesOneBody;
+    QColor sizesGroup;
 
     // Empty means "whatever apply() managed to load", which is the bundled DM
     // Sans when the resource is present and the platform default when it is
@@ -276,6 +285,8 @@ QColor focusRingMuted(); // same outline, dimmed - a focused widget in a
                         // attention
 QColor highlightHover();    // the viewport's hover tint
 QColor highlightSelected(); // and its selection tint
+QColor sizesOneBody();      // selection sizes around one body - see Spec
+QColor sizesGroup();        // selection sizes around a group - see Spec
 
 double chipStrokePx();      // ToolChip border width - see Spec::chipStrokePx
 double gridDensity();       // grid line density multiplier - see Spec::gridDensity

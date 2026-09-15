@@ -89,6 +89,10 @@ Spec graphite()
     // pixel-identical to the OCCT constants they replace.
     s.highlightHover    = QColor("#00ffff");
     s.highlightSelected = QColor("#ffa500");
+    // The picked mockup's own two hues (selection-sizes-options.html, option
+    // B): its --dim light blue and its --grp light violet.
+    s.sizesOneBody      = QColor("#6fb6ff");
+    s.sizesGroup        = QColor("#c89bff");
     s.basePt = 10.0;
     s.chipStrokePx = 1.0;
     s.gridDensity = 1.0;
@@ -240,6 +244,8 @@ const QVector<ColourToken>& colourTokens()
         {QStringLiteral("gizmoAxisZ"), &Spec::gizmoAxisZ},
         {QStringLiteral("highlightHover"), &Spec::highlightHover},
         {QStringLiteral("highlightSelected"), &Spec::highlightSelected},
+        {QStringLiteral("sizesOneBody"), &Spec::sizesOneBody},
+        {QStringLiteral("sizesGroup"), &Spec::sizesGroup},
         {QStringLiteral("sketchPointMarker"), &Spec::sketchPointMarker},
         {QStringLiteral("outlineLineColour"), &Spec::outlineLineColour},
         {QStringLiteral("chrome"), &Spec::chrome},
@@ -450,6 +456,8 @@ QColor focusRing()    { return spec().focusRing; }
 QColor focusRingMuted() { return spec().focusRingMuted; }
 QColor highlightHover()    { return spec().highlightHover; }
 QColor highlightSelected() { return spec().highlightSelected; }
+QColor sizesOneBody()      { return spec().sizesOneBody; }
+QColor sizesGroup()        { return spec().sizesGroup; }
 
 double chipStrokePx() { return spec().chipStrokePx; }
 double gridDensity()  { return spec().gridDensity; }

@@ -257,6 +257,7 @@ Source files under `src/`, plus `tests/`:
 | `ui/Toast.{h,cpp}` | one non-blocking message at a time, with Undo where it applies |
 | `ui/ExtrudePreview.{h,cpp}` | height entry with a live preview built by the commit's own path |
 | `ui/DimensionRenderer.{h,cpp}` | CAD length annotation; one renderer for the sketch and edges |
+| `ui/SelectionSizesRenderer.{h,cpp}` | width/depth/height around a selection; a composition over `DimensionRenderer` |
 | `ui/PullArrow.{h,cpp}` | face pull: 3D arrow + value chip, preview by the commit's own call |
 | `ui/BevelArrow.{h,cpp}` | edge drag: inward fillets, outward chamfers, same contract |
 | `ui/MitreTool.{h,cpp}` | Mitre end chip: typed angle, Flip, preview by the commit's own call; the dial is `OcctViewWidget`'s |
@@ -344,7 +345,8 @@ at once — the same string passes through `ItemsPanel`'s exempted sweep and fai
 `usesBannedWord()` call, proving the mechanism does something rather than nothing.
 
 Numbers are formatted by `Measure` (`src/Measure.h`), never by hand at a call
-site: lengths as `340 mm` / `1,200 mm` / `18.5 mm`, sizes as `340 × 220 × 18 mm`.
+site: lengths as `340 mm` / `1,200 mm` / `18.5 mm`, sizes as `340 × 220 × 18 mm`
+(`formatSize(a, b, c)` when the three numbers are already in hand, in the caller's order).
 Volume is not shown anywhere — furniture is specified by dimension.
 
 Punctuation: status-bar text takes no trailing period; dialog bodies are full
@@ -883,9 +885,10 @@ they generalize.
 derived fonts (badge = base−2, label = base−1, body = base, title = base+3 pt) read
 `Theme::Spec`; `defaultSpec()` is **the user's own look** — Graphite plus six baked deltas
 from `assets/defaultcolors.furnifytheme` (near-black viewport and grids, `#6a00ff` accent,
-tinted hover cyan, 2px chip strokes; Milestone 5 item 1) — and all 24 defaults are pinned
-to hex in the suite (three of them, `gizmoAxisX/Y/Z`, added in Milestone 3 — see "Direct
-modeling"'s gizmo restyle note). `graphite()` stays as the readable base the deltas
+tinted hover cyan, 2px chip strokes; Milestone 5 item 1) — and all 28 colour defaults are
+pinned to hex in the suite (three of them, `gizmoAxisX/Y/Z`, added in Milestone 3 — see
+"Direct modeling"'s gizmo restyle note; the last two, `sizesOneBody`/`sizesGroup`, by the
+selection sizes — see "Sizes around the selection"). `graphite()` stays as the readable base the deltas
 diff against. Edits apply live through one `themeChanged` broadcast — no
 widget may cache a colour across it — and persist **debounced** (400 ms, flushed on close),
 because a colour-wheel drag fires per mouse-move. The picker opens with `show()`, never
@@ -991,6 +994,85 @@ that chooses one and the grid that shows it.
   span it last drew and `MainWindow` drives `refresh()` from `appStateChanged` — the same
   signal the items panel and the extrude preview already follow, rather than
   `setDisplayUnit()` growing a private list of everything that shows a length.
+
+### Sizes around the selection
+
+Improvements item 5, picked from mockups (option B, "one overall size for the group"): a
+selected body carries its width, depth and height as three dimension lines with boxed
+numbers, in `Theme::sizesOneBody()`; a selected group carries ONE dashed box around
+everything selected and the group's overall three, in `Theme::sizesGroup()` — no per-piece
+numbers. The status bar says it too: `1 body selected — 600 × 300 × 18 mm`,
+`3 bodies selected — overall 636 × 300 × 718 mm`. `View → Show sizes` turns the drawing off;
+on by default, persisted as `showSizes`, no shortcut.
+
+- **"Measured along its own sides" is an oriented box, and the world axes win when they fit
+  just as well.** `ModelingOps::measuredBox()` (Qt-free, `headless_measured_box`) builds
+  OCCT's `Bnd_OBB` in **optimal mode on the exact B-rep**. Measured on OCCT 8.0.1: every mode
+  reads a 600 × 300 × 18 box to six decimals square, turned 30° about Z and tilted 37° about
+  (1,2,3), but on a tessellated cylinder the triangulation modes read 299.9 (the mesh sits
+  inside the surface) and non-optimal-exact 300.1; optimal-exact reads 300. The world
+  AABB of that turned board reads 669.6 × 559.8 — neither side — which is this app's most
+  repeated bug class, an oriented quantity measured in world terms. But an OBB's axes are
+  **arbitrary wherever the shape does not pin them**: a sphere's came back turned
+  (0.104, 0.994, −0.027), a cone's by 0.002, and a skewed frame draws slanted lines and odd
+  numbers on an ordinary cabinet. So the exact world box is computed too and **used whenever
+  its volume is within `kPreferWorldBoxTolerance` (1%) of the oriented box's**. 1% because
+  the gap it must absorb is optimizer slack (zero to six decimals on every shape measured),
+  while a visibly turned board inflates its world box far more — 600 × 300 × 18 at 1° is
+  +4.4%, at 0.25° +1.1%. The rule is about FIT, not about how the pieces sit: three
+  axis-aligned squares stepping along a diagonal fit a turned box of a third the volume and
+  are measured along that diagonal — pinned, and stated on the header. **Height** is the
+  axis closest to world Z; **width** the longer of the other two. Both directions are
+  mutation-pinned: forcing the world box reddens the turned/tilted board checks (headless
+  and `gui_smoke`'s "a board turned 30 degrees reads its own 600 x 300 x 18"), dropping the
+  prefer-world rule reddens the cabinet and free-turning group frame checks.
+- **One predicate, derived.** `MainWindow::selectionSizesVisible()`: Show sizes on, a
+  furniture open, not sketching, `selectionKind() == Body` (a face or an edge keeps its own
+  annotations), not render mode, no body-gizmo drag live. `refreshSelectionSizes()` applies
+  it from `appStateChanged` **and from the gizmo drag/release signals**, because a drag
+  emits no `appStateChanged` until it commits. Render mode clears the selection on entry, so
+  its term is only reachable by a body selected *inside* render mode — which is exactly what
+  the suite does to pin it (the mutation that drops the term goes red there and nowhere
+  else).
+- **Measure once, lay out on every camera move.** The box is cached in `MainWindow` on the
+  sorted selected ids and `DocumentModel::revision()` (dropped by `resyncView()`, the joint
+  cache's reason), so a pull, a scale or an undo re-measures while an orbit never does —
+  the suite counts `ModelingOps::measuredBoxCallCount()` across a 40-step orbit and requires
+  zero, and a mutation invalidating the cache on `cameraChanged` read 40. `OcctViewWidget`
+  keeps only the box it was handed and re-lays it out from `applyCameraState()`: which of
+  each extent's four parallel edges carries the line (width and depth share bottom/left by
+  which runs more across the screen, height goes right, pushed out along the edge's face
+  that points furthest that way). The pixel size is `worldPerPixelAt(box centre)`
+  **quantized to 5% steps**, and the layout choices carry **hysteresis** — both measured
+  necessities: the orbit-pacing probe wiggles about the fit-all view at azimuth −45, which is
+  precisely the tie between a square box's width and depth, and without hysteresis the two
+  swapped on every step (60 rebuilds in 60 moves, send cost 0.19 ms/move); with it, 0
+  rebuilds and 0.05 ms. The frame count stayed 1.00 per move throughout.
+- **Composition over `DimensionRenderer`, not a sibling.** The three lines are the edge
+  annotation asked for with a `DimensionRenderer::Style` — a token accessor (read at every
+  build) and `boxedLabel`: a panel-filled box with a 2 px border in the token, **centred on
+  the dimension line** so the number interrupts it and stays readable at any angle. The box
+  is its own `AIS_InteractiveObject` under `Graphic3d_TMF_ZoomRotatePers` anchored at the
+  line's midpoint — under that persistence one local unit is one device pixel and the axes
+  are the screen's — sized from `QFontMetricsF` of the same face at the same 13 px OCCT
+  draws the text at. The fill is a `Graphic3d_ArrayOfTriangles` with Unlit shading and
+  double-sided face culling set on its aspect, and it DOES draw — seen in both captures and
+  counted by the suite's token-pixel checks — against the arrowhead note above, whose
+  triangles drew nothing; which of the two settings made the difference was not measured. The style
+  says how it looks, never which case is asking.
+- **Its own layer: Immediate, no depth test, no depth write**, inserted before the joints'
+  layer. An annotation around a body has to read over it — a far edge's line or an outline
+  edge behind the body is exactly what a depth-tested layer hides — and Immediate keeps it
+  out of the normal layer list the shadow pass walks. With no depth test, display order is
+  paint order, and **display order is not stable across rebuilds**, so priority does the
+  work: boxed numbers `Graphic3d_DisplayPriority_Above`, the dashed outline `_Below` (the
+  first group capture had the outline striking through "300 mm").
+- **Live status, never somebody else's sentence.** `selectionStatusText()` is the one author;
+  `refreshSelectionSizes()` rewrites the bar only while it still shows the sentence this
+  window last painted (`myLastSelectionStatus`), the refusal-withdrawal rule — so a
+  commit's own Note (`Body 01 scaled — …`) or a kind-lock refusal stands. The size rides only
+  on a Body selection, and it stays in the status bar with Show sizes off: the preference
+  governs the drawing, and a line of status text covers nothing.
 
 ### Files, versions and the library
 

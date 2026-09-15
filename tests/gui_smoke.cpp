@@ -863,6 +863,8 @@ constexpr BlockInfo kBlocks[] = {
     { "the-joint-chip-edits-a-joint-through-one-checkpoint", false, true },
     { "joints-and-the-rest-of-the-app", false, true },
     { "mitre-end-a-board-end-at-an-angle", false, true },
+    { "selection-sizes-around-the-selection", false, true },
+    { "and-the-show-sizes-preference-persists", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -15945,6 +15947,10 @@ int main(int argc, char* argv[])
                 {QStringLiteral("focusRingMuted"), QStringLiteral("#9f7e2e")},
                 {QStringLiteral("highlightHover"), QStringLiteral("#06d1ff")},
                 {QStringLiteral("highlightSelected"), QStringLiteral("#ffa500")},
+                // Improvements item 5, the selection sizes: the picked
+                // mockup's own light blue and light violet.
+                {QStringLiteral("sizesOneBody"), QStringLiteral("#6fb6ff")},
+                {QStringLiteral("sizesGroup"), QStringLiteral("#c89bff")},
             };
             const Theme::Spec shippedSpec = Theme::defaultSpec();
             QStringList drifted;
@@ -15972,7 +15978,7 @@ int main(int argc, char* argv[])
                       .arg(Theme::colourTokens().size()).arg(pinned).arg(shipped.size()));
             check(drifted.isEmpty(),
                   QStringLiteral("and defaultSpec() is Graphite byte for byte (%1)")
-                      .arg(drifted.isEmpty() ? QStringLiteral("all 26 exact")
+                      .arg(drifted.isEmpty() ? QStringLiteral("all 28 exact")
                                              : drifted.join(QStringLiteral(", "))));
             check(std::fabs(shippedSpec.basePt - 10.0) < 1e-9,
                   QStringLiteral("and the shipped base size is still 10pt (%1)")
@@ -24882,8 +24888,26 @@ int main(int argc, char* argv[])
             return r;
         };
 
+        // (improvements item 5) Selecting the joint selects its two pieces, so
+        // the selection sizes - a dashed group box and three boxed numbers -
+        // are up for the modeling orbit too, and their per-camera-move layout
+        // pass is charged to the frames measured below.
+        check(lview->selectionSizesShown() && lview->selectionSizesOutlineShown(),
+              "orbit pacing: measured with the selection sizes drawn around the joint's pieces");
+        const int sizesBuildsBeforeOrbit = lview->selectionSizesBuildCount();
         const int kOrbitMoves = 60;
         const OrbitRun modeling = orbitRun(lview, kOrbitMoves);
+        const int sizesRebuilds = lview->selectionSizesBuildCount() - sizesBuildsBeforeOrbit;
+        std::printf("[orbit-pacing] selection sizes rebuilt %d times across the %d-move orbit\n",
+                    sizesRebuilds, kOrbitMoves);
+        // The wiggle orbits about the fit-all view, azimuth -45 - exactly where
+        // a square box's width and depth tie for "across the screen". Without
+        // the renderer's hysteresis they swapped on every step: 60 rebuilds.
+        check(sizesRebuilds <= 2,
+              QStringLiteral("orbit pacing: the selection sizes hold their layout through a wiggle "
+                             "on the tie view (%1 rebuilds in %2 moves)")
+                  .arg(sizesRebuilds)
+                  .arg(kOrbitMoves));
 
 
         QAction* renderAction = action(probe, QStringLiteral("Render mode"));
@@ -32689,6 +32713,484 @@ int main(int argc, char* argv[])
                   "mitre: the twin followed - the mirror image of the mitred board");
             check(mToasts && mToasts->currentText().contains(QStringLiteral("twin followed")),
                   "mitre: and the Note says so");
+        }
+    }
+
+    // --- selection sizes (improvements item 5) ----------------------------------
+    //
+    // Width, depth and height drawn around a selected body; ONE dashed box and
+    // the overall three around a selected group (the picked mockup's option B).
+    // Seeded rather than sketched, so every expected number is exact: a
+    // 600 x 300 x 18 board square to the world, the same board turned 30
+    // degrees about Z (its world box reads 669.6 x 559.8 - neither side), and
+    // a small cabinet of two 18 x 300 x 700 sides and a 636 x 300 x 18 top,
+    // whose overall box is 636 x 300 x 718.
+    if (blockEnabled("selection-sizes-around-the-selection")) {
+        RequiredTempDir sizesDir;
+        const double kPiS = 3.14159265358979323846;
+        QString sizesFurnitureId;
+        {
+            FurnitureStore seedStore(sizesDir.path());
+            sizesFurnitureId = seedStore.createFurniture(QStringLiteral("Sizes cabinet"));
+            DocumentModel seedDoc;
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 600.0, 300.0, 18.0));
+            gp_Trsf turn;
+            turn.SetRotation(gp_Ax1(gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0, 0, 1)), 30.0 * kPiS / 180.0);
+            gp_Trsf shift;
+            shift.SetTranslation(gp_Vec(0.0, 1200.0, 0.0));
+            seedDoc.addSolid(BRepBuilderAPI_Transform(
+                                 ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 600.0, 300.0, 18.0),
+                                 shift * turn, true)
+                                 .Shape());
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(1500.0, 0.0, 0.0), 18.0, 300.0, 700.0));
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(2118.0, 0.0, 0.0), 18.0, 300.0, 700.0));
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(1500.0, 0.0, 700.0), 636.0, 300.0, 18.0));
+            check(!sizesFurnitureId.isEmpty() &&
+                      seedStore.saveFurniture(sizesFurnitureId, seedDoc, QImage()),
+                  "sizes: a board, a turned board and a three-piece cabinet are seeded");
+        }
+
+        MainWindow mw(nullptr, /*persistProgress=*/false, sizesDir.path());
+        mw.setAttribute(Qt::WA_ShowWithoutActivating);
+        mw.resize(1100, 800);
+        mw.show();
+        settle(300);
+        OcctViewWidget* sv = mw.view();
+        sv->setAnimationsEnabled(false);
+        check(mw.openFurniture(sizesFurnitureId), "sizes: the seeded furniture opens");
+        settle(300);
+
+        const std::vector<DocumentModel::Solid> seeded = mw.document().solids();
+        const bool fiveBodies = seeded.size() == 5;
+        check(fiveBodies, "sizes: five bodies are open");
+        const int board = fiveBodies ? seeded[0].id : 0;
+        const int turned = fiveBodies ? seeded[1].id : 0;
+        const int sideL = fiveBodies ? seeded[2].id : 0;
+        const int sideR = fiveBodies ? seeded[3].id : 0;
+        const int top = fiveBodies ? seeded[4].id : 0;
+
+        const QString times = QString::fromUtf8("\xC3\x97");
+        const QString dash = QString::fromUtf8("\xE2\x80\x94");
+        const auto labels = [&]() {
+            const std::array<std::string, 3> l = sv->selectionSizesLabels();
+            return QStringLiteral("%1 | %2 | %3")
+                .arg(QString::fromStdString(l[0]), QString::fromStdString(l[1]),
+                     QString::fromStdString(l[2]));
+        };
+        const auto status = [&]() { return mw.statusBar()->currentMessage(); };
+        const auto frame = [&](const gp_Pnt& target, double distance) {
+            CameraState look;
+            look.target = target;
+            look.azimuthDeg = -35.0;
+            look.elevationDeg = 28.0;
+            look.distance = distance;
+            sv->setCameraStateNow(look);
+            settle(150);
+        };
+        // Pixels within a small reach of a token, in a Dump of the viewport.
+        const auto tokenPixels = [&](const QString& file, const QColor& token) {
+            const QString path = outDir + QStringLiteral("/") + file;
+            if (!sv->saveSnapshot(path)) return -1;
+            const QImage img(path);
+            if (img.isNull()) return -1;
+            int n = 0;
+            for (int y = 0; y < img.height(); ++y)
+                for (int x = 0; x < img.width(); ++x) {
+                    const QColor c = img.pixelColor(x, y);
+                    if (std::abs(c.red() - token.red()) <= 20 &&
+                        std::abs(c.green() - token.green()) <= 20 &&
+                        std::abs(c.blue() - token.blue()) <= 20)
+                        ++n;
+                }
+            return n;
+        };
+
+        // --- the action ------------------------------------------------------
+        QAction* sizesAction = action(mw, QStringLiteral("Show sizes"));
+        check(sizesAction != nullptr && sizesAction->isCheckable() && sizesAction->isChecked(),
+              "sizes: View -> Show sizes exists, checkable, on by default");
+        check(sizesAction && sizesAction->shortcut().isEmpty(),
+              "sizes: and takes no key");
+        {
+            bool inView = false;
+            for (QMenu* menu : mw.findChildren<QMenu*>())
+                if (menu->title().remove(QLatin1Char('&')) == QStringLiteral("View") &&
+                    menu->actions().contains(sizesAction))
+                    inView = true;
+            check(inView, "sizes: it lives in the View menu");
+        }
+        {
+            const Graphic3d_ZLayerSettings layer = sv->zLayerSettings(sv->sizesZLayer());
+            check(sv->sizesZLayer() != Graphic3d_ZLayerId_UNKNOWN && layer.IsImmediate() &&
+                      !layer.ToEnableDepthTest(),
+                  "sizes: drawn in their own Immediate layer with no depth test - over the "
+                  "bodies, and out of the shadow pass's layer list");
+        }
+
+        // --- nothing selected: nothing drawn -----------------------------------
+        sv->clearSelection();
+        settle(120);
+        check(!sv->selectionSizesShown() && !mw.selectionSizesVisible(),
+              "sizes: nothing selected draws nothing");
+
+        // --- one board, square to the world ------------------------------------
+        frame(gp_Pnt(300.0, 150.0, 9.0), 1500.0);
+        check(pickBodyOf(mw, board), "sizes: the board is taken by a double-click");
+        settle(200);
+        check(sv->selectionSizesShown() &&
+                  sv->selectionSizesKind() == SelectionSizesRenderer::Kind::OneBody &&
+                  !sv->selectionSizesOutlineShown(),
+              "sizes: one body selected draws its own sizes, no group outline");
+        check(labels() == QStringLiteral("600 mm | 300 mm | 18 mm"),
+              QStringLiteral("sizes: the three labels read the board's width, depth and height (%1)")
+                  .arg(labels()));
+        check(status() == QStringLiteral("1 body selected %1 600 %2 300 %2 18 mm").arg(dash, times),
+              QStringLiteral("sizes: the status bar reads the size (%1)").arg(status()));
+        {
+            const int blue = tokenPixels(QStringLiteral("sizes-single-dump.png"), Theme::sizesOneBody());
+            const int violet = tokenPixels(QStringLiteral("sizes-single-dump.png"), Theme::sizesGroup());
+            check(blue > 150, QStringLiteral("sizes: the lines are on screen in the one-body token "
+                                             "(%1 pixels)").arg(blue));
+            check(violet < blue / 10,
+                  QStringLiteral("sizes: and not in the group's (%1 violet against %2 blue)")
+                      .arg(violet).arg(blue));
+            settle(150);
+            check(!printWindowCapture(&mw, outDir + QStringLiteral("/sizes-single.png")).isNull(),
+                  "sizes: the single board is captured");
+        }
+
+        // --- an orbit re-lays out, never re-measures ----------------------------
+        {
+            const long long measuredBefore = ModelingOps::measuredBoxCallCount();
+            const int buildsBefore = sv->selectionSizesBuildCount();
+            const QPointF from(550.0, 400.0);
+            QMouseEvent press(QEvent::MouseButtonPress, from, sv->mapToGlobal(from),
+                              Qt::RightButton, Qt::RightButton, Qt::NoModifier);
+            QCoreApplication::sendEvent(sv, &press);
+            QPointF at = from;
+            for (int i = 0; i < 40; ++i) {
+                at += QPointF(9.0, 0.0);
+                QMouseEvent move(QEvent::MouseMove, at, sv->mapToGlobal(at), Qt::RightButton,
+                                 Qt::RightButton, Qt::NoModifier);
+                QCoreApplication::sendEvent(sv, &move);
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+            }
+            QMouseEvent release(QEvent::MouseButtonRelease, at, sv->mapToGlobal(at),
+                                Qt::RightButton, Qt::NoButton, Qt::NoModifier);
+            QCoreApplication::sendEvent(sv, &release);
+            settle(200);
+            const long long measured = ModelingOps::measuredBoxCallCount() - measuredBefore;
+            const int builds = sv->selectionSizesBuildCount() - buildsBefore;
+            std::printf("[sizes] a 40-step orbit: %lld box measurements, %d layout rebuilds\n",
+                        measured, builds);
+            check(measured == 0,
+                  QStringLiteral("sizes: a 40-step orbit measures the box zero times (%1)")
+                      .arg(measured));
+            check(builds > 0 && builds < 40,
+                  QStringLiteral("sizes: and re-lays the lines out only when an edge choice or "
+                                 "the pixel size moves - %1 rebuilds across 40 steps")
+                      .arg(builds));
+            check(sv->selectionSizesShown() &&
+                      labels() == QStringLiteral("600 mm | 300 mm | 18 mm"),
+                  QStringLiteral("sizes: still reading the board after the orbit (%1)").arg(labels()));
+        }
+
+        // --- a turned board is measured along its own sides --------------------
+        {
+            frame(gp_Pnt(150.0, 1450.0, 9.0), 1500.0);
+            sv->setSelectedSolids({turned});   // the kind as setup - the subject is the number
+            settle(200);
+            check(sv->selectionSizesShown() &&
+                      labels() == QStringLiteral("600 mm | 300 mm | 18 mm"),
+                  QStringLiteral("sizes: a board turned 30 degrees reads its own 600 x 300 x 18, "
+                                 "not its world box (%1)").arg(labels()));
+            check(status() == QStringLiteral("1 body selected %1 600 %2 300 %2 18 mm").arg(dash, times),
+                  QStringLiteral("sizes: and so does the status bar (%1)").arg(status()));
+        }
+
+        // --- three bodies: one overall box ----------------------------------------
+        {
+            frame(gp_Pnt(1818.0, 150.0, 359.0), 2600.0);
+            sv->setSelectedSolids({sideL, sideR, top});   // the kind as setup
+            settle(200);
+            check(sv->selectionKind() == OcctViewWidget::PickKind::Body &&
+                      sv->selectedSolidIds().size() == 3,
+                  "sizes: the three cabinet pieces are selected as bodies");
+            check(sv->selectionSizesShown() &&
+                      sv->selectionSizesKind() == SelectionSizesRenderer::Kind::Group &&
+                      sv->selectionSizesOutlineShown(),
+                  "sizes: three bodies draw ONE group box with its dashed outline");
+            check(labels() == QStringLiteral("636 mm | 300 mm | 718 mm"),
+                  QStringLiteral("sizes: the group reads its overall world extents, no per-piece "
+                                 "numbers (%1)").arg(labels()));
+            check(status() ==
+                      QStringLiteral("3 bodies selected %1 overall 636 %2 300 %2 718 mm").arg(dash, times),
+                  QStringLiteral("sizes: the status bar says overall (%1)").arg(status()));
+            const int violet = tokenPixels(QStringLiteral("sizes-group-dump.png"), Theme::sizesGroup());
+            const int blue = tokenPixels(QStringLiteral("sizes-group-dump.png"), Theme::sizesOneBody());
+            check(violet > 150 && blue < violet / 10,
+                  QStringLiteral("sizes: the group is drawn in its own token (%1 violet, %2 blue)")
+                      .arg(violet).arg(blue));
+            settle(150);
+            check(!printWindowCapture(&mw, outDir + QStringLiteral("/sizes-group.png")).isNull(),
+                  "sizes: the group is captured");
+        }
+
+        // --- a face or an edge: no selection sizes ------------------------------
+        {
+            frame(gp_Pnt(300.0, 150.0, 9.0), 900.0);
+            QPoint faceAt;
+            TopoDS_Face face;
+            check(pickFaceOf(mw, board, faceAt, face), "sizes: a face of the board is picked");
+            check(sv->selectionKind() == OcctViewWidget::PickKind::Face && !sv->selectionSizesShown(),
+                  "sizes: a face selection draws no selection sizes");
+            check(status() == QStringLiteral("1 body selected"),
+                  QStringLiteral("sizes: and the status bar carries no size for it (%1)").arg(status()));
+            QPoint edgeAt;
+            TopoDS_Edge edge;
+            check(pickEdgeOf(mw, board, edgeAt, edge), "sizes: an edge of the board is picked");
+            check(sv->selectionKind() == OcctViewWidget::PickKind::Edge && !sv->selectionSizesShown(),
+                  "sizes: an edge selection draws no selection sizes");
+            // The edge's own annotation answers to its own rule, untouched by
+            // the sizes: on screen unless the bevel arrow's value chip is
+            // already speaking for this edge (refreshEdgeAnnotation()), which
+            // one selected straight edge on a box is exactly the case of.
+            check(sv->dimension().isShowing() != sv->edgeDimensionSuppressed(),
+                  QStringLiteral("sizes: the edge keeps its own edge dimension rule (showing %1, "
+                                 "suppressed by the bevel arrow %2)")
+                      .arg(sv->dimension().isShowing())
+                      .arg(sv->edgeDimensionSuppressed()));
+            check(sv->selectionSizesLabels()[0].empty() && sv->selectionSizesLabels()[2].empty(),
+                  "sizes: and no selection-size label is left standing beside it");
+        }
+
+        // --- View -> Show sizes off hides them ------------------------------------
+        {
+            frame(gp_Pnt(300.0, 150.0, 9.0), 1500.0);
+            sv->setSelectedSolids({board});
+            settle(150);
+            check(sv->selectionSizesShown(), "sizes: (the board's sizes are back up)");
+            if (sizesAction) sizesAction->setChecked(false);
+            settle(150);
+            check(!sv->selectionSizesShown() && !mw.selectionSizesVisible(),
+                  "sizes: Show sizes off hides them with the body still selected");
+            if (sizesAction) sizesAction->setChecked(true);
+            settle(150);
+            check(sv->selectionSizesShown(), "sizes: and on again brings them back");
+        }
+
+        // --- a live Move drag hides them; the release brings them back ---------
+        {
+            check(sv->hasMoveGizmo(), "sizes: the Move gizmo stands on the selected board");
+            gp_Pnt tip;
+            QPoint grabAt, dragTo;
+            bool aimed = false;
+            if (sv->moveGizmoArmTip(0, tip)) {
+                const gp_Pnt pivot = sv->moveGizmoPivot();
+                const gp_Pnt grabWorld = pivot.Translated(gp_Vec(pivot, tip) * 0.65);
+                aimed = sv->projectToScreen(grabWorld, grabAt) &&
+                        sv->projectToScreen(grabWorld.Translated(gp_Vec(60.0, 0.0, 0.0)), dragTo) &&
+                        sv->moveGizmoAxisAt(grabAt) == 0;
+            }
+            check(aimed, "sizes: a drag on the X arm can be aimed");
+            if (aimed) {
+                const QPointF start(grabAt);
+                QMouseEvent down(QEvent::MouseButtonPress, start, sv->mapToGlobal(start),
+                                 Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QCoreApplication::sendEvent(sv, &down);
+                QPointF last = start;
+                for (int i = 1; i <= 8; ++i) {
+                    last = start + (QPointF(dragTo) - start) * (double(i) / 8.0);
+                    QMouseEvent move(QEvent::MouseMove, last, sv->mapToGlobal(last), Qt::NoButton,
+                                     Qt::LeftButton, Qt::NoModifier);
+                    QCoreApplication::sendEvent(sv, &move);
+                }
+                settle(150);
+                check(sv->moveDragActive() && !sv->selectionSizesShown(),
+                      "sizes: a live Move drag hides the sizes");
+                QMouseEvent up(QEvent::MouseButtonRelease, last, sv->mapToGlobal(last),
+                               Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+                QCoreApplication::sendEvent(sv, &up);
+                settle(250);
+                if (sv->selectionKind() != OcctViewWidget::PickKind::Body) {
+                    sv->setSelectedSolids({board});
+                    settle(150);
+                }
+                check(!sv->moveDragActive() && sv->selectionSizesShown() &&
+                          labels() == QStringLiteral("600 mm | 300 mm | 18 mm"),
+                      QStringLiteral("sizes: the release brings them back, still 600 x 300 x 18 (%1)")
+                          .arg(labels()));
+            }
+        }
+
+        // --- live: an edit with the body still selected updates the numbers ----
+        {
+            sv->setSelectedSolids({board});
+            settle(150);
+            const std::size_t depthBefore = mw.document().undoDepth();
+            const gp_Pnt pivot = ModelingOps::centreOfMass(mw.document().shapeOf(board));
+            gp_Trsf grow;
+            grow.SetScale(pivot, 1.5);
+            check(mw.transformBody(board, grow), "sizes: the board is scaled by 1.5 in place");
+            settle(250);
+            // LIVE: no re-selection in between - the body stays selected across
+            // its own commit, so the numbers must move under an unchanged
+            // selection, which only the revision half of the cache key allows.
+            check(sv->selectionKind() == OcctViewWidget::PickKind::Body &&
+                      sv->selectedSolidIds() == std::vector<int>{board},
+                  "sizes: the scaled board is still the selection");
+            check(sv->selectionSizesShown() &&
+                      labels() == QStringLiteral("900 mm | 450 mm | 27 mm"),
+                  QStringLiteral("sizes: the numbers follow the edit live (%1)").arg(labels()));
+            // The commit's own Note owns the bar now ("Body 01 scaled - ..."),
+            // and the live refresh rightly leaves somebody else's sentence
+            // alone - so this asks only that the NEW size is what it reads.
+            check(status().contains(QStringLiteral("900 %1 450 %1 27 mm").arg(times)),
+                  QStringLiteral("sizes: and the status bar reads the new size (%1)").arg(status()));
+            trigger(mw, QStringLiteral("Undo"));
+            settle(250);
+            check(mw.document().undoDepth() == depthBefore, "sizes: Undo takes the scale back");
+            if (sv->selectionKind() != OcctViewWidget::PickKind::Body) {
+                sv->setSelectedSolids({board});
+                settle(150);
+            }
+            check(labels() == QStringLiteral("600 mm | 300 mm | 18 mm"),
+                  QStringLiteral("sizes: and the numbers follow the undo (%1)").arg(labels()));
+
+            // A pull on the board's top face, then the body again.
+            TopoDS_Face topFace;
+            double bestZ = -1.0e300;
+            for (TopExp_Explorer it(mw.document().shapeOf(board), TopAbs_FACE); it.More(); it.Next()) {
+                GProp_GProps props;
+                BRepGProp::SurfaceProperties(it.Current(), props);
+                if (props.CentreOfMass().Z() > bestZ) {
+                    bestZ = props.CentreOfMass().Z();
+                    topFace = TopoDS::Face(it.Current());
+                }
+            }
+            check(!topFace.IsNull() && mw.pullFaceBy(topFace, 10.0),
+                  "sizes: the board's top face is pulled up 10 mm");
+            settle(250);
+            sv->setSelectedSolids({board});
+            settle(150);
+            check(labels() == QStringLiteral("600 mm | 300 mm | 28 mm"),
+                  QStringLiteral("sizes: pulling a face updates the height (%1)").arg(labels()));
+        }
+
+        // --- the unit ----------------------------------------------------------------
+        {
+            trigger(mw, QStringLiteral("Centimetres"));
+            settle(200);
+            check(labels() == QStringLiteral("60 cm | 30 cm | 2.8 cm"),
+                  QStringLiteral("sizes: switching to centimetres re-reads the labels (%1)").arg(labels()));
+            check(status() == QStringLiteral("1 body selected %1 60 %2 30 %2 2.8 cm").arg(dash, times),
+                  QStringLiteral("sizes: and the status bar (%1)").arg(status()));
+            trigger(mw, QStringLiteral("Millimetres"));
+            settle(200);
+            check(labels() == QStringLiteral("600 mm | 300 mm | 28 mm"),
+                  QStringLiteral("sizes: and back to millimetres (%1)").arg(labels()));
+        }
+
+        // --- render mode hides them; leaving restores them -------------------------
+        {
+            sv->setSelectedSolids({board});
+            settle(150);
+            check(sv->selectionSizesShown(), "sizes: (up before render mode)");
+            QAction* renderAction = action(mw, QStringLiteral("Render mode"));
+            if (renderAction) renderAction->trigger();
+            settle(2500);
+            check(sv->renderModeActive() && !sv->selectionSizesShown(),
+                  "sizes: render mode hides them");
+            // Render mode clears the selection on entry, so the predicate's own
+            // term is only reached by a body selected INSIDE render mode.
+            sv->setSelectedSolids({board});
+            settle(200);
+            check(sv->selectionKind() == OcctViewWidget::PickKind::Body,
+                  "sizes: (a body can be selected inside render mode)");
+            check(!sv->selectionSizesShown(),
+                  "sizes: render mode keeps them hidden even with a body selected inside it");
+            if (renderAction) renderAction->trigger();
+            settle(400);
+            if (sv->selectionKind() != OcctViewWidget::PickKind::Body) {
+                sv->setSelectedSolids({board});
+                settle(150);
+            }
+            check(!sv->renderModeActive() && sv->selectionSizesShown(),
+                  "sizes: leaving render mode restores them");
+        }
+
+        // --- the copy is clean -----------------------------------------------------
+        {
+            QStringList copy;
+            if (sizesAction) copy << sizesAction->text() << sizesAction->toolTip();
+            for (const std::string& l : sv->selectionSizesLabels()) copy << QString::fromStdString(l);
+            copy << status() << AppearancePanel::nameForToken(QStringLiteral("sizesOneBody"))
+                 << AppearancePanel::nameForToken(QStringLiteral("sizesGroup"));
+            bool clean = true;
+            for (const QString& text : copy)
+                for (const QString& word : bannedWords())
+                    if (usesBannedWord(text, word)) {
+                        clean = false;
+                        std::printf("  banned '%s' in \"%s\"\n", qPrintable(word), qPrintable(text));
+                    }
+            check(clean && copy.size() >= 7, "sizes: none of the copy uses a banned word");
+        }
+        mw.close();
+        settle(150);
+    }
+
+    // --- and the Show sizes preference comes back -------------------------------
+    if (blockEnabled("and-the-show-sizes-preference-persists")) {
+        ScopedTestSettings scopedSettings;
+        {
+            QSettings clean;
+            clean.remove(QStringLiteral("showSizes"));
+        }
+        {
+            RequiredTempDir quietLib;
+            MainWindow quiet(nullptr, /*persistProgress=*/false, quietLib.path());
+            quiet.setAttribute(Qt::WA_ShowWithoutActivating);
+            quiet.resize(900, 700);
+            quiet.show();
+            settle(250);
+            QAction* a = action(quiet, QStringLiteral("Show sizes"));
+            if (a) a->setChecked(false);
+            settle(150);
+            check(!QSettings().contains(QStringLiteral("showSizes")),
+                  "show sizes: a persistProgress=false window stores nothing");
+            quiet.close();
+            settle(120);
+        }
+        {
+            RequiredTempDir persistingLib;
+            MainWindow persisting(nullptr, /*persistProgress=*/true, persistingLib.path());
+            persisting.setAttribute(Qt::WA_ShowWithoutActivating);
+            persisting.resize(900, 700);
+            persisting.show();
+            settle(250);
+            QAction* a = action(persisting, QStringLiteral("Show sizes"));
+            check(a != nullptr && a->isChecked(), "show sizes: on for a fresh store");
+            if (a) a->setChecked(false);
+            settle(150);
+            QSettings written;
+            check(written.contains(QStringLiteral("showSizes")) &&
+                      !written.value(QStringLiteral("showSizes")).toBool(),
+                  "show sizes: a persisting window stores the choice");
+            persisting.close();
+            settle(120);
+        }
+        {
+            RequiredTempDir returningLib;
+            MainWindow returning(nullptr, /*persistProgress=*/true, returningLib.path());
+            returning.setAttribute(Qt::WA_ShowWithoutActivating);
+            returning.resize(900, 700);
+            returning.show();
+            settle(250);
+            QAction* a = action(returning, QStringLiteral("Show sizes"));
+            check(a != nullptr && !a->isChecked(),
+                  "show sizes: and a returning window comes back with it off");
+            returning.close();
+            settle(120);
         }
     }
 

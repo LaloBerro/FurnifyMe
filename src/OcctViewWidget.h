@@ -30,6 +30,7 @@
 #include "GridRenderer.h"
 #include "JointRenderer.h"
 #include "PullArrow.h"
+#include "SelectionSizesRenderer.h"
 #include "TransformGizmo.h"
 
 #include <QImage>
@@ -821,6 +822,25 @@ public:
     // and reapplyTheme() for the two paths that must NOT rebuild.
     int jointBuildCount() const { return myJointRenderer.buildCount(); }
 
+    // --- the selection sizes (improvements item 5) -------------------------
+    //
+    // Width, depth and height drawn around a selected body, or one dashed box
+    // and the overall three around a selected group - see
+    // src/ui/SelectionSizesRenderer.h. WHETHER they are up is MainWindow's one
+    // derived predicate (selectionSizesVisible()), and so is the box, which it
+    // measures and caches; this widget keeps the last box it was handed only
+    // so a camera move can re-lay the lines out around it (applyCameraState()
+    // -> updateSelectionSizes()), which is layout and never measurement.
+    // Drawn in sizesZLayer(). Never pickable.
+    void showSelectionSizes(const ModelingOps::MeasuredBox& box, SelectionSizesRenderer::Kind kind);
+    void clearSelectionSizes();
+    bool selectionSizesShown() const { return mySelectionSizes.isShowing(); }
+    bool selectionSizesOutlineShown() const { return mySelectionSizes.outlineShowing(); }
+    SelectionSizesRenderer::Kind selectionSizesKind() const { return mySelectionSizes.kind(); }
+    // Width, depth, height - the label strings actually on screen.
+    std::array<std::string, 3> selectionSizesLabels() const { return mySelectionSizes.labelTexts(); }
+    int selectionSizesBuildCount() const { return mySelectionSizes.buildCount(); }
+
     // --- Mirror plane placement (Milestone 4, Phase 3) ---------------------
     //
     // The RETROACTIVE half of live symmetry - pairing bodies that already
@@ -965,6 +985,9 @@ public:
     // The joints' hardware layer - Immediate, depth cleared, drawn after
     // every normal layer and BEFORE gizmoZLayer(). See initializeViewer().
     Graphic3d_ZLayerId jointsZLayer() const { return myJointsLayer; }
+    // The selection sizes' layer - Immediate, NO depth test, drawn after every
+    // normal layer and before the joints'. See initializeViewer().
+    Graphic3d_ZLayerId sizesZLayer() const { return mySizesLayer; }
     // The grid's layer, forwarded so a test can assert the order of the three
     // without reaching through to the renderer.
     Graphic3d_ZLayerId gridZLayer() const { return myGridRenderer.zLayer(); }
@@ -2391,6 +2414,9 @@ private:
     // The joints' hardware layer - see jointsZLayer(). UNKNOWN if the viewer
     // refused it, in which case JointRenderer falls back to Topmost.
     Graphic3d_ZLayerId myJointsLayer = Graphic3d_ZLayerId_UNKNOWN;
+    // The selection sizes' layer - see sizesZLayer(). UNKNOWN if refused, in
+    // which case the sizes draw in the default layer.
+    Graphic3d_ZLayerId mySizesLayer = Graphic3d_ZLayerId_UNKNOWN;
     Handle(AIS_Shape) myPreview;
     // The direct-modeling channel, kept strictly apart from myPreview above.
     // Milestone 5's cross-body bevel is the reason these are vectors rather
@@ -2422,6 +2448,14 @@ private:
     PullArrowRenderer myBevelArrow;
     // The joints' ghosted hardware - see showJoints().
     JointRenderer myJointRenderer;
+    // The selection sizes - see showSelectionSizes(). The box and kind last
+    // handed in, kept for re-layout on a camera move; mySizesWanted false
+    // means nothing was asked for.
+    SelectionSizesRenderer mySelectionSizes;
+    ModelingOps::MeasuredBox mySizesBox;
+    SelectionSizesRenderer::Kind mySizesKind = SelectionSizesRenderer::Kind::OneBody;
+    bool mySizesWanted = false;
+    void updateSelectionSizes();
 
     std::map<int, Handle(AIS_Shape)> mySolids;
     // The outline items - see displayOutline(). Keyed by the same document id

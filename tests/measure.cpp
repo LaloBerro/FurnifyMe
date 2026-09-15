@@ -71,6 +71,12 @@ int main()
                 "position does not change the reported dimensions");
     }
 
+    // --- formatSize: three lengths in the caller's order -----------------------
+    checkEq(Measure::formatSize(636.0, 300.0, 718.0), "636 \xC3\x97 300 \xC3\x97 718 mm",
+            "formatSize keeps the caller's order - width, depth, height");
+    checkEq(Measure::formatSize(1200.0, 18.5, 0.0), "1,200 \xC3\x97 18.5 \xC3\x97 0 mm",
+            "formatSize rounds each number exactly as formatLength does");
+
     // --- degenerate input -----------------------------------------------------
     {
         const TopoDS_Shape nothing;
@@ -95,6 +101,8 @@ int main()
     check(Measure::formatLength(123456.0) == "12,345.6 cm",
           "thousands are separated in the displayed value");
     check(Measure::unitSuffix() == "cm", "the suffix follows the unit");
+    checkEq(Measure::formatSize(600.0, 300.0, 18.0), "60 \xC3\x97 30 \xC3\x97 1.8 cm",
+            "formatSize follows the unit, once, at the end");
 
     // formatDimensions on the box built above, but now read in centimetres.
     {

@@ -661,6 +661,11 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         myShowNotifications =
             settings.value(QStringLiteral("showNotifications"), true).toBool();
 
+        // View -> Show sizes (improvements item 5). Same guard, same "read
+        // before buildActions()" reason; default ON, because the sizes are
+        // the feature and a user who never opened the View menu should see it.
+        myShowSizes = settings.value(QStringLiteral("showSizes"), true).toBool();
+
         // View -> Show bottom bar. Same guard, same "read before
         // buildActions()" reason as the notifications preference just above:
         // the View entry's initial checked state has to agree with what was
@@ -1060,6 +1065,20 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // reads state and moves AIS objects, so it cannot recurse into
     // updateActions().
     connect(this, &MainWindow::appStateChanged, this, &MainWindow::refreshJoints);
+
+    // The selection sizes follow the same signal, through their one predicate
+    // (selectionSizesVisible()). A body-gizmo drag is the one state change
+    // that emits no appStateChanged until it commits, so its per-move and
+    // release signals re-derive too - the predicate is cheap and show() is
+    // equal-guarded, so a drag costs one clear and then nothing. Only reads
+    // state and moves AIS objects: it cannot recurse into updateActions().
+    connect(this, &MainWindow::appStateChanged, this, &MainWindow::refreshSelectionSizes);
+    connect(myView, &OcctViewWidget::moveDragged, this, [this] { refreshSelectionSizes(); });
+    connect(myView, &OcctViewWidget::rotateDragged, this, [this] { refreshSelectionSizes(); });
+    connect(myView, &OcctViewWidget::scaleDragged, this, [this] { refreshSelectionSizes(); });
+    connect(myView, &OcctViewWidget::moveReleased, this, [this] { refreshSelectionSizes(); });
+    connect(myView, &OcctViewWidget::rotateReleased, this, [this] { refreshSelectionSizes(); });
+    connect(myView, &OcctViewWidget::scaleReleased, this, [this] { refreshSelectionSizes(); });
 
     // Selection syncs both ways.
     connect(myItemsPanel, &ItemsPanel::solidActivated, this,
@@ -1514,6 +1533,17 @@ void MainWindow::buildActions()
                                          "Edit menu and on Ctrl+Z either way."));
     connect(myNotificationsAction, &QAction::toggled, this, &MainWindow::setShowNotifications);
 
+    // Whether a body selection draws its sizes around it (improvements item
+    // 5). Checkable and persisted on the same terms as the preference above,
+    // and deliberately given no shortcut: it is flipped rarely, and a key
+    // taken for it is a key some later tool cannot have.
+    myShowSizesAction = new QAction(tr("Show &sizes"), this);
+    myShowSizesAction->setCheckable(true);
+    myShowSizesAction->setChecked(myShowSizes);
+    myShowSizesAction->setToolTip(tr("Width, depth and height drawn around the selected bodies\n"
+                                     "One body shows its own sides; several show one overall size."));
+    connect(myShowSizesAction, &QAction::toggled, this, &MainWindow::setShowSizes);
+
     // Whether the status bar along the bottom edge is shown at all. Checkable
     // and persisted on the same terms as the preference above; a Failure
     // toast is unrelated chrome (parented to OcctViewWidget, not to the
@@ -1764,6 +1794,7 @@ QMenuBar* MainWindow::buildMenus()
     // is drawn rather than where the camera stands.
     viewMenu->addAction(myOrthographicAction);
     viewMenu->addAction(myGridAction);
+    viewMenu->addAction(myShowSizesAction);
     viewMenu->addSeparator();
     viewMenu->addAction(mySnapAction);
     viewMenu->addAction(myMagnetAction);
@@ -2979,6 +3010,19 @@ void MainWindow::setShowNotifications(bool show)
     // capability. updateActions() is what actually pushes the state onto the
     // toast host - this function only stores it - so the one place that
     // decides what is available stays the one place that says it.
+    updateActions();
+}
+
+void MainWindow::setShowSizes(bool show)
+{
+    myShowSizes = show;
+    if (myPersistProgress) {
+        QSettings settings;
+        settings.setValue(QStringLiteral("showSizes"), show);
+    }
+    // A display preference, not a learned capability - the reasoning
+    // setShowNotifications() gives. updateActions() ends in appStateChanged,
+    // which is what refreshSelectionSizes() re-derives the drawing from.
     updateActions();
 }
 
@@ -4388,6 +4432,9 @@ void MainWindow::resyncView()
     // furniture's hardware over the new one's boards. Dropped here, at the
     // choke point every swap goes through, rather than at each assignment.
     myJointCacheRevision = -1;
+    // The selection-sizes box is keyed on the revision too, for the same
+    // reason: same ids, same revision number, a different furniture's bodies.
+    mySizesCacheRevision = -1;
     // ...and so is the selected joint: joint ids restart per document exactly as
     // body ids do, so an id kept across a swap could name a DIFFERENT furniture's
     // joint - and an undo is the other thing that ends one.
@@ -8005,8 +8052,77 @@ void MainWindow::onSelectionChanged()
 
     updateActions();
 
+    myLastSelectionStatus = selectionStatusText();
+    statusBar()->showMessage(myLastSelectionStatus);
+}
+
+bool MainWindow::selectionSizesVisible() const
+{
+    return myShowSizesAction != nullptr && myShowSizesAction->isChecked() &&
+           !myShowingInitScreen && !mySketching &&
+           myView->selectionKind() == OcctViewWidget::PickKind::Body &&
+           !myView->renderModeActive() && !myView->bodyGizmoDragActive();
+}
+
+ModelingOps::MeasuredBox MainWindow::selectionBox() const
+{
+    if (myView->selectionKind() != OcctViewWidget::PickKind::Body) return {};
+    std::vector<int> ids = myView->selectedSolidIds();
+    std::sort(ids.begin(), ids.end());
+    if (ids == mySizesCacheIds && myDocument.revision() == mySizesCacheRevision)
+        return mySizesCacheBox;
+
+    std::vector<TopoDS_Shape> shapes;
+    shapes.reserve(ids.size());
+    for (int id : ids) shapes.push_back(myDocument.shapeOf(id));
+    mySizesCacheBox = ModelingOps::measuredBox(shapes);
+    mySizesCacheIds = ids;
+    mySizesCacheRevision = myDocument.revision();
+    return mySizesCacheBox;
+}
+
+QString MainWindow::selectionStatusText() const
+{
     const std::size_t count = myView->selectedSolidIds().size();
-    statusBar()->showMessage(count == 0   ? tr("Nothing selected")
-                             : count == 1 ? tr("1 body selected")
-                                          : tr("%1 bodies selected").arg(count));
+    if (count == 0) return tr("Nothing selected");
+    QString text = count == 1 ? tr("1 body selected") : tr("%1 bodies selected").arg(count);
+    if (myView->selectionKind() == OcctViewWidget::PickKind::Body) {
+        const ModelingOps::MeasuredBox box = selectionBox();
+        if (box.ok) {
+            const QString size =
+                QString::fromStdString(Measure::formatSize(box.width, box.depth, box.height));
+            text = count == 1 ? tr("%1 — %2").arg(text, size)
+                              : tr("%1 — overall %2").arg(text, size);
+        }
+    }
+    return text;
+}
+
+void MainWindow::refreshSelectionSizes()
+{
+    if (selectionSizesVisible()) {
+        const ModelingOps::MeasuredBox box = selectionBox();
+        if (box.ok) {
+            myView->showSelectionSizes(box, myView->selectedSolidIds().size() > 1
+                                                ? SelectionSizesRenderer::Kind::Group
+                                                : SelectionSizesRenderer::Kind::OneBody);
+        } else {
+            myView->clearSelectionSizes();
+        }
+    } else {
+        myView->clearSelectionSizes();
+    }
+
+    // The status sentence is live too - a pull, a move, an undo or a unit
+    // switch changes the numbers in it without changing the selection - but
+    // only while the bar is still showing the sentence THIS window put there.
+    // A refusal or a report written since is somebody else's, and stands.
+    if (statusBar() && !myLastSelectionStatus.isEmpty() &&
+        statusBar()->currentMessage() == myLastSelectionStatus) {
+        const QString now = selectionStatusText();
+        if (now != myLastSelectionStatus) {
+            myLastSelectionStatus = now;
+            statusBar()->showMessage(now);
+        }
+    }
 }

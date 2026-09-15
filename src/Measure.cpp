@@ -207,6 +207,11 @@ std::string formatDimensions(const TopoDS_Shape& shape)
     const Extents e = extentsOf(shape);
     if (e.x == 0.0 && e.y == 0.0 && e.z == 0.0) return std::string();
 
+    return formatSize(e.x, e.y, e.z);
+}
+
+std::string formatSize(double first, double second, double third)
+{
     // Each number is formatted by formatLength so the rounding rule lives in
     // exactly one place, then the trailing unit is stripped from all but the
     // last - "340 x 220 x 18 mm", not "340 mm x 220 mm x 18 mm".
@@ -215,8 +220,8 @@ std::string formatDimensions(const TopoDS_Shape& shape)
         return space == std::string::npos ? withUnit : withUnit.substr(0, space);
     };
 
-    return bare(formatLength(e.x)) + " " + kTimes + " " + bare(formatLength(e.y)) +
-           " " + kTimes + " " + formatLength(e.z);
+    return bare(formatLength(first)) + " " + kTimes + " " + bare(formatLength(second)) +
+           " " + kTimes + " " + formatLength(third);
 }
 
 std::string formatFaceExtents(const TopoDS_Shape& face, const gp_Pln& plane)

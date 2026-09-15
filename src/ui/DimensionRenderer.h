@@ -16,6 +16,8 @@
 #include <gp_Dir.hxx>
 #include <gp_Pnt.hxx>
 
+#include <QColor>
+
 #include <string>
 #include <vector>
 
@@ -29,6 +31,20 @@ public:
     // twice would be two spills of the same resource and two chances to
     // resolve different family names.
     static const std::string& fontFamily();
+
+    // HOW the annotation looks - never WHICH case is asking. The edge and the
+    // live sketch segment use the default (accent lines, a filled label with
+    // no border); the selection sizes (improvements item 5, see
+    // SelectionSizesRenderer) set their own token and ask for the picked
+    // mockup's boxed number: a panel-filled box with a border in the same
+    // token, centred ON the dimension line so the number interrupts it the
+    // way a drawing's does. Colours are token ACCESSORS, read at every build,
+    // so a theme edit reaches the next rebuild without a copy going stale.
+    struct Style {
+        QColor (*lineColour)() = nullptr;   // null: Theme::accent()
+        bool boxedLabel = false;            // border in lineColour, centred on the line
+    };
+    void setStyle(const Style& style) { myStyle = style; }
 
     void attach(const Handle(AIS_InteractiveContext)& context);
     // Drops the context and everything built against it, WITHOUT touching the
@@ -91,6 +107,7 @@ private:
     std::vector<Handle(AIS_InteractiveObject)> myObjects;
     Graphic3d_ZLayerId myLayer = Graphic3d_ZLayerId_UNKNOWN;
     std::string myLabelText;
+    Style myStyle;
 
     // The last span shown, kept only so refresh() can rebuild it. Meaningful
     // only while something is showing.

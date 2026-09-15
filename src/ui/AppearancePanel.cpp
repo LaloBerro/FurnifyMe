@@ -144,6 +144,8 @@ QString AppearancePanel::nameForToken(const QString& id)
         {QStringLiteral("gizmoAxisZ"), QObject::tr("Orientation gizmo — Z")},
         {QStringLiteral("highlightHover"), QObject::tr("Hover highlight")},
         {QStringLiteral("highlightSelected"), QObject::tr("Selection highlight")},
+        {QStringLiteral("sizesOneBody"), QObject::tr("Sizes — one body")},
+        {QStringLiteral("sizesGroup"), QObject::tr("Sizes — several bodies")},
         {QStringLiteral("sketchPointMarker"), QObject::tr("Outline points")},
         {QStringLiteral("outlineLineColour"), QObject::tr("Outline lines — colour")},
         {QStringLiteral("chrome"), QObject::tr("Top bar and status bar")},

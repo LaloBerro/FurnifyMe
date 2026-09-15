@@ -46,6 +46,13 @@ std::string formatLength(double millimetres);
 // current display unit too.
 std::string formatDimensions(const TopoDS_Shape& shape);
 
+// "600 x 300 x 18 mm" from three lengths already in hand - the numbers in the
+// order given, U+00D7 between them, the unit once at the end. Each number goes
+// through formatLength. formatDimensions() is this over the world extents; the
+// selection sizes (improvements item 5) call it with width, depth and height
+// measured along a body's own sides, which is why the order is the caller's.
+std::string formatSize(double first, double second, double third);
+
 // "340 x 220 mm" with U+00D7 between the numbers - the size of a flat shape
 // measured IN ITS OWN PLANE, u first then v. Empty string for a null shape or
 // one with no vertices.
