@@ -4167,6 +4167,22 @@ int main(int argc, char* argv[])
               "Close without saving leaves every file on disk byte-identical to the last save");
         check(ask.isFurnitureDirty(),
               "...the discarded move genuinely was never written (the window still reads dirty)");
+        {
+            // The REAL quit, not the substitute hook this block counts:
+            // Qt 6's QCoreApplication::quit() first sends every window a
+            // (non-spontaneous) close event and cancels the quit if any
+            // window ignores it. After Close without saving the furniture
+            // is still dirty, so a closeEvent() that re-asks the question
+            // ignores that event and the app never exits - the user's
+            // "Close without saving does nothing". The answered close must
+            // accept it instead, and must not raise the card again.
+            QCloseEvent quitsClose;
+            QCoreApplication::sendEvent(&ask, &quitsClose);
+            settle(100);
+            check(quitsClose.isAccepted() && !ask.isAskingBeforeClose(),
+                  "...and the close event Qt's own quit() sends next is ACCEPTED, not asked "
+                  "again - otherwise the real app never exits");
+        }
 
         // --- 6 (quit route). a failed save never quits ---------------------------
         QString askFurnitureDir;

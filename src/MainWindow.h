@@ -1548,6 +1548,12 @@ private:
     // disk a moment later would not be a discard. Any new edit moves the
     // revision past it; opening or closing a furniture clears it.
     int myDiscardedRevision = -1;
+    // The revision a quit was ANSWERED at (Save and close, or Close without
+    // saving). Qt 6's quit() sends every window a close event and cancels the
+    // quit if one is ignored - and after a discard the furniture is still
+    // dirty, so closeEvent() would ask again and the app would never exit.
+    // closeEvent() accepts the one close event for this revision instead.
+    int myQuitAnsweredRevision = -1;
 
     // Which outline item Extrude would consume, when the user has chosen one
     // from the drawer. Not the pending face itself and not a cursor into the

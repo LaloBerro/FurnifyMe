@@ -3161,6 +3161,15 @@ void MainWindow::closeEvent(QCloseEvent* event)
         writeRenderSettingsNow();
     }
 
+    // A quit already answered at this revision - see myQuitAnsweredRevision.
+    // This is the close event QCoreApplication::quit() itself sends; asking
+    // again would ignore it and cancel the quit the user just chose.
+    if (myQuitAnsweredRevision >= 0 && myDocument.revision() == myQuitAnsweredRevision) {
+        myQuitAnsweredRevision = -1;
+        event->accept();
+        return;
+    }
+
     // Unsaved changes ASK (improvements item 3, Option A): the in-window
     // card, the same question File -> Close furniture asks, and nothing
     // closes until it is answered - see askBeforeClosing(). "Dirty" is read
@@ -3224,6 +3233,9 @@ void MainWindow::finishClose(CloseRoute route, const QString& statusMessage)
     }
     statusBar()->showMessage(statusMessage);
     updateActions();
+    // Marked BEFORE the quit is requested: the quit's own close event arrives
+    // inside that call.
+    myQuitAnsweredRevision = myDocument.revision();
     // The unwired-window rule closeEvent() keeps, for a close that was
     // answered rather than taken straight away.
     if (!isSignalConnected(QMetaMethod::fromSignal(&MainWindow::quitRequested))) hide();
@@ -3332,6 +3344,7 @@ void MainWindow::showInitScreen()
     applyAutosaveIntervalTimer();
     myAutosaveFailedAtRevision = -1;
     myDiscardedRevision = -1;
+    myQuitAnsweredRevision = -1;
 
     // A FRESH document, not a cleared one: DocumentModel::clear() leaves the
     // undo stack standing, and the next furniture opened must not inherit
@@ -3402,6 +3415,7 @@ bool MainWindow::openFurniture(const QString& id)
     // reasoning for why a stale failure mark must not carry over.
     myAutosaveFailedAtRevision = -1;
     myDiscardedRevision = -1;
+    myQuitAnsweredRevision = -1;
     // The timed modes' periodic timer starts here, on the newly open
     // furniture's own clock - applyAutosaveIntervalTimer() reads the live
     // mode and (no)-ops accordingly for Off/AfterEveryChange.
