@@ -15972,10 +15972,20 @@ int main(int argc, char* argv[])
     // differently coloured app - and the returning-user block below builds a
     // whole second window.
     if (blockEnabled("the-appearance-panel-every-colour-and-the-type")) {
-        QAction* appearance = action(window, QStringLiteral("Appearance..."));
-        check(appearance != nullptr, "there is an Appearance action");
+        // Named Settings since improvements item 10 - the card grew four
+        // tabs and stopped being about appearance alone. Looked up by the
+        // action's own text, so a rename that forgot the menu would fail
+        // here rather than quietly opening nothing.
+        QAction* appearance = action(window, QStringLiteral("Settings..."));
+        check(appearance != nullptr, "there is a Settings action");
+        check(action(window, QStringLiteral("Appearance...")) == nullptr,
+              "and the old Appearance... entry is gone, not left beside it");
         check(appearance != nullptr && appearance->isCheckable(),
-              "and it is checkable, so the panel's visibility can be derived from it");
+              "and it is checkable, so the drawer's visibility can be derived from it");
+        check(appearance != nullptr &&
+                  appearance->shortcut() == QKeySequence(QStringLiteral("Ctrl+Alt+A")),
+              QStringLiteral("and it kept Ctrl+Alt+A (%1)")
+                  .arg(appearance ? appearance->shortcut().toString() : QString()));
 
         // The untouched app IS the shipped app. Both halves of that claim are
         // pinned: the spec compares equal to the default one, and a pixel of
@@ -16198,9 +16208,342 @@ int main(int argc, char* argv[])
                 }
             }
             check(offenders.isEmpty(),
-                  QStringLiteral("no Appearance panel text uses a banned or code word (%1)")
+                  QStringLiteral("no Settings drawer text uses a banned or code word (%1)")
                       .arg(offenders.isEmpty() ? QStringLiteral("none")
                                                : offenders.join(QStringLiteral(", "))));
+        }
+
+        // --- four tabs, and every non-colour row is a MIRROR -----------------
+        //
+        // improvements item 10, mockup pick B. The colours panel grew into
+        // the Settings drawer, and the law every row it grew follows is that
+        // it holds NO state: it reads its QAction's isChecked()/isEnabled()
+        // and it triggers that action back. Both directions are driven here
+        // for every mirrored row there is, because a control that merely
+        // LOOKS right when the drawer opens is exactly what a stale private
+        // copy looks like - the failure this law exists to prevent only
+        // appears after the OTHER surface moves.
+        if (panel && panel->isVisible()) {
+            check(panel->paintedTexts().contains(QStringLiteral("Settings")),
+                  QStringLiteral("the drawer's own title reads Settings (painted: %1)")
+                      .arg(panel->paintedTexts().value(0)));
+
+            // Not a QDialog and holding none - the no-modal law reaches the
+            // drawer that grew four tabs exactly as it reached the card that
+            // had one.
+            check(panel->findChildren<QDialog*>().isEmpty() &&
+                      qobject_cast<QDialog*>(panel) == nullptr,
+                  QStringLiteral("the Settings drawer is not a dialog and holds none (%1)")
+                      .arg(panel->findChildren<QDialog*>().size()));
+
+            struct TabCase {
+                AppearancePanel::Tab tab;
+                const char* word;
+            };
+            const TabCase tabCases[] = {
+                {AppearancePanel::Tab::Colours, "Colours"},
+                {AppearancePanel::Tab::Viewport, "Viewport"},
+                {AppearancePanel::Tab::Units, "Units"},
+                {AppearancePanel::Tab::Files, "Files"},
+            };
+
+            // Real hit-testing through the viewport, the rule for every
+            // control over the GL surface: a tab nobody can click is a tab
+            // that does not exist, however present its pointer is.
+            QStringList unreachableTabs;
+            for (const TabCase& tabCase : tabCases) {
+                QAbstractButton* button = panel->tabButton(tabCase.tab);
+                if (!button) {
+                    unreachableTabs << QString::fromLatin1(tabCase.word) + QStringLiteral(" (none)");
+                    continue;
+                }
+                const QPoint centre = button->mapTo(view, button->rect().center());
+                bool found = false;
+                for (QWidget* w = view->childAt(centre); w; w = w->parentWidget()) {
+                    if (w == button) { found = true; break; }
+                    if (w == view) break;
+                }
+                if (!found) unreachableTabs << QString::fromLatin1(tabCase.word);
+            }
+            check(unreachableTabs.isEmpty(),
+                  QStringLiteral("all four tabs are reachable by a real click (%1)")
+                      .arg(unreachableTabs.isEmpty() ? QStringLiteral("all four")
+                                                     : unreachableTabs.join(QStringLiteral(", "))));
+
+            // Switching tabs SWAPS THE ROWS. Asserted on the pages
+            // themselves - exactly one visible at a time - rather than on a
+            // heading, because a drawer that repainted its title and left
+            // every row on screen would pass a title check and fail a user.
+            QStringList badSwaps;
+            int swapsChecked = 0;
+            for (const TabCase& tabCase : tabCases) {
+                QAbstractButton* button = panel->tabButton(tabCase.tab);
+                if (!button) continue;
+                clickAt(button, button->rect().center());
+                settle(60);
+                ++swapsChecked;
+                if (panel->currentTab() != tabCase.tab)
+                    badSwaps << QString::fromLatin1(tabCase.word) + QStringLiteral(" (not current)");
+                for (const TabCase& other : tabCases) {
+                    QWidget* page = panel->pageFor(other.tab);
+                    if (!page) { badSwaps << QStringLiteral("no page"); continue; }
+                    const bool wanted = other.tab == tabCase.tab;
+                    if (page->isVisible() != wanted)
+                        badSwaps << QStringLiteral("%1 page %2 while %3 is open")
+                                        .arg(QString::fromLatin1(other.word),
+                                             page->isVisible() ? QStringLiteral("shown")
+                                                               : QStringLiteral("hidden"),
+                                             QString::fromLatin1(tabCase.word));
+                }
+                // And the chip itself says which one is open, so the state is
+                // legible and not merely held.
+                if (!button->isEnabled()) badSwaps << QStringLiteral("tab disabled");
+                // One capture per tab, so what the drawer actually looks like
+                // is re-reviewable rather than remembered from a screenshot
+                // somebody took once.
+                renderExact(panel).save(outDir + QStringLiteral("/settings-") +
+                                        QString::fromLatin1(tabCase.word).toLower() +
+                                        QStringLiteral(".png"));
+            }
+            check(swapsChecked == 4 && badSwaps.isEmpty(),
+                  QStringLiteral("clicking each tab shows its own rows and hides the other "
+                                 "three (%1 tabs, %2)")
+                      .arg(swapsChecked)
+                      .arg(badSwaps.isEmpty() ? QStringLiteral("clean")
+                                              : badSwaps.join(QStringLiteral("; "))));
+
+            // The two Theme::Spec rows that MOVED: Grid detail and Gizmo size
+            // describe the grid and the gizmos, so they belong on Viewport.
+            // Checked from both sides - present there, absent from Colours -
+            // because "it is on Viewport" and "it is no longer on Colours"
+            // are two different mistakes.
+            panel->setCurrentTab(AppearancePanel::Tab::Viewport);
+            settle(60);
+            QWidget* viewportPage = panel->pageFor(AppearancePanel::Tab::Viewport);
+            QWidget* coloursPage = panel->pageFor(AppearancePanel::Tab::Colours);
+            check(panel->gridDensityControl() != nullptr && viewportPage &&
+                      viewportPage->isAncestorOf(panel->gridDensityControl()) &&
+                      panel->gridDensityControl()->isVisible(),
+                  "Grid detail sits on the Viewport tab and is on screen there");
+            check(panel->gizmoScaleControl() != nullptr && viewportPage &&
+                      viewportPage->isAncestorOf(panel->gizmoScaleControl()) &&
+                      panel->gizmoScaleControl()->isVisible(),
+                  "and so does Gizmo size");
+            check(coloursPage && panel->gridDensityControl() &&
+                      !coloursPage->isAncestorOf(panel->gridDensityControl()) &&
+                      panel->gizmoScaleControl() &&
+                      !coloursPage->isAncestorOf(panel->gizmoScaleControl()),
+                  "and neither is left behind on Colours");
+
+            // They still write and still persist their Theme::Spec value from
+            // their new tab - the move was a change of place, not of
+            // mechanism.
+            {
+                const double beforeDensity = Theme::gridDensity();
+                const double beforeGizmo = Theme::spec().gizmoScale;
+                panel->gridDensityControl()->setValue(1.7);
+                panel->gizmoScaleControl()->setValue(1.4);
+                settle(80);
+                check(std::fabs(Theme::gridDensity() - 1.7) < 1.0e-9 &&
+                          std::fabs(Theme::spec().gizmoScale - 1.4) < 1.0e-9,
+                      QStringLiteral("an edit on the Viewport tab still lands on Theme "
+                                     "(%1x grid, %2x gizmo)")
+                          .arg(Theme::gridDensity()).arg(Theme::spec().gizmoScale));
+                panel->gridDensityControl()->setValue(beforeDensity);
+                panel->gizmoScaleControl()->setValue(beforeGizmo);
+                settle(80);
+            }
+
+            // --- the mirror, both ways, for every row that has one ----------
+            //
+            // Each case flips the setting from the MENU and asserts the
+            // drawer followed, then flips it from the DRAWER and asserts the
+            // action followed - and the two flips together put the setting
+            // back where it started, so this probe leaves the shared window
+            // exactly as it found it.
+            struct ToggleCase {
+                AppearancePanel::Tab tab;
+                const char* actionText;
+                const char* what;
+            };
+            const ToggleCase toggles[] = {
+                {AppearancePanel::Tab::Viewport, "Grid", "Show the grid"},
+                {AppearancePanel::Tab::Viewport, "Show sizes", "Show sizes"},
+                {AppearancePanel::Tab::Viewport, "Show notifications", "Show notifications"},
+                {AppearancePanel::Tab::Units, "Snap to Grid", "Snap to Grid"},
+                {AppearancePanel::Tab::Units, "Magnet", "Magnet"},
+            };
+            QStringList mirrorFaults;
+            int mirrorsDriven = 0;
+            for (const ToggleCase& toggleCase : toggles) {
+                QAction* act = action(window, QString::fromLatin1(toggleCase.actionText));
+                if (!act) {
+                    mirrorFaults << QStringLiteral("%1: no action")
+                                        .arg(QString::fromLatin1(toggleCase.what));
+                    continue;
+                }
+                panel->setCurrentTab(toggleCase.tab);
+                settle(40);
+                QAbstractButton* control = panel->controlFor(act);
+                if (!control) {
+                    mirrorFaults << QStringLiteral("%1: no control")
+                                        .arg(QString::fromLatin1(toggleCase.what));
+                    continue;
+                }
+                ++mirrorsDriven;
+                const bool before = act->isChecked();
+                // menu -> drawer
+                act->trigger();
+                settle(40);
+                if (act->isChecked() == before)
+                    mirrorFaults << QStringLiteral("%1: the action did not flip")
+                                        .arg(QString::fromLatin1(toggleCase.what));
+                if (panel->controlIsCurrent(control) != act->isChecked())
+                    mirrorFaults << QStringLiteral("%1: the drawer did not follow the menu")
+                                        .arg(QString::fromLatin1(toggleCase.what));
+                // drawer -> menu
+                clickAt(control, control->rect().center());
+                settle(40);
+                if (act->isChecked() != before)
+                    mirrorFaults << QStringLiteral("%1: the menu did not follow the drawer")
+                                        .arg(QString::fromLatin1(toggleCase.what));
+                if (panel->controlIsCurrent(control) != before)
+                    mirrorFaults << QStringLiteral("%1: the control did not settle back")
+                                        .arg(QString::fromLatin1(toggleCase.what));
+            }
+            check(mirrorsDriven == 5 && mirrorFaults.isEmpty(),
+                  QStringLiteral("every on/off row mirrors its action in BOTH directions "
+                                 "(%1 rows driven, %2)")
+                      .arg(mirrorsDriven)
+                      .arg(mirrorFaults.isEmpty() ? QStringLiteral("clean")
+                                                  : mirrorFaults.join(QStringLiteral("; "))));
+
+            // Projection - one checkable action drawn as two chips, so the
+            // user is offered the word "Perspective" the app has no action
+            // for. Both halves read the same isChecked().
+            {
+                panel->setCurrentTab(AppearancePanel::Tab::Viewport);
+                settle(40);
+                QAction* ortho = action(window, QStringLiteral("Orthographic"));
+                QAbstractButton* onChip = ortho ? panel->controlFor(ortho) : nullptr;
+                check(ortho != nullptr && onChip != nullptr,
+                      "the Projection row is built from the Orthographic action");
+                if (ortho && onChip) {
+                    const bool before = ortho->isChecked();
+                    ortho->trigger();
+                    settle(60);
+                    check(panel->controlIsCurrent(onChip) == ortho->isChecked() &&
+                              ortho->isChecked() != before,
+                          QStringLiteral("flipping Projection in the menu moves the drawer's "
+                                         "own chip (%1)")
+                              .arg(ortho->isChecked() ? QStringLiteral("Orthographic")
+                                                      : QStringLiteral("Perspective")));
+                    // Back through the drawer: the chip standing for the
+                    // state we started in.
+                    QAbstractButton* backChip = before ? panel->controlFor(ortho)
+                                                      : panel->alternateControlFor(ortho);
+                    check(backChip != nullptr, "and the other half of the pair is there too");
+                    if (backChip) {
+                        clickAt(backChip, backChip->rect().center());
+                        settle(60);
+                    }
+                    check(ortho->isChecked() == before,
+                          "and clicking the drawer's other half moves the menu back");
+                }
+            }
+
+            // Units - two exclusive actions, one segmented row.
+            {
+                panel->setCurrentTab(AppearancePanel::Tab::Units);
+                settle(40);
+                QAction* mm = action(window, QStringLiteral("Millimetres"));
+                QAction* cm = action(window, QStringLiteral("Centimetres"));
+                QAbstractButton* mmChip = mm ? panel->controlFor(mm) : nullptr;
+                QAbstractButton* cmChip = cm ? panel->controlFor(cm) : nullptr;
+                check(mm && cm && mmChip && cmChip,
+                      "the Units row is built from the two unit actions");
+                if (mm && cm && mmChip && cmChip) {
+                    const bool startedMm = mm->isChecked();
+                    QAction* other = startedMm ? cm : mm;
+                    QAbstractButton* otherChip = startedMm ? cmChip : mmChip;
+                    QAbstractButton* startChip = startedMm ? mmChip : cmChip;
+                    other->trigger();
+                    settle(60);
+                    check(panel->controlIsCurrent(otherChip) && !panel->controlIsCurrent(startChip),
+                          "changing the unit from the menu moves the drawer's chips");
+                    clickAt(startChip, startChip->rect().center());
+                    settle(60);
+                    check((startedMm ? mm : cm)->isChecked() &&
+                              Measure::displayUnit() ==
+                                  (startedMm ? Measure::Unit::Millimetres
+                                             : Measure::Unit::Centimetres),
+                          "and clicking the drawer's chip changes the unit the app formats in");
+                }
+            }
+
+            // Autosave - five exclusive actions, stacked because five chips
+            // in a row of this width would be five unreadable chips.
+            {
+                panel->setCurrentTab(AppearancePanel::Tab::Files);
+                settle(40);
+                const char* modeTexts[] = {"Off", "After every change", "Every minute",
+                                           "Every 5 minutes", "Every 15 minutes"};
+                QVector<QAction*> modes;
+                QVector<QAbstractButton*> chips;
+                for (const char* text : modeTexts) {
+                    QAction* act = action(window, QString::fromLatin1(text));
+                    modes << act;
+                    chips << (act ? panel->controlFor(act) : nullptr);
+                }
+                check(!modes.contains(nullptr) && !chips.contains(nullptr),
+                      QStringLiteral("all five autosave modes have a row in the drawer"));
+                if (!modes.contains(nullptr) && !chips.contains(nullptr)) {
+                    int startedAt = 0;
+                    for (int i = 0; i < modes.size(); ++i)
+                        if (modes[i]->isChecked()) startedAt = i;
+                    const int otherAt = startedAt == 2 ? 4 : 2;
+                    modes[otherAt]->trigger();
+                    settle(60);
+                    int currentChips = 0;
+                    for (int i = 0; i < chips.size(); ++i)
+                        if (panel->controlIsCurrent(chips[i])) ++currentChips;
+                    check(currentChips == 1 && panel->controlIsCurrent(chips[otherAt]),
+                          QStringLiteral("choosing an autosave mode in the File menu moves "
+                                         "exactly one chip in the drawer (%1 current)")
+                              .arg(currentChips));
+                    clickAt(chips[startedAt], chips[startedAt]->rect().center());
+                    settle(60);
+                    check(modes[startedAt]->isChecked() && !modes[otherAt]->isChecked(),
+                          "and choosing one in the drawer moves the File menu's own check");
+                }
+            }
+
+            // A row whose action is unavailable must be unavailable too. The
+            // mirror is of isEnabled() as well as isChecked(), which is what
+            // keeps updateActions() the single place availability is decided
+            // rather than the single place MOST of it is decided.
+            {
+                panel->setCurrentTab(AppearancePanel::Tab::Viewport);
+                settle(40);
+                QAction* grid = action(window, QStringLiteral("Grid"));
+                QAbstractButton* gridChip = grid ? panel->controlFor(grid) : nullptr;
+                check(grid && gridChip && gridChip->isEnabled(),
+                      "the grid row starts available, so the check below is not vacuous");
+                if (grid && gridChip) {
+                    grid->setEnabled(false);
+                    settle(40);
+                    check(!gridChip->isEnabled(),
+                          "a drawer control whose action is unavailable is unavailable too");
+                    grid->setEnabled(true);
+                    settle(40);
+                    check(gridChip->isEnabled(), "and it comes back with the action");
+                }
+            }
+
+            // Left where the rest of this block expects it: the colour rows,
+            // the reset control and the two file buttons all live on Colours.
+            panel->setCurrentTab(AppearancePanel::Tab::Colours);
+            settle(60);
         }
 
         // --- a look, saved to a file and read back (item 7) -------------------
@@ -17157,16 +17500,33 @@ int main(int argc, char* argv[])
                     // own Appearance block above triggers.
                     enterFreshFurniture(persisting);
                     QAction* densityAppearance =
-                        action(persisting, QStringLiteral("Appearance..."));
+                        action(persisting, QStringLiteral("Settings..."));
                     if (densityAppearance && !densityAppearance->isChecked())
                         densityAppearance->trigger();
                     settle(200);
 
                     AppearancePanel* densityPanel = persisting.appearancePanel();
                     OcctViewWidget* densityView = persisting.view();
+                    // Grid detail lives on the VIEWPORT tab since improvements
+                    // item 10 - it describes the grid, not the palette - so
+                    // the tab has to be open for the row to be on screen at
+                    // all. Driven through the real tab button rather than
+                    // setCurrentTab(), so this also exercises the way a user
+                    // gets there.
+                    if (densityPanel) {
+                        QAbstractButton* viewportTab =
+                            densityPanel->tabButton(AppearancePanel::Tab::Viewport);
+                        check(viewportTab != nullptr, "the drawer has a Viewport tab button");
+                        if (viewportTab) {
+                            clickAt(viewportTab, viewportTab->rect().center());
+                            settle(80);
+                        }
+                        check(densityPanel->currentTab() == AppearancePanel::Tab::Viewport,
+                              "and clicking it opens the Viewport tab");
+                    }
                     check(densityPanel != nullptr && densityPanel->isVisible() &&
                               densityPanel->gridDensityControl() != nullptr,
-                          "the panel has a grid-detail row");
+                          "the drawer has a grid-detail row");
                     if (densityPanel && densityPanel->gridDensityControl() && densityView) {
                         check(densityPanel->gridDensityControl()->isVisible(),
                               "and it is actually reachable, not merely constructed");
@@ -17262,6 +17622,36 @@ int main(int argc, char* argv[])
                                                      densityReadBack) &&
                                   std::fabs(densityReadBack.gridDensity - 2.0) < 1.0e-9,
                               "and the debounced write stores the density that survived");
+
+                        // Gizmo size moved to this same tab and had to keep
+                        // the same mechanism - so it is asked the same
+                        // question, through the drawer's own control rather
+                        // than through Theme, and under the same scoped
+                        // store. Both halves matter: a row that MOVED and
+                        // stopped persisting would still look right until
+                        // the next launch.
+                        check(densityPanel->gizmoScaleControl() != nullptr &&
+                                  densityPanel->gizmoScaleControl()->isVisible(),
+                              "Gizmo size is on this tab too, and on screen");
+                        if (densityPanel->gizmoScaleControl()) {
+                            densityPanel->gizmoScaleControl()->setValue(1.6);
+                            settle(MainWindow::kAppearanceWriteMs * 2);
+                            QSettings writtenGizmo;
+                            Theme::Spec gizmoReadBack;
+                            check(std::fabs(Theme::spec().gizmoScale - 1.6) < 1.0e-9,
+                                  QStringLiteral("an edit through the Gizmo size row lands "
+                                                 "on Theme (%1x)")
+                                      .arg(Theme::spec().gizmoScale));
+                            check(Theme::deserializeSpec(
+                                      writtenGizmo.value(QStringLiteral("appearance")).toString(),
+                                      gizmoReadBack) &&
+                                      std::fabs(gizmoReadBack.gizmoScale - 1.6) < 1.0e-9,
+                                  QStringLiteral("and the same debounce stores it (%1x)")
+                                      .arg(gizmoReadBack.gizmoScale));
+                            densityPanel->gizmoScaleControl()->setValue(
+                                Theme::defaultSpec().gizmoScale);
+                            settle(MainWindow::kAppearanceWriteMs * 2);
+                        }
 
                         // Back to the default - Theme is process-global state,
                         // and nothing past this point should inherit an edit
@@ -25196,7 +25586,7 @@ int main(int argc, char* argv[])
 
         enterFreshFurniture(probe);
 
-        QAction* appearanceAction = action(probe, QStringLiteral("Appearance..."));
+        QAction* appearanceAction = action(probe, QStringLiteral("Settings..."));
         check(appearanceAction != nullptr, "there is an Appearance action");
         if (appearanceAction && !appearanceAction->isChecked()) appearanceAction->trigger();
         settle(200);

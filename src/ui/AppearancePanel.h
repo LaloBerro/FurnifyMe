@@ -1,5 +1,53 @@
 #pragma once
-// Every colour token and the type scale, opened to the user.
+// SETTINGS - the app's one settings drawer, in four tabs.
+//
+// THE CLASS AND THE FILE ARE STILL CALLED AppearancePanel, and that is a
+// deliberate keep rather than an oversight. This card began as the colours-
+// and-fonts panel and grew (improvements item 10, mockup pick B) into the
+// drawer that also holds the viewport switches, the unit and the autosave
+// mode; renaming the type would churn MainWindow, gui_smoke and CMake for
+// roughly a hundred references and buy nothing a reader of this comment does
+// not already have. What the class IS, is the Settings drawer: the title says
+// Settings, the action says Settings..., and nothing in here claims to be
+// about appearance alone.
+//
+// Four tabs, in this order, and the split is by MEANING rather than by
+// mechanism:
+//
+//   Colours  - every colour token, the type scale, the three line widths,
+//              the font, Save/Load colours and Reset. Theme::Spec values.
+//   Viewport - the grid switch, Grid detail, Show sizes, Projection,
+//              Gizmo size, Show notifications. A mix of QActions and two
+//              Theme::Spec values, which is the point: Grid detail and Gizmo
+//              size are SPEC values that belong beside the grid and the
+//              gizmos they describe, not beside the colour swatches they
+//              merely share a persistence mechanism with.
+//   Units    - Millimetres/Centimetres, Snap to Grid, Magnet.
+//   Files    - Autosave (Off / After every change / Every minute / 5 / 15).
+//
+// THE LAW EVERY NON-COLOUR ROW FOLLOWS: a control here is built from the
+// window's existing QAction and MIRRORS it. It holds no checked state of its
+// own - addToggleRow()/addChoiceRow() read isChecked() and isEnabled() off
+// the action on every QAction::changed, and a click on the control triggers
+// the action rather than writing anything. So the View menu, the File menu
+// and this drawer cannot disagree, updateActions() stays the single place
+// availability is decided, and the vocabulary sweep keeps covering these
+// settings through the actions it already finds by text. A row added here
+// that kept its own bool would be a second source of truth for a setting the
+// menus also show - which is the oldest mistake this shell has a rule
+// against.
+//
+// The Theme::Spec rows keep the mechanism they already had, unchanged: an
+// edit writes Theme::setSpec(), the notifier broadcasts, applyTheme()
+// re-reads every control, and MainWindow's 400 ms debounce stores it. No
+// widget caches a colour across the broadcast.
+//
+// WHICH TAB IS OPEN IS SESSION STATE, held in myTab and nowhere else. It is
+// deliberately not persisted: it is not a Theme::Spec value, so storing it
+// would mean a second persistence mechanism on this card for something that
+// is not a preference at all but where the user happened to be looking last
+// time. Reopening on Colours is also the honest default - it is the tab this
+// drawer has always opened on.
 //
 // A floating card of the Theme::paintSurface() family, parented to the
 // viewport and anchored by ViewportOverlay exactly as the items drawer is -
@@ -33,17 +81,28 @@
 // the whole point is that the user watches their model re-dress while they
 // choose, which they cannot do if they cannot orbit it.
 #include <QColor>
+#include <QHash>
 #include <QString>
 #include <QStringList>
+#include <QVector>
 #include <QWidget>
 
 #include <vector>
 
+class QAbstractButton;
+class QAction;
+// Both live in AppearancePanel.cpp: Swatch is one token's colour as a button,
+// OptionChip is the small checkable-looking chip the tab bar, the toggle
+// pills and the choice rows are all built from.
+class Swatch;
+class OptionChip;
 class QComboBox;
+class QHBoxLayout;
 class QColorDialog;
 class QDoubleSpinBox;
 class QLabel;
 class QSpinBox;
+class QStackedWidget;
 class QVBoxLayout;
 class QEvent;
 class QObject;
@@ -52,7 +111,69 @@ class AppearancePanel : public QWidget {
     Q_OBJECT
 
 public:
+    // The four tabs, in the order they are drawn. Used as an index into
+    // myPages, so the order of the enumerators IS the order on screen.
+    enum class Tab { Colours = 0, Viewport = 1, Units = 2, Files = 3 };
+    static constexpr int kTabCount = 4;
+
     explicit AppearancePanel(QWidget* parent = nullptr);
+
+    // --- the mirrored rows --------------------------------------------------
+    //
+    // Both take an action the WINDOW already owns and build a control that is
+    // a view of it: enabled follows isEnabled(), current follows isChecked(),
+    // and a click calls trigger(). Neither stores a bool. Called by
+    // MainWindow::buildOverlay() once, after the actions exist.
+    //
+    // addToggleRow() is the on/off pill - one checkable action.
+    // addChoiceRow() is the segmented pair or stack - a set of mutually
+    // exclusive checkable actions, `stacked` laying them out one per line for
+    // a set too wide to sit in a row (autosave's five modes).
+    void addToggleRow(Tab tab, const QString& label, QAction* action);
+    void addChoiceRow(Tab tab, const QString& label, const QVector<QAction*>& options,
+                      const QStringList& optionLabels, bool stacked = false);
+    // The two-state segmented row built from ONE checkable action: the left
+    // chip is the action unchecked, the right chip is it checked. Projection
+    // is the case - the app has an Orthographic action and no Perspective
+    // one, because perspective is simply Orthographic off - and a row that
+    // painted only the word "Orthographic" beside a pill would make the user
+    // work that out. Still a pure mirror: both chips read isChecked().
+    void addBinaryChoiceRow(Tab tab, const QString& label, QAction* action,
+                            const QString& offLabel, const QString& onLabel);
+
+    // --- this drawer's OWN Theme::Spec rows, placed by the caller -----------
+    //
+    // Grid detail and Gizmo size are Theme::Spec values that belong beside
+    // the grid and the gizmos they describe rather than beside the colour
+    // swatches they merely share a persistence mechanism with. They are built
+    // here, not in the constructor, so MainWindow can interleave them with
+    // the mirrored rows and the Viewport tab reads in the order the mockup
+    // set. Persisted exactly as before - Theme::setSpec() and MainWindow's
+    // 400 ms debounce, untouched by the move.
+    void addGridDetailRow(Tab tab);
+    void addGizmoSizeRow(Tab tab);
+
+    // Which tab is showing. Session state - see the header comment.
+    Tab currentTab() const { return myTab; }
+    void setCurrentTab(Tab tab);
+    // The tab's own button, for a childAt() hit test and for driving a real
+    // click the way a user does.
+    QAbstractButton* tabButton(Tab tab) const;
+    // The page a tab shows. Exposed so the suite can assert that switching
+    // tabs actually swaps the rows rather than merely repainting a heading.
+    QWidget* pageFor(Tab tab) const;
+    // The control mirroring `action`, or null for an action this drawer has
+    // no row for. One lookup for both kinds of row: a toggle's pill and a
+    // choice's option chip are both "the control that stands for this action".
+    QAbstractButton* controlFor(QAction* action) const;
+    // The OFF half of a binary choice row - the chip that is current exactly
+    // when `action` is not checked. Null for anything else.
+    QAbstractButton* alternateControlFor(QAction* action) const;
+    // What a mirrored control is actually PAINTING, read off the control's
+    // own state rather than out of the action again. That distinction is the
+    // whole point of the mirror law: a probe that asked the action twice
+    // would pass against a control that had silently gone stale.
+    bool controlIsCurrent(const QAbstractButton* control) const;
 
     // The panel's own edit path. A swatch click, the size spinner, the family
     // combo and the reset button all land here, and so does the suite - so
@@ -185,6 +306,29 @@ private:
         class Swatch* swatch = nullptr;
     };
 
+    // One mirrored control and the action it is a view of. `option` is the
+    // action a choice chip stands for; for a toggle it is the same action the
+    // pill watches. Nothing here holds a checked state - see syncMirrors().
+    struct Mirror {
+        QAction* action = nullptr;
+        OptionChip* control = nullptr;
+    };
+
+    // Puts one built row at the bottom of a tab's page - before the trailing
+    // stretch on the three pages that have one, so a short tab keeps its rows
+    // against the top edge however many are added later.
+    void appendRow(Tab tab, QWidget* row);
+    // A row shell: a transparent container, a left-aligned name label that
+    // goes into paintedTexts(), and the horizontal layout to put the control
+    // in. One builder, so a mirrored row and a spec row cannot drift apart
+    // in spacing or in what the sweep can see.
+    QHBoxLayout* makeRow(Tab tab, const QString& key, const QString& label);
+    // Re-reads every mirrored control from its action - checked and enabled
+    // both. Hooked to each action's QAction::changed, which Qt emits for a
+    // setChecked(), a setEnabled() and a text change alike, so there is no
+    // list of signals to keep in step with updateActions().
+    void syncMirrors();
+
     void openColourDialog(const QString& id);
     // The two buttons' own handlers: a native file dialog, then the matching
     // function above. Native dialogs are the one modal surface this app does
@@ -198,6 +342,21 @@ private:
     void applyTheme();
 
     std::vector<Row> myRows;
+    std::vector<Mirror> myMirrors;
+    // The OFF half of a binary choice row - a chip that is current exactly
+    // when its action is NOT checked. Kept apart from myMirrors so the
+    // ordinary "current == isChecked()" rule stays one line rather than
+    // growing a polarity flag every other row would have to carry.
+    QHash<OptionChip*, QAction*> myOffMirrors;
+    // Every label this drawer paints that is not already a member below -
+    // the mirrored rows' names and the tab buttons' words. Collected as they
+    // are built so paintedTexts() cannot fall behind a row somebody adds.
+    QStringList myExtraTexts;
+    QStackedWidget* myPages = nullptr;
+    OptionChip* myTabButtons[kTabCount] = {};
+    QWidget* myTabPages[kTabCount] = {};
+    QVBoxLayout* myPageLayouts[kTabCount] = {};
+    Tab myTab = Tab::Colours;
     QLabel* myTitle = nullptr;
     QLabel* mySizeLabel = nullptr;
     QLabel* myGridDensityLabel = nullptr;

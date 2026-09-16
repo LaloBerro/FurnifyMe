@@ -1450,7 +1450,7 @@ void MainWindow::buildActions()
     // straight into ItemsPanel rather than through this action (see
     // buildOverlay()'s connection to renameCommitted()).
     // No ellipsis: the convention elsewhere in this menu is that "..."
-    // promises a further dialog (Appearance..., Save version...), and this
+    // promises a further dialog (Settings..., Save version...), and this
     // app has none - Rename opens an inline edit directly over the row, the
     // same immediate contract Delete Selected's own unadorned label keeps.
     myRenameAction = new QAction(tr("Re&name"), this);
@@ -1520,10 +1520,16 @@ void MainWindow::buildActions()
     // user's hand lives on. Checkable, because the panel's visibility is
     // DERIVED from it in both directions - the same contract the items drawer
     // has, and the reason nothing else in this file shows or hides the panel.
-    myAppearanceAction = new QAction(tr("Appearance..."), this);
+    // Named Settings since improvements item 10: the card it shows grew from
+    // the colours-and-fonts panel into the drawer that also holds the
+    // viewport switches, the unit and the autosave mode. Ctrl+Alt+A is kept -
+    // it is the shortcut people already have in their hands, and a settings
+    // drawer is exactly what they were opening with it.
+    myAppearanceAction = new QAction(tr("Settings..."), this);
     myAppearanceAction->setCheckable(true);
     myAppearanceAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Alt+A")));
-    myAppearanceAction->setToolTip(tr("Choose the app's colours and text size (Ctrl+Alt+A)\n"
+    myAppearanceAction->setToolTip(tr("Colours, the viewport, units and autosave "
+                                      "(Ctrl+Alt+A)\n"
                                       "Every change is applied as you make it."));
 
     // Whether the app says so when something goes RIGHT. Checkable and
@@ -2135,7 +2141,7 @@ void MainWindow::buildOverlay()
             [this] { myUnitChip->setTextGlyph(QString::fromStdString(Measure::unitSuffix())); });
     myOverlay->addWidget(viewControls, ViewportOverlay::Anchor::TopRight);
 
-    // The Appearance card, anchored at the same corner so relayout() stacks
+    // The Settings card, anchored at the same corner so relayout() stacks
     // it one gap under the gizmo - see AppearancePanel.h for why TopRight and
     // not RightCenter. Hidden BEFORE it is added: ViewportOverlay::addWidget()
     // shows whatever it anchors unless the widget has already made an
@@ -2144,6 +2150,50 @@ void MainWindow::buildOverlay()
     myAppearancePanel = new AppearancePanel(myView);
     myAppearancePanel->hide();
     myOverlay->addWidget(myAppearancePanel, ViewportOverlay::Anchor::TopRight);
+
+    // --- the Settings drawer's other three tabs (improvements item 10) -----
+    //
+    // Composed HERE, in call order, because the Viewport tab interleaves two
+    // of the drawer's own Theme::Spec rows with four rows that mirror actions
+    // this window owns - and the order the mockup set is Grid, Grid detail,
+    // Show sizes, Projection, Gizmo size, Notifications.
+    //
+    // EVERY row below is a mirror and nothing else. The drawer is handed the
+    // QAction; it reads isChecked()/isEnabled() off it and triggers it back.
+    // There is no second copy of any of these settings, so the View menu, the
+    // File menu and this drawer cannot disagree, and updateActions() stays
+    // the single place that decides what is available.
+    using SettingsTab = AppearancePanel::Tab;
+    myAppearancePanel->addToggleRow(SettingsTab::Viewport, tr("Show the grid"),
+                                    myGridAction);
+    myAppearancePanel->addGridDetailRow(SettingsTab::Viewport);
+    myAppearancePanel->addToggleRow(SettingsTab::Viewport,
+                                    tr("Show sizes around a selection"), myShowSizesAction);
+    myAppearancePanel->addBinaryChoiceRow(SettingsTab::Viewport, tr("Projection"),
+                                          myOrthographicAction, tr("Perspective"),
+                                          tr("Orthographic"));
+    myAppearancePanel->addGizmoSizeRow(SettingsTab::Viewport);
+    myAppearancePanel->addToggleRow(SettingsTab::Viewport, tr("Show notifications"),
+                                    myNotificationsAction);
+
+    myAppearancePanel->addChoiceRow(SettingsTab::Units, tr("Sizes in"),
+                                    {myUnitsMillimetresAction, myUnitsCentimetresAction},
+                                    {tr("Millimetres"), tr("Centimetres")});
+    myAppearancePanel->addToggleRow(SettingsTab::Units, tr("Snap to Grid"), mySnapAction);
+    myAppearancePanel->addToggleRow(SettingsTab::Units, tr("Magnet"), myMagnetAction);
+
+    // Autosave's five modes stacked rather than segmented: five chips in a
+    // 272-pixel row would be five unreadable chips.
+    myAppearancePanel->addChoiceRow(
+        SettingsTab::Files, tr("Autosave"),
+        {myAutosaveModeActions[static_cast<int>(AutosaveMode::Off)],
+         myAutosaveModeActions[static_cast<int>(AutosaveMode::AfterEveryChange)],
+         myAutosaveModeActions[static_cast<int>(AutosaveMode::EveryMinute)],
+         myAutosaveModeActions[static_cast<int>(AutosaveMode::Every5Minutes)],
+         myAutosaveModeActions[static_cast<int>(AutosaveMode::Every15Minutes)]},
+        {tr("Off"), tr("After every change"), tr("Every minute"), tr("Every 5 minutes"),
+         tr("Every 15 minutes")},
+        /*stacked=*/true);
 
     // The render settings card (Task 7.2, Option A - "one floating card"),
     // anchored at the SAME TopRight slot the gizmo and the Appearance card

@@ -18,8 +18,10 @@
 #include <QPainter>
 #include <QPainterPath>
 #include <QPushButton>
+#include <QAction>
 #include <QScrollArea>
 #include <QSpinBox>
+#include <QStackedWidget>
 #include <QVBoxLayout>
 #include <QWheelEvent>
 
@@ -47,6 +49,16 @@ constexpr int kPad = 12;
 constexpr int kSwatchWidth = 46;
 constexpr int kSwatchHeight = 18;
 constexpr int kSwatchRadius = 4;
+
+// The tab bar's own rhythm and the two chip shapes below it. All three are
+// sized in logical pixels rather than derived from the type scale on purpose:
+// a switch is a fixed piece of furniture, and a pill that grew with the font
+// would push the four tabs onto two lines at the top of the scale.
+constexpr int kTabHeight = 24;
+constexpr int kSegHeight = 22;
+constexpr int kSwitchWidth = 38;
+constexpr int kSwitchHeight = 20;
+constexpr int kSwitchKnob = 14;
 
 // A colour file is a spec and nothing else - the same string QSettings holds -
 // so there is no size at which reading more of one is useful. A cap rather
@@ -125,6 +137,138 @@ private:
     QColor myColour;
 };
 
+// --- OptionChip --------------------------------------------------------------
+
+// The one control class behind the tab bar, every on/off row and every
+// choice row. Three drawings, one contract: it HOLDS NOTHING. `myCurrent` is
+// pushed in by whoever owns the truth - setCurrentTab() for a tab,
+// syncMirrors() reading QAction::isChecked() for a row - and a click emits
+// clicked() and changes no pixel by itself. That is ToolChip's own
+// action-mirroring discipline at drawer scale, and it is why the View menu
+// and this drawer cannot disagree: there is no second copy of the state to
+// disagree with.
+class OptionChip : public QAbstractButton {
+public:
+    enum class Style { Tab, Segment, Switch };
+
+    OptionChip(Style style, const QString& text, QWidget* parent)
+        : QAbstractButton(parent), myStyle(style)
+    {
+        setText(text);
+        setCursor(Qt::PointingHandCursor);
+        setFocusPolicy(Qt::StrongFocus);
+        // Every interactive control over the GL surface carries it - a press
+        // that reached the viewport underneath would re-pick the model behind
+        // this card. See CLAUDE.md's "Widgets over the viewport".
+        setAttribute(Qt::WA_NoMousePropagation);
+        setAttribute(Qt::WA_Hover, true);
+        Theme::makeSurfaceTransparent(this);
+        if (myStyle == Style::Switch)
+            setFixedSize(kSwitchWidth, kSwitchHeight);
+        else
+            setFixedHeight(myStyle == Style::Tab ? kTabHeight : kSegHeight);
+    }
+
+    void setCurrent(bool current)
+    {
+        if (myCurrent == current) return;
+        myCurrent = current;
+        update();
+    }
+    bool current() const { return myCurrent; }
+
+    QSize sizeHint() const override
+    {
+        if (myStyle == Style::Switch) return QSize(kSwitchWidth, kSwitchHeight);
+        const QFontMetrics fm(Theme::labelFont());
+        const int height = myStyle == Style::Tab ? kTabHeight : kSegHeight;
+        return QSize(fm.horizontalAdvance(text()) + (myStyle == Style::Tab ? 14 : 18), height);
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override
+    {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        const QRectF body(rect());
+        const bool off = !isEnabled();
+
+        if (myStyle == Style::Switch) {
+            // A pill and a knob. The knob's travel IS the state, so a
+            // screenshot of this card says which way every switch is set
+            // without reading a word.
+            const qreal radius = body.height() / 2.0;
+            QPainterPath path;
+            path.addRoundedRect(body, radius, radius);
+            QColor fill = myCurrent ? Theme::accent() : Theme::chip();
+            if (off) fill = Theme::chip();
+            else if (underMouse() && !myCurrent) fill = Theme::chipHover();
+            painter.fillPath(path, fill);
+            Theme::drawCrispBorder(painter, body, off ? Theme::border() : Theme::border(),
+                                   radius);
+            const qreal inset = (body.height() - kSwitchKnob) / 2.0;
+            const qreal x = myCurrent ? body.width() - kSwitchKnob - inset : inset;
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(off ? Theme::textDisabled() : Theme::text());
+            painter.drawEllipse(QRectF(x, inset, kSwitchKnob, kSwitchKnob));
+            paintFocus(painter, body, radius);
+            return;
+        }
+
+        if (myStyle == Style::Tab) {
+            // No box: a filled ground under the current tab and a 2px accent
+            // rule along its bottom edge, which is what the mockup draws and
+            // what keeps four tabs legible in 272 logical pixels.
+            if (myCurrent) {
+                QPainterPath path;
+                path.addRoundedRect(body.adjusted(0, 0, 0, -2), 6, 6);
+                painter.fillPath(path, Theme::chipActive());
+                painter.fillRect(QRectF(body.left() + 2, body.bottom() - 2,
+                                        body.width() - 4, 2),
+                                 Theme::accent());
+            } else if (underMouse() && !off) {
+                QPainterPath path;
+                path.addRoundedRect(body.adjusted(0, 0, 0, -2), 6, 6);
+                painter.fillPath(path, Theme::chipHover());
+            }
+            painter.setFont(Theme::labelFont());
+            painter.setPen(off ? Theme::textDisabled()
+                               : (myCurrent ? Theme::text() : Theme::textMuted()));
+            painter.drawText(rect(), Qt::AlignCenter, text());
+            paintFocus(painter, body.adjusted(0, 0, 0, -2), 6);
+            return;
+        }
+
+        QPainterPath path;
+        path.addRoundedRect(body, 6, 6);
+        QColor fill = Theme::chip();
+        if (myCurrent)                    fill = Theme::chipActive();
+        else if (underMouse() && !off)    fill = Theme::chipHover();
+        painter.fillPath(path, fill);
+        Theme::drawCrispBorder(painter, body,
+                               myCurrent && !off ? Theme::accent() : Theme::border(), 6,
+                               myCurrent && !off ? 1.6 : 1.0);
+        painter.setFont(Theme::labelFont());
+        painter.setPen(off ? Theme::textDisabled()
+                           : (myCurrent ? Theme::text() : Theme::textMuted()));
+        painter.drawText(rect(), Qt::AlignCenter, text());
+        paintFocus(painter, body, 6);
+    }
+
+private:
+    void paintFocus(QPainter& painter, const QRectF& body, qreal radius)
+    {
+        if (this != window()->focusWidget()) return;
+        const bool active = window()->isActiveWindow();
+        Theme::drawCrispBorder(painter, body.adjusted(2.0, 2.0, -2.0, -2.0),
+                               active ? Theme::focusRing() : Theme::focusRingMuted(),
+                               std::max(0.0, radius - 2.0), active ? 2.0 : 1.5);
+    }
+
+    Style myStyle;
+    bool myCurrent = false;
+};
+
 // --- AppearancePanel ---------------------------------------------------------
 
 QString AppearancePanel::nameForToken(const QString& id)
@@ -192,11 +336,62 @@ AppearancePanel::AppearancePanel(QWidget* parent)
     outer->setContentsMargins(kPad, kPad, kPad, kPad);
     outer->setSpacing(8);
 
-    myTitle = new QLabel(tr("Appearance"), this);
+    myTitle = new QLabel(tr("Settings"), this);
     outer->addWidget(myTitle);
 
+    // --- the tab bar --------------------------------------------------------
+    //
+    // Four chips across the top, each one a view of myTab and nothing else -
+    // a click calls setCurrentTab(), which is the single place the current
+    // tab is decided and the single place every chip is re-synced from it.
+    auto* tabRow = new QWidget(this);
+    makeTransparent(tabRow, QStringLiteral("settingsTabRow"));
+    auto* tabLine = new QHBoxLayout(tabRow);
+    tabLine->setContentsMargins(0, 0, 0, 0);
+    tabLine->setSpacing(3);
+    const QString tabNames[kTabCount] = {tr("Colours"), tr("Viewport"), tr("Units"),
+                                         tr("Files")};
+    const QString tabTips[kTabCount] = {
+        tr("Every colour the app draws with, and how big its text is"),
+        tr("What the 3D area shows around your furniture"),
+        tr("The unit sizes are written in, and what the cursor snaps to"),
+        tr("How often this furniture is written to disk")};
+    for (int i = 0; i < kTabCount; ++i) {
+        auto* chip = new OptionChip(OptionChip::Style::Tab, tabNames[i], tabRow);
+        chip->setToolTip(tabTips[i]);
+        const Tab tab = static_cast<Tab>(i);
+        connect(chip, &QAbstractButton::clicked, this, [this, tab] { setCurrentTab(tab); });
+        tabLine->addWidget(chip, 1);
+        myTabButtons[i] = chip;
+        myExtraTexts << tabNames[i];
+    }
+    outer->addWidget(tabRow);
+
+    // --- the four pages -----------------------------------------------------
+    myPages = new QStackedWidget(this);
+    makeTransparent(myPages, QStringLiteral("settingsPages"));
+    for (int i = 0; i < kTabCount; ++i) {
+        auto* page = new QWidget(myPages);
+        makeTransparent(page, QStringLiteral("settingsPage%1").arg(i));
+        auto* box = new QVBoxLayout(page);
+        box->setContentsMargins(0, 0, 0, 0);
+        box->setSpacing(6);
+        // Every page but Colours ends in a stretch, so a short tab's rows sit
+        // at the top rather than spreading down a 380px card. appendRow()
+        // inserts BEFORE it; Colours has no stretch because its scroll area
+        // already carries one.
+        if (i != static_cast<int>(Tab::Colours)) box->addStretch(1);
+        myTabPages[i] = page;
+        myPageLayouts[i] = box;
+        myPages->addWidget(page);
+    }
+    outer->addWidget(myPages, 1);
+
+    QWidget* coloursPage = myTabPages[static_cast<int>(Tab::Colours)];
+    QVBoxLayout* colours = myPageLayouts[static_cast<int>(Tab::Colours)];
+
     // --- the scrolling list of colour rows ---------------------------------
-    auto* scroll = new QScrollArea(this);
+    auto* scroll = new QScrollArea(coloursPage);
     scroll->setWidgetResizable(true);
     scroll->setFrameShape(QFrame::NoFrame);
     scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -239,10 +434,10 @@ AppearancePanel::AppearancePanel(QWidget* parent)
     }
     list->addStretch(1);
     scroll->setWidget(content);
-    outer->addWidget(scroll, 1);
+    colours->addWidget(scroll, 1);
 
     // --- the type controls --------------------------------------------------
-    auto* sizeRow = new QWidget(this);
+    auto* sizeRow = new QWidget(coloursPage);
     makeTransparent(sizeRow, QStringLiteral("appearanceSizeRow"));
     auto* sizeLine = new QHBoxLayout(sizeRow);
     sizeLine->setContentsMargins(0, 0, 0, 0);
@@ -260,44 +455,13 @@ AppearancePanel::AppearancePanel(QWidget* parent)
         setBaseSize(pt);
     });
     sizeLine->addWidget(mySize);
-    outer->addWidget(sizeRow);
-
-    // Beside Text size, the other spinbox-driven token: the work-plane
-    // grid's own density. A QDoubleSpinBox rather than the stroke row's
-    // integer QSpinBox - the spec field is a multiplier, not a pixel count,
-    // and Theme::kMinGridDensity..kMaxGridDensity is a sub-1.0 to low-single-
-    // digits band where whole numbers would waste most of the range. The
-    // suffix is a bare "x" rather than anything Measure would format: this
-    // is not a length, and routing it through Measure would be exactly the
-    // "hand-format at the call site" mistake CLAUDE.md's numbers rule warns
-    // against for lengths, applied to a value that was never a length at all.
-    auto* gridDensityRow = new QWidget(this);
-    makeTransparent(gridDensityRow, QStringLiteral("appearanceGridDensityRow"));
-    auto* gridDensityLine = new QHBoxLayout(gridDensityRow);
-    gridDensityLine->setContentsMargins(0, 0, 0, 0);
-    gridDensityLine->setSpacing(8);
-    myGridDensityLabel = new QLabel(tr("Grid detail"), gridDensityRow);
-    makeTransparent(myGridDensityLabel, QStringLiteral("appearanceGridDensityLabel"));
-    gridDensityLine->addWidget(myGridDensityLabel, 1);
-    myGridDensity = new QDoubleSpinBox(gridDensityRow);
-    myGridDensity->setRange(Theme::kMinGridDensity, Theme::kMaxGridDensity);
-    myGridDensity->setSingleStep(0.1);
-    myGridDensity->setDecimals(1);
-    myGridDensity->setSuffix(QStringLiteral("x"));
-    myGridDensity->setToolTip(tr("How many lines the work-plane grid draws — "
-                                 "higher packs more in, lower thins it out"));
-    connect(myGridDensity, &QDoubleSpinBox::valueChanged, this, [this](double density) {
-        if (mySyncing) return;
-        setGridDensity(density);
-    });
-    gridDensityLine->addWidget(myGridDensity);
-    outer->addWidget(gridDensityRow);
+    colours->addWidget(sizeRow);
 
     // Milestone 5, item 6: two more numeric tokens, on the exact same
     // QDoubleSpinBox template Grid detail set - a field + kMin/kMax
     // constants + defaultSpec + operator== + serialize/deserialize +
     // accessor + this row + applyTheme sync + paintedTexts.
-    auto* edgeWidthRow = new QWidget(this);
+    auto* edgeWidthRow = new QWidget(coloursPage);
     makeTransparent(edgeWidthRow, QStringLiteral("appearanceEdgeWidthRow"));
     auto* edgeWidthLine = new QHBoxLayout(edgeWidthRow);
     edgeWidthLine->setContentsMargins(0, 0, 0, 0);
@@ -317,9 +481,9 @@ AppearancePanel::AppearancePanel(QWidget* parent)
         setEdgeWidth(px);
     });
     edgeWidthLine->addWidget(myEdgeWidth);
-    outer->addWidget(edgeWidthRow);
+    colours->addWidget(edgeWidthRow);
 
-    auto* sketchLineWidthRow = new QWidget(this);
+    auto* sketchLineWidthRow = new QWidget(coloursPage);
     makeTransparent(sketchLineWidthRow, QStringLiteral("appearanceSketchLineWidthRow"));
     auto* sketchLineWidthLine = new QHBoxLayout(sketchLineWidthRow);
     sketchLineWidthLine->setContentsMargins(0, 0, 0, 0);
@@ -339,33 +503,9 @@ AppearancePanel::AppearancePanel(QWidget* parent)
         setSketchLineWidth(px);
     });
     sketchLineWidthLine->addWidget(mySketchLineWidth);
-    outer->addWidget(sketchLineWidthRow);
+    colours->addWidget(sketchLineWidthRow);
 
-    // The same bare-"x" multiplier template Grid detail set - this is not a
-    // length either, so it never goes near Measure.
-    auto* gizmoScaleRow = new QWidget(this);
-    makeTransparent(gizmoScaleRow, QStringLiteral("appearanceGizmoScaleRow"));
-    auto* gizmoScaleLine = new QHBoxLayout(gizmoScaleRow);
-    gizmoScaleLine->setContentsMargins(0, 0, 0, 0);
-    gizmoScaleLine->setSpacing(8);
-    myGizmoScaleLabel = new QLabel(tr("Gizmo size"), gizmoScaleRow);
-    makeTransparent(myGizmoScaleLabel, QStringLiteral("appearanceGizmoScaleLabel"));
-    gizmoScaleLine->addWidget(myGizmoScaleLabel, 1);
-    myGizmoScale = new QDoubleSpinBox(gizmoScaleRow);
-    myGizmoScale->setRange(Theme::kMinGizmoScale, Theme::kMaxGizmoScale);
-    myGizmoScale->setSingleStep(0.1);
-    myGizmoScale->setDecimals(1);
-    myGizmoScale->setSuffix(QStringLiteral("x"));
-    myGizmoScale->setToolTip(tr("How large the Move, Rotate and Scale handles "
-                                "draw over a selected body"));
-    connect(myGizmoScale, &QDoubleSpinBox::valueChanged, this, [this](double scale) {
-        if (mySyncing) return;
-        setGizmoScale(scale);
-    });
-    gizmoScaleLine->addWidget(myGizmoScale);
-    outer->addWidget(gizmoScaleRow);
-
-    auto* strokeRow = new QWidget(this);
+    auto* strokeRow = new QWidget(coloursPage);
     makeTransparent(strokeRow, QStringLiteral("appearanceStrokeRow"));
     auto* strokeLine = new QHBoxLayout(strokeRow);
     strokeLine->setContentsMargins(0, 0, 0, 0);
@@ -387,9 +527,9 @@ AppearancePanel::AppearancePanel(QWidget* parent)
         setChipStroke(px);
     });
     strokeLine->addWidget(myStroke);
-    outer->addWidget(strokeRow);
+    colours->addWidget(strokeRow);
 
-    auto* familyRow = new QWidget(this);
+    auto* familyRow = new QWidget(coloursPage);
     makeTransparent(familyRow, QStringLiteral("appearanceFamilyRow"));
     auto* familyLine = new QHBoxLayout(familyRow);
     familyLine->setContentsMargins(0, 0, 0, 0);
@@ -433,10 +573,10 @@ AppearancePanel::AppearancePanel(QWidget* parent)
     if (myFamily->view() && myFamily->view()->window())
         myFamily->view()->window()->installEventFilter(this);
     familyLine->addWidget(myFamily, 1);
-    outer->addWidget(familyRow);
+    colours->addWidget(familyRow);
 
     // --- the look as a file -------------------------------------------------
-    auto* fileRow = new QWidget(this);
+    auto* fileRow = new QWidget(coloursPage);
     makeTransparent(fileRow, QStringLiteral("appearanceFileRow"));
     auto* fileLine = new QHBoxLayout(fileRow);
     fileLine->setContentsMargins(0, 0, 0, 0);
@@ -451,13 +591,16 @@ AppearancePanel::AppearancePanel(QWidget* parent)
                           "Applied as soon as it is opened."));
     connect(myLoad, &QPushButton::clicked, this, &AppearancePanel::chooseLoadFile);
     fileLine->addWidget(myLoad, 1);
-    outer->addWidget(fileRow);
+    colours->addWidget(fileRow);
 
-    myReset = new QPushButton(tr("Reset to the original look"), this);
+    myReset = new QPushButton(tr("Reset to the original look"), coloursPage);
     myReset->setToolTip(tr("Put every colour and the text size back the way "
                            "they shipped"));
     connect(myReset, &QPushButton::clicked, this, &AppearancePanel::reset);
-    outer->addWidget(myReset);
+    colours->addWidget(myReset);
+
+    // The tab chips read myTab, which nothing has pushed onto them yet.
+    setCurrentTab(myTab);
 
     // The controls are filled in from the live spec here, and re-filled on
     // every broadcast - including the ones this panel itself causes, which is
@@ -466,6 +609,272 @@ AppearancePanel::AppearancePanel(QWidget* parent)
     connect(Theme::notifier(), &Theme::Notifier::changed, this,
             &AppearancePanel::applyTheme);
 
+}
+
+// --- tabs --------------------------------------------------------------------
+
+void AppearancePanel::setCurrentTab(Tab tab)
+{
+    const int index = static_cast<int>(tab);
+    if (index < 0 || index >= kTabCount) return;
+    myTab = tab;
+    // Deliberately NOT guarded on "it did not change": this is the one place
+    // the chips are re-synced from myTab, and the constructor calls it to
+    // push the initial state onto chips that have never been told anything.
+    if (myPages) myPages->setCurrentIndex(index);
+    for (int i = 0; i < kTabCount; ++i) {
+        if (myTabButtons[i]) myTabButtons[i]->setCurrent(i == index);
+    }
+}
+
+QAbstractButton* AppearancePanel::tabButton(Tab tab) const
+{
+    const int index = static_cast<int>(tab);
+    if (index < 0 || index >= kTabCount) return nullptr;
+    return myTabButtons[index];
+}
+
+QWidget* AppearancePanel::pageFor(Tab tab) const
+{
+    const int index = static_cast<int>(tab);
+    if (index < 0 || index >= kTabCount) return nullptr;
+    return myTabPages[index];
+}
+
+QAbstractButton* AppearancePanel::controlFor(QAction* action) const
+{
+    for (const Mirror& mirror : myMirrors) {
+        if (mirror.action == action) return mirror.control;
+    }
+    return nullptr;
+}
+
+QAbstractButton* AppearancePanel::alternateControlFor(QAction* action) const
+{
+    for (auto it = myOffMirrors.cbegin(); it != myOffMirrors.cend(); ++it) {
+        if (it.value() == action) return it.key();
+    }
+    return nullptr;
+}
+
+bool AppearancePanel::controlIsCurrent(const QAbstractButton* control) const
+{
+    for (const Mirror& mirror : myMirrors) {
+        if (mirror.control == control) return mirror.control->current();
+    }
+    for (auto it = myOffMirrors.cbegin(); it != myOffMirrors.cend(); ++it) {
+        if (it.key() == control) return it.key()->current();
+    }
+    return false;
+}
+
+void AppearancePanel::appendRow(Tab tab, QWidget* row)
+{
+    const int index = static_cast<int>(tab);
+    if (index < 0 || index >= kTabCount || !myPageLayouts[index] || !row) return;
+    QVBoxLayout* box = myPageLayouts[index];
+    // Colours ends in its own scroll area rather than a stretch, so its rows
+    // simply append; every other page keeps the stretch last.
+    const int at = (tab == Tab::Colours) ? box->count() : std::max(0, box->count() - 1);
+    box->insertWidget(at, row);
+}
+
+QHBoxLayout* AppearancePanel::makeRow(Tab tab, const QString& key, const QString& label)
+{
+    QWidget* page = pageFor(tab);
+    auto* row = new QWidget(page);
+    makeTransparent(row, QStringLiteral("settingsRow_") + key);
+    auto* line = new QHBoxLayout(row);
+    line->setContentsMargins(0, 0, 0, 0);
+    line->setSpacing(8);
+    if (!label.isEmpty()) {
+        auto* name = new QLabel(label, row);
+        name->setWordWrap(false);
+        makeTransparent(name, QStringLiteral("settingsLabel_") + key);
+        line->addWidget(name, 1);
+        myExtraTexts << label;
+    }
+    appendRow(tab, row);
+    return line;
+}
+
+// --- mirrored rows -----------------------------------------------------------
+
+void AppearancePanel::addToggleRow(Tab tab, const QString& label, QAction* action)
+{
+    if (!action) return;
+    QHBoxLayout* line = makeRow(tab, label, label);
+    auto* pill = new OptionChip(OptionChip::Style::Switch, QString(),
+                                line->parentWidget());
+    // The tooltip is the ACTION's, not a second sentence written here: the
+    // menu entry and this pill describe one setting, and a drawer that
+    // explained it differently would be two sources of copy for one thing.
+    pill->setToolTip(action->toolTip());
+    // A click TRIGGERS. It never sets myCurrent - that arrives back through
+    // QAction::changed and syncMirrors(), so the pill cannot show a state the
+    // action refused to take.
+    connect(pill, &QAbstractButton::clicked, this, [action] { action->trigger(); });
+    connect(action, &QAction::changed, this, &AppearancePanel::syncMirrors);
+    line->addWidget(pill);
+    myMirrors.push_back(Mirror{action, pill});
+    syncMirrors();
+}
+
+void AppearancePanel::addChoiceRow(Tab tab, const QString& label,
+                                   const QVector<QAction*>& options,
+                                   const QStringList& optionLabels, bool stacked)
+{
+    if (options.isEmpty() || options.size() != optionLabels.size()) return;
+    QHBoxLayout* line = makeRow(tab, label, label);
+    QWidget* row = line->parentWidget();
+
+    // A stacked set needs a column of its own inside the row, so five
+    // autosave modes read as a list rather than as five chips squeezed into
+    // 272 logical pixels.
+    QBoxLayout* target = line;
+    if (stacked) {
+        auto* column = new QVBoxLayout();
+        column->setContentsMargins(0, 0, 0, 0);
+        column->setSpacing(4);
+        line->addLayout(column, 1);
+        target = column;
+        // The name belongs beside the FIRST option, not floating in the
+        // middle of a five-row column - a label vertically centred against a
+        // stack reads as a heading for the gap between the third and fourth
+        // entries.
+        if (QLayoutItem* first = line->itemAt(0)) {
+            if (QWidget* name = first->widget())
+                line->setAlignment(name, Qt::AlignTop);
+        }
+    }
+
+    for (int i = 0; i < options.size(); ++i) {
+        QAction* option = options.at(i);
+        if (!option) continue;
+        auto* chip = new OptionChip(OptionChip::Style::Segment, optionLabels.at(i), row);
+        chip->setToolTip(option->toolTip().isEmpty() ? optionLabels.at(i)
+                                                     : option->toolTip());
+        // An exclusive group's already-current member must not be triggered:
+        // QActionGroup would keep it checked anyway, but a trigger still runs
+        // whatever the action does, and re-applying a setting nobody changed
+        // is a write this drawer has no business making.
+        connect(chip, &QAbstractButton::clicked, this, [option] {
+            if (option->isChecked()) return;
+            option->trigger();
+        });
+        connect(option, &QAction::changed, this, &AppearancePanel::syncMirrors);
+        target->addWidget(chip);
+        myMirrors.push_back(Mirror{option, chip});
+        myExtraTexts << optionLabels.at(i);
+    }
+    syncMirrors();
+}
+
+void AppearancePanel::addBinaryChoiceRow(Tab tab, const QString& label, QAction* action,
+                                         const QString& offLabel, const QString& onLabel)
+{
+    if (!action) return;
+    QHBoxLayout* line = makeRow(tab, label, label);
+    QWidget* row = line->parentWidget();
+
+    auto* offChip = new OptionChip(OptionChip::Style::Segment, offLabel, row);
+    auto* onChip = new OptionChip(OptionChip::Style::Segment, onLabel, row);
+    offChip->setToolTip(action->toolTip());
+    onChip->setToolTip(action->toolTip());
+    // Each half triggers only from the state it is NOT: the action is a
+    // toggle, so triggering it from its own side would turn the setting off.
+    connect(offChip, &QAbstractButton::clicked, this, [action] {
+        if (action->isChecked()) action->trigger();
+    });
+    connect(onChip, &QAbstractButton::clicked, this, [action] {
+        if (!action->isChecked()) action->trigger();
+    });
+    connect(action, &QAction::changed, this, &AppearancePanel::syncMirrors);
+    line->addWidget(offChip);
+    line->addWidget(onChip);
+
+    // Both halves are registered against the same action. syncMirrors() reads
+    // isChecked() for the ON chip and its negation for the OFF one, which is
+    // what myOffMirrors records - there is still exactly one piece of truth,
+    // asked twice.
+    myMirrors.push_back(Mirror{action, onChip});
+    myOffMirrors.insert(offChip, action);
+    myExtraTexts << offLabel << onLabel;
+    syncMirrors();
+}
+
+void AppearancePanel::syncMirrors()
+{
+    for (const Mirror& mirror : myMirrors) {
+        if (!mirror.action || !mirror.control) continue;
+        mirror.control->setCurrent(mirror.action->isChecked());
+        mirror.control->setEnabled(mirror.action->isEnabled());
+    }
+    for (auto it = myOffMirrors.cbegin(); it != myOffMirrors.cend(); ++it) {
+        if (!it.key() || !it.value()) continue;
+        it.key()->setCurrent(!it.value()->isChecked());
+        it.key()->setEnabled(it.value()->isEnabled());
+    }
+}
+
+// --- this drawer's own spec rows, placed by the caller -----------------------
+
+void AppearancePanel::addGridDetailRow(Tab tab)
+{
+    if (myGridDensity) return;
+    // A QDoubleSpinBox rather than the stroke row's integer QSpinBox - the
+    // spec field is a multiplier, not a pixel count, and
+    // Theme::kMinGridDensity..kMaxGridDensity is a sub-1.0 to low-single-
+    // digits band where whole numbers would waste most of the range. The
+    // suffix is a bare "x" rather than anything Measure would format: this is
+    // not a length, and routing it through Measure would be exactly the
+    // "hand-format at the call site" mistake CLAUDE.md's numbers rule warns
+    // against for lengths, applied to a value that was never a length at all.
+    QHBoxLayout* line = makeRow(tab, QStringLiteral("gridDetail"), QString());
+    QWidget* row = line->parentWidget();
+    myGridDensityLabel = new QLabel(tr("Grid detail"), row);
+    makeTransparent(myGridDensityLabel, QStringLiteral("settingsGridDetailLabel"));
+    line->addWidget(myGridDensityLabel, 1);
+    myGridDensity = new QDoubleSpinBox(row);
+    myGridDensity->setRange(Theme::kMinGridDensity, Theme::kMaxGridDensity);
+    myGridDensity->setSingleStep(0.1);
+    myGridDensity->setDecimals(1);
+    myGridDensity->setSuffix(QStringLiteral("x"));
+    myGridDensity->setAttribute(Qt::WA_NoMousePropagation);
+    myGridDensity->setToolTip(tr("How many lines the work-plane grid draws — "
+                                 "higher packs more in, lower thins it out"));
+    connect(myGridDensity, &QDoubleSpinBox::valueChanged, this, [this](double density) {
+        if (mySyncing) return;
+        setGridDensity(density);
+    });
+    line->addWidget(myGridDensity);
+    applyTheme();
+}
+
+void AppearancePanel::addGizmoSizeRow(Tab tab)
+{
+    if (myGizmoScale) return;
+    // The same bare-"x" multiplier template Grid detail set - this is not a
+    // length either, so it never goes near Measure.
+    QHBoxLayout* line = makeRow(tab, QStringLiteral("gizmoSize"), QString());
+    QWidget* row = line->parentWidget();
+    myGizmoScaleLabel = new QLabel(tr("Gizmo size"), row);
+    makeTransparent(myGizmoScaleLabel, QStringLiteral("settingsGizmoSizeLabel"));
+    line->addWidget(myGizmoScaleLabel, 1);
+    myGizmoScale = new QDoubleSpinBox(row);
+    myGizmoScale->setRange(Theme::kMinGizmoScale, Theme::kMaxGizmoScale);
+    myGizmoScale->setSingleStep(0.1);
+    myGizmoScale->setDecimals(1);
+    myGizmoScale->setSuffix(QStringLiteral("x"));
+    myGizmoScale->setAttribute(Qt::WA_NoMousePropagation);
+    myGizmoScale->setToolTip(tr("How large the Move, Rotate and Scale handles "
+                                "draw over a selected body"));
+    connect(myGizmoScale, &QDoubleSpinBox::valueChanged, this, [this](double scale) {
+        if (mySyncing) return;
+        setGizmoScale(scale);
+    });
+    line->addWidget(myGizmoScale);
+    applyTheme();
 }
 
 void AppearancePanel::applyTheme()
@@ -754,6 +1163,12 @@ QStringList AppearancePanel::paintedTexts() const
     if (mySave) texts << mySave->text();
     if (myLoad) texts << myLoad->text();
     if (myReset) texts << myReset->text();
+    // The tab words, every mirrored row's name and every choice chip's
+    // label. Collected as each is built rather than listed again here, so a
+    // row added later cannot slip past the sweep by being forgotten in this
+    // function - the generate-don't-duplicate rule WalkthroughPanel and
+    // ShortcutSheet already follow.
+    texts << myExtraTexts;
     // The file dialogs' own filter string is copy too - it names the app and
     // the file kind in a surface the user reads - and it is neither a QAction
     // nor a tooltip, so nothing else would sweep it.

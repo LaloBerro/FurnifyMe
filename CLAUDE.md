@@ -272,7 +272,7 @@ Source files under `src/`, plus `tests/`:
 | `ui/ReMeasureTool.{h,cpp}` | Re-Measure chip: a size number becomes a field; preview by the commit's own call |
 | `ui/ResizePinRenderer.{h,cpp}` | the Re-Measure pin: which end stays put, three marks on the dimension line |
 | `ui/TransformGizmo.{h,cpp}` | the gizmo we draw: shared `GizmoRenderer` base + the Move tool |
-| `ui/AppearancePanel.{h,cpp}` | every Theme token editable live; debounced persistence |
+| `ui/AppearancePanel.{h,cpp}` | the **Settings** drawer — four tabs; Theme tokens live and debounced, every other row a mirror of a `QAction` (class name kept, see its header) |
 | `ui/AppBar.{h,cpp}` | the floating pill: app mark, wordmark, real `QMenuBar` |
 | `FurnifySerial.{h,cpp}` | binary shape (de)serialization via `BinTools`, **zero Qt includes** |
 | `FurnitureStore.{h,cpp}` | owns the managed library — enumerate/create/save/load/rename/versions |
@@ -306,7 +306,20 @@ tooltip contains a banned word, so this table is executable, not aspirational.
 | Repositioning a body | Move / Rotate / Scale | transform, translate |
 | A live mirrored twin | Mirror | symmetry, mirroring-mode, reflect |
 | A copy that follows its source | Linked copy, `Duplicate linked` | instance, clone, reference |
-| The colours-and-fonts panel | Appearance | theme, settings, preferences |
+| The settings drawer | Settings | preferences, options, config |
+
+**The Settings row was renamed when the panel grew, and the rename is deliberate.** It
+used to read "The colours-and-fonts panel | Appearance | theme, **settings**, preferences",
+and that was right for a card holding twenty-eight colours and a type scale. Improvements
+item 10 turned it into a four-tab drawer that also holds the viewport switches, the display
+unit, the drawing aids and the autosave mode — at which point "Appearance" named a third of
+what the user was looking at, and the banned word was the honest one. So the row flipped:
+**Settings** is the word, "Appearance" is simply retired rather than banned (it is still the
+right word for a colour, and the Colours tab is where colours live), and "preferences",
+"options" and "config" are what it must never be called. `AppearancePanel` keeps its class
+and file name — a hundred references' worth of churn for no reader's benefit — and says so
+in its own header comment rather than leaving the code claiming to be about appearance
+alone.
 
 Extrude and Pull are two rows, not one, and the Extrude row no longer bans "pull":
 Milestone 2 made face pull an operation in its own right, so "pull" became a word
@@ -1738,6 +1751,65 @@ copies DLLs but **not** plugins, and the `windeployqt` feature is deliberately n
 copies `QWindowsIntegrationPlugin` and `QModernWindowsStylePlugin` itself in a POST_BUILD
 step. Delete that and the app dies at startup with
 `could not find the Qt platform plugin "windows"`.
+
+### Settings: one drawer, four tabs, and every row a mirror
+
+Improvements item 10, mockup pick **B** ("grow the Appearance panel into a Settings
+drawer"). The settings used to live in three places — the colours card, the View menu,
+and autosave under File — and nothing had a single home. `AppearancePanel` is now the
+**Settings** drawer: same floating card, same `Ctrl+Alt+A`, same `ViewportOverlay`
+TopRight anchor under the axis gizmo, same 296×380 at the same `Theme::wholeDevicePixels()`
+size — with a four-chip tab bar under the title and a `QStackedWidget` below it.
+
+| Tab | Rows |
+|---|---|
+| Colours | 28 colour swatches (scrolled) · Text size · Edge lines · Outline lines · Button border · Font · Save/Load colours · Reset |
+| Viewport | Show the grid · **Grid detail** · Show sizes around a selection · Projection · **Gizmo size** · Show notifications |
+| Units | Sizes in (Millimetres/Centimetres) · Snap to Grid · Magnet |
+| Files | Autosave (Off / After every change / Every minute / 5 / 15) |
+
+**Grid detail and Gizmo size MOVED from Colours to Viewport, and only their place moved.**
+They are `Theme::Spec` values still: an edit writes `Theme::setSpec()`, the notifier
+broadcasts, `applyTheme()` re-reads every control, `MainWindow`'s 400 ms debounce stores
+it. They sat on the colours card because that is where the persistence mechanism lives,
+which is a reason about the code and not about the user — a number describing the grid
+belongs beside the grid's own switch. `gui_smoke` pins both halves of the move: each is
+on the Viewport page and each is *not* on the Colours page, because "it arrived" and "it
+left" are two different mistakes.
+
+**Every row that is not a `Theme::Spec` value is a MIRROR of a `QAction`, and holds no
+state whatever.** `addToggleRow()` (a pill), `addChoiceRow()` (a segmented or stacked set
+of exclusive actions) and `addBinaryChoiceRow()` (one checkable action drawn as two chips)
+each take the action `MainWindow` already owns; `syncMirrors()` pushes `isChecked()` and
+`isEnabled()` onto the control on every `QAction::changed`, and a click calls
+`trigger()` and sets no pixel of its own. So the View menu, the File menu and this drawer
+cannot disagree, `updateActions()` stays the single place availability is decided, and the
+vocabulary sweep keeps covering these settings through the actions it already finds by
+text. `QAction::changed` is the one signal watched, deliberately: Qt emits it for a
+`setChecked()`, a `setEnabled()` and a text change alike, so there is no list of signals
+to keep in step with `updateActions()`.
+
+`addBinaryChoiceRow()` exists because **Projection has one action and two words**. The app
+has an `Orthographic` toggle and no `Perspective` action, perspective being simply that
+toggle off — and a row that painted "Orthographic" beside a pill would make the user work
+that out. Both chips read the same `isChecked()`; the OFF half lives in `myOffMirrors`
+rather than carrying a polarity flag every ordinary row would then have to carry.
+
+**Autosave is stacked, not segmented** — five chips in a 272-logical-pixel row would be
+five unreadable chips — and its name label is top-aligned, because a label centred against
+a five-row column reads as a heading for the gap between the third and fourth entries.
+
+**Which tab is open is session state**, held in one member and persisted nowhere. It is
+not a `Theme::Spec` value, so storing it would mean a second persistence mechanism on this
+card for something that is not a preference at all, only where the user last looked; and
+Colours is the tab this drawer has always opened on. `setCurrentTab()` is the single place
+the current tab is decided and the single place the four chips are re-synced from it — it
+is deliberately *not* guarded on "it did not change", because the constructor calls it to
+push the initial state onto chips nothing has told anything yet.
+
+The class and the file are still called `AppearancePanel`; see the rename note under the
+vocabulary table and the header's own first paragraph for why, and for what the type
+actually is now.
 
 ### The shell is action-driven, and composed as bar + rail + drawer
 
