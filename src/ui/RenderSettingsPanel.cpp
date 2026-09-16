@@ -134,12 +134,6 @@ protected:
         painter.fillPath(path, myColour);
         Theme::drawCrispBorder(painter, QRectF(rect()), Theme::border(), kSwatchRadius);
 
-        if (this == window()->focusWidget()) {
-            const bool active = window()->isActiveWindow();
-            Theme::drawCrispBorder(painter, QRectF(rect()).adjusted(2, 2, -2, -2),
-                                   active ? Theme::focusRing() : Theme::focusRingMuted(),
-                                   kSwatchRadius - 2, active ? 2.0 : 1.5);
-        }
     }
 
 private:
@@ -275,12 +269,6 @@ protected:
             Theme::drawCrispBorder(painter, body,
                                    myCurrent ? Theme::accent() : Theme::border(), kTileRadius,
                                    myCurrent ? 2.0 : 1.0);
-            if (this == window()->focusWidget()) {
-                const bool active = window()->isActiveWindow();
-                Theme::drawCrispBorder(painter, body.adjusted(3, 3, -3, -3),
-                                       active ? Theme::focusRing() : Theme::focusRingMuted(),
-                                       kTileRadius - 3, active ? 2.0 : 1.5);
-            }
             return;
         }
         if (myWood) {
@@ -300,12 +288,6 @@ protected:
             Theme::drawCrispBorder(painter, body,
                                    myCurrent ? Theme::accent() : Theme::border(), kTileRadius,
                                    myCurrent ? 2.0 : 1.0);
-            if (this == window()->focusWidget()) {
-                const bool active = window()->isActiveWindow();
-                Theme::drawCrispBorder(painter, body.adjusted(3, 3, -3, -3),
-                                       active ? Theme::focusRing() : Theme::focusRingMuted(),
-                                       kTileRadius - 3, active ? 2.0 : 1.5);
-            }
             return;
         }
         const QRectF ball(width() * 0.5 - height() * 0.30, height() * 0.16,
@@ -344,12 +326,6 @@ protected:
         Theme::drawCrispBorder(painter, body,
                                myCurrent ? Theme::accent() : Theme::border(), kTileRadius,
                                myCurrent ? 2.0 : 1.0);
-        if (this == window()->focusWidget()) {
-            const bool active = window()->isActiveWindow();
-            Theme::drawCrispBorder(painter, body.adjusted(3, 3, -3, -3),
-                                   active ? Theme::focusRing() : Theme::focusRingMuted(),
-                                   kTileRadius - 3, active ? 2.0 : 1.5);
-        }
     }
 
 private:
@@ -411,12 +387,6 @@ protected:
         painter.setFont(Theme::labelFont());
         painter.setPen(myCurrent ? Theme::text() : Theme::textMuted());
         painter.drawText(rect(), Qt::AlignCenter, text());
-        if (this == window()->focusWidget()) {
-            const bool active = window()->isActiveWindow();
-            Theme::drawCrispBorder(painter, body.adjusted(2.5, 2.5, -2.5, -2.5),
-                                   active ? Theme::focusRing() : Theme::focusRingMuted(),
-                                   4.5, active ? 2.0 : 1.5);
-        }
     }
 
 private:
@@ -1241,12 +1211,6 @@ void RenderShutterButton::paintEvent(QPaintEvent*)
                                height()),
                          Qt::AlignVCenter | Qt::AlignLeft, label);
 
-        if (this == window()->focusWidget()) {
-            const bool active = window()->isActiveWindow();
-            Theme::drawCrispBorder(painter, body.adjusted(3, 3, -3, -3),
-                                   active ? Theme::focusRing() : Theme::focusRingMuted(),
-                                   kShutterWideRadius - 3, active ? 2.0 : 1.5);
-        }
         return;
     }
 
@@ -1281,12 +1245,6 @@ void RenderShutterButton::paintEvent(QPaintEvent*)
         .paint(&painter, iconRect, Qt::AlignCenter,
               isEnabled() ? QIcon::Normal : QIcon::Disabled);
 
-    if (this == window()->focusWidget()) {
-        const bool active = window()->isActiveWindow();
-        Theme::drawCrispBorder(painter, body.adjusted(6, 6, -6, -6),
-                               active ? Theme::focusRing() : Theme::focusRingMuted(),
-                               radius - 6, active ? 2.0 : 1.5);
-    }
 }
 
 void RenderShutterButton::enterEvent(QEnterEvent*) { myHovered = true;  update(); }

@@ -287,13 +287,6 @@ void ToolChip::paintEvent(QPaintEvent* /*event*/)
     // very check this exists to satisfy. Painting a dimmer ring instead
     // solves both: it stops shouting focus at someone who has moved on
     // without ever going fully invisible.
-    if (this == window()->focusWidget()) {
-        const bool active = window()->isActiveWindow();
-        const QColor ringColor = active ? Theme::focusRing() : Theme::focusRingMuted();
-        const double ringWidth = active ? kFocusRingWidth : kFocusRingWidth - 0.5;
-        Theme::drawCrispBorder(painter, QRectF(body).adjusted(4, 4, -4, -4),
-                               ringColor, kRadius - 4, ringWidth);
-    }
 }
 
 void ToolChip::enterEvent(QEnterEvent* /*event*/) { myHovered = true;  update(); }

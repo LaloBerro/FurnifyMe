@@ -198,10 +198,14 @@ scale-dependent because the window covers more screen at 1.75×.
 
 A window still appears - OCCT's `V3d_View` needs a real native window and a GL surface, so
 `-platform offscreen` cannot work - but it is shown with `WA_ShowWithoutActivating` and
-never takes focus, and `KeepSuiteWindowsBehind` sends every top-level window the suite shows
-to the **back** of the desktop z-order (`SetWindowPos(HWND_BOTTOM)`, posted after the show,
-since a z-order change made before the native window is visible is undone by the show), so
-the user keeps working in front of it. Not minimized: a minimized window gets no surface and
+never takes focus, and `KeepSuiteWindowsBehind` keeps every top-level window the suite shows
+at the **back** of the desktop z-order. A single push at Show was NOT enough and the user
+said so - a run opens dozens of windows, and anything that shows or re-shows one puts it
+back over whatever they are working in, which left them minimizing and restoring their own
+window to get it forward again. So the push repeats: `SetWindowPos(HWND_BOTTOM)` on every
+visible top-level this process owns, every 125 ms, plus `WS_EX_NOACTIVATE` on each, so a
+stray click on a suite window cannot activate it either (the suite drives itself through
+`sendEvent()` and never needs one activated). Not minimized: a minimized window gets no surface and
 every `Dump`- and `PrintWindow`-measured check would fail. Occluded costs nothing the suite
 reads — the viewport renders into its own framebuffer, `Dump` reads that, and
 `PrintWindow(PW_RENDERFULLCONTENT)` captures a covered window; the render-mode shadow block,
@@ -258,6 +262,7 @@ Source files under `src/`, plus `tests/`:
 | `ui/ToolCluster.{h,cpp}` | a vertical stack of chips |
 | `ui/ViewportOverlay.{h,cpp}` | anchors clusters to viewport edges; not a widget |
 | `ui/ItemsPanel.{h,cpp}` | solid list with visibility toggles |
+| `ui/PanelCloseButton.{h,cpp}` | the hover-only x in a panel's corner; triggers the panel's own `QAction`, holds no state |
 | `ui/AxisGizmo.{h,cpp}` | Unity-style orientation gizmo; each axis tip snaps the view |
 | `ui/WalkthroughPanel.{h,cpp}` | the guided first build; steps derived from live state |
 | `ui/HintBalloon.{h,cpp}` | one hint at a time, retired when its trigger stops holding |
@@ -272,7 +277,7 @@ Source files under `src/`, plus `tests/`:
 | `ui/ReMeasureTool.{h,cpp}` | Re-Measure chip: a size number becomes a field; preview by the commit's own call |
 | `ui/ResizePinRenderer.{h,cpp}` | the Re-Measure pin: which end stays put, three marks on the dimension line |
 | `ui/TransformGizmo.{h,cpp}` | the gizmo we draw: shared `GizmoRenderer` base + the Move tool |
-| `ui/AppearancePanel.{h,cpp}` | the **Settings** drawer — four tabs; Theme tokens live and debounced, every other row a mirror of a `QAction` (class name kept, see its header) |
+| `ui/AppearancePanel.{h,cpp}` | the **Settings** drawer — five tabs; Theme tokens live and debounced, every other row a mirror of a `QAction` (class name kept, see its header) |
 | `ui/AppBar.{h,cpp}` | the floating pill: app mark, wordmark, real `QMenuBar` |
 | `FurnifySerial.{h,cpp}` | binary shape (de)serialization via `BinTools`, **zero Qt includes** |
 | `FurnitureStore.{h,cpp}` | owns the managed library — enumerate/create/save/load/rename/versions |
@@ -1752,21 +1757,57 @@ copies `QWindowsIntegrationPlugin` and `QModernWindowsStylePlugin` itself in a P
 step. Delete that and the app dies at startup with
 `could not find the Qt platform plugin "windows"`.
 
-### Settings: one drawer, four tabs, and every row a mirror
+**No control in this app paints a keyboard focus ring any more.** They were amber and the
+user asked for every one of them gone ("why its have that yellow stroke when i selected a
+tab? can you remove it?" - then, of the rest: "i dont wanna see them"). The nine paint
+sites in `ToolChip`, the Settings drawer and the render settings card are deleted, and
+`JointChip`'s typed field marks itself with `Theme::accent()` while it is being edited, as
+the mitre and re-measure fields already did. `focusRing`/`focusRingMuted` STAY in
+`Theme::Spec` - a `.furnifytheme` saved before this would be refused for an unknown key
+otherwise - but they are retired: `AppearancePanel::isRetiredToken()` keeps them out of the
+Colours tab, since a swatch for a colour nothing paints is a control that does nothing, and
+`gui_smoke` pins the exemption by name rather than letting the every-token-has-a-row check
+quietly cover two fewer tokens.
+
+### Settings: one drawer, five tabs, and every row a mirror
 
 Improvements item 10, mockup pick **B** ("grow the Appearance panel into a Settings
 drawer"). The settings used to live in three places — the colours card, the View menu,
 and autosave under File — and nothing had a single home. `AppearancePanel` is now the
 **Settings** drawer: same floating card, same `Ctrl+Alt+A`, same `ViewportOverlay`
 TopRight anchor under the axis gizmo, same 296×380 at the same `Theme::wholeDevicePixels()`
-size — with a four-chip tab bar under the title and a `QStackedWidget` below it.
+size — with a tab bar under the title and a `QStackedWidget` below it.
 
 | Tab | Rows |
 |---|---|
-| Colours | 28 colour swatches (scrolled) · Text size · Edge lines · Outline lines · Button border · Font · Save/Load colours · Reset |
+| Colours | 28 colour swatches (scrolled) · Save/Load colours · Reset |
+| Text & lines | Text size · Font · Edge lines · Outline lines · Button border |
 | Viewport | Show the grid · **Grid detail** · Show sizes around a selection · Projection · **Gizmo size** · Show notifications |
 | Units | Sizes in (Millimetres/Centimetres) · Snap to Grid · Magnet |
 | Files | Autosave (Off / After every change / Every minute / 5 / 15) |
+
+**Colours split into Colours and Text & lines, and only that split changed.** A user
+review of the four-tab drawer put it plainly — "the color tab doesnt not make any sense,
+maybe divide it in two tabs" — and they were right: the tab held 28 swatches *and* five
+unrelated type/line controls (Text size, Font, Edge lines, Outline lines, Button border),
+none of which is a colour. Colours kept the swatches and the three file-shaped actions
+that act on the whole look (Save, Load, Reset); the five type/line rows moved to a new
+Text & lines tab, in the order this table lists them. All five stayed exactly the
+`Theme::Spec` values and the exact mechanism they always were — only their page changed.
+
+**Five tabs do not fit one row of this card's 272 logical pixels of content width** — Text
+& lines alone runs close to what four tabs used to share between them — so the tab bar
+wraps to a **second row**. The wrap is measured, not a hand-picked split: each chip's own
+`sizeHint()` (built from `QFontMetrics(Theme::labelFont())`, the exact font `OptionChip`
+paints its label with — `chip->setFont(Theme::labelFont())` at construction and again on
+every `applyTheme()`, so a probe reading the chip's own `font()` reads what is actually on
+screen) is packed greedily into row one until the next chip would overflow the card's
+content width, and everything after that goes to row two. `gui_smoke` pins both the
+no-clipping property (every chip's real width is measured against an independent
+`QFontMetrics(chip->font())` re-measurement, not a call back into the chip's own
+`sizeHint()`, which would be grading the implementation against itself) and that the wrap
+actually happened (two distinct row positions, not five chips narrow enough to squeeze
+onto one line today).
 
 **Grid detail and Gizmo size MOVED from Colours to Viewport, and only their place moved.**
 They are `Theme::Spec` values still: an edit writes `Theme::setSpec()`, the notifier
@@ -1775,7 +1816,8 @@ it. They sat on the colours card because that is where the persistence mechanism
 which is a reason about the code and not about the user — a number describing the grid
 belongs beside the grid's own switch. `gui_smoke` pins both halves of the move: each is
 on the Viewport page and each is *not* on the Colours page, because "it arrived" and "it
-left" are two different mistakes.
+left" are two different mistakes. The Colours/Text & lines split is pinned the same way,
+both directions, for all five moved rows and for what stayed behind.
 
 **Every row that is not a `Theme::Spec` value is a MIRROR of a `QAction`, and holds no
 state whatever.** `addToggleRow()` (a pill), `addChoiceRow()` (a segmented or stacked set
@@ -1803,7 +1845,7 @@ a five-row column reads as a heading for the gap between the third and fourth en
 not a `Theme::Spec` value, so storing it would mean a second persistence mechanism on this
 card for something that is not a preference at all, only where the user last looked; and
 Colours is the tab this drawer has always opened on. `setCurrentTab()` is the single place
-the current tab is decided and the single place the four chips are re-synced from it — it
+the current tab is decided and the single place every chip is re-synced from it — it
 is deliberately *not* guarded on "it did not change", because the constructor calls it to
 push the initial state onto chips nothing has told anything yet.
 

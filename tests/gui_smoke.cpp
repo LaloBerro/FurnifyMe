@@ -982,7 +982,22 @@ protected:
 // before it is shown is undone by the show itself.
 class KeepSuiteWindowsBehind : public QObject {
 public:
-    using QObject::QObject;
+    explicit KeepSuiteWindowsBehind(QObject* parent = nullptr) : QObject(parent)
+    {
+#ifdef _WIN32
+        // A one-shot push at Show was not enough, and the user said so: "the
+        // test windows is still on top of everything ... the way to make it
+        // top is to minimize and then open again". A run opens dozens of
+        // windows, and anything that shows or re-shows one puts it back on
+        // top of whatever the user is working in - a single push per window
+        // only fixes the instant after it appears. So the push REPEATS: every
+        // tick, every visible top-level this process owns goes to the bottom
+        // again. Cheap (a handful of SetWindowPos calls at 8 Hz) against a
+        // suite that runs for minutes in front of somebody trying to work.
+        connect(&mySweep, &QTimer::timeout, this, [this] { sendAllToBack(); });
+        mySweep.start(125);
+#endif
+    }
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override
@@ -991,15 +1006,46 @@ protected:
         auto* widget = qobject_cast<QWidget*>(watched);
         if (!widget || !widget->isWindow()) return false;
 #ifdef _WIN32
+        // Immediately, so the window is behind for as much of its first frame
+        // as possible, and again once Qt has finished showing it - a z-order
+        // change made before the native window is visible is undone by the
+        // show itself.
+        sendToBack(widget);
         QPointer<QWidget> guard(widget);
-        QTimer::singleShot(0, this, [guard] {
-            if (!guard || !guard->isVisible()) return;
-            SetWindowPos(reinterpret_cast<HWND>(guard->winId()), HWND_BOTTOM, 0, 0, 0, 0,
-                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+        QTimer::singleShot(0, this, [this, guard] {
+            if (guard) sendToBack(guard);
         });
 #endif
         return false;
     }
+
+private:
+#ifdef _WIN32
+    void sendToBack(QWidget* widget)
+    {
+        if (!widget || !widget->isVisible()) return;
+        const auto hwnd = reinterpret_cast<HWND>(widget->winId());
+        if (!hwnd) return;
+        // WS_EX_NOACTIVATE as well as the z-order: without it a stray click on
+        // a suite window activates it, which is what put it back in front and
+        // left the user's own window unable to come forward without a
+        // minimize/restore. The suite drives itself through sendEvent(), so it
+        // never needs its windows activated.
+        const LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        if (!(ex & WS_EX_NOACTIVATE))
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE);
+        SetWindowPos(hwnd, HWND_BOTTOM, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER);
+    }
+
+    void sendAllToBack()
+    {
+        for (QWidget* top : QApplication::topLevelWidgets())
+            if (top && top->isVisible()) sendToBack(top);
+    }
+
+    QTimer mySweep;
+#endif
 };
 
 // RAII for the one probe below that needs to seed QSettings before
@@ -15575,9 +15621,10 @@ int main(int argc, char* argv[])
             settle(80);
             const QImage focused = chip->grab().toImage();
             const bool tookFocus = chip->window()->focusWidget() == chip;
-            check(couldTake && tookFocus && focused != unfocused,
-                  QStringLiteral("keyboard focus is visible on a chip (visible %1, "
-                                 "enabled %2, took focus %3)")
+            check(couldTake && tookFocus && focused == unfocused,
+                  QStringLiteral("a focused chip paints NO focus ring - the user asked for "
+                                 "every keyboard focus ring gone (visible %1, enabled %2, "
+                                 "took focus %3)")
                       .arg(chip->isVisible()).arg(chip->isEnabled()).arg(tookFocus));
 
             // The check above renders whatever this harness's own window can
@@ -15591,8 +15638,24 @@ int main(int argc, char* argv[])
             // suite must not do; checked at the token level instead, since
             // that is what determines whether the two branches would ever
             // look different on a window a real user is actually working in.
-            check(Theme::focusRing() != Theme::focusRingMuted(),
-                  "the active and muted focus-ring colours are visually distinct");
+            // ...and the same holds for a Settings tab chip, which is where the
+            // user actually saw the ring ("why its have that yellow stroke when
+            // i selected a tab?"). The two focus-ring tokens still exist in
+            // Theme::Spec - the defaults pin counts them - but nothing paints
+            // them any more.
+            if (AppearancePanel* settings = window.findChild<AppearancePanel*>()) {
+                if (QAbstractButton* tab = settings->tabButton(AppearancePanel::Tab::Viewport)) {
+                    tab->clearFocus();
+                    settle(40);
+                    const QImage tabPlain = tab->grab().toImage();
+                    tab->setFocus(Qt::TabFocusReason);
+                    settle(60);
+                    const QImage tabFocused = tab->grab().toImage();
+                    check(tab->window()->focusWidget() == tab && tabFocused == tabPlain,
+                          "and a focused Settings tab chip paints no ring either");
+                    tab->clearFocus();
+                }
+            }
         }
     }
 
@@ -16173,11 +16236,29 @@ int main(int argc, char* argv[])
 
         // --- one row per token, in the user's words -------------------------
         if (panel) {
-            check(panel->colourRowCount() == Theme::colourTokens().size(),
-                  QStringLiteral("every editable colour token has a row (%1 rows, %2 tokens)")
-                      .arg(panel->colourRowCount()).arg(Theme::colourTokens().size()));
+            // Two tokens are RETIRED rather than editable: the app draws no
+            // keyboard focus rings any more (the user asked for them gone), so
+            // a row for either would be a colour that changes nothing on
+            // screen. They stay in Theme::Spec so a .furnifytheme saved before
+            // the removal still loads instead of being refused for an unknown
+            // key - which is why this is an exemption here rather than a
+            // deletion there.
+            const QStringList retired{QStringLiteral("focusRing"),
+                                      QStringLiteral("focusRingMuted")};
+            const int editable = static_cast<int>(Theme::colourTokens().size()) - retired.size();
+            check(panel->colourRowCount() == editable,
+                  QStringLiteral("every editable colour token has a row (%1 rows, %2 tokens, "
+                                 "%3 retired)")
+                      .arg(panel->colourRowCount()).arg(Theme::colourTokens().size())
+                      .arg(retired.size()));
             QStringList nameless;
             for (const Theme::ColourToken& token : Theme::colourTokens()) {
+                if (retired.contains(token.id)) {
+                    if (!AppearancePanel::nameForToken(token.id).isEmpty() ||
+                        panel->swatchFor(token.id))
+                        nameless << token.id + QStringLiteral(" (retired, still shown)");
+                    continue;
+                }
                 if (AppearancePanel::nameForToken(token.id).isEmpty()) nameless << token.id;
                 if (!panel->swatchFor(token.id)) nameless << token.id + QStringLiteral(" (no swatch)");
             }
@@ -16213,23 +16294,26 @@ int main(int argc, char* argv[])
                                                : offenders.join(QStringLiteral(", "))));
         }
 
-        // --- four tabs, and every non-colour row is a MIRROR -----------------
+        // --- five tabs, and every non-colour row is a MIRROR ------------------
         //
-        // improvements item 10, mockup pick B. The colours panel grew into
-        // the Settings drawer, and the law every row it grew follows is that
-        // it holds NO state: it reads its QAction's isChecked()/isEnabled()
-        // and it triggers that action back. Both directions are driven here
-        // for every mirrored row there is, because a control that merely
-        // LOOKS right when the drawer opens is exactly what a stale private
-        // copy looks like - the failure this law exists to prevent only
-        // appears after the OTHER surface moves.
+        // improvements item 10, mockup pick B, and the Colours/Text & lines
+        // split that followed a user review of the four-tab drawer ("the
+        // color tab doesnt not make any sense, maybe divide it in two
+        // tabs"). The colours panel grew into the Settings drawer, and the
+        // law every row it grew follows is that it holds NO state: it reads
+        // its QAction's isChecked()/isEnabled() and it triggers that action
+        // back. Both directions are driven here for every mirrored row there
+        // is, because a control that merely LOOKS right when the drawer
+        // opens is exactly what a stale private copy looks like - the
+        // failure this law exists to prevent only appears after the OTHER
+        // surface moves.
         if (panel && panel->isVisible()) {
             check(panel->paintedTexts().contains(QStringLiteral("Settings")),
                   QStringLiteral("the drawer's own title reads Settings (painted: %1)")
                       .arg(panel->paintedTexts().value(0)));
 
             // Not a QDialog and holding none - the no-modal law reaches the
-            // drawer that grew four tabs exactly as it reached the card that
+            // drawer that grew five tabs exactly as it reached the card that
             // had one.
             check(panel->findChildren<QDialog*>().isEmpty() &&
                       qobject_cast<QDialog*>(panel) == nullptr,
@@ -16242,6 +16326,7 @@ int main(int argc, char* argv[])
             };
             const TabCase tabCases[] = {
                 {AppearancePanel::Tab::Colours, "Colours"},
+                {AppearancePanel::Tab::TextLines, "TextLines"},
                 {AppearancePanel::Tab::Viewport, "Viewport"},
                 {AppearancePanel::Tab::Units, "Units"},
                 {AppearancePanel::Tab::Files, "Files"},
@@ -16266,8 +16351,8 @@ int main(int argc, char* argv[])
                 if (!found) unreachableTabs << QString::fromLatin1(tabCase.word);
             }
             check(unreachableTabs.isEmpty(),
-                  QStringLiteral("all four tabs are reachable by a real click (%1)")
-                      .arg(unreachableTabs.isEmpty() ? QStringLiteral("all four")
+                  QStringLiteral("all five tabs are reachable by a real click (%1)")
+                      .arg(unreachableTabs.isEmpty() ? QStringLiteral("all five")
                                                      : unreachableTabs.join(QStringLiteral(", "))));
 
             // Switching tabs SWAPS THE ROWS. Asserted on the pages
@@ -16305,9 +16390,9 @@ int main(int argc, char* argv[])
                                         QString::fromLatin1(tabCase.word).toLower() +
                                         QStringLiteral(".png"));
             }
-            check(swapsChecked == 4 && badSwaps.isEmpty(),
+            check(swapsChecked == 5 && badSwaps.isEmpty(),
                   QStringLiteral("clicking each tab shows its own rows and hides the other "
-                                 "three (%1 tabs, %2)")
+                                 "four (%1 tabs, %2)")
                       .arg(swapsChecked)
                       .arg(badSwaps.isEmpty() ? QStringLiteral("clean")
                                               : badSwaps.join(QStringLiteral("; "))));
@@ -16352,6 +16437,127 @@ int main(int argc, char* argv[])
                 panel->gridDensityControl()->setValue(beforeDensity);
                 panel->gizmoScaleControl()->setValue(beforeGizmo);
                 settle(80);
+            }
+
+            // --- the Colours / Text & lines split (a user review: "the color -----
+            // tab doesnt not make any sense, maybe divide it in two tabs") --------
+            //
+            // Five controls moved off Colours onto the new Text & lines tab:
+            // Text size, Font, Edge lines, Outline lines, Button border. Checked
+            // from both sides, the same "it arrived" / "it left" pair the Grid
+            // detail move above already established - and then the reverse for
+            // what STAYED on Colours, so a mutation that left a row on the old
+            // page and one that dragged the swatches onto the new page would
+            // each go red on a named check.
+            {
+                panel->setCurrentTab(AppearancePanel::Tab::TextLines);
+                settle(60);
+                QWidget* textLinesPage = panel->pageFor(AppearancePanel::Tab::TextLines);
+                coloursPage = panel->pageFor(AppearancePanel::Tab::Colours);
+
+                struct MovedControlCase {
+                    QWidget* control;
+                    const char* what;
+                };
+                const MovedControlCase movedControls[] = {
+                    {panel->sizeControl(), "Text size"},
+                    {panel->familyControl(), "Font"},
+                    {panel->edgeWidthControl(), "Edge lines"},
+                    {panel->sketchLineWidthControl(), "Outline lines"},
+                    {panel->strokeControl(), "Button border"},
+                };
+                QStringList movedFaults;
+                for (const MovedControlCase& moved : movedControls) {
+                    const QString what = QString::fromLatin1(moved.what);
+                    if (!moved.control) {
+                        movedFaults << what + QStringLiteral(": no control");
+                        continue;
+                    }
+                    if (!textLinesPage || !textLinesPage->isAncestorOf(moved.control) ||
+                        !moved.control->isVisible())
+                        movedFaults << what + QStringLiteral(": not on Text & lines");
+                    if (coloursPage && coloursPage->isAncestorOf(moved.control))
+                        movedFaults << what + QStringLiteral(": still reachable from Colours");
+                }
+                check(movedFaults.isEmpty(),
+                      QStringLiteral("Text size, Font, Edge lines, Outline lines and Button "
+                                     "border all moved to Text & lines (%1)")
+                          .arg(movedFaults.isEmpty() ? QStringLiteral("all five")
+                                                     : movedFaults.join(QStringLiteral("; "))));
+
+                // And what STAYED: the swatches, Save, Load and Reset - present
+                // on Colours, absent from Text & lines.
+                panel->setCurrentTab(AppearancePanel::Tab::Colours);
+                settle(60);
+                QStringList keptFaults;
+                QWidget* accentSwatch = panel->swatchFor(QStringLiteral("accent"));
+                if (!accentSwatch || !coloursPage || !coloursPage->isAncestorOf(accentSwatch))
+                    keptFaults << QStringLiteral("a colour swatch: not on Colours");
+                if (accentSwatch && textLinesPage && textLinesPage->isAncestorOf(accentSwatch))
+                    keptFaults << QStringLiteral("a colour swatch: reachable from Text & lines");
+                const MovedControlCase keptButtons[] = {
+                    {panel->resetButton(), "Reset to the original look"},
+                    {panel->saveButton(), "Save colours..."},
+                    {panel->loadButton(), "Load colours..."},
+                };
+                for (const MovedControlCase& kept : keptButtons) {
+                    const QString what = QString::fromLatin1(kept.what);
+                    if (!kept.control || !coloursPage || !coloursPage->isAncestorOf(kept.control))
+                        keptFaults << what + QStringLiteral(": not on Colours");
+                    if (kept.control && textLinesPage && textLinesPage->isAncestorOf(kept.control))
+                        keptFaults << what + QStringLiteral(": reachable from Text & lines");
+                }
+                check(keptFaults.isEmpty(),
+                      QStringLiteral("the swatches, Save, Load and Reset all stayed on "
+                                     "Colours (%1)")
+                          .arg(keptFaults.isEmpty() ? QStringLiteral("all four")
+                                                    : keptFaults.join(QStringLiteral("; "))));
+            }
+
+            // --- the tab bar wraps to two rows, and no label clips -----------
+            //
+            // Five tabs do not fit one row of this card's content width -
+            // "Text & lines" alone runs close to what four tabs used to share -
+            // so the bar wraps. This is the check that would have caught a
+            // five-in-a-row layout: every chip's own width against the SAME
+            // font it paints its label with (OptionChip::paintEvent uses
+            // Theme::labelFont(), and the chip's own font() is set to match -
+            // see AppearancePanel.cpp's tab-bar comment), plus the chip's own
+            // horizontal padding.
+            {
+                QStringList clipped;
+                QSet<int> rowTops;
+                for (int i = 0; i < AppearancePanel::kTabCount; ++i) {
+                    const auto tab = static_cast<AppearancePanel::Tab>(i);
+                    QAbstractButton* button = panel->tabButton(tab);
+                    if (!button) { clipped << QStringLiteral("tab %1: no button").arg(i); continue; }
+                    const QFontMetrics fm(button->font());
+                    const int textWidth = fm.horizontalAdvance(button->text());
+                    // Deliberately NOT a call to the chip's own sizeHint() -
+                    // that would be asking the implementation under test to
+                    // grade itself. This re-measures independently, off the
+                    // font the chip is actually painted with, and compares
+                    // against the width the layout really gave it; any padding
+                    // the chip carries only helps this check pass, so the
+                    // comparison stays correct whatever that padding is.
+                    if (button->width() < textWidth)
+                        clipped << QStringLiteral("%1: %2px button, %3px text")
+                                        .arg(button->text())
+                                        .arg(button->width())
+                                        .arg(textWidth);
+                    rowTops << button->mapTo(panel, QPoint(0, 0)).y();
+                }
+                check(clipped.isEmpty(),
+                      QStringLiteral("no tab chip's label is wider than the chip itself (%1)")
+                          .arg(clipped.isEmpty() ? QStringLiteral("none clipped")
+                                                 : clipped.join(QStringLiteral("; "))));
+                // And the wrap actually happened - two distinct row tops, not
+                // five chips squeezed onto one line that merely happen not to
+                // clip because the font is narrow today.
+                check(rowTops.size() == 2,
+                      QStringLiteral("the tab bar lays out in exactly two rows (%1 distinct "
+                                     "row positions)")
+                          .arg(rowTops.size()));
             }
 
             // --- the mirror, both ways, for every row that has one ----------
@@ -25597,6 +25803,15 @@ int main(int argc, char* argv[])
                   panel->sketchLineWidthControl() != nullptr,
               "the panel has an edge-line row and an outline-line row");
 
+        // Edge lines and Outline lines moved to the Text & lines tab (the
+        // Colours/Text & lines split) - the drawer opens on Colours by
+        // default, so the row has to be reached the way a user reaches it
+        // before the checks below can mean anything.
+        if (panel) {
+            panel->setCurrentTab(AppearancePanel::Tab::TextLines);
+            settle(60);
+        }
+
         if (panel && panel->edgeWidthControl() && panel->sketchLineWidthControl()) {
             check(panel->edgeWidthControl()->isVisible() &&
                       panel->sketchLineWidthControl()->isVisible(),
@@ -25631,6 +25846,11 @@ int main(int argc, char* argv[])
             // dependent childAt proof is not something this suite attempts
             // for any of the other 24 swatches inside the same scrolling
             // list either.
+            //
+            // The swatch itself stayed on Colours (only the type/line
+            // controls moved to Text & lines), so this is back on that tab.
+            panel->setCurrentTab(AppearancePanel::Tab::Colours);
+            settle(60);
             QWidget* outlineSwatch = panel->swatchFor(QStringLiteral("outlineLineColour"));
             check(outlineSwatch != nullptr && outlineSwatch->isVisible(),
                   "the panel has a swatch for the outline colour token");

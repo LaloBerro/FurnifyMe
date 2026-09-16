@@ -474,7 +474,10 @@ void JointChip::restyleField(Slot slot)
     if (!edit) return;
     const bool invalid = myInvalid[static_cast<std::size_t>(slot)];
     const QColor border = invalid ? Theme::danger() : Theme::border();
-    const QColor focus = invalid ? Theme::danger() : Theme::focusRing();
+    // The accent, not the old amber focus ring: the app draws no focus rings
+    // any more (the user asked for them gone), and every other typed field in
+    // the app marks itself with the accent while it is being edited.
+    const QColor focus = invalid ? Theme::danger() : Theme::accent();
     edit->setStyleSheet(
         QStringLiteral("QLineEdit { background-color: %1; color: %2; border: 1px solid %3; "
                        "border-radius: 5px; padding: 1px 6px; } "

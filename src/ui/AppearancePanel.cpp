@@ -55,6 +55,9 @@ constexpr int kSwatchRadius = 4;
 // a switch is a fixed piece of furniture, and a pill that grew with the font
 // would push the four tabs onto two lines at the top of the scale.
 constexpr int kTabHeight = 24;
+// The gap between the tab bar's two rows - the same 3px the chips within a
+// row already use, so the grid reads even in both directions.
+constexpr int kTabRowGap = 3;
 constexpr int kSegHeight = 22;
 constexpr int kSwitchWidth = 38;
 constexpr int kSwitchHeight = 20;
@@ -125,12 +128,6 @@ protected:
         painter.fillPath(path, myColour);
         Theme::drawCrispBorder(painter, QRectF(rect()), Theme::border(), kSwatchRadius);
 
-        if (this == window()->focusWidget()) {
-            const bool active = window()->isActiveWindow();
-            Theme::drawCrispBorder(painter, QRectF(rect()).adjusted(2, 2, -2, -2),
-                                   active ? Theme::focusRing() : Theme::focusRingMuted(),
-                                   kSwatchRadius - 2, active ? 2.0 : 1.5);
-        }
     }
 
 private:
@@ -211,7 +208,6 @@ protected:
             painter.setPen(Qt::NoPen);
             painter.setBrush(off ? Theme::textDisabled() : Theme::text());
             painter.drawEllipse(QRectF(x, inset, kSwitchKnob, kSwitchKnob));
-            paintFocus(painter, body, radius);
             return;
         }
 
@@ -235,7 +231,6 @@ protected:
             painter.setPen(off ? Theme::textDisabled()
                                : (myCurrent ? Theme::text() : Theme::textMuted()));
             painter.drawText(rect(), Qt::AlignCenter, text());
-            paintFocus(painter, body.adjusted(0, 0, 0, -2), 6);
             return;
         }
 
@@ -252,24 +247,21 @@ protected:
         painter.setPen(off ? Theme::textDisabled()
                            : (myCurrent ? Theme::text() : Theme::textMuted()));
         painter.drawText(rect(), Qt::AlignCenter, text());
-        paintFocus(painter, body, 6);
     }
 
 private:
-    void paintFocus(QPainter& painter, const QRectF& body, qreal radius)
-    {
-        if (this != window()->focusWidget()) return;
-        const bool active = window()->isActiveWindow();
-        Theme::drawCrispBorder(painter, body.adjusted(2.0, 2.0, -2.0, -2.0),
-                               active ? Theme::focusRing() : Theme::focusRingMuted(),
-                               std::max(0.0, radius - 2.0), active ? 2.0 : 1.5);
-    }
-
     Style myStyle;
     bool myCurrent = false;
 };
 
 // --- AppearancePanel ---------------------------------------------------------
+
+bool AppearancePanel::isRetiredToken(const QString& id)
+{
+    // See the row loop: these two are kept in Theme::Spec for backward
+    // compatibility with saved colour files and are painted by nothing.
+    return id == QLatin1String("focusRing") || id == QLatin1String("focusRingMuted");
+}
 
 QString AppearancePanel::nameForToken(const QString& id)
 {
@@ -309,8 +301,6 @@ QString AppearancePanel::nameForToken(const QString& id)
         // A caution is not a failure: a fact worth seeing beside a joint - its
         // contact is not a plain rectangle - that refuses nothing.
         {QStringLiteral("caution"), QObject::tr("Caution")},
-        {QStringLiteral("focusRing"), QObject::tr("Keyboard focus ring")},
-        {QStringLiteral("focusRingMuted"), QObject::tr("Focus ring — window inactive")},
     };
     return names.value(id);
 }
@@ -341,27 +331,72 @@ AppearancePanel::AppearancePanel(QWidget* parent)
 
     // --- the tab bar --------------------------------------------------------
     //
-    // Four chips across the top, each one a view of myTab and nothing else -
-    // a click calls setCurrentTab(), which is the single place the current
-    // tab is decided and the single place every chip is re-synced from it.
+    // Five chips now (the Colours/Text & lines split), each one a view of
+    // myTab and nothing else - a click calls setCurrentTab(), which is the
+    // single place the current tab is decided and the single place every
+    // chip is re-synced from it.
+    //
+    // MEASURE TEXT WITH THE FONT YOU PAINT IT WITH: OptionChip paints its
+    // label in Theme::labelFont() (see its paintEvent), so its own font() is
+    // set to that here rather than left at whatever it would otherwise
+    // inherit (QApplication's default, which is bodyFont() - a different
+    // size on the same scale) - a chip that measured itself with one font
+    // and painted with another is exactly the mistake this project's rule
+    // exists to catch, and it is also what lets a plain QFontMetics(chip->
+    // font()) probe outside this class read the SAME width sizeHint() uses.
+    //
+    // Five chips do not fit this card's 272 logical pixels of content width
+    // in one row - "Text & lines" alone runs close to what four tabs used to
+    // split between them - so the bar wraps to a SECOND row rather than
+    // clipping a label or widening the whole card. The wrap is measured, not
+    // guessed: each chip's own sizeHint() (built from the same
+    // QFontMetrics(labelFont) the no-clipping suite check reads) is packed
+    // greedily into row one until the next chip would overflow this card's
+    // content width, and everything after that goes to row two. A
+    // hand-picked 3/2 split would silently go stale the day a tab's name or
+    // the font changes; this reflows instead.
     auto* tabRow = new QWidget(this);
     makeTransparent(tabRow, QStringLiteral("settingsTabRow"));
-    auto* tabLine = new QHBoxLayout(tabRow);
-    tabLine->setContentsMargins(0, 0, 0, 0);
-    tabLine->setSpacing(3);
-    const QString tabNames[kTabCount] = {tr("Colours"), tr("Viewport"), tr("Units"),
-                                         tr("Files")};
+    auto* tabColumn = new QVBoxLayout(tabRow);
+    tabColumn->setContentsMargins(0, 0, 0, 0);
+    tabColumn->setSpacing(kTabRowGap);
+    auto* tabRow1 = new QHBoxLayout();
+    tabRow1->setContentsMargins(0, 0, 0, 0);
+    tabRow1->setSpacing(3);
+    auto* tabRow2 = new QHBoxLayout();
+    tabRow2->setContentsMargins(0, 0, 0, 0);
+    tabRow2->setSpacing(3);
+    tabColumn->addLayout(tabRow1);
+    tabColumn->addLayout(tabRow2);
+
+    const QString tabNames[kTabCount] = {tr("Colours"), tr("Text & lines"), tr("Viewport"),
+                                         tr("Units"), tr("Files")};
     const QString tabTips[kTabCount] = {
-        tr("Every colour the app draws with, and how big its text is"),
+        tr("Every colour the app draws with"),
+        tr("Text size, the font, and the app's line weights"),
         tr("What the 3D area shows around your furniture"),
         tr("The unit sizes are written in, and what the cursor snaps to"),
         tr("How often this furniture is written to disk")};
+    const int tabContentWidth = kWidth - 2 * kPad;
+    int tabRowWidth = 0;
+    QHBoxLayout* activeTabRow = tabRow1;
     for (int i = 0; i < kTabCount; ++i) {
         auto* chip = new OptionChip(OptionChip::Style::Tab, tabNames[i], tabRow);
+        chip->setFont(Theme::labelFont());
         chip->setToolTip(tabTips[i]);
         const Tab tab = static_cast<Tab>(i);
         connect(chip, &QAbstractButton::clicked, this, [this, tab] { setCurrentTab(tab); });
-        tabLine->addWidget(chip, 1);
+
+        const int chipWidth = chip->sizeHint().width();
+        const int spacingBefore = tabRowWidth > 0 ? activeTabRow->spacing() : 0;
+        if (activeTabRow == tabRow1 && tabRowWidth > 0 &&
+            tabRowWidth + spacingBefore + chipWidth > tabContentWidth) {
+            activeTabRow = tabRow2;
+            tabRowWidth = 0;
+        }
+        activeTabRow->addWidget(chip, 1);
+        tabRowWidth += (tabRowWidth > 0 ? activeTabRow->spacing() : 0) + chipWidth;
+
         myTabButtons[i] = chip;
         myExtraTexts << tabNames[i];
     }
@@ -389,6 +424,8 @@ AppearancePanel::AppearancePanel(QWidget* parent)
 
     QWidget* coloursPage = myTabPages[static_cast<int>(Tab::Colours)];
     QVBoxLayout* colours = myPageLayouts[static_cast<int>(Tab::Colours)];
+    QWidget* textLinesPage = myTabPages[static_cast<int>(Tab::TextLines)];
+    QVBoxLayout* textLines = myPageLayouts[static_cast<int>(Tab::TextLines)];
 
     // --- the scrolling list of colour rows ---------------------------------
     auto* scroll = new QScrollArea(coloursPage);
@@ -410,6 +447,12 @@ AppearancePanel::AppearancePanel(QWidget* parent)
     // name in nameForToken() would get a nameless row, which is why gui_smoke
     // asserts every token has one.
     for (const Theme::ColourToken& token : Theme::colourTokens()) {
+        // A RETIRED token gets no row: the app draws no keyboard focus rings
+        // any more (the user asked for them gone), so a swatch for one would
+        // be a colour the user can change and never see. The fields stay in
+        // Theme::Spec so a .furnifytheme saved before the removal still loads
+        // rather than being refused for an unknown key.
+        if (isRetiredToken(token.id)) continue;
         auto* row = new QWidget(content);
         makeTransparent(row, QStringLiteral("appearanceRow_") + token.id);
         auto* line = new QHBoxLayout(row);
@@ -436,8 +479,16 @@ AppearancePanel::AppearancePanel(QWidget* parent)
     scroll->setWidget(content);
     colours->addWidget(scroll, 1);
 
-    // --- the type controls --------------------------------------------------
-    auto* sizeRow = new QWidget(coloursPage);
+    // --- the type controls, on TEXT & LINES now -----------------------------
+    //
+    // Split off Colours (a user review of the four-tab drawer: "the color
+    // tab doesnt not make any sense, maybe divide it in two tabs"): these
+    // five are Theme::Spec values exactly like the swatches, but nothing
+    // about them is a COLOUR, and a tab holding 28 swatches plus five
+    // unrelated type/line controls read as a grab bag wearing one label. In
+    // the order CLAUDE.md's Settings table lists them: Text size, Font,
+    // Edge lines, Outline lines, Button border.
+    auto* sizeRow = new QWidget(textLinesPage);
     makeTransparent(sizeRow, QStringLiteral("appearanceSizeRow"));
     auto* sizeLine = new QHBoxLayout(sizeRow);
     sizeLine->setContentsMargins(0, 0, 0, 0);
@@ -455,81 +506,9 @@ AppearancePanel::AppearancePanel(QWidget* parent)
         setBaseSize(pt);
     });
     sizeLine->addWidget(mySize);
-    colours->addWidget(sizeRow);
+    textLines->addWidget(sizeRow);
 
-    // Milestone 5, item 6: two more numeric tokens, on the exact same
-    // QDoubleSpinBox template Grid detail set - a field + kMin/kMax
-    // constants + defaultSpec + operator== + serialize/deserialize +
-    // accessor + this row + applyTheme sync + paintedTexts.
-    auto* edgeWidthRow = new QWidget(coloursPage);
-    makeTransparent(edgeWidthRow, QStringLiteral("appearanceEdgeWidthRow"));
-    auto* edgeWidthLine = new QHBoxLayout(edgeWidthRow);
-    edgeWidthLine->setContentsMargins(0, 0, 0, 0);
-    edgeWidthLine->setSpacing(8);
-    myEdgeWidthLabel = new QLabel(tr("Edge lines"), edgeWidthRow);
-    makeTransparent(myEdgeWidthLabel, QStringLiteral("appearanceEdgeWidthLabel"));
-    edgeWidthLine->addWidget(myEdgeWidthLabel, 1);
-    myEdgeWidth = new QDoubleSpinBox(edgeWidthRow);
-    myEdgeWidth->setRange(Theme::kMinEdgeWidthPx, Theme::kMaxEdgeWidthPx);
-    myEdgeWidth->setSingleStep(0.5);
-    myEdgeWidth->setDecimals(1);
-    myEdgeWidth->setSuffix(tr(" px"));
-    myEdgeWidth->setToolTip(tr("How thick the lines along a body's own edges are — "
-                               "0 leaves the shading with none at all"));
-    connect(myEdgeWidth, &QDoubleSpinBox::valueChanged, this, [this](double px) {
-        if (mySyncing) return;
-        setEdgeWidth(px);
-    });
-    edgeWidthLine->addWidget(myEdgeWidth);
-    colours->addWidget(edgeWidthRow);
-
-    auto* sketchLineWidthRow = new QWidget(coloursPage);
-    makeTransparent(sketchLineWidthRow, QStringLiteral("appearanceSketchLineWidthRow"));
-    auto* sketchLineWidthLine = new QHBoxLayout(sketchLineWidthRow);
-    sketchLineWidthLine->setContentsMargins(0, 0, 0, 0);
-    sketchLineWidthLine->setSpacing(8);
-    mySketchLineWidthLabel = new QLabel(tr("Outline lines"), sketchLineWidthRow);
-    makeTransparent(mySketchLineWidthLabel, QStringLiteral("appearanceSketchLineWidthLabel"));
-    sketchLineWidthLine->addWidget(mySketchLineWidthLabel, 1);
-    mySketchLineWidth = new QDoubleSpinBox(sketchLineWidthRow);
-    mySketchLineWidth->setRange(Theme::kMinSketchLineWidthPx, Theme::kMaxSketchLineWidthPx);
-    mySketchLineWidth->setSingleStep(0.5);
-    mySketchLineWidth->setDecimals(1);
-    mySketchLineWidth->setSuffix(tr(" px"));
-    mySketchLineWidth->setToolTip(tr("How thick the line an outline draws is — while it "
-                                     "is being drawn and once it is closed"));
-    connect(mySketchLineWidth, &QDoubleSpinBox::valueChanged, this, [this](double px) {
-        if (mySyncing) return;
-        setSketchLineWidth(px);
-    });
-    sketchLineWidthLine->addWidget(mySketchLineWidth);
-    colours->addWidget(sketchLineWidthRow);
-
-    auto* strokeRow = new QWidget(coloursPage);
-    makeTransparent(strokeRow, QStringLiteral("appearanceStrokeRow"));
-    auto* strokeLine = new QHBoxLayout(strokeRow);
-    strokeLine->setContentsMargins(0, 0, 0, 0);
-    strokeLine->setSpacing(8);
-    myStrokeLabel = new QLabel(tr("Button border"), strokeRow);
-    makeTransparent(myStrokeLabel, QStringLiteral("appearanceStrokeLabel"));
-    strokeLine->addWidget(myStrokeLabel, 1);
-    myStroke = new QSpinBox(strokeRow);
-    // The spec's field is a double, but a border is judged in whole pixels
-    // and the crisp-border idiom is built around integer alignment - so the
-    // control offers integers over the full legal range, 0 included.
-    myStroke->setRange(static_cast<int>(Theme::kMinChipStrokePx),
-                       static_cast<int>(Theme::kMaxChipStrokePx));
-    myStroke->setSuffix(tr(" px"));
-    myStroke->setToolTip(tr("How thick the line around the tool buttons is — "
-                            "0 leaves only the fill"));
-    connect(myStroke, &QSpinBox::valueChanged, this, [this](int px) {
-        if (mySyncing) return;
-        setChipStroke(px);
-    });
-    strokeLine->addWidget(myStroke);
-    colours->addWidget(strokeRow);
-
-    auto* familyRow = new QWidget(coloursPage);
+    auto* familyRow = new QWidget(textLinesPage);
     makeTransparent(familyRow, QStringLiteral("appearanceFamilyRow"));
     auto* familyLine = new QHBoxLayout(familyRow);
     familyLine->setContentsMargins(0, 0, 0, 0);
@@ -573,9 +552,81 @@ AppearancePanel::AppearancePanel(QWidget* parent)
     if (myFamily->view() && myFamily->view()->window())
         myFamily->view()->window()->installEventFilter(this);
     familyLine->addWidget(myFamily, 1);
-    colours->addWidget(familyRow);
+    textLines->addWidget(familyRow);
 
-    // --- the look as a file -------------------------------------------------
+    // Milestone 5, item 6: two more numeric tokens, on the exact same
+    // QDoubleSpinBox template Grid detail set - a field + kMin/kMax
+    // constants + defaultSpec + operator== + serialize/deserialize +
+    // accessor + this row + applyTheme sync + paintedTexts.
+    auto* edgeWidthRow = new QWidget(textLinesPage);
+    makeTransparent(edgeWidthRow, QStringLiteral("appearanceEdgeWidthRow"));
+    auto* edgeWidthLine = new QHBoxLayout(edgeWidthRow);
+    edgeWidthLine->setContentsMargins(0, 0, 0, 0);
+    edgeWidthLine->setSpacing(8);
+    myEdgeWidthLabel = new QLabel(tr("Edge lines"), edgeWidthRow);
+    makeTransparent(myEdgeWidthLabel, QStringLiteral("appearanceEdgeWidthLabel"));
+    edgeWidthLine->addWidget(myEdgeWidthLabel, 1);
+    myEdgeWidth = new QDoubleSpinBox(edgeWidthRow);
+    myEdgeWidth->setRange(Theme::kMinEdgeWidthPx, Theme::kMaxEdgeWidthPx);
+    myEdgeWidth->setSingleStep(0.5);
+    myEdgeWidth->setDecimals(1);
+    myEdgeWidth->setSuffix(tr(" px"));
+    myEdgeWidth->setToolTip(tr("How thick the lines along a body's own edges are — "
+                               "0 leaves the shading with none at all"));
+    connect(myEdgeWidth, &QDoubleSpinBox::valueChanged, this, [this](double px) {
+        if (mySyncing) return;
+        setEdgeWidth(px);
+    });
+    edgeWidthLine->addWidget(myEdgeWidth);
+    textLines->addWidget(edgeWidthRow);
+
+    auto* sketchLineWidthRow = new QWidget(textLinesPage);
+    makeTransparent(sketchLineWidthRow, QStringLiteral("appearanceSketchLineWidthRow"));
+    auto* sketchLineWidthLine = new QHBoxLayout(sketchLineWidthRow);
+    sketchLineWidthLine->setContentsMargins(0, 0, 0, 0);
+    sketchLineWidthLine->setSpacing(8);
+    mySketchLineWidthLabel = new QLabel(tr("Outline lines"), sketchLineWidthRow);
+    makeTransparent(mySketchLineWidthLabel, QStringLiteral("appearanceSketchLineWidthLabel"));
+    sketchLineWidthLine->addWidget(mySketchLineWidthLabel, 1);
+    mySketchLineWidth = new QDoubleSpinBox(sketchLineWidthRow);
+    mySketchLineWidth->setRange(Theme::kMinSketchLineWidthPx, Theme::kMaxSketchLineWidthPx);
+    mySketchLineWidth->setSingleStep(0.5);
+    mySketchLineWidth->setDecimals(1);
+    mySketchLineWidth->setSuffix(tr(" px"));
+    mySketchLineWidth->setToolTip(tr("How thick the line an outline draws is — while it "
+                                     "is being drawn and once it is closed"));
+    connect(mySketchLineWidth, &QDoubleSpinBox::valueChanged, this, [this](double px) {
+        if (mySyncing) return;
+        setSketchLineWidth(px);
+    });
+    sketchLineWidthLine->addWidget(mySketchLineWidth);
+    textLines->addWidget(sketchLineWidthRow);
+
+    auto* strokeRow = new QWidget(textLinesPage);
+    makeTransparent(strokeRow, QStringLiteral("appearanceStrokeRow"));
+    auto* strokeLine = new QHBoxLayout(strokeRow);
+    strokeLine->setContentsMargins(0, 0, 0, 0);
+    strokeLine->setSpacing(8);
+    myStrokeLabel = new QLabel(tr("Button border"), strokeRow);
+    makeTransparent(myStrokeLabel, QStringLiteral("appearanceStrokeLabel"));
+    strokeLine->addWidget(myStrokeLabel, 1);
+    myStroke = new QSpinBox(strokeRow);
+    // The spec's field is a double, but a border is judged in whole pixels
+    // and the crisp-border idiom is built around integer alignment - so the
+    // control offers integers over the full legal range, 0 included.
+    myStroke->setRange(static_cast<int>(Theme::kMinChipStrokePx),
+                       static_cast<int>(Theme::kMaxChipStrokePx));
+    myStroke->setSuffix(tr(" px"));
+    myStroke->setToolTip(tr("How thick the line around the tool buttons is — "
+                            "0 leaves only the fill"));
+    connect(myStroke, &QSpinBox::valueChanged, this, [this](int px) {
+        if (mySyncing) return;
+        setChipStroke(px);
+    });
+    strokeLine->addWidget(myStroke);
+    textLines->addWidget(strokeRow);
+
+    // --- the look as a file, back on COLOURS ---------------------------------
     auto* fileRow = new QWidget(coloursPage);
     makeTransparent(fileRow, QStringLiteral("appearanceFileRow"));
     auto* fileLine = new QHBoxLayout(fileRow);
@@ -896,6 +947,14 @@ void AppearancePanel::applyTheme()
     if (myFamily) {
         const int index = myFamily->findText(live.fontFamily);
         if (index >= 0) myFamily->setCurrentIndex(index);
+    }
+    // The tab chips' own font() tracks Theme::labelFont() the same way their
+    // paintEvent already does - "measure text with the font you paint it
+    // with" - so a live Text size or Font edit (both reachable from this
+    // very drawer, on the Text & lines tab) cannot leave a later chip->font()
+    // probe reading a size that is no longer what is on screen.
+    for (OptionChip* tabButton : myTabButtons) {
+        if (tabButton) tabButton->setFont(Theme::labelFont());
     }
     if (myTitle) {
         // A per-widget stylesheet wins over the app-wide one regardless of

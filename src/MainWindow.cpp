@@ -13,6 +13,7 @@
 #include "HintBalloon.h"
 #include "IconSet.h"
 #include "ItemsPanel.h"
+#include "PanelCloseButton.h"
 #include "PullArrow.h"
 #include "ShapeFlyout.h"
 #include "ShortcutSheet.h"
@@ -812,6 +813,10 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // ViewportOverlay would reparent it anyway, but a card that is a child of
     // the window until then would flash in the wrong place on the first show.
     myItemsPanel = new ItemsPanel(&myDocument, myView, myView);
+    // The x in the corner, shown only while the pointer is over this panel.
+    // It triggers the same checkable action the rail chip and the menu entry
+    // do - see PanelCloseButton.
+    new PanelCloseButton(myItemsPanelAction, myItemsPanel);
 
     connect(myView, &OcctViewWidget::sketchPointPicked, this, &MainWindow::onSketchPointPicked);
     connect(myView, &OcctViewWidget::sketchCursorMoved, this, &MainWindow::onSketchCursorMoved);
@@ -2048,6 +2053,10 @@ void MainWindow::buildOverlay()
     // already made its own explicit hide decision - hide() here, before
     // adding it, is what makes this one of those.
     myVersionsPanel = new VersionsPanel(this, myView, myView);
+    // The x in the corner, shown only while the pointer is over this panel.
+    // It triggers the same checkable action the rail chip and the menu entry
+    // do - see PanelCloseButton.
+    new PanelCloseButton(myVersionsPanelAction, myVersionsPanel);
     myVersionsPanel->hide();
     myOverlay->addWidget(myVersionsPanel, ViewportOverlay::Anchor::TopLeft);
 
@@ -2055,6 +2064,10 @@ void MainWindow::buildOverlay()
     // Items and Versions. Hidden BEFORE addWidget() for the same reason: its
     // visibility belongs to myJointsPanelAction alone.
     myJointsPanel = new JointsPanel(this, myView, myView);
+    // The x in the corner, shown only while the pointer is over this panel.
+    // It triggers the same checkable action the rail chip and the menu entry
+    // do - see PanelCloseButton.
+    new PanelCloseButton(myJointsPanelAction, myJointsPanel);
     myJointsPanel->hide();
     myOverlay->addWidget(myJointsPanel, ViewportOverlay::Anchor::TopLeft);
 
@@ -2148,6 +2161,10 @@ void MainWindow::buildOverlay()
     // explicit hide decision of its own, and this card's visibility belongs to
     // myAppearanceAction alone.
     myAppearancePanel = new AppearancePanel(myView);
+    // The x in the corner, shown only while the pointer is over this panel.
+    // It triggers the same checkable action the rail chip and the menu entry
+    // do - see PanelCloseButton.
+    new PanelCloseButton(myAppearanceAction, myAppearancePanel);
     myAppearancePanel->hide();
     myOverlay->addWidget(myAppearancePanel, ViewportOverlay::Anchor::TopRight);
 

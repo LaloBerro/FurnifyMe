@@ -11,19 +11,38 @@
 // Settings, the action says Settings..., and nothing in here claims to be
 // about appearance alone.
 //
-// Four tabs, in this order, and the split is by MEANING rather than by
+// Five tabs, in this order, and the split is by MEANING rather than by
 // mechanism:
 //
-//   Colours  - every colour token, the type scale, the three line widths,
-//              the font, Save/Load colours and Reset. Theme::Spec values.
-//   Viewport - the grid switch, Grid detail, Show sizes, Projection,
-//              Gizmo size, Show notifications. A mix of QActions and two
-//              Theme::Spec values, which is the point: Grid detail and Gizmo
-//              size are SPEC values that belong beside the grid and the
-//              gizmos they describe, not beside the colour swatches they
-//              merely share a persistence mechanism with.
-//   Units    - Millimetres/Centimetres, Snap to Grid, Magnet.
-//   Files    - Autosave (Off / After every change / Every minute / 5 / 15).
+//   Colours     - the 28 colour swatches, Save/Load colours and Reset.
+//                 Theme::Spec values.
+//   Text & lines- the type scale and the app's line weights: Text size,
+//                 Font, Edge lines, Outline lines, Button border.
+//                 Theme::Spec values, split out of Colours (a user review of
+//                 the four-tab drawer: "the color tab doesnt not make any
+//                 sense, maybe divide it in two tabs") because a tab that
+//                 held 28 swatches AND five unrelated type/line controls was
+//                 a grab bag wearing one label - "Colours" named the
+//                 swatches and nothing else on the page.
+//   Viewport    - the grid switch, Grid detail, Show sizes, Projection,
+//                 Gizmo size, Show notifications. A mix of QActions and two
+//                 Theme::Spec values, which is the point: Grid detail and
+//                 Gizmo size are SPEC values that belong beside the grid and
+//                 the gizmos they describe, not beside the colour swatches
+//                 they merely share a persistence mechanism with.
+//   Units       - Millimetres/Centimetres, Snap to Grid, Magnet.
+//   Files       - Autosave (Off / After every change / Every minute / 5 / 15).
+//
+// FIVE TABS DO NOT FIT ONE ROW OF THIS CARD'S 272 LOGICAL PIXELS OF CONTENT
+// WIDTH - "Text & lines" alone is close to what four whole tabs used to
+// share - so the tab bar is laid out in TWO ROWS, packed greedily off each
+// chip's own sizeHint() (which is already Theme::labelFont()'s
+// QFontMetrics, the same font OptionChip paints its label with - see
+// AppearancePanel.cpp's "Measure text with the font you paint it with"
+// comment at the tab bar). A fixed 3/2 split was rejected in favour of
+// measuring: a hand-picked split silently goes stale the day a tab's name
+// changes or the font does, and this project has a standing rule against
+// trusting a plausible-looking layout over a measured one.
 //
 // THE LAW EVERY NON-COLOUR ROW FOLLOWS: a control here is built from the
 // window's existing QAction and MIRRORS it. It holds no checked state of its
@@ -111,10 +130,10 @@ class AppearancePanel : public QWidget {
     Q_OBJECT
 
 public:
-    // The four tabs, in the order they are drawn. Used as an index into
+    // The five tabs, in the order they are drawn. Used as an index into
     // myPages, so the order of the enumerators IS the order on screen.
-    enum class Tab { Colours = 0, Viewport = 1, Units = 2, Files = 3 };
-    static constexpr int kTabCount = 4;
+    enum class Tab { Colours = 0, TextLines = 1, Viewport = 2, Units = 3, Files = 4 };
+    static constexpr int kTabCount = 5;
 
     explicit AppearancePanel(QWidget* parent = nullptr);
 
@@ -247,6 +266,10 @@ public:
     // id this panel has no name for, which is the case gui_smoke asserts can
     // never happen: a token in Theme::colourTokens() with no name here would
     // be an editable colour with no row.
+    // True for a colour token the app no longer paints: it keeps its field
+    // in Theme::Spec so old saved colour files still load, but gets no row.
+    static bool isRetiredToken(const QString& id);
+
     static QString nameForToken(const QString& id);
 
     // Every string this panel puts on screen - the title, each row's name,
