@@ -31,6 +31,7 @@
 #include "JointRenderer.h"
 #include "PullArrow.h"
 #include "SelectionSizesRenderer.h"
+#include "ResizePinRenderer.h"
 #include "TransformGizmo.h"
 
 #include <QImage>
@@ -840,6 +841,63 @@ public:
     // Width, depth, height - the label strings actually on screen.
     std::array<std::string, 3> selectionSizesLabels() const { return mySelectionSizes.labelTexts(); }
     int selectionSizesBuildCount() const { return mySelectionSizes.buildCount(); }
+
+    // --- Re-Measure (improvements item 8) ----------------------------------
+    //
+    // Right-click one of those numbers and it becomes a field. The gesture's
+    // STATE is MainWindow's (which body, which size, which anchor, what the
+    // field reads); what lives here is the part that needs the camera: which
+    // number is under the cursor, where to stand the chip, and the pin on the
+    // dimension line.
+    //
+    // WHICH SIZE, if any, is drawn at `logical`: 0 width, 1 depth, 2 height -
+    // SelectionSizesRenderer's own index order, which is also
+    // ModelingOps::MeasuredBox's axis order - or -1. The test is the boxed
+    // number's own rectangle, asked of the renderer that laid it out and
+    // converted from device pixels here, the one place in this widget that
+    // conversion is ever done.
+    int selectionSizeLabelAt(const QPoint& logical) const;
+    // Where that number's centre projects to, for a chip to stand beside.
+    bool selectionSizeLabelPoint(int index, QPoint& out) const;
+    // The whole number's own rectangle in logical pixels - ONE derivation,
+    // read by the hit test above and by the chip that stands clear of it, so
+    // the pixels a press is tested against and the pixels a chip avoids can
+    // never be two different boxes.
+    bool selectionSizeLabelRect(int index, QRect& out) const;
+
+    // The pin, at `anchor` (0 low, 1 centre, 2 high) on size `index`'s
+    // dimension line. Re-placed on every camera move from the line's own live
+    // ends, so an orbit keeps it on the ink. clearResizePin() ends it.
+    void showResizePin(int index, int anchor);
+    void clearResizePin();
+    bool resizePinShown() const { return myResizePin.isShowing(); }
+    int resizePinAnchor() const { return myResizePin.active(); }
+    // Which pin mark claims `logical`, or -1 - the shared 14 px grab radius,
+    // nearest mark wins, exactly as the gizmo handles' own hit tests do.
+    int resizePinMarkAt(const QPoint& logical) const;
+    // Where mark `index` projects to, which is the point resizePinMarkAt()
+    // measures against - so a caller aiming a click at a mark aims at the
+    // same place the press will be tested against, rather than deriving one
+    // a second way.
+    bool resizePinMarkPoint(int index, QPoint& out) const;
+
+signals:
+    // A right press and release that did not travel - see
+    // kRightClickSlopPx - over the size number `index`. A right DRAG orbits
+    // and emits nothing, which is the whole reason the two are told apart by
+    // distance rather than by which button is down.
+    void sizeLabelRightClicked(int index);
+    // A left click landed on pin mark `index` (0 low, 1 centre, 2 high).
+    void resizePinPicked(int index);
+
+public:
+    // How far the cursor may travel between a right press and its release and
+    // still count as a CLICK. Four logical pixels: a deliberate click on a
+    // number does not move that far, and an orbit the user means always moves
+    // further on its very first step (0.4 deg/px of camera for every one of
+    // them). Public so the suite drives the real threshold rather than a
+    // second copy of it.
+    static constexpr int kRightClickSlopPx = 4;
 
     // --- Mirror plane placement (Milestone 4, Phase 3) ---------------------
     //
@@ -2456,6 +2514,27 @@ private:
     SelectionSizesRenderer::Kind mySizesKind = SelectionSizesRenderer::Kind::OneBody;
     bool mySizesWanted = false;
     void updateSelectionSizes();
+
+    // --- Re-Measure (improvements item 8) ----------------------------------
+    // The pin on the live gesture's dimension line, and which size it belongs
+    // to. myResizeSizeIndex is -1 when no gesture is live, which is what makes
+    // updateSelectionSizes() able to re-place the pin on every camera move
+    // from the dimension line's own current ends rather than from a remembered
+    // pair of points that an orbit has moved out from under.
+    ResizePinRenderer myResizePin;
+    int myResizeSizeIndex = -1;
+    int myResizeAnchor = 1;   // low 0, centre 1, high 2 - starts at the CENTRE
+    void updateResizePin();
+    // True for exactly as long as the press that grabbed a pin mark is still
+    // down, so the release that ends it is swallowed instead of falling
+    // through to an ordinary pick that would end the gesture - every drag in
+    // this file keeps the same rule.
+    bool myResizePinPressTaken = false;
+    // Where the right button went down and how far it has travelled since -
+    // what tells a right CLICK (which opens the editor over a size number)
+    // from a right DRAG (which orbits, and must keep orbiting).
+    QPoint myRightPressPos;
+    double myRightMovedPx = 0.0;
 
     std::map<int, Handle(AIS_Shape)> mySolids;
     // The outline items - see displayOutline(). Keyed by the same document id

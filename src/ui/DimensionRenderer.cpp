@@ -236,6 +236,24 @@ bool DimensionRenderer::refresh()
     return show(myFrom, myTo, myNormal, myWorldPerPixel);
 }
 
+bool DimensionRenderer::labelBox(gp_Pnt& anchor, double& halfWidthPx, double& halfHeightPx) const
+{
+    if (!isShowing() || !myHasLabelBox) return false;
+    anchor = myLabelAnchor;
+    halfWidthPx = myLabelHalfWidthPx;
+    halfHeightPx = myLabelHalfHeightPx;
+    return true;
+}
+
+bool DimensionRenderer::dimensionLine(gp_Pnt& start, gp_Pnt& end, gp_Dir& outward) const
+{
+    if (!isShowing()) return false;
+    start = myDimStart;
+    end = myDimEnd;
+    outward = myDimOutward;
+    return true;
+}
+
 bool DimensionRenderer::show(const gp_Pnt& from, const gp_Pnt& to, const gp_Dir& normalIn,
                              double worldPerPixel)
 {
@@ -303,6 +321,15 @@ bool DimensionRenderer::show(const gp_Pnt& from, const gp_Pnt& to, const gp_Dir&
 
     const gp_Pnt dimStart = from.Translated(ext * offset);
     const gp_Pnt dimEnd = to.Translated(ext * offset);
+    // Recorded where they are BUILT - see dimensionLine() on the header. The
+    // outward direction is `ext` itself, which is the caller's normal already
+    // projected perpendicular to the span (and replaced outright when it came
+    // in parallel), so it is the one this annotation was really drawn along
+    // rather than the one that was asked for.
+    myDimStart = dimStart;
+    myDimEnd = dimEnd;
+    myDimOutward = gp_Dir(ext);
+    myHasLabelBox = false;
 
     // 3 lines (extension x2, dimension x1) + 2 arrowheads x 2 strokes each =
     // 7 segments, 14 vertices.
@@ -377,6 +404,12 @@ bool DimensionRenderer::show(const gp_Pnt& from, const gp_Pnt& to, const gp_Dir&
         myContext->Display(boxed, 0, -1, Standard_False);
         myContext->SetDisplayPriority(boxed, Graphic3d_DisplayPriority_Above);
         myObjects.push_back(boxed);
+        // Same numbers the box was built from, not a second measurement of
+        // the same string - see labelBox() on the header.
+        myLabelAnchor = mid;
+        myLabelHalfWidthPx = boxed->halfWidthPx;
+        myLabelHalfHeightPx = boxed->halfHeightPx;
+        myHasLabelBox = true;
         return true;
     }
 

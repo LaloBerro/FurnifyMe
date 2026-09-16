@@ -137,6 +137,7 @@ if(FURNIFYME_BUILD_APP)
       src/ui/DimensionRenderer.cpp
       src/ui/JointRenderer.cpp
       src/ui/SelectionSizesRenderer.cpp
+      src/ui/ResizePinRenderer.cpp
       src/ui/Theme.cpp
       src/ui/IconSet.cpp
       src/ui/ToolChip.cpp
@@ -152,6 +153,7 @@ if(FURNIFYME_BUILD_APP)
       src/ui/PullArrow.cpp
       src/ui/BevelArrow.cpp
       src/ui/MitreTool.cpp
+      src/ui/ReMeasureTool.cpp
       src/ui/TransformGizmo.cpp
       src/ui/InlineRename.cpp
       src/ui/WindowChrome.cpp

@@ -27,6 +27,7 @@
 #include "JointChip.h"
 #include "JointsPanel.h"
 #include "MitreTool.h"
+#include "ReMeasureTool.h"
 #include "WalkthroughPanel.h"
 #include "WindowChrome.h"
 
@@ -2454,6 +2455,17 @@ void MainWindow::buildOverlay()
     // channel on the way past, and connection order is emission order, so the
     // mitre ghost is put back after they have run rather than before.
     myMitreTool = new MitreTool(this, myView);
+    // Re-Measure's chip, built after the mitre's for the same reason it was
+    // built last: connection order is emission order, and every other
+    // gesture's refresh() clears the shared modeling-preview channel on the
+    // way past, so this ghost is put back after they have run.
+    myReMeasureTool = new ReMeasureTool(this, myView);
+
+    // The right-click on a size number, and the click on a pin mark - the
+    // viewport announces both and this window decides what they mean.
+    connect(myView, &OcctViewWidget::sizeLabelRightClicked, this,
+            &MainWindow::onSizeLabelRightClicked);
+    connect(myView, &OcctViewWidget::resizePinPicked, this, &MainWindow::setReMeasureAnchor);
 
     // The live view's half of the compare camera sync - see syncCamera()'s
     // declaration. A no-op for as long as myCompareView is null, which is
@@ -2504,6 +2516,7 @@ void MainWindow::buildOverlay()
     connect(myOverlay, &ViewportOverlay::laidOut, myMoveTool, &MoveTool::replace);
     connect(myOverlay, &ViewportOverlay::laidOut, mirrorChip, &MirrorPlacementChip::replace);
     connect(myOverlay, &ViewportOverlay::laidOut, myMitreTool, &MitreTool::replace);
+    connect(myOverlay, &ViewportOverlay::laidOut, myReMeasureTool, &ReMeasureTool::replace);
 
     // The unsaved-changes question (improvements item 3). Built LAST and
     // connected to laidOut() LAST, so its re-raise runs after every other
@@ -2561,6 +2574,18 @@ void MainWindow::updateActions()
         myMitreActive = false;
         myMitreFace.Nullify();
         myMitreBodyId = 0;
+    }
+
+    // ...and a live Re-Measure, on exactly the same terms and in the same
+    // place, so the two gestures share one idea of what ends one rather than
+    // two lists that could drift apart. ReMeasureTool::refresh() takes the
+    // chip and its ghost down off the appStateChanged this function ends
+    // with; the pin goes here, because nothing else owns it.
+    if (myResizeActive && !reMeasureGestureStillHolds()) {
+        myResizeActive = false;
+        myResizeBodyId = 0;
+        myResizeSizeIndex = -1;
+        myView->clearResizePin();
     }
 
     const std::size_t selectedCount = myView->selectedSolidIds().size();
@@ -2860,6 +2885,7 @@ void MainWindow::updateActions()
     // (a disabled action does not stop a programmatic trigger()).
     const bool canRename = !mySketching && !atInit && drawerVisible &&
                            !myView->mirrorPlacementActive() && !myMitreActive &&
+                           !myResizeActive &&
                            (selectedCount == 1 || renameTargetsOutline);
     myRenameAction->setEnabled(canRename);
     myRenameAction->setToolTip(
@@ -3890,7 +3916,7 @@ bool MainWindow::canOpenSaveVersion() const
     // placement really would fight over the same key.
     return !myShowingInitScreen && !myRenderModeOn && !mySketching && !hasPendingFace() &&
            !canPullSelectedFace() && !canBevelSelectedEdge() && !myView->mirrorPlacementActive() &&
-           !myMitreActive;
+           !myMitreActive && !myResizeActive;
 }
 
 void MainWindow::onSaveVersion()
@@ -4318,6 +4344,18 @@ void MainWindow::updateStateLabel()
         state = tr("%1 ready — press E to extrude")
                     .arg(QString::fromStdString(
                         myDocument.outlineNameOf(pendingOutlineId())));
+    } else if (myResizeActive) {
+        // A mode with no persistent cue is a trap - which body, which size,
+        // and which end the pin is holding, so the anchor can be read without
+        // hunting for the mark on the line.
+        state = tr("%1 %2 — type a size, Enter to apply, Esc to cancel — keeping %3")
+                    .arg(QString::fromStdString(myDocument.nameOf(myResizeBodyId)),
+                         reMeasureSizeName(myResizeSizeIndex).toLower(),
+                         myResizeAnchor == ModelingOps::ResizeAnchor::Low
+                             ? tr("the pinned end")
+                             : myResizeAnchor == ModelingOps::ResizeAnchor::High
+                                   ? tr("the pinned end")
+                                   : tr("the centre — both ends move by half"));
     } else if (myMitreActive) {
         // The mockup's own sentence: which end, which angle, which kind of
         // cut Flip has landed on - so a width side and a thickness side can be
@@ -5669,6 +5707,224 @@ bool MainWindow::mitreEndBy(double angleDeg, ModelingOps::MitreSide side)
     return true;
 }
 
+// --- Re-Measure (improvements item 8) ---------------------------------------
+
+QString MainWindow::reMeasureSizeName(int index)
+{
+    switch (index) {
+        case 0: return tr("Width");
+        case 1: return tr("Depth");
+        case 2: return tr("Height");
+        default: return tr("Size");
+    }
+}
+
+QString MainWindow::reMeasureSizeRefusalText()
+{
+    return tr("A size has to be more than zero — type the length you want");
+}
+
+QString MainWindow::reMeasureEndRefusalText()
+{
+    return tr("This end is not one flat face square to that size, so it cannot move — click "
+              "the other end of the line to keep this one instead");
+}
+
+QString MainWindow::reMeasureKernelRefusalText()
+{
+    return tr("This body can't be made that size — the geometry engine could not build the "
+              "shape. Try a different size");
+}
+
+QString MainWindow::reMeasureGroupRefusalText()
+{
+    return tr("A group's overall size is read-only — select one body to retype its size");
+}
+
+bool MainWindow::canReMeasureSize(int index) const
+{
+    if (index < 0 || index > 2) return false;
+    if (myShowingInitScreen || isAskingBeforeClose() || mySketching || hasPendingFace() ||
+        myRenderModeOn || isCompareOpen() || myView->mirrorPlacementActive() || myMitreActive ||
+        myResizeActive)
+        return false;
+    // ONE whole body. A group's box is not any one body's side, so there is no
+    // honest answer to which piece a retyped number should change - see
+    // reMeasureGroupRefusalText().
+    if (myView->selectionKind() != OcctViewWidget::PickKind::Body) return false;
+    if (myView->selectedSolidIds().size() != 1) return false;
+    // The sizes have to be ON SCREEN: what the gesture is about is the number
+    // the user right-clicked, and a dimension this camera is not drawing has
+    // no number to have been clicked.
+    if (!myView->selectionSizesShown()) return false;
+    const ModelingOps::MeasuredBox box = selectionBox();
+    if (!box.ok) return false;
+    const double sizes[3] = {box.width, box.depth, box.height};
+    return sizes[index] > ModelingOps::kResizeNoChange;
+}
+
+bool MainWindow::reMeasureGestureStillHolds() const
+{
+    if (!myResizeActive) return false;
+    if (myShowingInitScreen || isAskingBeforeClose() || mySketching || hasPendingFace() ||
+        myRenderModeOn || isCompareOpen() || myView->mirrorPlacementActive())
+        return false;
+    if (myDocument.revision() != myResizeRevision) return false;
+    if (myView->selectionKind() != OcctViewWidget::PickKind::Body) return false;
+    const std::vector<int> ids = myView->selectedSolidIds();
+    return ids.size() == 1 && ids.front() == myResizeBodyId;
+}
+
+bool MainWindow::beginReMeasure(int index)
+{
+    if (!canReMeasureSize(index)) {
+        // The one place a gesture that cannot begin can be answered - never a
+        // modal, and never a Failure toast: nothing failed.
+        statusBar()->showMessage(
+            mySketching          ? tr("Unavailable while you're drawing")
+            : hasPendingFace()   ? tr("Unavailable while an outline is waiting")
+            : myView->selectionKind() == OcctViewWidget::PickKind::Body &&
+                      myView->selectedSolidIds().size() > 1
+                                 ? reMeasureGroupRefusalText()
+                                 : tr("Select one body, then right-click one of its sizes"));
+        return false;
+    }
+
+    const ModelingOps::MeasuredBox box = selectionBox();
+    const gp_Dir axes[3] = {box.widthAxis, box.depthAxis, box.heightAxis};
+    const double sizes[3] = {box.width, box.depth, box.height};
+    myResizeBodyId = myView->selectedSolidIds().front();
+    myResizeSizeIndex = index;
+    // BY VALUE - see the member's own comment. The box is re-derived whenever
+    // the document moves, and an axis re-read mid-gesture would follow the
+    // preview being judged rather than the body that was clicked.
+    myResizeAxis = axes[index];
+    myResizeCurrentSize = sizes[index];
+    // The CENTRE, always: both ends move by half until the user pins one. It
+    // is the user's own change to the picked mockup, and it is a per-gesture
+    // default rather than a sticky one - a pin left on an end by the last
+    // gesture would silently decide the next one.
+    myResizeAnchor = ModelingOps::ResizeAnchor::Centre;
+    myResizeRevision = myDocument.revision();
+    myResizeActive = true;
+    myView->showResizePin(index, 1);
+    // The transform gizmo stands down and ReMeasureTool begins off this one
+    // emission.
+    updateActions();
+    return true;
+}
+
+void MainWindow::onSizeLabelRightClicked(int index)
+{
+    beginReMeasure(index);
+}
+
+void MainWindow::cancelReMeasure()
+{
+    if (!myResizeActive) return;
+    myResizeActive = false;
+    myResizeBodyId = 0;
+    myResizeSizeIndex = -1;
+    myView->clearResizePin();
+    updateActions();
+    statusBar()->showMessage(tr("Re-measure cancelled — nothing was changed"));
+}
+
+void MainWindow::setReMeasureAnchor(int mark)
+{
+    if (!myResizeActive) return;
+    const ModelingOps::ResizeAnchor anchor = mark == 0   ? ModelingOps::ResizeAnchor::Low
+                                             : mark == 2 ? ModelingOps::ResizeAnchor::High
+                                                         : ModelingOps::ResizeAnchor::Centre;
+    if (anchor == myResizeAnchor) return;
+    myResizeAnchor = anchor;
+    myView->showResizePin(myResizeSizeIndex, mark);
+    // The chip re-previews around the other end. Called directly rather than
+    // through updateActions(): this runs from a viewport signal, not from
+    // inside an appStateChanged slot, but the ghost has to be rebuilt whether
+    // or not anything else about the window's state changed.
+    if (myReMeasureTool) myReMeasureTool->anchorChanged();
+    updateStateLabel();
+}
+
+ModelingOps::BooleanResult MainWindow::reMeasureResult(double newSizeMm) const
+{
+    if (!myResizeActive) return {};
+    return ModelingOps::resizeAlongAxis(myDocument.shapeOf(myResizeBodyId), myResizeAxis,
+                                        newSizeMm, myResizeAnchor);
+}
+
+QString MainWindow::reMeasureRefusalFor(double newSizeMm) const
+{
+    if (!myResizeActive) return QString();
+    switch (ModelingOps::checkResize(myDocument.shapeOf(myResizeBodyId), myResizeAxis, newSizeMm,
+                                     myResizeAnchor)) {
+        case ModelingOps::ResizeCheck::Ok: return reMeasureKernelRefusalText();
+        case ModelingOps::ResizeCheck::SizeNotPositive: return reMeasureSizeRefusalText();
+        case ModelingOps::ResizeCheck::EndNotFlat: return reMeasureEndRefusalText();
+        case ModelingOps::ResizeCheck::AxisNotASide:
+        case ModelingOps::ResizeCheck::NotMeasurable: return reMeasureKernelRefusalText();
+    }
+    return reMeasureKernelRefusalText();
+}
+
+bool MainWindow::reMeasureTo(double newSizeMm)
+{
+    if (!myResizeActive) return false;
+    const int id = myResizeBodyId;
+    const double before = myResizeCurrentSize;
+    if (id <= 0 || myDocument.shapeOf(id).IsNull()) return false;
+
+    // Typing back the size it already is: not a change, so not a checkpoint -
+    // the same line Save and visibility already draw against checkpoint().
+    if (std::fabs(newSizeMm - before) < ModelingOps::kResizeNoChange) {
+        cancelReMeasure();
+        statusBar()->showMessage(tr("%1 is already %2")
+                                     .arg(QString::fromStdString(myDocument.nameOf(id)),
+                                          QString::fromStdString(Measure::formatLength(before))));
+        return true;
+    }
+
+    const ModelingOps::BooleanResult result = reMeasureResult(newSizeMm);
+    if (!result.ok) {
+        // Never a failed operation surfaced as a success, and never the
+        // kernel's own string: it is written for ModelingOps, not the user.
+        qWarning("Re-measure failed: %s", result.error.c_str());
+        myToasts->show(reMeasureRefusalFor(newSizeMm), Toast::Kind::Failure, false);
+        statusBar()->showMessage(tr("Re-measure refused — nothing was changed"));
+        return false;
+    }
+
+    // The gesture, the ghost and the pin all describe a body that is about to
+    // be replaced - gone before it is redisplayed.
+    myResizeActive = false;
+    myResizeBodyId = 0;
+    myResizeSizeIndex = -1;
+    myView->clearModelingPreview();
+    myView->clearResizePin();
+    myView->clearSelection();
+
+    // ONE checkpoint, through the choke point every replace-body edit uses:
+    // render mode exits, the twin re-derives by mirroring, linked copies
+    // follow, and joints re-derive off the revision it moves.
+    bool twinFollowed = false;
+    int linkedOthersUpdated = 0;
+    commitReplaceBody(id, result.shape, twinFollowed, linkedOthersUpdated);
+    recordProgress("remeasure.completed");
+
+    updateActions();
+    emit documentChanged();
+    QString message = tr("%1 — %2 to %3")
+                          .arg(QString::fromStdString(myDocument.nameOf(id)),
+                               QString::fromStdString(Measure::formatLength(before)),
+                               QString::fromStdString(Measure::formatLength(newSizeMm)));
+    if (twinFollowed) message += tr(" — twin followed");
+    message += linkedGroupSuffix(linkedOthersUpdated);
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    return true;
+}
+
 int MainWindow::bodyIdForEdge(const TopoDS_Edge& edge) const
 {
     if (edge.IsNull()) return 0;
@@ -6095,6 +6351,15 @@ int MainWindow::transformableBodyId() const
     // Enter/Escape/X/Y/Z does - can never visually collide over the same
     // body.
     if (myView->mirrorPlacementActive()) return 0;
+
+    // ...and a live Re-Measure (improvements item 8), for exactly the reason
+    // above and one more: that gesture stands on ONE whole body too, so its
+    // chip and this gizmo would otherwise be up over the same body at once -
+    // and the chip's application-wide Enter/Escape claim would sit beside
+    // MoveTool's own Escape-only one. The Escape a user presses to back out
+    // of a retyped size must reach the chip, not cancel a gizmo drag that is
+    // not happening. One stand-down, the mirror gesture's own precedent.
+    if (myResizeActive) return 0;
 
     // A WHOLE BODY selected, explicitly - the selection-content term that
     // replaced "body selection mode". selectedSolidIds() reports the OWNING
@@ -6786,6 +7051,12 @@ bool MainWindow::mirrorPlacementEnvironmentOk() const
     // the gesture on the handoff itself, with no second mechanism to keep in
     // step.
     if (myShowingInitScreen || isCompareOpen()) return false;
+    // A live Re-Measure holds Enter and Escape application-wide and stands on
+    // a whole-body selection, exactly as this gesture does - so the two are
+    // kept apart explicitly here, the same way canReMeasureSize() refuses
+    // while a placement is live. Two application-wide claims over the same
+    // body is the one collision neither predicate's other terms can rule out.
+    if (myResizeActive) return false;
     // AND NO SELECTION TERM, deliberately - this predicate guards BEGINNING a
     // placement and SURVIVING one, and the selection only decides the first.
     //

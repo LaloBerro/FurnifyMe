@@ -48,6 +48,7 @@
 #include "JointsPanel.h"
 #include "MainWindow.h"
 #include "MitreTool.h"
+#include "ReMeasureTool.h"
 #include "Measure.h"
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
@@ -867,6 +868,7 @@ constexpr BlockInfo kBlocks[] = {
     { "ctrl-a-selects-every-body-on-screen", false, true },
     { "selection-sizes-around-the-selection", false, true },
     { "and-the-show-sizes-preference-persists", false, true },
+    { "re-measure-right-click-a-size-and-type-a-new-one", false, true },
 };
 
 QString g_blockFilter;      // empty when no filter was given on the command line
@@ -33335,6 +33337,441 @@ int main(int argc, char* argv[])
             returning.close();
             settle(120);
         }
+    }
+
+    // --- Re-Measure (improvements item 8) ------------------------------------
+    //
+    // Right-click a size number drawn around ONE selected body, type a new
+    // size, and that side grows or shrinks. Independent: it builds its own
+    // window and its own library, so a filtered run of this one block is the
+    // intended fast loop.
+    //
+    // The three things a green run here is worth more than the count: a right
+    // DRAG still orbits and opens nothing (told apart by distance, not by
+    // button), the pin starts at the CENTRE so both ends move by half (which
+    // volume alone cannot tell from either end-anchored case - every commit
+    // check below reads the CENTRE OF MASS), and the ghost is built by the
+    // very call Enter commits.
+    if (blockEnabled("re-measure-right-click-a-size-and-type-a-new-one")) {
+        RequiredTempDir reDir;
+        QString reId;
+        {
+            FurnitureStore seedStore(reDir.path());
+            reId = seedStore.createFurniture(QStringLiteral("Re-measure bench"));
+            DocumentModel seedDoc;
+            // b1: the workhorse, 600 x 300 x 18 from the origin.
+            seedDoc.addSolid(ModelingOps::makeBox(gp_Pnt(0.0, 0.0, 0.0), 600.0, 300.0, 18.0));
+            // b2: a second board, far enough away to select as a group with.
+            seedDoc.addSolid(
+                ModelingOps::makeBox(gp_Pnt(0.0, 1200.0, 0.0), 600.0, 300.0, 18.0));
+            // b3: the same board with its high-X end MITRED off at 45 degrees,
+            // so that end is no longer one flat face square to the width.
+            const TopoDS_Shape plain =
+                ModelingOps::makeBox(gp_Pnt(0.0, -1200.0, 0.0), 600.0, 300.0, 18.0);
+            TopoDS_Face endFace;
+            double bestX = -1.0e300;
+            for (TopExp_Explorer it(plain, TopAbs_FACE); it.More(); it.Next()) {
+                const TopoDS_Face f = TopoDS::Face(it.Current());
+                const BRepAdaptor_Surface s(f);
+                if (s.GetType() != GeomAbs_Plane) continue;
+                if (std::fabs(s.Plane().Axis().Direction().X()) < 0.999999) continue;
+                if (s.Plane().Location().X() > bestX) {
+                    bestX = s.Plane().Location().X();
+                    endFace = f;
+                }
+            }
+            const ModelingOps::BooleanResult mitred =
+                ModelingOps::mitreEnd(plain, endFace, 45.0, ModelingOps::MitreSide::ThicknessA);
+            seedDoc.addSolid(mitred.ok ? mitred.shape : plain);
+            check(!reId.isEmpty() && mitred.ok && seedStore.saveFurniture(reId, seedDoc, QImage()),
+                  "re-measure: two boards and one mitred board are seeded");
+        }
+
+        MainWindow mw(nullptr, /*persistProgress=*/false, reDir.path());
+        mw.setAttribute(Qt::WA_ShowWithoutActivating);
+        mw.resize(1100, 800);
+        mw.show();
+        settle(300);
+        OcctViewWidget* rv = mw.view();
+        rv->setAnimationsEnabled(false);
+        ToastHost* reToasts = mw.findChild<ToastHost*>();
+        check(reToasts != nullptr, "re-measure: the window has its toast host");
+        const auto reToastText = [&]() { return reToasts ? reToasts->currentText() : QString(); };
+        check(mw.openFurniture(reId), "re-measure: the seeded furniture opens");
+        settle(300);
+
+        const std::vector<DocumentModel::Solid> seeded = mw.document().solids();
+        const bool threeBodies = seeded.size() == 3;
+        check(threeBodies, "re-measure: three bodies are open");
+        const int b1 = threeBodies ? seeded[0].id : 0;
+        const int b2 = threeBodies ? seeded[1].id : 0;
+        const int b3 = threeBodies ? seeded[2].id : 0;
+
+        const auto frameOn = [&](const gp_Pnt& target, double distance) {
+            CameraState look;
+            look.target = target;
+            look.azimuthDeg = -35.0;
+            look.elevationDeg = 28.0;
+            look.distance = distance;
+            rv->setCameraStateNow(look);
+            settle(150);
+        };
+        // The body's own size along one of its measured box's axes, and where
+        // its centre of mass sits along that axis - the two numbers every
+        // commit below is judged by, because volume cannot tell the three
+        // anchors apart.
+        const auto sizeOf = [&](int id, int index) {
+            const ModelingOps::MeasuredBox box =
+                ModelingOps::measuredBox({mw.document().shapeOf(id)});
+            const double sizes[3] = {box.width, box.depth, box.height};
+            return box.ok && index >= 0 && index < 3 ? sizes[index] : -1.0;
+        };
+        const auto centreAlongX = [&](const TopoDS_Shape& s) {
+            return ModelingOps::centreOfMass(s).X();
+        };
+        // Where a size label is on screen, or an off-screen sentinel.
+        const auto labelAt = [&](int index) {
+            QPoint at;
+            return rv->selectionSizeLabelPoint(index, at) ? at : QPoint(-1000, -1000);
+        };
+        // The field, typed into the way a user does - the text is what
+        // previews and what commits, one value and one path.
+        const auto typeSize = [&](const QString& text) {
+            if (mw.reMeasureTool() && mw.reMeasureTool()->field())
+                mw.reMeasureTool()->field()->setText(text);
+            settle(150);
+        };
+
+        // --- one board selected: the sizes, and which number is where --------
+        frameOn(gp_Pnt(300.0, 150.0, 9.0), 1500.0);
+        check(pickBodyOf(mw, b1), "re-measure: the board is taken by a double-click");
+        settle(200);
+        check(rv->selectionSizesShown(), "re-measure: its three sizes are drawn");
+        const QPoint widthLabel = labelAt(0);
+        check(widthLabel.x() > -1000 && rv->rect().contains(widthLabel),
+              "re-measure: the width number projects inside the viewport");
+        check(rv->selectionSizeLabelAt(widthLabel) == 0,
+              "re-measure: the hit test finds the width number at its own centre");
+        check(rv->selectionSizeLabelAt(widthLabel + QPoint(0, 90)) != 0,
+              "re-measure: and not ninety pixels below it");
+        check(rv->selectionSizeLabelAt(QPoint(4, 4)) == -1,
+              "re-measure: a corner of the viewport is no number at all");
+
+        // --- a right DRAG orbits and opens nothing ---------------------------
+        {
+            const double azimuthBefore = rv->camera().state().azimuthDeg;
+            // Deliberately SHORT - eight pixels, just past kRightClickSlopPx -
+            // and ENDING on the number. A long drag ends somewhere with no
+            // number under it at all, and a release over nothing opens nothing
+            // whatever the threshold says: that probe passes against an app
+            // with no threshold whatsoever, which is exactly what a mutation
+            // run caught it doing. The number still being under the cursor at
+            // the release is asserted first, so the premise cannot go quiet.
+            const QPoint dragFrom = widthLabel - QPoint(8, 0);
+            dragButton(rv, QPointF(dragFrom), QPointF(widthLabel), Qt::RightButton);
+            settle(150);
+            check(rv->selectionSizeLabelAt(widthLabel) == 0,
+                  "re-measure: the right drag ended with the width number still under the cursor");
+            check(!mw.reMeasureActive(),
+                  "re-measure: a right DRAG opens no field - the TRAVEL is what tells it from "
+                  "a click, not what was under the release");
+            check(std::fabs(rv->camera().state().azimuthDeg - azimuthBefore) > 1.0,
+                  "re-measure: ...and it orbits the camera exactly as it always did");
+            // Back where the number was framed from, since the drag moved the
+            // camera and every label has moved with it.
+            frameOn(gp_Pnt(300.0, 150.0, 9.0), 1500.0);
+            check(pickBodyOf(mw, b1), "re-measure: the board is taken again after the orbit");
+            settle(150);
+        }
+
+        // --- a right CLICK opens the field -----------------------------------
+        const QPoint width2 = labelAt(0);
+        pressThenReleaseAt(rv, QPointF(width2), QPointF(width2), Qt::RightButton);
+        settle(200);
+        check(mw.reMeasureActive() && mw.reMeasureBodyId() == b1 && mw.reMeasureSizeIndex() == 0,
+              "re-measure: a right CLICK on the width number opens the gesture on that size");
+        check(mw.reMeasureTool() != nullptr && mw.reMeasureTool()->isVisible(),
+              "re-measure: the chip is visible");
+        check(mw.findChildren<QDialog*>().isEmpty(),
+              "re-measure: and nothing modal was raised");
+        {
+            QLineEdit* f = mw.reMeasureTool() ? mw.reMeasureTool()->field() : nullptr;
+            check(f != nullptr && f->isVisible(),
+                  "re-measure: its field is visible");
+            // REACHABLE, not merely present - childAt() against the pointer,
+            // CLAUDE.md's own rule for a control over the viewport.
+            check(f && rv->childAt(f->geometry().center()) == f,
+                  "re-measure: and a click at its centre would land on it");
+            // The WINDOW's focus widget, not hasFocus(): every window in this
+            // suite carries WA_ShowWithoutActivating and so is never the
+            // OS-active one, which makes hasFocus() false however correctly
+            // the focus was set - sendKeyTo()'s own reasoning.
+            check(f && mw.focusWidget() == f,
+                  "re-measure: it holds focus, so typing goes straight in");
+            check(f && f->text() == QStringLiteral("600"),
+                  QStringLiteral("re-measure: seeded with the size that was clicked (\"%1\")")
+                      .arg(f ? f->text() : QString()));
+        }
+        check(rv->resizePinShown(), "re-measure: the pin is on the dimension line");
+        check(rv->resizePinAnchor() == 1 &&
+                  mw.reMeasureAnchor() == ModelingOps::ResizeAnchor::Centre,
+              "re-measure: and it starts at the CENTRE - both ends move by half");
+        // The transform gizmo stands down, so the two application-wide key
+        // claims can never be installed over the same body at once.
+        check(mw.moveToolBodyId() == 0,
+              "re-measure: the transform gizmo stands down while the field is open");
+
+        // --- typing previews, through the commit's own call -------------------
+        typeSize(QStringLiteral("450"));
+        check(rv->hasModelingPreview(),
+              "re-measure: typing 450 puts a ghost on the modeling preview channel");
+        check(mw.document().solids().size() == 3,
+              "re-measure: the ghost is in no document");
+        {
+            const TopoDS_Shape ghost = rv->modelingPreviewShape();
+            check(!ghost.IsNull() &&
+                      std::fabs(ModelingOps::volume(ghost) - 450.0 * 300.0 * 18.0) < 10.0,
+                  "re-measure: the ghost is 450 x 300 x 18");
+            // THE anchor check on the ghost: with the pin at the centre the
+            // body keeps its middle, which is what tells this ghost from the
+            // one either end-anchored case would build.
+            check(!ghost.IsNull() && std::fabs(centreAlongX(ghost) - 300.0) < 0.01,
+                  QStringLiteral("re-measure: and it kept its centre (x %1, expected 300)")
+                      .arg(ghost.IsNull() ? -1.0 : centreAlongX(ghost)));
+            settle(150);
+            check(!printWindowCapture(&mw, outDir + QStringLiteral("/remeasure-live.png"))
+                       .isNull(),
+                  "re-measure: the open field, the ghost and the centred pin are captured");
+        }
+
+        // --- Enter commits: one checkpoint, both ends moved equally ----------
+        const int revisionBeforeCommit = mw.document().revision();
+        sendKeyTo(&mw, Qt::Key_Return);
+        settle(250);
+        check(!mw.reMeasureActive(), "re-measure: Enter ends the gesture");
+        check(!rv->resizePinShown() && !rv->hasModelingPreview(),
+              "re-measure: the pin and the ghost go with it");
+        check(mw.document().revision() > revisionBeforeCommit,
+              "re-measure: the document moved");
+        check(std::fabs(sizeOf(b1, 0) - 450.0) < 0.01,
+              QStringLiteral("re-measure: the board's width is now the typed 450 (%1)")
+                  .arg(sizeOf(b1, 0)));
+        check(std::fabs(sizeOf(b1, 1) - 300.0) < 0.01 && std::fabs(sizeOf(b1, 2) - 18.0) < 0.01,
+              "re-measure: and the two sides nobody typed at are untouched");
+        check(std::fabs(centreAlongX(mw.document().shapeOf(b1)) - 300.0) < 0.01,
+              QStringLiteral("re-measure: the centre stayed put, so BOTH ends moved by half "
+                             "(x %1, expected 300)")
+                  .arg(centreAlongX(mw.document().shapeOf(b1))));
+        {
+            const QString message = mw.statusBar()->currentMessage();
+            check(message.contains(QStringLiteral("600 mm")) &&
+                      message.contains(QStringLiteral("450 mm")),
+                  QStringLiteral("re-measure: the report names the old size and the new one "
+                                 "(\"%1\")").arg(message));
+        }
+
+        // --- ONE undo puts it back -------------------------------------------
+        trigger(mw, QStringLiteral("Undo"));
+        settle(250);
+        check(std::fabs(sizeOf(b1, 0) - 600.0) < 0.01,
+              QStringLiteral("re-measure: one Undo restores the 600 (%1)").arg(sizeOf(b1, 0)));
+
+        // --- clicking an end moves the pin, and that end then stays ----------
+        frameOn(gp_Pnt(300.0, 150.0, 9.0), 1500.0);
+        check(pickBodyOf(mw, b1), "re-measure: the restored board is taken again");
+        settle(150);
+        {
+            const QPoint width3 = labelAt(0);
+            pressThenReleaseAt(rv, QPointF(width3), QPointF(width3), Qt::RightButton);
+            settle(200);
+            check(mw.reMeasureActive(), "re-measure: the gesture opens a second time");
+
+            check(rv->resizePinShown() && rv->resizePinAnchor() == 1,
+                  "re-measure: the pin is at the centre again - not sticky from the last gesture");
+            // Clicked where the mark is ACTUALLY drawn - the viewport's own
+            // projection of the very point its hit test measures against,
+            // never a point this test derived a second way. That the pixel
+            // really does claim the mark is asserted BEFORE the click, so a
+            // press landing somewhere harmless could not pass for one that
+            // landed on the handle.
+            QPoint lowAt;
+            const bool haveLowMark = rv->resizePinMarkPoint(0, lowAt) &&
+                                     rv->rect().contains(lowAt);
+            check(haveLowMark, "re-measure: the low end's mark is on screen");
+            check(haveLowMark && rv->resizePinMarkAt(lowAt) == 0,
+                  "re-measure: and a press at its own pixel is claimed by it");
+            if (haveLowMark) clickAt(rv, QPointF(lowAt));
+            check(mw.reMeasureActive(),
+                  "re-measure: the click on the mark did not end the gesture (the press is "
+                  "claimed, and its release swallowed)");
+            check(mw.reMeasureAnchor() == ModelingOps::ResizeAnchor::Low &&
+                      rv->resizePinAnchor() == 0,
+                  "re-measure: clicking the low end moves the pin there");
+
+            typeSize(QStringLiteral("450"));
+            {
+                const TopoDS_Shape ghost = rv->modelingPreviewShape();
+                check(!ghost.IsNull() && std::fabs(centreAlongX(ghost) - 225.0) < 0.01,
+                      QStringLiteral("re-measure: the ghost now keeps the low end (x %1, "
+                                     "expected 225)")
+                          .arg(ghost.IsNull() ? -1.0 : centreAlongX(ghost)));
+            }
+            sendKeyTo(&mw, Qt::Key_Return);
+            settle(250);
+            check(std::fabs(sizeOf(b1, 0) - 450.0) < 0.01,
+                  "re-measure: the commit is 450 wide with the pin on an end too");
+            check(std::fabs(centreAlongX(mw.document().shapeOf(b1)) - 225.0) < 0.01,
+                  QStringLiteral("re-measure: and the pinned end stayed exactly where it was "
+                                 "(x %1, expected 225)")
+                      .arg(centreAlongX(mw.document().shapeOf(b1))));
+            trigger(mw, QStringLiteral("Undo"));
+            settle(250);
+            check(std::fabs(sizeOf(b1, 0) - 600.0) < 0.01, "re-measure: undone again");
+        }
+
+        // --- Esc leaves the body exactly as it was ---------------------------
+        frameOn(gp_Pnt(300.0, 150.0, 9.0), 1500.0);
+        check(pickBodyOf(mw, b1), "re-measure: the board is taken for the cancel case");
+        settle(150);
+        {
+            const TopoDS_Shape before = mw.document().shapeOf(b1);
+            const int revisionBefore = mw.document().revision();
+            const QPoint width4 = labelAt(0);
+            pressThenReleaseAt(rv, QPointF(width4), QPointF(width4), Qt::RightButton);
+            settle(200);
+            check(mw.reMeasureActive(), "re-measure: open for the cancel case");
+            typeSize(QStringLiteral("500"));
+            check(rv->hasModelingPreview(), "re-measure: 500 previews");
+            sendKeyTo(&mw, Qt::Key_Escape);
+            settle(200);
+            check(!mw.reMeasureActive(), "re-measure: Esc ends the gesture");
+            check(!rv->hasModelingPreview() && !rv->resizePinShown(),
+                  "re-measure: the ghost and the pin go with it");
+            check(mw.document().revision() == revisionBefore,
+                  "re-measure: Esc took no checkpoint");
+            check(mw.document().shapeOf(b1).IsEqual(before),
+                  "re-measure: and the body is the very same shape it was");
+        }
+
+        // --- typed in CENTIMETRES, read in centimetres ------------------------
+        {
+            trigger(mw, QStringLiteral("Centimetres"));
+            settle(150);
+            frameOn(gp_Pnt(300.0, 150.0, 9.0), 1500.0);
+            check(pickBodyOf(mw, b1), "re-measure: the board is taken with centimetres chosen");
+            settle(150);
+            const QPoint width5 = labelAt(0);
+            pressThenReleaseAt(rv, QPointF(width5), QPointF(width5), Qt::RightButton);
+            settle(200);
+            check(mw.reMeasureActive(), "re-measure: open with centimetres chosen");
+            QLineEdit* f = mw.reMeasureTool() ? mw.reMeasureTool()->field() : nullptr;
+            check(f && f->text() == QStringLiteral("60"),
+                  QStringLiteral("re-measure: the field is seeded in the DISPLAYED unit - "
+                                 "600 mm reads \"60\" (\"%1\")").arg(f ? f->text() : QString()));
+            typeSize(QStringLiteral("45"));
+            sendKeyTo(&mw, Qt::Key_Return);
+            settle(250);
+            check(std::fabs(sizeOf(b1, 0) - 450.0) < 0.01,
+                  QStringLiteral("re-measure: typing 45 with centimetres chosen makes it 450 mm "
+                                 "(%1)").arg(sizeOf(b1, 0)));
+            trigger(mw, QStringLiteral("Undo"));
+            settle(250);
+            trigger(mw, QStringLiteral("Millimetres"));
+            settle(150);
+            check(std::fabs(sizeOf(b1, 0) - 600.0) < 0.01, "re-measure: back to 600 mm");
+        }
+
+        // --- a GROUP's overall size is read-only ------------------------------
+        {
+            frameOn(gp_Pnt(300.0, 600.0, 9.0), 3000.0);
+            check(pickBodyOf(mw, b1), "re-measure: the first board of a group is taken");
+            check(pickBodyOf(mw, b2, /*additive=*/true),
+                  "re-measure: and the second joins it");
+            settle(200);
+            check(rv->selectionSizesKind() == SelectionSizesRenderer::Kind::Group,
+                  "re-measure: the group's overall sizes are drawn");
+            const int revisionBefore = mw.document().revision();
+            const double widthBefore = sizeOf(b1, 0);
+            const QPoint groupLabel = labelAt(0);
+            check(rv->rect().contains(groupLabel),
+                  "re-measure: the group's width number is on screen");
+            pressThenReleaseAt(rv, QPointF(groupLabel), QPointF(groupLabel), Qt::RightButton);
+            settle(200);
+            check(!mw.reMeasureActive(),
+                  "re-measure: right-clicking a GROUP's number opens nothing");
+            check(mw.statusBar()->currentMessage() == MainWindow::reMeasureGroupRefusalText(),
+                  QStringLiteral("re-measure: it says to select one body instead (\"%1\")")
+                      .arg(mw.statusBar()->currentMessage()));
+            check(mw.document().revision() == revisionBefore &&
+                      std::fabs(sizeOf(b1, 0) - widthBefore) < 0.01,
+                  "re-measure: and nothing changed");
+        }
+
+        // --- a MITRED end refuses, with its own sentence ----------------------
+        {
+            frameOn(gp_Pnt(300.0, -1050.0, 9.0), 1500.0);
+            check(pickBodyOf(mw, b3), "re-measure: the mitred board is taken");
+            settle(200);
+            const QPoint mitreLabel = labelAt(0);
+            check(rv->rect().contains(mitreLabel),
+                  "re-measure: its width number is on screen");
+            pressThenReleaseAt(rv, QPointF(mitreLabel), QPointF(mitreLabel), Qt::RightButton);
+            settle(200);
+            check(mw.reMeasureActive() && mw.reMeasureBodyId() == b3,
+                  "re-measure: the gesture opens on the mitred board - a size can be TYPED "
+                  "before anything is known to refuse");
+            const int revisionBefore = mw.document().revision();
+            typeSize(QStringLiteral("450"));
+            check(!rv->hasModelingPreview(),
+                  "re-measure: a size the mitred end cannot take shows NO ghost");
+            check(mw.reMeasureTool() &&
+                      mw.reMeasureTool()->reasonText() == MainWindow::reMeasureEndRefusalText(),
+                  QStringLiteral("re-measure: and the chip says why (\"%1\")")
+                      .arg(mw.reMeasureTool() ? mw.reMeasureTool()->reasonText() : QString()));
+            sendKeyTo(&mw, Qt::Key_Return);
+            settle(250);
+            check(mw.document().revision() == revisionBefore,
+                  "re-measure: Enter on a refused size writes nothing");
+            check(reToastText() == MainWindow::reMeasureEndRefusalText(),
+                  QStringLiteral("re-measure: and a Failure toast carries the same sentence "
+                                 "(\"%1\")").arg(reToastText()));
+            // The refusal is about the END THAT MOVES, not about the body: pin
+            // the MITRED end and the square one moves instead, which the
+            // geometry accepts - so the very size that showed no ghost a
+            // moment ago shows one now.
+            mw.setReMeasureAnchor(2);
+            settle(200);
+            check(mw.reMeasureAnchor() == ModelingOps::ResizeAnchor::High,
+                  "re-measure: the mitred end is pinned");
+            check(rv->hasModelingPreview(),
+                  "re-measure: with the mitred end pinned the square end moves, and 450 previews");
+            check(mw.reMeasureTool() && mw.reMeasureTool()->reasonText().isEmpty(),
+                  "re-measure: and the chip has nothing left to refuse");
+            mw.cancelReMeasure();
+            settle(150);
+            check(!mw.reMeasureActive(), "re-measure: the mitred gesture is cancelled");
+        }
+
+        // --- the copy this chip paints ----------------------------------------
+        {
+            QStringList offenders;
+            QStringList texts = mw.reMeasureTool() ? mw.reMeasureTool()->paintedTexts()
+                                                   : QStringList();
+            texts << MainWindow::reMeasureSizeRefusalText() << MainWindow::reMeasureEndRefusalText()
+                  << MainWindow::reMeasureKernelRefusalText()
+                  << MainWindow::reMeasureGroupRefusalText();
+            check(texts.size() >= 8, "re-measure: there is painted copy to sweep");
+            for (const QString& text : texts)
+                for (const QString& word : bannedWords())
+                    if (usesBannedWord(text, word))
+                        offenders << text + QStringLiteral(": ") + word;
+            check(offenders.isEmpty(),
+                  QStringLiteral("re-measure: its painted copy uses no banned word (%1)")
+                      .arg(offenders.join(QStringLiteral("; "))));
+        }
+
+        check(mw.findChildren<QDialog*>().isEmpty(),
+              "re-measure: the whole gesture raised no modal dialog at any point");
     }
 
     // The coverage floor, asserted OUTSIDE check() on purpose: an assertion

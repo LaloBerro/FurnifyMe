@@ -757,6 +757,8 @@ void OcctViewWidget::releaseGlResources()
     myJointRenderer.detach();
     mySelectionSizes.detach();
     mySizesWanted = false;
+    myResizePin.detach();
+    myResizeSizeIndex = -1;
 
     // OCCT's own order: remove every presentation, drop the context, destroy
     // the view, then the viewer.
@@ -1059,6 +1061,8 @@ void OcctViewWidget::initializeViewer()
         myJointRenderer.setZLayer(myJointsLayer);
         mySelectionSizes.attach(myContext);
         mySelectionSizes.setZLayer(mySizesLayer);
+        myResizePin.attach(myContext);
+        myResizePin.setZLayer(mySizesLayer);
     }
 
     // The field of view is fixed at kFovyDeg for ordinary modeling; render
@@ -2624,6 +2628,120 @@ void OcctViewWidget::updateSelectionSizes()
     if (mySelectionSizes.show(mySizesBox, mySizesKind, myCamera.viewDirection(),
                               myCamera.upVector(), quantized))
         scheduleRedraw();
+    // The pin rides on the line that was just laid out, so it is re-placed
+    // from the line's own live ends here rather than from a remembered pair
+    // of points an orbit has moved out from under.
+    updateResizePin();
+}
+
+// --- Re-Measure (improvements item 8) ---------------------------------------
+
+bool OcctViewWidget::selectionSizeLabelRect(int index, QRect& out) const
+{
+    gp_Pnt anchor;
+    double halfW = 0.0, halfH = 0.0;
+    if (!mySelectionSizes.labelBox(index, anchor, halfW, halfH)) return false;
+    QPoint at;
+    if (!projectToScreen(anchor, at)) return false;
+    // The renderer's half sizes are DEVICE pixels (the box is laid out under
+    // zoom-rotate persistence, one local unit per device pixel) and every Qt
+    // coordinate here is logical - see toDevicePixels()'s own comment in the
+    // header for the one place that conversion lives. ONE derivation, read by
+    // the hit test and by the chip's placement alike, so the pixels a press is
+    // tested against and the pixels a chip stands clear of are the same box.
+    const double dpr = std::max(1.0, devicePixelRatioF());
+    const int w = static_cast<int>(std::round(halfW / dpr));
+    const int h = static_cast<int>(std::round(halfH / dpr));
+    out = QRect(at.x() - w, at.y() - h, 2 * w + 1, 2 * h + 1);
+    return true;
+}
+
+int OcctViewWidget::selectionSizeLabelAt(const QPoint& logical) const
+{
+    if (!mySelectionSizes.isShowing() || !viewReady()) return -1;
+    for (int index = 0; index < 3; ++index) {
+        QRect box;
+        if (selectionSizeLabelRect(index, box) && box.contains(logical)) return index;
+    }
+    return -1;
+}
+
+bool OcctViewWidget::selectionSizeLabelPoint(int index, QPoint& out) const
+{
+    QRect box;
+    if (!selectionSizeLabelRect(index, box)) return false;
+    out = box.center();
+    return true;
+}
+
+void OcctViewWidget::showResizePin(int index, int anchor)
+{
+    myResizeSizeIndex = (index < 0 || index > 2) ? -1 : index;
+    myResizeAnchor = (anchor < 0 || anchor > 2) ? 1 : anchor;
+    updateResizePin();
+}
+
+void OcctViewWidget::clearResizePin()
+{
+    myResizeSizeIndex = -1;
+    if (myResizePin.clear()) scheduleRedraw();
+}
+
+void OcctViewWidget::updateResizePin()
+{
+    if (myResizeSizeIndex < 0 || !mySelectionSizes.isShowing()) {
+        if (myResizePin.clear()) scheduleRedraw();
+        return;
+    }
+    gp_Pnt start, end;
+    gp_Dir outward;
+    if (!mySelectionSizes.dimensionLine(myResizeSizeIndex, start, end, outward)) {
+        // The dimension this gesture is about is not being drawn from here -
+        // height looked at straight down. Nothing to stand a pin on; the
+        // gesture itself is MainWindow's to end or keep.
+        if (myResizePin.clear()) scheduleRedraw();
+        return;
+    }
+    gp_Pnt middle(0.5 * (start.X() + end.X()), 0.5 * (start.Y() + end.Y()),
+                  0.5 * (start.Z() + end.Z()));
+    // The CENTRE mark steps clear of the line, and only that one. The boxed
+    // number sits exactly at the line's midpoint, so there is no room ON the
+    // line there - measured on the first capture, where the centred pin
+    // covered half of "600 mm". The two END marks stay exactly on the line's
+    // ends, which is where the picked mockup draws them; the offset is forced
+    // by the number's own position, not a preference.
+    const double clearancePx = 26.0;
+    middle.Translate(gp_Vec(outward) * (clearancePx * worldPerPixelAt(middle)));
+    if (myResizePin.show(start, middle, end, myResizeAnchor)) scheduleRedraw();
+}
+
+bool OcctViewWidget::resizePinMarkPoint(int index, QPoint& out) const
+{
+    gp_Pnt point;
+    if (!myResizePin.markPoint(index, point)) return false;
+    return projectToScreen(point, out);
+}
+
+int OcctViewWidget::resizePinMarkAt(const QPoint& logical) const
+{
+    if (!myResizePin.isShowing() || !viewReady()) return -1;
+    // NEAREST mark wins, not the first within tolerance: on a short dimension
+    // the centre mark and an end mark are within a grab radius of the same
+    // pixel, and a first-match rule would hand the user whichever happened to
+    // be checked first - moveGizmoAxisAt()'s own reasoning, one handle over.
+    int best = -1;
+    double bestDistance = kHandleGrabPx;
+    for (int index = 0; index < 3; ++index) {
+        gp_Pnt point;
+        QPoint at;
+        if (!myResizePin.markPoint(index, point) || !projectToScreen(point, at)) continue;
+        const QPoint d = logical - at;
+        const double distance = std::sqrt(static_cast<double>(d.x() * d.x() + d.y() * d.y()));
+        if (distance > bestDistance) continue;
+        best = index;
+        bestDistance = distance;
+    }
+    return best;
 }
 
 void OcctViewWidget::updateSymmetryIndicator()
@@ -4662,6 +4780,8 @@ void OcctViewWidget::applyTheme()
     myJointRenderer.reapplyTheme();
     // And the selection sizes, which bake their two tokens and the panel fill.
     mySelectionSizes.reapplyTheme();
+    // ...and the Re-Measure pin, which bakes the accent and the same token.
+    myResizePin.reapplyTheme();
 
     scheduleRedraw();
 }
@@ -6466,6 +6586,15 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
     // no cursor-anchored re-pivoting), MMB pans.
     if (event->button() == Qt::RightButton) {
         myOrbiting = true;
+        // Where this press landed and how far it has travelled since - what
+        // tells a right CLICK on a size number (which opens the Re-Measure
+        // field, on release) from a right DRAG (which orbits, and keeps
+        // orbiting). Recorded for EVERY right press, not only one that starts
+        // over a number: the orbit has to run regardless, and the decision is
+        // made on the release from the distance, never from what was under
+        // the press.
+        myRightPressPos = myLastPos;
+        myRightMovedPx = 0.0;
         return;
     }
     if (event->button() == Qt::MiddleButton) {
@@ -6513,6 +6642,23 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
         // contribute nothing, not a reason to hand the gesture back.
         beginAxisDrag(myPullDrag, myPullArrow.axis(), myLastPos);
         return;
+    }
+
+    // A Re-Measure pin mark, on the arrows' terms: a screen-space claim that
+    // takes the press outright, so clicking an end of the dimension line moves
+    // the pin instead of re-picking whatever is behind it - which would change
+    // the selection and so end the very gesture the click was adjusting.
+    // Checked before the handles below because it is only ever up over a WHOLE
+    // BODY selection, where none of them is (the arrows need a face and edges,
+    // and the transform gizmo stands down for a live Re-Measure), so the order
+    // is not load-bearing either.
+    if (event->button() == Qt::LeftButton && !mySketchMode && myResizePin.isShowing()) {
+        const int mark = resizePinMarkAt(myLastPos);
+        if (mark >= 0) {
+            myResizePinPressTaken = true;
+            emit resizePinPicked(mark);
+            return;
+        }
     }
 
     // The mirror-placement handle, on the same terms as the two arrows below
@@ -6680,8 +6826,28 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
 
 void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
 {
-    if (event->button() == Qt::RightButton)  myOrbiting = false;
+    if (event->button() == Qt::RightButton) {
+        myOrbiting = false;
+        // A right press and release that did not travel, over a size number,
+        // is the Re-Measure gesture. A drag of any consequence is an orbit and
+        // says nothing - the camera has already moved, and a menu appearing at
+        // the end of it would be the app answering a gesture the user did not
+        // make. Announced only; MainWindow decides whether the gesture can
+        // begin at all.
+        if (!myViewerOnly && myRightMovedPx <= kRightClickSlopPx) {
+            const int index = selectionSizeLabelAt(event->position().toPoint());
+            if (index >= 0) emit sizeLabelRightClicked(index);
+        }
+    }
     if (event->button() == Qt::MiddleButton) myPanningDrag = false;
+
+    // The end of a pin click, swallowed for the reason every handle release in
+    // this file is: the press was aimed at the mark, and re-picking here would
+    // replace the body selection the gesture is standing on.
+    if (myResizePinPressTaken && event->button() == Qt::LeftButton) {
+        myResizePinPressTaken = false;
+        return;
+    }
 
     // No picking in viewer-only mode - see the header. Orbit and pan are
     // both handled above (unconditionally, since neither depends on the
@@ -7022,6 +7188,15 @@ void OcctViewWidget::mouseMoveEvent(QMouseEvent* event)
             }
         }
     } else if (myOrbiting) {
+        // How far this right drag has travelled FROM ITS PRESS - not the sum
+        // of the steps, which a drag out and back would leave at zero after
+        // the camera had swung right round. Read on the release: past
+        // kRightClickSlopPx this was an orbit, not a click on a number.
+        const QPoint fromPress = pos - myRightPressPos;
+        myRightMovedPx = std::max(
+            myRightMovedPx,
+            std::sqrt(static_cast<double>(fromPress.x() * fromPress.x() +
+                                          fromPress.y() * fromPress.y())));
         const QPoint delta = pos - myLastPos;
         // Dragging right swings the scene right: azimuth decreases; dragging up
         // raises the eye. 0.4 deg/px and 0.3 deg/px feel close to Fusion.

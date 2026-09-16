@@ -88,6 +88,20 @@ std::array<std::string, 3> SelectionSizesRenderer::labelTexts() const
     return {myDims[0].labelText(), myDims[1].labelText(), myDims[2].labelText()};
 }
 
+bool SelectionSizesRenderer::labelBox(int index, gp_Pnt& anchor, double& halfWidthPx,
+                                      double& halfHeightPx) const
+{
+    if (index < 0 || index > 2 || !myShowing) return false;
+    return myDims[index].labelBox(anchor, halfWidthPx, halfHeightPx);
+}
+
+bool SelectionSizesRenderer::dimensionLine(int index, gp_Pnt& start, gp_Pnt& end,
+                                           gp_Dir& outward) const
+{
+    if (index < 0 || index > 2 || !myShowing) return false;
+    return myDims[index].dimensionLine(start, end, outward);
+}
+
 bool SelectionSizesRenderer::clear()
 {
     bool changed = false;

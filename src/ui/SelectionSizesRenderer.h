@@ -72,6 +72,25 @@ public:
     // banned-word sweep; the strings are Measure::formatLength's, never a
     // local format.
     std::array<std::string, 3> labelTexts() const;
+
+    // --- where each dimension IS, for Re-Measure's hit tests -----------------
+    //
+    // Index is WIDTH, DEPTH, HEIGHT - labelTexts()'s own order, which is also
+    // ModelingOps::MeasuredBox's widthAxis/depthAxis/heightAxis order, so a
+    // caller that hit-tests index 1 knows without a lookup that it is holding
+    // the depth and its axis. Both answers come straight out of
+    // DimensionRenderer, which laid the annotation out - see its own header
+    // for why the layout is not re-derived by whoever is testing against it.
+    //
+    // `start` is the end of the drawn line on the LOW side of that axis and
+    // `end` the high side, which is what makes the pin's three positions
+    // (low end, centre, high end) read the same way as
+    // ModelingOps::ResizeAnchor's own Low/Centre/High.
+    //
+    // False, outputs untouched, for an index outside 0..2 or a dimension this
+    // camera is not drawing (height looked at straight down).
+    bool labelBox(int index, gp_Pnt& anchor, double& halfWidthPx, double& halfHeightPx) const;
+    bool dimensionLine(int index, gp_Pnt& start, gp_Pnt& end, gp_Dir& outward) const;
     // How many times anything was actually rebuilt - the suite's count.
     int buildCount() const { return myBuilds; }
 

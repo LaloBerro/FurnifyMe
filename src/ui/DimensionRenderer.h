@@ -102,6 +102,27 @@ public:
     // nothing is shown.
     std::string labelText() const { return myLabelText; }
 
+    // --- where the annotation actually IS, for a screen-space hit test -------
+    //
+    // Re-Measure (improvements item 8) right-clicks the boxed number, and a
+    // pin handle sits on the drawn line's own two ends. Both are answered
+    // HERE rather than re-derived by whoever is testing the cursor against
+    // them: this class laid them out, and a second derivation of the same
+    // offsets is a second thing to keep in step with these.
+    //
+    // The box's half sizes are the ones BoxedLabel is drawn with, which under
+    // its zoom-rotate persistence are DEVICE pixels - the caller converts,
+    // exactly as OcctViewWidget::fromDevicePixels() already does for
+    // everything else that crosses that line. False, outputs untouched, when
+    // nothing is showing (and, for the box, when this annotation is not the
+    // boxed-label style at all).
+    bool labelBox(gp_Pnt& anchor, double& halfWidthPx, double& halfHeightPx) const;
+    // The two ends of the DRAWN dimension line - the offset line the arrows
+    // point at, not the span it measures - and the direction the annotation
+    // was pushed out along, which is the one direction a caller can step
+    // something further clear of the line without landing back on the body.
+    bool dimensionLine(gp_Pnt& start, gp_Pnt& end, gp_Dir& outward) const;
+
 private:
     Handle(AIS_InteractiveContext) myContext;
     std::vector<Handle(AIS_InteractiveObject)> myObjects;
@@ -119,4 +140,15 @@ private:
     // rebuilt against a changed display unit - PullArrowRenderer's own
     // myForceRebuild idiom, one renderer over.
     bool myForceRebuild = false;
+
+    // The last build's own layout - see labelBox()/dimensionLine(). Written
+    // where the geometry is built, never recomputed, so the answer and the
+    // ink can never describe different places.
+    gp_Pnt myDimStart;
+    gp_Pnt myDimEnd;
+    gp_Dir myDimOutward{0.0, 0.0, 1.0};
+    gp_Pnt myLabelAnchor;
+    double myLabelHalfWidthPx = 0.0;
+    double myLabelHalfHeightPx = 0.0;
+    bool myHasLabelBox = false;
 };

@@ -164,6 +164,78 @@ public:
     static QString mitreKernelRefusalText();
     MitreTool* mitreTool() const { return myMitreTool; }
 
+    // --- Re-Measure (improvements item 8) -----------------------------------
+    //
+    // Right-click one of the size numbers drawn around a SINGLE selected body
+    // and type the size you want; that side grows or shrinks. The geometry is
+    // ModelingOps::resizeAlongAxis() - the end FACE moves, nothing is scaled;
+    // this window owns the GESTURE's state (which body, which of the three
+    // sizes, which end stays put, since which revision) and the commit, the
+    // way it owns every other gizmo's; OcctViewWidget owns the hit test and
+    // the pin, and ReMeasureTool (src/ui/ReMeasureTool.h) owns the chip, the
+    // preview and the keys.
+    //
+    // `index` is 0 width, 1 depth, 2 height throughout - SelectionSizesRenderer's
+    // own order, which is ModelingOps::MeasuredBox's axis order too.
+    //
+    // Whether a right-click on size `index` can begin one: exactly ONE whole
+    // body selected (selectionKind() == Body), the sizes actually drawn, a
+    // furniture open, no sketch, no outline waiting, no render mode, no
+    // compare pane, no close question, no mirror placement, no mitre and no
+    // Re-Measure already live. A GROUP's overall size is deliberately
+    // read-only - see reMeasureGroupRefusalText().
+    bool canReMeasureSize(int index) const;
+    // The right-click's own route. False - with a status-bar sentence saying
+    // why, never a modal - when the predicate above does not hold.
+    bool beginReMeasure(int index);
+    // Escape's route, and every derived cancel's: ends the gesture with
+    // nothing changed. Safe when nothing is live.
+    void cancelReMeasure();
+    bool reMeasureActive() const { return myResizeActive; }
+    int reMeasureBodyId() const { return myResizeBodyId; }
+    int reMeasureSizeIndex() const { return myResizeSizeIndex; }
+    // The size the gesture began at, in millimetres - what the chip seeds its
+    // field with and what the success message names as the old value.
+    double reMeasureCurrentSize() const { return myResizeCurrentSize; }
+    ModelingOps::ResizeAnchor reMeasureAnchor() const { return myResizeAnchor; }
+    // The pin moved: `mark` is 0 low, 1 centre, 2 high, on the dimension
+    // line's own ends. The viewport's resizePinPicked() route, and the only
+    // one - the pin starts at the CENTRE (both ends move by half) and every
+    // change to it re-previews.
+    void setReMeasureAnchor(int mark);
+
+    // THE call the preview and the commit both make, so a ghost can never
+    // promise a body Enter will not build - bevelPreview()'s own contract,
+    // one gesture over. A refused result carries a null shape, as every
+    // BooleanResult in this app does.
+    ModelingOps::BooleanResult reMeasureResult(double newSizeMm) const;
+    // Enter's route: builds reMeasureResult() and commits it through
+    // commitReplaceBody(), ONE checkpoint, so the mirror twin re-derives,
+    // linked copies follow, joints re-derive, and render mode and autosave
+    // follow. A Note with Undo naming the old size and the new one on
+    // success; a Failure naming the reason and the body untouched otherwise.
+    // A size the body already is ends the gesture and writes nothing - not a
+    // change, so not a checkpoint.
+    bool reMeasureTo(double newSizeMm);
+    // Why ModelingOps::resizeAlongAxis() would refuse this size on the live
+    // gesture, in the user's words - read by the chip's reason row and by the
+    // Failure toast, so the two cannot say different things.
+    QString reMeasureRefusalFor(double newSizeMm) const;
+    // The painted copy, one source each, for the banned-word sweep.
+    static QString reMeasureSizeRefusalText();
+    static QString reMeasureEndRefusalText();
+    static QString reMeasureKernelRefusalText();
+    // Why a right-click on a GROUP's overall size does nothing: a group's box
+    // is not any one body's side, and there is no honest answer to "which
+    // piece should change" - so it is read-only and says so, in the status
+    // bar rather than as a Failure toast. Nothing failed; the gesture simply
+    // cannot begin, which is beginMitreEnd()'s own refusal taxonomy.
+    static QString reMeasureGroupRefusalText();
+    // "Width", "Depth" or "Height" - the one place the three are named, read
+    // by the chip's label, its tooltip and the success message alike.
+    static QString reMeasureSizeName(int index);
+    class ReMeasureTool* reMeasureTool() const { return myReMeasureTool; }
+
     // THE predicate behind the transform gizmo: the document id of the one
     // body it should be standing on, or 0. Exactly one WHOLE BODY selected,
     // with no sketch in progress and no outline waiting.
@@ -1951,6 +2023,30 @@ private:
     mutable bool myMitreCheckResult = false;
     // True while the gesture's derived cancel still holds - see updateActions().
     bool mitreGestureStillHolds() const;
+
+    // --- Re-Measure (improvements item 8) ------------------------------------
+    // THE gesture's state. The body, the size and its axis are captured at
+    // beginReMeasure(); the axis BY VALUE, because the measured box is
+    // re-derived on every change and an axis re-read mid-gesture would follow
+    // the very preview being judged. The revision is what makes "any change to
+    // the document ends it" one comparison in updateActions() rather than a
+    // call at every edit site.
+    bool myResizeActive = false;
+    int myResizeBodyId = 0;
+    int myResizeSizeIndex = -1;
+    gp_Dir myResizeAxis{1.0, 0.0, 0.0};
+    double myResizeCurrentSize = 0.0;
+    // Which end stays put. CENTRE by default - the user's own change to the
+    // picked mockup - so both ends move by half until somebody pins one.
+    ModelingOps::ResizeAnchor myResizeAnchor = ModelingOps::ResizeAnchor::Centre;
+    int myResizeRevision = -1;
+    class ReMeasureTool* myReMeasureTool = nullptr;
+    // The derived cancel, mitreGestureStillHolds()'s exact shape - see
+    // updateActions().
+    bool reMeasureGestureStillHolds() const;
+    // A right-click landed on size `index` - the viewport's own
+    // sizeLabelRightClicked() route.
+    void onSizeLabelRightClicked(int index);
     // The terms a joint edit shares with every other gesture's environment -
     // canPullSelectedFace()'s own three, plus the library and a compare pane
     // (linkGestureEnvironmentOk()'s two) and a live Mirror placement, whose

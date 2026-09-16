@@ -269,6 +269,8 @@ Source files under `src/`, plus `tests/`:
 | `ui/PullArrow.{h,cpp}` | face pull: 3D arrow + value chip, preview by the commit's own call |
 | `ui/BevelArrow.{h,cpp}` | edge drag: inward fillets, outward chamfers, same contract |
 | `ui/MitreTool.{h,cpp}` | Mitre end chip: typed angle, Flip, preview by the commit's own call; the dial is `OcctViewWidget`'s |
+| `ui/ReMeasureTool.{h,cpp}` | Re-Measure chip: a size number becomes a field; preview by the commit's own call |
+| `ui/ResizePinRenderer.{h,cpp}` | the Re-Measure pin: which end stays put, three marks on the dimension line |
 | `ui/TransformGizmo.{h,cpp}` | the gizmo we draw: shared `GizmoRenderer` base + the Move tool |
 | `ui/AppearancePanel.{h,cpp}` | every Theme token editable live; debounced persistence |
 | `ui/AppBar.{h,cpp}` | the floating pill: app mark, wordmark, real `QMenuBar` |
@@ -300,6 +302,7 @@ tooltip contains a banned word, so this table is executable, not aspirational.
 | Rounding an edge | Fillet, `R 20 mm` | bevel, round-over, round |
 | Flattening an edge | Chamfer, `C 20 mm` | bevel, break, flatten |
 | Cutting a board's end off at an angle | Mitre, `Mitre end`, `45°` | bevel, miter, angle cut, cut |
+| Retyping one of a body's three sizes | Re-measure, `Width` / `Depth` / `Height` | resize, rescale, stretch-to, set length |
 | Repositioning a body | Move / Rotate / Scale | transform, translate |
 | A live mirrored twin | Mirror | symmetry, mirroring-mode, reflect |
 | A copy that follows its source | Linked copy, `Duplicate linked` | instance, clone, reference |
@@ -819,6 +822,129 @@ keeps the board's full length.
   `projectedRange` was not ported). A board already mitred at its FAR end is length-checked
   against its longest reach, and only the result's one-solid check stands behind the corner
   there.
+
+#### Re-Measure: right-click a size number and type a new one
+
+Improvements item 8. Two HTML mockup rounds, both picked A: **the tool is "right-click a
+size number"** (not an edge menu, not a face's distance-to-its-opposite), and **a pin marks
+the end that stays put** — with one change the user stated outright, that **the pin starts at
+the CENTRE**, so both ends move by half until somebody pins one. Select a body so its sizes
+show (item 5), right-click one of the three numbers, type a size, Enter applies and Esc
+cancels; one undo, the twin and linked copies follow, joints re-derive.
+
+- **The faces move; nothing is scaled.** `ModelingOps::resizeAlongAxis(body, axis,
+  newExtentMm, anchor)` pulls the END FACE at the moving end by the difference, through
+  `pullFace()` itself — one implementation of the outward normal, of the mirrored-body
+  classifier probe and of every kernel refusal. `gp_Trsf` has no per-axis scale and
+  `GTransform` would turn every planar face into a NURBS surface (the `transformShape`
+  ruling), and a 600 mm board asked for 450 would come back 0.75× in its thickness too,
+  which is not what "make it 450 long" means to anybody cutting wood. The two untyped sides
+  come back untouched to the micron, and the headless suite asserts exactly that.
+- **The size is read off `measuredBox()`, never a world bounding box.** The number the user
+  right-clicked came from that box, so the number being changed has to come from the same
+  place: the world AABB of a 600 × 300 board turned 30° reads 669.6, and typing 450 against
+  it would move the end by −219.6 instead of −150. `axis` is therefore one of the measured
+  box's own three axes (either sign — a direction, not an end), and a direction that is not
+  one of them is refused rather than guessed at.
+- **`ResizeAnchor` is `Low` / `Centre` / `High`, and volume cannot tell them apart.** All
+  three produce a board of exactly the typed length, so every check in
+  `tests/resize_axis.cpp` (140, written before a pixel of the gesture existed) reads the
+  CENTRE OF MASS too: on 600 → 450 from x = 100, Low leaves it at 325, Centre at 400 and
+  High at 475. Three anchors × shrinking and growing × three axes, a board turned 30° about
+  Z then 37° about (1,2,3), a mirrored body, and every refusal by name. `Centre` is two
+  pulls of half each, and the second end's face is re-derived FROM THE SHAPE IN HAND —
+  `UnifySameDomain` rebuilds the body, so a face carried across that is a different
+  `TopoDS_Face` (the topological-naming warning, met by never carrying one). Two mutations:
+  `Centre` stepping like `Low` turned six named centre-of-mass checks red; reading the
+  extent off the world AABB turned `turned board 600 -> 450, anchor Low: accepted` red.
+- **`checkResize()` returns a value, not a sentence** — `checkMitre()`'s contract for its
+  reason: `error` is written for `ModelingOps` and never shown, so a caller matching
+  substrings of it would break the first time a sentence was reworded. `SizeNotPositive`,
+  `AxisNotASide`, `EndNotFlat`, `NotMeasurable`; `MainWindow::reMeasureRefusalFor()` only
+  maps the value. A new size equal to the current one within `kResizeNoChange` (a micron) is
+  **not** a refusal — it succeeds with the body handed straight back, and the window then
+  ends the gesture with a status line and **no checkpoint**, because that is not a change.
+- **A right CLICK opens it; a right DRAG still orbits, and the two are told apart by
+  DISTANCE.** `OcctViewWidget` records where the right press landed and the furthest the
+  cursor has been from it since (the max, not the sum — a drag out and back is still a
+  drag); on the release, within `kRightClickSlopPx` (4) and over a number, it emits
+  `sizeLabelRightClicked(index)`. **The obvious probe for this is vacuous and a mutation run
+  caught it being so**: a long drag ends where there is no number at all, and a release over
+  nothing opens nothing whatever the threshold says — so the suite drags eight pixels,
+  ENDING on the number, and asserts the number is still under the cursor at the release
+  before asserting that nothing opened.
+- **Which number is under the cursor is the renderer's own answer.** `DimensionRenderer`
+  records the boxed label's anchor and half-sizes (DEVICE pixels, the zoom-rotate
+  persistence's own unit) and the drawn line's two ends where it BUILDS them;
+  `SelectionSizesRenderer` indexes them width/depth/height — which is `MeasuredBox`'s axis
+  order, so an index carries its axis without a lookup — and
+  `OcctViewWidget::selectionSizeLabelRect()` is the ONE derivation the hit test and the
+  chip's placement both read, so the pixels a press is tested against and the pixels the
+  chip stands clear of cannot be two different boxes.
+- **The pin is three marks in the scene, and only the centre one steps off the line.**
+  `ResizePinRenderer` draws the active mark as a filled disc with a ring and a head in
+  `Theme::accent()`, the two alternatives as smaller open rings in `Theme::sizesOneBody()`,
+  all screen-sized under `Graphic3d_TMF_ZoomRotatePers` like the boxed number. A press
+  within `kHandleGrabPx` of a mark is claimed outright and its release swallowed (every
+  handle in that file's rule — a re-pick there would change the selection and so end the
+  gesture the click was adjusting). **The centre mark is nudged one label's clearance out
+  along the annotation's own `ext` direction**, because the boxed number sits exactly at the
+  line's midpoint and there is no room on the line there: measured on the first capture,
+  where the centred pin covered half of "600 mm". The two end marks stay exactly on the
+  line's ends, where the picked mockup draws them.
+- **Disjointness, by a term rather than by luck.** The gesture stands on exactly ONE whole
+  body — which is also what the transform gizmo and a mirror placement want, the one genuine
+  overlap — so `transformableBodyId()` returns 0 while it is live (the mirror gesture's own
+  precedent, and it matters: `MoveTool` claims **Escape** application-wide, and the Escape
+  that backs out of a retyped size must reach the chip), `mirrorPlacementEnvironmentOk()`
+  refuses while it is live and `canReMeasureSize()` refuses while a placement is, Rename and
+  Save version exclude it as they exclude a placement, and the pull arrow, the bevel arrow,
+  the mitre chip and `ExtrudePreview` are already held apart by needing a Face, an Edge, a
+  Face and a pending outline respectively. The joint chip needs exactly TWO bodies.
+- **A group's overall size is read-only, and it says so in the STATUS BAR.** A group's box
+  is not any one body's side, so there is no honest answer to which piece a retyped number
+  should change. Not a Failure toast: nothing failed, the gesture simply cannot begin, which
+  is `beginMitreEnd()`'s own refusal taxonomy.
+- **The chip follows ExtrudePreview's contract clause for clause.** The ghost is
+  `MainWindow::reMeasureResult()` — the very call `reMeasureTo()` commits, `bevelPreview()`'s
+  contract — on `setModelingPreview`, cached on revision/size/anchor and re-shown on every
+  `appStateChanged` (every other gizmo's `refresh()` clears that channel on the way past,
+  which is also why `ReMeasureTool` is constructed after every other chip). Input is read in
+  the DISPLAYED unit and the field is SEEDED in it, so 600 mm reads `60` with centimetres
+  chosen and typing 45 there makes the body 450 mm; the seed strips both the unit suffix and
+  `formatLength()`'s thousands comma, which `parseLength()` refuses by grammar — a 1,200 mm
+  board would otherwise seed a field that reads as invalid the instant it appears. Invalid
+  input keeps the last good ghost; a size the geometry refuses shows **no** ghost and a
+  reason row says why, and Enter on it reports rather than doing nothing silently. Moving the
+  pin re-previews immediately, because which end stays put changes the shape.
+- **The gesture ends by derivation, in the same place the mitre's does** — one
+  `reMeasureGestureStillHolds()` in `updateActions()` covering a selection change, any
+  document change (revision moved), a sketch, a pending outline, render mode, a compare
+  pane, the library and the close question, rather than a cancel at every one of those
+  sites. Commit is `commitReplaceBody()`: one checkpoint, render mode exits, the twin
+  re-derives, links propagate, joints re-derive, and a `Body 01 — 600 mm to 450 mm` Note
+  carries Undo.
+- **`gui_smoke` block `re-measure-right-click-a-size-and-type-a-new-one`** (independent, 81
+  checks, measured) seeds two boards and one mitred board, and pins the hit test, the right-drag, the
+  right-click, the field's reachability by `childAt` and its focus through the window's own
+  `focusWidget()` (never `hasFocus()` — these windows are never OS-active), the centred pin,
+  the ghost's own centre of mass, Enter's single checkpoint and the body's measured extent,
+  one Undo, a pin click moving the anchor and the pinned end staying put, Esc leaving the
+  shape `IsEqual`, centimetres, the group refusal, the mitred-end refusal on screen and in
+  the toast — **and then the same size previewing once the mitred end is PINNED**, which is
+  what makes that refusal about the end that moves rather than about the body — plus the
+  banned-word sweep over the chip's own painted copy. Three mutations each went red on a
+  named check: the pin defaulting to an end (`and it starts at the CENTRE`, plus two
+  centre-of-mass checks), the preview deriving its own axis and anchor instead of asking the
+  window (`and it kept its centre (x 225, expected 300)`), and the travel threshold ignored
+  (`a right DRAG opens no field`). `kCheckFloor` was **not** touched: this branch ran
+  filtered blocks only, and the floor is re-ratcheted by measuring an official run.
+- **Honest limits.** The ghost wears the app's one preview look (the yellow body caged in
+  its own outline), not the mockup's green. The mockup's "stays" and "moves" captions are
+  not drawn beside the line — the status bar carries that instead (`… — keeping the centre
+  — both ends move by half`). An end that is not ONE flat face square to the axis refuses:
+  a mitred end, a curved end, and equally a stepped or L-shaped end where two coplanar faces
+  sit at the same extreme, since picking one of them would move half the end.
 
 #### The custom transform gizmos: three 3D tools, one chip, no AIS_Manipulator
 
