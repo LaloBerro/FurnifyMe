@@ -571,6 +571,148 @@ BooleanResult applyBoolean(BooleanKind kind,
     return out;
 }
 
+namespace {
+
+// Is there any solid in here at all? An OCCT boolean can report IsDone() with
+// a perfectly empty compound - Intersect on bodies that never touch does
+// exactly that - and an empty shape has no volume, no faces and nothing to
+// show, so every caller below treats it as an answer of "nothing" rather than
+// as a shape.
+bool hasSolid(const TopoDS_Shape& shape)
+{
+    if (shape.IsNull()) return false;
+    TopExp_Explorer it(shape, TopAbs_SOLID);
+    return it.More() == Standard_True;
+}
+
+// One OCCT boolean with a whole LIST of tools. Everything applyBoolean() does
+// per call - parallel, the fuzzy value, UnifySameDomain afterwards - happens
+// here too, because a result that skipped the unify would accumulate exactly
+// the junk edges the app's own comment says make selection miserable.
+BooleanResult runBoolean(BooleanKind kind, const TopoDS_Shape& base,
+                         const std::vector<TopoDS_Shape>& tools, double fuzzyValue)
+{
+    BooleanResult out;
+
+    std::unique_ptr<BRepAlgoAPI_BooleanOperation> algo;
+    switch (kind) {
+        case BooleanKind::Fuse:   algo.reset(new BRepAlgoAPI_Fuse());   break;
+        case BooleanKind::Cut:    algo.reset(new BRepAlgoAPI_Cut());    break;
+        case BooleanKind::Common: algo.reset(new BRepAlgoAPI_Common()); break;
+    }
+
+    TopTools_ListOfShape arguments;
+    TopTools_ListOfShape toolList;
+    arguments.Append(base);
+    for (const TopoDS_Shape& tool : tools) toolList.Append(tool);
+    algo->SetArguments(arguments);
+    algo->SetTools(toolList);
+    algo->SetRunParallel(Standard_True);
+    algo->SetFuzzyValue(fuzzyValue);
+    algo->Build();
+
+    if (!algo->IsDone() || algo->HasErrors()) {
+        std::ostringstream why;
+        algo->DumpErrors(why);
+        out.error = why.str().empty() ? "boolean failed (no detail reported)" : why.str();
+        return out;
+    }
+
+    ShapeUpgrade_UnifySameDomain unify(algo->Shape(), Standard_True, Standard_True,
+                                       Standard_True);
+    unify.Build();
+
+    out.ok = true;
+    out.shape = unify.Shape();
+    return out;
+}
+
+// Every operand present and real, before the kernel is asked anything. The
+// all-or-nothing refusal lives here so `applyBooleanMulti` and
+// `booleanRegion` cannot drift apart about what a valid call looks like.
+bool operandsUsable(const TopoDS_Shape& base, const std::vector<TopoDS_Shape>& tools,
+                    std::string& why)
+{
+    if (base.IsNull()) {
+        why = "boolean: the base body is null";
+        return false;
+    }
+    if (tools.empty()) {
+        why = "boolean: no other body was given to work with";
+        return false;
+    }
+    for (const TopoDS_Shape& tool : tools) {
+        if (tool.IsNull()) {
+            why = "boolean: one of the bodies is null";
+            return false;
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
+BooleanResult applyBooleanMulti(BooleanKind kind, const TopoDS_Shape& base,
+                                const std::vector<TopoDS_Shape>& tools, double fuzzyValue)
+{
+    BooleanResult out;
+    if (!operandsUsable(base, tools, out.error)) return out;
+
+    BooleanResult built;
+    if (kind == BooleanKind::Common) {
+        // THE FOLD - see the header. Intersect means "common to every body
+        // picked", and OCCT's multi-tool Common answers a different question
+        // (base AND the UNION of the tools), so each tool narrows the running
+        // result in turn. A step that empties the result stops here rather
+        // than carrying an empty shape through the remaining tools.
+        built.ok = true;
+        built.shape = base;
+        for (const TopoDS_Shape& tool : tools) {
+            built = runBoolean(BooleanKind::Common, built.shape, {tool}, fuzzyValue);
+            if (!built.ok) return built;
+            if (!hasSolid(built.shape)) break;
+        }
+    } else {
+        built = runBoolean(kind, base, tools, fuzzyValue);
+        if (!built.ok) return built;
+    }
+
+    // AN EMPTY ANSWER IS A REFUSAL, not a body. The kernel reports success
+    // here - it genuinely did compute that nothing is left - and adding that
+    // to a document would make a body with no volume that can be named,
+    // selected and never seen.
+    if (!hasSolid(built.shape)) {
+        out.error = "boolean: the bodies share no volume, so there would be nothing left";
+        return out;
+    }
+    return built;
+}
+
+BooleanResult booleanRegion(BooleanKind kind, const TopoDS_Shape& base,
+                            const std::vector<TopoDS_Shape>& tools, double fuzzyValue)
+{
+    BooleanResult out;
+    if (!operandsUsable(base, tools, out.error)) return out;
+
+    // Intersect's region IS its result, so it takes the same fold - including
+    // the same refusal, since there is no honest highlight for an operation
+    // that cannot happen.
+    if (kind == BooleanKind::Common) return applyBooleanMulti(kind, base, tools, fuzzyValue);
+
+    // Cut and Fuse both highlight the OVERLAP: the base's own share of the
+    // tools. `runBoolean` with Common and the whole tool list is exactly that
+    // - base AND (the union of the tools) - which is the one case where
+    // OCCT's multi-tool answer is the question being asked.
+    BooleanResult overlap = runBoolean(BooleanKind::Common, base, tools, fuzzyValue);
+    if (!overlap.ok) return overlap;
+
+    // An empty overlap is an answer, not a refusal: a tool that misses has
+    // nothing to highlight, and the viewport draws no region rather than
+    // reporting a failure. `ok` with an empty shape is the one place in this
+    // file where that pair is deliberate, which is why it is said here.
+    return overlap;
+}
+
 TopoDS_Shape makeCompound(const std::vector<TopoDS_Shape>& shapes)
 {
     if (shapes.empty()) return TopoDS_Shape();

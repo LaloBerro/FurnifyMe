@@ -91,6 +91,10 @@ add_executable(headless_resize_axis tests/resize_axis.cpp)
 target_link_libraries(headless_resize_axis PRIVATE furnify_geometry)
 add_test(NAME headless_resize_axis COMMAND headless_resize_axis)
 
+add_executable(headless_boolean_multi tests/boolean_multi.cpp)
+target_link_libraries(headless_boolean_multi PRIVATE furnify_geometry)
+add_test(NAME headless_boolean_multi COMMAND headless_boolean_multi)
+
 # ---------------------------------------------------------------------------
 # Application (Qt + OCCT visualization)
 # ---------------------------------------------------------------------------

@@ -88,6 +88,48 @@ BooleanResult applyBoolean(BooleanKind kind,
                            const TopoDS_Shape& b,
                            double fuzzyValue = 1.0e-5);
 
+// ONE BASE, SEVERAL TOOLS, ONE BUILD - so six dowel holes are one operation,
+// one checkpoint and one undo rather than six of each. Subtract and Union
+// hand every tool to OCCT at once (`BRepAlgoAPI_BooleanOperation` already
+// takes argument and tool LISTS, so this is the call applyBoolean() makes
+// with a longer list, never a loop around it).
+//
+// INTERSECT IS A FOLD, and that is a ruling rather than an implementation
+// detail. OCCT's multi-tool Common answers `base AND (A OR B)` - the union of
+// the overlaps - while the word "Intersect" means the volume common to EVERY
+// body picked, which is `((base AND A) AND B)`. The two differ by real
+// millimetres the moment the tools do not overlap each other, so this folds
+// pairwise and the headless suite pins the difference.
+//
+// ALL OR NOTHING: one null or unbuildable tool refuses the whole call, the
+// same ruling filletEdges() makes for the same reason - a partial build
+// leaves the user working out which tools took. An EMPTY result is a refusal
+// too: Intersect on bodies that do not share a volume builds cleanly and
+// hands back an empty compound, and adding that to a document makes a body
+// with no volume that can be named and selected and never seen.
+BooleanResult applyBooleanMulti(BooleanKind kind,
+                                const TopoDS_Shape& base,
+                                const std::vector<TopoDS_Shape>& tools,
+                                double fuzzyValue = 1.0e-5);
+
+// THE VOLUME THE OPERATION WILL ACT ON - what a preview highlights, so the
+// user sees the hole before making it. One shape for all three kinds, and the
+// colour rather than the shape is what says what happens to it:
+//
+//   Cut    - the base's own share of the tools: the material COMING OUT.
+//            Not the tools themselves, which is the wrong answer that looks
+//            right until a tool sticks out past the base.
+//   Fuse   - the same overlap: the doubled wood that becomes one piece.
+//   Common - the RESULT itself, since what survives is the whole point, and
+//            it therefore follows the fold above and refuses where it does.
+//
+// An empty region is `ok` with an empty shape, NOT a refusal - a tool that
+// misses has nothing to highlight, and that is a picture, not a failure.
+BooleanResult booleanRegion(BooleanKind kind,
+                            const TopoDS_Shape& base,
+                            const std::vector<TopoDS_Shape>& tools,
+                            double fuzzyValue = 1.0e-5);
+
 // Single compound of several shapes, for exporting a whole document at once.
 TopoDS_Shape makeCompound(const std::vector<TopoDS_Shape>& shapes);
 
