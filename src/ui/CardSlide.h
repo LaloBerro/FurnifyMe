@@ -42,11 +42,12 @@ class CardSlide : public QObject {
 
 public:
     // Which edge the card leaves through - a card must leave the way it came
-    // in, and the way it came in is the edge it is anchored to. Only the rail
-    // uses this today (Left): the drawers were animated too and the user
-    // asked for that taken off, so Right is here for the anchor's sake and
-    // has no caller.
-    enum class From { Left, Right };
+    // in, and the way it came in is the edge it is anchored to. Two callers
+    // today: the rail leaves Left, and the app bar leaves Top when render
+    // mode takes the viewport (the user's own words, "just hide it (with
+    // animation)"). Right is here for the anchor's sake and has no caller -
+    // the drawers were animated too and the user asked for that taken off.
+    enum class From { Left, Right, Top };
 
     CardSlide(QWidget* card, From from, OcctViewWidget* viewport,
               ViewportOverlay* overlay, QObject* parent = nullptr);

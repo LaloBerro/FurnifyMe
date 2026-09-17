@@ -8,6 +8,7 @@
 
 #include "AppBar.h"
 #include "AppearancePanel.h"
+#include "RenderFrameGuides.h"
 #include "RenderSettingsPanel.h"
 #include "AxisGizmo.h"
 #include "CardSlide.h"
@@ -1045,6 +1046,29 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         // derived FROM - they are always on outside render mode - so this is
         // simply their whole predicate rather than one term of it.
         if (myRailSlide) myRailSlide->setShown(!hiddenForRenderMode);
+        // The pill goes with it, and the Back chip is its exact opposite -
+        // both derived here on every state change rather than set once at
+        // the toggle, the sibling-visibility law this whole block keeps.
+        if (myAppBarSlide) myAppBarSlide->setShown(!hiddenForRenderMode);
+        if (myRenderExitChip) myRenderExitChip->setVisible(hiddenForRenderMode);
+        if (myRenderFrame) {
+            myRenderFrame->setVisible(hiddenForRenderMode);
+            // Re-read on every state change, not only when the aspect moves:
+            // the viewport resizes when the panel docks and when the window
+            // does, and the frame is a fraction of the viewport either way.
+            if (hiddenForRenderMode) {
+                myRenderFrame->refresh();
+                // LOWERED among the viewport's siblings, not raised. The mask
+                // is meant to dim the SCENE, and every sibling over this
+                // viewport is a control - the Back chip, a toast - which has
+                // to stay crisp on top of it. Children of a QOpenGLWidget
+                // paint over its GL content whatever their sibling order, so
+                // lowering costs the mask nothing and keeps the controls
+                // legible over the part of the room that is outside the
+                // picture.
+                myRenderFrame->lower();
+            }
+        }
         if (myAxisGizmo) myAxisGizmo->setVisible(!hiddenForRenderMode);
         // The render settings card and the shutter (Task 7.2) - the exact
         // opposite predicate: neither has a QAction of its own either, and
@@ -1053,6 +1077,10 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         if (myRenderSettingsPanel) {
             myRenderSettingsPanel->setVisible(hiddenForRenderMode);
             myRenderSettingsPanel->setCutout(myView->renderCutout());
+            myRenderSettingsPanel->setAspect(
+                static_cast<RenderSettingsPanel::Aspect>(myView->renderAspect()));
+            myRenderSettingsPanel->setGuides(
+                static_cast<RenderSettingsPanel::Guides>(myView->renderGuides()));
             myRenderSettingsPanel->setExportSize(
                 static_cast<RenderSettingsPanel::ExportSize>(myView->renderExportSize()));
             // WHAT AN EXPORT WOULD ACTUALLY PRODUCE, in pixels, derived here
@@ -2147,6 +2175,10 @@ void MainWindow::buildOverlay()
     // viewport's own left edge. Every show and hide of it goes through this
     // object from here on; nothing else may call setVisible() on the rail.
     myRailSlide = new CardSlide(rail, CardSlide::From::Left, myView, myOverlay, this);
+    // And the pill above it leaves upward, for the same reason and through
+    // the same object: every show and hide of the app bar goes through this
+    // from here on, and nothing else may call setVisible() on it.
+    myAppBarSlide = new CardSlide(myAppBar, CardSlide::From::Top, myView, myOverlay, this);
 
     // The Add-shape flyout (Milestone 5, pick A): built hidden beside the
     // rail; the chip's action toggles it, a pick places and closes, and the
@@ -2215,6 +2247,31 @@ void MainWindow::buildOverlay()
     new PanelCloseButton(myJointsPanelAction, myJointsPanel);
     myJointsPanel->hide();
     myOverlay->addWidget(myJointsPanel, ViewportOverlay::Anchor::TopLeft);
+
+    // The way back out of render mode, added LAST in the TopLeft column so
+    // the three drawers above keep their order and this takes the corner
+    // only when they are all hidden - which is exactly and only render mode.
+    // Icon-only, like every other chip over this viewport - a rule gui_smoke
+    // enforces, and one a Labelled chip here would have been the sole
+    // exception to. IconSet::Glyph::Back was added for it: a left chevron
+    // reads as "back" without a word, and the words are in the tooltip,
+    // which mirrors the action exactly as every other chip's does.
+    myRenderExitChip = new ToolChip(myRenderModeAction, IconSet::Glyph::Back,
+                                    ToolChip::ChipMode::IconOnly, myView);
+    myRenderExitChip->hide();
+    myOverlay->addWidget(myRenderExitChip, ViewportOverlay::Anchor::TopLeft);
+
+    // The picture's edges. Deliberately NOT a ViewportOverlay entry: the
+    // overlay anchors cards to edges and this covers the viewport edge to
+    // edge, and it must never appear in occupiedRects() either - a toast
+    // stepping around the frame would be stepping around the whole viewport.
+    // Raised above the other siblings so the mask darkens what is outside the
+    // picture rather than being painted under it; it takes no clicks, so
+    // being on top costs nothing.
+    myRenderFrame = new RenderFrameGuides(myView);
+    connect(myView, &OcctViewWidget::renderFrameChanged, this, [this] {
+        if (myRenderFrame) myRenderFrame->refresh();
+    });
 
     // Wireframe and Fit All are buttons in the app bar, and Save Screenshot -
     // the least used of the three, and absent from the design's bar and rail
@@ -2380,7 +2437,19 @@ void MainWindow::buildOverlay()
     // pick A): RightEdge, the anchor added for exactly this - it stretches
     // top to bottom and pushes the view-controls cluster left past itself,
     // so the two never overlap while render mode is on.
-    myOverlay->addWidget(myRenderSettingsPanel, ViewportOverlay::Anchor::RightEdge);
+    // NOT anchored to the overlay any more. It is docked beside the viewport
+    // now (setRenderDockOpen()), so it is not a card floating over the 3D
+    // view and the overlay has no business placing it - leaving the entry
+    // registered was not harmless, either: relayout() went on move()ing it,
+    // and since the reparent had changed what those coordinates MEAN, the
+    // panel landed back over the viewport inside its new container. Found by
+    // the check that asks whether it stands clear of the view, which is
+    // exactly the kind of thing a parent-pointer assertion would have missed.
+    //
+    // This leaves ViewportOverlay::Anchor::RightEdge with no caller. Kept
+    // rather than deleted: the overlay offers four symmetric edges and the
+    // next full-height card belongs there, which is a different case from a
+    // glyph named after a control that no longer exists.
     // Seeded from whatever the constructor already applied to the viewport
     // (QSettings, or OcctViewWidget's own shipped defaults) - setValuesSilently()
     // so this first sync does not immediately re-emit six signals and
@@ -2416,6 +2485,21 @@ void MainWindow::buildOverlay()
             [this](const QColor& colour) {
                 myView->setRenderBackgroundOverride(colour);
                 persistRenderSettings();
+            });
+    // The picture's shape and its guides. Both are pure presentation - no
+    // checkpoint, no document revision - so they go straight to the viewport,
+    // which owns them and derives the frame rect from them. The panel's own
+    // enums are mapped onto the viewport's here, at the one wiring site, the
+    // arrangement every other row on this card already uses.
+    connect(myRenderSettingsPanel, &RenderSettingsPanel::aspectChanged, this,
+            [this](RenderSettingsPanel::Aspect aspect) {
+                myView->setRenderAspect(static_cast<OcctViewWidget::RenderAspect>(aspect));
+                updateActions();
+            });
+    connect(myRenderSettingsPanel, &RenderSettingsPanel::guidesChanged, this,
+            [this](RenderSettingsPanel::Guides guides) {
+                myView->setRenderGuides(static_cast<OcctViewWidget::RenderGuides>(guides));
+                updateActions();
             });
     connect(myRenderSettingsPanel, &RenderSettingsPanel::fovChanged, this,
             [this](double fovyDeg) {
@@ -4403,7 +4487,17 @@ void MainWindow::setRenderModeEnabled(bool on)
     // The backdrop is asked for rather than hard-coded, so an Appearance edit
     // that moves the studio moves these with it.
     const QColor ground = on && myView ? myView->renderBackdropColour() : QColor();
-    if (myAppBar) myAppBar->setGroundColour(ground);
+    // THE APP BAR IS NOT TINTED ANY MORE - it is hidden. The UI review gave
+    // both surfaces the studio's backdrop as their ground so they read as
+    // chrome belonging to the shot; the user's answer was "Dont put white the
+    // top bar, just hide it (with animation)", and a hidden surface needs no
+    // ground. myAppBarSlide carries it off the top edge; myRenderExitChip is
+    // how the menu's one render-mode entry stays reachable without it.
+    //
+    // The window buttons KEEP the tint, and that is a ruling rather than an
+    // oversight: they cannot leave with the bar, because a window with no
+    // close button is a trap, and untinted they are the one near-black card
+    // left standing in the middle of a pale studio photograph.
     if (myWindowButtons) myWindowButtons->setGroundColour(ground);
     // The single source of truth for the menu entry's checked state, kept in
     // step in BOTH directions - the user unchecking the box arrives here
@@ -4418,6 +4512,12 @@ void MainWindow::setRenderModeEnabled(bool on)
     }
 
     myView->setRenderMode(on);
+    // The panel takes its own column beside the viewport rather than floating
+    // over it - see setRenderDockOpen() and the member's own comment. Done
+    // AFTER setRenderMode() so the viewport is already in its studio state
+    // when it is resized into the narrower half, rather than rendering one
+    // modeling frame at the new width first.
+    setRenderDockOpen(on);
 
     // The one Note toast render mode raises on entry, naming the tier the
     // viewport just settled on - read AFTER setRenderMode(on) returns, since
@@ -4453,6 +4553,51 @@ void MainWindow::setRenderModeEnabled(bool on)
     // gizmo predicates all re-derive themselves off myRenderModeOn from the
     // appStateChanged this ends by emitting.
     updateActions();
+}
+
+void MainWindow::setRenderDockOpen(bool open)
+{
+    if (!myRenderSettingsPanel) return;
+    if (open == (myRenderDock != nullptr)) return;
+
+    if (open) {
+        // The size the viewport has RIGHT NOW is the size the container is
+        // about to be handed, and the compare pane's finding says to set it
+        // explicitly rather than trust a layout pass to happen: captured
+        // before anything below moves a widget.
+        const QSize centralSize = myView->size();
+
+        myRenderDock = new QWidget(this);
+        auto* row = new QHBoxLayout(myRenderDock);
+        row->setContentsMargins(0, 0, 0, 0);
+        row->setSpacing(0);
+        // The viewport takes every pixel the panel does not, and the panel
+        // takes its own fixed width at full height - which is the whole of
+        // what "a panel, not a card" means here.
+        row->addWidget(myView, 1);
+        row->addWidget(myRenderSettingsPanel, 0);
+        setCentralWidget(myRenderDock);
+        myRenderDock->resize(centralSize);
+    } else {
+        const QSize centralSize = myRenderDock ? myRenderDock->size() : myView->size();
+        // The panel is parented back to the WINDOW before the container goes,
+        // or deleting the container would delete the panel with it - every
+        // later appStateChanged reads it, and a dangling QPointer would read
+        // as "no panel" rather than as a crash, which is worse.
+        myRenderSettingsPanel->setParent(this);
+        myRenderSettingsPanel->hide();
+        setCentralWidget(myView);
+        // The compare pane's own lesson, applied at the second site that
+        // needs it: setCentralWidget() leaves myView at the width it had as
+        // ONE CHILD of the container until something forces
+        // QMainWindowLayout to run again, and neither invalidate() nor
+        // activate() is that something. It was found there by a composited
+        // capture rather than by any geometry check, because the view
+        // rendered and picked correctly inside its own wrong rect.
+        myView->resize(centralSize);
+        myRenderDock->deleteLater();
+        myRenderDock = nullptr;
+    }
 }
 
 bool MainWindow::canOpenSaveVersion() const

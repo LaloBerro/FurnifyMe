@@ -43,6 +43,15 @@ enum class Glyph {
     // shutter is a much bigger, round, standalone control, so the two would
     // never have shared a paintGlyph() case anyway.
     Camera,
+    // The way OUT of render mode, once the app bar carrying the menu entry
+    // has slid off the top edge. A left chevron with a short tail - "back",
+    // read the same way every browser and phone reads it - rather than the
+    // word, because every chip over this viewport is icon-only and gui_smoke
+    // enforces that: a Labelled chip here would have been the one exception
+    // in a rule with none, and the rule is worth more than the two words.
+    // The label lives in the tooltip, which mirrors the action like every
+    // other chip's does.
+    Back,
     // The four view controls (Milestone 5, item 3) that moved off the old
     // text-button app bar onto icon-only chips under the axis gizmo. The
     // unit chip is not here - it paints its own text ("mm"/"cm") as the

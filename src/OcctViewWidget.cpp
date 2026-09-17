@@ -4498,10 +4498,69 @@ void OcctViewWidget::setSelectedSolids(const std::vector<int>& ids)
     emit selectionChanged();
 }
 
+void OcctViewWidget::setRenderAspect(RenderAspect aspect)
+{
+    if (myRenderAspect == aspect) return;
+    myRenderAspect = aspect;
+    // Nothing in the SCENE changed - the frame is a Qt overlay, and the
+    // camera is untouched until an export asks for it. What has changed is
+    // where the picture's edges are, which only the overlay draws, so this
+    // emits rather than redrawing: MainWindow answers it by re-placing the
+    // frame overlay, the sibling-visibility discipline every other overlay
+    // here already follows.
+    emit renderFrameChanged();
+}
+
+void OcctViewWidget::setRenderGuides(RenderGuides guides)
+{
+    if (myRenderGuides == guides) return;
+    myRenderGuides = guides;
+    emit renderFrameChanged();
+}
+
+double OcctViewWidget::renderAspectValue() const
+{
+    switch (myRenderAspect) {
+        case RenderAspect::Square:      return 1.0;
+        case RenderAspect::FourFive:    return 4.0 / 5.0;
+        case RenderAspect::ThreeTwo:    return 3.0 / 2.0;
+        case RenderAspect::SixteenNine: return 16.0 / 9.0;
+        case RenderAspect::Free:        break;
+    }
+    return 0.0;
+}
+
+QRect OcctViewWidget::renderFrameRect() const
+{
+    const QRect all(0, 0, std::max(1, width()), std::max(1, height()));
+    const double wanted = renderAspectValue();
+    if (wanted <= 0.0) return all;
+    const double viewAspect = static_cast<double>(all.width()) / all.height();
+    if (wanted >= viewAspect) {
+        // Wider than the window: the frame keeps the full width and loses
+        // height off the top and bottom.
+        const int h = std::max(1, static_cast<int>(std::lround(all.width() / wanted)));
+        return QRect(all.x(), all.y() + (all.height() - h) / 2, all.width(), h);
+    }
+    const int w = std::max(1, static_cast<int>(std::lround(all.height() * wanted)));
+    return QRect(all.x() + (all.width() - w) / 2, all.y(), w, all.height());
+}
+
+double OcctViewWidget::renderFrameScale() const
+{
+    const int h = std::max(1, height());
+    return static_cast<double>(renderFrameRect().height()) / h;
+}
+
 QSize OcctViewWidget::renderExportPixels() const
 {
+    // THE FRAME'S OWN SIZE, not the window's. With no aspect chosen the two
+    // are the same rect, so this is the old behaviour written once rather
+    // than a branch; with one chosen, the picture is the frame and nothing
+    // outside it is exported.
+    const QRect frame = renderFrameRect();
     const QPoint deviceSize =
-        const_cast<OcctViewWidget*>(this)->toDevicePixels(QPoint(width(), height()));
+        const_cast<OcctViewWidget*>(this)->toDevicePixels(QPoint(frame.width(), frame.height()));
     const int deviceW = std::max(1, deviceSize.x());
     const int deviceH = std::max(1, deviceSize.y());
     int height = 0;
@@ -4516,9 +4575,10 @@ QSize OcctViewWidget::renderExportPixels() const
     // own device pixels, which is a real improvement in detail over what is
     // on screen and costs nothing to frame.
     if (height <= 0) return QSize(deviceW * 2, deviceH * 2);
-    // The WIDTH follows the viewport's aspect. An export that forced 16:9
-    // onto a square window would show more or less of the room than the user
-    // framed, and framing is the whole of what a render is.
+    // The WIDTH follows the FRAME's aspect - which is the viewport's own when
+    // nothing is chosen. An export that forced 16:9 onto a square frame would
+    // show more or less of the room than the user framed, and framing is the
+    // whole of what a render is.
     const int width = std::max(1, static_cast<int>(std::lround(
                                       static_cast<double>(height) * deviceW / deviceH)));
     return QSize(width, height);
@@ -4549,6 +4609,34 @@ bool OcctViewWidget::dumpOffscreen(const QString& path, const QSize& pixels, boo
     const Standard_Real hadAspect = myView->Camera()->Aspect();
     myView->Camera()->SetAspect(static_cast<Standard_Real>(pixels.width()) / pixels.height());
 
+    // AND THE VERTICAL EXTENT FOLLOWS THE FRAME. Setting the aspect alone is
+    // not enough once a picture shape can be chosen: OCCT's camera holds the
+    // vertical extent fixed and derives the horizontal from the aspect, so a
+    // frame WIDER than the viewport - which is drawn shorter than it, losing
+    // height off the top and bottom - would export with the viewport's full
+    // height and show a band of room the frame promised was outside the
+    // picture. renderFrameScale() is that band, expressed as the fraction of
+    // the viewport's own vertical extent the frame keeps, and it is 1.0
+    // whenever the frame is full height (every aspect narrower than the
+    // window, and Free) - so the ordinary case pays nothing and takes no
+    // branch of its own.
+    //
+    // Perspective and parallel are two different fields for one quantity,
+    // which is why both are written: FOVy is an ANGLE, so scaling the extent
+    // means scaling its tangent, not the angle.
+    const Standard_Real hadFovy = myView->Camera()->FOVy();
+    const Standard_Real hadScale = myView->Camera()->Scale();
+    const double frameScale = renderFrameScale();
+    if (frameScale < 0.999) {
+        if (myView->Camera()->IsOrthographic()) {
+            myView->Camera()->SetScale(hadScale * frameScale);
+        } else {
+            const double halfRad = hadFovy * 0.5 * M_PI / 180.0;
+            myView->Camera()->SetFOVy(2.0 * std::atan(std::tan(halfRad) * frameScale) *
+                                      180.0 / M_PI);
+        }
+    }
+
     // ONE redraw for a tier that draws the whole picture in one; the export
     // accumulation budget for the tier that does not. The passes land in the
     // SAME buffer, which is the whole reason this function exists.
@@ -4575,6 +4663,10 @@ bool OcctViewWidget::dumpOffscreen(const QString& path, const QSize& pixels, boo
         saved = dumped && pixmap.Save(path.toUtf8().constData());
     }
 
+    if (frameScale < 0.999) {
+        if (myView->Camera()->IsOrthographic()) myView->Camera()->SetScale(hadScale);
+        else myView->Camera()->SetFOVy(hadFovy);
+    }
     myView->Camera()->SetAspect(hadAspect);
     view->SetFBO(Handle(Standard_Transient)());
     view->FBORelease(fbo);
@@ -4693,7 +4785,16 @@ bool OcctViewWidget::saveSnapshot(const QString& path)
         // 1200x800 file. With an offscreen buffer that survives several
         // redraws, the accumulation happens at the requested size instead -
         // the reason this tier had to fall back no longer holds.
-        if (myRenderExportSize != ExportSize::Viewport)
+        // A CHOSEN SHAPE forces the same branch, and for the same reason one
+        // step along: the on-screen buffer is the WINDOW's shape. Once the
+        // user can pick a picture shape, exporting that buffer would hand
+        // back the window's rectangle with the frame's guides drawn over
+        // nothing - the mask says what is outside the picture and the file
+        // would contain it anyway. Free leaves the frame at the whole
+        // viewport, so the accumulated on-screen export below is still what
+        // an unframed shot gets.
+        if (myRenderExportSize != ExportSize::Viewport ||
+            myRenderAspect != RenderAspect::Free)
             return dumpOffscreen(path, renderExportPixels(), /*withAlpha=*/false);
         awaitPathTracingConvergence();
         const bool ok = myView->Dump(path.toUtf8().constData()) == Standard_True;

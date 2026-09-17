@@ -969,6 +969,13 @@ public:
     // the same way every other overlay card is, rather than making a caller
     // find it by class through findChild<>().
     AppBar* appBar() const { return myAppBar; }
+    // The way back out of render mode - exposed so the suite can click the
+    // real control rather than triggering the action behind it, which would
+    // prove the action works and nothing about the chip.
+    class ToolChip* renderExitChip() const { return myRenderExitChip; }
+    // The frame overlay, for the suite: what it is drawing is the same rect
+    // the export reproduces, so a check can compare the two.
+    class RenderFrameGuides* renderFrame() const { return myRenderFrame; }
     // The Add-shape flyout (Milestone 5, pick A) - gui_smoke's seam.
     class ShapeFlyout* shapeFlyout() const { return myShapeFlyout; }
     // Places one ready-made shape: standing on the ground at the point the
@@ -1244,6 +1251,10 @@ public:
     // calling updateActions(), the single authority every other toggle in
     // this file already answers to.
     void setRenderModeEnabled(bool on);
+    // Puts the render settings panel beside the viewport, or takes it back
+    // out. The ONE place the central widget changes for render mode, so the
+    // reparent and its explicit resize cannot drift apart.
+    void setRenderDockOpen(bool open);
     bool renderModeEnabled() const { return myRenderModeOn; }
 
     // THE predicate behind View -> Render mode's own enabled state: a
@@ -2110,6 +2121,49 @@ private:
     // animated and the user asked for it taken off again, so they are back to
     // a plain derived setVisible() and this is the only card that flies.
     class CardSlide* myRailSlide = nullptr;
+    // The app bar leaves the same way the rail does when render mode takes
+    // the viewport - upward, off its own edge. The user asked for the bar
+    // HIDDEN rather than tinted ("Dont put white the top bar, just hide it
+    // (with animation)"), which retires the ground-colour tint the UI review
+    // had put on it: a surface that is not there needs no ground. The window
+    // buttons KEEP theirs, because they cannot go - a window with no close
+    // button is a trap, and the Back chip below is a way out of the mode,
+    // not out of the app.
+    class CardSlide* myAppBarSlide = nullptr;
+
+    // The way back out of render mode once the menu has slid away. A plain
+    // ToolChip on myRenderModeAction, so it is a mirror and not a fourth
+    // entry point - the menu entry, this chip and any shortcut all read the
+    // one action updateActions() decides. Anchored TopLeft and added AFTER
+    // the three drawers, so in modelling it is hidden and occupies no slot,
+    // and in render mode - where every other TopLeft entry is hidden - it is
+    // the first visible one and lands in the corner the app bar just left.
+    class ToolChip* myRenderExitChip = nullptr;
+
+    // Render mode DOCKS its panel rather than floating it, which is a change
+    // to what the central widget is. The user's reason is the whole
+    // requirement: "it should occupy the whole height and instead of being a
+    // card it just has to be a panel, and this helps to the card not to be on
+    // front of the view, because when i made the screenshot i cant place
+    // right the camera becuase that part is anoying." A floating card cannot
+    // satisfy that at any size - the viewport behind it is still the part of
+    // the picture you are trying to frame.
+    //
+    // The reparent is the compare pane's own move, and it carries the compare
+    // pane's own lesson: setCentralWidget() alone leaves the widget it hands
+    // back at its OLD geometry until something forces QMainWindowLayout to
+    // run again, and neither invalidate() nor activate() is that something -
+    // so the size is set explicitly from the widget being replaced. See
+    // setRenderDockOpen().
+    QWidget* myRenderDock = nullptr;
+
+    // The picture's edges and its framing lines, over the viewport while
+    // render mode is on. Visibility is DERIVED off myRenderModeOn on every
+    // appStateChanged like every other render-mode surface; it is also
+    // refreshed off the viewport's own renderFrameChanged, because choosing
+    // an aspect moves the frame without moving any application state this
+    // window would otherwise notice.
+    class RenderFrameGuides* myRenderFrame = nullptr;
 
     AppBar* myAppBar = nullptr;
     QAction* myAddShapeAction = nullptr;

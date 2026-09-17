@@ -174,6 +174,7 @@ if(FURNIFYME_BUILD_APP)
       src/ui/JointChip.cpp
       src/ui/JointsPanel.cpp
       src/ui/RenderSettingsPanel.cpp
+      src/ui/RenderFrameGuides.cpp
       src/ui/UnsavedCloseCard.cpp
       src/FurnitureStore.cpp
     )

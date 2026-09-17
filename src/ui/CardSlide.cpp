@@ -13,10 +13,21 @@ namespace {
 // wide drawer's far half still on screen.
 QPoint parkedPosition(const QWidget* card, CardSlide::From from, const QPoint& home)
 {
-    return from == CardSlide::From::Left
-               ? QPoint(-card->width(), home.y())
-               : QPoint(card->parentWidget() ? card->parentWidget()->width() : home.x() + card->width(),
-                        home.y());
+    switch (from) {
+        case CardSlide::From::Left:
+            return QPoint(-card->width(), home.y());
+        case CardSlide::From::Top:
+            // Its own HEIGHT above the top edge, and the home x kept: a card
+            // leaving upward must not also drift sideways, and the app bar's
+            // x is the same kEdgeMargin the rail below it uses, so a drift
+            // would be visible against the rail for the whole flight.
+            return QPoint(home.x(), -card->height());
+        case CardSlide::From::Right:
+            break;
+    }
+    return QPoint(card->parentWidget() ? card->parentWidget()->width()
+                                       : home.x() + card->width(),
+                  home.y());
 }
 }  // namespace
 

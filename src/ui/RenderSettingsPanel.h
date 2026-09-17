@@ -130,6 +130,23 @@ public:
     // MainWindow owns what a click does and what the note says, because the
     // pixels depend on the viewport and the live tier, neither of which this
     // card knows anything about.
+    // THE PICTURE'S SHAPE and the lines drawn inside it. Mirrors of
+    // OcctViewWidget::RenderAspect and ::RenderGuides, declared here so this
+    // card still knows nothing about the viewport - the Quality enum's own
+    // arrangement, and for the same reason: MainWindow maps the one onto the
+    // other at the single wiring site.
+    //
+    // Free is first and is the default: a user who has not chosen a shape has
+    // the window's shape, which is what this app did before the picker
+    // existed, so nothing changes for anybody who never touches it.
+    enum class Aspect { Free, Square, FourFive, ThreeTwo, SixteenNine };
+    void setAspect(Aspect aspect);
+    Aspect aspect() const { return myAspect; }
+
+    enum class Guides { Off, Thirds, Centre };
+    void setGuides(Guides guides);
+    Guides guides() const { return myGuides; }
+
     enum class ExportSize { Viewport, Height720, Height1080, Height1440, Height2160 };
     void setExportSize(ExportSize size);
     ExportSize exportSize() const { return myExportSize; }
@@ -221,6 +238,8 @@ signals:
     void quickChanged(bool quick);
     void qualityChanged(Quality quality);
     void cutoutChanged(bool cutout);
+    void aspectChanged(Aspect aspect);
+    void guidesChanged(Guides guides);
     void exportSizeChanged(ExportSize size);
     // A tile was DOUBLE-clicked: open that material's own colour and
     // brightness editor. The first click of the gesture has already made it
@@ -291,6 +310,10 @@ private:
     bool myCutout = false;
     ExportSize myExportSize = ExportSize::Viewport;
     std::array<class SegChip*, 5> myExportChips{};
+    std::array<class SegChip*, 5> myAspectChips{};
+    std::array<class SegChip*, 3> myGuideChips{};
+    Aspect myAspect = Aspect::Free;
+    Guides myGuides = Guides::Thirds;
     class QLabel* myExportNote = nullptr;
     bool myWood = false;
     QString myWoodName = QStringLiteral("Wood");

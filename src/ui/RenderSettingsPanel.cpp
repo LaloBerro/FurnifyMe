@@ -472,6 +472,14 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
     sectionScroll->setWidgetResizable(true);
     sectionScroll->setFrameShape(QFrame::NoFrame);
     sectionScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    // AND THE VERTICAL ONE OFF TOO, which is the Items drawer's own answer
+    // and the user's own words there: "can you add an invisible scroll bar?"
+    // - invisible literally, nothing drawn and nothing clickable, the wheel
+    // being the whole interaction. It did not matter while this was a card
+    // that sized itself to its content; the Frame section pushed the docked
+    // panel past the window's height, and a real scrollbar appeared down the
+    // edge of a shot the user is composing.
+    sectionScroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     makeTransparent(sectionScroll, QStringLiteral("renderSettingsScroll"));
     makeTransparent(sectionScroll->viewport(),
                     QStringLiteral("renderSettingsScrollViewport"));
@@ -558,6 +566,75 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
     };
 
     // --- Light ----------------------------------------------------------
+    // --- Frame ----------------------------------------------------------
+    // FIRST, above everything else, because it is the first decision a
+    // picture needs: what shape is it. The user asked for the picker and the
+    // guides in one breath - "add a aspect ratio selected and some guides to
+    // help me to put right the camera" - and they are one section for the
+    // same reason, both being about where the edges of the shot are rather
+    // than about what is in it.
+    addSection(tr("Frame"));
+    {
+        auto* row = new QWidget(this);
+        makeTransparent(row, QStringLiteral("renderSettingsAspectRow"));
+        // Two rows of chips, the export row's own 3 + 2 grid: five of these
+        // do not fit this card's content width either, and the fifth would
+        // simply be drawn off the edge.
+        auto* line = new QGridLayout(row);
+        line->setContentsMargins(0, 0, 0, 0);
+        line->setHorizontalSpacing(5);
+        line->setVerticalSpacing(5);
+        const struct { const char* label; const char* tip; } shapes[] = {
+            {"Free", "The window's own shape - nothing is masked off"},
+            {"1:1", "A square picture"},
+            {"4:5", "Taller than wide - a single piece, standing"},
+            {"3:2", "A photograph's own shape"},
+            {"16:9", "Wide - a room, or a run of furniture"}};
+        for (std::size_t i = 0; i < myAspectChips.size(); ++i) {
+            auto* chip = new SegChip(tr(shapes[i].label), row);
+            chip->setToolTip(tr(shapes[i].tip));
+            connect(chip, &QAbstractButton::clicked, this, [this, i] {
+                const Aspect picked = static_cast<Aspect>(i);
+                if (myAspect == picked) return;
+                setAspect(picked);
+                emit aspectChanged(picked);
+            });
+            myAspectChips[i] = chip;
+            line->addWidget(chip, static_cast<int>(i / 3), static_cast<int>(i % 3));
+        }
+        line->setColumnStretch(3, 1);
+        outer->addWidget(row);
+    }
+    {
+        auto* row = new QWidget(this);
+        makeTransparent(row, QStringLiteral("renderSettingsGuidesRow"));
+        auto* line = new QHBoxLayout(row);
+        line->setContentsMargins(0, 0, 0, 0);
+        line->setSpacing(5);
+        const struct { const char* label; const char* tip; } kinds[] = {
+            {"Off", "No lines inside the picture"},
+            {"Thirds", "Two lines each way - put what matters where they cross"},
+            {"Centre", "One line each way, through the middle"}};
+        for (std::size_t i = 0; i < myGuideChips.size(); ++i) {
+            auto* chip = new SegChip(tr(kinds[i].label), row);
+            chip->setToolTip(tr(kinds[i].tip));
+            connect(chip, &QAbstractButton::clicked, this, [this, i] {
+                const Guides picked = static_cast<Guides>(i);
+                if (myGuides == picked) return;
+                setGuides(picked);
+                emit guidesChanged(picked);
+            });
+            myGuideChips[i] = chip;
+            line->addWidget(chip);
+        }
+        line->addStretch(1);
+        outer->addWidget(row);
+    }
+    setAspect(Aspect::Free);
+    setGuides(Guides::Thirds);
+
+    addRule();
+
     addSection(tr("Light"));
     myLightAngleSlider = addRow(QStringLiteral("lightAngle"), tr("Angle"), 0, 359, 0);
     connect(myLightAngleSlider, &QSlider::valueChanged, this, [this](int v) {
@@ -1006,6 +1083,22 @@ QSize RenderSettingsPanel::sizeHint() const
 
     const int rows = myScrollContent->sizeHint().height();
     return QSize(w, chrome + rows);
+}
+
+void RenderSettingsPanel::setAspect(Aspect aspect)
+{
+    myAspect = aspect;
+    for (std::size_t i = 0; i < myAspectChips.size(); ++i) {
+        if (myAspectChips[i]) myAspectChips[i]->setCurrent(static_cast<Aspect>(i) == aspect);
+    }
+}
+
+void RenderSettingsPanel::setGuides(Guides guides)
+{
+    myGuides = guides;
+    for (std::size_t i = 0; i < myGuideChips.size(); ++i) {
+        if (myGuideChips[i]) myGuideChips[i]->setCurrent(static_cast<Guides>(i) == guides);
+    }
 }
 
 void RenderSettingsPanel::setExportSize(ExportSize size)

@@ -55,6 +55,7 @@
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
 #include "PullArrow.h"
+#include "RenderFrameGuides.h"
 #include "RenderSettingsPanel.h"
 #include "SelectorWindow.h"
 #include "ShapeFlyout.h"
@@ -15853,8 +15854,22 @@ int main(int argc, char* argv[])
                   .arg(exempt.isEmpty() ? QStringLiteral("all do")
                                         : exempt.join(QStringLiteral(", "))));
 
-        ToolChip* chip = window.findChild<ToolChip*>();
-        check(chip != nullptr, "there is a chip to focus");
+        // THE FIRST VISIBLE, ENABLED CHIP - not simply the first ToolChip in
+        // the object tree. This probe asked for that one and got whatever
+        // happened to come first, which is the "a scan whose predicate is the
+        // first widget of type T will one day find a different T" failure
+        // this file already has a rule about: the render-mode Back chip is a
+        // ToolChip parented to the viewport and HIDDEN outside render mode,
+        // and it sorted ahead of the rail's chips the moment it existed. The
+        // check below then reported "visible 0, took focus 0" - true, and
+        // about the wrong widget. The predicate is now the one the check
+        // actually needs, so a chip added later cannot quietly answer for the
+        // rail's.
+        ToolChip* chip = nullptr;
+        for (ToolChip* candidate : window.findChildren<ToolChip*>()) {
+            if (candidate->isVisible() && candidate->isEnabled()) { chip = candidate; break; }
+        }
+        check(chip != nullptr, "there is a visible, enabled chip to focus");
         if (chip) {
             // setFocus() is a silent no-op on a widget that is hidden,
             // disabled or already focused, and all three would leave the two
@@ -24037,33 +24052,65 @@ int main(int argc, char* argv[])
         // and reused by the grid sweep below, so the two cannot disagree
         // about which scale this dump is at.
         const int dumpScale = tier == OcctViewWidget::RenderTier::PathTracing ? 1 : 2;
+        // THE VIEWPORT NARROWS IN RENDER MODE, and that is the panel being
+        // DOCKED rather than floated (the user's own reason: "it should
+        // occupy the whole height and instead of being a card it just has to
+        // be a panel... because when i made the screenshot i cant place right
+        // the camera becuase that part is anoying"). So this dump is not the
+        // modeling dump's size any more, and saying so is the point of the
+        // check rather than an exemption from it: same height, narrower by
+        // exactly what the panel took.
         check(!beforeShot.isNull() && !afterShot.isNull() &&
-                  afterShot.width() == beforeShot.width() * dumpScale &&
                   afterShot.height() == beforeShot.height() * dumpScale,
-              QStringLiteral("the render-mode dump is exactly %1x the normal dump's own "
-                             "dimensions (%2x%3 against %4x%5)")
+              QStringLiteral("the render-mode dump keeps the modeling dump's HEIGHT at %1x "
+                             "(%2 against %3)")
                   .arg(dumpScale)
-                  .arg(afterShot.width())
                   .arg(afterShot.height())
-                  .arg(beforeShot.width() * dumpScale)
                   .arg(beforeShot.height() * dumpScale));
-        // Every position that carried a grid pixel in the before-shot,
-        // mapped onto the after-shot by that same dumpScale (an exact
-        // integer multiple, since the two dumps share the same viewport
-        // geometry - see the bottom-bar pin above) and re-tested at the SAME
-        // spot. This is the "known grid line" probe: it cannot be fooled by
-        // the studio gradient reading close to gridMinor()/gridMajor()
-        // somewhere else in the image, because it never looks anywhere else.
+        check(!beforeShot.isNull() && !afterShot.isNull() &&
+                  afterShot.width() < beforeShot.width() * dumpScale,
+              QStringLiteral("and it is NARROWER, because the settings are a docked panel "
+                             "now and not a card over the wood (%1 against %2)")
+                  .arg(afterShot.width())
+                  .arg(beforeShot.width() * dumpScale));
+        // Every position that carried a grid pixel in the before-shot, mapped
+        // onto the after-shot and re-tested at the SAME PLACE IN THE SCENE.
+        // This is the "known grid line" probe: it cannot be fooled by the
+        // studio gradient reading close to gridMinor()/gridMajor() somewhere
+        // else in the image, because it never looks anywhere else.
+        //
+        // The mapping used to be the bare dumpScale, which was exact while
+        // the two dumps shared a viewport. Docking the panel took that away,
+        // and what replaces it is a property worth pinning rather than a
+        // fudge: the heights are equal, so world-per-pixel is unchanged, so
+        // OCCT's camera keeps the same vertical extent and simply shows less
+        // to the LEFT AND RIGHT OF THE SAME CENTRE. The horizontal mapping is
+        // therefore a pure translation by the difference in half-widths, and
+        // a before-position that falls outside the narrower frame is one the
+        // render genuinely no longer covers.
+        const int shiftX = (beforeShot.width() * dumpScale - afterShot.width()) / 2;
         int stillGridAfter = 0;
+        int gridPositionsTested = 0;
         for (const GridSample& sample : gridSamplesBefore) {
-            const QPoint mapped(sample.x * dumpScale, sample.y * dumpScale);
-            if (afterShot.rect().contains(mapped) && isGridColour(afterShot.pixelColor(mapped)))
-                ++stillGridAfter;
+            const QPoint mapped(sample.x * dumpScale - shiftX, sample.y * dumpScale);
+            if (!afterShot.rect().contains(mapped)) continue;
+            ++gridPositionsTested;
+            if (isGridColour(afterShot.pixelColor(mapped))) ++stillGridAfter;
         }
-        check(!gridSamplesBefore.empty() && stillGridAfter == 0,
-              QStringLiteral("and the ground grid is gone - none of the %1 positions that "
-                             "carried a grid pixel before render mode still do (%2 still do)")
-                  .arg(gridSamplesBefore.size())
+        // Non-vacuity in its own right: a mapping that put every sample
+        // outside the frame would leave this check with nothing to say and
+        // would pass silently, which is exactly the guard-that-skips failure
+        // this file has a rule about.
+        check(gridPositionsTested > 0,
+              QStringLiteral("the narrower render frame still covers %1 of the %2 positions "
+                             "that carried a grid pixel, so the sweep below has something "
+                             "to measure")
+                  .arg(gridPositionsTested)
+                  .arg(gridSamplesBefore.size()));
+        check(gridPositionsTested > 0 && stillGridAfter == 0,
+              QStringLiteral("and the ground grid is gone - none of those %1 positions still "
+                             "carries a grid pixel (%2 still do)")
+                  .arg(gridPositionsTested)
                   .arg(stillGridAfter));
 
         // --- orbit does NOT exit --------------------------------------------
@@ -24522,6 +24569,17 @@ int main(int argc, char* argv[])
             settle(150);
         }
 
+        // The two surfaces the bar-and-Back rework moved, read BEFORE the
+        // mode is on, so "it went away" is a transition rather than a state
+        // that might always have held.
+        AppBar* bar = probe.appBar();
+        ToolChip* backChip = probe.renderExitChip();
+        check(bar != nullptr && bar->isVisible(),
+              "the app bar is up outside render mode");
+        check(backChip != nullptr && !backChip->isVisible(),
+              "and the way back out of render mode is not");
+        const int viewWidthBefore = rview->width();
+
         renderAction->trigger();
         settle(250);
         check(renderAction->isChecked() && rview->renderModeActive(),
@@ -24530,6 +24588,181 @@ int main(int argc, char* argv[])
         check(panel != nullptr && panel->isVisible(),
               "the card appears the moment render mode is on");
         check(shutter != nullptr && shutter->isVisible(), "and so does the shutter");
+
+        // --- the bar leaves, and leaves a way back ----------------------------
+        // The user's own words: "Dont put white the top bar, just hide it
+        // (with animation)" and "add a button to come back". The animation
+        // itself is not asserted here - the suite runs with animations off,
+        // where CardSlide::setShown() is a plain setVisible() that has
+        // already happened by the time it returns (its own header says so) -
+        // so what is pinned is the end state and the way out of it.
+        check(bar != nullptr && !bar->isVisible(),
+              "the app bar is GONE in render mode, not tinted to match the studio");
+        check(backChip != nullptr && backChip->isVisible(),
+              "and the Back chip is up in the corner it left");
+        // A mirror, not a fourth entry point: the chip IS the menu entry's
+        // own action, so updateActions() decides both at once and neither can
+        // be live while the other is not.
+        check(backChip != nullptr && backChip->action() == renderAction,
+              "the chip mirrors the Render mode action rather than owning a second route");
+        // Reachable by a real click, the law every sibling over this viewport
+        // keeps - asserting isVisible() alone passes against a control no
+        // user can hit.
+        if (backChip) {
+            const QPoint backCentre = backChip->mapTo(rview, backChip->rect().center());
+            QWidget* hitBack = rview->childAt(backCentre);
+            check(hitBack == backChip || (hitBack && backChip->isAncestorOf(hitBack)),
+                  "and childAt() at its centre finds it, so a click can reach it");
+        }
+        // The viewport really did give up the panel's width rather than
+        // having a card laid over it.
+        check(rview->width() < viewWidthBefore,
+              QStringLiteral("the viewport gave up the panel's column (%1 -> %2)")
+                  .arg(viewWidthBefore)
+                  .arg(rview->width()));
+        // --- the picture's shape, and the guides inside it --------------------
+        // "add a aspect ratio selected and some guides to help me to put right
+        // the camera". The frame is drawn by a Qt overlay and reproduced by
+        // the export from ONE derivation, renderFrameRect(), so what is
+        // checked here is that derivation, that the overlay draws exactly it,
+        // and that the export is exactly its shape.
+        {
+            RenderFrameGuides* frameOverlay = probe.renderFrame();
+            check(frameOverlay != nullptr && frameOverlay->isVisible(),
+                  "the frame overlay is up in render mode");
+
+            const int vw = rview->width();
+            const int vh = rview->height();
+
+            // Free: the picture is the whole viewport, which is what this app
+            // did before a shape could be chosen - so nobody who never
+            // touches the picker sees any change at all.
+            rview->setRenderAspect(OcctViewWidget::RenderAspect::Free);
+            settle(120);   // setRenderAspect() emits renderFrameChanged
+
+            check(rview->renderFrameRect() == QRect(0, 0, vw, vh),
+                  "Free frames the whole viewport");
+            check(qFuzzyCompare(1.0 + rview->renderFrameScale(), 2.0),
+                  "and keeps all of its vertical extent");
+
+            // 4:5 is NARROWER than this probe's landscape viewport, so the
+            // frame keeps the full height and loses width off both sides.
+            rview->setRenderAspect(OcctViewWidget::RenderAspect::FourFive);
+            settle(120);   // setRenderAspect() emits renderFrameChanged
+
+            const QRect tall = rview->renderFrameRect();
+            check(tall.height() == vh,
+                  QStringLiteral("4:5 keeps the full height (%1 of %2)")
+                      .arg(tall.height()).arg(vh));
+            check(tall.width() == qRound(vh * 4.0 / 5.0),
+                  QStringLiteral("and its width is the shape's own (%1, expected %2)")
+                      .arg(tall.width()).arg(qRound(vh * 4.0 / 5.0)));
+            check(tall.left() == (vw - tall.width()) / 2,
+                  "centred, so the camera turns about the middle of the picture");
+            check(qFuzzyCompare(1.0 + rview->renderFrameScale(), 2.0),
+                  "a frame this shape needs no vertical correction on export");
+            check(frameOverlay != nullptr && frameOverlay->framedRect() == tall,
+                  "the overlay draws exactly the rect the export will reproduce - one "
+                  "derivation, not two");
+
+            // 16:9 is WIDER than the viewport, which is the case that needs
+            // the export's vertical extent corrected: the frame is shorter
+            // than the window, and OCCT holds the vertical extent fixed while
+            // deriving the horizontal from the aspect.
+            rview->setRenderAspect(OcctViewWidget::RenderAspect::SixteenNine);
+            settle(120);   // setRenderAspect() emits renderFrameChanged
+
+            const QRect wide = rview->renderFrameRect();
+            check(wide.width() == vw,
+                  QStringLiteral("16:9 keeps the full width (%1 of %2)")
+                      .arg(wide.width()).arg(vw));
+            check(wide.height() == qRound(vw * 9.0 / 16.0),
+                  QStringLiteral("and is shorter than the window (%1, expected %2)")
+                      .arg(wide.height()).arg(qRound(vw * 9.0 / 16.0)));
+            check(wide.top() == (vh - wide.height()) / 2, "centred vertically");
+            const double wideScale = rview->renderFrameScale();
+            check(wideScale < 0.999 &&
+                      std::fabs(wideScale - static_cast<double>(wide.height()) / vh) < 1e-9,
+                  QStringLiteral("and THIS one does need the correction - the export keeps "
+                                 "%1 of the viewport's vertical extent, exactly the frame's "
+                                 "own share")
+                      .arg(wideScale, 0, 'f', 4));
+
+            // The exported pixels are the FRAME's shape, not the window's -
+            // which is the whole point of drawing a frame at all.
+            const QSize exportPixels = rview->renderExportPixels();
+            const double exportAspect =
+                static_cast<double>(exportPixels.width()) / exportPixels.height();
+            check(std::fabs(exportAspect - 16.0 / 9.0) < 0.01,
+                  QStringLiteral("and an export is that shape too (%1x%2, aspect %3)")
+                      .arg(exportPixels.width()).arg(exportPixels.height())
+                      .arg(exportAspect, 0, 'f', 3));
+
+            // ORBITING STILL REACHES THE VIEWPORT. The overlay covers the
+            // whole viewport, so if it took mouse events the one gesture this
+            // feature exists to help - framing the shot - would be the one
+            // gesture it broke. Asked through childAt() against the real
+            // control pointer, this file's own rule for hit-testing.
+            QWidget* underFrame = rview->childAt(wide.center());
+            check(underFrame != frameOverlay,
+                  "the frame takes no mouse events, so an orbit still reaches the viewport");
+
+            // AND THE FRAME IS NOT IN THE PICTURE. The mask darkens what is
+            // outside the shot by a large, flat step; if any of it reached
+            // the export, the saved image would carry a dark band down its
+            // own edges. Measured as a MEDIAN over a band rather than a pixel
+            // - this tier is path-traced and grainy, and a median does not
+            // care. The export is the frame's content, so "outside" is not in
+            // it at all and both bands must read the same backdrop.
+            const QString framedPath = outDir + QStringLiteral("/render-frame-169.png");
+            check(rview->saveSnapshot(framedPath), "a framed export is written");
+            const QImage framedShot(framedPath);
+            check(!framedShot.isNull() && framedShot.width() == exportPixels.width() &&
+                      framedShot.height() == exportPixels.height(),
+                  QStringLiteral("and it is the size the frame asked for (%1x%2 against "
+                                 "%3x%4)")
+                      .arg(framedShot.width()).arg(framedShot.height())
+                      .arg(exportPixels.width()).arg(exportPixels.height()));
+            if (!framedShot.isNull() && framedShot.width() > 40) {
+                const auto bandMedian = [&framedShot](int x0, int x1) {
+                    std::vector<int> levels;
+                    for (int x = x0; x < x1; ++x) {
+                        for (int y = framedShot.height() / 4; y < framedShot.height() / 2; ++y)
+                            levels.push_back(qGray(framedShot.pixel(x, y)));
+                    }
+                    if (levels.empty()) return -1;
+                    std::sort(levels.begin(), levels.end());
+                    return levels[levels.size() / 2];
+                };
+                const int edgeBand = bandMedian(0, framedShot.width() / 50);
+                const int innerBand = bandMedian(framedShot.width() / 4,
+                                                 framedShot.width() / 4 +
+                                                     framedShot.width() / 50);
+                check(edgeBand > 0 && innerBand > 0 && std::abs(edgeBand - innerBand) < 20,
+                      QStringLiteral("and the mask is nowhere in it - the export's own edge "
+                                     "reads the same backdrop as its middle (%1 against %2)")
+                          .arg(edgeBand).arg(innerBand));
+            }
+
+            // The guides are the same kind of thing and ride on the same
+            // mechanism, so what is pinned here is that the choice reaches
+            // the overlay at all rather than a second pixel sweep.
+            rview->setRenderGuides(OcctViewWidget::RenderGuides::Centre);
+            settle(80);
+            check(rview->renderGuides() == OcctViewWidget::RenderGuides::Centre,
+                  "the guides can be changed");
+            rview->setRenderGuides(OcctViewWidget::RenderGuides::Thirds);
+
+            rview->setRenderAspect(OcctViewWidget::RenderAspect::Free);
+            settle(120);   // setRenderAspect() emits renderFrameChanged
+
+        }
+        check(panel != nullptr && rview->width() + panel->width() == viewWidthBefore,
+              QStringLiteral("exactly the panel's width, nothing lost between them "
+                             "(%1 + %2 against %3)")
+                  .arg(rview->width())
+                  .arg(panel ? panel->width() : 0)
+                  .arg(viewWidthBefore));
 
         // Milestone 5 item 2: the user's own report - "a round camera
         // shutter... a dark square patch over the light render backdrop".
@@ -24572,14 +24805,35 @@ int main(int argc, char* argv[])
         }
 
         // --- real hit-testing, not merely isVisible() -------------------------
-        const QPoint panelCentre = panel->mapTo(rview, panel->rect().center());
-        QWidget* hitPanel = rview->childAt(panelCentre);
+        // Asked of the WINDOW rather than of the viewport, and that is the
+        // whole of what docking changed here: the panel is no longer a child
+        // floating over the 3D view, it is the view's sibling in the central
+        // widget. The question this check exists to ask is unchanged - does a
+        // real click at that point land on the panel - and asking it of the
+        // common ancestor is the only spelling that stays true either way.
+        // childAt() against the viewport would now return null and the check
+        // would be measuring the reparent instead of the reachability.
+        const QPoint panelCentre = panel->mapTo(&probe, panel->rect().center());
+        QWidget* hitPanel = probe.childAt(panelCentre);
         check(hitPanel != nullptr && (hitPanel == panel || panel->isAncestorOf(hitPanel)),
-              "the card is reachable by a real click through the viewport, not merely "
-              "a widget that happens to report isVisible()");
-        const QPoint shutterCentre = shutter->mapTo(rview, shutter->rect().center());
-        check(rview->childAt(shutterCentre) == shutter,
+              "the panel is reachable by a real click, not merely a widget that happens "
+              "to report isVisible()");
+        const QPoint shutterCentre = shutter->mapTo(&probe, shutter->rect().center());
+        check(probe.childAt(shutterCentre) == shutter,
               "and childAt() at the shutter's own centre finds the shutter itself");
+        // And it is BESIDE the viewport, not over it - the ask, stated as
+        // geometry rather than as a parent pointer, so a future change that
+        // reparents it back but leaves it floating fails here.
+        check(!panel->geometry().intersects(
+                  QRect(rview->mapTo(&probe, QPoint(0, 0)), rview->size())),
+              QStringLiteral("and it stands clear of the viewport entirely - a docked "
+                             "panel, not a card over the wood (panel %1,%2 %3x%4 against "
+                             "a view %5 wide)")
+                  .arg(panel->geometry().x())
+                  .arg(panel->geometry().y())
+                  .arg(panel->geometry().width())
+                  .arg(panel->geometry().height())
+                  .arg(rview->width()));
 
         // --- a click on the card does not exit render mode --------------------
         clickAt(panel, QPointF(panel->rect().center()));

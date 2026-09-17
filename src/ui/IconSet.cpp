@@ -97,6 +97,11 @@ void paintGlyph(QPainter& p, Glyph glyph)
             p.drawLine(19, 13, 19, 8);
             p.drawLine(19, 8, 14, 10);
             break;
+        case Glyph::Back:                         // left chevron with a tail
+            p.drawLine(11, 6, 5, 12);
+            p.drawLine(5, 12, 11, 18);
+            p.drawLine(5, 12, 19, 12);
+            break;
         case Glyph::Items:                        // stacked list rows
             p.drawLine(5, 7, 19, 7);
             p.drawLine(5, 12, 19, 12);

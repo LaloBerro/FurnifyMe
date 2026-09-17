@@ -1497,6 +1497,39 @@ public:
     // picture on screen, at four times the pixels. So on Deep the size is
     // reported rather than silently ignored; Balanced and Simple honour it
     // exactly.
+    // THE PICTURE'S SHAPE, chosen rather than inherited from the window.
+    // The user's ask: "add a aspect ratio selected and some guides to help me
+    // to put right the camera". A render is a photograph and a photograph has
+    // a shape; until this existed the shape was whatever the window happened
+    // to be that day, which is also why the export could not be framed.
+    enum class RenderAspect { Free, Square, FourFive, ThreeTwo, SixteenNine };
+    void setRenderAspect(RenderAspect aspect);
+    RenderAspect renderAspect() const { return myRenderAspect; }
+    // The chosen shape as width/height, or 0 for Free.
+    double renderAspectValue() const;
+
+    // WHERE THE PICTURE IS, in the viewport's own LOGICAL pixels: Free is the
+    // whole viewport, anything else the largest rect of that shape centred in
+    // it. THE ONE derivation - the frame overlay draws exactly this, and
+    // renderExportPixels() and dumpOffscreen() reproduce exactly this. A
+    // second copy of the fitting maths is how a guide starts lying about the
+    // picture it claims to be guiding.
+    QRect renderFrameRect() const;
+    // How much of the viewport's own VERTICAL extent the frame keeps - 1.0
+    // whenever the frame is full height. The export needs it because OCCT's
+    // camera holds the vertical extent fixed and derives the horizontal from
+    // the aspect: a frame WIDER than the viewport is shorter than it, and
+    // without this the export would show more of the room above and below
+    // than the frame promised.
+    double renderFrameScale() const;
+
+    // The lines drawn inside the frame. Framing aids, never part of the
+    // picture - they are painted by a Qt overlay over the GL surface, so
+    // V3d_View::Dump() and every export go straight past them.
+    enum class RenderGuides { Off, Thirds, Centre };
+    void setRenderGuides(RenderGuides guides);
+    RenderGuides renderGuides() const { return myRenderGuides; }
+
     enum class ExportSize { Viewport, Height720, Height1080, Height1440, Height2160 };
     void setRenderExportSize(ExportSize size) { myRenderExportSize = size; }
     ExportSize renderExportSize() const { return myRenderExportSize; }
@@ -1993,6 +2026,10 @@ signals:
     void sketchPointPicked(const gp_Pnt& point);
     // Fired on every camera change so overlays (the axis gizmo) can repaint.
     void cameraChanged();
+    // The picture's SHAPE or its guides moved - nothing in the scene did.
+    // Only the frame overlay listens; the camera is untouched until an
+    // export asks for it.
+    void renderFrameChanged();
     // Live cursor position on the sketch plane, already snapped - drives the
     // rubber band and the coordinate readout.
     void sketchCursorMoved(const gp_Pnt& point);
@@ -3054,6 +3091,8 @@ private:
     double myMaterialBlue = 0.68;
     double myMaterialBrightness = 1.0;
     ExportSize myRenderExportSize = ExportSize::Viewport;
+    RenderAspect myRenderAspect = RenderAspect::Free;
+    RenderGuides myRenderGuides = RenderGuides::Thirds;
     // Wood (Milestone 5) - see setRenderWood(). The texture is built once
     // per session, lazily, from a procedural QImage; the handle lives for
     // the widget's life and dies with the GL resources.
