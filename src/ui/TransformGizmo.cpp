@@ -480,14 +480,18 @@ void MoveTool::refresh()
     // this disjoint from the pull arrow (a face), the bevel arrow (edges) and
     // ExtrudePreview (a pending outline) - so at most one application-wide key
     // claim can ever be installed at a time.
-    const int id = myWindow->moveToolBodyId();
-    if (id <= 0) {
+    const std::vector<int> ids = myWindow->transformableBodyIds();
+    if (ids.empty()) {
         end();
         return;
     }
 
-    if (id != myBodyId) {
-        begin(id);
+    // Re-begun when the SET changes, not merely its first member: adding a
+    // second board to the selection has to move the pivot to the middle of
+    // both, and the cheapest honest test for "the same bodies" is the list
+    // itself.
+    if (ids != myBodyIds) {
+        begin(ids);
         return;
     }
 
@@ -519,9 +523,10 @@ void MoveTool::resetDrag()
     myFactor = 1.0;
 }
 
-void MoveTool::begin(int bodyId)
+void MoveTool::begin(const std::vector<int>& bodyIds)
 {
-    myBodyId = bodyId;
+    myBodyIds = bodyIds;
+    myBodyId = bodyIds.empty() ? 0 : bodyIds.front();
     resetDrag();
     if (myHasPreview) {
         myView->clearModelingPreview();
@@ -539,6 +544,7 @@ void MoveTool::end()
     }
     myHasPreview = false;
     myBodyId = 0;
+    myBodyIds.clear();
     myShownTool = -1;
     resetDrag();
     updateVisibility();
@@ -558,12 +564,12 @@ void MoveTool::showGizmo()
     // (the branch review's finding). An edit bumps revision(), which is
     // exactly when the box can genuinely have moved.
     const int revision = myWindow->document().revision();
-    if (myBodyId != myPivotBodyId || revision != myPivotRevision) {
-        if (!ModelingOps::boundingBoxCentre(myWindow->document().shapeOf(myBodyId),
-                                            myPivotCache))
-            return;
+    if (myBodyId != myPivotBodyId || revision != myPivotRevision ||
+        myPivotCount != static_cast<int>(myBodyIds.size())) {
+        if (!sharedPivot(myPivotCache)) return;
         myPivotBodyId = myBodyId;
         myPivotRevision = revision;
+        myPivotCount = static_cast<int>(myBodyIds.size());
     }
     gp_Pnt pivot = myPivotCache;
     // WHICH gizmo is the active tool's to say - each show clears the other
@@ -647,6 +653,24 @@ void MoveTool::onReleased(bool dragged)
     showGizmo();
 }
 
+bool MoveTool::sharedPivot(gp_Pnt& out) const
+{
+    // The middle of everything selected, not of the first one: turning three
+    // boards about the first board's own centre swings the other two around
+    // the room. Measured off the bodies' combined bounding box, which is the
+    // same box the gizmo is drawn against.
+    if (!myWindow || myBodyIds.empty()) return false;
+    std::vector<TopoDS_Shape> shapes;
+    shapes.reserve(myBodyIds.size());
+    for (int id : myBodyIds) {
+        const TopoDS_Shape shape = myWindow->document().shapeOf(id);
+        if (!shape.IsNull()) shapes.push_back(shape);
+    }
+    if (shapes.empty()) return false;
+    if (shapes.size() == 1) return ModelingOps::boundingBoxCentre(shapes.front(), out);
+    return ModelingOps::boundingBoxCentre(ModelingOps::makeCompound(shapes), out);
+}
+
 bool MoveTool::dragTransform(gp_Trsf& out) const
 {
     if (!myWindow || myBodyId <= 0 || myAxis < 0) return false;
@@ -657,8 +681,7 @@ bool MoveTool::dragTransform(gp_Trsf& out) const
             // rings stand on - never the world origin, which would swing the
             // body around the room instead of turning it in place.
             gp_Pnt pivot;
-            if (!ModelingOps::boundingBoxCentre(myWindow->document().shapeOf(myBodyId), pivot))
-                return false;
+            if (!sharedPivot(pivot)) return false;
             out.SetRotation(gp_Ax1(pivot, MoveGizmoRenderer::armDirection(myAxis)),
                             myDistance * kPi / 180.0);
             return true;
@@ -669,8 +692,7 @@ bool MoveTool::dragTransform(gp_Trsf& out) const
             const double factor = std::clamp(myFactor, 0.05, 20.0);
             if (std::fabs(factor - 1.0) < 1.0e-7) return false;
             gp_Pnt pivot;
-            if (!ModelingOps::boundingBoxCentre(myWindow->document().shapeOf(myBodyId), pivot))
-                return false;
+            if (!sharedPivot(pivot)) return false;
             out.SetScale(pivot, factor);
             return true;
         }
@@ -697,16 +719,21 @@ void MoveTool::updatePreview()
         }
         return;
     }
-    const ModelingOps::BooleanResult result =
-        ModelingOps::transformShape(myWindow->document().shapeOf(myBodyId), delta);
-    if (!result.ok) return;   // the last good preview stands
-
-    // The DEDICATED channel, never setPreview(): that slot is already shared
-    // by the sketch outline and the extrude preview, and CLAUDE.md records
-    // what a third writer on it cost. myBodyId goes with it so the body the
-    // ghost stands in for is drawn as a cage rather than sitting solid at the
-    // old position.
-    myView->setModelingPreview(result.shape, myBodyId);
+    // ONE ghost per body, through the channel that already carries several
+    // (Milestone 5's cross-body bevel built it): each id goes with its own
+    // shape, so every body being moved is drawn as a cage at its old place
+    // rather than sitting solid there.
+    std::vector<std::pair<int, TopoDS_Shape>> previews;
+    previews.reserve(myBodyIds.size());
+    for (int id : myBodyIds) {
+        const TopoDS_Shape shape = myWindow->document().shapeOf(id);
+        if (shape.IsNull()) continue;
+        const ModelingOps::BooleanResult result = ModelingOps::transformShape(shape, delta);
+        if (!result.ok) return;   // the last good preview stands
+        previews.emplace_back(id, result.shape);
+    }
+    if (previews.empty()) return;
+    myView->setModelingPreviews(previews);
     myHasPreview = true;
 }
 
@@ -717,7 +744,7 @@ void MoveTool::commit()
     // THE existing commit path - the checkpoint, the toast with Undo, the
     // mirror twin, the linked copies and the kernel refusal all belong to it.
     // This gesture adds no commit logic of its own whatsoever.
-    myWindow->transformBody(myBodyId, delta);
+    myWindow->transformBodies(myBodyIds, delta);
 }
 
 void MoveTool::updateVisibility()

@@ -93,6 +93,12 @@ Spec graphite()
     // B): its --dim light blue and its --grp light violet.
     s.sizesOneBody      = QColor("#6fb6ff");
     s.sizesGroup        = QColor("#c89bff");
+    // The outline's own line, split off the accent (improvements item 17:
+    // "i mean this purple line, which is using the accent, i want a separate
+    // color for it"). It SHIPS at the shipped accent's own violet, so the
+    // split changes no pixel until somebody moves it - which is the point:
+    // what the user asked for was a control, not a new colour.
+    s.dimensionLine     = QColor("#6a00ff");
     s.basePt = 10.0;
     s.chipStrokePx = 1.0;
     s.gridDensity = 1.0;
@@ -244,6 +250,7 @@ const QVector<ColourToken>& colourTokens()
         {QStringLiteral("gizmoAxisZ"), &Spec::gizmoAxisZ},
         {QStringLiteral("highlightHover"), &Spec::highlightHover},
         {QStringLiteral("highlightSelected"), &Spec::highlightSelected},
+        {QStringLiteral("dimensionLine"), &Spec::dimensionLine},
         {QStringLiteral("sizesOneBody"), &Spec::sizesOneBody},
         {QStringLiteral("sizesGroup"), &Spec::sizesGroup},
         {QStringLiteral("sketchPointMarker"), &Spec::sketchPointMarker},
@@ -456,6 +463,7 @@ QColor focusRing()    { return spec().focusRing; }
 QColor focusRingMuted() { return spec().focusRingMuted; }
 QColor highlightHover()    { return spec().highlightHover; }
 QColor highlightSelected() { return spec().highlightSelected; }
+QColor dimensionLine()     { return spec().dimensionLine; }
 QColor sizesOneBody()      { return spec().sizesOneBody; }
 QColor sizesGroup()        { return spec().sizesGroup; }
 

@@ -54,6 +54,14 @@ AppBar::AppBar(QMenuBar* menuBar, QWidget* parent)
     setAttribute(Qt::WA_NoSystemBackground);
     Theme::makeSurfaceTransparent(this);
 
+    // A press that lands on this card's own padding - between two chips, or
+    // in the slack a stretched rail leaves - is THIS CARD'S, and it stops
+    // here. Without it Qt propagates the unhandled press to the parent, which
+    // is the viewport: mid-sketch, a click aimed at the card put a point in
+    // the drawing behind it (improvements item 5). Every other card over the
+    // viewport already carried this; these two were the gap.
+    setAttribute(Qt::WA_NoMousePropagation);
+
     auto* row = new QHBoxLayout(this);
     // Left/right start at 0 here and are set for real by updatePillMargins()
     // below, once the menu bar is in the layout and a sizeHint exists to

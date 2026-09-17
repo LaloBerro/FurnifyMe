@@ -6,6 +6,7 @@
 #include "Measure.h"
 #include "OcctViewWidget.h"
 #include "Theme.h"
+#include "ViewportOverlay.h"
 
 #include <QAbstractButton>
 #include <QCoreApplication>
@@ -398,7 +399,6 @@ JointChip::JointChip(MainWindow* window, OcctViewWidget* view)
     hide();
 
     if (myWindow) connect(myWindow, &MainWindow::appStateChanged, this, &JointChip::refresh);
-    if (myView) connect(myView, &OcctViewWidget::cameraChanged, this, &JointChip::reposition);
 }
 
 JointChip::~JointChip()
@@ -868,12 +868,6 @@ void JointChip::syncToggleTexts()
     }
 }
 
-void JointChip::updateAnchor()
-{
-    gp_Pnt anchor;
-    if (myWindow && myJointId > 0 && myWindow->jointAnchor(myJointId, anchor)) myAnchor = anchor;
-}
-
 void JointChip::refresh()
 {
     if (!myWindow || !myView) return;
@@ -912,7 +906,6 @@ void JointChip::refresh()
         }
     }
 
-    updateAnchor();
     reposition();
     if (!isVisible()) {
         show();
@@ -1097,6 +1090,10 @@ void JointChip::relayout()
     // painter cannot reach. Re-measured here, so More opening and closing each
     // land on a whole size of their own.
     setFixedSize(Theme::wholeDevicePixels(QSize(content + kPad * 2, y)));
+    // A card that changed height has to be placed again: it is anchored in
+    // the TopRight column, and everything below it in that column stacks off
+    // its bottom edge.
+    replaceInOverlay();
 
     const std::vector<QLineEdit*> order = tabOrder();
     for (std::size_t i = 1; i < order.size(); ++i) setTabOrder(order[i - 1], order[i]);
@@ -1207,11 +1204,32 @@ void JointChip::cancel()
     if (myJointId <= 0 || !myWindow) return;
     DocumentModel::Joint joint;
     if (!myWindow->jointOf(myJointId, joint)) return;
-    // The fields go back to the joint's own values. The joint itself is
-    // deliberately untouched - and so is the selection, so the card stays up
-    // and the user can simply type again.
+
+    // Escape does the nearest thing first. With a number typed over, it puts
+    // the fields back and leaves the card up, so a typo costs one key and not
+    // the whole card. With nothing typed there is nothing to take back, and
+    // the card itself is what Escape is for - this card is a live gesture
+    // since improvements item 2, and a gesture that no click ends has to have
+    // a key that does. The x in the corner is the same route.
+    if (!fieldsEdited()) {
+        myWindow->setSelectedJoint(0);
+        return;
+    }
     reseed(joint);
     update();
+}
+
+bool JointChip::fieldsEdited() const
+{
+    // Against mySeededText, which is what reseed() last wrote - so this asks
+    // "has the user changed a number since the card was seeded", never "does
+    // this text parse", which an invalid entry would answer wrongly.
+    for (std::size_t i = 0; i < static_cast<std::size_t>(kSlotCount); ++i) {
+        const QLineEdit* edit = myFields[i];
+        if (!edit || !edit->isVisible()) continue;
+        if (edit->text() != mySeededText[i]) return true;
+    }
+    return false;
 }
 
 QStringList JointChip::paintedTexts() const
@@ -1242,17 +1260,16 @@ QStringList JointChip::paintedNames() const
 void JointChip::reposition()
 {
     if (!myView || myJointId <= 0) return;
-    QPoint at;
-    // projectToScreen() answers false while the viewer is mid-rebuild (see
-    // OcctViewWidget::viewReady()), which is exactly what a GL-context-loss
-    // recovery does underneath this signal - the card simply stays where it is
-    // until the view has a window again.
-    if (!myView->projectToScreen(myAnchor, at)) return;
-    // Beside the anchor, flipped rather than clamped when it would run off the
-    // right edge, and snapped to whole device pixels - GestureChip's one
-    // implementation, shared with the pull and bevel chips.
-    move(GestureChip::placeBeside(this, myView, at));
+    // The card itself is placed by ViewportOverlay (TopRight) - see the
+    // header. All that is left to follow is the kind menu, which hangs off
+    // the kind button and so moves with whatever the overlay decided.
     if (kindMenuOpen()) placeKindMenu();
+}
+
+void JointChip::replaceInOverlay()
+{
+    if (!myView) return;
+    if (auto* overlay = myView->findChild<ViewportOverlay*>()) overlay->relayout();
 }
 
 void JointChip::replace()
@@ -1284,6 +1301,9 @@ void JointChip::paintEvent(QPaintEvent*)
 void JointChip::showEvent(QShowEvent* event)
 {
     QWidget::showEvent(event);
+    // A hidden entry occupies no slot, so appearing and disappearing both
+    // change that column's stack - ask for it to be laid out again.
+    replaceInOverlay();
     mySwallowNextRelease = false;
     // Installed for exactly as long as the card is up - ShortcutSheet's and
     // ExtrudePreview's lifetime rule for an application-wide filter.
@@ -1294,6 +1314,7 @@ void JointChip::hideEvent(QHideEvent* event)
 {
     QWidget::hideEvent(event);
     closeKindMenu();
+    replaceInOverlay();
     if (!mySwallowNextRelease) QCoreApplication::instance()->removeEventFilter(this);
 }
 

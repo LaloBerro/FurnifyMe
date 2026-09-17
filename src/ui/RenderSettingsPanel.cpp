@@ -719,28 +719,99 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
         auto* line = new QHBoxLayout(row);
         line->setContentsMargins(0, 0, 0, 0);
         line->setSpacing(7);
-        myDeepChip = new SegChip(tr("Deep"), row);
-        myDeepChip->setToolTip(tr("The richest picture this machine reaches — slower, "
-                                  "and it keeps polishing while you watch"));
+        // Ascending, left to right, so the row reads as a dial rather than as
+        // three unrelated buttons.
         mySimpleChip = new SegChip(tr("Simple"), row);
         mySimpleChip->setToolTip(tr("Instant frames with real shadows — for framing a "
                                     "shot or a quicker machine"));
-        connect(myDeepChip, &QAbstractButton::clicked, this, [this] {
-            if (!myQuick) return;
-            setQuick(false);
-            emit quickChanged(false);
-        });
-        connect(mySimpleChip, &QAbstractButton::clicked, this, [this] {
-            if (myQuick) return;
-            setQuick(true);
-            emit quickChanged(true);
-        });
-        line->addWidget(myDeepChip);
+        myBalancedChip = new SegChip(tr("Balanced"), row);
+        myBalancedChip->setToolTip(tr("Sharp the moment it appears, with no grain to wait "
+                                      "out — the middle of the three"));
+        myDeepChip = new SegChip(tr("Deep"), row);
+        myDeepChip->setToolTip(tr("The richest picture this machine reaches — slower, "
+                                  "and it keeps polishing while you watch"));
+        const auto pick = [this](Quality quality) {
+            if (myQuality == quality) return;
+            setQuality(quality);
+            emit qualityChanged(quality);
+            // The two-state signal still fires for whatever only knows Quick -
+            // and only when the answer to THAT question actually changed.
+            emit quickChanged(quality == Quality::Simple);
+        };
+        connect(mySimpleChip, &QAbstractButton::clicked, this,
+                [pick] { pick(Quality::Simple); });
+        connect(myBalancedChip, &QAbstractButton::clicked, this,
+                [pick] { pick(Quality::Balanced); });
+        connect(myDeepChip, &QAbstractButton::clicked, this, [pick] { pick(Quality::Deep); });
         line->addWidget(mySimpleChip);
+        line->addWidget(myBalancedChip);
+        line->addWidget(myDeepChip);
         line->addStretch(1);
         outer->addWidget(row);
     }
-    setQuick(false);
+    setQuality(Quality::Deep);
+
+    // The cut-out switch, under Quality because that is where what an EXPORT
+    // produces is decided. One chip that reads as on or off, the Quality
+    // chips' own control rather than a new kind of switch on this card.
+    {
+        auto* row = new QWidget(this);
+        makeTransparent(row, QStringLiteral("renderSettingsCutoutRow"));
+        auto* line = new QHBoxLayout(row);
+        line->setContentsMargins(0, 0, 0, 0);
+        line->setSpacing(7);
+        myCutoutChip = new SegChip(tr("Cut out"), row);
+        myCutoutChip->setToolTip(tr("Save Screenshot writes a PNG with no floor and no "
+                                    "background — just the furniture, on transparency"));
+        connect(myCutoutChip, &QAbstractButton::clicked, this, [this] {
+            setCutout(!myCutout);
+            emit cutoutChanged(myCutout);
+        });
+        line->addWidget(myCutoutChip);
+        line->addStretch(1);
+        outer->addWidget(row);
+    }
+    setCutout(false);
+
+    // The export SIZE, beside the cut-out switch: both are about what a saved
+    // file contains rather than what the viewport shows.
+    {
+        auto* row = new QWidget(this);
+        makeTransparent(row, QStringLiteral("renderSettingsExportRow"));
+        auto* line = new QHBoxLayout(row);
+        line->setContentsMargins(0, 0, 0, 0);
+        line->setSpacing(5);
+        const struct { ExportSize size; const char* label; const char* tip; } kSizes[] = {
+            {ExportSize::Viewport, QT_TR_NOOP("Window"),
+             QT_TR_NOOP("Twice the viewport's own pixels — what this app has always saved")},
+            {ExportSize::Height720, QT_TR_NOOP("720"), QT_TR_NOOP("1280 x 720, near enough")},
+            {ExportSize::Height1080, QT_TR_NOOP("1080"), QT_TR_NOOP("Full HD")},
+            {ExportSize::Height1440, QT_TR_NOOP("1440"), QT_TR_NOOP("Quad HD")},
+            {ExportSize::Height2160, QT_TR_NOOP("4K"), QT_TR_NOOP("Ultra HD")},
+        };
+        for (std::size_t i = 0; i < myExportChips.size(); ++i) {
+            auto* chip = new SegChip(tr(kSizes[i].label), row);
+            chip->setToolTip(tr(kSizes[i].tip));
+            const ExportSize size = kSizes[i].size;
+            connect(chip, &QAbstractButton::clicked, this, [this, size] {
+                if (myExportSize == size) return;
+                setExportSize(size);
+                emit exportSizeChanged(size);
+            });
+            myExportChips[i] = chip;
+            line->addWidget(chip);
+        }
+        line->addStretch(1);
+        outer->addWidget(row);
+
+        // What those chips actually produce, in pixels, pushed in by
+        // MainWindow - and what the live tier can honour.
+        myExportNote = new QLabel(this);
+        myExportNote->setWordWrap(true);
+        makeTransparent(myExportNote, QStringLiteral("renderSettingsExportNote"));
+        outer->addWidget(myExportNote);
+    }
+    setExportSize(ExportSize::Viewport);
 
     // --- footer: the live tier, the polish bar, the shutter ---------------
     // OUTSIDE the scroll, pinned to the panel's bottom edge: whatever the
@@ -894,11 +965,31 @@ QStringList RenderSettingsPanel::paintedTexts() const
     return texts;
 }
 
-void RenderSettingsPanel::setQuick(bool quick)
+void RenderSettingsPanel::setExportSize(ExportSize size)
 {
-    myQuick = quick;
-    if (myDeepChip) myDeepChip->setCurrent(!quick);
-    if (mySimpleChip) mySimpleChip->setCurrent(quick);
+    myExportSize = size;
+    for (std::size_t i = 0; i < myExportChips.size(); ++i) {
+        if (myExportChips[i]) myExportChips[i]->setCurrent(static_cast<ExportSize>(i) == size);
+    }
+}
+
+void RenderSettingsPanel::setExportNote(const QString& note)
+{
+    if (myExportNote) myExportNote->setText(note);
+}
+
+void RenderSettingsPanel::setCutout(bool cutout)
+{
+    myCutout = cutout;
+    if (myCutoutChip) myCutoutChip->setCurrent(cutout);
+}
+
+void RenderSettingsPanel::setQuality(Quality quality)
+{
+    myQuality = quality;
+    if (mySimpleChip) mySimpleChip->setCurrent(quality == Quality::Simple);
+    if (myBalancedChip) myBalancedChip->setCurrent(quality == Quality::Balanced);
+    if (myDeepChip) myDeepChip->setCurrent(quality == Quality::Deep);
 }
 
 void RenderSettingsPanel::setWood(bool wood)
@@ -943,8 +1034,29 @@ void RenderSettingsPanel::setWoodSelection(const QString& name)
     syncPresetTiles();
 }
 
+bool RenderSettingsPanel::eventFilter(QObject* watched, QEvent* event)
+{
+    if (event->type() == QEvent::MouseButtonDblClick) {
+        // Asked of the list rather than by casting: MaterialTile is a plain
+        // class in this file with no Q_OBJECT of its own (it needs none - it
+        // emits nothing), so qobject_cast cannot see it. "Is this one of my
+        // tiles" is also the question actually being asked.
+        for (MaterialTile* tile : myPresetTiles) {
+            if (tile != watched) continue;
+            emit materialEditRequested(tile->name());
+            return true;
+        }
+    }
+    return QWidget::eventFilter(watched, event);
+}
+
 void RenderSettingsPanel::addTile(MaterialTile* tile)
 {
+    // The double-click that opens this material's own editor. Watched rather
+    // than subclassed: QAbstractButton has no doubleClicked() of its own, and
+    // a filter on the tiles keeps every tile - preset and file-backed alike -
+    // answering the same gesture from one place.
+    tile->installEventFilter(this);
     const int index = static_cast<int>(myPresetTiles.size());
     myTileGrid->addWidget(tile, index / kTileColumns, index % kTileColumns);
     myPresetTiles.push_back(tile);

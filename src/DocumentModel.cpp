@@ -105,6 +105,11 @@ bool DocumentModel::removeSolid(int id)
         std::remove_if(myJoints.begin(), myJoints.end(),
                        [id](const Joint& j) { return j.bodyA == id || j.bodyB == id; }),
         myJoints.end());
+    // A folder membership cannot outlive the item it is about - the same
+    // rule the pairing map, the link groups and the joints keep just above.
+    // The FOLDER itself stays: a folder emptied by a delete is still the
+    // folder the user made, and an undo puts the body back in it.
+    myItemGroup.erase(id);
     ++myRevision;
     return true;
 }
@@ -120,6 +125,13 @@ void DocumentModel::clear()
     // about (ids restart at 1) - clear() wipes every id space, so it wipes
     // this one too, the same as myTwin/myLinkGroups just above.
     myJoints.clear();
+    // Folders too: clear() wipes every id space, so a folder from before it
+    // must not survive holding ids nothing owns any more.
+    myGroups.clear();
+    myItemGroup.clear();
+    // Materials too: clear() wipes the whole document, and a look belongs to
+    // the furniture that set it.
+    myMaterialLooks.clear();
     ++myRevision;
     // Ids are not reused: a stale id must never silently resolve to a new solid.
 }
@@ -630,6 +642,8 @@ bool DocumentModel::removeOutline(int id)
     if (it == myOutlines.end()) return false;
 
     myOutlines.erase(it);
+    // Its folder membership goes with it - removeSolid()'s own rule.
+    myItemGroup.erase(id);
     ++myRevision;
     return true;
 }
@@ -678,9 +692,15 @@ int DocumentModel::convertOutlineToBody(int outlineId, const TopoDS_Shape& solid
                                  [outlineId](const Outline& o) { return o.id == outlineId; });
     if (it == myOutlines.end()) return 0;
 
+    // The new body inherits the outline's folder: extruding something inside
+    // a folder must not tip it out to the root, which is where a fresh id
+    // would otherwise land.
+    const int folder = groupOf(outlineId);
+    myItemGroup.erase(outlineId);
     myOutlines.erase(it);
     const int id = myNextId++;
     mySolids.push_back(Solid{id, defaultName(myNextName++), solid});
+    if (folder != 0) myItemGroup[id] = folder;
     // ONE bump for the pair. The conversion is one change to the document, and
     // a toast stamped with the revision before it must be dismissed by it
     // exactly once.
@@ -704,7 +724,7 @@ bool DocumentModel::contains(int id) const
 
 void DocumentModel::checkpoint()
 {
-    myUndo.push_back(State{mySolids, myOutlines, myTwin, myLinkGroups, myJoints});
+    myUndo.push_back(State{mySolids, myOutlines, myTwin, myLinkGroups, myJoints, myGroups, myItemGroup});
     if (myUndo.size() > kMaxHistory) myUndo.erase(myUndo.begin());
 
     // Anything redoable described a future that no longer follows from here.
@@ -715,7 +735,7 @@ bool DocumentModel::undo()
 {
     if (myUndo.empty()) return false;
 
-    myRedo.push_back(State{mySolids, myOutlines, myTwin, myLinkGroups, myJoints});
+    myRedo.push_back(State{mySolids, myOutlines, myTwin, myLinkGroups, myJoints, myGroups, myItemGroup});
     mySolids = myUndo.back().solids;
     myOutlines = myUndo.back().outlines;
     // symmetryOn/symmetryPlane are NOT part of State - see its own comment.
@@ -724,6 +744,8 @@ bool DocumentModel::undo()
     myTwin = myUndo.back().twin;
     myLinkGroups = myUndo.back().linkGroups;
     myJoints = myUndo.back().joints;
+    myGroups = myUndo.back().groups;
+    myItemGroup = myUndo.back().itemGroup;
     myUndo.pop_back();
     ++myRevision;
     return true;
@@ -733,12 +755,14 @@ bool DocumentModel::redo()
 {
     if (myRedo.empty()) return false;
 
-    myUndo.push_back(State{mySolids, myOutlines, myTwin, myLinkGroups, myJoints});
+    myUndo.push_back(State{mySolids, myOutlines, myTwin, myLinkGroups, myJoints, myGroups, myItemGroup});
     mySolids = myRedo.back().solids;
     myOutlines = myRedo.back().outlines;
     myTwin = myRedo.back().twin;
     myLinkGroups = myRedo.back().linkGroups;
     myJoints = myRedo.back().joints;
+    myGroups = myRedo.back().groups;
+    myItemGroup = myRedo.back().itemGroup;
     myRedo.pop_back();
     ++myRevision;
     return true;
@@ -761,6 +785,169 @@ bool DocumentModel::renameSolid(int id, const std::string& name)
         }
     }
     return false;
+}
+
+// --- folders (improvements item 10) -----------------------------------------
+
+int DocumentModel::createGroup(const std::string& name, int parent)
+{
+    if (parent != 0 && !groupExists(parent)) return 0;
+    Group group;
+    // The SAME counter bodies and outlines draw from - see the type's own
+    // comment for why one id space is the whole point.
+    group.id = myNextId++;
+    group.name = name;
+    group.parent = parent;
+    myGroups.push_back(group);
+    ++myRevision;
+    return group.id;
+}
+
+bool DocumentModel::groupExists(int groupId) const
+{
+    return std::any_of(myGroups.begin(), myGroups.end(),
+                       [groupId](const Group& g) { return g.id == groupId; });
+}
+
+std::string DocumentModel::groupNameOf(int groupId) const
+{
+    for (const Group& g : myGroups) {
+        if (g.id == groupId) return g.name;
+    }
+    return {};
+}
+
+bool DocumentModel::setGroupName(int groupId, const std::string& name)
+{
+    for (Group& g : myGroups) {
+        if (g.id != groupId) continue;
+        g.name = name;
+        ++myRevision;
+        return true;
+    }
+    return false;
+}
+
+bool DocumentModel::groupContains(int maybeAncestor, int groupId) const
+{
+    if (maybeAncestor == groupId) return true;
+    int walk = groupId;
+    // Bounded by the number of folders: a malformed tree (which nothing here
+    // can build, since every mutation refuses a cycle) must not hang.
+    for (std::size_t guard = 0; guard <= myGroups.size() && walk != 0; ++guard) {
+        int parent = 0;
+        for (const Group& g : myGroups) {
+            if (g.id == walk) { parent = g.parent; break; }
+        }
+        if (parent == maybeAncestor) return true;
+        walk = parent;
+    }
+    return false;
+}
+
+bool DocumentModel::setGroupParent(int groupId, int parent)
+{
+    if (!groupExists(groupId)) return false;
+    if (parent != 0 && !groupExists(parent)) return false;
+    // A folder inside itself, or inside one of its own descendants, is not a
+    // tree any more - refused rather than repaired, since there is no honest
+    // answer to which half of the cycle the user meant.
+    if (parent != 0 && groupContains(groupId, parent)) return false;
+    for (Group& g : myGroups) {
+        if (g.id != groupId) continue;
+        if (g.parent == parent) return true;
+        g.parent = parent;
+        ++myRevision;
+        return true;
+    }
+    return false;
+}
+
+bool DocumentModel::setItemGroup(int itemId, int groupId)
+{
+    if (!contains(itemId) && !containsOutline(itemId)) return false;
+    if (groupId != 0 && !groupExists(groupId)) return false;
+    if (groupId == 0) {
+        if (myItemGroup.erase(itemId) == 0) return true;   // already at the root
+    } else {
+        const auto it = myItemGroup.find(itemId);
+        if (it != myItemGroup.end() && it->second == groupId) return true;
+        myItemGroup[itemId] = groupId;
+    }
+    ++myRevision;
+    return true;
+}
+
+int DocumentModel::groupOf(int itemId) const
+{
+    const auto it = myItemGroup.find(itemId);
+    if (it != myItemGroup.end()) return it->second;
+    // A folder answers with its OWN parent, so a caller walking upward from
+    // any row asks one question rather than branching on the kind first.
+    for (const Group& g : myGroups) {
+        if (g.id == itemId) return g.parent;
+    }
+    return 0;
+}
+
+bool DocumentModel::removeGroup(int groupId)
+{
+    const auto it = std::find_if(myGroups.begin(), myGroups.end(),
+                                 [groupId](const Group& g) { return g.id == groupId; });
+    if (it == myGroups.end()) return false;
+
+    const int parent = it->parent;
+    // Everything directly inside moves UP one level. Nothing is deleted by an
+    // ungroup - a folder is organisation, and dissolving it must not take a
+    // body with it.
+    for (Group& g : myGroups) {
+        if (g.parent == groupId) g.parent = parent;
+    }
+    for (auto& kv : myItemGroup) {
+        if (kv.second == groupId) kv.second = parent;
+    }
+    if (parent == 0) {
+        for (auto kv = myItemGroup.begin(); kv != myItemGroup.end();) {
+            kv = kv->second == 0 ? myItemGroup.erase(kv) : std::next(kv);
+        }
+    }
+    myGroups.erase(it);
+    ++myRevision;
+    return true;
+}
+
+std::vector<int> DocumentModel::childGroups(int groupId) const
+{
+    std::vector<int> ids;
+    for (const Group& g : myGroups) {
+        if (g.parent == groupId) ids.push_back(g.id);
+    }
+    return ids;
+}
+
+std::vector<int> DocumentModel::itemsInGroup(int groupId) const
+{
+    std::vector<int> ids;
+    // The document's own order - outlines first, then bodies - so the drawer
+    // lists a folder's contents exactly as it lists the root's.
+    for (const Outline& o : myOutlines) {
+        if (groupOf(o.id) == groupId) ids.push_back(o.id);
+    }
+    for (const Solid& s : mySolids) {
+        if (groupOf(s.id) == groupId) ids.push_back(s.id);
+    }
+    return ids;
+}
+
+std::vector<int> DocumentModel::bodiesUnderGroup(int groupId) const
+{
+    std::vector<int> ids;
+    if (groupId != 0 && !groupExists(groupId)) return ids;
+    for (const Solid& s : mySolids) {
+        if (groupId == 0 || groupContains(groupId, groupOf(s.id)) || groupOf(s.id) == groupId)
+            ids.push_back(s.id);
+    }
+    return ids;
 }
 
 bool DocumentModel::setItemName(int id, const std::string& name)
@@ -798,6 +985,29 @@ bool DocumentModel::isVisible(int id) const
 {
     const auto it = myVisibility.find(id);
     return it == myVisibility.end() ? true : it->second;
+}
+
+bool DocumentModel::materialLook(const std::string& material, MaterialLook& out) const
+{
+    for (const MaterialLook& look : myMaterialLooks) {
+        if (look.material != material) continue;
+        out = look;
+        return true;
+    }
+    return false;
+}
+
+void DocumentModel::setMaterialLook(const MaterialLook& look)
+{
+    if (look.material.empty()) return;
+    for (MaterialLook& existing : myMaterialLooks) {
+        if (existing.material != look.material) continue;
+        existing = look;
+        ++myRevision;
+        return;
+    }
+    myMaterialLooks.push_back(look);
+    ++myRevision;
 }
 
 FurnifySerial::SerializedDocument DocumentModel::toSerialized(DocumentMeta& meta) const
@@ -890,6 +1100,59 @@ FurnifySerial::SerializedDocument DocumentModel::toSerialized(DocumentMeta& meta
         record.adjustments = joint.adjustments;
         meta.joints.push_back(record);
     }
+
+    // Folders (improvements item 10), by INDEX into meta.groups - see
+    // DocumentMeta::GroupRecord for why a folder is numbered by its own
+    // position rather than by a body position or an id. Emitted
+    // PARENTS-FIRST: myGroups is only in creation order, and a child created
+    // before its parent was re-parented into it would otherwise be written
+    // ahead of it. The walk below takes every folder whose parent is already
+    // written, repeatedly, so the array reads top-down.
+    {
+        std::unordered_map<int, int> indexOfGroup;   // folder id -> index in meta.groups
+        std::vector<const Group*> pending;
+        pending.reserve(myGroups.size());
+        for (const Group& g : myGroups) pending.push_back(&g);
+        bool progressed = true;
+        while (progressed && !pending.empty()) {
+            progressed = false;
+            std::vector<const Group*> next;
+            for (const Group* g : pending) {
+                const bool rooted = g->parent == 0;
+                const auto parentIt = indexOfGroup.find(g->parent);
+                if (!rooted && parentIt == indexOfGroup.end()) {
+                    next.push_back(g);
+                    continue;
+                }
+                DocumentMeta::GroupRecord record;
+                record.name = g->name;
+                record.parentIndex = rooted ? -1 : parentIt->second;
+                indexOfGroup[g->id] = static_cast<int>(meta.groups.size());
+                meta.groups.push_back(std::move(record));
+                progressed = true;
+            }
+            pending.swap(next);
+        }
+
+        // Only when there is something to say: a document with no folders
+        // writes no membership arrays at all, which is exactly what an older
+        // file looks like, so the two are indistinguishable by design.
+        if (!meta.groups.empty()) {
+            meta.bodyGroups.reserve(mySolids.size());
+            for (const Solid& body : mySolids) {
+                const auto it = indexOfGroup.find(groupOf(body.id));
+                meta.bodyGroups.push_back(it == indexOfGroup.end() ? -1 : it->second);
+            }
+            meta.outlineGroups.reserve(myOutlines.size());
+            for (const Outline& outline : myOutlines) {
+                const auto it = indexOfGroup.find(groupOf(outline.id));
+                meta.outlineGroups.push_back(it == indexOfGroup.end() ? -1 : it->second);
+            }
+        }
+    }
+
+    // How each material looks on this furniture - straight across, by name.
+    meta.materialLooks = myMaterialLooks;
 
     return serial;
 }
@@ -987,6 +1250,36 @@ bool DocumentModel::fromSerialized(const FurnifySerial::SerializedDocument& seri
         }
     }
 
+    // Folders (improvements item 10). A membership array, when present, must
+    // describe every item - a short one would silently drop the items past
+    // its end to the root - and every index must name a real folder. Refused
+    // outright rather than repaired, the validate-before-mutate law every
+    // other structural check above follows. An EMPTY array is not short: it
+    // is what a document with no folders writes, and what every file written
+    // before folders existed carries.
+    {
+        const int groupCount = static_cast<int>(meta.groups.size());
+        for (int i = 0; i < groupCount; ++i) {
+            const int parent = meta.groups[static_cast<std::size_t>(i)].parentIndex;
+            // Parents-first, which is also the cycle guard: a folder may only
+            // name a folder written BEFORE it, so no chain can close on
+            // itself.
+            if (parent < -1 || parent >= i) return false;
+        }
+        if (!meta.bodyGroups.empty() && meta.bodyGroups.size() != serial.bodies.size())
+            return false;
+        if (!meta.outlineGroups.empty() &&
+            meta.outlineGroups.size() != serial.outlineFaces.size()) {
+            return false;
+        }
+        for (int index : meta.bodyGroups) {
+            if (index < -1 || index >= groupCount) return false;
+        }
+        for (int index : meta.outlineGroups) {
+            if (index < -1 || index >= groupCount) return false;
+        }
+    }
+
     mySolids.clear();
     myOutlines.clear();
     myUndo.clear();
@@ -1013,6 +1306,14 @@ bool DocumentModel::fromSerialized(const FurnifySerial::SerializedDocument& seri
     // `meta.joints` (Task 9) repopulates this below, positionally, the same
     // way symmetryPairs and linkGroups already do.
     myJoints.clear();
+    // Folders too: a second load onto the same instance must not carry the
+    // OLD document's tree forward - the same reasoning myTwin, myLinkGroups
+    // and myJoints each carry just above.
+    myGroups.clear();
+    myItemGroup.clear();
+    // A second load onto the same instance must not keep the OLD furniture's
+    // materials - the same reasoning every block above it carries.
+    myMaterialLooks = meta.materialLooks;
     ++myRevision;
 
     std::vector<int> bodyIds;
@@ -1023,11 +1324,37 @@ bool DocumentModel::fromSerialized(const FurnifySerial::SerializedDocument& seri
         setVisible(id, meta.bodyVisible[i]);
         bodyIds.push_back(id);
     }
+    std::vector<int> outlineIds;
+    outlineIds.reserve(serial.outlineFaces.size());
     for (std::size_t i = 0; i < serial.outlineFaces.size(); ++i) {
         const TopoDS_Face face = TopoDS::Face(serial.outlineFaces[i]);
         const int id = addOutline(face, serial.outlinePlanes[i]);
         setItemName(id, meta.outlineNames[i]);
         setVisible(id, meta.outlineVisible[i]);
+        outlineIds.push_back(id);
+    }
+
+    // Folders (improvements item 10): the records were written parents-first
+    // and validated as such above, so creating them in order means every
+    // parent already exists by the time its child names it. The membership
+    // arrays then translate back into the ids just assigned.
+    {
+        std::vector<int> groupIds;
+        groupIds.reserve(meta.groups.size());
+        for (const DocumentMeta::GroupRecord& record : meta.groups) {
+            const int parent = record.parentIndex < 0
+                                   ? 0
+                                   : groupIds[static_cast<std::size_t>(record.parentIndex)];
+            groupIds.push_back(createGroup(record.name, parent));
+        }
+        for (std::size_t i = 0; i < meta.bodyGroups.size() && i < bodyIds.size(); ++i) {
+            const int index = meta.bodyGroups[i];
+            if (index >= 0) setItemGroup(bodyIds[i], groupIds[static_cast<std::size_t>(index)]);
+        }
+        for (std::size_t i = 0; i < meta.outlineGroups.size() && i < outlineIds.size(); ++i) {
+            const int index = meta.outlineGroups[i];
+            if (index >= 0) setItemGroup(outlineIds[i], groupIds[static_cast<std::size_t>(index)]);
+        }
     }
 
     // Symmetry: setSymmetry() first (it clears myTwin outright when off, and

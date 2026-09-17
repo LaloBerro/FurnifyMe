@@ -1,5 +1,7 @@
 #include "ViewportOverlay.h"
 
+#include <QDebug>
+
 #include "Theme.h"
 
 #include <QEvent>
@@ -68,6 +70,20 @@ bool ViewportOverlay::eventFilter(QObject* watched, QEvent* event)
 
 void ViewportOverlay::relayout()
 {
+    // RE-ENTRY IS REFUSED, and it is not defensive tidiness: this function
+    // moves and resizes anchored cards, and a card that answers a move by
+    // asking for another layout (the joint chip does, when its own content
+    // changes height) puts this function back on the stack under itself.
+    // Nested passes cannot produce a different answer either - the second one
+    // reads the same viewport and the same size hints - so the outer pass
+    // stands and the inner one returns.
+    if (myLayingOut) return;
+    myLayingOut = true;
+    struct Guard {
+        bool& flag;
+        ~Guard() { flag = false; }
+    } guard{myLayingOut};
+
     const int w = myViewport->width();
     const int h = myViewport->height();
 

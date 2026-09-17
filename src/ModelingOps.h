@@ -419,6 +419,83 @@ MitreCheck checkMitre(const TopoDS_Shape& body, const TopoDS_Face& endFace, doub
 BooleanResult mitreEnd(const TopoDS_Shape& body, const TopoDS_Face& endFace, double angleDeg,
                        MitreSide side);
 
+// --- Slats (improvements item 11) --------------------------------------------
+//
+// A slatted front: pick the flat face of a panel and the tool fills it with
+// evenly spaced battens standing proud of it. The user's own reference is a
+// wardrobe front in vertical lamas - two dozen of them, all the same, and
+// laying those one at a time is the work this replaces.
+//
+// THE FACE IS THE AREA. It gives all three things the layout needs - the
+// rectangle to fill, the plane to lay them on, and which way is out - so
+// there is nothing to aim and nothing for a caller to supply that could
+// disagree with the wood. The frame is the FACE'S OWN, never a world axis:
+// the same discipline mitreFrame() keeps, and for the same reason (a panel
+// turned 30 degrees is still a panel).
+//
+// WHICH WAY THE SLATS RUN is derived, not asked for: they run along the
+// face's SHORTER extent and repeat along its longer one, which is what a
+// wide cabinet front in vertical slats looks like. `runAcross` swaps that for
+// the case the geometry cannot guess (a tall narrow door in horizontal
+// slats).
+//
+// THE ENDS COME OUT FLUSH. Given the width and the gap the user asked for,
+// the count is floor((extent + gap) / (width + gap)) and the PITCH is then
+// re-derived as (extent - width) / (count - 1), so the first slat's edge sits
+// on one end of the face and the last slat's on the other. The gap that
+// results is the asked-for gap or a hair more, never less, and never a stub
+// of leftover face at one end - which is what a made panel actually looks
+// like, and what nobody wants to work out by hand.
+struct SlatPlan {
+    double width = 20.0;    // across the run, millimetres
+    double gap = 12.0;      // the smallest gap between two slats
+    double depth = 18.0;    // how far they stand proud of the face
+    bool runAcross = false;  // true swaps which axis they run along
+};
+
+// What slatsOnFace() would refuse before the kernel is asked - a value, not a
+// sentence, so the app maps it to its own copy and nothing re-derives a rule
+// this file owns (checkMitre()/checkResize()'s contract). `countOut` carries
+// how many slats would be laid, which the chip shows live.
+enum class SlatCheck { Ok, NotAFlatFace, SizeOutOfRange, NoneFit };
+SlatCheck checkSlats(const TopoDS_Shape& body, const TopoDS_Face& face, const SlatPlan& plan,
+                     int* countOut = nullptr, std::string* why = nullptr);
+
+// One shape per slat, in the order they are laid across the face. They are
+// separate bodies, deliberately: the user renames, hides, joints and mirrors
+// them like any other piece, and a single fused shell could do none of that.
+// Never fused to the host panel either - the panel is still its own body.
+struct SlatResult {
+    bool ok = false;
+    std::vector<TopoDS_Shape> slats;
+    std::string error;
+};
+SlatResult slatsOnFace(const TopoDS_Shape& body, const TopoDS_Face& face, const SlatPlan& plan);
+
+// The numbers a run of slats ALREADY laid is made of - read back off the
+// bodies themselves rather than stored anywhere. That is what lets the tool
+// reopen on a folder of slats and change their size: measure what is there,
+// show it, rebuild it. Nothing persists, so nothing can go stale, and a file
+// written before this tool existed opens exactly as it always did.
+//
+// False when `slats` is not a run this tool could have made: fewer than two
+// shapes, boxes that are not all the same size, or centres that do not sit on
+// one line at one pitch. `plane` comes back as the face they stand on - their
+// own back plane, its normal pointing OUT the way they stand - with `area`
+// the rectangle they cover, measured in that plane's own axes.
+struct SlatArea {
+    gp_Pln plane{gp_Pnt(0.0, 0.0, 0.0), gp_Dir(0.0, 0.0, 1.0)};
+    // The rectangle, in the plane's own (u, v) as ElSLib::Parameters reads
+    // them - the same coordinates snapToPlaneGrid() and the grid already use.
+    double uLo = 0.0, uHi = 0.0, vLo = 0.0, vHi = 0.0;
+};
+bool slatRunFromBodies(const std::vector<TopoDS_Shape>& slats, SlatPlan& plan, SlatArea& area);
+
+// The same layout as slatsOnFace(), over a rectangle measured earlier rather
+// than a face measured now - what a rebuild uses, so the two paths lay slats
+// by ONE implementation and a rebuilt run cannot drift from a fresh one.
+SlatResult slatsOnArea(const SlatArea& area, const SlatPlan& plan);
+
 // --- Re-Measure (improvements item 8) ----------------------------------------
 //
 // Retype one of a body's three sizes and the body changes to match. The user
@@ -471,7 +548,17 @@ enum class ResizeAnchor { Low, Centre, High };
 // reworded. `currentExtent`, when given, receives the body's size along
 // `axis` as measuredBox() reads it, so a UI can seed its field from the same
 // number the operation will compare against.
-enum class ResizeCheck { Ok, NotMeasurable, SizeNotPositive, AxisNotASide, EndNotFlat };
+// AN END THAT CANNOT BE PULLED IS NOT A REFUSAL AT ALL (improvements item
+// 13). A board whose end is a mitre, a chamfer or a rounded corner is not one
+// flat face square to the axis, and this used to report EndNotFlat and stop
+// there - which is the exact case the user reported ("if I add bevel or a cut
+// angle in the shape i could not use the re measure tool"). Its length is
+// taken out of the MIDDLE now (stretchAlongAxis below), so the enumerator is
+// gone rather than left unreachable: a code no caller can ever see is a
+// sentence in the UI that no user can ever be shown. What is left is
+// NoStraightPart - there is a middle, or there is not.
+enum class ResizeCheck { Ok, NotMeasurable, SizeNotPositive, AxisNotASide,
+                         NoStraightPart };
 ResizeCheck checkResize(const TopoDS_Shape& body, const gp_Dir& axis, double newExtentMm,
                         ResizeAnchor anchor, double* currentExtent = nullptr,
                         std::string* why = nullptr);
@@ -481,6 +568,19 @@ ResizeCheck checkResize(const TopoDS_Shape& body, const gp_Dir& axis, double new
 // pullFace() refuses a distance below (so a Centre resize, which moves each
 // end by half, can never hand the kernel a distance it will refuse).
 constexpr double kResizeNoChange = 1.0e-6;
+
+// Takes the difference out of the MIDDLE of the body rather than off its end:
+// cuts across the straight part, slides the far piece along `axis` by `delta`
+// (positive grows, negative shrinks), and joins the two again. The LOW end
+// stays where it is and the high end moves - the anchor is the caller's to
+// apply, by shifting the whole result afterwards.
+//
+// What it is for: a board with a mitre, a chamfer or a rounded end cannot
+// have that end pulled, and every feature has to come through the edit at its
+// own size. The result is MEASURED against the length that was asked for
+// before it is returned, so a shape with no straight middle refuses rather
+// than coming back the wrong length.
+BooleanResult stretchAlongAxis(const TopoDS_Shape& body, const gp_Dir& axis, double delta);
 
 BooleanResult resizeAlongAxis(const TopoDS_Shape& body, const gp_Dir& axis, double newExtentMm,
                               ResizeAnchor anchor);

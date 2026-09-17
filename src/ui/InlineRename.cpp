@@ -1,5 +1,7 @@
 #include "InlineRename.h"
 
+#include "Theme.h"
+
 #include <QKeyEvent>
 #include <QKeySequence>
 #include <QLineEdit>
@@ -62,6 +64,19 @@ void beginRename(QWidget* host, const QRect& cellRect, const QString& current,
     // running. The bare pointer would then be dangling for the
     // deleteLater() call right after it.
     QPointer<QLineEdit> edit = new QLineEdit(host);
+    // OPAQUE, and that is a fix rather than a flourish: this editor opens
+    // directly over the name it is editing, and an unstyled QLineEdit over a
+    // card that paints its own surface let the OLD name show straight through
+    // the new one - two strings on top of each other for the whole of the
+    // gesture, which is what the user reported. It wears the same fill,
+    // border and padding every other typed field in this app does
+    // (JointChip's, MitreTool's, ReMeasureTool's), so a rename looks like
+    // typing rather than like a glitch.
+    edit->setStyleSheet(QStringLiteral("QLineEdit { background-color: %1; color: %2; "
+                                       "border: 1px solid %3; border-radius: 3px; "
+                                       "padding: 0px 4px; }")
+                            .arg(Theme::chip().name(), Theme::text().name(),
+                                 Theme::accent().name()));
     edit->setGeometry(cellRect);
     edit->setText(current);
     edit->selectAll();

@@ -111,4 +111,6 @@ private:
 
     QWidget* myViewport = nullptr;
     std::vector<Entry> myEntries;
+    // See relayout(): one pass at a time, never nested.
+    bool myLayingOut = false;
 };

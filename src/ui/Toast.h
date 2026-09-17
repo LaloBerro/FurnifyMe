@@ -282,6 +282,13 @@ private:
     // the constructor, reading myToast live each time rather than a capture
     // that could go stale.
     QVariantAnimation* myFade = nullptr;
+    // The arrival rise: a message lifts kRisePx into its place as it fades
+    // in, so it reads as arriving rather than as appearing. One animation for
+    // the host's lifetime on the same terms as the fade above (parented,
+    // KeepWhenStopped), driving the toast's own "pos" - reposition() stops it
+    // before moving the card itself, so the solver's answer always wins over
+    // a flight aimed at where the card used to be going.
+    class QPropertyAnimation* myRise = nullptr;
     // The callback for whichever fade is currently running, if any - read
     // and cleared by the one permanent `finished` connection made in the
     // constructor. fadeTo() itself sets this, never a second connection.

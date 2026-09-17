@@ -46,6 +46,7 @@
 
 #include <map>
 #include <utility>
+#include <set>
 #include <vector>
 
 // The Qt <-> OCCT bridge. Hosts a V3d_View inside a QOpenGLWidget - OCCT renders
@@ -1202,6 +1203,21 @@ public:
     // Renders the viewport straight to an image file. Independent of what is on
     // screen or on top of the window, unlike a screen grab.
     bool saveSnapshot(const QString& path);
+    // saveSnapshot()'s cut-out branch - see setRenderCutout(). Called only
+    // from inside that function's own GlScope.
+    bool saveCutoutSnapshot(const QString& path);
+    // Renders into an OFFSCREEN buffer of exactly `pixels` and writes it to
+    // `path`. The path-traced tier is why this exists: ToPixMap() renders its
+    // own buffer and reads it in ONE call, so a progressive tier gets exactly
+    // one sample - but FBOCreate()/SetFBO() hand the view a buffer that
+    // SURVIVES several Redraw()s, and a path tracer accumulates across
+    // redraws of the same target. So the passes go in, then the buffer is
+    // read once, and a 4K path-traced export is the same picture as the one
+    // on screen with four times the pixels.
+    //
+    // `withAlpha` dumps RGBA (the cut-out's own need). Called only from
+    // inside saveSnapshot()'s GlScope.
+    bool dumpOffscreen(const QString& path, const QSize& pixels, bool withAlpha);
 
     // MainWindow's furniture-thumbnail capture at save time - built on
     // saveSnapshot() itself (V3d_View::Dump has no in-memory sibling) through
@@ -1216,6 +1232,12 @@ public:
     void animateTo(const CameraState& goal);
     void setAnimationsEnabled(bool enabled) { myAnimationsEnabled = enabled; }
     bool animationsEnabled() const { return myAnimationsEnabled; }
+    // The same answer for a widget that has no viewport pointer of its own -
+    // an overlay chip, say. Walks up from `child` to the OcctViewWidget that
+    // hosts it, so there is still ONE flag rather than a second one kept in
+    // step, and returns true when there is no viewport above it at all (a
+    // widget outside the editor's viewport is nobody's to switch off).
+    static bool animationsEnabledFor(const QWidget* child);
     void setViewAxonometric();
     // Sketching happens on the XY plane, so a true top view makes clicking
     // accurate in a way the angled default cannot.
@@ -1372,8 +1394,84 @@ public:
     // through the one entry path they have always taken. Persisted with the
     // other render settings; myRenderTier (what every live read consults)
     // is derived from the probed best AND this flag at entry.
-    void setRenderQuick(bool quick) { myRenderQuick = quick; }
-    bool renderQuick() const { return myRenderQuick; }
+    // WHICH TIER RENDER MODE ACTUALLY USES (improvements item 16). The probe
+    // still finds the best this machine can run; this says how much of it to
+    // spend. Deep is that best, Simple is the shadow-mapped raster tier
+    // (instant frames, real shadows), and Balanced is the middle one the user
+    // asked for: ray tracing, which is sharp the moment it appears and has no
+    // grain to wait out.
+    //
+    // A choice ABOUT the probe rather than a second probe: the ceiling is
+    // still whatever probeRenderTier() measured, so asking for Deep on a
+    // machine that only reaches Shadows gets Shadows, exactly as before.
+    enum class RenderQuality { Simple, Balanced, Deep };
+    // CUT-OUT EXPORT: Save Screenshot writes a PNG with a real alpha channel -
+    // no floor, no backdrop, just the furniture - so a render can be dropped
+    // straight onto a page. A checkbox on the render card rather than a
+    // second menu entry (the user's own call): it changes what the export
+    // this app already has produces, and a second entry would be a second
+    // route to the same picture.
+    //
+    // It is not a colour knocked out afterwards: the floor is hidden, the
+    // driver's alpha writes are turned on for the dump, and the buffer is
+    // read as RGBA. Knocking out a colour would take the same colour out of
+    // the WOOD as well, wherever the backdrop's tone happens to appear in it.
+    // HOW BIG AN EXPORTED RENDER IS. It used to be whatever the window
+    // happened to be - twice the viewport's own device pixels - so the same
+    // furniture exported at a different size on every machine and after every
+    // resize, and a 900-pixel-tall viewport could never produce a Full HD
+    // picture. The chosen HEIGHT is what is asked for and the width follows
+    // the viewport's own aspect, so the framing on screen is the framing in
+    // the file: picking a size must not re-frame the shot.
+    //
+    // ONE TIER CANNOT HONOUR IT, and that is measured rather than assumed:
+    // the path-traced tier exports the ON-SCREEN accumulation buffer through
+    // Dump(), because ToPixMap() renders its own offscreen buffer at exactly
+    // one deterministic sample per pixel there (saveSnapshot()'s own comment
+    // records the sweep that established it). An offscreen 4K path-traced
+    // export would be a single-sample image - darker and grainier than the
+    // picture on screen, at four times the pixels. So on Deep the size is
+    // reported rather than silently ignored; Balanced and Simple honour it
+    // exactly.
+    enum class ExportSize { Viewport, Height720, Height1080, Height1440, Height2160 };
+    void setRenderExportSize(ExportSize size) { myRenderExportSize = size; }
+    ExportSize renderExportSize() const { return myRenderExportSize; }
+    // The pixel size an export would actually produce right now, for the card
+    // to print and for the status line after a save. Answers the viewport's
+    // own doubled size for Viewport, and for a fixed height derives the width
+    // from the live aspect ratio.
+    QSize renderExportPixels() const;
+    // False when the live tier cannot produce renderExportPixels() - the Deep
+    // tier, which exports the on-screen buffer. The card reads this to say so
+    // BEFORE the user exports, rather than after.
+    bool renderExportSizeApplies() const;
+
+    // THE ACTIVE MATERIAL'S OWN COLOUR AND BRIGHTNESS, pushed in by
+    // MainWindow from the furniture's own record (DocumentModel::MaterialLook)
+    // whenever the material or the furniture changes. This widget stores and
+    // applies them; which material they belong to is the window's business,
+    // because a material name is a thing the render CARD offers and this
+    // class has never known one.
+    //
+    // Brightness multiplies the colour into the albedo rather than touching
+    // the lights: a body lit brighter than the room it stands in is a
+    // lighting change, and the lights here are calibrated against the floor
+    // and the backdrop (CLAUDE.md's render section). Scaling the material is
+    // what "this walnut is darker than that one" actually means.
+    void setRenderMaterialLook(double red, double green, double blue, double brightness);
+
+    void setRenderCutout(bool cutout) { myRenderCutout = cutout; }
+    bool renderCutout() const { return myRenderCutout; }
+
+    void setRenderQuality(RenderQuality quality) { myRenderQuality = quality; }
+    RenderQuality renderQuality() const { return myRenderQuality; }
+    // The older two-state spelling, kept because the persisted setting and
+    // gui_smoke both speak it: Quick on IS Simple, and off is Deep.
+    void setRenderQuick(bool quick)
+    {
+        myRenderQuality = quick ? RenderQuality::Simple : RenderQuality::Deep;
+    }
+    bool renderQuick() const { return myRenderQuality == RenderQuality::Simple; }
 
     // The wood material (Milestone 5): render-mode bodies dress in a
     // procedurally generated wood grain - a texture on the raster tiers,
@@ -1835,11 +1933,6 @@ signals:
     // rubber band and the coordinate readout.
     void sketchCursorMoved(const gp_Pnt& point);
     void selectionChanged();
-    // A face CTRL+double-clicked. MainWindow decides what that means (it locks
-    // it); this widget knows nothing about locking. The modifier is what
-    // leaves the plain double-click free for the whole-body pick - see
-    // mouseDoubleClickEvent().
-    void faceDoubleClicked(const TopoDS_Face& face);
 
     // A live face pull. `distance` is signed along the pulled face's outward
     // normal and measured from the press - positive grows, negative carves -
@@ -1957,6 +2050,10 @@ protected:
     void resizeGL(int w, int h) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
+    void keyPressEvent(QKeyEvent* event) override;
+    void keyReleaseEvent(QKeyEvent* event) override;
+    // The ShortcutOverride claim the fly keys need - see myFlyKeys.
+    bool event(QEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
     void mouseDoubleClickEvent(QMouseEvent* event) override;
@@ -2114,6 +2211,13 @@ private:
     // reads it, so setting it first means the presentation is never computed
     // into the default layer and moved a frame later.
     void markInSketchLayer(const Handle(AIS_InteractiveObject)& object) const;
+    // The sketch DRAWING - the outlines, the live line, the placed dots, the
+    // first point's square and the cursor ring - goes one layer higher still,
+    // where nothing depth-tests it against the furniture (improvements item
+    // 8). What stays in the depth-tested layer is everything that belongs to
+    // the scene rather than to the drawing: the ghost of a body being edited,
+    // the mirror plane and its handle, the mirroring indicator.
+    void markOnTopOfBodies(const Handle(AIS_InteractiveObject)& object) const;
     // Whether `point` lands on `arrow`, tested in SCREEN space against the
     // arrow's own projected endpoints rather than through AIS - see the
     // comment on PullArrowLines in PullArrow.cpp for why these arrows must not
@@ -2242,8 +2346,20 @@ private:
     // Quick is on (Plain stays Plain - there is nothing simpler to fall to).
     RenderTier effectiveRenderTier() const
     {
-        if (!myRenderQuick) return myRenderTierBest;
-        return myRenderTierBest == RenderTier::Plain ? RenderTier::Plain : RenderTier::Shadows;
+        switch (myRenderQuality) {
+            case RenderQuality::Deep:
+                return myRenderTierBest;
+            case RenderQuality::Balanced:
+                // One step down from the top, and only when there IS a step
+                // down: on a machine whose best is already RayTracing or
+                // lower, Balanced is simply that.
+                return myRenderTierBest == RenderTier::PathTracing ? RenderTier::RayTracing
+                                                                   : myRenderTierBest;
+            case RenderQuality::Simple:
+                return myRenderTierBest == RenderTier::Plain ? RenderTier::Plain
+                                                             : RenderTier::Shadows;
+        }
+        return myRenderTierBest;
     }
     // Writes `tier`'s rendering params (Method, IsShadowEnabled, GI/adaptive
     // sampling/antialiasing for path tracing, the PBR shading model and
@@ -2464,6 +2580,8 @@ private:
     // and if the viewer ever refuses the layer everything below simply
     // displays into the default layer as it did before.
     Graphic3d_ZLayerId mySketchLayer = Graphic3d_ZLayerId_UNKNOWN;
+    // The always-on-top half - see markOnTopOfBodies().
+    Graphic3d_ZLayerId mySketchTopLayer = Graphic3d_ZLayerId_UNKNOWN;
     // The transform gizmo's own layer, above every other, depth cleared - see
     // initializeViewer() for why it is not simply Graphic3d_ZLayerId_Topmost.
     // UNKNOWN if the viewer refused it, in which case the gizmo falls back to
@@ -2590,6 +2708,27 @@ private:
     QPoint myLastPos;
     bool myOrbiting = false;
     bool myPanningDrag = false;
+
+    // --- the WASD flythrough (improvements item 6) --------------------------
+    // Unity's scene-view fly, which is the camera model this app already
+    // follows: while the RIGHT button is held - the button that orbits - W and
+    // S walk the camera along its own look direction, A and D across it, Q and
+    // E down and up the world's Z, and Shift goes faster. The keys mean this
+    // ONLY while that button is down, which is what lets them stay Mirror (S),
+    // Extrude (E) and the rest the rest of the time: while flying, this widget
+    // claims QEvent::ShortcutOverride for them so QShortcutMap cannot take one
+    // first, and it releases the claim with the button.
+    //
+    // It flies only while THIS widget holds the keyboard focus. Focus is never
+    // taken to make it work: a mitre angle or a joint number being typed must
+    // keep the keys it is being typed with, and an orbit mid-edit is exactly
+    // the gesture those fields are designed to survive.
+    void stepFly();
+    bool isFlyKey(int key) const;
+    // Which of the six are held right now. A set, not a bitmask: two keys at
+    // once is an ordinary diagonal, and the timer reads all of them per tick.
+    std::set<int> myFlyKeys;
+    class QTimer* myFlyTimer = nullptr;
 
     // True only for the duration of applyCameraState()'s cameraChanged()
     // emission, so a slot that changes the scene can skip its own viewer
@@ -2831,7 +2970,15 @@ private:
     // What the probe actually found this session - myRenderTier is this,
     // capped by the Quick flag (see effectiveRenderTier()).
     RenderTier myRenderTierBest = RenderTier::Plain;
-    bool myRenderQuick = false;
+    RenderQuality myRenderQuality = RenderQuality::Deep;
+    bool myRenderCutout = false;
+    // The live material's look - the defaults are the tone this app has
+    // always drawn a body in, so nothing changes until a furniture says so.
+    double myMaterialRed = 0.70;
+    double myMaterialGreen = 0.70;
+    double myMaterialBlue = 0.68;
+    double myMaterialBrightness = 1.0;
+    ExportSize myRenderExportSize = ExportSize::Viewport;
     // Wood (Milestone 5) - see setRenderWood(). The texture is built once
     // per session, lazily, from a procedural QImage; the handle lives for
     // the widget's life and dies with the GL resources.

@@ -92,6 +92,12 @@ public:
     // childAt-real probes) keeps working untouched.
     QPushButton* newFurnitureButton() const { return myNewButton; }
 
+    // The name question this window asks when the + card is pressed
+    // (improvements item 4) - the same card the editor's File -> New
+    // furniture asks, so the two flows are one question. Exposed for the
+    // suite's own childAt() reachability checks.
+    class NameFurnitureCard* nameCard() const { return myNameCard; }
+
     // The Gallery header's own controls: search filters cards by name as
     // you type (a filtered card is hidden, never rebuilt), and the two sort
     // chips are one exclusive pair - Recent (newest edit first, the
@@ -209,6 +215,10 @@ private:
     QPushButton* mySortRecent = nullptr;
     QPushButton* mySortName = nullptr;
     QLabel* myFailureBanner = nullptr;   // built lazily, see showFailure()
+    class NameFurnitureCard* myNameCard = nullptr;
+    // Creates `name` and reports it chosen - the + card's own tail, moved out
+    // of the click so the name question can call it once it is answered.
+    void createNamedFurniture(const QString& name);
     QTimer* myFailureTimer = nullptr;
     QStringList myShownFailures;         // every message shown this run - see paintedTexts()
     QScrollArea* myScroll = nullptr;

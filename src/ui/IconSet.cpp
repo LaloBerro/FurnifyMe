@@ -85,6 +85,22 @@ void paintGlyph(QPainter& p, Glyph glyph)
             p.drawEllipse(QPoint(12, 12), 8, 8);
             p.drawLine(12, 4, 12, 20);
             break;
+        case Glyph::ChevronRight:                 // a collapsed folder's twisty
+            p.drawLine(10, 6, 16, 12);
+            p.drawLine(16, 12, 10, 18);
+            break;
+        case Glyph::ChevronDown:                  // an open folder's twisty
+            p.drawLine(6, 10, 12, 16);
+            p.drawLine(12, 16, 18, 10);
+            break;
+        case Glyph::Folder:                       // a tabbed folder outline
+            p.drawLine(3, 7, 9, 7);
+            p.drawLine(9, 7, 11, 10);
+            p.drawLine(11, 10, 21, 10);
+            p.drawLine(21, 10, 21, 19);
+            p.drawLine(21, 19, 3, 19);
+            p.drawLine(3, 19, 3, 7);
+            break;
         case Glyph::FitAll:                       // frame corners
             p.drawLine(4, 8, 4, 4);  p.drawLine(4, 4, 8, 4);
             p.drawLine(16, 4, 20, 4); p.drawLine(20, 4, 20, 8);

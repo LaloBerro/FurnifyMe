@@ -54,6 +54,13 @@
 // card shows the user's own words unmangled, and the sweep has nothing to
 // trip on because it never reads them in the first place.
 #include <QDateTime>
+// A QPointer needs the COMPLETE type it points at - the pointer's own
+// data() static_casts through QObject* - and a forward declaration is not
+// it. These headers compiled for two milestones only because something
+// earlier in every translation unit happened to include the real header
+// first; adding one new header to the moc build was enough to change that
+// order and break it. A header that declares a QPointer<T> includes T.
+#include <QLineEdit>
 #include <QPointer>
 #include <QRect>
 #include <QSize>

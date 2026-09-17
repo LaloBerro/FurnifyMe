@@ -1,5 +1,7 @@
 #include "MainWindow.h"
 
+#include <cstdio>
+
 #include "Measure.h"
 #include "ModelingOps.h"
 #include "OcctViewWidget.h"
@@ -8,6 +10,7 @@
 #include "AppearancePanel.h"
 #include "RenderSettingsPanel.h"
 #include "AxisGizmo.h"
+#include "CardSlide.h"
 #include "BevelArrow.h"
 #include "ExtrudePreview.h"
 #include "HintBalloon.h"
@@ -28,7 +31,11 @@
 #include "JointChip.h"
 #include "JointsPanel.h"
 #include "MitreTool.h"
+#include "LoadingCard.h"
+#include "MaterialCard.h"
+#include "NameFurnitureCard.h"
 #include "ReMeasureTool.h"
+#include "SlatsTool.h"
 #include "WalkthroughPanel.h"
 #include "WindowChrome.h"
 
@@ -66,6 +73,9 @@
 #include <QMetaMethod>
 #include <QCloseEvent>
 #include <QPainter>
+#include <QParallelAnimationGroup>
+#include <QPropertyAnimation>
+#include <QSequentialAnimationGroup>
 #include <QPushButton>
 #include <QSettings>
 #include <QShowEvent>
@@ -630,6 +640,7 @@ private:
 
 }  // namespace
 
+
 MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& libraryRoot)
     : QMainWindow(parent)
     , myStore(resolveLibraryRoot(libraryRoot))
@@ -754,8 +765,27 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         }
         myStartRenderFov =
             settings.value(QStringLiteral("renderMode/fov"), myStartRenderFov).toDouble();
-        myStartRenderQuick =
+        // Three states now (improvements item 16), read from the key that
+        // carries all three - with the OLDER two-state key as its default, so
+        // a session that only ever knew Quick opens on exactly what it last
+        // chose rather than being reset to Deep.
+        myStartRenderCutout =
+            settings.value(QStringLiteral("renderMode/cutout"), false).toBool();
+        myStartRenderExportSize =
+            settings.value(QStringLiteral("renderMode/exportSize"), 0).toInt();
+        const bool storedQuick =
             settings.value(QStringLiteral("renderMode/quick"), false).toBool();
+        const int storedQuality =
+            settings
+                .value(QStringLiteral("renderMode/quality"),
+                       static_cast<int>(storedQuick ? OcctViewWidget::RenderQuality::Simple
+                                                    : OcctViewWidget::RenderQuality::Deep))
+                .toInt();
+        myStartRenderQuality =
+            storedQuality >= static_cast<int>(OcctViewWidget::RenderQuality::Simple) &&
+                    storedQuality <= static_cast<int>(OcctViewWidget::RenderQuality::Deep)
+                ? storedQuality
+                : static_cast<int>(OcctViewWidget::RenderQuality::Deep);
         myStartGridOn = settings.value(QStringLiteral("view/gridOn"), true).toBool();
         myStartRenderWood =
             settings.value(QStringLiteral("renderMode/wood"), false).toBool();
@@ -813,20 +843,21 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // ViewportOverlay would reparent it anyway, but a card that is a child of
     // the window until then would flash in the wrong place on the first show.
     myItemsPanel = new ItemsPanel(&myDocument, myView, myView);
-    // The x in the corner, shown only while the pointer is over this panel.
-    // It triggers the same checkable action the rail chip and the menu entry
-    // do - see PanelCloseButton.
-    new PanelCloseButton(myItemsPanelAction, myItemsPanel);
+    // NO hover x on this one, by the user's own call: its title row carries a
+    // + that makes a folder instead, and the drawer is closed from its rail
+    // chip and its menu entry exactly as it always could be. The other three
+    // closable panels keep theirs.
 
     connect(myView, &OcctViewWidget::sketchPointPicked, this, &MainWindow::onSketchPointPicked);
     connect(myView, &OcctViewWidget::sketchCursorMoved, this, &MainWindow::onSketchCursorMoved);
     connect(myView, &OcctViewWidget::selectionChanged, this, &MainWindow::onSelectionChanged);
-    // The second route to Lock to Face. The viewport reports the gesture; this
-    // window decides what it means, and both routes land in the same
-    // lockToFace() - including its refusal - rather than one of them growing
-    // its own copy of the rule.
-    connect(myView, &OcctViewWidget::faceDoubleClicked, this, &MainWindow::lockToFace);
-    // The other double-click route - a plain one, meaning "the whole body" -
+    // Lock to Face had a SECOND route once - Ctrl+double-click on a face, the
+    // viewport reporting the gesture and this window deciding what it meant.
+    // It is removed (the user's call on improvements item 9): L, Shift+L and
+    // the Model menu are the routes, and a modifier-plus-double-click those
+    // three already covered cost the double-click handler an exemption that
+    // twice turned into a bug of its own.
+    // The double-click route that remains - a plain one, meaning "the whole body" -
     // has no wire here any more. It used to be announced so this window could
     // trigger the body-mode action; with the modes gone there is no action to
     // trigger, so the viewport performs the pick itself and reports it through
@@ -1011,7 +1042,7 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         // The rail and the axis gizmo card have no action of their own to be
         // derived FROM - they are always on outside render mode - so this is
         // simply their whole predicate rather than one term of it.
-        if (myRail) myRail->setVisible(!hiddenForRenderMode);
+        if (myRailSlide) myRailSlide->setShown(!hiddenForRenderMode);
         if (myAxisGizmo) myAxisGizmo->setVisible(!hiddenForRenderMode);
         // The render settings card and the shutter (Task 7.2) - the exact
         // opposite predicate: neither has a QAction of its own either, and
@@ -1019,7 +1050,26 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
         // is read as their whole visibility rather than negated into it.
         if (myRenderSettingsPanel) {
             myRenderSettingsPanel->setVisible(hiddenForRenderMode);
-            myRenderSettingsPanel->setQuick(myView->renderQuick());
+            myRenderSettingsPanel->setCutout(myView->renderCutout());
+            myRenderSettingsPanel->setExportSize(
+                static_cast<RenderSettingsPanel::ExportSize>(myView->renderExportSize()));
+            // WHAT AN EXPORT WOULD ACTUALLY PRODUCE, in pixels, derived here
+            // because the answer depends on the viewport's own size and on
+            // the live tier - neither of which the card knows. The Deep tier
+            // exports the on-screen buffer (see
+            // OcctViewWidget::renderExportSizeApplies()), so it says so
+            // BEFORE the user saves rather than after.
+            {
+                const QSize pixels = myView->renderExportPixels();
+                myRenderSettingsPanel->setExportNote(
+                    tr("Saves at %1 × %2").arg(pixels.width()).arg(pixels.height()));
+            }
+            myRenderSettingsPanel->setQuality(
+                myView->renderQuality() == OcctViewWidget::RenderQuality::Simple
+                    ? RenderSettingsPanel::Quality::Simple
+                    : (myView->renderQuality() == OcctViewWidget::RenderQuality::Balanced
+                           ? RenderSettingsPanel::Quality::Balanced
+                           : RenderSettingsPanel::Quality::Deep));
             myRenderSettingsPanel->setWood(myView->renderWood());
             // The footer's tier line follows the mode: pushed here on every
             // state change, and per-second by the polish ticker below while
@@ -1032,6 +1082,18 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
             // note follows the tier the session actually probed into rather
             // than being set once at the toggle site.
             myRenderSettingsPanel->setMaterialRowsApply(myView->renderMaterialControlsApply());
+            // The live material's own look, re-applied on every state change:
+            // the material can be swapped from a tile, from a persisted
+            // setting or by opening another furniture, and all three land
+            // here.
+            applyMaterialLook();
+            // The editor closes when the material it is about stops being the
+            // live one - a card editing something the viewport is no longer
+            // showing would be editing in the dark.
+            if (myMaterialCard && myMaterialCard->isOpen() &&
+                myMaterialCard->material() != activeMaterialName()) {
+                myMaterialCard->close();
+            }
         }
         if (myRenderTierTicker) {
             // The polish bar is live data - the accumulation deepens frame
@@ -1087,8 +1149,12 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     connect(myView, &OcctViewWidget::scaleReleased, this, [this] { refreshSelectionSizes(); });
 
     // Selection syncs both ways.
-    connect(myItemsPanel, &ItemsPanel::solidActivated, this,
-            [this](int id) { myView->setSelectedSolids({id}); });
+    // What a click on a body row asks the selection to BE - the panel works
+    // that out from the modifiers and the row order (plain replaces, Ctrl
+    // toggles, Shift takes the run between), and this window simply applies
+    // it. One place decides, one place applies.
+    connect(myItemsPanel, &ItemsPanel::selectionRequested, this,
+            [this](std::vector<int> ids) { myView->setSelectedSolids(ids); });
     // An outline row is the outline's only handle - it is not pickable in the
     // viewport - so clicking one is what chooses which outline Extrude
     // consumes. Routed through MainWindow rather than the panel writing the
@@ -1103,6 +1169,24 @@ MainWindow::MainWindow(QWidget* parent, bool persistProgress, const QString& lib
     // the panel's own header says - see onItemRenameCommitted().
     connect(myItemsPanel, &ItemsPanel::renameCommitted, this,
             &MainWindow::onItemRenameCommitted);
+    // The folder rows' own three gestures (improvements item 10), each
+    // routed through this window for the same reason the rename above is:
+    // the panel runs the gesture, MainWindow checkpoints and reports.
+    // A folder row's click arrives as selectionRequested() with the bodies
+    // already worked out (plain replaces, Ctrl adds the folder to what is
+    // selected) - the same channel a body row uses, so the two cannot end up
+    // with two different ideas of what a click means.
+    connect(myItemsPanel, &ItemsPanel::groupRenameCommitted, this,
+            &MainWindow::onGroupRenameCommitted);
+    connect(myItemsPanel, &ItemsPanel::itemsDropped, this, &MainWindow::onItemsDropped);
+    // The + in the title row and the right-click menu, each landing on the
+    // SAME two handlers the Model menu's own entries do.
+    connect(myItemsPanel, &ItemsPanel::newFolderRequested, this,
+            &MainWindow::onGroupSelection);
+    connect(myItemsPanel, &ItemsPanel::ungroupRequested, this,
+            &MainWindow::onUngroupSelection);
+    connect(myItemsPanel, &ItemsPanel::deleteGroupRequested, this,
+            &MainWindow::onDeleteGroup);
 
     // The Items rail button, the menu entry and Ctrl+Alt+S all drive the one
     // action, and the drawer's shown state is read off that action rather
@@ -1315,9 +1399,13 @@ void MainWindow::buildActions()
 
     // Milestone 5, item 8: plain Duplicate. An independent copy of the
     // selected body - no link, no mirror pairing inherited from the source -
-    // offset by one grid step and left selected, the same visible gesture
-    // Duplicate linked below already established. Claims the bare Ctrl+D;
-    // Duplicate linked moves to Ctrl+Shift+D to make room for it.
+    // left selected, so the transform gizmo is already on it. It sits exactly
+    // where its source does since improvements item 15 ("Dont Change position
+    // when duplicating"): the copy used to be nudged one grid step in X and Y
+    // so it read as a second object, and the user's point is that a duplicate
+    // is the start of a deliberate move, so a nudge is one more thing to undo
+    // before the move can begin. Claims the bare Ctrl+D; Duplicate linked
+    // moves to Ctrl+Shift+D to make room for it.
     myDuplicateAction = new QAction(tr("&Duplicate"), this);
     myDuplicateAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_D));
     connect(myDuplicateAction, &QAction::triggered, this,
@@ -1410,6 +1498,38 @@ void MainWindow::buildActions()
     myAutosaveMenu->addAction(makeAutosaveModeAction(
         AutosaveMode::Every15Minutes, tr("Every 15 minutes"),
         tr("Save every 15 minutes, but only while there is a change to save")));
+
+    myNewFurnitureAction = new QAction(tr("&New furniture"), this);
+    myNewFurnitureAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_N));
+    myNewFurnitureAction->setToolTip(tr("Start a new furniture (Ctrl+N)\n"
+                                        "It asks for a name, and asks about unsaved work "
+                                        "first."));
+    connect(myNewFurnitureAction, &QAction::triggered, this, &MainWindow::onNewFurniture);
+
+    // Slats (improvements item 11): menu-only, no rail chip - the rail-floor
+    // rule again - and no single-key shortcut, because every free letter this
+    // app has left reads as something else.
+    mySlatsAction = new QAction(tr("&Slats..."), this);
+    mySlatsAction->setToolTip(tr("Fill the selected face with evenly spaced slats\n"
+                                 "Select a run of slats instead to change their sizes."));
+    connect(mySlatsAction, &QAction::triggered, this, &MainWindow::beginSlats);
+
+    // Folders (improvements item 10). Model-menu entries with shortcuts and
+    // no rail chips: the rail's height is a real ceiling on this app's own
+    // screen (CLAUDE.md, "The shell is action-driven"), and grouping is a
+    // thing done occasionally rather than constantly.
+    myGroupAction = new QAction(tr("&Group"), this);
+    myGroupAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_G));
+    myGroupAction->setToolTip(tr("Put the selected bodies in a folder (Ctrl+G)\n"
+                                 "A folder is organisation only - it changes no geometry."));
+    connect(myGroupAction, &QAction::triggered, this, &MainWindow::onGroupSelection);
+
+    myUngroupAction = new QAction(tr("&Ungroup"), this);
+    myUngroupAction->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_G));
+    myUngroupAction->setToolTip(tr("Dissolve the folder these bodies are in (Ctrl+Shift+G)\n"
+                                   "Everything inside moves up one level - nothing is "
+                                   "deleted."));
+    connect(myUngroupAction, &QAction::triggered, this, &MainWindow::onUngroupSelection);
 
     myCloseFurnitureAction = new QAction(tr("&Close furniture"), this);
     myCloseFurnitureAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_W));
@@ -1654,8 +1774,17 @@ void MainWindow::buildActions()
     myScreenshotAction = new QAction(tr("Save S&creenshot..."), this);
     myScreenshotAction->setToolTip(tr("Save the viewport as a PNG image"));
     connect(myScreenshotAction, &QAction::triggered, this, [this] {
-        const QString path = QFileDialog::getSaveFileName(this, tr("Save Screenshot"),
-                                                          QString(), tr("PNG image (*.png)"));
+        // Opens on the folder the last screenshot went to, with this
+        // furniture's own name suggested - see saveDialogPath().
+        const QString suggested =
+            (myFurnitureName.isEmpty() ? tr("Screenshot") : myFurnitureName) +
+            QStringLiteral(".png");
+        const QString path = QFileDialog::getSaveFileName(
+            this, tr("Save Screenshot"),
+            saveDialogPath(QStringLiteral("paths/screenshot"), suggested,
+                           QStandardPaths::PicturesLocation),
+            tr("PNG image (*.png)"));
+        rememberSaveDialogPath(QStringLiteral("paths/screenshot"), path);
         if (!path.isEmpty() && !myView->saveSnapshot(path)) {
             myToasts->show(tr("Screenshot failed — Couldn't save the image to %1 — "
                               "Check that the folder exists and isn't read-only")
@@ -1723,6 +1852,8 @@ QMenuBar* MainWindow::buildMenus()
     auto* bar = new QMenuBar(this);
 
     QMenu* fileMenu = bar->addMenu(tr("&File"));
+    fileMenu->addAction(myNewFurnitureAction);
+    fileMenu->addSeparator();
     fileMenu->addAction(myFileSaveAction);
     myAutosaveMenuAction = fileMenu->addMenu(myAutosaveMenu);
     fileMenu->addAction(mySaveVersionAction);
@@ -1785,6 +1916,14 @@ QMenuBar* MainWindow::buildMenus()
     // Joinery (Task 11) - menu-only, no rail chip: every rail tool raises the
     // viewport's minimum height, and the rail is already near its ceiling.
     modelMenu->addAction(myJointAction);
+    modelMenu->addSeparator();
+    // Folders (improvements item 10) - menu-only, same rail-floor rule; their
+    // real home is Ctrl+G with bodies already selected, and the drawer, where
+    // a folder can also be made by dragging one row onto another.
+    modelMenu->addAction(myGroupAction);
+    modelMenu->addAction(myUngroupAction);
+    modelMenu->addSeparator();
+    modelMenu->addAction(mySlatsAction);
 
     QMenu* viewMenu = bar->addMenu(tr("&View"));
     viewMenu->addAction(myFitAction);
@@ -2002,6 +2141,10 @@ void MainWindow::buildOverlay()
         rail->sizeHint().height() + 2 * ViewportOverlay::kEdgeMargin);
 
     myOverlay->addWidget(rail, ViewportOverlay::Anchor::LeftEdge);
+    // Render mode hides the rail, and it leaves the way it arrived - off the
+    // viewport's own left edge. Every show and hide of it goes through this
+    // object from here on; nothing else may call setVisible() on the rail.
+    myRailSlide = new CardSlide(rail, CardSlide::From::Left, myView, myOverlay, this);
 
     // The Add-shape flyout (Milestone 5, pick A): built hidden beside the
     // rail; the chip's action toggles it, a pick places and closes, and the
@@ -2126,33 +2269,39 @@ void MainWindow::buildOverlay()
     // button carried instead of the plain action-driven contract every other
     // chip in the shell follows.
     viewTool(myOrthographicAction, IconSet::Glyph::Projection);
-    // The unit chip: the text-glyph ToolChip variant (see ToolChip.h), built
-    // action-less on the exact contract the old bar's unit button already
-    // had - a click triggers whichever unit action is NOT the current one,
-    // rather than growing a toggle of its own - so this is the one control
-    // in the cluster that needs its own wiring instead of a bare viewTool()
-    // call.
-    myUnitChip = new ToolChip(nullptr, QString::fromStdString(Measure::unitSuffix()),
-                              ToolChip::ChipMode::IconOnly);
-    myUnitChip->setToolTip(tr("The unit every length is shown and typed in — click "
-                              "to swap between millimetres and centimetres"));
-    connect(myUnitChip, &QAbstractButton::clicked, this, [this] {
-        if (Measure::displayUnit() == Measure::Unit::Millimetres)
-            myUnitsCentimetresAction->trigger();
-        else
-            myUnitsMillimetresAction->trigger();
-    });
-    viewControls->addChip(myUnitChip);
+    // NO UNIT CHIP here any more (improvements item 18, the user's own call:
+    // "remove the mm button, keep mm in the View tab"). The unit lives in
+    // Settings -> Units, where the rest of the reading preferences are, and
+    // in the View menu's own two entries - which is where a setting flipped
+    // once in a session belongs, rather than on a chip beside the four
+    // controls a user reaches for constantly. Nothing about the unit itself
+    // changed: Measure is still the one place it is read, and every surface
+    // still follows appStateChanged.
     viewTool(myDisplayModeAction, IconSet::Glyph::Wireframe);
     viewTool(myFitAction,         IconSet::Glyph::FitAll);
-    // The unit readout follows the one signal every unit-following surface
-    // already refreshes on - AppBar::setUnitLabel()'s own reasoning, carried
-    // over unchanged now that a ToolChip paints the readout instead of a
-    // BarButton. Only reads state and sets a string, so it cannot recurse
-    // back into updateActions().
-    connect(this, &MainWindow::appStateChanged, myUnitChip,
-            [this] { myUnitChip->setTextGlyph(QString::fromStdString(Measure::unitSuffix())); });
     myOverlay->addWidget(viewControls, ViewportOverlay::Anchor::TopRight);
+
+    // The joint's chip (joinery, Task 13). It decides its own visibility from
+    // MainWindow::jointChipJointId() on every appStateChanged, exactly as the
+    // two arrows do - nothing here shows or hides it - but unlike them it is
+    // a DOCKED card: anchored in this same TopRight column, so relayout()
+    // stacks it one gap under the view controls. It used to stand beside the
+    // joint's own projected anchor, which is the contact point BETWEEN two
+    // boards, so the card sat dead centre over the pieces it describes. It is
+    // constructed HERE, between the view controls and the Settings drawer,
+    // purely so the column stacks in that order - a joint card pushed below
+    // an open 380px drawer would be the middle-of-the-viewport problem again
+    // with a different address. Hidden before it is anchored:
+    // ViewportOverlay::addWidget() shows whatever it anchors unless the
+    // widget has already made an explicit hide decision of its own.
+    myJointChip = new JointChip(this, myView);
+    myJointChip->hide();
+    myOverlay->addWidget(myJointChip, ViewportOverlay::Anchor::TopRight);
+    // The x in its corner, on the same hover terms every closable panel has -
+    // but with no checkable action behind it, because this card's visibility
+    // is a gesture this window holds rather than a drawer's derived state.
+    // setSelectedJoint(0) is the ONE way out, shared with Escape.
+    new PanelCloseButton(myJointChip, [this] { setSelectedJoint(0); });
 
     // The Settings card, anchored at the same corner so relayout() stacks
     // it one gap under the gizmo - see AppearancePanel.h for why TopRight and
@@ -2284,8 +2433,22 @@ void MainWindow::buildOverlay()
     // and the honest way to re-dress every tier-derived thing - lights,
     // materials, background, tone mapping, the convergence loop - is the one
     // entry path they have always taken, so a flip re-enters render mode.
-    myView->setRenderQuick(myStartRenderQuick);
-    myRenderSettingsPanel->setQuick(myStartRenderQuick);
+    myView->setRenderCutout(myStartRenderCutout);
+    myRenderSettingsPanel->setCutout(myStartRenderCutout);
+    if (myStartRenderExportSize >= 0 && myStartRenderExportSize <= 4) {
+        myView->setRenderExportSize(
+            static_cast<OcctViewWidget::ExportSize>(myStartRenderExportSize));
+        myRenderSettingsPanel->setExportSize(
+            static_cast<RenderSettingsPanel::ExportSize>(myStartRenderExportSize));
+    }
+    const auto startQuality = static_cast<OcctViewWidget::RenderQuality>(myStartRenderQuality);
+    myView->setRenderQuality(startQuality);
+    myRenderSettingsPanel->setQuality(
+        startQuality == OcctViewWidget::RenderQuality::Simple
+            ? RenderSettingsPanel::Quality::Simple
+            : (startQuality == OcctViewWidget::RenderQuality::Balanced
+                   ? RenderSettingsPanel::Quality::Balanced
+                   : RenderSettingsPanel::Quality::Deep));
     // The persisted Grid choice, through the action so the menu check, the
     // view and the saved value can never disagree - toggled() carries it
     // into OcctViewWidget::setGridEnabled().
@@ -2359,9 +2522,36 @@ void MainWindow::buildOverlay()
                 myView->setRenderWoodAngleDeg(degrees);
                 persistRenderSettings();
             });
-    connect(myRenderSettingsPanel, &RenderSettingsPanel::quickChanged, this,
-            [this](bool quick) {
-                myView->setRenderQuick(quick);
+    // The Quality chips (improvements item 16). ONE handler for all three:
+    // the panel says which of its own three was picked, this maps it to the
+    // viewport's own enum, and render mode is re-entered so the new tier is
+    // applied to the scene that is already on screen.
+    // The cut-out switch: it changes what an EXPORT produces, nothing about
+    // what is on screen, so it re-enters no render mode and re-draws nothing.
+    // The export SIZE chips. They change what a saved file contains, nothing
+    // on screen, so like the cut-out switch this re-enters no render mode.
+    connect(myRenderSettingsPanel, &RenderSettingsPanel::materialEditRequested, this,
+            &MainWindow::onMaterialEditRequested);
+    connect(myRenderSettingsPanel, &RenderSettingsPanel::exportSizeChanged, this,
+            [this](RenderSettingsPanel::ExportSize size) {
+                myView->setRenderExportSize(static_cast<OcctViewWidget::ExportSize>(size));
+                persistRenderSettings();
+                updateActions();
+            });
+    connect(myRenderSettingsPanel, &RenderSettingsPanel::cutoutChanged, this,
+            [this](bool cutout) {
+                myView->setRenderCutout(cutout);
+                persistRenderSettings();
+                updateActions();
+            });
+    connect(myRenderSettingsPanel, &RenderSettingsPanel::qualityChanged, this,
+            [this](RenderSettingsPanel::Quality quality) {
+                myView->setRenderQuality(
+                    quality == RenderSettingsPanel::Quality::Simple
+                        ? OcctViewWidget::RenderQuality::Simple
+                        : (quality == RenderSettingsPanel::Quality::Balanced
+                               ? OcctViewWidget::RenderQuality::Balanced
+                               : OcctViewWidget::RenderQuality::Deep));
                 if (myRenderModeOn) {
                     setRenderModeEnabled(false);
                     setRenderModeEnabled(true);
@@ -2486,13 +2676,6 @@ void MainWindow::buildOverlay()
     // appStateChanged. Nothing here shows or hides it.
     myBevelArrow = new BevelArrow(this, myView);
 
-    // The joint's chip (joinery, Task 13), on exactly the same terms as the two
-    // arrows: it parents itself to the viewport, places itself beside the
-    // joint's own anchor, and decides its own visibility from
-    // MainWindow::jointChipJointId() on every appStateChanged. Nothing here
-    // shows or hides it.
-    myJointChip = new JointChip(this, myView);
-
     // The Move tool (custom gizmo, Phase 1), on exactly the same terms as the
     // two arrows above: it parents itself to the viewport, places its chip
     // beside the arm being dragged, and decides both its own visibility and
@@ -2527,6 +2710,11 @@ void MainWindow::buildOverlay()
     // gesture's refresh() clears the shared modeling-preview channel on the
     // way past, so this ghost is put back after they have run.
     myReMeasureTool = new ReMeasureTool(this, myView);
+    // The slats chip (improvements item 11), built LAST for that same reason:
+    // connection order is emission order, and every gesture chip before it
+    // clears the shared modeling-preview channel on the way past, so a run of
+    // slats is put back on screen after they have all run.
+    mySlatsTool = new SlatsTool(this, myView);
 
     // The right-click on a size number, and the click on a pin mark - the
     // viewport announces both and this window decides what they mean.
@@ -2584,6 +2772,7 @@ void MainWindow::buildOverlay()
     connect(myOverlay, &ViewportOverlay::laidOut, mirrorChip, &MirrorPlacementChip::replace);
     connect(myOverlay, &ViewportOverlay::laidOut, myMitreTool, &MitreTool::replace);
     connect(myOverlay, &ViewportOverlay::laidOut, myReMeasureTool, &ReMeasureTool::replace);
+    connect(myOverlay, &ViewportOverlay::laidOut, mySlatsTool, &SlatsTool::replace);
 
     // The unsaved-changes question (improvements item 3). Built LAST and
     // connected to laidOut() LAST, so its re-raise runs after every other
@@ -2601,6 +2790,96 @@ void MainWindow::buildOverlay()
     connect(myCloseCard, &UnsavedCloseCard::discardChosen, this,
             &MainWindow::onCloseDiscardChosen);
     connect(myCloseCard, &UnsavedCloseCard::keepChosen, this, &MainWindow::onCloseKeepChosen);
+
+    // The name question (improvements items 3 and 4), built and connected on
+    // exactly the same terms as the close question above it, and last of all
+    // for the same reason: its re-place runs after every other self-placing
+    // card has raised itself.
+    // What the viewport shows while a heavy furniture is opening - see
+    // LoadingCard.h. Built beside the other two cards that cover the
+    // viewport, and re-fitted from the same laidOut() they are.
+    myLoadingCard = new LoadingCard(myView);
+    connect(myOverlay, &ViewportOverlay::laidOut, this, [this] {
+        if (myLoadingCard && myLoadingCard->isBusy()) myLoadingCard->replace();
+    });
+
+    // The material editor (a tile's double-click opens it) - see
+    // MaterialCard.h. It does NOT cover the viewport: watching the furniture
+    // change while the slider moves is the whole point of it.
+    myMaterialCard = new MaterialCard(myView);
+    connect(myOverlay, &ViewportOverlay::laidOut, this, [this] {
+        if (myMaterialCard && myMaterialCard->isOpen()) myMaterialCard->replace();
+    });
+    connect(myMaterialCard, &MaterialCard::changed, this,
+            [this](QString material, QColor colour, double brightness) {
+                onMaterialLookChanged(material, colour, brightness);
+            });
+
+    myNameCard = new NameFurnitureCard(myView);
+    connect(myOverlay, &ViewportOverlay::laidOut, this, [this] {
+        if (!myNameCard || !myNameCard->isAsking()) return;
+        myNameCard->replace();
+        if (myWindowButtons) myWindowButtons->raise();
+    });
+    connect(myNameCard, &NameFurnitureCard::created, this,
+            &MainWindow::createAndOpenFurniture);
+    connect(myNameCard, &NameFurnitureCard::cancelled, this, [this] { updateActions(); });
+}
+
+void MainWindow::playShellEntrance()
+{
+    // The app bar drops in from above the viewport's top edge and the rail
+    // slides in from its left, a quarter of the way behind it, so the two read
+    // as one column arriving rather than two cards appearing at once.
+    //
+    // Called from main.cpp on the editor's first show and from nowhere else.
+    // NOT from showEvent(), and not from EditorSelectorHandoff: gui_smoke
+    // drives the same handoff, shows the same window and reads both cards'
+    // positions the instant it is up, so an entrance that started itself would
+    // leave the suite measuring widgets in flight. The window that never calls
+    // this is laid out exactly as it always was.
+    if (!myAppBar || !myRail || !myOverlay || !myView) return;
+    if (myShellEntrance) return;  // once per window
+    if (!myView->animationsEnabled()) return;
+    if (!myAppBar->isVisible() || !myRail->isVisible()) return;
+
+    // Where the overlay put them IS the destination - this animates toward the
+    // laid-out positions, it never computes one of its own. A relayout() that
+    // has not run yet leaves both at the origin, and there is nothing to fly to.
+    const QPoint barHome = myAppBar->pos();
+    const QPoint railHome = myRail->pos();
+    if (barHome.isNull() && railHome.isNull()) return;
+
+    const int ms = Theme::motionMs() * 2;  // 160 reads as a flicker at this distance
+
+    auto* bar = new QPropertyAnimation(myAppBar, "pos", this);
+    bar->setDuration(ms);
+    bar->setEasingCurve(Theme::motionCurve());
+    bar->setStartValue(QPoint(barHome.x(), -myAppBar->height()));
+    bar->setEndValue(barHome);
+
+    auto* rail = new QPropertyAnimation(myRail, "pos", this);
+    rail->setDuration(ms);
+    rail->setEasingCurve(Theme::motionCurve());
+    rail->setStartValue(QPoint(-myRail->width(), railHome.y()));
+    rail->setEndValue(railHome);
+
+    auto* railLeg = new QSequentialAnimationGroup(this);
+    railLeg->addPause(ms / 4);
+    railLeg->addAnimation(rail);
+
+    myShellEntrance = new QParallelAnimationGroup(this);
+    myShellEntrance->addAnimation(bar);
+    myShellEntrance->addAnimation(railLeg);
+
+    // ViewportOverlay::relayout() has the final say, as it does for every other
+    // self-placing card: a resize landing mid-flight has already moved both to
+    // their new home, so the flight stops there rather than tweening on toward
+    // a position that no longer exists. Parented to this and KeepWhenStopped -
+    // DeleteWhenStopped would dangle the pointer on natural completion too.
+    connect(myOverlay, &ViewportOverlay::laidOut, myShellEntrance,
+            [this] { myShellEntrance->stop(); });
+    myShellEntrance->start(QAbstractAnimation::KeepWhenStopped);
 }
 
 void MainWindow::updateActions()
@@ -2653,6 +2932,17 @@ void MainWindow::updateActions()
         myResizeBodyId = 0;
         myResizeSizeIndex = -1;
         myView->clearResizePin();
+    }
+
+    // ...and a live Slats run (improvements item 11), in the same place and
+    // on the same terms, so all three gestures share one idea of what ends
+    // one. SlatsTool::refresh() takes the chip and its ghost down off the
+    // appStateChanged this function ends with.
+    if (mySlatsActive && !slatsGestureStillHolds()) {
+        mySlatsActive = false;
+        mySlatsRebuild = false;
+        mySlatsFace.Nullify();
+        mySlatsBodies.clear();
     }
 
     const std::size_t selectedCount = myView->selectedSolidIds().size();
@@ -2883,6 +3173,21 @@ void MainWindow::updateActions()
     const bool twoWholeBodies =
         myView->selectionKind() == OcctViewWidget::PickKind::Body && selectedCount == 2;
     myJointAction->setEnabled(!mySketching && !atInit && !myRenderModeOn && twoWholeBodies);
+
+    // Folders (improvements item 10). Group wants WHOLE BODIES selected -
+    // selectedSolidIds() reports the owning body of a picked face or edge
+    // too, so the kind term is what stops a face pick reading as its body.
+    // Ungroup wants those bodies to share one folder: with nothing selected,
+    // or a selection spread across two folders, there is no honest answer to
+    // WHICH folder would be dissolved.
+    const bool wholeBodies =
+        myView->selectionKind() == OcctViewWidget::PickKind::Body && selectedCount >= 1;
+    // Group needs no selection at all - with none it makes an empty folder
+    // (see onGroupSelection()), which is the + button's own meaning.
+    myGroupAction->setEnabled(!mySketching && !atInit && !myRenderModeOn);
+    mySlatsAction->setEnabled(canBeginSlats() || mySlatsActive);
+    myUngroupAction->setEnabled(!mySketching && !atInit && !myRenderModeOn && wholeBodies &&
+                                folderOfSelection() != 0);
 
     myIsolateAction->setChecked(isolateActive());
     myIsolateAction->setToolTip(
@@ -3274,6 +3579,30 @@ void MainWindow::syncChromeHeights()
     }
 }
 
+QString MainWindow::saveDialogPath(const QString& key, const QString& suggestedName,
+                                  QStandardPaths::StandardLocation fallback) const
+{
+    // WHERE THE LAST ONE WENT. Both save dialogs used to be handed an empty
+    // path, which leaves Qt to open wherever it likes - usually not where the
+    // user put the last five files. The folder is remembered per KIND of save
+    // (screenshots and STEP files are rarely the same place), and the file
+    // name is suggested from the furniture, so a second screenshot of the
+    // same piece lands beside the first with a name that says what it is.
+    QSettings settings;
+    QString folder = settings.value(key).toString();
+    if (folder.isEmpty() || !QDir(folder).exists())
+        folder = QStandardPaths::writableLocation(fallback);
+    if (folder.isEmpty()) folder = QDir::homePath();
+    return QDir(folder).filePath(suggestedName);
+}
+
+void MainWindow::rememberSaveDialogPath(const QString& key, const QString& path)
+{
+    if (path.isEmpty()) return;
+    QSettings settings;
+    settings.setValue(key, QFileInfo(path).absolutePath());
+}
+
 void MainWindow::writeAppearanceNow()
 {
     // The ONE place the spec reaches QSettings. Two routes want it - the
@@ -3320,6 +3649,11 @@ void MainWindow::writeRenderSettingsNow()
                       bg.isValid() ? bg.name(QColor::HexArgb) : QString());
     settings.setValue(QStringLiteral("renderMode/fov"), myView->renderFov());
     settings.setValue(QStringLiteral("renderMode/quick"), myView->renderQuick());
+    settings.setValue(QStringLiteral("renderMode/quality"),
+                      static_cast<int>(myView->renderQuality()));
+    settings.setValue(QStringLiteral("renderMode/cutout"), myView->renderCutout());
+    settings.setValue(QStringLiteral("renderMode/exportSize"),
+                      static_cast<int>(myView->renderExportSize()));
     settings.setValue(QStringLiteral("renderMode/wood"), myView->renderWood());
     settings.setValue(QStringLiteral("renderMode/woodName"),
                       myRenderSettingsPanel ? myRenderSettingsPanel->woodSelection()
@@ -3427,6 +3761,15 @@ void MainWindow::askBeforeClosing(CloseRoute route)
 
 void MainWindow::finishClose(CloseRoute route, const QString& statusMessage)
 {
+    if (route == CloseRoute::NewFurniture) {
+        // The current furniture has been dealt with (saved, or deliberately
+        // discarded) and the editor stays exactly where it is - no return to
+        // the library, no window swap. What is left is the name, and then the
+        // new furniture takes this window over.
+        statusBar()->showMessage(statusMessage);
+        askNewFurnitureName();
+        return;
+    }
     if (route == CloseRoute::Library) {
         statusBar()->showMessage(statusMessage);
         showInitScreen();
@@ -3441,6 +3784,49 @@ void MainWindow::finishClose(CloseRoute route, const QString& statusMessage)
     // answered rather than taken straight away.
     if (!isSignalConnected(QMetaMethod::fromSignal(&MainWindow::quitRequested))) hide();
     emit quitRequested();
+}
+
+void MainWindow::onNewFurniture()
+{
+    // Unsaved work is asked about FIRST and the furniture is created LAST, so
+    // a question answered "keep editing" leaves nothing behind - no orphan
+    // furniture in the library named after a flow the user backed out of.
+    if (!myShowingInitScreen && !myFurnitureId.isEmpty() && isFurnitureDirty()) {
+        askBeforeClosing(CloseRoute::NewFurniture);
+        return;
+    }
+    askNewFurnitureName();
+}
+
+void MainWindow::askNewFurnitureName()
+{
+    if (!myNameCard) return;
+    // Render mode hides every overlay, this card included; leaving the
+    // furniture is a document change by render mode's own gate anyway.
+    if (myRenderModeOn) setRenderModeEnabled(false);
+    myNameCard->ask(myStore.nextFurnitureName());
+    updateActions();
+    myNameCard->raise();
+    if (myWindowButtons) myWindowButtons->raise();
+}
+
+void MainWindow::createAndOpenFurniture(const QString& name)
+{
+    // FurnitureStore::createFurniture() answers with an empty id when the
+    // library folder cannot be written - never swallowed, and never reported
+    // as a success (CLAUDE.md's refusal law, the same one the selector's own
+    // + card keeps).
+    const QString id = myStore.createFurniture(name);
+    if (id.isEmpty()) {
+        myToasts->show(tr("Couldn't create %1 — Check that the library folder still "
+                          "exists and isn't read-only")
+                           .arg(name),
+                       Toast::Kind::Failure, false);
+        return;
+    }
+    // openFurniture() is the one path a freshly made furniture and an
+    // existing card both take - see its own declaration.
+    openFurniture(id);
 }
 
 void MainWindow::onCloseSaveChosen()
@@ -3607,9 +3993,26 @@ bool MainWindow::openFurniture(const QString& id)
     myIsolatedIds.clear();
     myIsolateWatermark = 0;
 
+    // THE CARD GOES UP FIRST, before either slow half runs (the file decode,
+    // then a tessellation per body): both are synchronous, so without it the
+    // editor window simply sits blank for the seconds they take. Its name
+    // comes from the library listing rather than the document, which is not
+    // loaded yet.
+    QString openingName;
+    for (const FurnitureStore::FurnitureInfo& info : myStore.listFurniture()) {
+        if (info.id == id) { openingName = info.name; break; }
+    }
+    if (myLoadingCard) myLoadingCard->begin(openingName, tr("Reading the file"));
+    // Hidden on EVERY exit below, the refusal included - a card left standing
+    // over a viewport nothing is loading into is worse than no card at all.
+    const auto closeCard = [this] {
+        if (myLoadingCard) myLoadingCard->end();
+    };
+
     QString error;
     DocumentModel loaded;
     if (!myStore.loadFurniture(id, loaded, &error)) {
+        closeCard();
         myToasts->show(tr("Couldn't open this furniture — %1").arg(error),
                       Toast::Kind::Failure, false);
         return false;
@@ -3649,9 +4052,16 @@ bool MainWindow::openFurniture(const QString& id)
     // resyncView() itself reapplies persisted visibility onto the freshly
     // displayed items now - see its own comment - so nothing further is
     // needed here.
+    // The bar measures the half that actually takes the time: one step per
+    // body, ticked inside resyncView()'s own display loop.
+    if (myLoadingCard) {
+        myLoadingCard->setTotal(static_cast<int>(myDocument.count()));
+        myLoadingCard->step(tr("Putting the bodies on screen"));
+    }
     resyncView();
 
     myView->fitAll();
+    closeCard();
     updateActions();
     emit documentChanged();
     statusBar()->showMessage(tr("Opened %1").arg(myFurnitureName));
@@ -4340,13 +4750,11 @@ void MainWindow::recordProgress(const std::string& event)
 
 QString MainWindow::lockTooltipText() const
 {
-    // The gesture gained its Ctrl this phase, and the sentence has to say so:
-    // a plain double-click on a body now selects the whole body instead. A
-    // tooltip that still taught the old gesture would be teaching something
-    // that quietly does a different thing.
+    // ONE route, and the tooltip names it. The Ctrl+double-click second
+    // route is removed (improvements item 9), so a tooltip that still
+    // taught it would be teaching a gesture that no longer does anything.
     return tr("Draw on the selected face instead of the ground (L)\n"
-              "Ctrl+double-clicking a face does the same. Outlines drawn "
-              "there extrude square to it.");
+              "Outlines drawn there extrude square to it.");
 }
 
 QString MainWindow::unlockTooltipText() const
@@ -4356,8 +4764,9 @@ QString MainWindow::unlockTooltipText() const
 
 QString MainWindow::duplicateTooltipText() const
 {
-    return tr("Copy this body, independent of the original (Ctrl+D)\n"
-              "Editing either one afterward leaves the other exactly as it was.");
+    return tr("Copy the selected bodies, independent of the originals (Ctrl+D)\n"
+              "The copies land exactly on top and are already selected — drag them "
+              "where they go.");
 }
 
 QString MainWindow::duplicateLinkedTooltipText() const
@@ -4581,6 +4990,11 @@ void MainWindow::resyncView()
     myView->clearSolids();
     for (const DocumentModel::Solid& solid : myDocument.solids()) {
         myView->displaySolid(solid.id, solid.shape);
+        // One step per body while a load is on screen - displaySolid()
+        // tessellates, which is where the seconds go. A no-op every other
+        // time this function runs (undo, redo, a context-loss rebuild), since
+        // the card is only busy during an open.
+        if (myLoadingCard && myLoadingCard->isBusy()) myLoadingCard->step();
     }
     // Outlines are document items, so undo and redo have to move them on
     // screen exactly as they move bodies. Rebuilt wholesale for the same
@@ -4824,6 +5238,447 @@ void MainWindow::onRenameSelected()
     if (ids.empty() && hasPendingFace())
         myItemsPanel->beginRenameForItem(pendingOutlineId(), /*isOutline=*/true);
 }
+
+// --- slats (improvements item 11) -------------------------------------------
+
+bool MainWindow::canBeginSlats() const
+{
+    if (myShowingInitScreen || isAskingBeforeClose() || mySketching || hasPendingFace()) return false;
+    if (myRenderModeOn || isCompareOpen()) return false;
+    if (myView->mirrorPlacementActive() || myMitreActive || myResizeActive) return false;
+    if (jointChipJointId() > 0) return false;
+
+    // A FACE: a fresh run on it.
+    if (myView->selectionKind() == OcctViewWidget::PickKind::Face) {
+        const TopoDS_Face face = myView->selectedFace();
+        if (face.IsNull()) return false;
+        const int id = bodyIdForFace(face);
+        const TopoDS_Shape body = myDocument.shapeOf(id);
+        if (id <= 0 || body.IsNull()) return false;
+        return ModelingOps::checkSlats(body, face, ModelingOps::SlatPlan{}) !=
+               ModelingOps::SlatCheck::NotAFlatFace;
+    }
+
+    // THE BODIES OF ONE FOLDER, reading back as a run: a rebuild. Asked of
+    // ModelingOps, which owns what a run is - this window only supplies the
+    // shapes.
+    if (myView->selectionKind() != OcctViewWidget::PickKind::Body) return false;
+    const std::vector<int> ids = myView->selectedSolidIds();
+    if (ids.size() < 2) return false;
+    std::vector<TopoDS_Shape> shapes;
+    shapes.reserve(ids.size());
+    for (int id : ids) {
+        const TopoDS_Shape shape = myDocument.shapeOf(id);
+        if (shape.IsNull()) return false;
+        shapes.push_back(shape);
+    }
+    ModelingOps::SlatPlan plan;
+    ModelingOps::SlatArea area;
+    return ModelingOps::slatRunFromBodies(shapes, plan, area);
+}
+
+void MainWindow::beginSlats()
+{
+    // Re-checked here, not trusted from the action: QAction::trigger() does
+    // not consult isEnabled().
+    if (!canBeginSlats()) return;
+
+    mySlatsActive = true;
+    mySlatsRevision = myDocument.revision();
+    mySlatsFolderId = 0;
+    mySlatsBodies.clear();
+    mySlatsRebuild = false;
+    mySlatsFace.Nullify();
+    mySlatsPlan = ModelingOps::SlatPlan{};
+
+    if (myView->selectionKind() == OcctViewWidget::PickKind::Face) {
+        mySlatsFace = myView->selectedFace();
+        mySlatsBodyId = bodyIdForFace(mySlatsFace);
+    } else {
+        const std::vector<int> ids = myView->selectedSolidIds();
+        std::vector<TopoDS_Shape> shapes;
+        shapes.reserve(ids.size());
+        for (int id : ids) shapes.push_back(myDocument.shapeOf(id));
+        if (!ModelingOps::slatRunFromBodies(shapes, mySlatsPlan, mySlatsArea)) {
+            mySlatsActive = false;
+            return;
+        }
+        mySlatsRebuild = true;
+        mySlatsBodies = ids;
+        mySlatsBodyId = ids.front();
+        // The folder they share, if they are in one - the rebuilt run goes
+        // back into it rather than landing at the root.
+        mySlatsFolderId = myDocument.groupOf(ids.front());
+        for (int id : ids) {
+            if (myDocument.groupOf(id) != mySlatsFolderId) mySlatsFolderId = 0;
+        }
+    }
+    updateActions();
+}
+
+void MainWindow::cancelSlats()
+{
+    if (!mySlatsActive) return;
+    mySlatsActive = false;
+    mySlatsRebuild = false;
+    mySlatsFace.Nullify();
+    mySlatsBodies.clear();
+    myView->clearModelingPreview();
+    updateActions();
+    statusBar()->showMessage(tr("Slats cancelled"));
+}
+
+bool MainWindow::slatsGestureStillHolds() const
+{
+    if (!mySlatsActive) return false;
+    if (myShowingInitScreen || isAskingBeforeClose() || mySketching || hasPendingFace())
+        return false;
+    if (myRenderModeOn || isCompareOpen()) return false;
+    if (myView->mirrorPlacementActive()) return false;
+    // ANY document change ends it: the face the run is laid on, or the slats
+    // being rebuilt, are exactly what an undo or a boolean would move under
+    // it. The mitre and re-measure gestures end on the same term.
+    if (myDocument.revision() != mySlatsRevision) return false;
+    if (mySlatsRebuild) {
+        for (int id : mySlatsBodies) {
+            if (!myDocument.contains(id)) return false;
+        }
+        return true;
+    }
+    return !mySlatsFace.IsNull() && myDocument.contains(mySlatsBodyId);
+}
+
+ModelingOps::SlatResult MainWindow::slatsResult(const ModelingOps::SlatPlan& plan) const
+{
+    if (!mySlatsActive) return ModelingOps::SlatResult{};
+    if (mySlatsRebuild) return ModelingOps::slatsOnArea(mySlatsArea, plan);
+    return ModelingOps::slatsOnFace(myDocument.shapeOf(mySlatsBodyId), mySlatsFace, plan);
+}
+
+int MainWindow::slatsCountFor(const ModelingOps::SlatPlan& plan) const
+{
+    if (!mySlatsActive) return 0;
+    if (mySlatsRebuild) {
+        const ModelingOps::SlatResult result = ModelingOps::slatsOnArea(mySlatsArea, plan);
+        return result.ok ? static_cast<int>(result.slats.size()) : 0;
+    }
+    int count = 0;
+    ModelingOps::checkSlats(myDocument.shapeOf(mySlatsBodyId), mySlatsFace, plan, &count);
+    return count;
+}
+
+QString MainWindow::slatsRefusalFor(const ModelingOps::SlatPlan& plan) const
+{
+    if (mySlatsRebuild) {
+        const ModelingOps::SlatResult result = ModelingOps::slatsOnArea(mySlatsArea, plan);
+        if (result.ok) return QString();
+        return tr("These sizes lay no slats here");
+    }
+    switch (ModelingOps::checkSlats(myDocument.shapeOf(mySlatsBodyId), mySlatsFace, plan)) {
+        case ModelingOps::SlatCheck::Ok: return QString();
+        case ModelingOps::SlatCheck::NotAFlatFace: return tr("Slats need one flat face");
+        case ModelingOps::SlatCheck::SizeOutOfRange:
+            return tr("Width 1-1,000 mm, gap 0-1,000 mm, depth 0.5-1,000 mm");
+        case ModelingOps::SlatCheck::NoneFit: return tr("Not one slat fits across this face");
+    }
+    return QString();
+}
+
+bool MainWindow::slatsAnchor(gp_Pnt& out) const
+{
+    if (!mySlatsActive) return false;
+    if (!mySlatsRebuild && !mySlatsFace.IsNull()) {
+        // The face's own middle - pointOnFace() answers a point genuinely ON
+        // the material, which a centroid does not for a face with a hole.
+        if (ModelingOps::pointOnFace(mySlatsFace, out)) return true;
+    }
+    const TopoDS_Shape body = myDocument.shapeOf(mySlatsBodyId);
+    if (body.IsNull()) return false;
+    const ModelingOps::MeasuredBox box = ModelingOps::measuredBox({body});
+    if (!box.ok) return false;
+    out = box.centre;
+    return true;
+}
+
+void MainWindow::slatsApply(const ModelingOps::SlatPlan& plan)
+{
+    if (!mySlatsActive) return;
+    const ModelingOps::SlatResult result = slatsResult(plan);
+    if (!result.ok || result.slats.empty()) {
+        // Never silently: a refusal the user cannot see is the thing this app
+        // does not do.
+        const QString why = slatsRefusalFor(plan);
+        myToasts->show(why.isEmpty() ? tr("Slats — the kernel refused these sizes") : why,
+                       Toast::Kind::Failure, false);
+        return;
+    }
+
+    checkpointDocument();
+
+    int folder = mySlatsFolderId;
+    if (mySlatsRebuild) {
+        // The old run goes, the new one takes its place - inside the SAME
+        // checkpoint, so one undo puts the old slats back exactly as they
+        // were.
+        for (int id : mySlatsBodies) myDocument.removeSolid(id);
+    } else {
+        folder = myDocument.createGroup(tr("Slats").toStdString(), folderOfSelection());
+    }
+
+    std::vector<int> made;
+    made.reserve(result.slats.size());
+    int n = 1;
+    for (const TopoDS_Shape& slat : result.slats) {
+        const int id = myDocument.addSolid(slat);
+        if (id <= 0) continue;
+        myDocument.setItemName(
+            id, tr("Slat %1").arg(n++, 2, 10, QLatin1Char('0')).toStdString());
+        if (folder != 0) myDocument.setItemGroup(id, folder);
+        made.push_back(id);
+    }
+
+    mySlatsActive = false;
+    mySlatsRebuild = false;
+    mySlatsFace.Nullify();
+    mySlatsBodies.clear();
+    myView->clearModelingPreview();
+    resyncView();
+    updateActions();
+    emit documentChanged();
+
+    const QString message = tr("%1 slats — %2 mm wide, %3 mm apart")
+                                .arg(made.size())
+                                .arg(QString::fromStdString(Measure::formatLength(plan.width)))
+                                .arg(QString::fromStdString(Measure::formatLength(plan.gap)));
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+}
+
+int MainWindow::folderOfSelection() const
+{
+    const std::vector<int> ids = myView->selectedSolidIds();
+    if (ids.empty()) return 0;
+    const int first = myDocument.groupOf(ids.front());
+    for (int id : ids) {
+        if (myDocument.groupOf(id) != first) return 0;   // spread across folders
+    }
+    return first;
+}
+
+void MainWindow::onGroupSelection()
+{
+    if (myShowingInitScreen || mySketching || myRenderModeOn) return;
+    // Bodies, explicitly - selectedSolidIds() reports the OWNING body of a
+    // selected face or edge too, and grouping the body a face belongs to
+    // because a face was picked would be acting on something the user did not
+    // choose. The same selection-content term every gizmo predicate carries.
+    //
+    // NOTHING selected is not a refusal: it makes an EMPTY folder, which is
+    // what the + in the drawer's title row is for - a place to drag rows into
+    // rather than a gesture that only works if you got the selection right
+    // first.
+    const std::vector<int> ids = myView->selectionKind() == OcctViewWidget::PickKind::Body
+                                     ? myView->selectedSolidIds()
+                                     : std::vector<int>();
+
+    checkpointDocument();
+    // Created INSIDE whatever folder the selection already shares, so
+    // grouping two bodies that sit in "Left cabinet" makes a folder inside it
+    // rather than pulling them out to the root.
+    const int parent = folderOfSelection();
+    const int folder = myDocument.createGroup(tr("Folder").toStdString(), parent);
+    if (folder == 0) {
+        updateActions();
+        return;
+    }
+    for (int id : ids) myDocument.setItemGroup(id, folder);
+
+    updateActions();
+    emit documentChanged();
+    const QString message = ids.empty()
+                                ? tr("Empty folder added — drag rows into it")
+                                : (ids.size() == 1
+                                       ? tr("1 body put in a folder")
+                                       : tr("%1 bodies put in a folder").arg(ids.size()));
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+    // Straight into the rename, over the row that was just made: a folder
+    // called "Folder" is a folder nobody named, and the one moment the user
+    // knows what it holds is right now. Folders START FOLDED now, but the one
+    // being made is opened - its contents are what the user just chose, and a
+    // folder that swallowed them with no sign of where they went would read
+    // as a delete.
+    if (myItemsPanel && myItemsPanel->isVisible()) {
+        myItemsPanel->setGroupExpanded(folder, true);
+        myItemsPanel->beginRenameForGroup(folder);
+    }
+}
+
+void MainWindow::onUngroupSelection()
+{
+    const int folder = folderOfSelection();
+    if (folder == 0) return;
+
+    checkpointDocument();
+    // removeGroup() moves everything inside up to ITS parent - nothing is
+    // deleted by an ungroup, which is the one thing a user has to be able to
+    // trust about it.
+    if (!myDocument.removeGroup(folder)) {
+        updateActions();
+        return;
+    }
+    updateActions();
+    emit documentChanged();
+    const QString message = tr("Folder dissolved");
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+}
+
+QString MainWindow::activeMaterialName() const
+{
+    if (!myRenderSettingsPanel) return QStringLiteral("Matte");
+    // A wood names itself. Everything else is one of the three presets, and
+    // WHICH one is derived from the live gloss/metal exactly as the tiles'
+    // own highlight is (syncPresetTiles()) - so the name this returns is the
+    // tile the user can see is current, never a fourth opinion.
+    if (myRenderSettingsPanel->wood()) return myRenderSettingsPanel->woodSelection();
+    const double metal = myView->renderMetal();
+    if (metal > 0.5) return QStringLiteral("Metal");
+    return myView->renderSurfaceRoughness() < 0.45 ? QStringLiteral("Satin")
+                                                   : QStringLiteral("Matte");
+}
+
+void MainWindow::applyMaterialLook()
+{
+    if (!myView) return;
+    DocumentModel::MaterialLook look;
+    // An unset material is not a special case: MaterialLook's own defaults
+    // ARE the tone this app has always drawn a body in, so a furniture that
+    // has never opened the editor gets exactly what it always got.
+    myDocument.materialLook(activeMaterialName().toStdString(), look);
+    myView->setRenderMaterialLook(look.red, look.green, look.blue, look.brightness);
+}
+
+void MainWindow::onMaterialEditRequested(const QString& material)
+{
+    if (!myMaterialCard || material.isEmpty()) return;
+    DocumentModel::MaterialLook look;
+    myDocument.materialLook(material.toStdString(), look);
+    myMaterialCard->open(material,
+                         QColor::fromRgbF(look.red, look.green, look.blue), look.brightness);
+}
+
+void MainWindow::onMaterialLookChanged(const QString& material, const QColor& colour,
+                                       double brightness)
+{
+    if (material.isEmpty() || myShowingInitScreen) return;
+    DocumentModel::MaterialLook look;
+    look.material = material.toStdString();
+    look.red = colour.redF();
+    look.green = colour.greenF();
+    look.blue = colour.blueF();
+    look.brightness = brightness;
+    // NO CHECKPOINT: a material's look is presentation, the same category as
+    // visibility - it is persisted with the furniture but it is not an edit
+    // to undo (CLAUDE.md's own line on what checkpoint() is for). It bumps
+    // the revision, so autosave notices and the status bar's unsaved dot
+    // lights.
+    myDocument.setMaterialLook(look);
+    applyMaterialLook();
+    updateActions();
+}
+
+void MainWindow::onDeleteGroup(int groupId)
+{
+    if (!myDocument.groupExists(groupId)) return;
+
+    // The bodies FIRST, then the folders they were in - all inside ONE
+    // checkpoint, so a single Ctrl+Z puts the folder, its sub-folders and
+    // every body back exactly as they were. That undo is also why this asks
+    // nothing first: document data is taken back with Undo in this app, and
+    // only FILE data (a version) gets a second click (CLAUDE.md's taxonomy).
+    const std::vector<int> bodies = myDocument.bodiesUnderGroup(groupId);
+    checkpointDocument();
+    for (int id : bodies) myDocument.removeSolid(id);
+
+    // Depth first: a sub-folder has to go before its parent, or removing the
+    // parent would move it up to the root and leave it behind.
+    std::function<void(int)> removeTree = [&](int folder) {
+        for (int child : myDocument.childGroups(folder)) removeTree(child);
+        myDocument.removeGroup(folder);
+    };
+    removeTree(groupId);
+
+    myView->clearSelection();
+    resyncView();
+    updateActions();
+    emit documentChanged();
+
+    const QString message = bodies.empty()
+                                ? tr("Folder deleted")
+                                : (bodies.size() == 1
+                                       ? tr("Folder deleted — 1 body with it")
+                                       : tr("Folder deleted — %1 bodies with it")
+                                             .arg(bodies.size()));
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+}
+
+void MainWindow::onGroupActivated(int groupId)
+{
+    // A folder selects the BODIES under it, at any depth. That is the whole
+    // of what selecting a folder means - everything downstream (the gizmo,
+    // Delete, Mirror, the selection sizes) sees the ordinary body selection
+    // it always saw, and none of them needs to learn what a folder is.
+    const std::vector<int> ids = myDocument.bodiesUnderGroup(groupId);
+    myView->setSelectedSolids(ids);
+}
+
+void MainWindow::onGroupRenameCommitted(int groupId, QString newName)
+{
+    if (!myDocument.groupExists(groupId)) return;
+    checkpointDocument();
+    myDocument.setGroupName(groupId, newName.trimmed().toStdString());
+    updateActions();
+    emit documentChanged();
+    const QString message = tr("Renamed to \"%1\"").arg(newName.trimmed());
+    statusBar()->showMessage(message);
+    myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
+}
+
+void MainWindow::onItemsDropped(const std::vector<int>& ids, int targetGroupId)
+{
+    // ONE checkpoint for the whole drag, however many rows it carried: the
+    // user made one gesture, so one Ctrl+Z takes it back.
+    bool moved = false;
+    bool checkpointed = false;
+    for (int id : ids) {
+        const bool isFolder = myDocument.groupExists(id);
+        if (myDocument.groupOf(id) == targetGroupId) continue;   // already there
+        if (!checkpointed) {
+            checkpointDocument();
+            checkpointed = true;
+        }
+        // The document owns whether a move is legal - setGroupParent()
+        // refuses a folder dropped into itself or into its own descendant,
+        // and both setters answer false for an id they do not know. A refused
+        // row is simply left where it was.
+        moved = (isFolder ? myDocument.setGroupParent(id, targetGroupId)
+                          : myDocument.setItemGroup(id, targetGroupId)) ||
+                moved;
+    }
+    if (checkpointed && !moved) {
+        // Nothing actually moved, so the checkpoint would be an undo step
+        // that undoes nothing. Taken back rather than left standing.
+        myDocument.undo();
+        updateActions();
+        return;
+    }
+    if (!moved) return;
+    updateActions();
+    emit documentChanged();
+}
+
 
 void MainWindow::onItemRenameCommitted(int id, bool isOutline, QString newName)
 {
@@ -5413,6 +6268,13 @@ bool MainWindow::canPullSelectedFace() const
     // disjoint by making the gesture a term the arrow refuses on.
     if (myMitreActive) return false;
 
+    // The joint card is a live gesture since improvements item 2, and a
+    // selection no longer ends it - so it can now be up over the very
+    // selection this predicate answers to, and its application-wide
+    // Enter/Escape claim must not sit beside a second one. The mirror
+    // placement's own stand-down precedent, applied to one more gesture.
+    if (jointChipJointId() > 0) return false;
+
     // THE SELECTION-CONTENT TERM, and it is new: it used to be implicit,
     // because selectedFace() answered null outside face-selection mode and
     // face-selection mode was a thing the user chose. With auto selection
@@ -5630,6 +6492,12 @@ bool MainWindow::canMitreSelectedFace() const
     if (myShowingInitScreen || isAskingBeforeClose() || mySketching || hasPendingFace() ||
         myRenderModeOn || isCompareOpen() || myView->mirrorPlacementActive() || myMitreActive)
         return false;
+    // The joint card is a live gesture since improvements item 2, and a
+    // selection no longer ends it - so it can now be up over the very
+    // selection this predicate answers to, and its application-wide
+    // Enter/Escape claim must not sit beside a second one. The mirror
+    // placement's own stand-down precedent, applied to one more gesture.
+    if (jointChipJointId() > 0) return false;
     if (myView->selectionKind() != OcctViewWidget::PickKind::Face) return false;
     const TopoDS_Face face = myView->selectedFace();
     if (face.IsNull()) return false;
@@ -5791,10 +6659,13 @@ QString MainWindow::reMeasureSizeRefusalText()
     return tr("A size has to be more than zero — type the length you want");
 }
 
-QString MainWindow::reMeasureEndRefusalText()
+QString MainWindow::reMeasureStraightRefusalText()
 {
-    return tr("This end is not one flat face square to that size, so it cannot move — click "
-              "the other end of the line to keep this one instead");
+    // The stretch's own refusal (improvements item 13): the length comes out
+    // of the middle of the board, and this one has no middle left to take it
+    // out of - the piece asked for is shorter than the ends themselves.
+    return tr("There is no straight part left to take that much out of — try a size "
+              "closer to this one");
 }
 
 QString MainWindow::reMeasureKernelRefusalText()
@@ -5815,6 +6686,12 @@ bool MainWindow::canReMeasureSize(int index) const
         myRenderModeOn || isCompareOpen() || myView->mirrorPlacementActive() || myMitreActive ||
         myResizeActive)
         return false;
+    // The joint card is a live gesture since improvements item 2, and a
+    // selection no longer ends it - so it can now be up over the very
+    // selection this predicate answers to, and its application-wide
+    // Enter/Escape claim must not sit beside a second one. The mirror
+    // placement's own stand-down precedent, applied to one more gesture.
+    if (jointChipJointId() > 0) return false;
     // ONE whole body. A group's box is not any one body's side, so there is no
     // honest answer to which piece a retyped number should change - see
     // reMeasureGroupRefusalText().
@@ -5928,7 +6805,7 @@ QString MainWindow::reMeasureRefusalFor(double newSizeMm) const
                                      myResizeAnchor)) {
         case ModelingOps::ResizeCheck::Ok: return reMeasureKernelRefusalText();
         case ModelingOps::ResizeCheck::SizeNotPositive: return reMeasureSizeRefusalText();
-        case ModelingOps::ResizeCheck::EndNotFlat: return reMeasureEndRefusalText();
+        case ModelingOps::ResizeCheck::NoStraightPart: return reMeasureStraightRefusalText();
         case ModelingOps::ResizeCheck::AxisNotASide:
         case ModelingOps::ResizeCheck::NotMeasurable: return reMeasureKernelRefusalText();
     }
@@ -6009,6 +6886,13 @@ bool MainWindow::bevelTarget(std::vector<TopoDS_Edge>& edges, TopoDS_Edge& edge,
     // The same three terms canPullSelectedFace() opens with, for the same
     // reasons - see its comment and the header.
     if (mySketching || hasPendingFace() || myRenderModeOn) return false;
+
+    // The joint card is a live gesture since improvements item 2, and a
+    // selection no longer ends it - so it can now be up over the very
+    // selection this predicate answers to, and its application-wide
+    // Enter/Escape claim must not sit beside a second one. The mirror
+    // placement's own stand-down precedent, applied to one more gesture.
+    if (jointChipJointId() > 0) return false;
 
     // EDGES SELECTED, explicitly - the selection-content term that replaced
     // "edge selection mode" when the modes went away. selectionKind() derives
@@ -6428,6 +7312,13 @@ int MainWindow::transformableBodyId() const
     // not happening. One stand-down, the mirror gesture's own precedent.
     if (myResizeActive) return 0;
 
+    // The joint card is a live gesture since improvements item 2, and a
+    // selection no longer ends it - so it can now be up over the very
+    // selection this predicate answers to, and its application-wide
+    // Enter/Escape claim must not sit beside a second one. The mirror
+    // placement's own stand-down precedent, applied to one more gesture.
+    if (jointChipJointId() > 0) return 0;
+
     // A WHOLE BODY selected, explicitly - the selection-content term that
     // replaced "body selection mode". selectedSolidIds() reports the OWNING
     // body of a selected face or edge too, so without this the gizmo would
@@ -6437,8 +7328,17 @@ int MainWindow::transformableBodyId() const
     if (myView->selectionKind() != OcctViewWidget::PickKind::Body) return 0;
 
     const std::vector<int> ids = myView->selectedSolidIds();
-    if (ids.size() != 1) return 0;
+    if (ids.empty()) return 0;
+    // The FIRST of however many are selected - the gizmo stands on all of
+    // them (transformableBodyIds()), and every caller of this one wants "is
+    // there a body to transform" rather than "is there exactly one".
     return ids.front();
+}
+
+std::vector<int> MainWindow::transformableBodyIds() const
+{
+    if (transformableBodyId() <= 0) return {};
+    return myView->selectedSolidIds();
 }
 
 QString MainWindow::bodyToolName(BodyTool tool)
@@ -6508,8 +7408,14 @@ void MainWindow::refreshEdgeAnnotation()
 
 bool MainWindow::transformBody(int id, const gp_Trsf& delta)
 {
-    const TopoDS_Shape body = myDocument.shapeOf(id);
-    if (id <= 0 || body.IsNull()) return false;
+    return transformBodies({id}, delta);
+}
+
+bool MainWindow::transformBodies(const std::vector<int>& ids, const gp_Trsf& delta)
+{
+    if (ids.empty()) return false;
+    const TopoDS_Shape body = myDocument.shapeOf(ids.front());
+    if (ids.front() <= 0 || body.IsNull()) return false;
 
     // This layer's clamp, not the kernel's: transformShape refuses only a
     // factor <= 0, and a body scaled to 1e-9 is not an error the kernel can
@@ -6539,37 +7445,72 @@ bool MainWindow::transformBody(int id, const gp_Trsf& delta)
         return false;
     }
 
-    const ModelingOps::BooleanResult result = ModelingOps::transformShape(body, delta);
-    if (!result.ok) {
-        // Never present a failed kernel operation as a success, and never show
-        // its error text - it is written for this file, not for the user.
-        qWarning("Transform failed: %s", result.error.c_str());
-        myToasts->show(transformRefusalText(delta), Toast::Kind::Failure, false);
-        statusBar()->showMessage(tr("%1 refused — nothing was changed").arg(operation));
-        return false;
+    // EVERY body is transformed BEFORE anything is committed: a kernel
+    // refusal on the third of three must leave the document exactly as it
+    // was, not two-thirds moved. The scratch-then-swap discipline every load
+    // in this app already keeps.
+    std::vector<std::pair<int, TopoDS_Shape>> results;
+    results.reserve(ids.size());
+    for (int bodyId : ids) {
+        const TopoDS_Shape shape = myDocument.shapeOf(bodyId);
+        if (shape.IsNull()) continue;
+        const ModelingOps::BooleanResult result = ModelingOps::transformShape(shape, delta);
+        if (!result.ok) {
+            // Never present a failed kernel operation as a success, and never
+            // show its error text - it is written for this file, not for the
+            // user.
+            qWarning("Transform failed: %s", result.error.c_str());
+            myToasts->show(transformRefusalText(delta), Toast::Kind::Failure, false);
+            statusBar()->showMessage(tr("%1 refused — nothing was changed").arg(operation));
+            return false;
+        }
+        results.emplace_back(bodyId, result.shape);
     }
+    if (results.empty()) return false;
 
+    const int id = results.front().first;
     bool twinFollowed = false;
     int linkedOthersUpdated = 0;
-    commitReplaceBody(id, result.shape, twinFollowed, linkedOthersUpdated);
+    // ONE checkpoint for the whole gesture, then one replacement per body -
+    // the split applyBodyReplacement() exists for (the cross-body bevel's own
+    // reason): several bodies moved by one drag is one undo step.
+    checkpointDocument();
+    for (const auto& entry : results) {
+        bool twin = false;
+        int linked = 0;
+        applyBodyReplacement(entry.first, entry.second, twin, linked);
+        twinFollowed = twinFollowed || twin;
+        linkedOthersUpdated += linked;
+    }
     // Selected again on purpose, unlike the face pull's clearSelection(): the
     // body is still the same body, and keeping it selected is what leaves the
     // gizmo standing on it for a second drag. displaySolid() detached the
     // gizmo along with the presentation it was holding; the updateActions()
     // below re-attaches it at the body's new position.
-    myView->setSelectedSolids({id});
+    // Selected again on purpose, unlike the face pull's clearSelection(): they
+    // are still the same bodies, and keeping them selected is what leaves the
+    // gizmo standing on them for a second drag. displaySolid() detached the
+    // gizmo along with the presentations it was holding; the updateActions()
+    // below re-attaches it at their new position.
+    std::vector<int> moved;
+    moved.reserve(results.size());
+    for (const auto& entry : results) moved.push_back(entry.first);
+    myView->setSelectedSolids(moved);
     recordProgress("transform.completed");
 
     updateActions();
     emit documentChanged();
 
-    // The same derivation the refusals above use - one source for all three
-    // outcomes, and it stays right if a gesture ever combines two of them.
+    // One body names itself and its new size; several are counted, because a
+    // toast listing eight names and eight sizes is a paragraph.
     QString message =
-        tr("%1 %2 — %3")
-            .arg(QString::fromStdString(myDocument.nameOf(id)),
-                 transformPastVerb(delta),
-                 QString::fromStdString(Measure::formatDimensions(result.shape)));
+        results.size() == 1
+            ? tr("%1 %2 — %3")
+                  .arg(QString::fromStdString(myDocument.nameOf(id)),
+                       transformPastVerb(delta),
+                       QString::fromStdString(
+                           Measure::formatDimensions(results.front().second)))
+            : tr("%1 bodies %2").arg(results.size()).arg(transformPastVerb(delta));
     if (twinFollowed) message += tr(" — twin followed");
     message += linkedGroupSuffix(linkedOthersUpdated);
     statusBar()->showMessage(message);
@@ -6761,8 +7702,16 @@ void MainWindow::onExportStep()
 {
     if (myDocument.count() == 0) return;
 
-    const QString path = QFileDialog::getSaveFileName(this, tr("Export STEP"), QString(),
-                                                      tr("STEP files (*.step *.stp)"));
+    // The same remembered-folder rule as the screenshot above: an export goes
+    // where the last export went, named after the furniture.
+    const QString suggested =
+        (myFurnitureName.isEmpty() ? tr("Furniture") : myFurnitureName) + QStringLiteral(".step");
+    const QString path = QFileDialog::getSaveFileName(
+        this, tr("Export STEP"),
+        saveDialogPath(QStringLiteral("paths/export"), suggested,
+                       QStandardPaths::DocumentsLocation),
+        tr("STEP files (*.step *.stp)"));
+    rememberSaveDialogPath(QStringLiteral("paths/export"), path);
     if (path.isEmpty()) return;
 
     std::vector<TopoDS_Shape> shapes;
@@ -6866,7 +7815,7 @@ bool MainWindow::canChangeSketchPlane()
     // A FAILURE, not a Note, and the reason is item 12's toggle: this is a
     // refusal - the gesture the user just made did not happen - and a refusal
     // that goes silent when notifications are off is a silent failure. It is
-    // reachable from the Ctrl+double-click route, which consults no action's
+    // reachable from the faceDoubleClicked route, which consults no action's
     // enabled state, so "the action was disabled anyway" is not an answer here.
     // See ToastHost::show() for the rule.
     //
@@ -7156,6 +8105,12 @@ bool MainWindow::canBeginMirrorPlacement() const
     // A gesture already running cannot be begun a second time on top of
     // itself.
     if (myView->mirrorPlacementActive()) return false;
+    // The joint card is a live gesture since improvements item 2, and a
+    // selection no longer ends it - so it can now be up over the very
+    // selection this predicate answers to, and its application-wide
+    // Enter/Escape claim must not sit beside a second one. The mirror
+    // placement's own stand-down precedent, applied to one more gesture.
+    if (jointChipJointId() > 0) return false;
     // WHOLE BODIES selected, explicitly - selectedSolidIds() reports the
     // owning body of a selected face or edge too, so without this the gesture
     // could be begun beside a face selection and collide with the pull arrow's
@@ -7392,14 +8347,28 @@ int MainWindow::duplicateSourceId() const
     // source itself is doing.
     if (!linkGestureEnvironmentOk()) return 0;
     const std::vector<int> ids = myView->selectedSolidIds();
-    if (ids.size() != 1) return 0;
+    // The FIRST of however many are selected. Duplicate takes the whole
+    // selection now (improvements item 14) - this answer is what the action's
+    // enabled state and the tooltip read, and "is there at least one body"
+    // is the question both are really asking.
+    if (ids.empty()) return 0;
     return ids.front();
+}
+
+std::vector<int> MainWindow::duplicateSourceIds() const
+{
+    if (!linkGestureEnvironmentOk()) return {};
+    return myView->selectedSolidIds();
 }
 
 bool MainWindow::duplicateSelectedBody()
 {
-    const int sourceId = duplicateSourceId();
-    if (sourceId <= 0) {
+    // EVERY selected body, not just one (improvements item 14). One gesture,
+    // ONE checkpoint around all of it, one toast and one selection of the
+    // copies at the end - so Ctrl+Z takes the whole duplicate back and the
+    // transform gizmo stands on what was just made.
+    const std::vector<int> sources = duplicateSourceIds();
+    if (sources.empty()) {
         // canDuplicate() already gates the action, and every term this
         // predicate checks has its own disabled-tooltip reason - unlike
         // duplicateLinkedCopy(), there is no further exclusion worth naming
@@ -7407,80 +8376,113 @@ bool MainWindow::duplicateSelectedBody()
         return false;
     }
 
-    const TopoDS_Shape sourceShape = myDocument.shapeOf(sourceId);
-    if (sourceShape.IsNull()) return false;   // unreachable in practice -
-                                               // sourceId came from the live
-                                               // selection.
-
-    // A visible offset - one grid step along X and Y - the same one
-    // duplicateLinkedCopy() uses, so the copy never lands exactly on its
-    // source regardless of unit or of whether Snap to Grid is on.
-    const double step = myView->snapStep();
-    gp_Trsf offset;
-    offset.SetTranslation(gp_Vec(step, step, 0.0));
-
-    const ModelingOps::BooleanResult transformed =
-        ModelingOps::transformShape(sourceShape, offset);
-    if (!transformed.ok) {
-        qWarning("Duplicate failed: %s", transformed.error.c_str());
-        myToasts->show(tr("Couldn't duplicate that body — the geometry engine turned "
-                          "the copy down. Try a different body"),
-                      Toast::Kind::Failure, false);
-        statusBar()->showMessage(tr("Duplicate refused — nothing was changed"));
-        return false;
+    // BUILT BEFORE ANY CHECKPOINT: a refusal from the kernel must leave the
+    // document exactly as it was, and a checkpoint pushed for a copy that
+    // then failed would be an undo step that undoes nothing. The whole
+    // gesture is prepared first and committed second - the scratch-then-swap
+    // discipline every load in this app already keeps.
+    std::vector<std::pair<int, TopoDS_Shape>> copies;
+    copies.reserve(sources.size());
+    for (int sourceId : sources) {
+        const TopoDS_Shape sourceShape = myDocument.shapeOf(sourceId);
+        if (sourceShape.IsNull()) continue;   // unreachable - sourceId came from
+                                              // the live selection
+        // NO OFFSET: the copy lands exactly where its source is (improvements
+        // item 15, "dont change position when duplicating"). It used to step
+        // one grid square along X and Y so the two could be told apart on
+        // screen - but a copy made to be moved somewhere specific has to
+        // start from the place it is a copy OF, and the gizmo this commit
+        // leaves standing on it is how it gets moved.
+        //
+        // Still through transformShape() rather than adding the source's own
+        // shape twice: it hands back a genuine copy, and its refusal path is
+        // the one reported below.
+        const ModelingOps::BooleanResult transformed =
+            ModelingOps::transformShape(sourceShape, gp_Trsf());
+        if (!transformed.ok) {
+            qWarning("Duplicate failed: %s", transformed.error.c_str());
+            myToasts->show(tr("Couldn't duplicate that body — the geometry engine turned "
+                              "the copy down. Try a different body"),
+                          Toast::Kind::Failure, false);
+            statusBar()->showMessage(tr("Duplicate refused — nothing was changed"));
+            return false;
+        }
+        copies.emplace_back(sourceId, transformed.shape);
     }
+    if (copies.empty()) return false;
 
-    // ONE checkpoint around the copy AND its own creation-time twin (if
-    // any) below - the same "one gesture, one checkpoint" rule
-    // extrudePendingFace() and duplicateLinkedCopy() each follow.
     checkpointDocument();
-    const int id = myDocument.addSolid(transformed.shape);
-    myView->displaySolid(id, transformed.shape);
 
-    // Creation-time pairing - reused VERBATIM from onExtrude()'s own block
-    // rather than special-cased here (CLAUDE.md's "do not special-case" for
-    // this exact task): a genuinely new body gets its own fresh twin when
-    // mirroring is on and it does not straddle the plane. This is
-    // independent of the SOURCE's own pairing - a mirrored source's copy
-    // does NOT inherit the source's twin (duplicateSourceId()'s whole
-    // point is that the copy is plain), but it is still a new body, so
-    // under live mirroring it is paired with its OWN fresh twin exactly as
-    // any other freshly created body would be.
-    int twinId = 0;
-    if (id > 0 && myDocument.symmetryOn() &&
-        !ModelingOps::boundingBoxStraddlesPlane(transformed.shape, myDocument.symmetryPlane())) {
-        const ModelingOps::BooleanResult mirrored =
-            ModelingOps::mirrorShape(transformed.shape, myDocument.symmetryPlane());
-        if (mirrored.ok) {
-            twinId = myDocument.addSolid(mirrored.shape);
-            if (twinId > 0) {
-                myDocument.pairBodies(id, twinId);
-                myView->displaySolid(twinId, mirrored.shape);
+    std::vector<int> made;
+    made.reserve(copies.size());
+    int twins = 0;
+    int lastTwinId = 0;
+    for (const auto& copy : copies) {
+        const int id = myDocument.addSolid(copy.second);
+        if (id <= 0) continue;
+        myView->displaySolid(id, copy.second);
+        made.push_back(id);
+        // The copy joins whatever folder its source is in (improvements item
+        // 10): a duplicate of something inside "Left cabinet" belongs in
+        // there beside it, not out at the root.
+        const int folder = myDocument.groupOf(copy.first);
+        if (folder != 0) myDocument.setItemGroup(id, folder);
+
+        // Creation-time pairing - reused VERBATIM from onExtrude()'s own
+        // block rather than special-cased here (CLAUDE.md's "do not
+        // special-case" for this exact task): a genuinely new body gets its
+        // own fresh twin when mirroring is on and it does not straddle the
+        // plane. This is independent of the SOURCE's own pairing - a mirrored
+        // source's copy does NOT inherit the source's twin, but it is still a
+        // new body, so under live mirroring it is paired with its OWN fresh
+        // twin exactly as any other freshly created body would be.
+        if (myDocument.symmetryOn() &&
+            !ModelingOps::boundingBoxStraddlesPlane(copy.second, myDocument.symmetryPlane())) {
+            const ModelingOps::BooleanResult mirrored =
+                ModelingOps::mirrorShape(copy.second, myDocument.symmetryPlane());
+            if (mirrored.ok) {
+                const int twinId = myDocument.addSolid(mirrored.shape);
+                if (twinId > 0) {
+                    myDocument.pairBodies(id, twinId);
+                    myView->displaySolid(twinId, mirrored.shape);
+                    if (folder != 0) myDocument.setItemGroup(twinId, folder);
+                    ++twins;
+                    lastTwinId = twinId;
+                }
+            } else {
+                qWarning("Symmetry: creation-pair mirror failed on duplicate: %s",
+                         mirrored.error.c_str());
             }
-        } else {
-            qWarning("Symmetry: creation-pair mirror failed on duplicate: %s",
-                     mirrored.error.c_str());
         }
     }
+    if (made.empty()) return false;
 
-    // A WHOLE-BODY selection - which is what makes MoveTool::refresh() (an
-    // appStateChanged slot) stand the transform gizmo on the copy, the same
-    // machinery an ordinary click already drives.
-    myView->setSelectedSolids({id});
+    // A WHOLE-BODY selection of the COPIES - which is what makes
+    // MoveTool::refresh() (an appStateChanged slot) stand the transform gizmo
+    // on them, the same machinery an ordinary click already drives, and what
+    // lets one drag move everything that was just made.
+    myView->setSelectedSolids(made);
     recordProgress("duplicate.completed");
 
     updateActions();
     emit documentChanged();
 
-    // Paired: names both, the same shape onExtrude()'s own paired message
-    // takes. Unpaired: the ordinary single-body duplicate message.
-    const QString message =
-        twinId > 0
-            ? tr("%1 and %2 created")
-                  .arg(QString::fromStdString(myDocument.nameOf(id)),
-                       QString::fromStdString(myDocument.nameOf(twinId)))
-            : tr("%1 duplicated")
-                  .arg(QString::fromStdString(myDocument.nameOf(id)));
+    // One body names itself (and its twin, when mirroring made one); several
+    // are counted, because a toast listing eight names is a paragraph.
+    QString message;
+    if (made.size() == 1) {
+        message = twins > 0
+                      ? tr("%1 and %2 created")
+                            .arg(QString::fromStdString(myDocument.nameOf(made.front())),
+                                 QString::fromStdString(myDocument.nameOf(lastTwinId)))
+                      : tr("%1 duplicated")
+                            .arg(QString::fromStdString(myDocument.nameOf(made.front())));
+    } else {
+        message = twins > 0 ? tr("%1 bodies duplicated — %2 mirrored twins with them")
+                                  .arg(made.size())
+                                  .arg(twins)
+                            : tr("%1 bodies duplicated").arg(made.size());
+    }
     statusBar()->showMessage(message);
     myToasts->show(message, Toast::Kind::Note, true, myDocument.revision());
     return true;
@@ -7903,21 +8905,28 @@ bool MainWindow::jointOf(int jointId, DocumentModel::Joint& out) const
 
 int MainWindow::jointChipJointId() const
 {
+    // A LIVE GESTURE, not a reading of the selection. It used to require the
+    // joint's own two pieces to BE the whole-body selection, which under auto
+    // selection meant the first click anywhere - a face, an edge, empty space
+    // - retired the card the user was working in ("having Join activated and
+    // press the face selector disables the joinery mode"). The selection is
+    // therefore no longer a term: the card opens when a joint is selected and
+    // stays until it is closed (the x, Escape), until the joint itself is
+    // gone (deleted, or undone away - jointOf() below), or until the editor
+    // is left (jointEditEnvironmentOk()).
+    //
+    // What that costs, and where it is paid: the card's disjointness from the
+    // pull arrow, the bevel arrow and the transform gizmo used to fall out of
+    // the selection term for free, and now it does not - so those three, the
+    // Mitre gesture, Re-Measure and a Mirror placement each carry an explicit
+    // stand-down while this card is up, exactly as they already do for one
+    // another. At most one application-wide Enter/Escape claim, still by
+    // construction rather than by luck.
     const int id = selectedJointId();
     if (id <= 0 || !jointEditEnvironmentOk()) return 0;
     DocumentModel::Joint joint;
     if (!jointOf(id, joint)) return 0;
-
-    // THE selection-content term - see the header. selectedSolidIds() reports
-    // the OWNING body of a selected face or edge too, so the KIND is asked as
-    // well as the ids: a face picked on one of the two pieces must not raise
-    // this card beside the pull arrow.
-    if (myView->selectionKind() != OcctViewWidget::PickKind::Body) return 0;
-    std::vector<int> selected = myView->selectedSolidIds();
-    std::vector<int> pieces = {joint.bodyA, joint.bodyB};
-    std::sort(selected.begin(), selected.end());
-    std::sort(pieces.begin(), pieces.end());
-    return selected == pieces ? id : 0;
+    return id;
 }
 
 bool MainWindow::jointDerivationOf(int jointId, Joinery::Derivation& out) const
@@ -7935,29 +8944,6 @@ bool MainWindow::jointDerivationOf(int jointId, Joinery::Derivation& out) const
     return false;
 }
 
-bool MainWindow::jointAnchor(int jointId, gp_Pnt& out) const
-{
-    Joinery::Derivation derivation;
-    if (jointDerivationOf(jointId, derivation) && derivation.ok && !derivation.items.empty()) {
-        out = derivation.items.front().centre;
-        return true;
-    }
-    // A BROKEN joint has no items and still carries a card - its kind is
-    // exactly what the user may want to change - so it stands at the centre of
-    // its two pieces instead.
-    DocumentModel::Joint joint;
-    if (!jointOf(jointId, joint)) return false;
-    Bnd_Box box;
-    for (const int id : {joint.bodyA, joint.bodyB}) {
-        const TopoDS_Shape shape = myDocument.shapeOf(id);
-        if (!shape.IsNull()) BRepBndLib::Add(shape, box);
-    }
-    if (box.IsVoid()) return false;
-    double xMin = 0.0, yMin = 0.0, zMin = 0.0, xMax = 0.0, yMax = 0.0, zMax = 0.0;
-    box.Get(xMin, yMin, zMin, xMax, yMax, zMax);
-    out = gp_Pnt((xMin + xMax) / 2.0, (yMin + yMax) / 2.0, (zMin + zMax) / 2.0);
-    return true;
-}
 
 bool MainWindow::jointContact(int jointId, Joinery::ContactResult& out) const
 {
@@ -8249,15 +9235,11 @@ bool MainWindow::duplicateLinkedCopy()
     // follows.
     if (myRenderModeOn) setRenderModeEnabled(false);
 
-    // A visible offset - one grid step along X and Y - so the copy never
-    // lands exactly on top of its source. snapStep() is the same length the
-    // drawn grid and Snap to Grid itself use, so the number stays meaningful
-    // regardless of unit or of whether Snap to Grid happens to be on.
-    const double step = myView->snapStep();
-    gp_Trsf offset;
-    offset.SetTranslation(gp_Vec(step, step, 0.0));
-
-    const DocumentModel::LinkResult result = myDocument.createLinkedCopy(sourceId, offset);
+    // NO OFFSET, exactly as plain Duplicate above (improvements item 15): a
+    // linked copy starts on its source and is dragged where it belongs. The
+    // placement is still what the link group stores per member, so moving it
+    // afterwards is an ordinary edit the group already knows how to carry.
+    const DocumentModel::LinkResult result = myDocument.createLinkedCopy(sourceId, gp_Trsf());
     if (!result.ok) {
         // Unreachable in practice - duplicateLinkedSourceId() already ruled
         // out the mirror/link exclusion above, and an unknown id cannot
@@ -8416,10 +9398,12 @@ void MainWindow::onSelectionChanged()
         !myProgress.hasLearned("subPick.used"))
         recordProgress("subPick.used");
 
-    // A selected joint ends with the body selection it sits beside: clearing
-    // the bodies (a click on empty viewport, Escape, an undo) puts the joint's
-    // hardware away too - see the drawing gate in refreshJoints().
-    if (myView->selectedSolidIds().empty()) mySelectedJointId = 0;
+    // A selected joint used to end with the body selection it sat beside, so a
+    // click on empty viewport put its hardware and its card away. It does not
+    // any more: the card is a live gesture now (see jointChipJointId()), and a
+    // click that lands on nothing is exactly the click the user complained
+    // about losing it to. It ends at the x, at Escape, or when the joint or
+    // the editor goes - never at a click.
 
     updateActions();
 

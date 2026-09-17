@@ -44,6 +44,8 @@
 #include <QStringList>
 #include <QWidget>
 
+#include <array>
+
 #include <vector>
 
 class QAction;
@@ -111,8 +113,37 @@ public:
     // in); a user click emits quickChanged() and nothing else - MainWindow
     // owns what a flip actually does (OcctViewWidget::setRenderQuick() plus
     // a render-mode re-entry).
-    void setQuick(bool quick);
-    bool quick() const { return myQuick; }
+    // THREE now, not two (improvements item 16): Simple, Balanced, Deep.
+    // The panel keeps its own enum rather than reaching for
+    // OcctViewWidget::RenderQuality - this card knows nothing about tiers or
+    // GPUs, only about which of three chips is lit, and MainWindow maps the
+    // one to the other exactly as it does for every other row here.
+    enum class Quality { Simple, Balanced, Deep };
+    // The cut-out checkbox: with it on, Save Screenshot writes a PNG with a
+    // real alpha channel - no floor, no backdrop. setCutout() is the silent
+    // return path (MainWindow pushes the persisted value in); a click emits
+    // cutoutChanged() and nothing else.
+    // How big an exported render is. Five chips, and a line under them that
+    // prints the pixels it would actually produce - a size picker whose
+    // answer you only learn after exporting is a size picker that has to be
+    // tried. setExportSize()/setExportNote() are the silent return paths;
+    // MainWindow owns what a click does and what the note says, because the
+    // pixels depend on the viewport and the live tier, neither of which this
+    // card knows anything about.
+    enum class ExportSize { Viewport, Height720, Height1080, Height1440, Height2160 };
+    void setExportSize(ExportSize size);
+    ExportSize exportSize() const { return myExportSize; }
+    void setExportNote(const QString& note);
+
+    void setCutout(bool cutout);
+    bool cutout() const { return myCutout; }
+
+    void setQuality(Quality quality);
+    Quality quality() const { return myQuality; }
+    // The two-state spelling the rest of this file used before the middle
+    // chip existed, kept so nothing that only knows Quick has to change.
+    void setQuick(bool quick) { setQuality(quick ? Quality::Simple : Quality::Deep); }
+    bool quick() const { return myQuality == Quality::Simple; }
 
     // The Wood preset (Milestone 5): a material of its own rather than a
     // gloss/metal pair, so it is a flag beside the sliders, not a write into
@@ -188,6 +219,14 @@ public:
 
 signals:
     void quickChanged(bool quick);
+    void qualityChanged(Quality quality);
+    void cutoutChanged(bool cutout);
+    void exportSizeChanged(ExportSize size);
+    // A tile was DOUBLE-clicked: open that material's own colour and
+    // brightness editor. The first click of the gesture has already made it
+    // the live material, which is what makes the editor's changes visible
+    // the moment they are made.
+    void materialEditRequested(QString material);
     void woodChanged(bool wood);
     // A textured tile was clicked: `path` is the image file, empty for the
     // built-in procedural grain. MainWindow routes it into
@@ -222,13 +261,21 @@ private:
     // The footer's live status pair - see setTierStatus().
     QLabel* myTierLabel = nullptr;
     class ProgressLine* myProgress = nullptr;
-    // The Quality pair and its state - see setQuick().
+    // The Quality chips and their state - see setQuality().
     class SegChip* myDeepChip = nullptr;
     class SegChip* mySimpleChip = nullptr;
-    bool myQuick = false;
+    Quality myQuality = Quality::Deep;
+    class SegChip* myBalancedChip = nullptr;
+    class SegChip* myCutoutChip = nullptr;
+    bool myCutout = false;
+    ExportSize myExportSize = ExportSize::Viewport;
+    std::array<class SegChip*, 5> myExportChips{};
+    class QLabel* myExportNote = nullptr;
     bool myWood = false;
     QString myWoodName = QStringLiteral("Wood");
     class QGridLayout* myTileGrid = nullptr;
+    // Watches the material tiles for a double-click - see addTile().
+    bool eventFilter(QObject* watched, QEvent* event) override;
     void addTile(class MaterialTile* tile);
     // The three material preset tiles (the mockup's "B material selector").
     std::vector<class MaterialTile*> myPresetTiles;

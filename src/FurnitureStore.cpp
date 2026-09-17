@@ -225,6 +225,101 @@ void jsonToLinkGroups(const QJsonObject& obj, DocumentModel::DocumentMeta& meta)
 // means the face it was saved with.
 constexpr const char* kDrilledFromInsetFace = "insetFace";
 constexpr const char* kDrilledFromOppositeFace = "oppositeFace";
+// Folders (improvements item 10):
+// {"folders": [{"name": "...", "parent": -1}, ...], "bodies": [...],
+//  "outlines": [...]} - the folder array in the parents-first order
+// DocumentModel::toSerialized() writes, and one index per item into it (-1 =
+// the document's root). linkGroupsToJson()'s shape, one concept over.
+// How each material looks on this furniture:
+// {"materials": [{"name": "...", "r": 0.7, "g": 0.7, "b": 0.68, "brightness": 1.0}]}.
+// By NAME, since a material is not one of this document's own items.
+QJsonObject materialsToJson(const DocumentModel::DocumentMeta& meta)
+{
+    QJsonArray arr;
+    for (const DocumentModel::MaterialLook& look : meta.materialLooks) {
+        QJsonObject entry;
+        entry[QStringLiteral("name")] = QString::fromStdString(look.material);
+        entry[QStringLiteral("r")] = look.red;
+        entry[QStringLiteral("g")] = look.green;
+        entry[QStringLiteral("b")] = look.blue;
+        entry[QStringLiteral("brightness")] = look.brightness;
+        arr.append(entry);
+    }
+    QJsonObject obj;
+    obj[QStringLiteral("materials")] = arr;
+    return obj;
+}
+
+// The inverse, on the forward-compatibility rule every block here follows: an
+// absent key decodes to "no materials set", never a refusal, so every
+// furniture saved before this existed opens with the tones it always had. A
+// record with no name is dropped rather than stored under an empty key, and
+// each number is clamped to the range the editor itself allows - a file is
+// not a way around a bound the UI enforces.
+void jsonToMaterials(const QJsonObject& obj, DocumentModel::DocumentMeta& meta)
+{
+    const auto clamp01 = [](double v) { return std::clamp(v, 0.0, 1.0); };
+    for (const QJsonValue& value : obj.value(QStringLiteral("materials")).toArray()) {
+        const QJsonObject entry = value.toObject();
+        DocumentModel::MaterialLook look;
+        look.material = entry.value(QStringLiteral("name")).toString().toStdString();
+        if (look.material.empty()) continue;
+        look.red = clamp01(entry.value(QStringLiteral("r")).toDouble(0.70));
+        look.green = clamp01(entry.value(QStringLiteral("g")).toDouble(0.70));
+        look.blue = clamp01(entry.value(QStringLiteral("b")).toDouble(0.68));
+        look.brightness =
+            std::clamp(entry.value(QStringLiteral("brightness")).toDouble(1.0), 0.25, 2.0);
+        meta.materialLooks.push_back(look);
+    }
+}
+
+QJsonObject foldersToJson(const DocumentModel::DocumentMeta& meta)
+{
+    QJsonArray foldersArr;
+    for (const DocumentModel::DocumentMeta::GroupRecord& group : meta.groups) {
+        QJsonObject obj;
+        obj[QStringLiteral("name")] = QString::fromStdString(group.name);
+        obj[QStringLiteral("parent")] = group.parentIndex;
+        foldersArr.append(obj);
+    }
+    QJsonArray bodiesArr;
+    for (int index : meta.bodyGroups) bodiesArr.append(index);
+    QJsonArray outlinesArr;
+    for (int index : meta.outlineGroups) outlinesArr.append(index);
+
+    QJsonObject obj;
+    obj[QStringLiteral("folders")] = foldersArr;
+    obj[QStringLiteral("bodies")] = bodiesArr;
+    obj[QStringLiteral("outlines")] = outlinesArr;
+    return obj;
+}
+
+// The inverse, on the forward-compatibility rule every block here follows: an
+// absent or malformed key decodes to "no folders", never a refusal, so every
+// furniture saved before folders existed loads flat. A record missing its
+// name or parent decodes to a root folder called nothing rather than
+// poisoning the array's indices, which every later record is numbered
+// against; the genuine structural refusals - a parent that is not written
+// before its child, an index naming no folder, a membership array of the
+// wrong length - all live in DocumentModel::fromSerialized(), where the item
+// counts are known.
+void jsonToFolders(const QJsonObject& obj, DocumentModel::DocumentMeta& meta)
+{
+    const QJsonArray foldersArr = obj.value(QStringLiteral("folders")).toArray();
+    for (const QJsonValue& value : foldersArr) {
+        const QJsonObject entry = value.toObject();
+        DocumentModel::DocumentMeta::GroupRecord record;
+        record.name = entry.value(QStringLiteral("name")).toString().toStdString();
+        record.parentIndex = entry.value(QStringLiteral("parent")).toInt(-1);
+        meta.groups.push_back(std::move(record));
+    }
+    if (meta.groups.empty()) return;   // no folders: no membership to read
+    for (const QJsonValue& value : obj.value(QStringLiteral("bodies")).toArray())
+        meta.bodyGroups.push_back(value.toInt(-1));
+    for (const QJsonValue& value : obj.value(QStringLiteral("outlines")).toArray())
+        meta.outlineGroups.push_back(value.toInt(-1));
+}
+
 QJsonObject jointsToJson(const DocumentModel::DocumentMeta& meta)
 {
     QJsonArray list;
@@ -496,6 +591,8 @@ QString FurnitureStore::createFurniture(const QString& name)
     // Same story again for joints (Task 9): a fresh furniture starts with
     // nothing jointed.
     manifest[QStringLiteral("joints")] = jointsToJson(DocumentModel::DocumentMeta{});
+    manifest[QStringLiteral("folders")] = foldersToJson(DocumentModel::DocumentMeta{});
+    manifest[QStringLiteral("materials")] = materialsToJson(DocumentModel::DocumentMeta{});
 
     if (!writeManifestObject(id, manifest)) return QString();
 
@@ -527,6 +624,8 @@ bool FurnitureStore::saveFurniture(const QString& id, const DocumentModel& doc, 
     manifest[QStringLiteral("symmetry")] = symmetryToJson(meta);
     manifest[QStringLiteral("linkGroups")] = linkGroupsToJson(meta);
     manifest[QStringLiteral("joints")] = jointsToJson(meta);
+    manifest[QStringLiteral("folders")] = foldersToJson(meta);
+    manifest[QStringLiteral("materials")] = materialsToJson(meta);
     if (!writeManifestObject(id, manifest)) return false;
 
     // A null/empty thumbnail is not a failure - the caller may not have
@@ -580,6 +679,9 @@ bool FurnitureStore::loadFurniture(const QString& id, DocumentModel& doc, QStrin
     // record's actual refusal happens below, in fromSerialized() - this
     // call only decodes the JSON into meta.joints.
     jsonToJoints(manifest.value(QStringLiteral("joints")).toObject(), meta);
+    // Same forward-compatibility rule for folders (improvements item 10).
+    jsonToFolders(manifest.value(QStringLiteral("folders")).toObject(), meta);
+    jsonToMaterials(manifest.value(QStringLiteral("materials")).toObject(), meta);
 
     // Scratch, then swap - never half-load, per the standing contract.
     DocumentModel scratch;
@@ -687,6 +789,11 @@ bool FurnitureStore::saveVersion(const QString& id, const QString& name, const D
     // the library"), and a restore that silently dropped planned joints
     // would be exactly the half-restored document that law forbids.
     entry[QStringLiteral("joints")] = jointsToJson(meta);
+    // Folders travel with a version for the identical reason: a version is a
+    // snapshot of the WHOLE document, and a restore that silently flattened
+    // the tree would be the half-restored document that law forbids.
+    entry[QStringLiteral("folders")] = foldersToJson(meta);
+    entry[QStringLiteral("materials")] = materialsToJson(meta);
     versionsArr.append(entry);
     manifest[QStringLiteral("versions")] = versionsArr;
     if (!writeManifestObject(id, manifest)) {
@@ -750,6 +857,8 @@ bool FurnitureStore::loadVersion(const QString& id, const QString& name, Documen
         // a version saved before this task existed, which decodes to no
         // joints rather than a refusal.
         jsonToJoints(entry.value(QStringLiteral("joints")).toObject(), meta);
+        jsonToFolders(entry.value(QStringLiteral("folders")).toObject(), meta);
+        jsonToMaterials(entry.value(QStringLiteral("materials")).toObject(), meta);
 
         DocumentModel scratch;
         if (!scratch.fromSerialized(serial, meta)) return false;

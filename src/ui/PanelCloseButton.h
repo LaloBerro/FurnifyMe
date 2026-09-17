@@ -3,6 +3,8 @@
 #include <QAbstractButton>
 #include <QPointer>
 
+#include <functional>
+
 class QAction;
 
 // The small x in a panel's top-right corner, shown only while the pointer is
@@ -27,6 +29,14 @@ public:
     // `action` is the checkable action the panel's visibility is derived from.
     PanelCloseButton(QAction* action, QWidget* panel);
 
+    // For a card whose visibility is NOT derived from a checkable action -
+    // the joint card, which is a live gesture this window holds rather than a
+    // drawer with a rail chip and a menu entry. `onClose` is what a click
+    // runs, and it must be the same route every other way out of that gesture
+    // takes, so the x stays one more entry point rather than a second
+    // implementation of closing.
+    PanelCloseButton(QWidget* panel, std::function<void()> onClose);
+
     // The inset from the panel's top-right corner, so a panel that paints its
     // own padding can line the button up with its title row.
     void setCornerInset(int px);
@@ -44,6 +54,9 @@ private:
     void syncVisible();
 
     QPointer<QAction> myAction;
+    // Set by the action-less constructor instead of myAction; exactly one of
+    // the two is ever live.
+    std::function<void()> myOnClose;
     QWidget* myPanel = nullptr;
     int myInset = 8;
     bool myHovered = false;

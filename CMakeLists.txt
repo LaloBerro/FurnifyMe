@@ -134,6 +134,7 @@ if(FURNIFYME_BUILD_APP)
       src/ui/AppBar.cpp
       src/ui/AppearancePanel.cpp
       src/ui/AxisGizmo.cpp
+      src/ui/CardSlide.cpp
       src/ui/DimensionRenderer.cpp
       src/ui/JointRenderer.cpp
       src/ui/SelectionSizesRenderer.cpp
@@ -145,6 +146,9 @@ if(FURNIFYME_BUILD_APP)
       src/ui/ViewportOverlay.cpp
       src/ui/ItemsPanel.cpp
       src/ui/PanelCloseButton.cpp
+      src/ui/NameFurnitureCard.cpp
+      src/ui/LoadingCard.cpp
+      src/ui/MaterialCard.cpp
       src/ui/ShapeFlyout.cpp
       src/ui/ShortcutSheet.cpp
       src/ui/WalkthroughPanel.cpp
@@ -155,6 +159,7 @@ if(FURNIFYME_BUILD_APP)
       src/ui/BevelArrow.cpp
       src/ui/MitreTool.cpp
       src/ui/ReMeasureTool.cpp
+      src/ui/SlatsTool.cpp
       src/ui/TransformGizmo.cpp
       src/ui/InlineRename.cpp
       src/ui/WindowChrome.cpp
@@ -241,6 +246,23 @@ if(FURNIFYME_BUILD_APP)
     # a window server, unlike the headless tests.
     add_executable(gui_smoke tests/gui_smoke.cpp)
     target_link_libraries(gui_smoke PRIVATE furnify_app)
+    # The suite's own stack-overflow reporter resolves its frames with DbgHelp
+    # (see traceStackOverflow() in tests/gui_smoke.cpp) - there is no debugger
+    # installed on this machine, and a crash whose location cannot be read
+    # costs far more than this one link.
+    if(WIN32)
+      target_link_libraries(gui_smoke PRIVATE dbghelp)
+      # A BIGGER STACK, and it is this file's own shape that needs it. main()
+      # here is one function of some thirty thousand lines: MSVC allocates a
+      # frame for every local in every block of it AT ENTRY, so the frame is
+      # enormous and grows with each block added. Windows gives a thread 1 MB
+      # by default, and the first GL context creation - a deep call through
+      # the display driver - is what finally ran off the end of it: a stack
+      # overflow at window.show(), 34 frames deep, in a stack with no
+      # recursion anywhere in it. Reserve, not commit, so it costs address
+      # space and nothing else.
+      target_link_options(gui_smoke PRIVATE /STACK:33554432)
+    endif()
 
     # Qt refuses to start without a platform plugin, and it is looked up in a
     # `platforms/` directory next to the executable rather than alongside the

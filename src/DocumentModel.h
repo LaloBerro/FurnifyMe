@@ -424,6 +424,93 @@ public:
     bool undo();
     bool redo();
 
+    // --- folders (improvements item 10) --------------------------------------
+    // A FOLDER holds items and other folders, to any depth. It is pure
+    // organisation: nothing about a body's geometry, its joints, its twin or
+    // its links changes by being put in one, and no operation in this app
+    // reads a folder to decide what it does - selecting a folder selects the
+    // bodies under it, and everything downstream sees the ordinary body
+    // selection it always saw. That is the whole design: one place answers
+    // "which bodies", and folders feed it rather than teaching every gesture
+    // a second kind of target.
+    //
+    // A folder carries its own parent, and items carry theirs, so the tree is
+    // stored once rather than as a parent's list of children AND a child's
+    // parent, which can disagree. Folder ids come from the SAME counter
+    // bodies and outlines use, so an id names exactly one thing whatever kind
+    // it is - the drawer hands bare ints around and two id spaces would make
+    // "which kind is 7" a question with two answers.
+    struct Group {
+        int id = 0;
+        std::string name;
+        int parent = 0;   // 0 = the document's root
+    };
+
+    // Creates an empty folder under `parent` (0 = root) and returns its id, or
+    // 0 when `parent` names no live folder. Takes no checkpoint of its own -
+    // the caller checkpoints, exactly as every other mutation here expects.
+    int createGroup(const std::string& name, int parent = 0);
+    // Dissolves a folder: everything directly inside it - items and folders
+    // alike - moves up to ITS parent, so nothing is ever orphaned or deleted
+    // by an ungroup. False for an unknown id.
+    bool removeGroup(int groupId);
+    bool groupExists(int groupId) const;
+    const std::vector<Group>& groups() const { return myGroups; }
+    std::string groupNameOf(int groupId) const;
+    bool setGroupName(int groupId, const std::string& name);
+    // Re-parents a folder. Refuses a cycle - a folder cannot be put inside
+    // itself or inside one of its own descendants - and refuses an unknown
+    // id on either side.
+    bool setGroupParent(int groupId, int parent);
+    // Puts a body or an outline in a folder; 0 = the document's root. False
+    // for an unknown item, or a `groupId` that names no live folder.
+    bool setItemGroup(int itemId, int groupId);
+    // Which folder an item sits in directly, or 0 for the root / an unknown
+    // id. Answers for a FOLDER too, reading its own parent, so a caller
+    // walking upward asks one question rather than two.
+    int groupOf(int itemId) const;
+    // The folders directly inside `groupId` (0 = root), in creation order.
+    std::vector<int> childGroups(int groupId) const;
+    // The bodies and outlines directly inside `groupId` (0 = root), in the
+    // document's own order - outlines first, then bodies, which is the order
+    // the drawer lists them in.
+    std::vector<int> itemsInGroup(int groupId) const;
+    // Every BODY at or below `groupId`, at any depth - what selecting a
+    // folder selects. Empty for an unknown folder.
+    std::vector<int> bodiesUnderGroup(int groupId) const;
+    // True when `groupId` is `maybeAncestor` or sits anywhere below it. The
+    // cycle guard setGroupParent() uses, exposed because a drag in the drawer
+    // has to refuse the same move before it is made.
+    bool groupContains(int maybeAncestor, int groupId) const;
+
+    // --- how each material looks (per furniture) -----------------------------
+    // A material's own COLOUR and BRIGHTNESS, one record per material name -
+    // "Matte", "Satin", "Metal", or a wood's own name. The render card's
+    // tiles pick WHICH material a furniture wears; these two say what that
+    // material looks like on THIS furniture, so an oak dresser and an oak
+    // shelf can be two different oaks.
+    //
+    // Presentation, not geometry - so, exactly like visibility, it rides
+    // OUTSIDE State and takes no checkpoint (looking at a darker walnut is
+    // not an edit anybody should have to undo), but it IS persisted, because
+    // a look that evaporated when the file closed would not be worth setting.
+    // It bumps revision() so autosave notices.
+    struct MaterialLook {
+        std::string material;
+        // 0..1 each. The defaults are the tone this app has always drawn a
+        // body in, so a furniture that never opens this editor is unchanged.
+        double red = 0.70;
+        double green = 0.70;
+        double blue = 0.68;
+        // 0.25 .. 2.0, 1.0 being the material as it comes.
+        double brightness = 1.0;
+    };
+    const std::vector<MaterialLook>& materialLooks() const { return myMaterialLooks; }
+    // False (and `out` left at its defaults) when this furniture has never
+    // been told what that material should look like.
+    bool materialLook(const std::string& material, MaterialLook& out) const;
+    void setMaterialLook(const MaterialLook& look);
+
     // --- serialization -------------------------------------------------------
     // Everything a save/load round-trip needs beyond raw geometry: the
     // labels and visibility the user set, positionally matched to
@@ -488,6 +575,34 @@ public:
             std::vector<Joinery::Adjustment> adjustments;
         };
         std::vector<JointRecord> joints;
+
+        // Folders (improvements item 10). A folder is not a body, so it has
+        // no position in serial.bodies to be named by - folders are numbered
+        // by their own INDEX IN THIS ARRAY instead, which is a closed,
+        // self-contained numbering that needs no ids (ids are session-only
+        // handles - see the header note at the top of this file).
+        // `parentIndex` is an index into `groups` itself, -1 for the root,
+        // and a folder always appears AFTER its own parent so a reader can
+        // build the tree in one pass.
+        struct GroupRecord {
+            std::string name;
+            int parentIndex = -1;
+        };
+        std::vector<GroupRecord> groups;
+        // Which folder each item sits in: bodyGroups[i] is an index into
+        // `groups` for serial.bodies[i], outlineGroups[i] likewise for
+        // serial.outlineFaces[i], -1 for the root. Either may be EMPTY, which
+        // means "everything at the root" - so a file written before folders
+        // existed round-trips as a flat document for free, the same
+        // absent-means-none rule linkGroups and joints already follow.
+        std::vector<int> bodyGroups;
+        std::vector<int> outlineGroups;
+
+        // How each material looks on this furniture - see MaterialLook.
+        // Keyed by NAME rather than by position, unlike everything above it:
+        // a material is not an item in a list this document owns, it is a
+        // thing the app offers, and the name is what both ends already use.
+        std::vector<MaterialLook> materialLooks;
     };
 
     // Walks mySolids/myOutlines in order, building the kernel-side shapes
@@ -590,6 +705,13 @@ private:
         // inside checkpointed commits, so an undo must restore them exactly
         // as they stood - including the joints a deleted body took with it.
         std::vector<Joint> joints;
+        // Folders (improvements item 10) ride in State for the reason the
+        // pairing map, the link groups and the joints do: grouping and
+        // ungrouping happen inside checkpointed commits, so an undo must put
+        // the tree back exactly as it stood - including the folder a deleted
+        // body was in.
+        std::vector<Group> groups;
+        std::map<int, int> itemGroup;
     };
 
     // Drops `id`'s existing pairing, both directions, if it has one. The one
@@ -622,6 +744,15 @@ private:
     // own `joints` field is only ever a snapshot taken of it (checkpoint())
     // or written back into it (undo()/redo()).
     std::vector<Joint> myJoints;
+    // The folder tree - see Group. myItemGroup maps a BODY or OUTLINE id to
+    // the folder it sits in; a folder's own parent lives on the folder.
+    // Neither carries an entry for the root, so "not in the map" IS the root
+    // and there is no second spelling of it.
+    std::vector<Group> myGroups;
+    std::map<int, int> myItemGroup;
+    // See MaterialLook. Keyed by the material's own name, and deliberately
+    // not in State - presentation, persisted, never undone.
+    std::vector<MaterialLook> myMaterialLooks;
     int myNextId = 1;
     // Its own counter, never rolled back by undo - the same rule myNextId
     // itself follows (see the header note at the top of this file): a

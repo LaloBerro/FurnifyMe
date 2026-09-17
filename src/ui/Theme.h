@@ -94,6 +94,17 @@ struct Spec {
     QColor sizesOneBody;
     QColor sizesGroup;
 
+    // THE MEASURING LINE (improvements item 17): the length annotation drawn
+    // along a hovered or selected edge and along the live sketch segment -
+    // the line, its arrows, its extension ticks and the border of its boxed
+    // number. It wore accent() until the user asked for it to be its own
+    // colour, and they were right to: accent marks STATE - what is selected,
+    // what is live, which chip is on - while this is a reading of the wood,
+    // and the two happening to be the same violet made a measurement look
+    // like a selection. Its default IS today's accent, so nothing moves until
+    // somebody picks a colour for it.
+    QColor dimensionLine;
+
     // Empty means "whatever apply() managed to load", which is the bundled DM
     // Sans when the resource is present and the platform default when it is
     // not. defaultSpec() fills it in with the real family name once apply()
@@ -285,6 +296,7 @@ QColor focusRingMuted(); // same outline, dimmed - a focused widget in a
                         // attention
 QColor highlightHover();    // the viewport's hover tint
 QColor highlightSelected(); // and its selection tint
+QColor dimensionLine();     // the measuring line and its number - see Spec
 QColor sizesOneBody();      // selection sizes around one body - see Spec
 QColor sizesGroup();        // selection sizes around a group - see Spec
 

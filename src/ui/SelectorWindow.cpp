@@ -3,6 +3,7 @@
 #include "FurnitureStore.h"
 #include "IconSet.h"
 #include "InlineRename.h"
+#include "NameFurnitureCard.h"
 #include "Theme.h"
 #include "WindowChrome.h"
 
@@ -506,23 +507,16 @@ SelectorWindow::SelectorWindow(FurnitureStore& store, QWidget* parent)
     myScroll->setWidget(myGrid);
 
     myNewButton = new NewFurnitureCard(myGrid);
-    connect(myNewButton, &QPushButton::clicked, this, [this] {
-        emit createRequested();
-        const QString name = myStore.nextFurnitureName();
-        const QString id = myStore.createFurniture(name);
-        // FurnitureStore::createFurniture() refuses (empty id) when the root
-        // or the furniture's own directory cannot be created - never
-        // swallowed: InitScreen's own furnitureCreateFailed() ruling, moved
-        // in-window since there is no MainWindow toast to route it through
-        // from here.
-        if (id.isEmpty()) {
-            showFailure(tr("Couldn't create %1 — Check that the library folder "
-                          "still exists and isn't read-only")
-                            .arg(name));
-            return;
-        }
-        emit furnitureChosen(id);
-    });
+    // The + card ASKS FOR A NAME now (improvements item 4) instead of making
+    // "Furniture 03" and opening it. The question is the editor's own card,
+    // over this window - one question, one wording, one pair of keys,
+    // wherever a furniture is born. Nothing is created until it is answered,
+    // so Escape leaves no orphan in the library.
+    myNameCard = new NameFurnitureCard(this);
+    connect(myNameCard, &NameFurnitureCard::created, this,
+            &SelectorWindow::createNamedFurniture);
+    connect(myNewButton, &QPushButton::clicked, this,
+            [this] { myNameCard->ask(myStore.nextFurnitureName()); });
 
     applyTheme();
     connect(Theme::notifier(), &Theme::Notifier::changed, this, &SelectorWindow::applyTheme);
@@ -886,10 +880,31 @@ void SelectorWindow::paintEvent(QPaintEvent*)
     painter.fillRect(rect(), Theme::chrome());
 }
 
+void SelectorWindow::createNamedFurniture(const QString& name)
+{
+    emit createRequested();
+    const QString id = myStore.createFurniture(name);
+    // FurnitureStore::createFurniture() refuses (empty id) when the root
+    // or the furniture's own directory cannot be created - never
+    // swallowed: InitScreen's own furnitureCreateFailed() ruling, moved
+    // in-window since there is no MainWindow toast to route it through
+    // from here.
+    if (id.isEmpty()) {
+        showFailure(tr("Couldn't create %1 — Check that the library folder "
+                       "still exists and isn't read-only")
+                        .arg(name));
+        return;
+    }
+    emit furnitureChosen(id);
+}
+
 void SelectorWindow::resizeEvent(QResizeEvent* event)
 {
     QWidget::resizeEvent(event);
     relayoutCards();
+    // The name question is a scrim over this whole window - it re-fits
+    // itself from its own filter on us, and this is the belt for it.
+    if (myNameCard && myNameCard->isAsking()) myNameCard->replace();
 }
 
 void SelectorWindow::closeEvent(QCloseEvent* event)

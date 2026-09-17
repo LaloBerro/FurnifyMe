@@ -939,11 +939,204 @@ ResizeCheck checkResize(const TopoDS_Shape& body, const gp_Dir& axis, double new
     const bool movesHigh = anchor != ResizeAnchor::High;
     const bool movesLow = anchor != ResizeAnchor::Low;
     int found = 0;
-    if (movesHigh && endFaceAlong(body, axis, true, found).IsNull())
-        return refuse(ResizeCheck::EndNotFlat, "resize: no single flat end square to that size");
-    if (movesLow && endFaceAlong(body, axis, false, found).IsNull())
-        return refuse(ResizeCheck::EndNotFlat, "resize: no single flat end square to that size");
+    const bool highPullable = !movesHigh || !endFaceAlong(body, axis, true, found).IsNull();
+    const bool lowPullable = !movesLow || !endFaceAlong(body, axis, false, found).IsNull();
+    if (highPullable && lowPullable) return ResizeCheck::Ok;
+
+    // AN END THAT CANNOT BE PULLED IS NO LONGER A REFUSAL (improvements item
+    // 13). A mitred, chamfered or rounded end is not one flat face square to
+    // the axis, and pulling it would shear the feature off - so the length
+    // comes out of the MIDDLE instead (stretchAlongAxis). What this check
+    // still answers is whether there is a middle to take it out of: the cut
+    // goes through the halfway point, so the board has to be longer than
+    // twice the difference for the piece being copied or removed to be
+    // straight board rather than one of its own ends.
+    if (extent <= 2.0 * std::fabs(delta))
+        return refuse(ResizeCheck::NoStraightPart,
+                      "resize: this shape has no straight part to take the length out of");
     return ResizeCheck::Ok;
+}
+
+// --- the stretch (improvements item 13) -------------------------------------
+//
+// Re-Measure moves an end FACE, which needs that end to be one flat face
+// square to the axis. A mitred, chamfered or rounded end is not, so the tool
+// used to refuse the board outright - and a board with a 45 on one end is
+// exactly the board somebody wants to make 150 shorter.
+//
+// So when the end cannot be pulled, the length is taken out of the MIDDLE
+// instead: cut the board across its straight part, slide the end piece along
+// the axis by the difference, and join the two again. Every feature survives
+// at its own size - a 45 stays 45, an 8 mm chamfer stays 8 mm - and the
+// thickness and depth are untouched, which is the promise re-measure makes
+// everywhere else.
+//
+// It is all booleans against a bounded box, never a half-space: a half-space
+// would also take anything of the body lying beyond the plane well away from
+// this board (the mitre tool's own ruling, one file over).
+namespace {
+
+// Defined further down this file (the mitre frame's own helper): the range of
+// a shape's vertices projected on a direction. Declared here rather than
+// moved, so the one implementation stays where its own neighbours are.
+void vertexRange(const TopoDS_Shape& shape, const gp_Dir& axis, double& lo, double& hi);
+
+// A solid slab covering the body's whole cross-section, between `from` and
+// `to` measured along `axis` - the cutting tool every step below commons
+// against.
+TopoDS_Shape axisSlab(const TopoDS_Shape& body, const gp_Dir& axis, double from, double to)
+{
+    if (!(to > from)) return TopoDS_Shape();
+    // Any two directions square to the axis; which two does not matter, since
+    // the slab is grown past the body in both.
+    // Any direction square to the axis: cross it with whichever world axis it
+    // is least parallel to, so the cross product is never degenerate.
+    const gp_Dir world = std::fabs(axis.Z()) < 0.9 ? gp_Dir(0.0, 0.0, 1.0) : gp_Dir(1.0, 0.0, 0.0);
+    const gp_Dir u = axis.Crossed(world);
+    const gp_Dir v = axis.Crossed(u);
+
+    double uLo = 0.0, uHi = 0.0, vLo = 0.0, vHi = 0.0;
+    vertexRange(body, u, uLo, uHi);
+    vertexRange(body, v, vLo, vHi);
+    if (uHi < uLo || vHi < vLo) return TopoDS_Shape();
+    // A margin proportional to the body, so no slab face ever lands coplanar
+    // with a body face it merely touches.
+    const double margin = 10.0 + (uHi - uLo) + (vHi - vLo);
+
+    const gp_Pnt corner(u.XYZ() * (uLo - margin) + v.XYZ() * (vLo - margin) +
+                        axis.XYZ() * from);
+    // gp_Ax2's Y is Z x X, so with Z = axis and X = u the box runs along
+    // axis x u = v - which is the third axis of the same frame.
+    const gp_Ax2 axes(corner, axis, u);
+    BRepPrimAPI_MakeBox maker(axes, (uHi - uLo) + 2.0 * margin, (vHi - vLo) + 2.0 * margin,
+                              to - from);
+    maker.Build();
+    return maker.IsDone() ? maker.Shape() : TopoDS_Shape();
+}
+
+TopoDS_Shape partOf(const TopoDS_Shape& body, const gp_Dir& axis, double from, double to)
+{
+    const TopoDS_Shape slab = axisSlab(body, axis, from, to);
+    if (slab.IsNull()) return TopoDS_Shape();
+    const BooleanResult common = applyBoolean(BooleanKind::Common, body, slab);
+    return common.ok ? common.shape : TopoDS_Shape();
+}
+
+TopoDS_Shape movedAlong(const TopoDS_Shape& shape, const gp_Dir& axis, double distance)
+{
+    if (shape.IsNull()) return shape;
+    gp_Trsf move;
+    move.SetTranslation(gp_Vec(axis) * distance);
+    const BooleanResult moved = transformShape(shape, move);
+    return moved.ok ? moved.shape : TopoDS_Shape();
+}
+
+}  // namespace
+
+BooleanResult stretchAlongAxis(const TopoDS_Shape& body, const gp_Dir& axis, double delta)
+{
+    BooleanResult out;
+    if (body.IsNull()) {
+        out.error = "stretch: body is null";
+        return out;
+    }
+    if (std::fabs(delta) < kResizeNoChange) {
+        out.ok = true;
+        out.shape = body;
+        return out;
+    }
+
+    try {
+        double lo = 0.0, hi = 0.0;
+        vertexRange(body, axis, lo, hi);
+        if (hi - lo < 1.0e-6) {
+            out.error = "stretch: the body has no length along that side";
+            return out;
+        }
+
+        // THE CUT GOES THROUGH THE MIDDLE, which is the part of a board least
+        // likely to carry a feature: the ends are where mitres, chamfers and
+        // rounds live, and anything else this cut lands on is still a
+        // straight section as long as the board's own profile does not change
+        // there. The result is checked against the size that was asked for
+        // below, so a cut that lands somewhere it should not be reports
+        // rather than shipping a wrong board.
+        const double cut = 0.5 * (lo + hi);
+
+        // The low part stays where it is; the high part slides by `delta`.
+        // Which END that leaves standing still is the ANCHOR's business, and
+        // the caller shifts the whole result afterwards - one convention
+        // here, three anchors there.
+        TopoDS_Shape low;
+        if (delta > 0.0) {
+            // Growing: the new material is a copy of the straight slab just
+            // below the cut, moved up into the gap. It is a piece of this
+            // very board, so its cross-section IS the board's - no section
+            // face to build and no chance of one being built wrong.
+            if (cut - delta <= lo + 1.0e-6) {
+                out.error = "stretch: there is not enough straight board to grow from";
+                return out;
+            }
+            low = partOf(body, axis, lo - 1.0, cut);
+            const TopoDS_Shape filler = movedAlong(partOf(body, axis, cut - delta, cut), axis, delta);
+            if (low.IsNull() || filler.IsNull()) {
+                out.error = "stretch: the board could not be cut across its middle";
+                return out;
+            }
+            const BooleanResult joined = applyBoolean(BooleanKind::Fuse, low, filler);
+            if (!joined.ok) {
+                out.error = "stretch: " + joined.error;
+                return out;
+            }
+            low = joined.shape;
+        } else {
+            // Shrinking: the low part simply stops `delta` earlier, and the
+            // high part comes back to meet it.
+            if (cut + delta <= lo + 1.0e-6) {
+                out.error = "stretch: that size is shorter than the board's own ends";
+                return out;
+            }
+            low = partOf(body, axis, lo - 1.0, cut + delta);
+            if (low.IsNull()) {
+                out.error = "stretch: the board could not be cut across its middle";
+                return out;
+            }
+        }
+
+        const TopoDS_Shape high = movedAlong(partOf(body, axis, cut, hi + 1.0), axis, delta);
+        if (high.IsNull()) {
+            out.error = "stretch: the board could not be cut across its middle";
+            return out;
+        }
+
+        const BooleanResult joined = applyBoolean(BooleanKind::Fuse, low, high);
+        if (!joined.ok) {
+            out.error = "stretch: " + joined.error;
+            return out;
+        }
+        if (countSolids(joined.shape) != 1) {
+            out.error = "stretch: the result is not one body";
+            return out;
+        }
+        // THE RESULT IS MEASURED, not assumed. The cut is placed at the
+        // middle on the expectation that the middle is straight; if it was
+        // not - a shape that tapers, or one whose ends reach past halfway -
+        // the board that comes out is not the length that was asked for, and
+        // a wrong board reported as a success is the one outcome this file
+        // forbids.
+        double newLo = 0.0, newHi = 0.0;
+        vertexRange(joined.shape, axis, newLo, newHi);
+        if (std::fabs((newHi - newLo) - ((hi - lo) + delta)) > 1.0e-3) {
+            out.error = "stretch: this shape has no straight part to take the length out of";
+            return out;
+        }
+        out.ok = true;
+        out.shape = joined.shape;
+        return out;
+    } catch (const Standard_Failure& e) {
+        out.error = std::string("stretch: ") + e.GetMessageString();
+        return out;
+    }
 }
 
 BooleanResult resizeAlongAxis(const TopoDS_Shape& body, const gp_Dir& axis, double newExtentMm,
@@ -981,6 +1174,49 @@ BooleanResult resizeAlongAxis(const TopoDS_Shape& body, const gp_Dir& axis, doub
             steps.push_back({true, 0.5 * delta});
             steps.push_back({false, 0.5 * delta});
             break;
+    }
+
+    // WHICH MECHANISM: pulling an end face is exact and is what re-measure has
+    // always done, so it stays the path whenever both ends this anchor moves
+    // are flat and square. When one is not - a mitre, a chamfer, a rounded
+    // end - the difference is taken out of the middle instead, and every
+    // feature comes through at its own size (improvements item 13).
+    {
+        int found = 0;
+        const bool movesHigh = anchor != ResizeAnchor::High;
+        const bool movesLow = anchor != ResizeAnchor::Low;
+        const bool pullable = (!movesHigh || !endFaceAlong(body, axis, true, found).IsNull()) &&
+                              (!movesLow || !endFaceAlong(body, axis, false, found).IsNull());
+        if (!pullable) {
+            // The stretch keeps the LOW end still, so the whole result is
+            // shifted afterwards to put the anchor where the caller asked
+            // for it - one convention in the geometry, three anchors here.
+            const BooleanResult stretched = stretchAlongAxis(body, axis, delta);
+            if (!stretched.ok) {
+                out.error = stretched.error;
+                return out;
+            }
+            double shift = 0.0;
+            switch (anchor) {
+                case ResizeAnchor::Low: shift = 0.0; break;
+                case ResizeAnchor::Centre: shift = -0.5 * delta; break;
+                case ResizeAnchor::High: shift = -delta; break;
+            }
+            if (std::fabs(shift) > kResizeNoChange) {
+                gp_Trsf move;
+                move.SetTranslation(gp_Vec(axis) * shift);
+                const BooleanResult moved = transformShape(stretched.shape, move);
+                if (!moved.ok) {
+                    out.error = "resize: " + moved.error;
+                    return out;
+                }
+                out.shape = moved.shape;
+            } else {
+                out.shape = stretched.shape;
+            }
+            out.ok = true;
+            return out;
+        }
     }
 
     TopoDS_Shape current = body;
@@ -1567,6 +1803,355 @@ MeasuredBox measuredBox(const std::vector<TopoDS_Shape>& shapes)
     out.height = ext[h];
     out.worldAligned = worldAligned;
     return out;
+}
+
+// --- Slats (improvements item 11) --------------------------------------------
+
+namespace {
+
+// The layout, in one place, so checkSlats(), slatsOnFace() and slatsOnArea()
+// cannot disagree about how many slats there are or where they sit. `extent`
+// is the face's own extent along the axis they REPEAT on.
+//
+// Count first, pitch second: the count is what the asked-for width and gap
+// buy, and the pitch is then stretched so the two end slats land flush with
+// the ends of the face. The gap that falls out is the asked-for gap or a hair
+// more - never less, which would be a panel that does not fit.
+struct SlatLayout {
+    int count = 0;
+    double pitch = 0.0;   // low edge to low edge
+};
+
+SlatLayout layOutSlats(double extent, double width, double gap)
+{
+    SlatLayout out;
+    if (width <= 0.0 || extent < width - 1.0e-9) return out;
+    out.count = static_cast<int>(std::floor((extent + gap) / (width + gap) + 1.0e-9));
+    if (out.count < 1) return out;
+    out.pitch = out.count > 1 ? (extent - width) / (out.count - 1) : 0.0;
+    return out;
+}
+
+// The three orthonormal axes are a basis, so a point is the sum of its three
+// projections. Everything below measures in projections (a dot product
+// against a direction, from the world origin) and builds points this way -
+// the same arithmetic mitreFrame() uses to put its pivot on an edge.
+gp_Pnt pointFromProjections(const gp_Dir& a, double da, const gp_Dir& b, double db,
+                            const gp_Dir& c, double dc)
+{
+    return gp_Pnt(a.XYZ() * da + b.XYZ() * db + c.XYZ() * dc);
+}
+
+// The face's frame: outward, the axis the slats REPEAT along, the axis they
+// RUN along, and the rectangle in those two. `along` is always
+// `outward x repeat`, which is what lets a slat be built from a gp_Ax2 whose
+// Y direction the kernel derives for itself.
+struct SlatFrame {
+    gp_Dir outward{0.0, 0.0, 1.0};
+    gp_Dir repeat{1.0, 0.0, 0.0};
+    gp_Dir along{0.0, 1.0, 0.0};
+    double rLo = 0.0, rHi = 0.0;
+    double sLo = 0.0, sHi = 0.0;
+    double planeOffset = 0.0;   // the face plane's own projection on `outward`
+};
+
+// `u`/`v` are the plane's two in-plane axes with v = outward x u, and
+// `repeatOnU` says which of them the slats repeat along. The caller decides
+// that - the face path from the face's own proportions, the rebuild path from
+// the rectangle it measured earlier - so this function never guesses.
+SlatFrame frameFor(const gp_Dir& outward, const gp_Dir& u, double uLo, double uHi, double vLo,
+                   double vHi, bool repeatOnU, double planeOffset)
+{
+    const gp_Dir v = outward.Crossed(u);
+
+    SlatFrame frame;
+    frame.outward = outward;
+    frame.planeOffset = planeOffset;
+    if (repeatOnU) {
+        frame.repeat = u;
+        frame.along = v;   // = outward x u
+        frame.rLo = uLo;
+        frame.rHi = uHi;
+        frame.sLo = vLo;
+        frame.sHi = vHi;
+    } else {
+        // outward x v = outward x (outward x u) = -u, so the run axis is u
+        // reversed and its range is negated with it.
+        frame.repeat = v;
+        frame.along = u.Reversed();
+        frame.rLo = vLo;
+        frame.rHi = vHi;
+        frame.sLo = -uHi;
+        frame.sHi = -uLo;
+    }
+    return frame;
+}
+
+bool slatSizesInRange(const SlatPlan& plan)
+{
+    if (!std::isfinite(plan.width) || !std::isfinite(plan.gap) || !std::isfinite(plan.depth))
+        return false;
+    if (plan.width < 1.0 || plan.width > 1000.0) return false;
+    if (plan.gap < 0.0 || plan.gap > 1000.0) return false;
+    if (plan.depth < 0.5 || plan.depth > 1000.0) return false;
+    return true;
+}
+
+SlatResult refuseSlats(const std::string& why)
+{
+    SlatResult result;
+    result.ok = false;
+    result.error = why;
+    return result;
+}
+
+SlatResult slatsOnFrame(const SlatFrame& frame, const SlatPlan& plan)
+{
+    const SlatLayout layout = layOutSlats(frame.rHi - frame.rLo, plan.width, plan.gap);
+    if (layout.count < 1) return refuseSlats("slats: not one slat fits across this face");
+
+    SlatResult result;
+    result.slats.reserve(static_cast<std::size_t>(layout.count));
+    const double run = frame.sHi - frame.sLo;
+    for (int i = 0; i < layout.count; ++i) {
+        const double r0 = layout.count > 1
+                              ? frame.rLo + layout.pitch * i
+                              : frame.rLo + 0.5 * ((frame.rHi - frame.rLo) - plan.width);
+        const gp_Pnt corner = pointFromProjections(frame.repeat, r0, frame.along, frame.sLo,
+                                                   frame.outward, frame.planeOffset);
+        const gp_Ax2 axes(corner, frame.outward, frame.repeat);
+        BRepPrimAPI_MakeBox maker(axes, plan.width, run, plan.depth);
+        maker.Build();
+        if (!maker.IsDone()) return refuseSlats("slats: the kernel could not build a slat");
+        result.slats.push_back(maker.Shape());
+    }
+    result.ok = true;
+    return result;
+}
+
+// The face's frame, or false with a reason. The outward normal comes from
+// pullFace()'s own derivation - the flag as a guess, then the classifier
+// probe a mirrored twin needs - so slats stand OUT of a mirrored panel too.
+bool slatFrameForFace(const TopoDS_Shape& body, const TopoDS_Face& face, bool runAcross,
+                      SlatFrame& out, std::string* why)
+{
+    if (body.IsNull() || face.IsNull()) return refuseFrame(why, "slats: body or face is null");
+    if (!faceBelongsToBody(body, face))
+        return refuseFrame(why, "slats: face does not belong to the body");
+
+    const BRepAdaptor_Surface surface(face);
+    if (surface.GetType() != GeomAbs_Plane)
+        return refuseFrame(why, "slats: face is not flat");
+
+    const gp_Dir outward = outwardPlane(body, face, surface).Axis().Direction();
+    gp_Dir u;
+    if (!faceOwnAxis(face, outward, u))
+        return refuseFrame(why, "slats: face has no straight extent to measure");
+    const gp_Dir v = outward.Crossed(u);
+
+    double uLo = 0.0, uHi = 0.0, vLo = 0.0, vHi = 0.0;
+    vertexRange(face, u, uLo, uHi);
+    vertexRange(face, v, vLo, vHi);
+    if (uHi - uLo < 1.0e-6 || vHi - vLo < 1.0e-6)
+        return refuseFrame(why, "slats: face has no area to fill");
+
+    // They RUN along the face's shorter extent and REPEAT along its longer
+    // one - a wide front in vertical slats, which is what the reference
+    // photograph of this feature is. runAcross swaps it for the case the
+    // geometry cannot guess: a tall narrow door in horizontal slats.
+    const bool repeatOnU = ((uHi - uLo) >= (vHi - vLo)) != runAcross;
+    const double planeOffset = surface.Plane().Location().XYZ().Dot(outward.XYZ());
+    out = frameFor(outward, u, uLo, uHi, vLo, vHi, repeatOnU, planeOffset);
+    return true;
+}
+
+// One of a measured box's three axes / extents by index, so the run below can
+// walk them rather than writing every comparison three times.
+gp_Dir boxAxis(const MeasuredBox& box, int index)
+{
+    return index == 0 ? box.widthAxis : (index == 1 ? box.depthAxis : box.heightAxis);
+}
+double boxExtent(const MeasuredBox& box, int index)
+{
+    return index == 0 ? box.width : (index == 1 ? box.depth : box.height);
+}
+
+}  // namespace
+
+SlatCheck checkSlats(const TopoDS_Shape& body, const TopoDS_Face& face, const SlatPlan& plan,
+                     int* countOut, std::string* why)
+{
+    if (countOut) *countOut = 0;
+    if (!slatSizesInRange(plan)) {
+        if (why) *why = "slats: width, gap or depth is out of range";
+        return SlatCheck::SizeOutOfRange;
+    }
+    SlatFrame frame;
+    if (!slatFrameForFace(body, face, plan.runAcross, frame, why)) return SlatCheck::NotAFlatFace;
+
+    const SlatLayout layout = layOutSlats(frame.rHi - frame.rLo, plan.width, plan.gap);
+    if (layout.count < 1) {
+        if (why) *why = "slats: not one slat fits across this face";
+        return SlatCheck::NoneFit;
+    }
+    if (countOut) *countOut = layout.count;
+    return SlatCheck::Ok;
+}
+
+SlatResult slatsOnFace(const TopoDS_Shape& body, const TopoDS_Face& face, const SlatPlan& plan)
+{
+    if (!slatSizesInRange(plan))
+        return refuseSlats("slats: width, gap or depth is out of range");
+    try {
+        SlatFrame frame;
+        std::string why;
+        if (!slatFrameForFace(body, face, plan.runAcross, frame, &why)) return refuseSlats(why);
+        return slatsOnFrame(frame, plan);
+    } catch (const Standard_Failure& e) {
+        return refuseSlats(std::string("slats: ") + e.GetMessageString());
+    }
+}
+
+SlatResult slatsOnArea(const SlatArea& area, const SlatPlan& plan)
+{
+    if (!slatSizesInRange(plan))
+        return refuseSlats("slats: width, gap or depth is out of range");
+    try {
+        // A SlatArea's own convention: u is the axis the slats RUN along and
+        // v the one they repeat along, which is how slatRunFromBodies()
+        // writes it. runAcross swaps that, so flipping the direction on a
+        // rebuild re-runs them the other way inside the same rectangle.
+        const gp_Dir outward = area.plane.Axis().Direction();
+        const gp_Dir u = area.plane.Position().XDirection();
+        const gp_Dir v = outward.Crossed(u);
+        // The rectangle is in OFFSETS from the plane's own location, while a
+        // frame measures absolute projections - so the plane's own
+        // projections are added back here.
+        const double planeOffset = area.plane.Location().XYZ().Dot(outward.XYZ());
+        const double uOrigin = area.plane.Location().XYZ().Dot(u.XYZ());
+        const double vOrigin = area.plane.Location().XYZ().Dot(v.XYZ());
+        const SlatFrame frame =
+            frameFor(outward, u, uOrigin + area.uLo, uOrigin + area.uHi, vOrigin + area.vLo,
+                     vOrigin + area.vHi, /*repeatOnU=*/plan.runAcross, planeOffset);
+        return slatsOnFrame(frame, plan);
+    } catch (const Standard_Failure& e) {
+        return refuseSlats(std::string("slats: ") + e.GetMessageString());
+    }
+}
+
+bool slatRunFromBodies(const std::vector<TopoDS_Shape>& slats, SlatPlan& plan, SlatArea& area)
+{
+    // Two is the fewest that can name a pitch, and a pitch is what makes a
+    // run a run rather than two battens that happen to be parallel.
+    if (slats.size() < 2) return false;
+
+    // Every slat is measured in its OWN sides (measuredBox), so a run on a
+    // panel turned 30 degrees reads its real width and depth rather than a
+    // world box's idea of them - the bug class this project has paid for most
+    // often.
+    std::vector<MeasuredBox> boxes;
+    boxes.reserve(slats.size());
+    for (const TopoDS_Shape& slat : slats) {
+        if (slat.IsNull()) return false;
+        const MeasuredBox box = measuredBox({slat});
+        if (!box.ok) return false;
+        boxes.push_back(box);
+    }
+
+    // All the same size, within a tenth of a millimetre. A run somebody has
+    // since edited one slat of is no longer a run this tool can rebuild, and
+    // rebuilding it anyway would silently throw that edit away.
+    const double tol = 0.1;
+    const MeasuredBox& first = boxes.front();
+    for (const MeasuredBox& box : boxes) {
+        for (int axis = 0; axis < 3; ++axis) {
+            if (std::fabs(boxExtent(box, axis) - boxExtent(first, axis)) > tol) return false;
+        }
+    }
+
+    // The line the centres sit on, taken from the two furthest apart.
+    gp_Pnt lo = first.centre;
+    gp_Pnt hi = first.centre;
+    double longest = 0.0;
+    for (std::size_t i = 0; i < boxes.size(); ++i) {
+        for (std::size_t j = i + 1; j < boxes.size(); ++j) {
+            const double d = boxes[i].centre.Distance(boxes[j].centre);
+            if (d > longest) {
+                longest = d;
+                lo = boxes[i].centre;
+                hi = boxes[j].centre;
+            }
+        }
+    }
+    if (longest < 1.0e-6) return false;
+    const gp_Dir repeat(gp_Vec(lo, hi));
+
+    // Which of the slat's own three axes the centres march along.
+    int repeatAxis = -1;
+    double best = 0.0;
+    for (int axis = 0; axis < 3; ++axis) {
+        const double alignment = std::fabs(boxAxis(first, axis).Dot(repeat));
+        if (alignment > best) {
+            best = alignment;
+            repeatAxis = axis;
+        }
+    }
+    if (repeatAxis < 0 || best < 0.999) return false;   // centres not along a slat's own axis
+
+    // Every centre on that one line, at one pitch. Sorted by their projection,
+    // so a folder whose rows were reordered still reads as a run.
+    std::vector<double> at;
+    at.reserve(boxes.size());
+    for (const MeasuredBox& box : boxes) {
+        const gp_Vec offset(lo, box.centre);
+        const double across = offset.Dot(gp_Vec(repeat));
+        if ((offset - gp_Vec(repeat) * across).Magnitude() > tol) return false;
+        at.push_back(across);
+    }
+    std::sort(at.begin(), at.end());
+    const double pitch = (at.back() - at.front()) / static_cast<double>(at.size() - 1);
+    if (pitch < 1.0e-6) return false;
+    for (std::size_t i = 1; i < at.size(); ++i) {
+        if (std::fabs((at[i] - at[i - 1]) - pitch) > tol) return false;
+    }
+
+    // Of the two axes left, the longer extent is the RUN and the shorter is
+    // the DEPTH - that is what makes a batten a batten.
+    int runAxis = -1;
+    int depthAxis = -1;
+    for (int axis = 0; axis < 3; ++axis) {
+        if (axis == repeatAxis) continue;
+        if (runAxis < 0) runAxis = axis;
+        else depthAxis = axis;
+    }
+    if (runAxis < 0 || depthAxis < 0) return false;
+    if (boxExtent(first, depthAxis) > boxExtent(first, runAxis)) std::swap(runAxis, depthAxis);
+
+    plan.width = boxExtent(first, repeatAxis);
+    plan.gap = std::max(0.0, pitch - plan.width);
+    plan.depth = boxExtent(first, depthAxis);
+    // The rectangle is written with u as the run axis, which IS the area's own
+    // convention - so a rebuild of what is there needs no swap.
+    plan.runAcross = false;
+
+    // The plane they stand ON is their own back face. The depth axis points
+    // along the depth but its sign is the measured box's, so `outward` is
+    // resolved by stepping half a depth off the centre line and calling that
+    // the back: both signs give the same plane, and the normal is then made
+    // to point the way the slats stand.
+    const gp_Dir depthDir = boxAxis(first, depthAxis);
+    const gp_Pnt centre((lo.XYZ() + hi.XYZ()) * 0.5);
+    const gp_Pnt back(centre.XYZ() - depthDir.XYZ() * (plan.depth * 0.5));
+    const double runExtent = boxExtent(first, runAxis);
+    const double repeatExtent = (at.back() - at.front()) + plan.width;
+    // gp_Ax3(origin, normal, xDirection): the x direction is the run axis, so
+    // the plane's own (u, v) read (run, repeat) exactly as the area promises.
+    area.plane = gp_Pln(gp_Ax3(back, depthDir, boxAxis(first, runAxis)));
+    area.uLo = -0.5 * runExtent;
+    area.uHi = 0.5 * runExtent;
+    area.vLo = -0.5 * repeatExtent;
+    area.vHi = 0.5 * repeatExtent;
+    return true;
 }
 
 static int countOf(const TopoDS_Shape& shape, TopAbs_ShapeEnum type)

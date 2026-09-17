@@ -358,7 +358,12 @@ bool DimensionRenderer::show(const gp_Pnt& from, const gp_Pnt& to, const gp_Dir&
 
     Handle(DimensionLines) linesObj = new DimensionLines();
     linesObj->lines = segs;
-    linesObj->colour = toOcct(myStyle.lineColour ? myStyle.lineColour() : Theme::accent());
+    // Theme::dimensionLine(), not accent() (improvements item 17): a
+    // measurement is a reading of the wood, and accent is what marks state.
+    // The selection sizes still pass their OWN token through myStyle, which
+    // is what that hook is for.
+    linesObj->colour =
+        toOcct(myStyle.lineColour ? myStyle.lineColour() : Theme::dimensionLine());
     if (myLayer != Graphic3d_ZLayerId_UNKNOWN) linesObj->SetZLayer(myLayer);
     myContext->Display(linesObj, 0, -1, Standard_False);   // mode -1: feedback only, never pickable
     myObjects.push_back(linesObj);
@@ -392,7 +397,8 @@ bool DimensionRenderer::show(const gp_Pnt& from, const gp_Pnt& to, const gp_Dir&
         boxed->halfWidthPx = 0.5 * textWidth + 8.0;
         boxed->halfHeightPx = 11.0;
         boxed->fill = toOcct(Theme::panel());
-        boxed->border = toOcct(myStyle.lineColour ? myStyle.lineColour() : Theme::accent());
+        boxed->border =
+            toOcct(myStyle.lineColour ? myStyle.lineColour() : Theme::dimensionLine());
         boxed->ink = toOcct(Theme::text());
         boxed->SetTransformPersistence(
             new Graphic3d_TransformPers(Graphic3d_TMF_ZoomRotatePers, mid));

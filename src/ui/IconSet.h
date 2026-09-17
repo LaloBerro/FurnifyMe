@@ -70,6 +70,13 @@ enum class Glyph {
     Maximize,    // an empty frame
     Restore,     // two offset frames
     Close,       // the X
+    // Folders (improvements item 10): the twisty on a folder row in the
+    // Items drawer, and the folder mark beside its name. Two glyphs rather
+    // than one rotated, because icon() bakes a pixmap per glyph and a
+    // rotation would need a transform every caller would have to remember.
+    ChevronRight,   // a folder that is collapsed
+    ChevronDown,    // a folder that is open
+    Folder,         // a tabbed folder outline
 };
 
 // Returns an icon with Normal and Disabled modes already filled in.

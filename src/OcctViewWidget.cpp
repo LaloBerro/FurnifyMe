@@ -33,6 +33,9 @@
 #include <Aspect_TypeOfMarker.hxx>
 #include <Bnd_Box.hxx>
 #include <BRepBndLib.hxx>
+#include <BRepBuilderAPI_MakeEdge.hxx>
+#include <BRepBuilderAPI_MakeWire.hxx>
+#include <gp_Circ.hxx>
 #include <BRepBuilderAPI_MakeFace.hxx>
 #include <BRepPrimAPI_MakeBox.hxx>
 #include <Graphic3d_ArrayOfPoints.hxx>
@@ -58,7 +61,11 @@
 #include <Graphic3d_TransformPers.hxx>
 #include <Graphic3d_Vec2.hxx>
 #include <Graphic3d_ZLayerSettings.hxx>
+#include <V3d_ImageDumpOptions.hxx>
+#include <Graphic3d_BufferType.hxx>
+#include <Graphic3d_TypeOfBackground.hxx>
 #include <Image_AlienPixMap.hxx>
+#include <Image_Format.hxx>
 #include <Message.hxx>
 #include <NCollection_HArray1.hxx>
 // The GL-hosting half of the bridge. These pull in OCCT's own OpenGL enum and
@@ -112,6 +119,8 @@
 #include <QOpenGLContext>
 #include <QSet>
 #include <QTemporaryFile>
+#include <QGuiApplication>
+#include <QKeyEvent>
 #include <QTimer>
 #include <QVariantAnimation>
 #include <QWheelEvent>
@@ -915,6 +924,29 @@ void OcctViewWidget::initializeViewer()
         Graphic3d_ZLayerId layer = Graphic3d_ZLayerId_UNKNOWN;
         if (myViewer->InsertLayerAfter(layer, settings, after)) mySketchLayer = layer;
     }
+    // THE DRAWING ITSELF GOES ONE HIGHER, and always over the furniture
+    // (improvements item 8: "sketch should be always on top"). The layer
+    // above depth-tests, which is right for everything that is part of the
+    // SCENE - the mirror plane, the ghost of a body being edited - and wrong
+    // for the line the user is drawing right now: an outline traced across a
+    // cabinet vanished into it, and a drawing you cannot see is not a
+    // drawing. No depth test, no depth write, and Immediate for the
+    // shadow-map reason every custom overlay layer here carries.
+    {
+        Graphic3d_ZLayerSettings settings;
+        settings.SetName("FurnifyMe sketch on top");
+        settings.SetClearDepth(Standard_False);
+        settings.SetEnableDepthTest(Standard_False);
+        settings.SetEnableDepthWrite(Standard_False);
+        settings.SetRaytracable(Standard_False);
+        settings.SetRenderInDepthPrepass(Standard_False);
+        settings.SetImmediate(Standard_True);
+        const Graphic3d_ZLayerId under = mySketchLayer != Graphic3d_ZLayerId_UNKNOWN
+                                             ? mySketchLayer
+                                             : Graphic3d_ZLayerId_Default;
+        Graphic3d_ZLayerId layer = Graphic3d_ZLayerId_UNKNOWN;
+        if (myViewer->InsertLayerAfter(layer, settings, under)) mySketchTopLayer = layer;
+    }
     // A FOURTH layer, above every one of them, for the transform gizmo alone.
     //
     // A gizmo is fully visible over the geometry it stands on, always - that is
@@ -1048,7 +1080,12 @@ void OcctViewWidget::initializeViewer()
     // than one this constructor quietly disagrees with.
     if (!myViewerOnly) {
         myDimension.attach(myContext);
-        myDimension.setZLayer(mySketchLayer);
+        // With the drawing, not under it: the live segment's own length is
+        // part of the sketch (improvements item 8), and a hovered edge's
+        // label reads over the body it measures rather than inside it.
+        myDimension.setZLayer(mySketchTopLayer != Graphic3d_ZLayerId_UNKNOWN
+                                  ? mySketchTopLayer
+                                  : mySketchLayer);
         myPullArrow.attach(myContext);
         myBevelArrow.attach(myContext);
         myMoveGizmo.attach(myContext);
@@ -1673,7 +1710,7 @@ void OcctViewWidget::displayOutline(int id, const TopoDS_Face& face)
     // (outline) at two moments of its life.
     presentation->SetWidth(Theme::sketchLineWidthPx());
     // Above the work-plane grid it lies exactly on top of - see sketchZLayer().
-    markInSketchLayer(presentation);
+    markOnTopOfBodies(presentation);
     // Selection mode -1: never pickable. Outlines are handled from the drawer
     // this phase, and a shape the user can select but cannot Union, Pull or
     // bevel would be a selection that makes every gizmo predicate lie.
@@ -1758,6 +1795,19 @@ void OcctViewWidget::markInSketchLayer(const Handle(AIS_InteractiveObject)& obje
     object->SetZLayer(mySketchLayer);
 }
 
+void OcctViewWidget::markOnTopOfBodies(const Handle(AIS_InteractiveObject)& object) const
+{
+    // The always-visible half of the sketch work - see the layer's own
+    // comment. Falls back to the depth-tested sketch layer if this viewer
+    // could not create it, so a failure costs the always-on-top property and
+    // never the drawing itself.
+    if (object.IsNull()) return;
+    if (mySketchTopLayer != Graphic3d_ZLayerId_UNKNOWN)
+        object->SetZLayer(mySketchTopLayer);
+    else
+        markInSketchLayer(object);
+}
+
 void OcctViewWidget::setPreview(const TopoDS_Shape& shape, bool shaded)
 {
     initializeViewer();
@@ -1775,7 +1825,7 @@ void OcctViewWidget::setPreview(const TopoDS_Shape& shape, bool shaded)
     myPreview->SetWidth(Theme::sketchLineWidthPx());
     // The in-progress outline and the closed face are drawn above the
     // work-plane grid they sit exactly on top of - see sketchZLayer().
-    markInSketchLayer(myPreview);
+    markOnTopOfBodies(myPreview);
     // Selection mode -1: feedback only, never pickable.
     myContext->Display(myPreview, shaded ? AIS_Shaded : AIS_WireFrame, -1, Standard_False);
     scheduleRedraw();
@@ -3200,7 +3250,7 @@ void OcctViewWidget::setSketchPointMarkers(const std::vector<gp_Pnt>& points)
         Handle(SketchPointMarker) dot =
             makeMarker(p, SketchMarkerShape::Disc, kPlacedDotPx,
                        toOcctColor(Theme::sketchPointMarker()), ratio);
-        markInSketchLayer(dot);
+        markOnTopOfBodies(dot);
         myContext->Display(dot, 0, -1, Standard_False);
         myPlacedMarkers.push_back(dot);
     }
@@ -3223,7 +3273,7 @@ void OcctViewWidget::setSketchPointMarkers(const std::vector<gp_Pnt>& points)
     Handle(SketchPointMarker) square =
         makeMarker(points.front(), SketchMarkerShape::Square, kStartSquarePx,
                    toOcctColor(Theme::accent()), ratio);
-    markInSketchLayer(square);
+    markOnTopOfBodies(square);
     myContext->Display(square, 0, -1, Standard_False);
     // ON TOP of its dot by priority, not by display order. The two sprites
     // stand at the same depth, so whichever OCCT draws second wins, and it
@@ -3276,7 +3326,7 @@ void OcctViewWidget::setSketchCursorMarker(const gp_Pnt& point)
     Handle(SketchPointMarker) cursor =
         makeMarker(point, SketchMarkerShape::Ring, kCursorRingPx,
                    toOcctColor(Theme::sketchPointMarker()), devicePixelRatioF());
-    markInSketchLayer(cursor);
+    markOnTopOfBodies(cursor);
     myContext->Display(cursor, 0, -1, Standard_False);
     myCursorMarker = cursor;
     scheduleRedraw();
@@ -4267,6 +4317,147 @@ void OcctViewWidget::setSelectedSolids(const std::vector<int>& ids)
     emit selectionChanged();
 }
 
+QSize OcctViewWidget::renderExportPixels() const
+{
+    const QPoint deviceSize =
+        const_cast<OcctViewWidget*>(this)->toDevicePixels(QPoint(width(), height()));
+    const int deviceW = std::max(1, deviceSize.x());
+    const int deviceH = std::max(1, deviceSize.y());
+    int height = 0;
+    switch (myRenderExportSize) {
+        case ExportSize::Height720: height = 720; break;
+        case ExportSize::Height1080: height = 1080; break;
+        case ExportSize::Height1440: height = 1440; break;
+        case ExportSize::Height2160: height = 2160; break;
+        case ExportSize::Viewport: break;
+    }
+    // Viewport keeps what this app has always exported: twice the viewport's
+    // own device pixels, which is a real improvement in detail over what is
+    // on screen and costs nothing to frame.
+    if (height <= 0) return QSize(deviceW * 2, deviceH * 2);
+    // The WIDTH follows the viewport's aspect. An export that forced 16:9
+    // onto a square window would show more or less of the room than the user
+    // framed, and framing is the whole of what a render is.
+    const int width = std::max(1, static_cast<int>(std::lround(
+                                      static_cast<double>(height) * deviceW / deviceH)));
+    return QSize(width, height);
+}
+
+bool OcctViewWidget::renderExportSizeApplies() const
+{
+    // EVERY TIER honours it now. It did not when the export on the
+    // path-traced tier was the on-screen buffer; dumpOffscreen() accumulates
+    // into a buffer of the requested size instead, so the size a user picks
+    // is the size they get on Deep as well.
+    return true;
+}
+
+bool OcctViewWidget::dumpOffscreen(const QString& path, const QSize& pixels, bool withAlpha)
+{
+    if (myView.IsNull() || pixels.width() < 1 || pixels.height() < 1) return false;
+    const Handle(Graphic3d_CView) view = myView->View();
+    if (view.IsNull()) return false;
+
+    Handle(Standard_Transient) fbo = view->FBOCreate(pixels.width(), pixels.height());
+    if (fbo.IsNull()) return false;
+    view->SetFBO(fbo);
+
+    // The camera's aspect follows the buffer, or a 16:9 export of a square
+    // window would show more of the room than the user framed. Restored
+    // below, because the on-screen view is about to get its own back.
+    const Standard_Real hadAspect = myView->Camera()->Aspect();
+    myView->Camera()->SetAspect(static_cast<Standard_Real>(pixels.width()) / pixels.height());
+
+    // ONE redraw for a tier that draws the whole picture in one; the export
+    // accumulation budget for the tier that does not. The passes land in the
+    // SAME buffer, which is the whole reason this function exists.
+    const int passes =
+        myRenderTier == RenderTier::PathTracing ? kMeasurementSettlePasses * 2 : 1;
+    for (int i = 0; i < passes; ++i) myView->Redraw();
+
+    // SIZED FIRST, and this is what the first build missed: BufferDump()
+    // reads the buffer INTO an image that already has a format and a size -
+    // it allocates nothing - so an empty pixmap fails the dump, and the save
+    // then reported a folder problem for a picture that was never taken.
+    // ToPixMap() does this same init internally, which is exactly why the
+    // path that goes around it has to do it here.
+    //
+    // TopDown false because GL reads bottom-up; the dump respects the flag
+    // rather than flipping behind the caller's back.
+    Image_AlienPixMap pixmap;
+    const Image_Format format = withAlpha ? Image_Format_RGBA : Image_Format_RGB;
+    bool saved = false;
+    if (pixmap.InitTrash(format, pixels.width(), pixels.height())) {
+        pixmap.SetTopDown(false);
+        const bool dumped =
+            view->BufferDump(pixmap, withAlpha ? Graphic3d_BT_RGBA : Graphic3d_BT_RGB);
+        saved = dumped && pixmap.Save(path.toUtf8().constData());
+    }
+
+    myView->Camera()->SetAspect(hadAspect);
+    view->SetFBO(Handle(Standard_Transient)());
+    view->FBORelease(fbo);
+    // The on-screen buffer was never touched by any of this - the redraws
+    // above went to the offscreen target - but the path tracer's own
+    // accumulation counter did move, so it is restarted exactly as every
+    // other export on that tier restarts it.
+    if (myRenderTier == RenderTier::PathTracing) {
+        myAccumulationDepth = 0;
+        if (myRenderModeActive) startPathTracingConvergence();
+    }
+    myView->Redraw();
+    return saved;
+}
+
+bool OcctViewWidget::saveCutoutSnapshot(const QString& path)
+{
+    // Called from inside saveSnapshot()'s own GlScope - the context is ours
+    // for the whole of this.
+    if (myView.IsNull() || myContext.IsNull()) return false;
+
+    Handle(OpenGl_GraphicDriver) driver =
+        Handle(OpenGl_GraphicDriver)::DownCast(myViewer->Driver());
+    if (driver.IsNull()) return false;
+
+    // THE FLOOR GOES, and with it the shadow it was catching: a cut-out is
+    // the furniture, and a shadow with nothing to fall on is a grey smear in
+    // mid-air.
+    const bool hadFloor = !myRenderFloor.IsNull();
+    if (hadFloor) hideRenderFloor();
+
+    // ALPHA WRITES ON for the duration. The driver is built with
+    // buffersOpaqueAlpha - "colour buffer will be kept opaque", OpenGl_Caps'
+    // own words - which is right for everything else this app draws: every
+    // measured pixel in the render calibration is read out of that buffer,
+    // and a meaningful alpha there would make each of those numbers depend on
+    // what happened to be behind them. It comes off for this one dump and
+    // goes straight back.
+    const bool hadOpaqueAlpha = driver->ChangeOptions().buffersOpaqueAlpha;
+    driver->ChangeOptions().buffersOpaqueAlpha = Standard_False;
+
+    // AND THE BACKGROUND IS TURNED OFF, which is the half the first build
+    // missed: alpha writes alone only mean the buffer CAN carry alpha, and
+    // the view still cleared it with an opaque backdrop, so the export came
+    // back with the backdrop painted over the transparency. Graphic3d_TOB_NONE
+    // is "no background at all" - nothing is drawn behind the furniture, so
+    // the clear stands at alpha zero.
+    const Graphic3d_TypeOfBackground hadBackgroundType = myView->View()->BackgroundType();
+    myView->View()->SetBackgroundType(Graphic3d_TOB_NONE);
+
+    // Through the OFFSCREEN buffer, which accumulates across redraws - so a
+    // cut-out on the path-traced tier is the same converged picture every
+    // other export on that tier gets, rather than the single-sample
+    // near-black silhouette the first build produced (ToPixMap() renders and
+    // reads in one call, which on a progressive tier is one sample).
+    const bool saved = dumpOffscreen(path, renderExportPixels(), /*withAlpha=*/true);
+
+    driver->ChangeOptions().buffersOpaqueAlpha = hadOpaqueAlpha;
+    myView->View()->SetBackgroundType(hadBackgroundType);
+    if (hadFloor) showRenderFloor();
+    myView->Redraw();
+    return saved;
+}
+
 bool OcctViewWidget::saveSnapshot(const QString& path)
 {
     // Pixels before this returns, so the GL context has to be OURS for the
@@ -4278,6 +4469,12 @@ bool OcctViewWidget::saveSnapshot(const QString& path)
     myView->Redraw();
 
     if (!myRenderModeActive) return myView->Dump(path.toUtf8().constData()) == Standard_True;
+
+    // THE CUT-OUT: the furniture alone, on transparency. Taken before every
+    // tier branch below, because what it produces is the same picture on any
+    // tier - the floor and the backdrop are what it leaves out, and neither
+    // is a tier's business.
+    if (myRenderCutout) return saveCutoutSnapshot(path);
 
     // Render mode doubles the export - the view's own DEVICE-pixel size
     // (toDevicePixels()'s own conversion, so a 150% display's screenshot is
@@ -4309,6 +4506,14 @@ bool OcctViewWidget::saveSnapshot(const QString& path)
     // the only alternative on offer was twice the resolution of the wrong
     // image.
     if (myRenderTier == RenderTier::PathTracing) {
+        // A CHOSEN SIZE IS HONOURED HERE TOO, which it was not on the first
+        // build: the branch below exports the on-screen buffer, which is the
+        // window's size and nothing else, so picking 1440 produced a
+        // 1200x800 file. With an offscreen buffer that survives several
+        // redraws, the accumulation happens at the requested size instead -
+        // the reason this tier had to fall back no longer holds.
+        if (myRenderExportSize != ExportSize::Viewport)
+            return dumpOffscreen(path, renderExportPixels(), /*withAlpha=*/false);
         awaitPathTracingConvergence();
         const bool ok = myView->Dump(path.toUtf8().constData()) == Standard_True;
         // READING THE BUFFER EMPTIES IT, and the user is still looking at it.
@@ -4332,9 +4537,12 @@ bool OcctViewWidget::saveSnapshot(const QString& path)
         return ok;
     }
 
-    const QPoint deviceSize = toDevicePixels(QPoint(width(), height()));
+    // The size the user asked for - see setRenderExportSize(). Viewport is
+    // the old behaviour (twice the viewport's own device pixels) and is still
+    // the default.
+    const QSize target = renderExportPixels();
     Image_AlienPixMap pixmap;
-    if (!myView->ToPixMap(pixmap, deviceSize.x() * 2, deviceSize.y() * 2)) return false;
+    if (!myView->ToPixMap(pixmap, target.width(), target.height())) return false;
     return pixmap.Save(path.toUtf8().constData());
 }
 
@@ -4484,6 +4692,15 @@ void OcctViewWidget::setCameraStateNow(const CameraState& state)
 {
     myCamera.setState(state);
     applyCameraState();
+}
+
+bool OcctViewWidget::animationsEnabledFor(const QWidget* child)
+{
+    for (const QWidget* w = child; w; w = w->parentWidget()) {
+        if (const auto* view = qobject_cast<const OcctViewWidget*>(w))
+            return view->animationsEnabled();
+    }
+    return true;
 }
 
 void OcctViewWidget::fitAll()
@@ -4858,17 +5075,30 @@ void OcctViewWidget::showRenderFloor()
     // Big enough that its edge stays out of frame at any orbit that looks
     // down on the furniture at all - only a near-horizontal camera ever sees
     // a horizon, and a studio shot is not taken lying on the floor.
-    const double half = std::max({xmax - xmin, ymax - ymin, 100.0}) * 4.0;
+    const double radius = std::max({xmax - xmin, ymax - ymin, 100.0}) * 4.0;
     const gp_Pnt centre((xmin + xmax) / 2.0, (ymin + ymax) / 2.0,
                         // A hair below the lowest body, not exactly at it: a
                         // body resting at Z = 0 would otherwise be coplanar
                         // with the floor across its whole underside, and a
                         // depth tie is a coin toss per pixel.
                         zmin - 0.1);
+    // A DISC, not a square (the user's own call). The square's edge was a
+    // straight line across the shot the moment the camera came down toward
+    // the horizon, and its CORNERS reached half again as far as its sides -
+    // so which way you orbited decided how far the ground appeared to go. A
+    // circle reaches the same distance in every direction, which is what a
+    // studio ground is: the same everywhere, ending nowhere in particular.
+    const gp_Ax2 axes(centre, gp_Dir(0.0, 0.0, 1.0));
+    const TopoDS_Edge rim = BRepBuilderAPI_MakeEdge(gp_Circ(axes, radius)).Edge();
     const TopoDS_Face face =
         BRepBuilderAPI_MakeFace(gp_Pln(centre, gp_Dir(0.0, 0.0, 1.0)),
-                                -half, half, -half, half)
+                                BRepBuilderAPI_MakeWire(rim).Wire())
             .Face();
+    // Meshed at a deflection proportional to its own size, so the rim is a
+    // circle rather than a polygon at any furniture scale - an untessellated
+    // or coarsely tessellated face is the one thing CLAUDE.md warns draws
+    // wrong rather than not at all.
+    ModelingOps::tessellate(face, std::max(0.5, radius / 400.0));
 
     myRenderFloor = new AIS_Shape(face);
     // The material half is per-tier - fix round 2's scoping ruling. Reads
@@ -5667,6 +5897,27 @@ OcctViewWidget::LightRigProbe OcctViewWidget::lightRigProbe() const
     return probe;
 }
 
+void OcctViewWidget::setRenderMaterialLook(double red, double green, double blue,
+                                          double brightness)
+{
+    const double r = std::clamp(red, 0.0, 1.0);
+    const double g = std::clamp(green, 0.0, 1.0);
+    const double b = std::clamp(blue, 0.0, 1.0);
+    const double k = std::clamp(brightness, 0.25, 2.0);
+    if (r == myMaterialRed && g == myMaterialGreen && b == myMaterialBlue &&
+        k == myMaterialBrightness)
+        return;
+    myMaterialRed = r;
+    myMaterialGreen = g;
+    myMaterialBlue = b;
+    myMaterialBrightness = k;
+    // Only render mode draws these materials at all, so outside it there is
+    // nothing to re-apply and nothing to redraw.
+    if (!myRenderModeActive) return;
+    applyRenderBodyMaterials();
+    scheduleRedraw();
+}
+
 void OcctViewWidget::applyRenderBodyMaterials()
 {
     if (myContext.IsNull()) return;
@@ -5688,17 +5939,44 @@ void OcctViewWidget::applyRenderBodyMaterials()
     // 0.55/0.0 this used to carry - their defaults reproduce those two
     // literals exactly, so a session that never opens the render settings
     // card gets the identical look this always shipped.
+    // THE FURNITURE'S OWN TONE for this material, brightness folded in - see
+    // setRenderMaterialLook(). The literals it replaced are exactly this
+    // struct's defaults, so a furniture that has never been told otherwise
+    // gets the identical material this always shipped.
+    const auto toned = [this](double base) {
+        return std::clamp(base * myMaterialBrightness, 0.0, 1.0);
+    };
+    const Quantity_Color lookColour(toned(myMaterialRed), toned(myMaterialGreen),
+                                    toned(myMaterialBlue), Quantity_TOC_RGB);
+    // Wood keeps its near-white under-texture as the BASE - the grain is
+    // multiplied by it, and a brown-times-brown red-shifts the oak (measured)
+    // - but the look's brightness still scales it, which is how a wood is
+    // made darker or lighter without touching its colour.
+    const Quantity_Color woodColour(
+        std::clamp(kWoodUnderTexture.Red() * myMaterialBrightness, 0.0, 1.0),
+        std::clamp(kWoodUnderTexture.Green() * myMaterialBrightness, 0.0, 1.0),
+        std::clamp(kWoodUnderTexture.Blue() * myMaterialBrightness, 0.0, 1.0),
+        Quantity_TOC_RGB);
+
     Graphic3d_MaterialAspect material(Graphic3d_NameOfMaterial_UserDefined);
-    material.SetColor(myRenderWood ? kWoodUnderTexture
-                                   : Quantity_Color(0.70, 0.70, 0.68, Quantity_TOC_RGB));
+    material.SetColor(myRenderWood ? woodColour : lookColour);
     Graphic3d_PBRMaterial pbr;
     // Wood swaps the albedo and nothing else - roughness and metal stay the
     // user's own sliders, so a satin-varnished or a raw plank both remain
     // one drag away. NEAR-WHITE, not kWoodTone: the path tracer multiplies
     // the sampled grain by this albedo, and a brown-times-brown red-shifted
     // the user's oak (measured against the Shadows tier's correct colour).
-    pbr.SetColor(myRenderWood ? kWoodUnderTexture
-                              : Quantity_Color(0.55, 0.55, 0.53, Quantity_TOC_RGB));
+    // The PBR albedo is deliberately darker than the Phong colour (0.55
+    // against 0.70 at the defaults - see this function's own note), so the
+    // look is applied as that same RATIO of it rather than as a second set of
+    // numbers that could drift from the first.
+    constexpr double kPbrOfPhong = 0.55 / 0.70;
+    pbr.SetColor(myRenderWood
+                     ? woodColour
+                     : Quantity_Color(std::clamp(lookColour.Red() * kPbrOfPhong, 0.0, 1.0),
+                                      std::clamp(lookColour.Green() * kPbrOfPhong, 0.0, 1.0),
+                                      std::clamp(lookColour.Blue() * kPbrOfPhong, 0.0, 1.0),
+                                      Quantity_TOC_RGB));
     pbr.SetMetallic(static_cast<float>(myRenderMetallic));
     pbr.SetRoughness(static_cast<float>(myRenderRoughness));
     material.SetPBRMaterial(pbr);
@@ -6605,31 +6883,11 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
     // The pull arrow owns LEFT drags that start on it, and nothing else -
     // RMB orbit and MMB pan pass straight through above, so grabbing the
     // arrow never costs the user the camera.
-    // Ctrl is the lock gesture and is not a grab, scoped exactly as
-    // mouseDoubleClickEvent() scopes the same exemption. Without it the lock's
-    // first press armed a pull drag on the way past: the release ended a drag
-    // that had moved nothing, which fell through to an ordinary pick and
-    // deselected the very face the gesture was aimed at.
-    //
-    // THE EXEMPTION IS THE PULL ARROW'S ALONE, and it is scoped by WHERE it is
-    // written rather than by what it names. It used to be scoped by naming
-    // face mode, so that the bevel arrow one branch down - where Ctrl means
-    // nothing - kept its guard whole; with the modes gone that reason no
-    // longer parses, and `lockGesture` is now true for Ctrl in auto whatever
-    // is under the cursor. What keeps the bevel branch whole is that it does
-    // not consult `lockGesture` at all: it is guarded on Shift only, so a
-    // Ctrl press on a bevel arrow still claims the bevel drag exactly as it
-    // always did. mouseDoubleClickEvent() carries the matching guard for the
-    // double-click half - see its own comment on why Ctrl keeps the arrow
-    // guard there while a plain double-click gives it up.
-    const bool lockGesture = (event->modifiers() & Qt::ControlModifier) &&
-                             (mySelectionMode == SelectionMode::Face ||
-                              mySelectionMode == SelectionMode::Auto);
     // Declared here rather than beside the bevel branch that first needed it:
     // three screen-space handles now read it, and a modifier the FIRST of them
     // consults has to be in scope before the first of them.
     const bool additivePress = (event->modifiers() & Qt::ShiftModifier) != 0;
-    if (event->button() == Qt::LeftButton && !mySketchMode && !lockGesture &&
+    if (event->button() == Qt::LeftButton && !mySketchMode &&
         arrowHit(myPullArrow, myLastPos)) {
         // The press CLAIMS the gesture whether or not the drag maths can
         // measure it yet. It used to claim it only when
@@ -6743,7 +7001,7 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
     // lock's gesture and never a grab - the pull arrow's own exemption, and
     // the arms of a gizmo standing at a body's centre cross that body's faces
     // exactly where a user aims to lock one.
-    if (event->button() == Qt::LeftButton && !mySketchMode && !additivePress && !lockGesture &&
+    if (event->button() == Qt::LeftButton && !mySketchMode && !additivePress &&
         myMoveGizmo.isShowing()) {
         const int axis = moveGizmoAxisAt(myLastPos);
         if (axis >= 0) {
@@ -6764,7 +7022,7 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
     // drag's zero is the press's own vector from the pivot in the ring's
     // plane; a press whose ray runs too flat to the plane anchors on the
     // first move that can be measured instead, beginAxisDrag()'s own rule.
-    if (event->button() == Qt::LeftButton && !mySketchMode && !additivePress && !lockGesture &&
+    if (event->button() == Qt::LeftButton && !mySketchMode && !additivePress &&
         myRotateGizmo.isShowing()) {
         const int axis = rotateGizmoAxisAt(myLastPos);
         if (axis >= 0) {
@@ -6801,7 +7059,7 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
     // The Scale gizmo's press claim. The drag is the Move drag's own maths -
     // a parameter along the frozen arm line - read out as a factor of the
     // arm's length at the press instead of as millimetres.
-    if (event->button() == Qt::LeftButton && !mySketchMode && !additivePress && !lockGesture &&
+    if (event->button() == Qt::LeftButton && !mySketchMode && !additivePress &&
         myScaleGizmo.isShowing()) {
         const int axis = scaleGizmoAxisAt(myLastPos);
         if (axis >= 0) {
@@ -6824,10 +7082,123 @@ void OcctViewWidget::mousePressEvent(QMouseEvent* event)
 
 }
 
+namespace {
+// The flythrough's own numbers (improvements item 6). Speed is a FRACTION OF
+// THE CAMERA'S DISTANCE per second, not a number of millimetres: the same key
+// has to feel the same on a 300 mm shelf and a 3 m wardrobe, and distance is
+// the only scale the camera itself carries. Shift multiplies it, as Unity's
+// does. The tick is 16 ms so the walk is a smooth glide rather than a series
+// of hops - it only runs while a key is actually held.
+constexpr double kFlyPerSecond = 1.1;
+constexpr double kFlyFastFactor = 3.0;
+constexpr int kFlyTickMs = 16;
+}  // namespace
+
+bool OcctViewWidget::isFlyKey(int key) const
+{
+    switch (key) {
+        case Qt::Key_W:
+        case Qt::Key_A:
+        case Qt::Key_S:
+        case Qt::Key_D:
+        case Qt::Key_Q:
+        case Qt::Key_E: return true;
+        default: return false;
+    }
+}
+
+void OcctViewWidget::keyPressEvent(QKeyEvent* event)
+{
+    // Only while the orbit button is down. That single term is what keeps
+    // Mirror on S and Extrude on E: outside a right drag these keys never
+    // reach this branch at all.
+    if (myOrbiting && isFlyKey(event->key()) && !event->isAutoRepeat()) {
+        myFlyKeys.insert(event->key());
+        if (!myFlyTimer) {
+            myFlyTimer = new QTimer(this);
+            myFlyTimer->setInterval(kFlyTickMs);
+            connect(myFlyTimer, &QTimer::timeout, this, &OcctViewWidget::stepFly);
+        }
+        if (!myFlyTimer->isActive()) myFlyTimer->start();
+        event->accept();
+        return;
+    }
+    QOpenGLWidget::keyPressEvent(event);
+}
+
+void OcctViewWidget::keyReleaseEvent(QKeyEvent* event)
+{
+    if (!event->isAutoRepeat() && myFlyKeys.erase(event->key()) > 0) {
+        if (myFlyKeys.empty() && myFlyTimer) myFlyTimer->stop();
+        event->accept();
+        return;
+    }
+    QOpenGLWidget::keyReleaseEvent(event);
+}
+
+bool OcctViewWidget::event(QEvent* theEvent)
+{
+    // The claim, and it lasts exactly as long as the right button is held: a
+    // ShortcutOverride accepted here stops QShortcutMap taking the key, which
+    // is the only way a plain S can mean "walk backwards" in a window where it
+    // already means Mirror. Outside a right drag nothing is claimed, so every
+    // shortcut in the app is untouched.
+    if (theEvent->type() == QEvent::ShortcutOverride && myOrbiting) {
+        auto* key = static_cast<QKeyEvent*>(theEvent);
+        if (isFlyKey(key->key()) && (key->modifiers() & ~Qt::ShiftModifier) == Qt::NoModifier) {
+            theEvent->accept();
+            return true;
+        }
+    }
+    return QOpenGLWidget::event(theEvent);
+}
+
+void OcctViewWidget::stepFly()
+{
+    if (myFlyKeys.empty() || !myOrbiting) {
+        if (myFlyTimer) myFlyTimer->stop();
+        myFlyKeys.clear();
+        return;
+    }
+
+    CameraState state = myCamera.state();
+    const double fast = (QGuiApplication::keyboardModifiers() & Qt::ShiftModifier)
+                            ? kFlyFastFactor
+                            : 1.0;
+    const double step = state.distance * kFlyPerSecond * fast * (kFlyTickMs / 1000.0);
+
+    // Along the camera's OWN axes for W/A/S/D - a fly that walked the world's
+    // X and Y would send the camera sideways the moment it was not square to
+    // them - and along the world's Z for Q/E, which is what "up" means to
+    // somebody building furniture that stands on a floor.
+    const gp_Dir look = myCamera.viewDirection();
+    const gp_Dir right = myCamera.rightVector();
+    gp_Vec delta(0.0, 0.0, 0.0);
+    if (myFlyKeys.count(Qt::Key_W)) delta += gp_Vec(look) * step;
+    if (myFlyKeys.count(Qt::Key_S)) delta -= gp_Vec(look) * step;
+    if (myFlyKeys.count(Qt::Key_D)) delta += gp_Vec(right) * step;
+    if (myFlyKeys.count(Qt::Key_A)) delta -= gp_Vec(right) * step;
+    if (myFlyKeys.count(Qt::Key_E)) delta += gp_Vec(0.0, 0.0, 1.0) * step;
+    if (myFlyKeys.count(Qt::Key_Q)) delta -= gp_Vec(0.0, 0.0, 1.0) * step;
+    if (delta.Magnitude() < 1e-9) return;
+
+    // The TARGET is what moves; the eye follows it at the same distance, so a
+    // fly never changes how big the furniture reads and the next orbit turns
+    // about wherever the walk finished. That is the same target pan() moves.
+    state.target.Translate(delta);
+    myCamera.setState(state);
+    applyCameraState();
+}
+
 void OcctViewWidget::mouseReleaseEvent(QMouseEvent* event)
 {
     if (event->button() == Qt::RightButton) {
         myOrbiting = false;
+        // The fly ends with the button that armed it, whatever the keyboard
+        // is doing - a key released after the button would otherwise never be
+        // seen (the claim is down by then) and the camera would walk on.
+        myFlyKeys.clear();
+        if (myFlyTimer) myFlyTimer->stop();
         // A right press and release that did not travel, over a size number,
         // is the Re-Measure gesture. A drag of any consequence is an orbit and
         // says nothing - the camera has already moved, and a menu appearing at
@@ -7336,34 +7707,18 @@ void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
 
     // A second click on either arrow belongs to the arrow, not to whatever the
     // double-click would otherwise mean - the same rule every control over the
-    // viewport follows. It matters most for the two gestures that would move
-    // something the user is not looking at: framing the body, and selecting the
-    // whole body out from under a face or an edge they are mid-drag on.
+    // viewport follows. It matters most for the gesture that would move
+    // something the user is not looking at: selecting the whole body out from
+    // under a face or an edge they are mid-drag on.
     //
-    // ONE gesture is exempt, and only one: Ctrl+double-click in FACE mode, the
-    // lock. An arrow's tail sits at the centre of the face it belongs to, which
-    // is exactly where a user aims when they want to draw on that face - so
-    // with no exemption the lock was unreachable at the most obvious pixel on
-    // its own target, and reaching it meant aiming at a corner. That gesture is
-    // also the one thing on this arrow that no sequence of drags can produce by
-    // accident, which is what the guard is protecting against.
+    // There used to be ONE exemption here, for Ctrl+double-click on a face -
+    // the second route to Lock to Face, which needed it because an arrow's
+    // tail sits at the centre of the face a user aims at to draw on it. That
+    // gesture is REMOVED (the user's call on improvements item 9): locking a
+    // face is L, Shift+L and the Model menu, and a modifier-plus-double-click
+    // that three other routes already cover was not worth the exemption it
+    // cost. Nothing is exempt now.
     //
-    // The exemption is deliberately NOT "Ctrl held": it was written that way
-    // first, and it let Ctrl+double-click in EDGE mode fall through to the
-    // whole-body route below, which switches the selection mode out from under
-    // a live bevel arrow - precisely the case the guard exists for, reachable
-    // by holding a key the edge-mode gesture does not even use. The exemption
-    // names the branch it exists for, so nothing else can inherit it.
-    const bool ctrlHeld = (event->modifiers() & Qt::ControlModifier) != 0;
-    // Auto joins face mode here for the reason the exemption exists at all:
-    // in Auto a face is one of the two things the cursor can be on, so
-    // Ctrl+double-click means exactly what it means in face mode, and the
-    // gesture has to survive an arrow's tail sitting at the face's centre.
-    // The exemption still names the BRANCH rather than the modifier, so
-    // nothing else inherits it.
-    const bool lockGesture = ctrlHeld && (mySelectionMode == SelectionMode::Face ||
-                                          mySelectionMode == SelectionMode::Auto);
-
     // IN AUTO THE GUARD HAS NOTHING LEFT TO GUARD, and Phase 1 flagged this
     // exact pixel. The pull arrow used to need face mode, so a double-click
     // could only meet one while the user was deliberately in it; in Auto a
@@ -7379,11 +7734,8 @@ void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
     // own first press/release pair has already offered it that gesture and
     // been answered (mousePressEvent claims the drag; mouseReleaseEvent ends
     // it and picks nothing). What arrives here is the double-click, and in
-    // Auto that means one thing: the whole body. The two harms the guard was
-    // written against are both gone with the mode - Auto's branch below picks
-    // the body rather than flying the camera to frame it, and there is no
-    // selection mode left for it to yank out from under a live drag.
-    if (onArrow && !lockGesture && mySelectionMode != SelectionMode::Auto) return;
+    // Auto that means one thing: the whole body.
+    if (onArrow && mySelectionMode != SelectionMode::Auto) return;
 
     // (The manipulator-era GizmoPickShield around this MoveTo is gone with
     // the manipulator: the custom gizmos' handles are invisible to the
@@ -7395,44 +7747,9 @@ void OcctViewWidget::mouseDoubleClickEvent(QMouseEvent* event)
     myContext->MoveTo(device.x(), device.y(), myView, Standard_False);
     if (!myContext->HasDetected()) return;
 
-    // CTRL+double-click in face mode means "sketch on this" - the second route
-    // to Lock to Face, alongside the action and its L shortcut. It carried no
-    // modifier until this phase, and it had to give the plain gesture up: a
-    // user working on a face or an edge who wants the whole body back reaches
-    // for a double-click first, and locking the sketch plane instead is a mode
-    // change they did not ask for. Framing the body would be no better - it is
-    // the one gesture that takes the camera away from the face just chosen -
-    // which is why locking keeps the gesture and only gains the modifier.
-    //
-    // The refusal for a non-planar face, and the pending-outline guard, both
-    // live in MainWindow, which owns the toast, not here.
-    if (lockGesture && myContext->HasDetectedShape() &&
-        myContext->DetectedShape().ShapeType() == TopAbs_FACE) {
-        // Select it too, so the actions agree with what was just locked.
-        myContext->SelectDetected(AIS_SelectionScheme_Replace);
-        scheduleRedraw();
-        emit selectionChanged();
-        emit faceDoubleClicked(TopoDS::Face(myContext->DetectedShape()));
-        return;
-    }
-
-    // Past the one exempt branch, an arrow hit is an arrow hit again. A
-    // Ctrl+double-click that got this far is one whose detection was not a
-    // face after all - a body, an edge, the ground - and there is no reason
-    // the modifier should buy it the whole-body route the guard would refuse
-    // to an unmodified click on the same pixel.
-    //
-    // AUTO IS EXEMPT ONLY WITHOUT CTRL, and the difference is the whole point
-    // of the two clauses. A PLAIN double-click means "the whole body" and has
-    // to reach it through an arrow the first click of that same gesture put
-    // under the cursor - that is the guard stand-down the comment above
-    // argues for. A CTRL double-click means "lock this face", nothing else,
-    // and if the detection was not a face it means nothing at all; letting it
-    // fall through here is exactly the harm the exemption's own comment names,
-    // because it takes the whole body out from under a live bevel arrow the
-    // user is standing on. Ctrl keeps the pre-phase guard, in auto as in the
-    // seam modes.
-    if (onArrow && (lockGesture || mySelectionMode != SelectionMode::Auto)) return;
+    // Past this point an arrow hit is an arrow hit again, with no exemption
+    // left to let anything through - see the guard above.
+    if (onArrow && mySelectionMode != SelectionMode::Auto) return;
 
     // In Auto the whole-body pick is performed HERE. There is no selection
     // mode to come back out to and nothing to announce: this is the gesture,

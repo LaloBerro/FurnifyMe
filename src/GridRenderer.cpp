@@ -22,6 +22,11 @@
 #include <cmath>
 
 namespace {
+// How much of its strength the grid keeps when the camera is looking square
+// at its plane - improvements item 7's whole number. Not a Theme token: it is
+// a property of how a grid reads at that angle, not a colour anybody chose,
+// and the grid's own colours already carry the look.
+constexpr double kFaceOnFloor = 0.45;
 
 Quantity_Color toOcct(const QColor& c)
 {
@@ -76,6 +81,7 @@ uniform vec2 uPoolCentre;   // plane (u,v) of the camera's look point
 uniform vec2 uEyeFoot;      // plane (u,v) under the eye
 uniform vec4 uRadii;        // pool start, pool end, graze start, graze end (mm)
 uniform vec2 uSteps;        // minor step, major step (mm)
+uniform float uFaceOnFade;  // 1 = full strength, < 1 = looking square at the plane
 uniform vec4 uMinorColour;  // linear rgb + line half-width in pixels
 uniform vec4 uMajorColour;
 uniform vec4 uAxisXColour;
@@ -139,6 +145,13 @@ void main()
   float fPool = smoothstep(uRadii.x, uRadii.y, distance(p, uPoolCentre));
   float fGraze = smoothstep(uRadii.z, uRadii.w, distance(p, uEyeFoot));
   alpha *= 1.0 - max(fPool, fGraze);
+
+  // Looking straight down at the plane (improvements item 7). Every line is
+  // fully visible at once from there - the grazing fade above is doing
+  // nothing, the pool covers the whole screen - and the drawing behind it
+  // competes with the furniture standing on it. One multiply, per pixel,
+  // computed on the CPU from the view angle and pushed as a uniform.
+  alpha *= uFaceOnFade;
 
   if (alpha <= 0.001) discard;
   occSetFragColor(vec4(colour, alpha));
@@ -279,6 +292,25 @@ bool GridRenderer::update(double cameraDistance, const gp_Pnt& cameraTarget,
                                                float(eyeHeight * 5.0),
                                                float(eyeHeight * 9.0)));
     myProgram->PushVariableVec2("uSteps", Graphic3d_Vec2(float(step), float(major)));
+    // How square the eye is to the plane: 0 looking along it, 1 looking
+    // straight at it. Derived from the eye's own height above the plane
+    // against its distance from the look point, so it is the real geometry
+    // and not the turntable's elevation angle - a locked vertical face gets
+    // the same treatment for free, which is the point of computing it here
+    // rather than in MainWindow.
+    {
+        const gp_Vec toEye(cameraTarget, cameraEye);
+        const double reach = std::max(toEye.Magnitude(), 1.0e-6);
+        const double squareness = std::clamp(eyeHeight / reach, 0.0, 1.0);
+        // Nothing changes until the last 25 degrees (sin 65 = 0.906), then it
+        // ramps down to kFaceOnFloor at dead-on. smoothstep rather than a
+        // linear ramp so the change is never a visible edge as the camera
+        // swings through it.
+        const double t = std::clamp((squareness - 0.906) / (1.0 - 0.906), 0.0, 1.0);
+        const double eased = t * t * (3.0 - 2.0 * t);
+        const double fade = 1.0 - (1.0 - kFaceOnFloor) * eased;
+        myProgram->PushVariableFloat("uFaceOnFade", float(fade));
+    }
     // Linear-space colours (the shader writes linear; the sRGB framebuffer
     // encodes on the way out) with each family's line HALF-width in pixels
     // riding in the alpha slot: minors 1px, majors 1.4px, axes 1.8px wide.

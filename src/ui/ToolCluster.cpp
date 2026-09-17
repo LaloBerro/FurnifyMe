@@ -74,6 +74,13 @@ ToolCluster::ToolCluster(QWidget* parent)
     : QWidget(parent)
 {
     setAttribute(Qt::WA_NoSystemBackground);
+    // A press that lands on this card's own padding - between two chips, or
+    // in the slack a stretched rail leaves - is THIS CARD'S, and it stops
+    // here. Without it Qt propagates the unhandled press to the parent, which
+    // is the viewport: mid-sketch, a click aimed at the card put a point in
+    // the drawing behind it (improvements item 5). Every other card over the
+    // viewport already carried this; these two were the gap.
+    setAttribute(Qt::WA_NoMousePropagation);
     // A cluster IS a floating surface, one of the family the design lists
     // alongside the drawer, the guide, the balloon and the toast - it does
     // not merely hold widgets that are. That was invisible while a cluster

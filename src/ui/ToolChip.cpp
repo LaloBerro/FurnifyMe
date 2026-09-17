@@ -5,7 +5,10 @@
 #include <QAction>
 #include <QFocusEvent>
 #include <QFontMetrics>
+#include "../OcctViewWidget.h"
+
 #include <QPainter>
+#include <QPropertyAnimation>
 #include <QPainterPath>
 
 #include <algorithm>
@@ -17,6 +20,13 @@ constexpr int kPadY = 8;
 constexpr int kGap = 8;
 constexpr int kRadius = 6;
 constexpr double kFocusRingWidth = 2.0;
+// The press dip: how far the card gives way under a press, and how long it
+// takes to get there and back. 4% is the smallest step that reads as movement
+// on a 34px chip (a 1.4px inset all round) without looking like the chip
+// changed size; the duration is deliberately shorter than Theme::motionMs(),
+// because a press is meant to answer the finger rather than transition.
+constexpr double kPressScale = 0.96;
+constexpr int kDipMs = 90;
 // The IconOnly body, per the plan: a 34x34 square of painted card. The glyph
 // inside it stays kIcon, the same 16px every other chip and bar button draws -
 // IconSet renders exact pixmaps at 16/24/32/48, so 16 is a crisp rendering
@@ -65,6 +75,16 @@ void ToolChip::init()
     // than written out once here and again there.
     applyTheme();
     connect(Theme::notifier(), &Theme::Notifier::changed, this, &ToolChip::applyTheme);
+
+    // The press dip (one animation for this chip's whole life, parented and
+    // KeepWhenStopped). Hung off pressed()/released() rather than read from
+    // isDown() at paint time, because the spring back on release is the half
+    // that makes it read as physical, and a released chip paints once.
+    myDip = new QPropertyAnimation(this, "pressScale", this);
+    myDip->setDuration(kDipMs);
+    myDip->setEasingCurve(Theme::motionCurve());
+    connect(this, &QAbstractButton::pressed, this, [this] { dipTo(kPressScale); });
+    connect(this, &QAbstractButton::released, this, [this] { dipTo(1.0); });
 
     if (myAction) {
         connect(this, &QAbstractButton::clicked, myAction, &QAction::trigger);
@@ -163,10 +183,45 @@ QSize ToolChip::sizeHint() const
     return QSize(width + margin * 2, kIcon + kPadY * 2 + margin * 2);
 }
 
+void ToolChip::setPressScale(double scale)
+{
+    if (qFuzzyCompare(scale, myPressScale)) return;
+    myPressScale = scale;
+    update();
+}
+
+void ToolChip::dipTo(double target)
+{
+    if (!myDip) return;
+    myDip->stop();
+    if (!OcctViewWidget::animationsEnabledFor(this)) {
+        // Applied outright, synchronously - the suite measures chip pixels
+        // (token colours at exact corners, gap rows between borders) and
+        // every one of those numbers is taken at a scale of exactly 1.
+        setPressScale(target);
+        return;
+    }
+    myDip->setStartValue(myPressScale);
+    myDip->setEndValue(target);
+    myDip->start(QAbstractAnimation::KeepWhenStopped);
+}
+
 void ToolChip::paintEvent(QPaintEvent* /*event*/)
 {
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
+
+    // The press dip, applied to the PAINT and not to the geometry: everything
+    // below draws in this widget's own coordinates as it always has, and the
+    // transform shrinks the result about the card's centre. At rest the
+    // transform is the identity, so a chip nobody is pressing paints exactly
+    // the pixels it painted before this existed.
+    if (!qFuzzyCompare(myPressScale, 1.0)) {
+        const QPointF centre(rect().center());
+        painter.translate(centre);
+        painter.scale(myPressScale, myPressScale);
+        painter.translate(-centre);
+    }
 
     // `body` is the visible card, inset from this widget's own bounds by
     // Theme::surfaceShadowMargin() - the margin sizeHint() reserved above,

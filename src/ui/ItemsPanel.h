@@ -28,11 +28,13 @@
 //
 // Its visibility is DERIVED from MainWindow's existing Items action and never
 // set from anywhere else; see MainWindow's constructor.
+#include <QPoint>
 #include <QSize>
 #include <QString>
 #include <QStringList>
 #include <QWidget>
 
+#include <set>
 #include <vector>
 
 class DocumentModel;
@@ -85,6 +87,22 @@ public:
                    ? myRowList[index].isOutline
                    : false;
     }
+    // Folder rows (improvements item 10) - the suite asks the same way it
+    // asks about outline rows, and for the same reason: a row's kind decides
+    // what a click on it means.
+    bool rowIsGroupAt(int index) const
+    {
+        return index >= 0 && index < static_cast<int>(myRowList.size())
+                   ? myRowList[index].isGroup
+                   : false;
+    }
+    // How deep in the tree the row sits: 0 at the document's root.
+    int rowDepthAt(int index) const
+    {
+        return index >= 0 && index < static_cast<int>(myRowList.size())
+                   ? myRowList[index].depth
+                   : 0;
+    }
 
     // Highlights the rows for these solids. Called when the viewport selection
     // changes, so the two views of the document never disagree.
@@ -119,6 +137,18 @@ public:
     // MainWindow does both, and is the single place every other checkpointed
     // commit in this app goes through. renameCommitted() is the handoff.
     void beginRenameForItem(int id, bool isOutline);
+    // The same gesture over a FOLDER row. A separate entry point rather than
+    // a third value threaded through the one above: the two report through
+    // different signals, because what MainWindow does with the new name
+    // differs (setItemName against setGroupName), and a caller that got the
+    // flag wrong would rename nothing and say nothing.
+    void beginRenameForGroup(int id);
+    // Whether `groupId` is open in this drawer. Expansion is SESSION state -
+    // where the user last looked, not a property of the furniture - so it
+    // lives here and is persisted nowhere, the same ruling the Settings
+    // drawer's current tab already carries.
+    bool isGroupExpanded(int groupId) const;
+    void setGroupExpanded(int groupId, bool expanded);
 
     // The fixed app copy this panel paints, for the vocabulary sweep -
     // title, tooltips, the empty-state message. Item NAMES are deliberately
@@ -136,6 +166,12 @@ signals:
     // composed answer is re-derived at the one writer.
     void visibilityToggled();
     void solidActivated(int id);
+    // WHAT THE SELECTION SHOULD BE after a click on a body row, worked out
+    // here rather than at the receiving end: plain click replaces, Ctrl
+    // toggles, Shift takes the run of rows between the last click and this
+    // one. The panel is the only thing that knows the row ORDER a Shift-range
+    // is measured in, so it is the only thing that can answer it.
+    void selectionRequested(std::vector<int> ids);
     // An outline row was clicked. A separate signal rather than one id
     // channel with a kind flag: the two do genuinely different things -
     // a body row changes the viewport selection, an outline row changes which
@@ -147,6 +183,28 @@ signals:
     // non-empty. MainWindow is what actually checkpoints, writes the name and
     // reports the toast; this panel only ran the UI gesture.
     void renameCommitted(int id, bool isOutline, QString newName);
+    // A folder row was clicked: MainWindow answers by selecting every body
+    // under it, so everything downstream sees the ordinary body selection it
+    // always saw (see DocumentModel::Group's own comment).
+    void groupActivated(int id);
+    void groupRenameCommitted(int id, QString newName);
+    // A row was dragged onto a folder row (or onto empty space, which is the
+    // root): `targetGroupId` is 0 for the root. MainWindow checkpoints and
+    // performs the move - this panel only ran the gesture, exactly as it does
+    // for a rename.
+    void itemsDropped(std::vector<int> ids, int targetGroupId);
+    // The + button in the title row, and the right-click menu's own entry:
+    // make a folder out of whatever is selected (or an empty one when nothing
+    // is).
+    void newFolderRequested();
+    // The right-click menu's other two, each the same route the Model menu
+    // takes rather than a second implementation.
+    void ungroupRequested();
+    // The folder row's own Delete: the folder AND every body in it, which is
+    // the one thing Ungroup deliberately does not do. Reported rather than
+    // performed - MainWindow owns the checkpoint and the toast that carries
+    // Undo, exactly as it does for a rename.
+    void deleteGroupRequested(int groupId);
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -192,6 +250,13 @@ private:
         // the document again, so a row can never be styled as one kind and
         // toggled as the other.
         bool isOutline = false;
+        // A FOLDER row (improvements item 10). Three kinds now, and each is
+        // carried on the row rather than re-derived by asking the document
+        // again, so a row can never be styled as one kind and acted on as
+        // another.
+        bool isGroup = false;
+        int depth = 0;     // 0 at the document's root
+        class QPushButton* twisty = nullptr;
         QString text;      // what rowTextAt() reports
     };
 
@@ -200,6 +265,22 @@ private:
     class QLabel* myTitle = nullptr;
     QVBoxLayout* myOuter = nullptr;
     QVBoxLayout* myRows = nullptr;
+    // The rows scroll inside the card once there are more of them than fit
+    // (improvements item 12). WITH NO SCROLLBAR DRAWN, by the user's own call:
+    // the bar is turned off rather than styled thin, so the card looks exactly
+    // as it always did and the wheel does the work. A QScrollArea still
+    // scrolls with its bar off - the policy governs the bar, not the area.
+    class QScrollArea* myScroll = nullptr;
+    // The + in the title row: one click makes a folder. It replaced the hover
+    // x this card used to carry - the drawer is closed from its rail chip and
+    // its menu entry, and the corner is worth more as the one control this
+    // list actually needs.
+    class QPushButton* myNewFolder = nullptr;
+    // The tallest the card may grow before the rows start scrolling: a share
+    // of the VIEWPORT's own height, read live, so the answer follows the
+    // window rather than a number picked on one screen. Zero until the card
+    // has a parent to ask.
+    int rowsHeightCap() const;
     // The document's outlines first, then its bodies - the order the rows are
     // built in, which is what rowTextAt(index) reports against.
     std::vector<Row> myRowList;
@@ -216,4 +297,44 @@ private:
     std::vector<int> mySelectedIds;
     int myPendingOutlineId = 0;
     void restyleRows();
+
+    // --- folders (improvements item 10) --------------------------------------
+    // Which folders the user has OPENED. A set of the open ones, not the
+    // closed ones, because folders start FOLDED (the user's own call): a
+    // drawer whose folders all opened themselves is the long list folders
+    // exist to shorten. A folder nothing has an opinion about yet is
+    // therefore closed, and stays closed until its twisty is clicked.
+    std::set<int> myExpanded;
+    // Where a Shift-range starts: the last body row clicked without Shift.
+    int myAnchorRowId = 0;
+    // The selection a click asks for, from the modifiers it was made with.
+    std::vector<int> selectionFor(int id, Qt::KeyboardModifiers mods) const;
+    // The context menu the right button opens over the rows.
+    void showRowMenu(const QPoint& globalPos, int rowId, bool isGroupRow);
+    // Builds `groupId`'s children into the rows, depth first. Recursive: the
+    // tree nests to any depth, and a loop with an explicit stack would be the
+    // same thing written longer.
+    void addItemRow(int id, const QString& itemName, bool visible, bool isOutline, int depth);
+    void addGroupRow(int groupId, const QString& groupName, int depth);
+    void buildGroupRows(int groupId, int depth);
+    // The drag that moves a row into a folder. myDragId is what is being
+    // dragged (0 = nothing), myDragStart where the press landed, and
+    // myDragging only becomes true once the pointer has travelled - a press
+    // that never moves is an ordinary click and must stay one.
+    int myDragId = 0;
+    bool myDragIsGroup = false;
+    // Every row the drag is carrying. A drag that starts on a row which is
+    // part of a multiple selection carries the whole of it - which is what
+    // "grab them and insert them into a folder" means - and one that starts
+    // anywhere else carries just that row.
+    std::vector<int> myDragIds;
+    QPoint myDragStart;
+    bool myDragging = false;
+    // The folder row the pointer is over mid-drag, so it can be marked - 0
+    // for the root (anywhere else in the card). Read by restyleRows().
+    int myDropTarget = 0;
+    // Which folder a point in THIS panel's coordinates would drop into: a
+    // folder row answers itself, an item row answers the folder it sits in,
+    // and anything else is the root.
+    int dropTargetAt(const QPoint& pos) const;
 };

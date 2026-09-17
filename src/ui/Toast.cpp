@@ -15,6 +15,7 @@
 #include <QShowEvent>
 #include <QRect>
 #include <QTimer>
+#include <QPropertyAnimation>
 #include <QVariantAnimation>
 
 #include <algorithm>
@@ -28,6 +29,10 @@ constexpr int kUndoWidth = 64;
 constexpr int kUndoHeight = 26;
 constexpr int kBottomMargin = 24;
 constexpr int kClearance = 8;   // gap left when stepping around the guide
+// How far a message lifts into place as it fades in. Six pixels: enough to
+// read as movement at the fade's own 160 ms, small enough that a card caught
+// at any point of the rise is still plainly where it belongs.
+constexpr int kRisePx = 6;
 
 constexpr int kNoteMs = 4000;
 constexpr int kFailureMs = 8000;
@@ -336,6 +341,12 @@ ToastHost::ToastHost(OcctViewWidget* viewport, QWidget* parent)
     // comment on myFade for why. valueChanged reads myToast live (not a
     // captured pointer) so it is always correct regardless of which fadeTo()
     // call is currently in flight.
+    // The arrival rise (see the header). Built beside the fade, runs with it.
+    myRise = new QPropertyAnimation(this);
+    myRise->setPropertyName("pos");
+    myRise->setDuration(Theme::motionMs());
+    myRise->setEasingCurve(Theme::motionCurve());
+
     myFade = new QVariantAnimation(this);
     myFade->setDuration(Theme::motionMs());
     myFade->setEasingCurve(Theme::motionCurve());
@@ -380,6 +391,10 @@ void ToastHost::show(const QString& text, Toast::Kind kind, bool undo, int docum
     if (kind == Toast::Kind::Note && !myNotesEnabled) return;
 
     myStamp = documentStamp;
+    // Whether this message is ARRIVING or merely replacing the one already
+    // on screen - a replacement must not jump back down six pixels and climb
+    // again, since the card never left.
+    const bool arriving = !myToast->isVisible();
     myToast->setMessage(text, kind, undo);
     reposition();
     myToast->show();
@@ -392,6 +407,19 @@ void ToastHost::show(const QString& text, Toast::Kind kind, bool undo, int docum
     // at), or mid a dismiss() fade-out that this call is interrupting (a
     // smooth reversal back up to fully shown, rather than an abrupt jump).
     fadeTo(1.0, nullptr);
+
+    // The rise rides with the fade, and only on a genuine arrival. Skipped
+    // outright when animations are off, exactly as the fade is - the suite
+    // reads this card's position against the solver's own answer, and a
+    // toast caught mid-rise would be six pixels low.
+    if (arriving && myRise && myViewport && myViewport->animationsEnabled()) {
+        const QPoint home = myToast->pos();
+        myRise->setTargetObject(myToast);
+        myRise->setStartValue(home + QPoint(0, kRisePx));
+        myRise->setEndValue(home);
+        myToast->move(home + QPoint(0, kRisePx));
+        myRise->start(QAbstractAnimation::KeepWhenStopped);
+    }
 
     // Armed here, unconditionally and synchronously - never inside fadeTo()
     // or its callback. A fade must not change when the dismiss countdown
@@ -592,6 +620,11 @@ void ToastHost::reposition()
         y = Theme::snapToDevicePixels(y, origin.y(), dpr);
     }
 
+    // The solver has just answered where this card belongs, so a rise still
+    // in the air is aimed at a position that no longer applies. Stopped
+    // rather than re-aimed: six pixels is not a flight worth rescuing, and
+    // the card is one move away from correct either way.
+    if (myRise) myRise->stop();
     myToast->move(x, y);
 
     // A hint balloon may already be up and have no way to know this toast

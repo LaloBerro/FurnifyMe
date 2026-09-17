@@ -11,6 +11,14 @@ class QFocusEvent;
 
 class ToolChip : public QAbstractButton {
     Q_OBJECT
+    // The press dip: everything this widget paints is scaled about the card's
+    // own centre by this factor while a press is live, so the chip gives way
+    // under the finger and springs back on release. A property rather than a
+    // bare member because QPropertyAnimation is what drives it - one
+    // animation, parented, KeepWhenStopped (CLAUDE.md's DeleteWhenStopped
+    // finding). The card's GEOMETRY never changes: a chip that really
+    // resized would re-lay the rail out on every press.
+    Q_PROPERTY(double pressScale READ pressScale WRITE setPressScale)
 
 public:
     // How a chip presents itself.
@@ -61,6 +69,9 @@ public:
     // asks here rather than at text().
     QString textGlyph() const { return myUsesTextGlyph ? myTextGlyph : QString(); }
 
+    double pressScale() const { return myPressScale; }
+    void setPressScale(double scale);
+
     QAction* action() const { return myAction; }
     ChipMode mode() const { return myMode; }
     QSize sizeHint() const override;
@@ -102,6 +113,10 @@ private:
 
     // Shared construction body for both constructors.
     void init();
+    // Starts the dip toward `target`, or sets it outright when animations are
+    // off (gui_smoke) - the same skip-and-apply ToastHost::fadeTo() makes, so
+    // every pixel the suite measures is measured at a scale of exactly 1.
+    void dipTo(double target);
 
     QAction* myAction = nullptr;
     ChipMode myMode = ChipMode::Labelled;
@@ -114,4 +129,7 @@ private:
     QString myTextGlyph;
     QString myShortcut;
     bool myHovered = false;
+    // 1.0 at rest; kPressScale while held. Painted, never laid out.
+    double myPressScale = 1.0;
+    class QPropertyAnimation* myDip = nullptr;
 };

@@ -9,6 +9,7 @@
 #include "ModelingOps.h"
 
 #include <QMainWindow>
+#include <QStandardPaths>
 
 #include <set>
 
@@ -191,6 +192,52 @@ public:
     // Escape's route, and every derived cancel's: ends the gesture with
     // nothing changed. Safe when nothing is live.
     void cancelReMeasure();
+    // --- slats (improvements item 11) ----------------------------------------
+    // A slatted front: the user picks the flat face of a panel and the tool
+    // fills it with evenly spaced battens standing proud of it. The split is
+    // the one every gesture in this app keeps - ModelingOps owns the layout
+    // (checkSlats/slatsOnFace, Qt-free and headless), this window owns the
+    // gesture's state and its commit, and SlatsTool is the chip that carries
+    // the three numbers and the Enter/Escape claim.
+    //
+    // TWO WAYS IN, one gesture. With a FACE selected it lays a fresh run on
+    // that face. With the BODIES OF ONE FOLDER selected - which is what
+    // clicking a folder row gives - and those bodies reading back as a run
+    // (ModelingOps::slatRunFromBodies), it reopens on the numbers they are
+    // already made of and rebuilds them in place. Nothing is persisted for
+    // that: the slats themselves are the record, measured back when asked,
+    // so a file written before this tool existed opens exactly as it did.
+    void beginSlats();
+    void cancelSlats();
+    // Builds the run for `plan` - the call the commit itself makes, so the
+    // ghost can never promise a shape Enter will not build (bevelPreview()'s
+    // contract).
+    ModelingOps::SlatResult slatsResult(const ModelingOps::SlatPlan& plan) const;
+    // Commits `plan`: one checkpoint, the slats as bodies in a folder of
+    // their own, and a Note carrying Undo. On a rebuild the old slats go and
+    // the new ones take their folder.
+    void slatsApply(const ModelingOps::SlatPlan& plan);
+    // What checkSlats() refuses `plan` for, as this app's own sentence -
+    // mitreRefusalFor()'s contract: ModelingOps answers with a value and only
+    // this function turns it into words.
+    QString slatsRefusalFor(const ModelingOps::SlatPlan& plan) const;
+    // How many slats `plan` would lay, for the chip's count line. 0 when none
+    // would fit.
+    int slatsCountFor(const ModelingOps::SlatPlan& plan) const;
+    bool slatsActive() const { return mySlatsActive; }
+    // Which body the run belongs to - the panel on a fresh run, the first
+    // slat on a rebuild. The chip places itself beside this body's own
+    // selection anchor.
+    int slatsBodyId() const { return mySlatsBodyId; }
+    // The numbers the chip opens on: the defaults on a fresh run, the ones
+    // measured back off the slats on a rebuild.
+    ModelingOps::SlatPlan slatsPlan() const { return mySlatsPlan; }
+    // Where the chip stands: the middle of the face, or of the run.
+    bool slatsAnchor(gp_Pnt& out) const;
+    // Whether beginSlats() would do anything - the action's enabled state,
+    // asked of the one predicate rather than a copy of it.
+    bool canBeginSlats() const;
+
     bool reMeasureActive() const { return myResizeActive; }
     int reMeasureBodyId() const { return myResizeBodyId; }
     int reMeasureSizeIndex() const { return myResizeSizeIndex; }
@@ -223,7 +270,12 @@ public:
     QString reMeasureRefusalFor(double newSizeMm) const;
     // The painted copy, one source each, for the banned-word sweep.
     static QString reMeasureSizeRefusalText();
-    static QString reMeasureEndRefusalText();
+    // Why a stretch refused - see ModelingOps::ResizeCheck::NoStraightPart.
+    // (There was a reMeasureEndRefusalText() beside it until improvements
+    // item 13: a mitred or rounded end used to refuse, and now it is
+    // stretched from the middle instead, so the sentence had nothing left to
+    // report.)
+    static QString reMeasureStraightRefusalText();
     static QString reMeasureKernelRefusalText();
     // Why a right-click on a GROUP's overall size does nothing: a group's box
     // is not any one body's side, and there is no honest answer to "which
@@ -266,6 +318,19 @@ public:
     // same reasons spelled out there, and they are what keep all three
     // disjoint from ExtrudePreview.
     int transformableBodyId() const;
+    // EVERY body the gizmo would transform, not just one. The gizmo used to
+    // require exactly one selected body; it now stands on the whole selection
+    // and moves, turns or scales all of it about one shared pivot - which is
+    // what makes "select three boards, or a folder, or two folders, and move
+    // them" work, since selecting a folder row IS selecting its bodies.
+    //
+    // THE DISJOINTNESS ARGUMENT IS UNCHANGED, and this is why it survives the
+    // widening: the term was never "exactly one body", it was "the selection
+    // is bodies" - a face selection raises the pull arrow, an edge selection
+    // the bevel arrow, and neither can be true at the same time as this. The
+    // one-body cases that genuinely need to stay one (a Mirror placement, a
+    // Re-Measure) keep their own counts.
+    std::vector<int> transformableBodyIds() const;
     bool canTransformSelectedBody() const { return transformableBodyId() > 0; }
 
     // WHICH handle that one body wears. Space cycles it, the status label
@@ -308,6 +373,10 @@ public:
     // factor <= 0, and it will happily build a body 1e-9 of its size or a
     // thousand times it - both of which are a lost body rather than an edit.
     bool transformBody(int id, const gp_Trsf& delta);
+    // The same commit for a whole selection: ONE checkpoint, `delta` applied
+    // to every body about the shared pivot the caller already measured it
+    // against, one toast. transformBody() is the one-body spelling of it.
+    bool transformBodies(const std::vector<int>& ids, const gp_Trsf& delta);
 
     // The OPEN band a single scale gesture may land in - both ends are
     // refused, not merely everything beyond them. Exclusive on purpose: a
@@ -552,6 +621,10 @@ public:
     // and its own creation-time twin if any), one Note toast with Undo
     // naming what was created.
     bool duplicateSelectedBody();
+    // Every body Duplicate would copy - the whole body selection
+    // (improvements item 14). duplicateSourceId() answers with the first of
+    // them, which is what the action's enabled state and its tooltip ask for.
+    std::vector<int> duplicateSourceIds() const;
     // The body that would be copied, or 0 when the gesture is unavailable.
     int duplicateSourceId() const;
     bool canDuplicate() const { return duplicateSourceId() > 0; }
@@ -713,9 +786,6 @@ public:
     // One joint's derivation out of the same cache refreshJoints() reads, so
     // the card and the hardware can never disagree about a number.
     bool jointDerivationOf(int jointId, Joinery::Derivation& out) const;
-    // Where the card stands: the joint's first item, or - for a BROKEN joint,
-    // which still has a kind to switch - the centre of its two pieces together.
-    bool jointAnchor(int jointId, gp_Pnt& out) const;
     // The joint's live contact, measured now, in its own (bodyA, bodyB) order -
     // what the kind menu asks which kinds this contact can take. False, with
     // `out` carrying the refusal, when the pieces cannot be measured.
@@ -1202,6 +1272,30 @@ private slots:
     // call, one Note toast with Undo - the shape every other checkpointed
     // commit in this file follows.
     void onItemRenameCommitted(int id, bool isOutline, QString newName);
+    // --- folders (improvements item 10) --------------------------------------
+    // Model -> Group (Ctrl+G) and Ungroup (Ctrl+Shift+G). A folder is pure
+    // organisation - see DocumentModel::Group - so these do the whole of it:
+    // nothing else in this window reads a folder to decide what it does.
+    // (The two QActions themselves live with the other actions further down -
+    // moc refuses a data member inside a slots section.)
+    void onGroupSelection();
+    void onUngroupSelection();
+    // A folder row was clicked: select every body under it, so everything
+    // downstream sees the ordinary body selection it always saw.
+    void onGroupActivated(int groupId);
+    // The folder row's Delete: the folder, its sub-folders and every body
+    // inside, in one checkpoint with Undo.
+    void onDeleteGroup(int groupId);
+    void onGroupRenameCommitted(int groupId, QString newName);
+    // Rows were dragged onto a folder (0 = the document's root) - every row
+    // the drag was carrying, which is the whole selection when it started on
+    // one of several selected rows.
+    void onItemsDropped(const std::vector<int>& ids, int targetGroupId);
+    // The folder every selected body already shares, or 0 - what Ungroup
+    // acts on and what a fresh Group is created inside, so grouping two
+    // bodies that sit in "Left cabinet" makes a folder INSIDE it rather than
+    // pulling them out to the root.
+    int folderOfSelection() const;
 
     void onExportStep();
     void onSelectionChanged();
@@ -1403,6 +1497,12 @@ private:
     // debounce timer and closeEvent()'s flush - call this rather than carrying
     // a copy of the write each.
     void writeAppearanceNow();
+    // WHERE A SAVE DIALOG OPENS: the folder the last save of this KIND went
+    // to (remembered under `key`), falling back to the platform's own
+    // location for it, with `suggestedName` already filled in.
+    QString saveDialogPath(const QString& key, const QString& suggestedName,
+                           QStandardPaths::StandardLocation fallback) const;
+    static void rememberSaveDialogPath(const QString& key, const QString& path);
     // persistAppearance()'s own shape, for the six render-settings values
     // (Task 7.2) - a no-op under the same myPersistProgress guard, debounced
     // on the same kRenderSettingsWriteMs, restarted by every one of the six
@@ -1681,7 +1781,11 @@ private:
 
     // The unsaved-changes question (improvements item 3, Option A). Which
     // exit asked it: the X quits, Close furniture returns to the library.
-    enum class CloseRoute { Quit, Library };
+    // Which exit asked the unsaved question. NewFurniture is File -> New
+    // furniture (improvements item 3): the same question, but what an answer
+    // carries out is "now ask for a name and open the new one", not "go back
+    // to the library" - the editor never leaves.
+    enum class CloseRoute { Quit, Library, NewFurniture };
     // Shows the question for `route` - exits render mode first, stops the
     // autosave debounce, raises the card. Asked again while it stands, the
     // latest route wins (an X over Close furniture's question means quit).
@@ -1693,6 +1797,36 @@ private:
     void onCloseDiscardChosen();
     void onCloseKeepChosen();
     class UnsavedCloseCard* myCloseCard = nullptr;
+    // --- File -> New furniture (improvements items 3 and 4) ------------------
+    QAction* myNewFurnitureAction = nullptr;
+    // The name question, over this window's own viewport. The library asks
+    // the identical question over its own window - see NameFurnitureCard.
+    class NameFurnitureCard* myNameCard = nullptr;
+    // The loading card - see LoadingCard.h. Only openFurniture() opens it,
+    // and resyncView() ticks it while it is open.
+    class LoadingCard* myLoadingCard = nullptr;
+    // --- how each material looks (per furniture) -----------------------------
+    // The little editor a material tile opens on a double-click. What it
+    // edits is stored on the DOCUMENT (DocumentModel::MaterialLook), so a
+    // look travels with the furniture; this window is what keeps the three -
+    // the card, the document and the viewport - saying the same thing.
+    class MaterialCard* myMaterialCard = nullptr;
+    // WHICH material is live: the wood's own name while a wood is on, and
+    // the nearest preset otherwise. One derivation, because the card, the
+    // store and the viewport all have to agree about which record they are
+    // talking about.
+    QString activeMaterialName() const;
+    // Pushes the live material's stored look into the viewport - after a
+    // material change, after an edit, and after a furniture opens.
+    void applyMaterialLook();
+    void onMaterialEditRequested(const QString& material);
+    void onMaterialLookChanged(const QString& material, const QColor& colour, double brightness);
+    // File -> New furniture: asks about unsaved work first when there is any,
+    // then the name, then creates and opens. Split in three so each half is
+    // reachable from the answer that precedes it.
+    void onNewFurniture();
+    void askNewFurnitureName();
+    void createAndOpenFurniture(const QString& name);
     class FurnitureNameMark* myNameMark = nullptr;
     CloseRoute myCloseRoute = CloseRoute::Library;
     // The revision "Close without saving" threw away, or -1. Both autosave
@@ -1863,13 +1997,44 @@ private:
     double myStartRenderLightAngleDeg = -1.0;   // sentinel: "use the viewport's own default"
     double myStartRenderLightStrength = 2.0;
     QColor myStartRenderBackground;             // invalid = no stored override
-    bool myStartRenderQuick = false;
+    // The persisted render quality, as the plain number it is stored as:
+    // this header only forward-declares OcctViewWidget, and pulling that
+    // whole header in for one enum would be a heavy include for a startup
+    // value applied in exactly one place. buildOverlay() converts it there.
+    int myStartRenderQuality = 2;   // = RenderQuality::Deep
+    bool myStartRenderCutout = false;
+    int myStartRenderExportSize = 0;   // = ExportSize::Viewport
     bool myStartRenderWood = false;
     QString myStartRenderWoodName;
     QString myStartRenderWoodPath;
     double myStartRenderWoodTile = 300.0;
     double myStartRenderWoodAngle = 0.0;
     double myStartRenderFov = 45.0;
+
+public:
+    // The shell's entrance: the app bar drops in from above the viewport's top
+    // edge and the rail slides in from its left, once, when the editor first
+    // appears. Called by main.cpp on the window's first show and by nothing
+    // else - NOT from showEvent(), and not from EditorSelectorHandoff, because
+    // gui_smoke drives the same handoff and its startup-layout checks read
+    // these two cards' positions the instant the window is up. A no-op while
+    // the overlay has not laid out yet, and it always ends by handing the
+    // final say back to ViewportOverlay::relayout().
+    void playShellEntrance();
+
+private:
+    // The entrance flight, parented here and kept when stopped (a
+    // DeleteWhenStopped animation deletes itself on natural completion too,
+    // which dangles a retained pointer). Non-null means it has already played
+    // once for this window.
+    class QParallelAnimationGroup* myShellEntrance = nullptr;
+
+    // The rail slides off the viewport's left edge when render mode hides it,
+    // and back when it returns; this object owns its visibility outright -
+    // see CardSlide.h. The four DRAWERS deliberately do NOT slide: they were
+    // animated and the user asked for it taken off again, so they are back to
+    // a plain derived setVisible() and this is the only card that flies.
+    class CardSlide* myRailSlide = nullptr;
 
     AppBar* myAppBar = nullptr;
     QAction* myAddShapeAction = nullptr;
@@ -1990,6 +2155,25 @@ private:
     // --- joinery (Task 12) ---------------------------------------------------
     // View -> Joints (Ctrl+Alt+J) - the drawer's law, both directions, exactly
     // as myVersionsPanelAction is the versions drawer's.
+    QAction* mySlatsAction = nullptr;
+    // The slats gesture's own state - see beginSlats(). It ends by DERIVATION
+    // in updateActions(), the way the mitre and re-measure gestures do, rather
+    // than by a cancel call at every site that could invalidate it.
+    bool mySlatsActive = false;
+    int mySlatsBodyId = 0;
+    TopoDS_Face mySlatsFace;
+    int mySlatsRevision = -1;
+    // A REBUILD carries the folder whose slats are being replaced and the
+    // rectangle they cover; a fresh run leaves both empty and uses the face.
+    int mySlatsFolderId = 0;
+    std::vector<int> mySlatsBodies;
+    ModelingOps::SlatArea mySlatsArea;
+    bool mySlatsRebuild = false;
+    ModelingOps::SlatPlan mySlatsPlan;
+    bool slatsGestureStillHolds() const;
+    class SlatsTool* mySlatsTool = nullptr;
+    QAction* myGroupAction = nullptr;
+    QAction* myUngroupAction = nullptr;
     QAction* myJointsPanelAction = nullptr;
     class JointsPanel* myJointsPanel = nullptr;
     // See selectedJointId(). 0 = none.
@@ -2073,7 +2257,6 @@ private:
     // QAction of its own to mirror - its text is pushed in on every
     // appStateChanged, exactly as AppBar::setUnitLabel() used to be called.
     ToolCluster* myViewControls = nullptr;
-    class ToolChip* myUnitChip = nullptr;
     QString myCompareVersionName;   // user text - see the badge's own rule
     // The badge and its Close-compare control, parented to myCompareView -
     // owned by Qt's parent-child cascade (destroyed with myCompareView),

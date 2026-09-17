@@ -44,6 +44,16 @@ PanelCloseButton::PanelCloseButton(QAction* action, QWidget* panel)
     }
 }
 
+PanelCloseButton::PanelCloseButton(QWidget* panel, std::function<void()> onClose)
+    : PanelCloseButton(static_cast<QAction*>(nullptr), panel)
+{
+    myOnClose = std::move(onClose);
+    setToolTip(tr("Close this panel"));
+    connect(this, &QAbstractButton::clicked, this, [this] {
+        if (myOnClose) myOnClose();
+    });
+}
+
 void PanelCloseButton::setCornerInset(int px)
 {
     myInset = px;
@@ -78,6 +88,10 @@ bool PanelCloseButton::eventFilter(QObject* watched, QEvent* event)
             syncVisible();
             break;
         case QEvent::Resize:
+        // A panel MOVES as well as resizes now: it slides in from its own
+        // edge (CardSlide), and an x that stayed at the panel's old corner
+        // through the flight would be an x floating over the viewport.
+        case QEvent::Move:
             replace();
             break;
         case QEvent::Show:

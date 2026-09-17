@@ -351,6 +351,11 @@ public:
 
     // The body the gizmo is standing on, or 0.
     int bodyId() const { return myBodyId; }
+    // EVERY body this gizmo is standing on. One drag moves, turns or scales
+    // all of them about one shared pivot - selecting three boards, a folder,
+    // or two folders all arrive here as a body selection, and the gizmo makes
+    // no distinction between them.
+    const std::vector<int>& bodyIds() const { return myBodyIds; }
     bool hasPreview() const { return myHasPreview; }
     // The last distance that actually previewed, in millimetres, along
     // axis() - 0 when no drag is live.
@@ -369,7 +374,10 @@ protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
-    void begin(int bodyId);
+    void begin(const std::vector<int>& bodyIds);
+    // The middle of every body the gizmo is standing on - what Rotate and
+    // Scale turn and scale about, and where the gizmo is drawn.
+    bool sharedPivot(gp_Pnt& out) const;
     void end();
     // Puts the gizmo where the body is RIGHT NOW. The pivot is re-derived from
     // the document on every call rather than remembered: a commit replaces the
@@ -405,7 +413,11 @@ private:
 
     // The body the gizmo stands on, re-derived from the live predicate on
     // every refresh() rather than trusted across a rebuild.
+    // The FIRST of myBodyIds, kept because half this class reads "is there a
+    // body" and the pivot cache is keyed on one id. The list is what the
+    // drag, the ghost and the commit all work from.
     int myBodyId = 0;
+    std::vector<int> myBodyIds;
     // Which arm is being dragged (0/1/2) and the drag's value - millimetres
     // for Move, degrees for Rotate, a factor for Scale (myFactor). All
     // meaningful only while a drag is live.
@@ -425,5 +437,8 @@ private:
     // the document revision, so it can never outlive an edit.
     gp_Pnt myPivotCache;
     int myPivotBodyId = 0;
+    // How many bodies the cached pivot was measured from: the id alone cannot
+    // tell "this board" from "this board and two others".
+    int myPivotCount = 0;
     int myPivotRevision = -1;
 };

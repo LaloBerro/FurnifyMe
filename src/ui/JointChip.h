@@ -79,8 +79,13 @@ public:
     // fields whenever the joint itself changed underneath them (an undo, a
     // commit, a kind switch, the display unit).
     void refresh();
-    // Beside the joint's anchor (its first item, projected). Driven by
-    // OcctViewWidget::cameraChanged.
+    // Re-places the kind menu under the kind button. The CARD's own position
+    // is ViewportOverlay's: this is a docked TopRight card now, stacked in
+    // the column under the view controls, not a chip that follows the joint.
+    // It used to stand beside the joint's own anchor - and a joint's anchor
+    // is the contact BETWEEN two boards, so the card landed dead centre over
+    // the very pieces it describes, which is what the user asked to be rid
+    // of ("having the join ui in the middle does not helps").
     void reposition();
     // Re-places AND re-raises, from ViewportOverlay::laidOut().
     void replace();
@@ -171,8 +176,18 @@ private:
     void relayout();
     void restyleField(Slot slot);
     void syncToggleTexts();
-    void updateAnchor();
     void placeKindMenu();
+    // True while any visible field carries text the user has typed over the
+    // value reseed() last put there - what decides whether Escape takes the
+    // numbers back or closes the card. See cancel().
+    bool fieldsEdited() const;
+    // Asks ViewportOverlay to place this card again - after a resize of its
+    // own (More opening or folding changes its height) and when it is shown
+    // or hidden, since a hidden entry occupies no slot in that column.
+    // Deliberately NOT called from reposition(): relayout() emits laidOut(),
+    // which calls replace(), which calls reposition() - one more hop and that
+    // is a loop.
+    void replaceInOverlay();
     void onKindPicked(Joinery::Kind kind);
     void onFieldEdited(Slot slot);
     QString seedSignature(const DocumentModel::Joint& joint) const;
@@ -195,7 +210,6 @@ private:
     QString myNameA;
     QString myNameB;
     QString mySeed;
-    gp_Pnt myAnchor;
 
     bool myMoreOpen = false;
     int myLayoutCount = 0;
