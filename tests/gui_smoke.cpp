@@ -887,6 +887,7 @@ constexpr BlockInfo kBlocks[] = {
     { "an-orbit-step-costs-one-frame-in-both-modes", false, true },
     { "milestone-5-item-6-edge-and-outline-line-width-rows", false, true },
     { "milestone-5-item-8-plain-duplicate-ctrl-d", false, true },
+    { "ctrl-d-on-a-folder-duplicates-the-folder", false, true },
     { "milestone-5-item-10-autosave-modes-and-timed-saves", false, true },
     { "milestone-5-item-10-autosave-persistence-and-migration", false, true },
     { "auto-selection-phase-1-the-cursor-decides", false, true },
@@ -27044,6 +27045,233 @@ int main(int argc, char* argv[])
                 QCoreApplication::sendEvent(sheet, &escape);
                 settle(120);
             }
+        }
+
+        probe.close();
+    }
+
+
+    // --- Ctrl+D on a FOLDER duplicates the folder ----------------------------
+    //
+    // The user's ask, verbatim: "ctrl+D when a folder is selected should
+    // duplicate the folder". Clicking a folder row selects every body under
+    // it, so a plain duplicate already copied those bodies - straight back
+    // into the SAME folder, which is not what anybody means by duplicating a
+    // folder. What is new is one derivation (duplicateFolderId()) and the
+    // cloning it drives; the copies themselves go through the exact path
+    // improvements item 14 already built, which is why the ordinary
+    // one-body-inside-a-folder case is pinned here too.
+    //
+    // Its own window: this makes folders, and the shared window's row-index
+    // checks count rows.
+    if (blockEnabled("ctrl-d-on-a-folder-duplicates-the-folder")) {
+        RequiredTempDir folderLib;
+        MainWindow probe(nullptr, /*persistProgress=*/false, folderLib.path());
+        probe.setAttribute(Qt::WA_ShowWithoutActivating);
+        probe.resize(1000, 700);
+        probe.show();
+        settle(200);
+        probe.view()->setAnimationsEnabled(false);
+        enterFreshFurniture(probe);
+        OcctViewWidget* fView = probe.view();
+
+        // The drawer stays SHUT for this block. Group opens an inline rename
+        // over the row it just made when the drawer is up, and a live
+        // QLineEdit holding focus is not a thing this block wants between its
+        // checks - it is testing the document, not the rename.
+        QAction* folderItems = action(probe, QStringLiteral("Items"));
+        if (folderItems && folderItems->isChecked()) folderItems->trigger();
+        settle(120);
+
+        // Three bodies, far enough apart that nothing overlaps - this block
+        // runs no boolean, but a degenerate extrude would take the premise of
+        // every check below with it.
+        std::vector<int> bodyIds;
+        const double spots[3][2] = {{0.10, 0.10}, {0.40, 0.10}, {0.10, 0.45}};
+        for (const auto& spot : spots) {
+            trigger(probe, QStringLiteral("Start Sketch"));
+            sketchQuad(probe, spot[0], spot[1], spot[0] + 0.12, spot[1] + 0.12);
+            trigger(probe, QStringLiteral("Finish Sketch"));
+            if (probe.extrudePendingFace(25.0))
+                bodyIds.push_back(probe.document().solids().back().id);
+        }
+        check(bodyIds.size() == 3,
+              QStringLiteral("three bodies for the folder probe (%1)").arg(bodyIds.size()));
+        if (bodyIds.size() != 3) bodyIds.resize(3, 0);
+        const int idA = bodyIds[0], idB = bodyIds[1], idC = bodyIds[2];
+
+        fView->setSelectedSolids({idC});
+        settle(80);
+        check(probe.duplicateFolderId() == 0,
+              "with no folders in the document at all, nothing is a folder duplicate");
+
+        // --- A and B into a folder ------------------------------------------
+        fView->setSelectedSolids({idA, idB});
+        settle(80);
+        check(trigger(probe, QStringLiteral("Group")), "Group puts the two bodies in a folder");
+        settle(150);
+        const int folder = probe.document().groupOf(idA);
+        check(folder > 0 && probe.document().groupOf(idB) == folder,
+              QStringLiteral("both bodies are in the one new folder (%1)").arg(folder));
+
+        // --- the derivation, in both directions -----------------------------
+        // Selecting a folder row IS selecting its bodies, which is why this
+        // can be derived from the selection at all rather than asking the
+        // drawer which row was clicked - and why a partial selection has to
+        // be told apart from a whole one.
+        fView->setSelectedSolids({idA, idB});
+        settle(80);
+        check(probe.duplicateFolderId() == folder,
+              "the whole folder selected - the gesture knows which folder that is");
+        fView->setSelectedSolids({idA});
+        settle(80);
+        check(probe.duplicateFolderId() == 0,
+              "ONE of its two bodies selected - no folder is being duplicated, because part "
+              "of a folder is not the folder");
+        fView->setSelectedSolids({idC});
+        settle(80);
+        check(probe.duplicateFolderId() == 0, "a body outside any folder - still 0");
+
+        // --- the ordinary case is untouched ---------------------------------
+        // A single body inside a folder duplicates INTO that folder, exactly
+        // as it did before this existed. Pinned first, so a later green run
+        // cannot quietly mean "folders swallowed the plain gesture".
+        {
+            const std::size_t before = probe.document().count();
+            fView->setSelectedSolids({idA});
+            settle(80);
+            check(probe.duplicateSelectedBody(), "one body inside the folder duplicates");
+            settle(150);
+            check(probe.document().count() == before + 1, "one body arrived");
+            const int plainCopy = probe.document().solids().back().id;
+            check(probe.document().groupOf(plainCopy) == folder,
+                  "and it landed in the SOURCE folder beside it - no folder was cloned");
+            check(probe.document().groups().size() == 1,
+                  QStringLiteral("still exactly one folder in the document (%1)")
+                      .arg(probe.document().groups().size()));
+            check(trigger(probe, QStringLiteral("Undo")),
+                  "undone, back to two bodies in the folder");
+            settle(150);
+            check(probe.document().count() == before, "the plain copy is gone again");
+        }
+
+        // --- the folder itself ----------------------------------------------
+        const std::size_t beforeFolderDup = probe.document().count();
+        const std::vector<int> underBefore = probe.document().bodiesUnderGroup(folder);
+        const int folderParent = probe.document().groupOf(folder);
+        fView->setSelectedSolids({idA, idB});
+        settle(80);
+        check(probe.duplicateSelectedBody(), "Ctrl+D with the folder selected succeeds");
+        settle(150);
+        check(probe.document().count() == beforeFolderDup + 2,
+              QStringLiteral("two bodies arrived, one per body in the folder (%1 -> %2)")
+                  .arg(beforeFolderDup)
+                  .arg(probe.document().count()));
+        check(probe.document().groups().size() == 2,
+              QStringLiteral("and a SECOND folder exists now (%1)")
+                  .arg(probe.document().groups().size()));
+
+        int clone = 0;
+        for (const DocumentModel::Group& g : probe.document().groups()) {
+            if (g.id != folder) clone = g.id;
+        }
+        check(clone > 0, "the clone can be found");
+        check(clone > 0 && probe.document().groupNameOf(clone) ==
+                               probe.document().groupNameOf(folder) + " copy",
+              QStringLiteral("it is named after its source (\"%1\")")
+                  .arg(clone > 0
+                           ? QString::fromStdString(probe.document().groupNameOf(clone))
+                           : QString()));
+        check(clone > 0 && probe.document().groupOf(clone) == folderParent,
+              "and it sits BESIDE its source, not inside it");
+
+        // Two separate claims, because a clone holding all four bodies and a
+        // clone holding none each fail only one of them.
+        const std::vector<int> underClone = probe.document().bodiesUnderGroup(clone);
+        check(underClone.size() == 2,
+              QStringLiteral("the two copies are inside the clone (%1)").arg(underClone.size()));
+        check(probe.document().bodiesUnderGroup(folder) == underBefore,
+              "and the source folder still holds exactly the bodies it held before");
+        {
+            bool overlap = false;
+            for (int id : underClone) {
+                if (std::find(underBefore.begin(), underBefore.end(), id) != underBefore.end())
+                    overlap = true;
+            }
+            check(!overlap, "no body is in both folders - these are copies, not a re-parent");
+        }
+        {
+            std::vector<int> selectedAfter = fView->selectedSolidIds();
+            std::sort(selectedAfter.begin(), selectedAfter.end());
+            std::vector<int> expected = underClone;
+            std::sort(expected.begin(), expected.end());
+            check(selectedAfter == expected,
+                  "the COPIES are what is selected afterwards, so the gizmo stands on the "
+                  "new folder's contents");
+        }
+
+        // One gesture, one checkpoint: the bodies AND the folder go back
+        // together. A clone left behind by an undo is an empty folder nobody
+        // made.
+        check(trigger(probe, QStringLiteral("Undo")), "one Undo");
+        settle(150);
+        check(probe.document().count() == beforeFolderDup, "takes both copies back");
+        check(probe.document().groups().size() == 1,
+              QStringLiteral("and the cloned folder with them (%1 folders left)")
+                  .arg(probe.document().groups().size()));
+
+        // --- a folder inside a folder ---------------------------------------
+        // The recursion is the part that can silently flatten, so the SHAPE is
+        // asserted and not only the count. Grouping a body that already sits
+        // in a folder makes the new one INSIDE it - onGroupSelection()'s own
+        // rule - which is all the nesting this needs.
+        fView->setSelectedSolids({idA});
+        settle(80);
+        check(trigger(probe, QStringLiteral("Group")), "A gets a folder of its own");
+        settle(150);
+        const int sub = probe.document().groupOf(idA);
+        check(sub > 0 && sub != folder && probe.document().groupOf(sub) == folder,
+              QStringLiteral("and it was made INSIDE the first one (%1 under %2)")
+                  .arg(sub)
+                  .arg(folder));
+
+        fView->setSelectedSolids({idA, idB});
+        settle(80);
+        check(probe.duplicateFolderId() == folder,
+              "selecting both bodies still names the OUTER folder - a folder row selects its "
+              "whole subtree, which is what this compares against");
+        const std::size_t beforeNested = probe.document().count();
+        check(probe.duplicateSelectedBody(), "duplicating the nested folder succeeds");
+        settle(150);
+        check(probe.document().count() == beforeNested + 2, "two bodies arrived");
+        check(probe.document().groups().size() == 4,
+              QStringLiteral("two folders arrived with them - the outer clone and the inner "
+                             "one (%1 total)")
+                  .arg(probe.document().groups().size()));
+
+        int outerClone = 0;
+        for (const DocumentModel::Group& g : probe.document().groups()) {
+            if (g.parent == folderParent && g.id != folder) outerClone = g.id;
+        }
+        check(outerClone > 0, "the outer clone can be found at the source's own level");
+        if (outerClone > 0) {
+            const std::vector<int> innerClones = probe.document().childGroups(outerClone);
+            check(innerClones.size() == 1,
+                  QStringLiteral("it holds exactly one subfolder, not a flattened pair (%1)")
+                      .arg(innerClones.size()));
+            check(probe.document().bodiesUnderGroup(outerClone).size() == 2,
+                  "and two bodies at or below it");
+            check(!innerClones.empty() &&
+                      probe.document().itemsInGroup(innerClones.front()).size() == 1,
+                  "with one of them down in the subfolder, where its source sits");
+            check(probe.document().itemsInGroup(outerClone).size() == 1,
+                  "and the other directly in the clone, where ITS source sits");
+            // The INNER folder keeps its own name - only the folder the user
+            // picked is a "copy". Two levels of "copy copy" would be noise.
+            check(!innerClones.empty() &&
+                      probe.document().groupNameOf(innerClones.front()) ==
+                          probe.document().groupNameOf(sub),
+                  "the subfolder keeps its own name - only the folder you picked is renamed");
         }
 
         probe.close();

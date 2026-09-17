@@ -216,6 +216,17 @@ before hunting for a cycle. And **the reporter writes to stderr rather than a fi
 hard-coded path is a diagnostic that works on exactly one machine, and stderr is unbuffered
 by the standard, which is the one property a dying process actually needs.
 
+**And it compiles `/bigobj`, for the same reason one step along.** A COFF object holds at
+most 65,279 sections and MSVC emits them per function and per COMDAT — which in this file
+means per block, per lambda and per string literal folded out of that one enormous `main()`.
+The folder-duplicate block is simply the one that crossed the line: `fatal error C1128:
+number of sections exceeded object file format limit`, which names its own fix and is not a
+symptom of anything else. `/bigobj` widens the count to 2^32, costs a slightly larger `.obj`
+and changes no generated code. Note what the two flags have in common: **both are the price
+of `main()` being one function of thirty thousand lines**, and both are cheaper than the
+restructuring that would remove the need for them — but a third symptom of the same shape is
+the point at which that trade should be re-examined rather than paid again.
+
 **The no-input law runs both ways.** `gui_smoke` installs an application-wide filter that
 drops every *spontaneous* mouse, wheel and key event, so the machine's own user cannot drive
 the app under test either. That is not belt-and-braces: Windows' "scroll inactive windows on
@@ -2124,6 +2135,35 @@ itself a mirror SOURCE used to leave the copy unpaired, because the nudge pushed
 gesture's own tangent plane and `pairWithMirror()` skips a straddling body. With no nudge the
 copy is where its source is — wholly on one side — so the ordinary new-body rule fires and the
 copy gets a **fresh twin of its own**, which is what the rule always said should happen.
+
+**Ctrl+D on a FOLDER duplicates the folder.** The user's ask in full: *"ctrl+D when a folder
+is selected should duplicate the folder"*. Clicking a folder row selects every body under it,
+so a plain duplicate already copied those bodies — straight back into the **same** folder,
+which is nobody's idea of duplicating a folder. `MainWindow::duplicateFolderId()` is the one
+derivation and it is **derived from the selection, never reported by the drawer**: the drawer
+is one of several things that can select bodies, and a rule that only worked when the click
+came from the list is a rule with a hole in it. It walks **up** from the first selected body —
+a folder with subfolders has no single `groupOf()` its bodies share — and answers with the
+first folder whose `bodiesUnderGroup()` **is** the selection exactly. Anything less is a
+duplicate of some bodies that happen to live in a folder, and cloning around that would be
+inventing an intent the user did not express. `groupOf()` already answers for a folder (its
+own parent), which is what lets the walk ask one question rather than branching on the kind.
+Inside the commit, a `cloneOf` map plus a recursive `cloneFolder` lambda build the copies'
+folders on demand: the picked folder's clone lands **beside** its source (same parent) named
+`"<name> copy"`, and a folder nested inside it is cloned into its own parent's clone, so the
+tree comes out the shape it went in — and only the folder the user picked is renamed, because
+two levels of "copy copy" is noise. Creation-paired mirror twins follow their own copy into
+the clone rather than staying behind in the source folder. One checkpoint still covers all of
+it, so **one `Ctrl+Z` takes the bodies and the cloned folders back together** — a clone left
+standing by an undo is an empty folder nobody made. The toast names the folder
+(`Pillars copy created — 6 bodies`), since "6 bodies duplicated" says nothing about where they
+landed. `gui_smoke`'s `ctrl-d-on-a-folder-duplicates-the-folder` block (independent, 42 checks)
+pins the derivation in both directions — the whole subtree names the folder, one body of two
+names nothing — pins that **the ordinary one-body-in-a-folder case is unchanged**, and pins
+the nested shape rather than only a count. Two mutations each went red on named checks: the
+derivation returning 0 reddened 12, starting with *the whole folder selected — the gesture
+knows which folder that is*; parenting every clone flat reddened 4, starting with *it holds
+exactly one subfolder, not a flattened pair*.
 
 **Ctrl+double-click is gone (item 9)**, **the `mm` chip is gone (item 18)**, and the outline's
 line has **its own colour token** (`dimensionLine`, item 17 — *"i mean this purple line, which

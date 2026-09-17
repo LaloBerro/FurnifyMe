@@ -682,6 +682,20 @@ public:
     // and its own creation-time twin if any), one Note toast with Undo
     // naming what was created.
     bool duplicateSelectedBody();
+    // WHICH FOLDER Ctrl+D would duplicate, or 0 for none.
+    //
+    // Selecting a folder row selects every body under it, so a plain
+    // duplicate already copied those bodies - straight back into the SAME
+    // folder, which is not what "duplicate this folder" means to anyone. When
+    // the selection is exactly one folder's whole subtree, the gesture clones
+    // the folder (and any folders inside it) and puts the copies there.
+    //
+    // DERIVED from the selection rather than reported by the drawer: the
+    // drawer is one of several things that can select bodies, and a rule that
+    // only worked when the click came from the list would be a rule with a
+    // hole in it. It walks UP from the first selected body, because a folder
+    // with subfolders has no single groupOf() its bodies share.
+    int duplicateFolderId() const;
     // Every body Duplicate would copy - the whole body selection
     // (improvements item 14). duplicateSourceId() answers with the first of
     // them, which is what the action's enabled state and its tooltip ask for.

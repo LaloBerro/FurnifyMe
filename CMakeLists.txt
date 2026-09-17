@@ -268,6 +268,16 @@ if(FURNIFYME_BUILD_APP)
       # recursion anywhere in it. Reserve, not commit, so it costs address
       # space and nothing else.
       target_link_options(gui_smoke PRIVATE /STACK:33554432)
+      # AND A BIGGER OBJECT FILE, for the same reason one step along. A COFF
+      # object holds at most 65,279 sections, and MSVC emits sections per
+      # function and per COMDAT - which for this file means per block, per
+      # lambda and per string literal folded out of one thirty-thousand-line
+      # main(). The folder-duplicate block is simply the one that crossed it:
+      # `fatal error C1128: number of sections exceeded object file format
+      # limit`, which names its own fix and is not a symptom of anything else.
+      # /bigobj widens the section count to 2^32 and costs nothing but a
+      # slightly larger .obj; it changes no code that is generated.
+      target_compile_options(gui_smoke PRIVATE /bigobj)
     endif()
 
     # Qt refuses to start without a platform plugin, and it is looked up in a

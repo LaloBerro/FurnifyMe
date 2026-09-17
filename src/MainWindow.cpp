@@ -90,6 +90,7 @@
 #include <algorithm>
 #include <cmath>
 #include <initializer_list>
+#include <functional>
 #include <map>
 #include <utility>
 #include <vector>
@@ -8729,6 +8730,28 @@ std::vector<int> MainWindow::duplicateSourceIds() const
     return myView->selectedSolidIds();
 }
 
+int MainWindow::duplicateFolderId() const
+{
+    if (!linkGestureEnvironmentOk()) return 0;
+    std::vector<int> selected = myView->selectedSolidIds();
+    if (selected.empty()) return 0;
+    std::sort(selected.begin(), selected.end());
+
+    // Up the tree from the first selected body. The folder being duplicated
+    // is the one whose WHOLE subtree is the selection - anything less is a
+    // duplicate of some bodies that happen to live in a folder, and copying
+    // the folder around that would be inventing an intent the user did not
+    // express. groupOf() answers for a folder too (its own parent), which is
+    // what lets this walk.
+    for (int group = myDocument.groupOf(selected.front()); group > 0;
+         group = myDocument.groupOf(group)) {
+        std::vector<int> under = myDocument.bodiesUnderGroup(group);
+        std::sort(under.begin(), under.end());
+        if (under == selected) return group;
+    }
+    return 0;
+}
+
 bool MainWindow::duplicateSelectedBody()
 {
     // EVERY selected body, not just one (improvements item 14). One gesture,
@@ -8781,6 +8804,38 @@ bool MainWindow::duplicateSelectedBody()
 
     checkpointDocument();
 
+    // THE FOLDER, CLONED FIRST, so every copy below has somewhere of its own
+    // to land. `cloneOf` maps a source folder to its copy and builds one on
+    // demand: the top folder's clone sits beside the original (same parent),
+    // and a folder INSIDE it is cloned into its own parent's clone, so a
+    // nested tree comes out the same shape it went in.
+    //
+    // Named "<name> copy" rather than the source's own name: two folders
+    // called "Pillars" in one list is a puzzle, and "copy" is a word this app
+    // already owns (Linked copy). Duplicating a duplicate does give "Pillars
+    // copy copy", which is honest about what happened.
+    const int sourceFolder = duplicateFolderId();
+    std::map<int, int> cloneOf;
+    std::function<int(int)> cloneFolder = [&](int source) -> int {
+        // The walk upward stops at the root, and it has to stop HERE rather
+        // than by assuming every folder it is handed sits under sourceFolder.
+        // Without this a folder outside the duplicated subtree would recurse
+        // on groupOf(0), which is 0, forever.
+        if (source <= 0) return 0;
+        const auto known = cloneOf.find(source);
+        if (known != cloneOf.end()) return known->second;
+        const int parent = source == sourceFolder
+                               ? myDocument.groupOf(sourceFolder)
+                               : cloneFolder(myDocument.groupOf(source));
+        const QString name = source == sourceFolder
+                                 ? tr("%1 copy").arg(
+                                       QString::fromStdString(myDocument.groupNameOf(source)))
+                                 : QString::fromStdString(myDocument.groupNameOf(source));
+        const int made = myDocument.createGroup(name.toStdString(), parent);
+        cloneOf[source] = made;
+        return made;
+    };
+
     std::vector<int> made;
     made.reserve(copies.size());
     int twins = 0;
@@ -8794,7 +8849,12 @@ bool MainWindow::duplicateSelectedBody()
         // 10): a duplicate of something inside "Left cabinet" belongs in
         // there beside it, not out at the root.
         const int folder = myDocument.groupOf(copy.first);
-        if (folder != 0) myDocument.setItemGroup(id, folder);
+        // Into the CLONED folder when a whole folder is being duplicated, and
+        // into the source's own folder otherwise - which is the ordinary case
+        // and unchanged: a duplicate of one body inside "Left cabinet"
+        // belongs in there beside it, not out at the root.
+        if (sourceFolder > 0 && folder != 0) myDocument.setItemGroup(id, cloneFolder(folder));
+        else if (folder != 0) myDocument.setItemGroup(id, folder);
 
         // Creation-time pairing - reused VERBATIM from onExtrude()'s own
         // block rather than special-cased here (CLAUDE.md's "do not
@@ -8813,7 +8873,14 @@ bool MainWindow::duplicateSelectedBody()
                 if (twinId > 0) {
                     myDocument.pairBodies(id, twinId);
                     myView->displaySolid(twinId, mirrored.shape);
-                    if (folder != 0) myDocument.setItemGroup(twinId, folder);
+                    // Wherever its own copy went - into the CLONE when a
+                    // folder is being duplicated. A twin left behind in the
+                    // source folder would put half of one gesture's output in
+                    // each of two folders.
+                    if (sourceFolder > 0 && folder != 0)
+                        myDocument.setItemGroup(twinId, cloneFolder(folder));
+                    else if (folder != 0)
+                        myDocument.setItemGroup(twinId, folder);
                     ++twins;
                     lastTwinId = twinId;
                 }
@@ -8838,7 +8905,17 @@ bool MainWindow::duplicateSelectedBody()
     // One body names itself (and its twin, when mirroring made one); several
     // are counted, because a toast listing eight names is a paragraph.
     QString message;
-    if (made.size() == 1) {
+    if (sourceFolder > 0) {
+        // A folder duplicate names the FOLDER, because that is the thing the
+        // user asked for and the thing they will look for in the drawer - a
+        // bare "6 bodies duplicated" says nothing about where they landed.
+        // The count rides along, since a folder's contents are exactly what
+        // was copied.
+        const int clone = cloneOf.count(sourceFolder) ? cloneOf[sourceFolder] : 0;
+        message = tr("%1 created — %2 bodies")
+                      .arg(QString::fromStdString(myDocument.groupNameOf(clone)))
+                      .arg(made.size());
+    } else if (made.size() == 1) {
         message = twins > 0
                       ? tr("%1 and %2 created")
                             .arg(QString::fromStdString(myDocument.nameOf(made.front())),
