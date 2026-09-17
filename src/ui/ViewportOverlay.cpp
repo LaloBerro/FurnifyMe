@@ -53,11 +53,26 @@ void ViewportOverlay::addWidget(QWidget* widget, Anchor anchor)
     relayout();
 }
 
+void ViewportOverlay::addFloatingObstacle(QWidget* widget)
+{
+    if (!widget) return;
+    for (const QPointer<QWidget>& known : myObstacles) {
+        if (known == widget) return;
+    }
+    myObstacles.push_back(widget);
+}
+
 std::vector<QRect> ViewportOverlay::occupiedRects() const
 {
     std::vector<QRect> rects;
     for (const Entry& entry : myEntries) {
         if (entry.widget && entry.widget->isVisible()) rects.push_back(entry.widget->geometry());
+    }
+    // The chips that place themselves - see addFloatingObstacle(). Same
+    // isVisible() test the entries take, for the same reason: a hidden chip
+    // occupies nothing and a toast must be free to use its space.
+    for (const QPointer<QWidget>& obstacle : myObstacles) {
+        if (obstacle && obstacle->isVisible()) rects.push_back(obstacle->geometry());
     }
     return rects;
 }
@@ -274,13 +289,24 @@ void ViewportOverlay::relayout()
                 bottomRightY -= kGap;
                 break;
             case Anchor::RightEdge:
-                // The right-hand spine: pinned to the edge, stretched to the
-                // viewport's full height, on LeftEdge's own terms (std::max
-                // against the natural height, wholeDevicePixels on the
-                // arbitrary stretch - see the LeftEdge comment below).
+                // A FLOATING CARD PINNED TO THE RIGHT EDGE - its own natural
+                // height, never the viewport's.
+                //
+                // It used to stretch to the full height, copied from the
+                // LeftEdge spine. But the rail stretches for a reason (it is
+                // a spine: a column of tools that reads as one rail from top
+                // to bottom), and the render settings card has no such
+                // reason - it is a card of rows like every other card in this
+                // app. Stretched, it was the only surface here whose height
+                // came from the window rather than from its contents, which
+                // read as a different application's panel, and it opened a
+                // band of dead space between its last row and its footer.
+                //
+                // Clamped to the viewport so a card taller than the window
+                // still fits inside it rather than running off both ends.
                 placed->move(snapped(w - cw - kEdgeMargin, kEdgeMargin));
                 placed->resize(cw, Theme::wholeDevicePixels(
-                                       std::max(ch, h - 2 * kEdgeMargin)));
+                                       std::min(ch, h - 2 * kEdgeMargin)));
                 break;
             case Anchor::LeftEdge:
                 // Every LeftEdge entry shares x = kEdgeMargin and stacks at

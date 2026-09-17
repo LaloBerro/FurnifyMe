@@ -397,6 +397,14 @@ the plane messages read `Mirror plane …`. The old `&Symmetry` entry was the vo
 law broken in the one direction that matters most: the word on the control the user had
 to press was not the word any of its own feedback used.
 
+**An override declared one line into a `signals:` block becomes a SIGNAL.** moc reads the
+section, not the `override` keyword, so `QSize sizeHint() const override;` placed there had
+moc generate a definition of its own and the linker reported it as a duplicate of the real
+one - a confusing error that names neither moc nor the section. This project has now hit the
+same trap twice, the first time with a `QAction` member in a slots section. When adding a
+member to an existing class, read UP to the nearest access specifier before trusting where
+an anchor landed.
+
 **`round` and `flatten` are banned too, but matched at a word boundary.** They are the
 Never column for Fillet and Chamfer and they shipped for a whole branch inside two Failure
 sentences ("will only round some of them") because the sweep could not see them — while
@@ -2495,6 +2503,19 @@ rule below exists so no card ever has a row to leave unpainted in the first plac
 a multiple of four is whole at every quarter-step Windows scale, so it does not read
 `devicePixelRatioF()` - a size that is only right on the monitor it was written on is the same
 bug with a longer fuse.
+
+**`QScrollArea::sizeHint()` DOES NOT ANSWER FOR ITS WIDGET, and any layout
+holding one inherits that lie.** It returns a cached size bounded to roughly 24 text lines
+and ignores `sizeAdjustPolicy` entirely. This has now bitten twice, in two unrelated cards,
+and cost four wrong fixes between them: the Items drawer came back too short and three
+rounds went into raising a cap that was never the binding constraint; then the render
+settings card, the moment it stopped being stretched to the viewport's full height and had
+to answer for its own size, showed a scrollbar and put its Quality rows out of reach. Both
+are fixed the same way and it is the only way that works: **add the height up from the
+parts** - the widgets outside the scroll area, the layout's margins, and the SCROLL
+CONTENT's own `sizeHint()` - and never ask the scroll area. `sizeHint`, not
+`heightForWidth`: the content lives in a `widgetResizable` scroll area, so asking its layout
+what height it wants AT A WIDTH re-enters the very layout pass that is asking.
 
 **A whole size only helps if the near edge is whole too**, so a card's POSITION goes through
 `Theme::snapToDevicePixels()`. `ViewportOverlay::relayout()` grows every anchored card and

@@ -80,6 +80,13 @@ QRect WindowButtons::maxChipRectIn(const QWidget* ancestor) const
     return QRect(mapTo(const_cast<QWidget*>(ancestor), r.topLeft()), r.size());
 }
 
+void WindowButtons::setGroundColour(const QColor& ground)
+{
+    if (myGround == ground) return;
+    myGround = ground;
+    update();
+}
+
 void WindowButtons::setMaxHovered(bool hovered)
 {
     if (myMaxHovered == hovered) return;
@@ -99,7 +106,7 @@ void WindowButtons::paintEvent(QPaintEvent*)
     QPainter painter(this);
     painter.setRenderHint(QPainter::Antialiasing, true);
     const ButtonMetrics m = metricsFor(myLook);
-    if (myLook == Look::Card) Theme::paintSurface(painter, rect(), 10);
+    if (myLook == Look::Card) Theme::paintSurfaceOn(painter, rect(), 10, myGround);
 
     for (int i = 0; i < 3; ++i) {
         const QRect chip = chipRect(i);
@@ -122,7 +129,13 @@ void WindowButtons::paintEvent(QPaintEvent*)
         // ink is state-dependent. White over Close's danger fill by the
         // same ruling the selector's accent-filled button recorded: white
         // reads against every shipped danger/accent hue, none pastel.
-        QColor ink = hovered || pressed ? Theme::text() : Theme::textMuted();
+        // On a tinted card the glyphs follow the ground, or three near-white
+        // strokes sit on a near-white pill - setGroundColour()'s reason.
+        const QColor base = myGround.isValid() ? Theme::inkOn(myGround) : Theme::text();
+        const QColor quiet = myGround.isValid()
+                                 ? QColor(base.red(), base.green(), base.blue(), 150)
+                                 : Theme::textMuted();
+        QColor ink = hovered || pressed ? base : quiet;
         if (i == 2 && (hovered || pressed)) ink = QColor(Qt::white);
 
         const IconSet::Glyph glyph =

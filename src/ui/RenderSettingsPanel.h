@@ -244,6 +244,23 @@ signals:
     void fovChanged(double fovyDeg);
 
 protected:
+    // THE CARD'S OWN HEIGHT, added up from its parts rather than asked of the
+    // layout. The rows live in a widgetResizable QScrollArea, and
+    // QScrollArea::sizeHint() answers with a cached, line-bounded box of its
+    // own - a layout containing one reports whatever that says, which is not
+    // how tall this card's content actually is. ItemsPanel learned exactly
+    // this (see its own sizeHint()), and it cost three wrong fixes there
+    // before the cause was found; the same trap bit this card the moment it
+    // stopped being stretched to the viewport's full height and had to answer
+    // for itself.
+    //
+    // DECLARED HERE, beside the other QWidget overrides, and not one line
+    // higher: the section above is `signals:`, and moc read an override put
+    // there as a SIGNAL - generating a definition of its own, which the
+    // linker then reported as a duplicate of the real one. The same trap this
+    // project already hit once with a QAction in a slots section.
+    QSize sizeHint() const override;
+
     void paintEvent(QPaintEvent* event) override;
     // AppearancePanel's own reason: an unhandled wheel over a slider row
     // would propagate to the viewport underneath and zoom the camera - the
@@ -252,6 +269,10 @@ protected:
     void wheelEvent(QWheelEvent* event) override;
 
 private:
+    // The widget inside the scroll area - the only thing that knows how tall
+    // the rows are. See sizeHint().
+    QWidget* myScrollContent = nullptr;
+    class QScrollArea* myScroll = nullptr;
     void openBackgroundDialog();
     // Restyles every row's font/colour off Theme - AppearancePanel's own
     // applyTheme(), hooked to the same Theme::notifier() broadcast.

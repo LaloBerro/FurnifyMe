@@ -47,6 +47,9 @@ constexpr int kRadius = 10;
 constexpr int kPad = 12;
 
 constexpr int kSwatchWidth = 46;
+// What the colour list keeps between its swatches and the scroll area's right
+// edge - see the contentsMargins() call that uses it.
+constexpr int kSwatchGutter = 6;
 constexpr int kSwatchHeight = 18;
 constexpr int kSwatchRadius = 4;
 
@@ -400,12 +403,22 @@ AppearancePanel::AppearancePanel(QWidget* parent)
             activeTabRow = tabRow2;
             tabRowWidth = 0;
         }
-        activeTabRow->addWidget(chip, 1);
+        // NATURAL WIDTH, PACKED LEFT, on both rows. They used to be added
+        // with a stretch factor, which made row one's chips share the width
+        // evenly and left row two's single chip - "Files" - floating in the
+        // middle of an otherwise empty row, where it read as a heading for
+        // the panel rather than as the fifth tab. A tab bar that wraps has to
+        // wrap like text: the next line starts where the first one did.
+        activeTabRow->addWidget(chip);
         tabRowWidth += (tabRowWidth > 0 ? activeTabRow->spacing() : 0) + chipWidth;
 
         myTabButtons[i] = chip;
         myExtraTexts << tabNames[i];
     }
+    // The slack goes to the END of each row rather than between the chips,
+    // which is what keeps the second row left-aligned under the first.
+    tabRow1->addStretch(1);
+    tabRow2->addStretch(1);
     outer->addWidget(tabRow);
 
     // --- the four pages -----------------------------------------------------
@@ -444,7 +457,13 @@ AppearancePanel::AppearancePanel(QWidget* parent)
     auto* content = new QWidget(scroll);
     makeTransparent(content, QStringLiteral("appearanceContent"));
     auto* list = new QVBoxLayout(content);
-    list->setContentsMargins(0, 0, 0, 0);
+    // A RIGHT MARGIN the swatches can breathe in. Every label on the left of
+    // this list sits inside the card's own kPad; the swatches on the right
+    // ran flush to the scroll area's edge, so the list read as pushed against
+    // the wall. Right-side only: the card's padding already spaces the left,
+    // and doubling it here would indent the names away from every other row
+    // in the drawer.
+    list->setContentsMargins(0, 0, kSwatchGutter, 0);
     list->setSpacing(4);
 
     // Driven off Theme::colourTokens() rather than a second list written out

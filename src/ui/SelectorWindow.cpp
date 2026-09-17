@@ -236,12 +236,37 @@ public:
     static QString deleteLabel() { return tr("Delete"); }
     static QString deleteArmedLabel() { return tr("Delete — click again"); }
 
+    // WHEN IT WAS LAST TOUCHED, in the terms somebody actually thinks in.
+    // This was QLocale::ShortFormat - "9/17/2026 1:46 PM" - which is a
+    // machine's answer to a question nobody asked precisely: in an app where
+    // every length goes through Measure so the numbers look considered, a raw
+    // locale stamp was the one string that read as unconsidered.
+    //
+    // What a user wants from a library card is how OLD it is, and only far
+    // enough back to matter. Today and yesterday are named; inside a week the
+    // weekday is enough; beyond that the date, and the year only once it is
+    // not this one. The clock stays on the two that are about today, where a
+    // time genuinely distinguishes two saves.
+    static QString editedText(const QDateTime& when)
+    {
+        const QLocale locale;
+        const QDate day = when.date();
+        const QDate today = QDate::currentDate();
+        const qint64 age = day.daysTo(today);
+        const QString clock = locale.toString(when.time(), QLocale::ShortFormat);
+        if (age == 0) return tr("Today, %1").arg(clock);
+        if (age == 1) return tr("Yesterday, %1").arg(clock);
+        if (age > 1 && age < 7) return tr("%1, %2").arg(locale.dayName(day.dayOfWeek()), clock);
+        if (day.year() == today.year())
+            return locale.toString(day, QStringLiteral("d MMM"));
+        return locale.toString(day, QStringLiteral("d MMM yyyy"));
+    }
+
     void setFurniture(const QString& name, const QString& thumbPath, const QDateTime& lastEdited)
     {
         myName->setText(name);
-        myDate->setText(lastEdited.isValid()
-                            ? QLocale().toString(lastEdited.toLocalTime(), QLocale::ShortFormat)
-                            : tr("Never saved"));
+        myDate->setText(lastEdited.isValid() ? editedText(lastEdited.toLocalTime())
+                                             : tr("Never saved"));
         myThumb->setThumbnailPath(thumbPath);
         update();
     }

@@ -69,8 +69,21 @@ Spec graphite()
     s.gizmoAxisX        = QColor("#e0564a");   // vivid red
     s.gizmoAxisY        = QColor("#7fc84e");   // vivid green
     s.gizmoAxisZ        = QColor("#4a80e0");   // vivid blue
-    s.sketchPointMarker = QColor("#ff4fc3");   // magenta - unclaimed by any
-                                               // other viewport hue
+    // MAGENTA, AND IT HAS TO BE. This was briefly changed to a warm amber on
+    // the reasoning that a yellow line, magenta points and an accent-violet
+    // first-point square are three unrelated hues in one gesture - which is
+    // true as a description and wrong as a fix. The marks sit ON the line: if
+    // they share its hue they stop being separable from it, for a reader and
+    // for a probe alike. gui_smoke measures the antialiasing of each mark by
+    // the pixels lying between the GROUND and that mark's own token, and it
+    // can only tell those from a blend with the outline's yellow because the
+    // two colours are nowhere near each other. Moving this warm dropped the
+    // start-square's measurable blend to zero.
+    //
+    // So the three hues stay, and the reason is legibility of one thing
+    // against another rather than a palette nobody planned. Unclaimed by any
+    // other viewport hue - which is the property, not an accident.
+    s.sketchPointMarker = QColor("#ff4fc3");
     // Quantity_NOC_YELLOW, which is what displayOutline()/setPreview() drew
     // before this task rather than a token - written as hex for the same
     // reason the two highlight colours below are: pixel-identical to the
@@ -543,6 +556,40 @@ void drawCrispRule(QPainter& p, const QPointF& from, const QPointF& to, const QC
     p.setPen(QPen(colour, 1.0));
     p.drawLine(a, b);
     p.restore();
+}
+
+QColor inkOn(const QColor& ground)
+{
+    // Rec. 709 luma, the ordinary one. A backdrop this app would ever use is
+    // either plainly light or plainly dark, so the midpoint needs no care.
+    const double luma = 0.2126 * ground.redF() + 0.7152 * ground.greenF() +
+                        0.0722 * ground.blueF();
+    return luma > 0.5 ? QColor(28, 28, 30) : QColor(232, 232, 234);
+}
+
+void paintSurfaceOn(QPainter& p, const QRect& rect, int radius, const QColor& ground)
+{
+    if (!ground.isValid()) {
+        paintSurface(p, rect, radius);
+        return;
+    }
+    // A CARD, not a hole: the fill is the ground lifted a little so the card
+    // still reads as a surface sitting ON the backdrop rather than as a patch
+    // of it. Lifted toward the ink's opposite, so this works on a dark ground
+    // too if one ever appears.
+    const QColor ink = inkOn(ground);
+    const bool lightGround = ink.red() < 128;
+    const QColor fill = lightGround ? ground.lighter(106) : ground.lighter(150);
+    const QColor edge = lightGround ? ground.darker(118) : ground.lighter(190);
+
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing, true);
+    QPainterPath surface;
+    surface.addRoundedRect(rect, radius, radius);
+    p.fillPath(surface, fill);
+    p.restore();
+
+    drawCrispBorder(p, QRectF(rect), edge, radius);
 }
 
 void paintSurface(QPainter& p, const QRect& rect, int radius)

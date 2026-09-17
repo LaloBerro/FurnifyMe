@@ -2893,7 +2893,49 @@ void OcctViewWidget::showBooleanBadges(const std::vector<BooleanBadgeRenderer::B
         clearBooleanBadges();
         return;
     }
-    if (myBooleanBadges.show(badges)) scheduleRedraw();
+    // BADGES THAT WOULD LAND ON TOP OF EACH OTHER STEP APART, and this is
+    // not a nicety: two stacked 18 mm slabs have centres of mass 18 mm
+    // apart, which is a handful of pixels on screen, so both pills drew in
+    // the same place and neither could be read. The obvious fixture - two
+    // boards lying side by side - never shows it, which is why it survived
+    // until a capture of a real cabinet.
+    //
+    // Resolved HERE rather than in the renderer or in MainWindow because
+    // this is the only layer that knows both the world points and the
+    // camera: the nudge has to be a SCREEN distance converted back into
+    // world units at each badge's own depth, or a pair far from the camera
+    // would separate by miles and a pair near it by nothing.
+    std::vector<BooleanBadgeRenderer::Badge> placed = badges;
+    if (placed.size() > 1 && viewReady()) {
+        // One pill's height plus a hair, which is the smallest gap at which
+        // two of them read as two.
+        const double stepPx = BooleanBadgeRenderer::kHalfHeightPx * 2.0 + 6.0;
+        const gp_Dir up = myCamera.upVector();
+        for (std::size_t i = 1; i < placed.size(); ++i) {
+            for (int attempt = 0; attempt < 8; ++attempt) {
+                QPoint mine;
+                if (!projectToScreen(placed[i].at, mine)) break;
+                bool clashes = false;
+                for (std::size_t j = 0; j < i && !clashes; ++j) {
+                    QPoint theirs;
+                    if (!projectToScreen(placed[j].at, theirs)) continue;
+                    // Overlap in BOTH directions - two pills side by side at
+                    // the same height are fine, and so are two stacked with
+                    // clear air between them.
+                    clashes = std::abs(mine.x() - theirs.x()) <
+                                  BooleanBadgeRenderer::kHalfWidthPx * 2.0 &&
+                              std::abs(mine.y() - theirs.y()) <
+                                  BooleanBadgeRenderer::kHalfHeightPx * 2.0 + 2.0;
+                }
+                if (!clashes) break;
+                // Up the screen, at this badge's own depth.
+                const double worldStep = worldPerPixelAt(placed[i].at) * stepPx;
+                placed[i].at = placed[i].at.Translated(gp_Vec(up) * worldStep);
+            }
+        }
+    }
+
+    if (myBooleanBadges.show(placed)) scheduleRedraw();
 }
 
 void OcctViewWidget::clearBooleanBadges()

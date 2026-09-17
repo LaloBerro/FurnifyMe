@@ -2259,6 +2259,10 @@ private:
     bool myBooleanKeepTool = false;
     int myBooleanRevision = -1;
     class BooleanTool* myBooleanTool = nullptr;
+    // Whether a self-placed gesture chip is on screen - see the connection in
+    // buildOverlay(). Remembered so the relayout it triggers happens on the
+    // edge rather than on every appStateChanged.
+    bool myFloatingChipUp = false;
     // True while the gesture's derived cancel still holds - see updateActions().
     bool booleanGestureStillHolds() const;
     // The shapes the live gesture would hand the kernel: the kept body, then

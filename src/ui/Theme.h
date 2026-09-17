@@ -424,6 +424,26 @@ void drawCrispRule(QPainter& p, const QPointF& from, const QPointF& to, const QC
 // what the mockup's near-invisible rgba-on-dark shadows amounted to anyway.
 void paintSurface(QPainter& p, const QRect& rect, int radius = 8);
 
+// THE SAME CARD, PAINTED FOR A LIGHT GROUND. Render mode replaces the
+// near-black viewport with a pale studio backdrop, and the two chrome
+// surfaces that stay on screen there - the app bar pill and the window
+// buttons - went on wearing panel(), which is a black box sitting in the
+// middle of a white photograph. Everything else that could clash is already
+// hidden by render mode; these two cannot be, because one carries the menu
+// that leaves render mode and the other carries the window's close button.
+//
+// `ground` is the backdrop the card is sitting on (OcctViewWidget's own
+// renderBackdropColour()), so the card is tinted TOWARD what is behind it
+// rather than to some second hard-coded light grey that would drift from the
+// studio the day its own colour moved. The ink to draw on it with is
+// inkOn(ground) below, so a caller cannot pick a fill here and a text colour
+// somewhere else.
+void paintSurfaceOn(QPainter& p, const QRect& rect, int radius, const QColor& ground);
+
+// Black or white, whichever reads on `ground` - the one place that decision
+// is made, so every label on a tinted card agrees.
+QColor inkOn(const QColor& ground);
+
 // Rounds a floating card's logical size UP to one that covers a WHOLE number
 // of device pixels at every display scale Windows offers.
 //

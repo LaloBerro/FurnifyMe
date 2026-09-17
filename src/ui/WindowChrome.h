@@ -28,6 +28,7 @@
 // and the native title bar simply stays.
 #include <QPoint>
 #include <QRect>
+#include <QColor>
 #include <QWidget>
 
 #include <functional>
@@ -82,6 +83,11 @@ public:
 
     // Pushed by the native filter (see WindowChrome) - the maximize chip's
     // mouse traffic never reaches Qt.
+    // The ground this cluster is sitting on, or an invalid colour for the
+    // ordinary dark viewport - AppBar::setGroundColour()'s own contract, and
+    // for its reason: render mode cannot hide the window's own close button.
+    void setGroundColour(const QColor& ground);
+
     void setMaxHovered(bool hovered);
     void setMaxPressed(bool pressed);
 
@@ -99,6 +105,7 @@ private:
     int chipAt(const QPoint& pos) const;
 
     Look myLook = Look::Card;
+    QColor myGround;   // see setGroundColour()
     int myHovered = -1;      // client-side hover: minimize/close only
     int myPressed = -1;
     bool myMaxHovered = false;

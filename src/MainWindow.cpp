@@ -2716,12 +2716,29 @@ void MainWindow::buildOverlay()
     // clears the shared modeling-preview channel on the way past, so a run of
     // slats is put back on screen after they have all run.
     mySlatsTool = new SlatsTool(this, myView);
+    // Bottom-centre and self-placed, which is exactly where a toast wants to
+    // be - so the overlay is told about it (see addFloatingObstacle()).
+    myOverlay->addFloatingObstacle(mySlatsTool);
 
     // The boolean chip. Constructed AFTER every other chip for the reason
     // MitreTool's own comment gives: connection order is emission order, and
     // a chip built earlier would have its feedback cleared by a later one's
     // refresh() on the way past.
     myBooleanTool = new BooleanTool(this, myView);
+    myOverlay->addFloatingObstacle(myBooleanTool);
+    // A CHIP APPEARING UNDER A LIVE TOAST has to move the toast, not sit
+    // beneath it. ToastHost re-places off ViewportOverlay::laidOut(), and
+    // showing a self-placed chip runs no relayout of its own - so the one is
+    // asked for here, derived from the chips' visibility rather than from
+    // each site that could change it. Cheap: it compares two bools and does
+    // nothing the rest of the time.
+    connect(this, &MainWindow::appStateChanged, this, [this] {
+        const bool up = (myBooleanTool && !myBooleanTool->isHidden()) ||
+                        (mySlatsTool && !mySlatsTool->isHidden());
+        if (up == myFloatingChipUp) return;
+        myFloatingChipUp = up;
+        if (myOverlay) myOverlay->relayout();
+    });
     connect(this, &MainWindow::appStateChanged, myBooleanTool, &BooleanTool::refresh);
     connect(myOverlay, &ViewportOverlay::laidOut, this, [this] {
         if (myBooleanTool) myBooleanTool->replace();
@@ -4116,7 +4133,16 @@ bool MainWindow::openFurniture(const QString& id)
     closeCard();
     updateActions();
     emit documentChanged();
-    statusBar()->showMessage(tr("Opened %1").arg(myFurnitureName));
+    // NOT "Opened <name>": the FurnitureNameMark two inches to the right is
+    // already showing that name, permanently, and a status bar that says the
+    // same word twice at the same moment reads as a bug rather than as
+    // emphasis. What the message is actually for is telling the user the open
+    // FINISHED and what they got - so it says that instead, and lets the mark
+    // do the naming it is there to do.
+    statusBar()->showMessage(
+        myDocument.count() == 1
+            ? tr("Opened — 1 body")
+            : tr("Opened — %1 bodies").arg(static_cast<int>(myDocument.count())));
     return true;
 }
 
@@ -4364,6 +4390,20 @@ void MainWindow::setRenderModeEnabled(bool on)
 {
     if (myRenderModeOn == on) return;
     myRenderModeOn = on;
+
+    // THE TWO SURFACES RENDER MODE CANNOT HIDE take the studio's own backdrop
+    // as their ground. Every other overlay goes away there - that is the
+    // mode's whole rule - but the app bar carries the menu that LEAVES render
+    // mode and the window buttons carry the close button, so both stay, and
+    // both were near-black cards sitting in the middle of a pale studio
+    // photograph. Tinted toward the backdrop they read as chrome belonging to
+    // the shot rather than as two holes punched in it.
+    //
+    // The backdrop is asked for rather than hard-coded, so an Appearance edit
+    // that moves the studio moves these with it.
+    const QColor ground = on && myView ? myView->renderBackdropColour() : QColor();
+    if (myAppBar) myAppBar->setGroundColour(ground);
+    if (myWindowButtons) myWindowButtons->setGroundColour(ground);
     // The single source of truth for the menu entry's checked state, kept in
     // step in BOTH directions - the user unchecking the box arrives here
     // already in sync (QAction::toggled already changed it), but every OTHER
@@ -9741,6 +9781,15 @@ void MainWindow::onSelectionChanged()
 
 bool MainWindow::selectionSizesVisible() const
 {
+    // A LIVE BOOLEAN ALREADY HAS THE VIEWPORT'S ATTENTION. Its badges name
+    // each body, its region shows what the operation will take, and the
+    // status bar carries the sizes in words - putting three dimension lines
+    // and a dashed group box on top of that is more ink than anyone can read
+    // at once. The same reason a gizmo drag stands them down, one gesture
+    // over: the sizes describe a selection, and during a gesture the
+    // selection is not what the user is looking at.
+    if (myBooleanActive) return false;
+
     return myShowSizesAction != nullptr && myShowSizesAction->isChecked() &&
            !myShowingInitScreen && !mySketching &&
            myView->selectionKind() == OcctViewWidget::PickKind::Body &&

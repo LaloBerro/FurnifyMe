@@ -40,7 +40,16 @@ namespace {
 // function rather than trusting that arithmetic by eye is what keeps a
 // future editor from copying the LITERAL instead of the PATTERN and
 // shipping a width that is not.
-constexpr int kWidth = 260;
+// 296, THE SAME WIDTH AS THE SETTINGS DRAWER it sits beside - which is what
+// the comment above always said the rule was, while the number said 260. At
+// 260 the content genuinely did not fit: with kPad either side the rows had
+// 236 logical pixels for a label, a 120-wide slider AND a value, so
+// "Strength" showed a truncated number, "Grain size" read "30(" and the
+// export row ran its last chip off the edge. Measured rather than eyeballed -
+// the clipping is plain in a composited capture of the card and invisible in
+// any render of the widget on its own, which is the whole reason CLAUDE.md
+// says to measure the composited window.
+constexpr int kWidth = 296;
 constexpr int kRadius = 10;
 constexpr int kPad = 12;
 constexpr int kRowSpacing = 10;
@@ -473,6 +482,8 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
     outer->setSpacing(kRowSpacing);
     sectionScroll->setWidget(sectionContent);
     shell->addWidget(sectionScroll, 1);
+    myScroll = sectionScroll;
+    myScrollContent = sectionContent;
 
     // A section header - smaller and more muted than a row label, the studio
     // panel's own grouping device (mockup A). Collected for applyTheme() and
@@ -778,9 +789,16 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
     {
         auto* row = new QWidget(this);
         makeTransparent(row, QStringLiteral("renderSettingsExportRow"));
-        auto* line = new QHBoxLayout(row);
+        // TWO ROWS, because five chips do not fit one row of this card's
+        // content width and the fifth was simply drawn off the edge. The
+        // Settings drawer's tab bar already wraps for exactly this reason;
+        // this is the same answer in the same shape - a grid rather than a
+        // greedy pack, since these chips are near enough the same width that
+        // a fixed 3 + 2 split is honest and needs no measuring pass.
+        auto* line = new QGridLayout(row);
         line->setContentsMargins(0, 0, 0, 0);
-        line->setSpacing(5);
+        line->setHorizontalSpacing(5);
+        line->setVerticalSpacing(5);
         const struct { ExportSize size; const char* label; const char* tip; } kSizes[] = {
             {ExportSize::Viewport, QT_TR_NOOP("Window"),
              QT_TR_NOOP("Twice the viewport's own pixels — what this app has always saved")},
@@ -799,9 +817,12 @@ RenderSettingsPanel::RenderSettingsPanel(QWidget* parent)
                 emit exportSizeChanged(size);
             });
             myExportChips[i] = chip;
-            line->addWidget(chip);
+            line->addWidget(chip, static_cast<int>(i) / 3, static_cast<int>(i) % 3);
         }
-        line->addStretch(1);
+        // The empty cell at the end of row two takes the slack, so the chips
+        // stay left-aligned under their neighbours above rather than
+        // stretching to fill.
+        line->setColumnStretch(3, 1);
         outer->addWidget(row);
 
         // What those chips actually produce, in pixels, pushed in by
@@ -963,6 +984,28 @@ QStringList RenderSettingsPanel::paintedTexts() const
     // Reported whether or not it is currently shown - see the header.
     if (myMaterialNote) texts << myMaterialNote->text();
     return texts;
+}
+
+QSize RenderSettingsPanel::sizeHint() const
+{
+    const int w = kWidth;
+    if (!myScrollContent || !layout()) return QWidget::sizeHint();
+
+    // Everything outside the scroll area (the title, the footer, the shell's
+    // own margins) plus what the rows genuinely need - never the scroll
+    // area's own answer. See the header.
+    int chrome = 0;
+    for (int i = 0; i < layout()->count(); ++i) {
+        QLayoutItem* item = layout()->itemAt(i);
+        if (!item) continue;
+        if (item->widget() == myScroll) continue;
+        chrome += item->sizeHint().height() + layout()->spacing();
+    }
+    const QMargins margins = layout()->contentsMargins();
+    chrome += margins.top() + margins.bottom();
+
+    const int rows = myScrollContent->sizeHint().height();
+    return QSize(w, chrome + rows);
 }
 
 void RenderSettingsPanel::setExportSize(ExportSize size)

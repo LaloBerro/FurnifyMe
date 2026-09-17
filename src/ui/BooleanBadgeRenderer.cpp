@@ -53,6 +53,18 @@ public:
         // the fill and the curve can never disagree.
         const int arc = 10;
 
+        // ONE WINDING, ALL THE WAY ROUND. The first build walked the right
+        // arc top-to-bottom and then the LEFT arc top-to-bottom as well,
+        // which jumps from the bottom-right straight back up to the top-left
+        // - a self-intersecting outline that the triangle fan below turned
+        // into a bow tie with the word stretched across its pinch. It looked
+        // like a pill in the numbers (the right count of vertices, the right
+        // extents) and like an hourglass on screen, which is the whole
+        // argument for trusting the pixel over the data.
+        //
+        // The loop has to run: down the right arc, along the bottom, up the
+        // left arc, along the top. So the second arc goes BOTTOM to TOP -
+        // from 270 degrees back to 90 - rather than top to bottom again.
         std::vector<gp_Pnt> outline;
         outline.reserve(arc * 2 + 2);
         for (int i = 0; i <= arc; ++i) {
@@ -60,7 +72,7 @@ public:
             outline.push_back(gp_Pnt(hw - hh + hh * std::cos(a), hh * std::sin(a), 0.0));
         }
         for (int i = 0; i <= arc; ++i) {
-            const double a = kPiHalf + kPi * i / arc;  // left end, top to bottom
+            const double a = 3.0 * kPiHalf - kPi * i / arc;  // left end, bottom to top
             outline.push_back(gp_Pnt(-hw + hh + hh * std::cos(a), hh * std::sin(a), 0.0));
         }
 
@@ -78,10 +90,17 @@ public:
 
         const int n = static_cast<int>(outline.size());
         Handle(Graphic3d_ArrayOfTriangles) fan =
-            new Graphic3d_ArrayOfTriangles(n + 1, (n - 1) * 3);
+            new Graphic3d_ArrayOfTriangles(n + 1, n * 3);
         fan->AddVertex(gp_Pnt(0.0, 0.0, 0.0));
         for (const gp_Pnt& p : outline) fan->AddVertex(p);
         for (int i = 1; i < n; ++i) fan->AddEdges(1, i + 1, i + 2);
+        // AND THE TRIANGLE THAT CLOSES THE FAN, from the last outline vertex
+        // back to the first. Without it the fill stops one wedge short, and
+        // because the outline starts and ends at the TOP of the stadium the
+        // gap lands as a V bitten out of the badge's top edge - with the
+        // border, which is a separate closed loop, drawn correctly right
+        // across it. A capture caught it; the vertex count never would.
+        fan->AddEdges(1, n + 1, 2);
         fillGroup->AddPrimitiveArray(fan);
 
         Handle(Graphic3d_Group) borderGroup = presentation->NewGroup();

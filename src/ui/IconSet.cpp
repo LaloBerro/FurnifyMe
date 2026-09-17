@@ -27,25 +27,59 @@ void paintGlyph(QPainter& p, Glyph glyph)
             p.drawLine(12, 4, 9, 7);
             p.drawLine(12, 4, 15, 7);
             break;
-        case Glyph::Fuse:                         // two overlapping squares
-            p.drawRect(4, 8, 11, 11);
-            p.drawRect(10, 4, 11, 11);
+        // THE THREE BOOLEANS, told apart by SHAPE rather than by line style.
+        //
+        // They used to be two solid squares, one solid and one dashed, and
+        // two solid with a small filled patch between - all three genuinely
+        // different in the code and all three near-identical on the rail,
+        // where the glyph is 24 px and the pen is one pixel wide: a dashed
+        // rectangle at that size is a slightly fainter rectangle, and a 5x7
+        // fill reads as a smudge. Magnifying the rail is what showed it; at
+        // 1:1 they simply looked like three copies of one icon.
+        //
+        // Now the RESULT of each operation is the shape drawn, which is the
+        // one thing that cannot be confused: one blob, a notched piece beside
+        // a ghost, a lone lens.
+        case Glyph::Fuse: {                       // ONE outline round both
+            QPainterPath a;
+            a.addRect(4, 8, 11, 11);
+            QPainterPath b;
+            b.addRect(10, 4, 11, 11);
+            // United, so there is no seam through the middle: a Union makes
+            // one piece, and the icon is one piece.
+            p.drawPath(a.united(b));
             break;
-        case Glyph::Cut: {                        // square with a bite removed
-            p.drawRect(4, 8, 11, 11);
-            // Copy the pen and change only its style: p.setPen(Qt::DashLine) would
-            // build a fresh black pen and lose the theme colour entirely.
-            QPen dashed = p.pen();
-            dashed.setStyle(Qt::DashLine);
-            p.setPen(dashed);
+        }
+        case Glyph::Cut: {                        // the base, with a real bite out
+            QPainterPath a;
+            a.addRect(4, 8, 11, 11);
+            QPainterPath b;
+            b.addRect(10, 4, 11, 11);
+            p.drawPath(a.subtracted(b));
+            // The tool that took it, as a ghost. Copy the pen and change only
+            // its style: p.setPen(Qt::DotLine) would build a fresh black pen
+            // and lose the theme colour entirely.
+            QPen ghost = p.pen();
+            ghost.setStyle(Qt::DotLine);
+            p.setPen(ghost);
             p.drawRect(10, 4, 11, 11);
             break;
         }
-        case Glyph::Intersect: {                  // the shared region filled
+        case Glyph::Intersect: {                  // the shared lens alone, solid
+            QPainterPath a;
+            a.addRect(4, 8, 11, 11);
+            QPainterPath b;
+            b.addRect(10, 4, 11, 11);
+            const QPen solid = p.pen();
+            QPen ghost = p.pen();
+            ghost.setStyle(Qt::DotLine);
+            p.setPen(ghost);
             p.drawRect(4, 8, 11, 11);
             p.drawRect(10, 4, 11, 11);
-            const QBrush brush = p.pen().color();
-            p.fillRect(QRect(10, 8, 5, 7), brush);
+            p.setPen(solid);
+            const QPainterPath lens = a.intersected(b);
+            p.fillPath(lens, QBrush(solid.color()));
+            p.drawPath(lens);
             break;
         }
         case Glyph::Delete:                       // bin

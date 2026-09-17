@@ -138,6 +138,22 @@ QStringList AppBar::paintedTexts() const
     return {wordmark()};
 }
 
+void AppBar::setGroundColour(const QColor& ground)
+{
+    if (myGround == ground) return;
+    myGround = ground;
+    // The menu bar's own text has to follow the card it sits on, or the
+    // words stay near-white on a near-white pill.
+    if (myMenus) {
+        const QColor ink = ground.isValid() ? Theme::inkOn(ground) : Theme::text();
+        myMenus->setStyleSheet(
+            QStringLiteral("QMenuBar { background: transparent; color: %1; } "
+                           "QMenuBar::item { background: transparent; color: %1; }")
+                .arg(ink.name()));
+    }
+    update();
+}
+
 void AppBar::paintEvent(QPaintEvent* /*event*/)
 {
     QPainter painter(this);
@@ -148,7 +164,7 @@ void AppBar::paintEvent(QPaintEvent* /*event*/)
     // fill and the curve this widget draws can never disagree with
     // whatever updatePillMargins() derived its horizontal padding from.
     const int radius = height() / 2;
-    Theme::paintSurface(painter, rect(), radius);
+    Theme::paintSurfaceOn(painter, rect(), radius, myGround);
 
     // The mark and the wordmark, drawn starting at exactly `radius` from the
     // left edge - the same value the layout's own left margin uses (see
@@ -162,7 +178,9 @@ void AppBar::paintEvent(QPaintEvent* /*event*/)
     const QFont font = wordmarkFont();
     const QFontMetrics metrics(font);
     painter.setFont(font);
-    painter.setPen(Theme::text());
+    // The wordmark follows the card it is painted on, the same way the menu
+    // bar's own text does - see setGroundColour().
+    painter.setPen(myGround.isValid() ? Theme::inkOn(myGround) : Theme::text());
     const int baseline = rect().center().y() + metrics.ascent() / 2 - 1;
     painter.drawText(radius + mark.width() + kGap, baseline, wordmark());
 }

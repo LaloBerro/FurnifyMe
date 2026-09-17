@@ -26,6 +26,7 @@
 // empty menu bar the moment anything called it. MainWindow never does;
 // this class is built on the QMenuBar MainWindow::buildMenus() hands it, and
 // AppBar::menus() is how a caller reaches the real object.
+#include <QColor>
 #include <QWidget>
 
 class QMenuBar;
@@ -56,10 +57,19 @@ public:
     // paints exactly one string of its own.
     QStringList paintedTexts() const;
 
+    // THE GROUND THIS PILL IS SITTING ON, or an invalid colour for the
+    // ordinary dark viewport. Render mode is the only caller: it puts a pale
+    // studio backdrop behind a pill that would otherwise stay black, and this
+    // app hides every other overlay there precisely so nothing clashes - but
+    // this one carries the menu that LEAVES render mode, so it cannot be
+    // hidden too. See Theme::paintSurfaceOn().
+    void setGroundColour(const QColor& ground);
+
 protected:
     void paintEvent(QPaintEvent* event) override;
 
 private:
+    QColor myGround;   // see setGroundColour()
     // The wordmark and the app mark are both PAINTED, not child widgets, so
     // the layout only holds an empty spacer wide enough to keep their space
     // clear - re-measured here because it moves when the base type size (the

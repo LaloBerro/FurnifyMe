@@ -86,6 +86,22 @@ public:
     // becoming the next collision to discover.
     std::vector<QRect> occupiedRects() const;
 
+    // A WIDGET THAT PLACES ITSELF BUT MUST STILL BE STEPPED AROUND.
+    //
+    // The gesture chips that stand at a fixed spot rather than at an anchor -
+    // SlatsTool and BooleanTool, both bottom-centre by the user's own call -
+    // are not entries: they are never moved by relayout() and they occupy no
+    // slot in any stack. But `occupiedRects()` is how ToastHost finds out what
+    // it has to avoid, and CLAUDE.md is explicit that it asks the overlay
+    // rather than naming widget classes so that "a cluster added later is
+    // stepped around for free". A chip that places itself quietly opted out of
+    // that, and the toast landed squarely on top of it.
+    //
+    // So they register here instead: counted as occupied, never laid out.
+    // Registering twice is harmless, and a widget that goes away is dropped by
+    // the QPointer rather than needing to be unregistered.
+    void addFloatingObstacle(QWidget* widget);
+
 signals:
     // Emitted once relayout() has moved and raise()d every anchored entry.
     //
@@ -110,6 +126,9 @@ private:
     };
 
     QWidget* myViewport = nullptr;
+    // See addFloatingObstacle(). QPointer, so a chip destroyed with its window
+    // leaves no dangling entry for occupiedRects() to dereference.
+    std::vector<QPointer<QWidget>> myObstacles;
     std::vector<Entry> myEntries;
     // See relayout(): one pass at a time, never nested.
     bool myLayingOut = false;
